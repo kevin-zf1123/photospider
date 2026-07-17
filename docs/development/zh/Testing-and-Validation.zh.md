@@ -132,7 +132,8 @@ CTest inventory 和 CI script 都不能依赖个人开发内容。
 
 验证应与风险成比例。实现期间只运行 scoped static check、受影响 build target 和 focused
 regression。是否运行本机原生 clean configure、full build 或完整 CTest/JUnit，应只根据改动风险
-决定，而不是常设要求。不要把 Docker 或本地 `linux/amd64` 模拟作为常规本地 preflight；
+决定，而不是常设要求。本机 workflow 源码、YAML 与 shell 检查只属于开发者 preflight；它们不模拟
+托管 GitHub Actions runner。不要把 Docker 或本地 `linux/amd64` 模拟作为常规本地 preflight；
 current-head GitHub Actions 仍是权威远程 integration 环境。
 
 ## CLI option action 验证
@@ -318,17 +319,67 @@ replay/provenance helper。
 GitHub Actions 和 Linux CI container 是当前维护中的验证路径。目标为 `main` 的 pull request
 通过 `pull_request_target` 使用 base branch 中受保护的 workflow；推送到 `main` 和 `CI/**`
 也会运行 CI。普通 feature branch 不能修改 `ci/**`、`.github/workflows/**` 或
-`Dockerfile.ci`；这些输入必须通过 `CI/**` branch 修改。
+`Dockerfile.ci`；这些输入必须通过 base repository 中的 `CI/**` branch 修改。只有同仓库
+`CI/**` pull request 会改由该分支的 push run 处理。Fork 使用相同分支前缀时会在 checkout
+前被拒绝，分支拼写本身绝不授权 protected-path 修改。
+两份生产门禁都会把 `git diff --name-only -z` 写入父 shell 可见的 artifact，由 Bash 读取精确
+NUL record、按完整路径值匹配，并用 `%q` 生成供人阅读的 changed/protected 日志。Producer 或
+reader 失败时会 fail closed；合法 `ci/**` 文件名中的换行既不能绕过门禁，也不能伪造清单记录。
 
-常规 healthcheck 和 integration job 在已发布的
-`ghcr.io/<owner>/<repo>/photospider-ci:latest` 镜像中运行。如果某项改动修改 image input，
-workflow 会构建 `photospider-ci:local`，并在该镜像中运行同一套仓库脚本，避免验证过程与镜像发布
-产生竞态。`Dockerfile.ci` 会安装这些脚本所需的 C++ toolchain、CMake、OpenCV、yaml-cpp、
+每次触发的 run 都会保留稳定的 `healthcheck` 结论。integration workflow 会在 configure 前对
+event 的精确 revision 分类：仅修改 `docs/**`、根目录 Markdown 和已记录根目录文本契约的变更会
+有意跳过所有 build、CTest 与 integration 分片，再由稳定的 `integration` 门禁校验并报告该路由。
+任何非文档路径或不确定 Git 状态都会执行完整 integration。Type change 与少见 Git status 会保留在
+不带过滤的路径清单中。每次 `CI/**` push 也都会强制执行 current-head 完整 integration，包括后续
+仅修改文档的增量 push。workflow 刻意不使用 `paths-ignore`，因为它可能让已配置的 required check
+一直 pending。稳定门禁采用相同的 repository-identity 决策：只有同仓库 `CI/**` pull request
+可以报告有意去重；fork 或 identity 缺失时会 fail closed。
+
+`healthcheck-published-image` 是 container job，published-image healthcheck 执行 job 与
+build/test integration job 会在 `ghcr.io/<owner>/<repo>/photospider-ci:latest` 中运行；轻量路由与
+结果门禁仍在 `ubuntu-latest` 上运行。Checkout 后，published container 中唯一的
+`Trust checked-out workspace` step 会绑定 `shell: bash`，只把精确的 `$GITHUB_WORKSPACE` 加入
+该 job 持久的 global `safe.directory`，并以只读方式校验 `HEAD^{commit}`。它既不会配置
+`safe.directory=*`，也不会执行 checkout 得到的仓库脚本。该 trust boundary 先于两个条件
+history fetch 与 `healthcheck.sh`，也覆盖两个 fetch 都不会运行的 `main` push 和
+`workflow_dispatch` 路由，而不依赖 checkout 的临时 HOME 范围配置。`Fetch pull request base
+history` 与 `Fetch CI branch main history` step 同样绑定 `shell: bash`，使各自的
+`set -Eeuo pipefail` 前导命令无需依赖 container 默认 shell 即可正确执行。如果某项改动修改
+image input，workflow 会构建
+`photospider-ci:local`，并在该镜像中运行同一套仓库脚本，避免验证过程与镜像发布产生竞态。
+对于 pull request，published-image 与 local-image healthcheck job 都会在各自 job 内从
+base-repository URL 拉取目标分支，把 `CI_BASE_SHA` 校验为 event 的精确 base commit，并把该精确
+SHA 作为 `CI_BASE_REF` 传入，不依赖 fork checkout 的 `origin`。对于每次 `CI/**` push，两条路径
+都会改为在各自 job 内拉取并校验 `origin/main`，再把它作为 `CI_BASE_REF`，使静态检查范围在连续
+push 之间始终从 `main` merge base 开始累计。因此，后续纯文档 push 无法隐藏更早的未格式化 C++
+commit。普通 `main` push 则继续使用 `github.event.before` 作为增量 `CI_BASE_REF`。
+Published-image 校验先于 `healthcheck.sh`；local-image 校验先于构建 head Dockerfile 与执行挂载
+workspace。任何必需 fetch 或解析失败都会在脚本使用 fallback base 选择前停止。
+`Dockerfile.ci` 会安装这些脚本所需的 C++ toolchain、CMake、OpenCV、yaml-cpp、
 GTest、nlohmann-json、clang-format、Python 和 cpplint。
+镜像 detector 不使用 Git status filter；healthcheck 静态范围清单则使用 `--diff-filter=d` 排除
+无法交给 formatter/linter 的删除路径，同时保留 type change 与少见的非删除 status。两者都使用
+NUL 分隔的 Git 输出与父 shell 可见的临时文件。因此 `git diff` 失败时，镜像检测或 healthcheck
+静态范围检测会直接终止，不会输出假阴性路由。
 
 当前维护的入口包括：
 
-- `ci/scripts/healthcheck.sh`：执行 diff、format 和 cpplint 检查。
+- `ci/scripts/healthcheck.sh`：执行 fail-closed changed-path 清单、diff、format、cpplint 与两项长期
+  shell 回归。
+- `ci/scripts/change_classification.sh` 与
+  `ci/scripts/change_classification_test.sh`：执行 fail-closed 纯文档路由及其长期 event/path
+  回归矩阵。
+- `ci/scripts/ci_routing_test.sh`：精确锁定两份 canonical `protected-ci-paths.if` 表达式；执行真实
+  stable-gate、fork-rejection 与 protected-path block；以 job/step 作用域锁定 published-image
+  两个 history-fetch step 各自的 `shell: bash` 元数据；以 job/step 作用域锁定唯一的
+  published-image workspace-trust step、精确且不含通配符的 global `safe.directory`、只读 HEAD
+  校验，以及 checkout < trust < fetch/healthcheck 的顺序；校验 published/local job-scoped
+  pull-request 精确 base、`CI/**` 累计 main 顺序、三路 `CI_BASE_REF` 精确源码路由、含换行路径
+  artifact，以及 detector/reader/producer 失败传播。测试会在隔离 HOME/仓库中执行 production
+  trust block，并要求所得 global trust 清单只包含该仓库；同时还会执行两份 production
+  main-fetch block。隔离 Git 历史会证明累计 main 范围保留更早的 C++，而 event-before 范围只
+  看到较晚的 docs 增量。本机源码/shell 锁定不模拟 GitHub expression evaluator、跨 UID
+  dubious ownership 或托管 container runner。
 - `ci/scripts/build_integrity.sh`：执行 configure、必需 target 与全量 build，并完成 CTest discovery。
 - `ci/scripts/ctest_full.sh`：运行主 CTest suite。
 - `ci/scripts/integration_suite.sh`：顺序执行 integration 行为检查，包括 CLI、propagation、plugin

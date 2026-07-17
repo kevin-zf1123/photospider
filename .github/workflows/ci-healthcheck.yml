@@ -18,27 +18,54 @@ jobs:
   protected-ci-paths:
     if: >-
       ${{
-        (github.event_name != 'pull_request' || startsWith(github.head_ref, 'CI/')) &&
-        (github.event_name != 'pull_request_target' || !startsWith(github.head_ref, 'CI/'))
+        github.event_name != 'pull_request_target' ||
+        !startsWith(github.head_ref, 'CI/') ||
+        github.event.pull_request.head.repo.full_name != github.repository
       }}
     runs-on: ubuntu-latest
     steps:
+      - name: Reject fork CI branch pull request
+        if: >-
+          ${{
+            github.event_name == 'pull_request_target' &&
+            startsWith(github.head_ref, 'CI/') &&
+            github.event.pull_request.head.repo.full_name != github.repository
+          }}
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$CI_ARTIFACT_DIR"
+          {
+            echo "Fork CI/** pull requests are rejected before checkout."
+            echo "Only CI/** branches in '$CI_BASE_REPOSITORY' are covered by the push-triggered workflow."
+            echo "Received head repository: '${CI_HEAD_REPOSITORY:-unavailable}'."
+          } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
-          submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
       - name: Protect CI workflow paths
         env:
           CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
           CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          CI_HEAD_IS_BASE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
         run: |
           set -Eeuo pipefail
           mkdir -p "$CI_ARTIFACT_DIR"
-          git fetch --no-tags --prune origin main
+          : > "$CI_ARTIFACT_DIR/changed-files.z"
           : > "$CI_ARTIFACT_DIR/changed-files.txt"
           : > "$CI_ARTIFACT_DIR/protected-files.txt"
 
@@ -47,26 +74,75 @@ jobs:
               tee "$CI_ARTIFACT_DIR/summary.log"
             exit 0
           fi
-          if [[ "$CI_BRANCH_NAME" == CI/* ]]; then
+          if [[ "$CI_BRANCH_NAME" == CI/* &&
+            (
+              "$CI_EVENT_NAME" == push ||
+              "$CI_EVENT_NAME" == workflow_dispatch ||
+              (
+                "$CI_EVENT_NAME" == pull_request_target &&
+                -n "$CI_HEAD_REPOSITORY" &&
+                "$CI_HEAD_IS_BASE_REPOSITORY" == true
+              )
+            ) ]]; then
             echo "CI branch '$CI_BRANCH_NAME' may update CI workflow files." |
               tee "$CI_ARTIFACT_DIR/summary.log"
             exit 0
           fi
 
-          git diff --name-only --diff-filter=ACMRD origin/main...HEAD |
-            sort -u |
-            tee "$CI_ARTIFACT_DIR/changed-files.txt"
-          awk '
-            $0 == "Dockerfile.ci" || $0 ~ /^ci\// || $0 ~ /^\.github\/workflows\// {
-              print
-            }
-          ' "$CI_ARTIFACT_DIR/changed-files.txt" |
-            tee "$CI_ARTIFACT_DIR/protected-files.txt"
+          diff_candidate_base=origin/main
+          diff_head=HEAD
+          if [[ "$CI_EVENT_NAME" == pull_request ||
+            "$CI_EVENT_NAME" == pull_request_target ]]; then
+            git fetch --no-tags --no-recurse-submodules \
+              "https://github.com/${CI_BASE_REPOSITORY}.git" \
+              "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+            diff_candidate_base=$CI_BASE_SHA
+            diff_head=$CI_HEAD_SHA
+          else
+            git fetch --no-tags --prune origin main
+          fi
+
+          git rev-parse --verify "$diff_candidate_base^{commit}" >/dev/null
+          git rev-parse --verify "$diff_head^{commit}" >/dev/null
+          if ! git merge-base --all "$diff_candidate_base" "$diff_head" \
+            > "$CI_ARTIFACT_DIR/merge-bases.txt"; then
+            echo "Protected-path merge-base detection failed." >&2
+            exit 1
+          fi
+          mapfile -t merge_bases < "$CI_ARTIFACT_DIR/merge-bases.txt"
+          if ((${#merge_bases[@]} != 1)); then
+            echo "Protected-path comparison requires exactly one merge base." >&2
+            exit 1
+          fi
+          diff_base=${merge_bases[0]}
+
+          if ! git diff --no-renames --name-only -z \
+            "$diff_base" "$diff_head" \
+            > "$CI_ARTIFACT_DIR/changed-files.z"; then
+            echo "Protected-path changed-path detection failed." >&2
+            exit 1
+          fi
+          changed_files=()
+          if ! mapfile -d '' -t changed_files \
+            < "$CI_ARTIFACT_DIR/changed-files.z"; then
+            echo "Protected-path changed-path inventory read failed." >&2
+            exit 1
+          fi
+          for changed_file in "${changed_files[@]}"; do
+            printf '%q\n' "$changed_file" \
+              >> "$CI_ARTIFACT_DIR/changed-files.txt"
+            case "$changed_file" in
+              Dockerfile.ci | ci/* | .github/workflows/*)
+                printf '%q\n' "$changed_file" \
+                  >> "$CI_ARTIFACT_DIR/protected-files.txt"
+                ;;
+            esac
+          done
 
           if [[ -s "$CI_ARTIFACT_DIR/protected-files.txt" ]]; then
             {
-              echo "Non-CI branches must not change ci/, .github/workflows/, or Dockerfile.ci."
-              echo "Use a branch whose name starts with CI/ for CI workflow changes."
+              echo "Only trusted base-repository CI/** runs may change ci/, .github/workflows/, or Dockerfile.ci."
+              echo "Develop CI workflow changes on a CI/** branch in '$CI_BASE_REPOSITORY'."
             } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
             exit 1
           fi
@@ -95,10 +171,27 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Fetch pull request base history
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        env:
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules \
+            "https://github.com/${CI_BASE_REPOSITORY}.git" \
+            "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+          git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
+      - name: Fetch CI branch main history
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --prune origin main
       - name: Detect CI image input changes
         id: detect
         env:
-          CI_IMAGE_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && format('origin/{0}', github.base_ref) || github.event.before }}
+          CI_IMAGE_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event.before }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-change
         run: bash ci/scripts/ci_image_changed.sh
       - name: Upload CI image change logs
@@ -109,7 +202,7 @@ jobs:
           path: CI-results/ci-image-change
           if-no-files-found: warn
 
-  healthcheck:
+  healthcheck-published-image:
     needs: ci-image-change
     if: needs.ci-image-change.outputs.changed != 'true'
     runs-on: ubuntu-latest
@@ -126,9 +219,39 @@ jobs:
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
+      - name: Trust checked-out workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" rev-parse --verify "HEAD^{commit}" >/dev/null
+
+      - name: Fetch pull request base history
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules \
+            "https://github.com/${CI_BASE_REPOSITORY}.git" \
+            "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+          git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
+
+      - name: Fetch CI branch main history
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          git rev-parse --verify "origin/main^{commit}" >/dev/null
+
       - name: Run healthcheck
         env:
-          CI_BASE_REF: origin/${{ github.base_ref || 'main' }}
+          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event_name == 'push' && github.event.before || 'origin/main' }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/healthcheck
         run: bash ci/scripts/healthcheck.sh
 
@@ -152,12 +275,33 @@ jobs:
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
+      - name: Fetch pull request base history
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        env:
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules \
+            "https://github.com/${CI_BASE_REPOSITORY}.git" \
+            "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+          git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
+
+      - name: Fetch CI branch main history
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          git rev-parse --verify "origin/main^{commit}" >/dev/null
+
       - name: Build local CI image
         run: docker build -t photospider-ci:local -f Dockerfile.ci .
 
       - name: Run healthcheck in local CI image
         env:
-          CI_BASE_REF: origin/${{ github.base_ref || 'main' }}
+          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event_name == 'push' && github.event.before || 'origin/main' }}
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
@@ -174,3 +318,78 @@ jobs:
           name: healthcheck-results
           path: CI-results/healthcheck
           if-no-files-found: warn
+
+  healthcheck:
+    needs:
+      - protected-ci-paths
+      - ci-image-change
+      - healthcheck-published-image
+      - healthcheck-local-image
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report healthcheck gate
+        env:
+          CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          CI_HEAD_IS_BASE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+          PROTECTED_RESULT: ${{ needs.protected-ci-paths.result }}
+          IMAGE_CHANGE_RESULT: ${{ needs.ci-image-change.result }}
+          IMAGE_CHANGED: ${{ needs.ci-image-change.outputs.changed }}
+          PUBLISHED_HEALTHCHECK_RESULT: ${{ needs.healthcheck-published-image.result }}
+          LOCAL_HEALTHCHECK_RESULT: ${{ needs.healthcheck-local-image.result }}
+        run: |
+          set -Eeuo pipefail
+
+          # @brief Require one named assertion value to match exactly.
+          # @param $1 Stable assertion label used only for diagnostics.
+          # @param $2 Actual value being asserted.
+          # @param $3 Expected value.
+          # @return Zero for an exact match, otherwise one with a diagnostic.
+          # @throws Nothing; mismatches return nonzero to the gate.
+          # @note Labels may identify job conclusions or routed output values.
+          require_value() {
+            local assertion_label=$1
+            local actual=$2
+            local expected=$3
+            if [[ "$actual" != "$expected" ]]; then
+              echo "$assertion_label was '$actual'; expected '$expected'." >&2
+              return 1
+            fi
+          }
+
+          if [[ "$CI_EVENT_NAME" == pull_request_target &&
+            "$CI_BRANCH_NAME" == CI/* &&
+            -n "$CI_HEAD_REPOSITORY" &&
+            "$CI_HEAD_IS_BASE_REPOSITORY" == true ]]; then
+            echo "Same-repository CI/** pull request intentionally uses the push-triggered workflow." |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          require_value protected-ci-paths "$PROTECTED_RESULT" success
+          require_value ci-image-change "$IMAGE_CHANGE_RESULT" success
+          case "$IMAGE_CHANGED" in
+            true)
+              require_value healthcheck-published-image \
+                "$PUBLISHED_HEALTHCHECK_RESULT" skipped
+              require_value healthcheck-local-image \
+                "$LOCAL_HEALTHCHECK_RESULT" success
+              echo "Healthcheck passed in the locally built CI image." |
+                tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            false)
+              require_value healthcheck-published-image \
+                "$PUBLISHED_HEALTHCHECK_RESULT" success
+              require_value healthcheck-local-image \
+                "$LOCAL_HEALTHCHECK_RESULT" skipped
+              echo "Healthcheck passed in the published CI image." |
+                tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "CI image classification produced '$IMAGE_CHANGED'." >&2
+              exit 1
+              ;;
+          esac
