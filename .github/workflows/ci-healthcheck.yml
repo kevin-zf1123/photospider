@@ -232,9 +232,17 @@ jobs:
             "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
           git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
 
+      - name: Fetch CI branch main history
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          git rev-parse --verify "origin/main^{commit}" >/dev/null
+
       - name: Run healthcheck
         env:
-          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}
+          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event_name == 'push' && github.event.before || 'origin/main' }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/healthcheck
         run: bash ci/scripts/healthcheck.sh
 
@@ -271,12 +279,20 @@ jobs:
             "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
           git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
 
+      - name: Fetch CI branch main history
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          git rev-parse --verify "origin/main^{commit}" >/dev/null
+
       - name: Build local CI image
         run: docker build -t photospider-ci:local -f Dockerfile.ci .
 
       - name: Run healthcheck in local CI image
         env:
-          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}
+          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event_name == 'push' && github.event.before || 'origin/main' }}
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \

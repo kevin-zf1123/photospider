@@ -315,6 +315,112 @@ validate_published_image_base_fetch() {
   pass healthcheck-published-image-exact-base-before-execution
 }
 
+# @brief Require one healthcheck job to use cumulative main on CI/** pushes.
+# @param $1 Healthcheck workflow YAML path.
+# @param $2 Exact published-image or local-image healthcheck job identifier.
+# @return Zero after job-scoped fetch, route, syntax, and order checks pass.
+# @throws Nothing; missing, duplicated, or misordered contracts exit through
+#   fail.
+# @note This exact-locks production source without claiming to evaluate GitHub
+#   expressions; the extracted production fetch block is executed separately.
+validate_ci_branch_healthcheck_base() {
+  local workflow=$1
+  local job_name=$2
+  local job_file="$TEST_ROOT/${job_name}-ci-main-job.yml"
+  local fetch_script="$TEST_ROOT/${job_name}-ci-main-fetch.sh"
+  local expected_route
+  local fetch_step_count
+  local base_ref_binding_count
+  local route_count
+  local checkout_line
+  local fetch_step_line
+  local verify_line
+  local build_line
+  local healthcheck_step_line
+  local healthcheck_run_line
+  local mount_line
+
+  expected_route="          CI_BASE_REF: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event_name == 'push' && github.event.before || 'origin/main' }}"
+
+  extract_job_block "$workflow" "$job_name" "$job_file" ||
+    fail "$job_name job could not be extracted for CI branch routing"
+  extract_step_run_block "$job_file" "Fetch CI branch main history" \
+    "$fetch_script" ||
+    fail "$job_name CI branch main-fetch run block could not be extracted"
+
+  fetch_step_count=$(grep -Fxc -- \
+    "      - name: Fetch CI branch main history" "$job_file" || true)
+  ((fetch_step_count == 1)) ||
+    fail "$job_name must contain exactly one CI branch main-fetch step"
+  assert_file_contains "$job_file" \
+    "        if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')"
+  base_ref_binding_count=$(grep -Fc -- "CI_BASE_REF:" "$job_file" || true)
+  ((base_ref_binding_count == 1)) ||
+    fail "$job_name must contain exactly one CI_BASE_REF binding"
+  route_count=$(grep -Fxc -- "$expected_route" "$job_file" || true)
+  ((route_count == 1)) ||
+    fail "$job_name does not contain the exact PR/CI-branch/main-push base route"
+  assert_file_contains "$fetch_script" \
+    'git fetch --no-tags --no-recurse-submodules origin \'
+  assert_file_contains "$fetch_script" \
+    '"+refs/heads/main:refs/remotes/origin/main"'
+  assert_file_contains "$fetch_script" \
+    'git rev-parse --verify "origin/main^{commit}" >/dev/null'
+  bash -n "$fetch_script"
+
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  fetch_step_line=$(grep -nF -- \
+    "- name: Fetch CI branch main history" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  verify_line=$(grep -nF -- \
+    'git rev-parse --verify "origin/main^{commit}" >/dev/null' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  [[ -n "$checkout_line" && -n "$fetch_step_line" && -n "$verify_line" ]] ||
+    fail "$job_name lacks a complete CI branch main-fetch order"
+
+  case "$job_name" in
+    healthcheck-published-image)
+      healthcheck_step_line=$(grep -nF -- "- name: Run healthcheck" \
+        "$job_file" | head -n 1 | cut -d: -f1)
+      healthcheck_run_line=$(grep -nF -- \
+        'run: bash ci/scripts/healthcheck.sh' "$job_file" |
+        head -n 1 | cut -d: -f1)
+      [[ -n "$healthcheck_step_line" && -n "$healthcheck_run_line" ]] ||
+        fail "$job_name lacks the production healthcheck execution"
+      ((checkout_line < fetch_step_line &&
+        fetch_step_line < verify_line &&
+        verify_line < healthcheck_step_line &&
+        healthcheck_step_line < healthcheck_run_line)) ||
+        fail "$job_name runs healthcheck before CI main verification"
+      ;;
+    healthcheck-local-image)
+      build_line=$(grep -nF -- "- name: Build local CI image" "$job_file" |
+        head -n 1 | cut -d: -f1)
+      healthcheck_step_line=$(grep -nF -- \
+        "- name: Run healthcheck in local CI image" "$job_file" |
+        head -n 1 | cut -d: -f1)
+      mount_line=$(grep -nF -- \
+        '-v "${{ github.workspace }}:/workspace" \' "$job_file" |
+        head -n 1 | cut -d: -f1)
+      [[ -n "$build_line" && -n "$healthcheck_step_line" &&
+        -n "$mount_line" ]] ||
+        fail "$job_name lacks the Docker build and mounted healthcheck order"
+      ((checkout_line < fetch_step_line &&
+        fetch_step_line < verify_line &&
+        verify_line < build_line &&
+        build_line < healthcheck_step_line &&
+        healthcheck_step_line < mount_line)) ||
+        fail "$job_name builds or mounts head content before CI main verification"
+      ;;
+    *)
+      fail "unsupported healthcheck job for CI branch routing: $job_name"
+      ;;
+  esac
+
+  pass "$job_name-ci-branch-cumulative-main-before-execution"
+}
+
 # @brief Require one command to succeed and capture its combined output.
 # @param $1 Stable case label.
 # @param $2 Output log path.
@@ -687,6 +793,115 @@ exercise_protected_path_guard() {
     "$read_failure_artifact_dir" "$read_failure_shim_dir:$PATH"
 }
 
+# @brief Create a CI branch with an early C++ commit and later docs-only push.
+# @param $1 Destination work repository.
+# @param $2 Destination bare origin repository containing the main baseline.
+# @return Zero after printing main, event-before, and head SHAs in order.
+# @throws Nothing; Git and filesystem failures terminate through set -e.
+# @note The deliberately unformatted C++ file remains present at the final
+#   head even though the final push increment contains only documentation.
+create_healthcheck_scope_history() {
+  local repository=$1
+  local origin_repository=$2
+  local main_sha
+  local before_sha
+  local head_sha
+
+  git init -q -b main "$repository"
+  git -C "$repository" config user.name "CI Routing Test"
+  git -C "$repository" config user.email "ci-routing@example.invalid"
+  printf 'baseline\n' > "$repository/seed.txt"
+  git -C "$repository" add seed.txt
+  git -C "$repository" commit -qm baseline
+  main_sha=$(git -C "$repository" rev-parse HEAD)
+
+  git init -q --bare "$origin_repository"
+  git -C "$repository" remote add origin "$origin_repository"
+  git -C "$repository" push -q -u origin main
+
+  git -C "$repository" checkout -qb CI/cumulative-healthcheck
+  mkdir -p "$repository/src"
+  printf 'int badly_formatted( ){return 0;}\n' \
+    > "$repository/src/bad.cpp"
+  git -C "$repository" add src/bad.cpp
+  git -C "$repository" commit -qm "early unformatted C++"
+  before_sha=$(git -C "$repository" rev-parse HEAD)
+
+  mkdir -p "$repository/docs"
+  printf '# later documentation push\n' > "$repository/docs/note.md"
+  git -C "$repository" add docs/note.md
+  git -C "$repository" commit -qm "later documentation push"
+  head_sha=$(git -C "$repository" rev-parse HEAD)
+
+  printf '%s\n%s\n%s\n' "$main_sha" "$before_sha" "$head_sha"
+}
+
+# @brief Execute both production main-fetch blocks and compare static scopes.
+# @param $1 Extracted published-image CI branch main-fetch shell block.
+# @param $2 Extracted local-image CI branch main-fetch shell block.
+# @return Zero after both fetches resolve main and both inventories are exact.
+# @throws Nothing; production fetch or inventory mismatches exit through fail.
+# @note This proves Git range behavior in isolation; GitHub expression
+#   evaluation remains covered only by the exact production-source assertion.
+exercise_healthcheck_scope_history() {
+  local published_fetch_script=$1
+  local local_fetch_script=$2
+  local repository="$TEST_ROOT/healthcheck-scope-repository"
+  local origin_repository="$TEST_ROOT/healthcheck-scope-origin.git"
+  local history_file="$TEST_ROOT/healthcheck-scope-history.txt"
+  local cumulative_inventory="$TEST_ROOT/healthcheck-cumulative-paths.z"
+  local incremental_inventory="$TEST_ROOT/healthcheck-incremental-paths.z"
+  local main_sha
+  local before_sha
+  local head_sha
+  local fetch_script
+  local fetched_main
+  local -a history=()
+  local -a cumulative_paths=()
+  local -a incremental_paths=()
+
+  create_healthcheck_scope_history "$repository" "$origin_repository" \
+    > "$history_file"
+  mapfile -t history < "$history_file"
+  ((${#history[@]} == 3)) ||
+    fail "healthcheck scope history did not expose three revisions"
+  main_sha=${history[0]}
+  before_sha=${history[1]}
+  head_sha=${history[2]}
+
+  grep -Fqx -- 'int badly_formatted( ){return 0;}' \
+    "$repository/src/bad.cpp" ||
+    fail "healthcheck scope fixture lost its unformatted C++ source"
+  for fetch_script in "$published_fetch_script" "$local_fetch_script"; do
+    git -C "$repository" update-ref -d refs/remotes/origin/main
+    if ! (cd "$repository" && bash "$fetch_script"); then
+      fail "production CI branch main-fetch block failed in isolated history"
+    fi
+    fetched_main=$(git -C "$repository" rev-parse origin/main)
+    [[ "$fetched_main" == "$main_sha" ]] ||
+      fail "production CI branch main-fetch block resolved the wrong main commit"
+  done
+
+  git -C "$repository" diff --no-renames --name-only -z \
+    "origin/main...$head_sha" > "$cumulative_inventory"
+  git -C "$repository" diff --no-renames --name-only -z \
+    "$before_sha...$head_sha" > "$incremental_inventory"
+  mapfile -d '' -t cumulative_paths < "$cumulative_inventory"
+  mapfile -d '' -t incremental_paths < "$incremental_inventory"
+
+  ((${#cumulative_paths[@]} == 2)) ||
+    fail "cumulative main healthcheck scope did not contain two paths"
+  [[ "${cumulative_paths[0]}" == docs/note.md &&
+    "${cumulative_paths[1]}" == src/bad.cpp ]] ||
+    fail "cumulative main healthcheck scope omitted the early C++ path"
+  ((${#incremental_paths[@]} == 1)) ||
+    fail "event-before healthcheck scope did not contain exactly one path"
+  [[ "${incremental_paths[0]}" == docs/note.md ]] ||
+    fail "event-before healthcheck scope was not docs-only"
+
+  pass healthcheck-ci-branch-cumulative-main-retains-earlier-cpp
+}
+
 # @brief Create an isolated image-input history with cumulative and exact bases.
 # @param $1 Destination repository path.
 # @return Zero after printing base, image, docs, and newline-path SHAs.
@@ -928,6 +1143,13 @@ main() {
   validate_workflow_contract "$integration_workflow" "Report integration gate"
   validate_published_image_base_fetch "$health_workflow"
   validate_local_image_base_fetch "$health_workflow"
+  validate_ci_branch_healthcheck_base "$health_workflow" \
+    healthcheck-published-image
+  validate_ci_branch_healthcheck_base "$health_workflow" \
+    healthcheck-local-image
+  exercise_healthcheck_scope_history \
+    "$TEST_ROOT/healthcheck-published-image-ci-main-fetch.sh" \
+    "$TEST_ROOT/healthcheck-local-image-ci-main-fetch.sh"
   cmp -s "$TEST_ROOT/ci-healthcheck-protected.sh" \
     "$TEST_ROOT/ci-integration-protected.sh" ||
     fail "healthcheck and integration protected-path blocks diverged"
