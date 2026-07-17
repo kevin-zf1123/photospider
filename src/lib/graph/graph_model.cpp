@@ -8,8 +8,6 @@
 #include <utility>
 #include <vector>
 
-#include "core/parameter_value_adapter.hpp"
-
 namespace ps {
 
 namespace {
@@ -476,8 +474,7 @@ bool GraphModel::skip_save_cache() const {
 
 plugin::ParameterMap resolve_effective_parameter_snapshot(
     const Node& node, const GraphModel& graph) {
-  YAML::Node effective = node.parameters ? YAML::Clone(node.parameters)
-                                         : YAML::Node(YAML::NodeType::Map);
+  plugin::ParameterMap effective = node.parameters;
   for (const auto& input : node.parameter_inputs) {
     if (input.from_node_id < 0) {
       continue;
@@ -500,9 +497,9 @@ plugin::ParameterMap resolve_effective_parameter_snapshot(
                        "Node " + std::to_string(input.from_node_id) +
                            " missing output '" + input.from_output_name + "'");
     }
-    effective[input.to_parameter_name] = YAML::Clone(value->second);
+    effective.insert_or_assign(input.to_parameter_name, value->second);
   }
-  return core::parameter_map_from_yaml(effective);
+  return effective;
 }
 
 std::vector<PixelSize> cached_image_input_extents(const Node& node,

@@ -6,6 +6,9 @@
 #include <exception>
 #include <filesystem>
 #include <future>
+#include <iomanip>
+#include <limits>
+#include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -19,6 +22,7 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/dirty_region_snapshot.hpp"
+#include "core/parameter_value_adapter.hpp"
 #include "photospider/host/host.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
@@ -1390,27 +1394,37 @@ std::string trim_trailing_newlines(std::string text) {
 }
 
 /**
- * @brief Converts a YAML parameter map into public string values.
+ * @brief Converts a format-neutral parameter map into public display strings.
  *
- * @param parameters Backend YAML parameters.
+ * @param parameters Backend ParameterValue parameters.
  * @return Map from parameter name to display/serialization text.
- * @throws YAML::Exception/std::bad_alloc if YAML conversion fails.
- * @note Host clients receive YAML as text so they do not depend on yaml-cpp.
+ * @throws YAML::Exception or std::bad_alloc if recursive display conversion
+ * fails.
+ * @note Scalar strings retain their exact text. Arrays and objects are dumped
+ * through the document adapter so Host clients remain independent of yaml-cpp.
  */
-std::map<std::string, std::string> parameter_strings_from_yaml(
-    const YAML::Node& parameters) {
+std::map<std::string, std::string> parameter_strings_from_values(
+    const plugin::ParameterMap& parameters) {
   std::map<std::string, std::string> out;
-  if (!parameters || !parameters.IsMap()) {
-    return out;
-  }
-  for (auto it = parameters.begin(); it != parameters.end(); ++it) {
-    std::string key;
-    if (it->first.IsScalar()) {
-      key = it->first.as<std::string>();
+  for (const auto& [key, value] : parameters) {
+    if (value.is_null()) {
+      out[key] = "null";
+    } else if (value.is_bool()) {
+      out[key] = value.as_bool() ? "true" : "false";
+    } else if (value.is_int64()) {
+      out[key] = std::to_string(value.as_int64());
+    } else if (value.is_double()) {
+      std::ostringstream stream;
+      stream.imbue(std::locale::classic());
+      stream << std::setprecision(std::numeric_limits<double>::max_digits10)
+             << value.as_double();
+      out[key] = stream.str();
+    } else if (value.is_string()) {
+      out[key] = value.as_string();
     } else {
-      key = trim_trailing_newlines(YAML::Dump(it->first));
+      out[key] = trim_trailing_newlines(
+          YAML::Dump(core::parameter_value_to_yaml(value)));
     }
-    out[key] = trim_trailing_newlines(YAML::Dump(it->second));
   }
   return out;
 }
@@ -1466,9 +1480,9 @@ SpatialSnapshot to_public_space(const SpatialContext& space, int output_width,
  *
  * @param info Backend node inspection result.
  * @return Public node inspection view.
- * @throws YAML::Exception/std::bad_alloc if parameter conversion allocates or
- *         fails.
- * @note Backend Node and YAML objects are copied into public value fields.
+ * @throws YAML::Exception or std::bad_alloc if recursive parameter display
+ * conversion allocates or fails.
+ * @note Backend Node values are copied into public value fields.
  */
 NodeInspectionView to_public_node(const GraphNodeInspectInfo& info) {
   NodeInspectionView view;
@@ -1476,7 +1490,7 @@ NodeInspectionView to_public_node(const GraphNodeInspectInfo& info) {
   view.name = info.name;
   view.type = info.type;
   view.subtype = info.subtype;
-  view.parameters = parameter_strings_from_yaml(info.parameters);
+  view.parameters = parameter_strings_from_values(info.parameters);
   if (info.metadata) {
     view.has_cached_output = info.metadata->has_cached_output;
     if (!info.metadata->source_label.empty()) {
@@ -1519,7 +1533,8 @@ void throw_if_graph_adapter_bad_alloc_probe(const GraphNodeInspectInfo& info) {
  * @return Public graph inspection view.
  * @throws std::bad_alloc when public node, parameter, or result storage
  * exhausts memory.
- * @throws YAML::Exception when backend YAML parameters cannot be converted.
+ * @throws YAML::Exception when recursive parameter display values cannot be
+ * serialized.
  * @note BUILD_TESTING may compile an immutable-name failpoint inside the real
  * adapter loop. Production builds compile out the probe and expose no callable
  * test seam.
@@ -2681,7 +2696,8 @@ class EmbeddedHost final : public Host {
    * @param node Node to inspect.
    * @return Public node snapshot, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note YAML parameter formatting exceptions are converted to status.
+   * @note Recursive parameter display-format exceptions are converted to
+   * status.
    */
   Result<NodeInspectionView> inspect_node(const GraphSessionId& session,
                                           NodeId node) override {

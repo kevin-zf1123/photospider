@@ -601,22 +601,23 @@ TEST(Scheduler,
 }
 
 /**
- * @brief Verifies concurrent HP/RT dirty siblings preserve YAML node state.
+ * @brief Verifies concurrent HP/RT dirty siblings preserve ParameterMap state.
  *
  * The test seeds one scheduler-backed graph, performs an authoritative HP
  * compute, then issues repeated RealTimeUpdate transactions whose HP and RT
  * siblings resolve the same live node parameters concurrently. It finally
- * checks both the graph-owned YAML state and the RT proxy output.
+ * checks graph-owned static state, request-local runtime cleanup, and the RT
+ * proxy output.
  *
- * @return Nothing; GoogleTest assertions report compute, YAML, or proxy-state
- *         failures.
- * @throws std::bad_alloc, YAML::Exception, GraphError, or std::system_error if
- *         graph setup, concurrent dirty execution, or result inspection fails.
+ * @return Nothing; GoogleTest assertions report compute, parameter, or
+ * proxy-state failures.
+ * @throws std::bad_alloc, GraphError, or std::system_error if graph setup,
+ * concurrent dirty execution, or result inspection fails.
  * @note The test exercises production scheduler callbacks. Transaction-local
  *       synchronization must protect same-node snapshot and parameter staging
  *       without serializing operation bodies or persisting into GraphRuntime.
  */
-TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
+TEST(Scheduler, ConcurrentDirtySiblingsPreserveParameterValueState) {
   ps::Kernel kernel;
   ps::Kernel::SchedulerConfig scheduler_config;
   scheduler_config.worker_count = 8;
@@ -664,10 +665,10 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
   runtime.graph_state()
       .submit([](ps::GraphModel& graph) {
         const ps::Node& blur = graph.node(2);
-        ASSERT_TRUE(blur.parameters);
-        EXPECT_EQ(blur.parameters["ksize"].as<int>(), 25);
-        ASSERT_TRUE(blur.runtime_parameters);
-        EXPECT_EQ(blur.runtime_parameters["ksize"].as<int>(), 25);
+        ASSERT_FALSE(blur.parameters.empty());
+        EXPECT_EQ(blur.parameters.at("ksize").as_int64(), 25);
+        EXPECT_TRUE(blur.runtime_parameters.empty())
+            << "request-local effective parameters must not persist in Graph";
       })
       .get();
   const auto* proxy_output = runtime.realtime_proxy_graph().find_output(3);

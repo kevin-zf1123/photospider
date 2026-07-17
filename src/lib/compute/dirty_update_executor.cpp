@@ -324,20 +324,19 @@ bool has_image_payload(const NodeOutput& output) noexcept {
 }
 
 /**
- * @brief Builds exact execution-local YAML parameters from a stabilized map.
+ * @brief Builds exact execution-local parameters from a stabilized map.
  * @param node Node whose static parameters and bindings are merged.
  * @param graph Live graph supplying unaffected committed parameter outputs.
  * @param stabilized Immutable preflight parameter producer outputs.
- * @return Deep-owned effective YAML parameter map.
+ * @return Deep-owned effective ParameterMap.
  * @throws GraphError when a producer or named data output is unavailable.
- * @throws YAML::Exception or std::bad_alloc from cloning/assignment.
+ * @throws std::bad_alloc from recursive value copying.
  * @note Image payload selection is deliberately absent from this helper.
  */
-YAML::Node stabilized_runtime_parameters(
+plugin::ParameterMap stabilized_runtime_parameters(
     const Node& node, const GraphModel& graph,
     const StabilizedDirtyParameters& stabilized) {
-  YAML::Node effective = node.parameters ? YAML::Clone(node.parameters)
-                                         : YAML::Node(YAML::NodeType::Map);
+  plugin::ParameterMap effective = node.parameters;
   for (const ParameterInput& input : node.parameter_inputs) {
     if (input.from_node_id < 0) {
       continue;
@@ -361,7 +360,7 @@ YAML::Node stabilized_runtime_parameters(
                            " did not produce output '" +
                            input.from_output_name + "'");
     }
-    effective[input.to_parameter_name] = YAML::Clone(value->second);
+    effective.insert_or_assign(input.to_parameter_name, value->second);
   }
   return effective;
 }

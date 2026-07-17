@@ -34,6 +34,7 @@
 #include "compute/task_population_strategy.hpp"
 #include "compute/tiled_input_normalizer.hpp"
 #include "core/ops.hpp"
+#include "core/param_utils.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
@@ -295,7 +296,6 @@ Node make_node(int id, std::string type, std::string subtype) {
   node.name = "split_node_" + std::to_string(id);
   node.type = std::move(type);
   node.subtype = std::move(subtype);
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   return node;
 }
 
@@ -313,14 +313,14 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
  *
  * @param node Source node providing the requested output extent.
  * @param inputs Image inputs, which must remain empty for this generator.
- * @return Image output plus either a valid integer or a deliberately
- * malformed explicitly tagged integer under `injected`.
+ * @return Image output plus either an Int64 or a deliberately mismatched String
+ * under `injected`.
  * @throws GraphError when the input-free generator receives an image input.
- * @throws YAML::Exception or std::bad_alloc when YAML/output storage fails.
+ * @throws std::bad_alloc when parameter/output storage fails.
  * @throws std::invalid_argument when image-buffer allocation rejects shape.
  * @throws std::runtime_error or cv::Exception when CPU pixels cannot be filled.
- * @note The malformed node is valid YAML storage and survives request-local
- * cloning; conversion to the public ParameterValue is the intended failure.
+ * @note The mismatched String remains a valid ParameterValue; the exact public
+ * Int64 accessor is the intended failure.
  */
 NodeOutput execute_host_preparation_source(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -330,13 +330,11 @@ NodeOutput execute_host_preparation_source(
         "host-preparation source received an image input: " + node.name);
   }
   g_host_preparation_source_calls.fetch_add(1, std::memory_order_relaxed);
-  NodeOutput output =
-      make_image_output(node.parameters["width"].as<int>(64),
-                        node.parameters["height"].as<int>(16), 1, 4.0f);
+  NodeOutput output = make_image_output(
+      as_int_flexible(node.parameters, "width", 64),
+      as_int_flexible(node.parameters, "height", 16), 1, 4.0f);
   if (g_host_preparation_emit_malformed_value.load(std::memory_order_acquire)) {
-    YAML::Node malformed("not-an-integer");
-    malformed.SetTag("!!int");
-    output.data["injected"] = std::move(malformed);
+    output.data["injected"] = "not-an-integer";
   } else {
     output.data["injected"] = 1;
   }
@@ -346,19 +344,25 @@ NodeOutput execute_host_preparation_source(
 /**
  * @brief Produces a data-only radius through the public operation contract.
  *
- * @param node Public callback identity with host-converted effective params.
+ * @param node Public callback identity with copied effective parameters.
  * @param inputs Source image/data views prepared by the host adapter.
  * @return Data-only output containing radius 1.
  * @throws std::bad_alloc when public output-map storage cannot grow.
- * @note The callback increments its entry count first. A malformed `injected`
- * parameter must therefore fail in the host adapter before this function.
+ * @throws plugin::ParameterTypeError when `injected` is not exact Int64.
+ * @note The callback increments its entry count first, then exercises the
+ * public exact accessor before publishing its output.
  */
 plugin::OperationOutput execute_host_preparation_parameter(
     const plugin::NodeView& node,
     plugin::ArrayView<plugin::OperationInputView> inputs) {
-  (void)node;
   (void)inputs;
   g_host_preparation_plugin_calls.fetch_add(1, std::memory_order_relaxed);
+  const plugin::ParameterValue* injected = node.find_parameter("injected");
+  if (injected == nullptr) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "host-preparation parameter is missing injected");
+  }
+  (void)injected->as_int64();
   plugin::OperationOutput output;
   output.data.emplace("radius", plugin::ParameterValue(std::int64_t{1}));
   return output;
@@ -500,8 +504,9 @@ void register_split_ops() {
         "split_plan", "source",
         MonolithicOpFunc(
             [](const Node& node, const std::vector<const NodeOutput*>&) {
-              return make_image_output(node.parameters["width"].as<int>(64),
-                                       node.parameters["height"].as<int>(64));
+              return make_image_output(
+                  as_int_flexible(node.parameters, "width", 64),
+                  as_int_flexible(node.parameters, "height", 64));
             }));
     registry.register_op_hp_monolithic(
         "split_plan", "parameter_source",
@@ -539,14 +544,14 @@ void register_split_ops() {
             }));
     registry.register_op_hp_monolithic(
         "split_plan", "dynamic_extent_target",
-        MonolithicOpFunc(
-            [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const YAML::Node& parameters = node.runtime_parameters
-                                                 ? node.runtime_parameters
-                                                 : node.parameters;
-              return make_image_output(parameters["width"].as<int>(),
-                                       parameters["height"].as<int>());
-            }));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          const plugin::ParameterMap& parameters =
+              node.runtime_parameters.empty() ? node.parameters
+                                              : node.runtime_parameters;
+          return make_image_output(as_int_flexible(parameters, "width", 0),
+                                   as_int_flexible(parameters, "height", 0));
+        }));
     registry.register_op_hp_monolithic(
         "image_generator", "split_image_parameter_source",
         MonolithicOpFunc([](const Node&,
@@ -560,9 +565,9 @@ void register_split_ops() {
         "split_plan", "gradient_source",
         MonolithicOpFunc([](const Node& node,
                             const std::vector<const NodeOutput*>&) {
-          NodeOutput output =
-              make_image_output(node.parameters["width"].as<int>(320),
-                                node.parameters["height"].as<int>(64), 1, 0.0f);
+          NodeOutput output = make_image_output(
+              as_int_flexible(node.parameters, "width", 320),
+              as_int_flexible(node.parameters, "height", 64), 1, 0.0f);
           cv::Mat pixels = toCvMat(output.image_buffer);
           for (int y = 0; y < pixels.rows; ++y) {
             for (int x = 0; x < pixels.cols; ++x) {
@@ -596,8 +601,8 @@ void register_split_ops() {
                 throw GraphError(GraphErrc::MissingDependency,
                                  "derived parameter requires source input");
               }
-              const int generation =
-                  inputs.front()->data.at("generation").as<int>();
+              const int generation = static_cast<int>(
+                  inputs.front()->data.at("generation").as_int64());
               g_derived_parameter_seen_generation.store(
                   generation, std::memory_order_release);
               NodeOutput output;
@@ -830,11 +835,10 @@ void populate_dynamic_blur_graph(GraphModel& graph) {
  * @param graph Empty graph receiving the image/data source, adapted public
  * parameter callback, and HP/RT tiled target.
  * @return Nothing.
- * @throws GraphError or allocation/YAML exceptions from graph construction.
+ * @throws GraphError or allocation exceptions from graph construction.
  * @note The parameter node consumes the source through both image and named
- * parameter edges. Preflight must therefore stage the source, clone its
- * `injected` value into effective parameters, and convert that map before the
- * adapted callback can enter.
+ * parameter edges. Preflight must therefore stage the source and copy its
+ * `injected` ParameterValue into the effective map before callback entry.
  */
 void populate_host_preparation_failure_graph(GraphModel& graph) {
   Node source = make_node(1, "image_generator", "host_preparation_source");
@@ -970,7 +974,7 @@ TEST(NodeInputResolverSplit,
   GraphModel graph("cache/split-input-resolver");
   Node parent = make_node(10, "split", "parent");
   parent.cached_output_high_precision = make_image_output(12, 7);
-  parent.cached_output_high_precision->data["threshold"] = YAML::Node(42);
+  parent.cached_output_high_precision->data["threshold"] = 42;
   graph.add_node(parent);
 
   Node child = make_node(20, "split", "child");
@@ -987,8 +991,8 @@ TEST(NodeInputResolverSplit,
       "resolver test");
 
   ASSERT_EQ(resolved.image_inputs.size(), 1u);
-  EXPECT_EQ(child.runtime_parameters["threshold"].as<int>(), 42);
-  EXPECT_EQ(child.parameters["threshold"].as<int>(), 1)
+  EXPECT_EQ(child.runtime_parameters.at("threshold").as_int64(), 42);
+  EXPECT_EQ(child.parameters.at("threshold").as_int64(), 1)
       << "runtime parameter cloning must not mutate static parameters";
   ASSERT_TRUE(child.last_input_size_hp.has_value());
   EXPECT_EQ(*child.last_input_size_hp, (PixelSize{12, 7}));
@@ -1060,7 +1064,7 @@ TEST(NodeExecutorSplit,
   ASSERT_EQ(normalized_context.normalized_storage.size(), 1u);
   EXPECT_EQ(normalized_context.normalized_storage.front()
                 .data.at("normalization_marker")
-                .as<int>(),
+                .as_int64(),
             17);
   EXPECT_EQ(normalized_context.normalized_storage.front().space.absolute_roi,
             secondary.space.absolute_roi);
@@ -1156,7 +1160,7 @@ TEST(NodeExecutorSplit,
           }));
 
   Node execution_node = graph.node(12);
-  execution_node.runtime_parameters = YAML::Clone(execution_node.parameters);
+  execution_node.runtime_parameters = execution_node.parameters;
   execution_node.runtime_parameters["radius"] = 3;
   NodeOutput left = make_image_output(40, 20);
   left.data["generation"] = 99;
@@ -1886,8 +1890,8 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_DOUBLE_EQ(source_min, 3.0);
   EXPECT_DOUBLE_EQ(source_max, 3.0);
   ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
-  ASSERT_TRUE(graph.node(2).runtime_parameters);
-  EXPECT_EQ(graph.node(2).runtime_parameters["radius"].as<int>(), 7);
+  ASSERT_FALSE(graph.node(2).runtime_parameters.empty());
+  EXPECT_EQ(graph.node(2).runtime_parameters.at("radius").as_int64(), 7);
 }
 
 TEST(TaskGraphPlanningSplit,
@@ -2191,7 +2195,7 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
 }
 
 TEST(ComputeServiceSplit,
-     HostPreparationFailureBeforePluginEntryPublishesNoDirtyState) {
+     ExactParameterTypeFailureInsidePluginPublishesNoDirtyState) {
   register_split_ops();
   for (const ComputeIntent intent :
        {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
@@ -2249,11 +2253,13 @@ TEST(ComputeServiceSplit,
         toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
             .clone();
     const int source_value_before =
-        graph.node(1)
-            .cached_output_high_precision->data.at("injected")
-            .as<int>();
+        static_cast<int>(graph.node(1)
+                             .cached_output_high_precision->data.at("injected")
+                             .as_int64());
     const int parameter_value_before =
-        graph.node(3).cached_output_high_precision->data.at("radius").as<int>();
+        static_cast<int>(graph.node(3)
+                             .cached_output_high_precision->data.at("radius")
+                             .as_int64());
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
@@ -2288,11 +2294,11 @@ TEST(ComputeServiceSplit,
     g_host_preparation_rt_target_calls.store(0, std::memory_order_relaxed);
     g_host_preparation_emit_malformed_value.store(true,
                                                   std::memory_order_release);
-    bool saw_conversion_failure = false;
+    bool saw_type_failure = false;
     try {
       (void)service.compute_parallel(graph, runtime, request);
     } catch (const GraphError& error) {
-      saw_conversion_failure = true;
+      saw_type_failure = true;
       EXPECT_EQ(error.code(), GraphErrc::ComputeError);
       EXPECT_NE(std::string(error.what()).find("split_node_3"),
                 std::string::npos)
@@ -2305,13 +2311,13 @@ TEST(ComputeServiceSplit,
     g_host_preparation_emit_malformed_value.store(false,
                                                   std::memory_order_release);
 
-    EXPECT_TRUE(saw_conversion_failure);
+    EXPECT_TRUE(saw_type_failure);
     EXPECT_EQ(g_host_preparation_source_calls.load(std::memory_order_relaxed),
               1)
         << "preflight must stage the malformed connected source exactly once";
     EXPECT_EQ(g_host_preparation_plugin_calls.load(std::memory_order_relaxed),
-              0)
-        << "effective-parameter conversion must fail before callback entry";
+              1)
+        << "the exact Int64 accessor must fail after callback entry";
     EXPECT_EQ(
         g_host_preparation_hp_target_calls.load(std::memory_order_relaxed), 0)
         << "HP phase two must not dispatch after preparation failure";
@@ -2349,12 +2355,13 @@ TEST(ComputeServiceSplit,
         0.0);
     EXPECT_EQ(graph.node(1)
                   .cached_output_high_precision->data.at("injected")
-                  .as<int>(),
+                  .as_int64(),
               source_value_before)
         << "the malformed staged source value must not replace HP cache";
-    EXPECT_EQ(
-        graph.node(3).cached_output_high_precision->data.at("radius").as<int>(),
-        parameter_value_before);
+    EXPECT_EQ(graph.node(3)
+                  .cached_output_high_precision->data.at("radius")
+                  .as_int64(),
+              parameter_value_before);
 
     const compute::RealtimeProxyGraph::NodeState* proxy_after =
         runtime.realtime_proxy_graph().find_state(2);
@@ -2768,7 +2775,7 @@ TEST(DownsampleExecutorSplit,
     EXPECT_EQ(output.context.get(), expected_owner.get());
     EXPECT_FALSE(output.context.owner_before(expected_owner));
     EXPECT_FALSE(expected_owner.owner_before(output.context));
-    EXPECT_EQ(state->output->data.at("marker").as<int>(), 17);
+    EXPECT_EQ(state->output->data.at("marker").as_int64(), 17);
     EXPECT_EQ(state->version, version);
     ASSERT_TRUE(state->roi_hp.has_value());
     EXPECT_EQ(*state->roi_hp, expected_roi);

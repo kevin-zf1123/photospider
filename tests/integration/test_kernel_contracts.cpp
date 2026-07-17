@@ -11,11 +11,13 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
+#include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_io_service.hpp"
@@ -24,6 +26,7 @@
 #endif
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
+#include "plugin/operation_host_adapter.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
@@ -31,6 +34,11 @@
 
 namespace ps {
 namespace {
+
+static_assert(std::is_same_v<decltype(Node::parameters), plugin::ParameterMap>);
+static_assert(
+    std::is_same_v<decltype(Node::runtime_parameters), plugin::ParameterMap>);
+static_assert(std::is_same_v<decltype(NodeOutput::data), plugin::ParameterMap>);
 
 /** @brief Serializes the blocking contract operation's release future. */
 std::mutex g_blocking_source_mutex;
@@ -40,6 +48,12 @@ std::shared_future<void> g_blocking_source_release;
 
 /** @brief Publishes entry into the blocking contract operation callback. */
 std::atomic<bool> g_blocking_source_started{false};
+
+/** @brief Counts document-to-operation parameter producer invocations. */
+std::atomic<int> g_parameter_value_source_calls{0};
+
+/** @brief Counts effective-parameter consumer invocations. */
+std::atomic<int> g_parameter_value_consumer_calls{0};
 
 /**
  * @brief Configures the blocking contract op release signal for one test.
@@ -107,8 +121,10 @@ void register_contract_ops() {
         "kernel_contract_test", "source",
         MonolithicOpFunc(
             [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const int width = node.runtime_parameters["width"].as<int>(17);
-              const int height = node.runtime_parameters["height"].as<int>(3);
+              const int width =
+                  as_int_flexible(node.runtime_parameters, "width", 17);
+              const int height =
+                  as_int_flexible(node.runtime_parameters, "height", 3);
               NodeOutput output;
               output.image_buffer = make_aligned_cpu_image_buffer(
                   width, height, 1, DataType::FLOAT32);
@@ -149,8 +165,10 @@ void register_contract_ops() {
                 release.wait();
               }
 
-              const int width = node.runtime_parameters["width"].as<int>(17);
-              const int height = node.runtime_parameters["height"].as<int>(3);
+              const int width =
+                  as_int_flexible(node.runtime_parameters, "width", 17);
+              const int height =
+                  as_int_flexible(node.runtime_parameters, "height", 3);
               NodeOutput output;
               output.image_buffer = make_aligned_cpu_image_buffer(
                   width, height, 1, DataType::FLOAT32);
@@ -172,6 +190,74 @@ void register_contract_ops() {
           src.copyTo(dst);
         }),
         OpMetadata{});
+
+    registry.register_op_hp_monolithic(
+        "kernel_contract_test", "parameter_value_source",
+        plugin_host::adapt_monolithic_operation(plugin::MonolithicOperation(
+            [](const plugin::NodeView& node,
+               plugin::ArrayView<plugin::OperationInputView>) {
+              g_parameter_value_source_calls.fetch_add(
+                  1, std::memory_order_relaxed);
+              const plugin::ParameterValue* enabled =
+                  node.find_parameter("enabled");
+              const plugin::ParameterValue* count =
+                  node.find_parameter("count");
+              const plugin::ParameterValue* ratio =
+                  node.find_parameter("ratio");
+              const plugin::ParameterValue* label =
+                  node.find_parameter("label");
+              if (enabled == nullptr || count == nullptr || ratio == nullptr ||
+                  label == nullptr ||
+                  node.find_parameter("optional_value") != nullptr) {
+                throw GraphError(GraphErrc::InvalidParameter,
+                                 "parameter source contract is incomplete");
+              }
+              if (!enabled->as_bool() || ratio->as_double() != 1.25 ||
+                  label->as_string() != "007") {
+                throw GraphError(GraphErrc::InvalidParameter,
+                                 "parameter source contract values differ");
+              }
+              plugin::OperationOutput output;
+              output.data["dynamic_count"] = count->as_int64() + 4;
+              return output;
+            })));
+
+    registry.register_op_hp_monolithic(
+        "kernel_contract_test", "parameter_value_consumer",
+        plugin_host::adapt_monolithic_operation(plugin::MonolithicOperation(
+            [](const plugin::NodeView& node,
+               plugin::ArrayView<plugin::OperationInputView>) {
+              g_parameter_value_consumer_calls.fetch_add(
+                  1, std::memory_order_relaxed);
+              const plugin::ParameterValue* enabled =
+                  node.find_parameter("enabled");
+              const plugin::ParameterValue* count =
+                  node.find_parameter("count");
+              const plugin::ParameterValue* ratio =
+                  node.find_parameter("ratio");
+              const plugin::ParameterValue* label =
+                  node.find_parameter("label");
+              if (enabled == nullptr || count == nullptr || ratio == nullptr ||
+                  label == nullptr ||
+                  node.find_parameter("optional_value") != nullptr) {
+                throw GraphError(GraphErrc::InvalidParameter,
+                                 "parameter consumer contract is incomplete");
+              }
+              if (enabled->as_bool() || count->as_int64() != 11 ||
+                  ratio->as_double() != 2.5 ||
+                  label->as_string() != "consumer") {
+                throw GraphError(GraphErrc::InvalidParameter,
+                                 "effective parameter contract values differ");
+              }
+              constexpr int kDefaultHeight = 3;
+              plugin::OperationOutput output;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  static_cast<int>(count->as_int64()), kDefaultHeight, 1,
+                  DataType::FLOAT32);
+              cv::Mat image = toCvMat(output.image_buffer);
+              image.setTo(2.0f);
+              return output;
+            })));
   });
 }
 
@@ -181,7 +267,6 @@ Node make_contract_node() {
   node.name = "contract_source";
   node.type = "kernel_contract_test";
   node.subtype = "source";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = 17;
   node.parameters["height"] = 3;
   return node;
@@ -434,7 +519,7 @@ TEST(InteractionInspectionContracts,
   EXPECT_EQ(tree->entries[1].incoming_edge->to_node_id, 2);
   EXPECT_EQ(tree->entries[1].incoming_edge->from_output_name, "image");
   EXPECT_EQ(tree->entries[1].node.id, 1);
-  EXPECT_EQ(tree->entries[1].node.parameters["width"].as<int>(), 17);
+  EXPECT_EQ(tree->entries[1].node.parameters.at("width").as_int64(), 17);
 
   auto graph = svc.cmd_inspect_graph(*loaded);
   ASSERT_TRUE(graph.has_value());
@@ -445,6 +530,157 @@ TEST(InteractionInspectionContracts,
   EXPECT_FALSE(graph->nodes[0].metadata->has_cached_output);
 
   std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies one document-to-Graph-to-operation ParameterValue path.
+ *
+ * @return Nothing; GoogleTest assertions report kind, value, merge, and output
+ * mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The producer emits a named Int64 value which overrides the consumer's
+ * static Int64 parameter without passing through YAML storage.
+ */
+TEST(ParameterValuePath, DocumentGraphAndOperationsStayFormatNeutral) {
+  register_contract_ops();
+  g_parameter_value_source_calls.store(0, std::memory_order_relaxed);
+  g_parameter_value_consumer_calls.store(0, std::memory_order_relaxed);
+
+  const std::string graph_name = "parameter_value_vertical_path";
+  const auto root = clean_temp_path("photospider-parameter-value-root");
+  const auto yaml_path = temp_path("photospider-parameter-value.yaml");
+  write_text(yaml_path, R"YAML(
+- id: 1
+  name: parameter_source
+  type: kernel_contract_test
+  subtype: parameter_value_source
+  parameters:
+    enabled: true
+    count: 7
+    ratio: 1.25
+    label: "007"
+- id: 2
+  name: parameter_consumer
+  type: kernel_contract_test
+  subtype: parameter_value_consumer
+  parameter_inputs:
+    - from_node_id: 1
+      from_output_name: dynamic_count
+      to_parameter_name: count
+  parameters:
+    enabled: false
+    count: 2
+    ratio: 2.5
+    label: consumer
+)YAML");
+
+  Kernel kernel;
+  const auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 2;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.execution.parallel = false;
+  ASSERT_TRUE(kernel.compute(request));
+  EXPECT_FALSE(kernel.last_error(graph_name).has_value());
+  EXPECT_EQ(g_parameter_value_source_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_parameter_value_consumer_calls.load(std::memory_order_relaxed),
+            1);
+
+  const plugin::ParameterMap evidence =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            const Node& source = graph.node(1);
+            const Node& consumer = graph.node(2);
+            plugin::ParameterMap snapshot;
+            snapshot["enabled"] = source.parameters.at("enabled");
+            snapshot["source_count"] = source.parameters.at("count");
+            snapshot["ratio"] = source.parameters.at("ratio");
+            snapshot["label"] = source.parameters.at("label");
+            snapshot["consumer_static_count"] = consumer.parameters.at("count");
+            snapshot["dynamic_count"] =
+                source.cached_output_high_precision->data.at("dynamic_count");
+            snapshot["final_width"] =
+                consumer.cached_output_high_precision->image_buffer.width;
+            snapshot["final_height"] =
+                consumer.cached_output_high_precision->image_buffer.height;
+            return snapshot;
+          })
+          .get();
+
+  EXPECT_TRUE(evidence.at("enabled").as_bool());
+  EXPECT_EQ(evidence.at("source_count").as_int64(), 7);
+  EXPECT_DOUBLE_EQ(evidence.at("ratio").as_double(), 1.25);
+  EXPECT_EQ(evidence.at("label").as_string(), "007");
+  EXPECT_EQ(evidence.at("consumer_static_count").as_int64(), 2);
+  EXPECT_EQ(evidence.at("dynamic_count").as_int64(), 11);
+  EXPECT_EQ(evidence.at("final_width").as_int64(), 11);
+  EXPECT_EQ(evidence.at("final_height").as_int64(), 3);
+
+  kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
+ * @brief Verifies quoted numeric text fails an exact Int64 plugin accessor.
+ *
+ * @return Nothing; GoogleTest assertions report callback and error mismatch.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Loading succeeds because string is a valid parameter kind; failure
+ * occurs only when the operation requires Int64.
+ */
+TEST(ParameterValuePath, ExactTypeMismatchFailsInsideOperation) {
+  register_contract_ops();
+  g_parameter_value_source_calls.store(0, std::memory_order_relaxed);
+  g_parameter_value_consumer_calls.store(0, std::memory_order_relaxed);
+
+  const std::string graph_name = "parameter_value_type_mismatch";
+  const auto root =
+      clean_temp_path("photospider-parameter-value-mismatch-root");
+  const auto yaml_path = temp_path("photospider-parameter-value-mismatch.yaml");
+  write_text(yaml_path, R"YAML(
+- id: 1
+  name: parameter_source
+  type: kernel_contract_test
+  subtype: parameter_value_source
+  parameters:
+    enabled: true
+    count: "7"
+    ratio: 1.25
+    label: "007"
+)YAML");
+
+  Kernel kernel;
+  const auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  EXPECT_FALSE(kernel.compute(request));
+  const auto error = kernel.last_error(graph_name);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_EQ(error->code, GraphErrc::ComputeError);
+  EXPECT_EQ(g_parameter_value_source_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_parameter_value_consumer_calls.load(std::memory_order_relaxed),
+            0);
+
+  kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
 }
 
 TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
@@ -602,8 +838,8 @@ TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
       ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
   ASSERT_NE(out.data.find("answer"), out.data.end());
   ASSERT_NE(out.data.find("label"), out.data.end());
-  EXPECT_EQ(out.data["answer"].as<int>(), 42);
-  EXPECT_EQ(out.data["label"].as<std::string>(), "cached");
+  EXPECT_EQ(out.data.at("answer").as_int64(), 42);
+  EXPECT_EQ(out.data.at("label").as_string(), "cached");
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());

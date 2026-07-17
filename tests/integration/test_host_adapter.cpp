@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/param_utils.hpp"
 #include "core/ps_types.hpp"               // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"                  // NOLINT(build/include_subdir)
@@ -773,42 +774,42 @@ void register_host_adapter_ops() {
   std::call_once(once, [] {
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "source",
-        MonolithicOpFunc(
-            [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const YAML::Node& params = node.runtime_parameters
-                                             ? node.runtime_parameters
-                                             : node.parameters;
-              const int width = params["width"].as<int>(6);
-              const int height = params["height"].as<int>(4);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              cv::Mat mat = toCvMat(output.image_buffer);
-              mat.setTo(7.0f);
-              output.space.absolute_roi = PixelRect{0, 0, width, height};
-              output.debug.compute_device = "host-adapter-test";
-              return output;
-            }));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          const plugin::ParameterMap& params = node.runtime_parameters.empty()
+                                                   ? node.parameters
+                                                   : node.runtime_parameters;
+          const int width = as_int_flexible(params, "width", 6);
+          const int height = as_int_flexible(params, "height", 4);
+          NodeOutput output;
+          output.image_buffer = make_aligned_cpu_image_buffer(
+              width, height, 1, DataType::FLOAT32);
+          cv::Mat mat = toCvMat(output.image_buffer);
+          mat.setTo(7.0f);
+          output.space.absolute_roi = PixelRect{0, 0, width, height};
+          output.debug.compute_device = "host-adapter-test";
+          return output;
+        }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "slow_source",
-        MonolithicOpFunc(
-            [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const YAML::Node& params = node.runtime_parameters
-                                             ? node.runtime_parameters
-                                             : node.parameters;
-              std::this_thread::sleep_for(
-                  std::chrono::milliseconds(params["sleep_ms"].as<int>(50)));
-              const int width = params["width"].as<int>(5);
-              const int height = params["height"].as<int>(3);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              cv::Mat mat = toCvMat(output.image_buffer);
-              mat.setTo(3.0f);
-              output.space.absolute_roi = PixelRect{0, 0, width, height};
-              output.debug.compute_device = "host-adapter-slow-test";
-              return output;
-            }));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          const plugin::ParameterMap& params = node.runtime_parameters.empty()
+                                                   ? node.parameters
+                                                   : node.runtime_parameters;
+          std::this_thread::sleep_for(std::chrono::milliseconds(
+              as_int_flexible(params, "sleep_ms", 50)));
+          const int width = as_int_flexible(params, "width", 5);
+          const int height = as_int_flexible(params, "height", 3);
+          NodeOutput output;
+          output.image_buffer = make_aligned_cpu_image_buffer(
+              width, height, 1, DataType::FLOAT32);
+          cv::Mat mat = toCvMat(output.image_buffer);
+          mat.setTo(3.0f);
+          output.space.absolute_roi = PixelRect{0, 0, width, height};
+          output.debug.compute_device = "host-adapter-slow-test";
+          return output;
+        }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "blocking_source",
         MonolithicOpFunc([](const Node& node,
@@ -822,11 +823,11 @@ void register_host_adapter_ops() {
           if (release.valid()) {
             release.wait();
           }
-          const YAML::Node& params = node.runtime_parameters
-                                         ? node.runtime_parameters
-                                         : node.parameters;
-          const int width = params["width"].as<int>(5);
-          const int height = params["height"].as<int>(3);
+          const plugin::ParameterMap& params = node.runtime_parameters.empty()
+                                                   ? node.parameters
+                                                   : node.runtime_parameters;
+          const int width = as_int_flexible(params, "width", 5);
+          const int height = as_int_flexible(params, "height", 3);
           NodeOutput output;
           output.image_buffer = make_aligned_cpu_image_buffer(
               width, height, 1, DataType::FLOAT32);
@@ -839,13 +840,13 @@ void register_host_adapter_ops() {
         "host_adapter_test", "resized_extent",
         MonolithicOpFunc([](const Node& node,
                             const std::vector<const NodeOutput*>&) {
-          const YAML::Node& params = node.runtime_parameters
-                                         ? node.runtime_parameters
-                                         : node.parameters;
-          const int width = params["width"].as<int>(6);
-          const int height = params["height"].as<int>(4);
-          const int roi_width = params["roi_width"].as<int>(12);
-          const int roi_height = params["roi_height"].as<int>(9);
+          const plugin::ParameterMap& params = node.runtime_parameters.empty()
+                                                   ? node.parameters
+                                                   : node.runtime_parameters;
+          const int width = as_int_flexible(params, "width", 6);
+          const int height = as_int_flexible(params, "height", 4);
+          const int roi_width = as_int_flexible(params, "roi_width", 12);
+          const int roi_height = as_int_flexible(params, "roi_height", 9);
           NodeOutput output;
           output.image_buffer = make_aligned_cpu_image_buffer(
               width, height, 1, DataType::FLOAT32);

@@ -3,6 +3,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/parameter_value_adapter.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -110,7 +111,7 @@ static YAML::Node caches_to_yaml(const std::vector<CacheEntry>& caches) {
  * - parameter_inputs: 如果存在，迭代序列以提取参数映射，
  *   其中 'from_output_name' 和 'to_parameter_name' 均不能为空；否则抛出
  * GraphError 异常。
- * - parameters: 如果存在，则直接赋值。
+ * - parameters: 如果存在，则在文档边界递归转换为 ParameterValue map。
  * - outputs: 如果存在，迭代序列以提取输出端口的详细信息，
  *   包括 output_id、output_type 以及可选的 output_parameters。
  * - caches: 如果存在，迭代序列以提取缓存条目的详细信息，
@@ -122,7 +123,10 @@ static YAML::Node caches_to_yaml(const std::vector<CacheEntry>& caches) {
  * @param n 包含 Node 配置信息的 YAML::Node 对象。
  * @return Node 从指定 YAML 节点构造的 Node 对象。
  *
- * @throws GraphError 如果参数输入缺少必需字段。
+ * @throws YAML::Exception 如果字段或参数标量无法按其声明类型转换。
+ * @throws GraphError 如果参数输入缺少必需字段，或参数 map 的键无法规范化。
+ * @throws std::bad_alloc 如果字符串、参数树或容器分配失败。
+ * @note 参数转换在此处完成一次；返回的 Node 不保留 YAML 参数别名。
  */
 Node Node::from_yaml(const YAML::Node& n) {
   Node node;
@@ -160,7 +164,17 @@ Node Node::from_yaml(const YAML::Node& n) {
   }
 
   if (n["parameters"]) {
-    node.parameters = n["parameters"];
+    try {
+      node.parameters = core::parameter_map_from_yaml(n["parameters"]);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const YAML::Exception&) {
+      throw;
+    } catch (const std::invalid_argument& error) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Invalid parameters for node " +
+                           std::to_string(node.id) + ": " + error.what());
+    }
   }
 
   if (n["outputs"]) {
@@ -197,12 +211,15 @@ Node Node::from_yaml(const YAML::Node& n) {
  * - "subtype": 节点的子类别或子类型。
  * - "image_inputs": 如果不为空，则使用 image_inputs_to_yaml 序列化。
  * - "parameter_inputs": 如果不为空，则使用 parameter_inputs_to_yaml 序列化。
- * - "parameters": 如果 parameters 字段为非空映射，则直接赋值；否则创建一个空的
- * YAML 映射。
+ * - "parameters": 通过 document adapter 将 ParameterValue map 转换为 YAML。
  * - "outputs": 如果存在，则使用 ports_to_yaml 序列化输出端口信息。
  * - "caches": 如果存在，则使用 caches_to_yaml 序列化缓存项。
  *
  * @return 一个包含节点完整配置的 YAML::Node 对象。
+ * @throws YAML::Exception 如果 yaml-cpp 无法构造输出节点。
+ * @throws std::invalid_argument 如果参数树包含未知 ParameterKind。
+ * @throws std::bad_alloc 如果 YAML 或临时容器分配失败。
+ * @note 只序列化静态参数；runtime_parameters 和所有计算状态都被排除。
  */
 YAML::Node Node::to_yaml() const {
   YAML::Node n;
@@ -220,10 +237,7 @@ YAML::Node Node::to_yaml() const {
   if (!parameter_inputs.empty())
     n["parameter_inputs"] = parameter_inputs_to_yaml(parameter_inputs);
 
-  if (parameters && parameters.IsMap() && parameters.size() > 0)
-    n["parameters"] = parameters;
-  else
-    n["parameters"] = YAML::Node(YAML::NodeType::Map);
+  n["parameters"] = core::parameter_map_to_yaml(parameters);
 
   if (!outputs.empty())
     n["outputs"] = ports_to_yaml(outputs);

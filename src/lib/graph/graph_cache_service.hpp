@@ -113,8 +113,9 @@ class GraphCacheService {
    * @note The method is a no-op for disabled saving, missing cache roots,
    * unsupported cache entries, empty locations, or nodes without HP output.
    * Image serialization accepts only CPU buffers with owned data. Opaque
-   * non-CPU images are skipped without unsafe mapping, while any named YAML
-   * outputs are still saved; a future device adapter may add explicit download.
+   * non-CPU images are skipped without unsafe mapping, while named
+   * ParameterValue outputs are serialized as YAML metadata; a future device
+   * adapter may add explicit download.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;

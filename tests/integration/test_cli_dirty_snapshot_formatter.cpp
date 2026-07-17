@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "graph_cli/command/commands.hpp"
@@ -41,18 +42,18 @@ void register_cli_command_ops() {
   std::call_once(once, [] {
     OpRegistry::instance().register_op_hp_monolithic(
         "cli_dirty_test", "source",
-        MonolithicOpFunc(
-            [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const int width = node.parameters["width"].as<int>(256);
-              const int height = node.parameters["height"].as<int>(128);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              toCvMat(output.image_buffer).setTo(3.0f);
-              output.space.absolute_roi = PixelRect{0, 0, width, height};
-              output.debug.compute_device = "cli-dirty-test-source";
-              return output;
-            }));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          const int width = as_int_flexible(node.parameters, "width", 256);
+          const int height = as_int_flexible(node.parameters, "height", 128);
+          NodeOutput output;
+          output.image_buffer = make_aligned_cpu_image_buffer(
+              width, height, 1, DataType::FLOAT32);
+          toCvMat(output.image_buffer).setTo(3.0f);
+          output.space.absolute_roi = PixelRect{0, 0, width, height};
+          output.debug.compute_device = "cli-dirty-test-source";
+          return output;
+        }));
     OpRegistry::instance().register_op_hp_monolithic(
         "cli_dirty_test", "offset_identity",
         MonolithicOpFunc(

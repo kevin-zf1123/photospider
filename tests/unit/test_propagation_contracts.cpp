@@ -121,7 +121,6 @@ Node make_source_node(int id, const std::string& name, int width, int height) {
   node.name = name;
   node.type = "image_generator";
   node.subtype = "constant";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   if (width > 0)
     node.parameters["width"] = width;
   if (height > 0)
@@ -136,7 +135,6 @@ Node make_unparameterized_source_node(int id, const std::string& name) {
   node.name = name;
   node.type = "image_generator";
   node.subtype = "constant";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   return node;
 }
 
@@ -146,7 +144,6 @@ Node make_blur_node(int id, int parent_id, int ksize) {
   node.name = "blur";
   node.type = "image_process";
   node.subtype = "gaussian_blur";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["ksize"] = ksize;
   node.image_inputs.push_back(ImageInput{parent_id, "image"});
   return node;
@@ -159,7 +156,6 @@ Node make_resize_node(int id, int parent_id, int width, int height,
   node.name = "resize";
   node.type = "image_process";
   node.subtype = "resize";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = width;
   node.parameters["height"] = height;
   node.parameters["interpolation"] = interpolation;
@@ -173,7 +169,6 @@ Node make_curve_node(int id, int parent_id) {
   node.name = "curve";
   node.type = "image_process";
   node.subtype = "curve_transform";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.image_inputs.push_back(ImageInput{parent_id, "image"});
   return node;
 }
@@ -198,7 +193,7 @@ void seed_hp_extent(GraphModel& graph, int node_id, int width, int height) {
  * @param image_parent_id Image source node id.
  * @param parameter_parent_id Named-value source node id.
  * @return Node configured with an 8x8 output and `radius` parameter input.
- * @throws std::bad_alloc or YAML exceptions during value construction.
+ * @throws std::bad_alloc during value construction.
  * @note The operation key is test-local and registered explicitly by its test.
  */
 Node make_public_dependency_node(int id, int image_parent_id,
@@ -208,7 +203,6 @@ Node make_public_dependency_node(int id, int image_parent_id,
   node.name = "public_dependency";
   node.type = "operation_sdk_test";
   node.subtype = "dependency";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = 8;
   node.parameters["height"] = 8;
   node.parameters["radius"] = 1;
@@ -225,7 +219,7 @@ Node make_public_dependency_node(int id, int image_parent_id,
  * @param value Integer named output value.
  * @param revision Positive HP revision paired with the value.
  * @return Nothing.
- * @throws std::bad_alloc or YAML exceptions during output construction.
+ * @throws std::bad_alloc during output construction.
  * @note Mutation uses the graph runtime-state boundary so topology is
  * unchanged.
  */
@@ -502,7 +496,8 @@ TEST(OperationHostAdapter,
   child.name = "lut_validation";
   child.type = "operation_sdk_test";
   child.subtype = "lut_validation";
-  child.parameters = YAML::Load("{width: 4, height: 4}");
+  child.parameters["width"] = 4;
+  child.parameters["height"] = 4;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
@@ -555,8 +550,6 @@ TEST(OperationHostAdapter,
   node.name = "null_views";
   node.type = "operation_sdk_test";
   node.subtype = "null_views";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
-
   bool monolithic_saw_nulls = false;
   MonolithicOpFunc monolithic = plugin_host::adapt_monolithic_operation(
       [&](const plugin::NodeView& public_node,
@@ -572,7 +565,7 @@ TEST(OperationHostAdapter,
   EXPECT_TRUE(monolithic_saw_nulls);
 
   NodeOutput data_only;
-  data_only.data.emplace("answer", YAML::Node(42));
+  data_only.data.emplace("answer", plugin::ParameterValue(42));
   data_only.space.absolute_roi = (PixelRect{3, 4, 5, 6});
   data_only.space.global_scale_x = 2.0;
   bool monolithic_saw_data_only = false;
@@ -638,48 +631,34 @@ TEST(OperationHostAdapter,
                     .available_input.spatial->absolute_roi.height == 6;
         return context.requested_roi;
       });
-  const plugin::ParameterMap effective =
-      core::parameter_map_from_yaml(roi_child.parameters);
+  const plugin::ParameterMap effective = roi_child.parameters;
   EXPECT_EQ(dirty(graph.node(52), (PixelRect{0, 0, 1, 1}), graph,
                   (PixelSize{1, 1}), {(PixelSize{})}, effective, nullptr),
             (PixelRect{0, 0, 1, 1}));
   EXPECT_TRUE(roi_saw_data_only_spatial);
 }
 
-TEST(OperationHostAdapter, RejectsMalformedTaggedParametersBeforePluginEntry) {
+TEST(OperationParameterAdapter,
+     RejectsMalformedTaggedParametersBeforeGraphStorage) {
   Node node;
   node.id = 42;
   node.name = "malformed_parameter";
   node.type = "operation_sdk_test";
   node.subtype = "malformed_parameter";
-  node.parameters = YAML::Load("{radius: !!int not-an-integer}");
-  bool callback_entered = false;
-  MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) {
-        callback_entered = true;
-        return plugin::OperationOutput{};
-      });
-
-  EXPECT_THROW((void)operation(node, {}), YAML::Exception);
-  EXPECT_FALSE(callback_entered);
-
   const std::vector<std::string> malformed_documents{
       "{value: !!null nope}", "{value: !!bool nope}", "{value: !!int nope}",
       "{value: !!float nope}", "{value: 9223372036854775808}"};
   for (const std::string& document : malformed_documents) {
     SCOPED_TRACE(document);
-    node.parameters = YAML::Load(document);
-    callback_entered = false;
-    EXPECT_THROW((void)operation(node, {}), YAML::Exception);
-    EXPECT_FALSE(callback_entered);
+    EXPECT_THROW(core::parameter_map_from_yaml(YAML::Load(document)),
+                 YAML::Exception);
+    EXPECT_TRUE(node.parameters.empty());
   }
 
-  node.parameters = YAML::Load("{value: !!float 1}");
-  const plugin::ParameterMap parameters =
-      plugin_host::parameter_map_from_yaml(node.parameters);
-  EXPECT_TRUE(parameters.at("value").is_double());
-  EXPECT_DOUBLE_EQ(parameters.at("value").as_double(), 1.0);
+  node.parameters =
+      core::parameter_map_from_yaml(YAML::Load("{value: !!float 1}"));
+  EXPECT_TRUE(node.parameters.at("value").is_double());
+  EXPECT_DOUBLE_EQ(node.parameters.at("value").as_double(), 1.0);
 }
 
 TEST(OperationHostAdapter, RejectsInvalidPublicSpatialMetadata) {
@@ -688,8 +667,6 @@ TEST(OperationHostAdapter, RejectsInvalidPublicSpatialMetadata) {
   node.name = "invalid_spatial";
   node.type = "operation_sdk_test";
   node.subtype = "invalid_spatial";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
-
   std::vector<plugin::SpatialSnapshot> invalid_snapshots(3);
   invalid_snapshots[0].transform_matrix[0] =
       std::numeric_limits<double>::quiet_NaN();
@@ -717,8 +694,6 @@ TEST(OperationHostAdapter,
   node.name = "image_descriptor";
   node.type = "operation_sdk_test";
   node.subtype = "image_descriptor";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
-
   cv::Mat source(3, 5, CV_32FC1, cv::Scalar(4.0f));
   cv::UMat unified;
   source.copyTo(unified);
@@ -815,7 +790,7 @@ TEST(OperationHostAdapter,
   child.name = "merge";
   child.type = "operation_sdk_test";
   child.subtype = "forward";
-  child.parameters = YAML::Load("{mode: exact}");
+  child.parameters["mode"] = "exact";
   child.image_inputs = {ImageInput{1, "image"}, ImageInput{2, "image"}};
   graph.add_node(child);
   graph.validate_topology();
@@ -837,8 +812,7 @@ TEST(OperationHostAdapter,
       });
   const std::vector<PixelSize> extents{(PixelSize{10, 11}),
                                        (PixelSize{20, 21})};
-  const plugin::ParameterMap effective =
-      core::parameter_map_from_yaml(child.parameters);
+  const plugin::ParameterMap effective = child.parameters;
   const PixelRect result =
       forward(graph.node(3), (PixelRect{1, 2, 3, 4}), graph,
               (PixelSize{20, 21}), (PixelSize{20, 21}), 1, extents, effective);
@@ -853,8 +827,7 @@ TEST(OperationHostAdapter, ValidatesReturnedRoiGeometryAfterCallbackReturn) {
   Node child = make_blur_node(2, 1, 3);
   graph.add_node(child);
   graph.validate_topology();
-  const plugin::ParameterMap effective =
-      core::parameter_map_from_yaml(child.parameters);
+  const plugin::ParameterMap effective = child.parameters;
 
   DirtyRoiPropFunc negative_origin = plugin_host::adapt_dirty_propagator(
       [](const plugin::RoiContext&) { return (PixelRect{-7, -5, 3, 4}); });
@@ -909,7 +882,8 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
   child.name = "dependency_route";
   child.type = type;
   child.subtype = subtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs = {ImageInput{1, "image"}, ImageInput{4, "image"}};
   graph.add_node(child);
   graph.validate_topology();
@@ -960,7 +934,8 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
   child.name = "bounded_dependency_union";
   child.type = type;
   child.subtype = subtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
@@ -1138,7 +1113,8 @@ TEST(PropagationContracts,
   child.name = "builder_revision";
   child.type = type;
   child.subtype = subtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();

@@ -8,11 +8,9 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "core/parameter_value_adapter.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
@@ -95,27 +93,6 @@ SpatialContext to_private_spatial(const plugin::SpatialSnapshot& spatial) {
   result.absolute_roi = spatial.absolute_roi;
   result.global_scale_x = spatial.global_scale_x;
   result.global_scale_y = spatial.global_scale_y;
-  return result;
-}
-
-/**
- * @brief Converts one private named-output map to public values.
- * @param data Host-owned named YAML outputs.
- * @return Deep-owned public parameter map.
- * @throws std::invalid_argument for unsupported mapping keys or normalized-key
- * collisions in a nested output value.
- * @throws YAML::Exception when a nested scalar cannot be represented by its
- * inferred or explicit type, or uses an unsupported explicit tag.
- * @throws std::bad_alloc unchanged from recursive conversion.
- * @note Keys are already strings and therefore require no numeric
- * normalization.
- */
-plugin::ParameterMap output_data_to_public(
-    const std::unordered_map<std::string, OutputValue>& data) {
-  plugin::ParameterMap result;
-  for (const auto& [key, value] : data) {
-    result.emplace(key, parameter_value_from_yaml(value));
-  }
   return result;
 }
 
@@ -303,12 +280,8 @@ void validate_image_descriptor(const ImageBuffer& buffer) {
 /**
  * @brief Builds callback-scoped public views for private upstream outputs.
  * @param inputs Borrowed private output pointers in image-input order.
- * @return Storage owning every converted non-image value and view.
- * @throws std::invalid_argument for unsupported mapping keys or normalized-key
- * collisions in upstream named data.
- * @throws YAML::Exception when an upstream named-data scalar cannot be
- * represented by its inferred or explicit type, or uses an unsupported tag.
- * @throws std::bad_alloc unchanged from conversion or vector allocation.
+ * @return Storage owning every copied non-image value and view.
+ * @throws std::bad_alloc unchanged from recursive copying or vector allocation.
  * @note Null inputs become empty views without dereferencing host storage.
  *       Every non-null NodeOutput exposes its spatial snapshot even when it is
  *       data-only and therefore has no image payload.
@@ -324,7 +297,7 @@ OperationInputStorage make_operation_inputs(
       storage.spatial.emplace_back();
       continue;
     }
-    storage.data.push_back(output_data_to_public(input->data));
+    storage.data.push_back(input->data);
     storage.spatial.push_back(to_public_spatial(input->space));
   }
   storage.views.reserve(inputs.size());
@@ -347,21 +320,18 @@ OperationInputStorage make_operation_inputs(
  * @brief Converts a complete public operation output to private storage.
  * @param output Public value moved out of plugin code.
  * @return Complete private output without a library lease.
- * @throws std::invalid_argument for an invalid image descriptor, public
- * parameter kind, or spatial snapshot.
- * @throws std::bad_alloc unchanged from YAML conversion or map growth.
+ * @throws std::invalid_argument for an invalid image descriptor or spatial
+ * snapshot.
+ * @throws std::bad_alloc unchanged from recursive map moves/copies.
  * @note The caller attaches its private DSO lease only after this conversion
  *       succeeds; during conversion the callback wrapper still retains it.
- *       This public-to-YAML direction performs no tagged-scalar parsing, so it
- *       does not propagate the pre-entry `YAML::Exception` category.
+ *       Named values remain ParameterValue objects without format conversion.
  */
 NodeOutput operation_output_to_private(plugin::OperationOutput output) {
   validate_image_descriptor(output.image_buffer);
   NodeOutput result;
   result.image_buffer = std::move(output.image_buffer);
-  for (const auto& [key, value] : output.data) {
-    result.data.emplace(key, parameter_value_to_yaml(value));
-  }
+  result.data = std::move(output.data);
   result.space = to_private_spatial(output.spatial);
   result.debug.computed_by_worker_id = output.debug.computed_by_worker_id;
   result.debug.timestamp_us = output.debug.timestamp_us;
@@ -444,10 +414,6 @@ struct RoiInvocationStorage {
  * @param available_inputs Optional destination-indexed execution inputs. Null
  * selects immutable snapshots from the supplied planning graph.
  * @return Owned invocation storage with stable internal pointers.
- * @throws std::invalid_argument for unsupported mapping keys or normalized-key
- * collisions in available upstream named data.
- * @throws YAML::Exception when an available named-data scalar cannot be
- * represented by its inferred or explicit type, or uses an unsupported tag.
  * @throws std::bad_alloc unchanged from snapshot construction.
  * @note The returned context contains no graph owner or mutable cache handle.
  *       Active-edge validation belongs to `RoiInvocationStorage::view()` after
@@ -494,7 +460,7 @@ RoiInvocationStorage make_roi_invocation(
       available = cached_output(graph.node(edge.from_node_id));
     }
     if (available) {
-      storage.available_data.back() = output_data_to_public(available->data);
+      storage.available_data.back() = available->data;
       storage.available_spatial.back() = to_public_spatial(available->space);
       public_edge.has_available_input = true;
       const bool has_image = has_image_payload(available->image_buffer);
@@ -609,29 +575,13 @@ SpatialDependencyMap dependency_lut_to_private(
 
 }  // namespace
 
-/** @copydoc ps::plugin_host::parameter_value_from_yaml */
-plugin::ParameterValue parameter_value_from_yaml(const YAML::Node& value) {
-  return core::parameter_value_from_yaml(value);
-}
-
-/** @copydoc ps::plugin_host::parameter_map_from_yaml */
-plugin::ParameterMap parameter_map_from_yaml(const YAML::Node& value) {
-  return core::parameter_map_from_yaml(value);
-}
-
-/** @copydoc ps::plugin_host::parameter_value_to_yaml */
-YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value) {
-  return core::parameter_value_to_yaml(value);
-}
-
 /** @copydoc ps::plugin_host::make_node_view */
 plugin::NodeView make_node_view(const Node& node) {
-  const YAML::Node& effective =
-      node.runtime_parameters && !node.runtime_parameters.IsNull()
-          ? node.runtime_parameters
-          : node.parameters;
+  const plugin::ParameterMap& effective = node.runtime_parameters.empty()
+                                              ? node.parameters
+                                              : node.runtime_parameters;
   return plugin::NodeView(node.id, node.name, node.type, node.subtype,
-                          parameter_map_from_yaml(effective));
+                          effective);
 }
 
 /** @copydoc ps::plugin_host::operation_device_to_private */

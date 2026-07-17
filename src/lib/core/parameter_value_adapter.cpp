@@ -429,4 +429,15 @@ YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value) {
   throw std::invalid_argument("Unknown public parameter kind");
 }
 
+/** @copydoc ps::core::parameter_map_to_yaml */
+YAML::Node parameter_map_to_yaml(const plugin::ParameterMap& values) {
+  YAML::Node result(YAML::NodeType::Map);
+  for (const auto& [key, value] : values) {
+    YAML::Node yaml_key(key);
+    yaml_key.SetTag("!!str");
+    result[yaml_key] = parameter_value_to_yaml(value);
+  }
+  return result;
+}
+
 }  // namespace ps::core

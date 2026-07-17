@@ -29,7 +29,7 @@ namespace ps::compute {
  * @brief Owns per-node critical sections for one dirty update transaction.
  *
  * Dirty scheduler callbacks use these mutexes while copying a live `Node`,
- * resolving its YAML-backed runtime parameters, and touching request-local
+ * resolving its format-neutral runtime parameters, and touching request-local
  * staging metadata. A scheduler-backed `RealTimeUpdate` shares one instance
  * between its concurrent HP and RT siblings so both domains synchronize access
  * to the same live node without coupling their task graphs or output buffers.

@@ -20,7 +20,6 @@ Node make_source(int id) {
   node.name = "source" + std::to_string(id);
   node.type = "image_generator";
   node.subtype = "constant";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = 16;
   node.parameters["height"] = 16;
   return node;

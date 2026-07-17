@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/parameter_value_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps {
@@ -198,8 +199,9 @@ void load_image_cache_file(const fs::path& cache_file, NodeOutput& output) {
  * @brief Loads YAML metadata next to an image cache file into NodeOutput data.
  *
  * @param metadata_file Existing YAML metadata path to parse.
- * @param output Output object receiving named YAML data entries.
+ * @param output Output object receiving format-neutral named data entries.
  * @throws GraphError when the metadata root is not a map.
+ * @throws std::invalid_argument when metadata keys cannot be normalized.
  * @throws YAML::Exception from YAML parser failures.
  * @note Null or empty YAML files are accepted as empty metadata, preserving the
  * previous best-effort metadata behavior.
@@ -215,9 +217,7 @@ void load_metadata_cache_file(const fs::path& metadata_file,
         GraphErrc::InvalidYaml,
         "Disk cache metadata is not a map: " + metadata_file.string());
   }
-  for (auto it = meta.begin(); it != meta.end(); ++it) {
-    output.data[it->first.as<std::string>()] = it->second;
-  }
+  output.data = core::parameter_map_from_yaml(meta);
 }
 
 /**
@@ -272,6 +272,10 @@ DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
     return make_error_attempt(
         node.id, cache_entry, cache_file, metadata_file, GraphErrc::InvalidYaml,
         std::string("Failed to parse disk cache metadata: ") + e.what());
+  } catch (const std::invalid_argument& e) {
+    return make_error_attempt(
+        node.id, cache_entry, cache_file, metadata_file, GraphErrc::InvalidYaml,
+        std::string("Invalid disk cache metadata: ") + e.what());
   } catch (const fs::filesystem_error& e) {
     return make_error_attempt(
         node.id, cache_entry, cache_file, metadata_file, GraphErrc::Io,
@@ -422,10 +426,7 @@ void GraphCacheService::save_cache_if_configured(
     if (!output->data.empty()) {
       fs::path meta_path = final_path;
       meta_path.replace_extension(".yml");
-      YAML::Node meta_node;
-      for (const auto& pair : output->data) {
-        meta_node[pair.first] = pair.second;
-      }
+      YAML::Node meta_node = core::parameter_map_to_yaml(output->data);
       std::ofstream fout(meta_path);
       fout << meta_node;
     }

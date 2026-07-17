@@ -1,7 +1,5 @@
 #pragma once
 
-#include <yaml-cpp/yaml.h>
-
 #include <memory>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
@@ -14,59 +12,10 @@ class Node;
 namespace ps::plugin_host {
 
 /**
- * @brief Recursively copies one host YAML value into the public value tree.
- *
- * @param value Host configuration or named-output value to copy.
- * @return Deep-owned public value with no YAML aliases.
- * @throws std::invalid_argument for unsupported mapping keys or normalized-key
- *         collisions.
- * @throws YAML::Exception when a scalar cannot be represented by its inferred
- * or explicit type, including numeric overflow, or uses an unsupported
- * explicit tag.
- * @throws std::bad_alloc unchanged when recursive storage allocation fails.
- * @note Plain numeric scalars retain numeric alternatives; explicitly quoted
- *       numeric text remains a string.
- */
-plugin::ParameterValue parameter_value_from_yaml(const YAML::Node& value);
-
-/**
- * @brief Recursively copies one host YAML mapping into a public parameter map.
- *
- * @param value Null/undefined or mapping value to copy.
- * @return Empty map for null/undefined input, otherwise a deep-owned map.
- * @throws std::invalid_argument when value is non-map or normalized mapping
- *         keys collide.
- * @throws YAML::Exception when a key or value scalar cannot be represented by
- * its inferred or explicit type, including numeric overflow, or uses an
- * unsupported explicit tag.
- * @throws std::bad_alloc unchanged when recursive storage allocation fails.
- * @note Numeric keys are normalized to deterministic strings before collision
- *       checks and publication.
- */
-plugin::ParameterMap parameter_map_from_yaml(const YAML::Node& value);
-
-/**
- * @brief Converts a deep-owned public value to host YAML storage.
- *
- * @param value Public value to convert recursively.
- * @return Independent YAML value containing no plugin container aliases.
- * @throws std::invalid_argument if value reports an unknown public parameter
- * kind.
- * @throws std::bad_alloc unchanged when YAML or temporary storage allocation
- *         fails.
- * @note The conversion completes in a local value before caller publication.
- */
-YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value);
-
-/**
  * @brief Creates one callback-scoped public identity and parameter snapshot.
  *
  * @param node Host-private operation node.
  * @return Public view borrowing identity strings and owning effective params.
- * @throws std::invalid_argument from malformed effective parameter mappings.
- * @throws YAML::Exception when an effective-parameter scalar cannot be
- * represented by its inferred or explicit type, including numeric overflow,
- * or uses an unsupported explicit tag.
  * @throws std::bad_alloc unchanged from recursive parameter copying.
  * @note The returned identity views must not outlive node; its parameter map
  * may be copied or moved independently.
@@ -104,9 +53,8 @@ OpMetadata operation_metadata_to_private(
  * @note For loaded plugins, the caller must fence the public callback itself
  * with the DSO exception wrapper before passing it here. Host pre-entry
  * conversion and post-return validation then remain outside that fence and
- * preserve their host-owned exception types. Invocation propagates
- * `YAML::Exception` from malformed tagged effective parameters before entering
- * the plugin callback.
+ * preserve their host-owned exception types. Effective parameters are copied
+ * directly from Graph-owned format-neutral storage.
  */
 MonolithicOpFunc adapt_monolithic_operation(
     plugin::MonolithicOperation callback,
@@ -120,8 +68,7 @@ MonolithicOpFunc adapt_monolithic_operation(
  * @throws std::bad_alloc if adapter callable storage cannot be allocated.
  * @note For loaded plugins, the supplied public callback must already carry
  * the DSO-only exception fence. Every public pointer remains valid only through
- * one callback. Invocation propagates `YAML::Exception` from malformed tagged
- * effective parameters before entering the plugin callback.
+ * one callback.
  */
 TileOpFunc adapt_tiled_operation(plugin::TiledOperation callback);
 
@@ -134,8 +81,7 @@ TileOpFunc adapt_tiled_operation(plugin::TiledOperation callback);
  * @throws std::invalid_argument after callback return for a negative dimension
  * or signed-int endpoint overflow in the returned ROI.
  * @note For loaded plugins, the supplied public callback must already carry
- * the DSO-only exception fence. Invocation conversion errors, including
- * `YAML::Exception` from tagged effective parameters, occur before plugin
+ * the DSO-only exception fence. Effective parameters are copied before plugin
  * entry.
  */
 DirtyRoiPropFunc adapt_dirty_propagator(plugin::DirtyRoiPropagator callback);
@@ -149,8 +95,7 @@ DirtyRoiPropFunc adapt_dirty_propagator(plugin::DirtyRoiPropagator callback);
  * @throws std::invalid_argument after callback return for a negative dimension
  * or signed-int endpoint overflow in the returned ROI.
  * @note For loaded plugins, the supplied public callback must already carry
- * the DSO-only exception fence. Invocation conversion errors, including
- * `YAML::Exception` from tagged effective parameters, occur before plugin
+ * the DSO-only exception fence. Effective parameters are copied before plugin
  * entry.
  */
 ForwardRoiPropFunc adapt_forward_propagator(
@@ -166,8 +111,7 @@ ForwardRoiPropFunc adapt_forward_propagator(
  * @note For loaded plugins, the supplied public callback must already carry
  * the DSO-only exception fence. Invalid, mismatched, or overflowing LUTs throw
  * host-owned `std::invalid_argument` after plugin return and before cache
- * replacement. `YAML::Exception` from tagged effective parameters propagates
- * before plugin entry.
+ * replacement.
  */
 DependencyLutBuilder adapt_dependency_builder(
     plugin::DependencyLutBuilder callback);

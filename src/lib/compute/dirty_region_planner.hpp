@@ -358,7 +358,7 @@ class DirtyRegionPlanner {
    * @param graph Graph used to resolve one exact effective parameter snapshot.
    * @param node Node whose static parameters are inspected.
    * @return Non-negative HP halo radius.
-   * @throws YAML::Exception if malformed static parameters are converted.
+   * @throws std::bad_alloc if the effective ParameterMap cannot be copied.
    * @note Connected parameter producers return zero here because their current
    *       request value is not yet proven. The propagation pass detects that
    *       case, selects each parameter producer, promotes output and all image

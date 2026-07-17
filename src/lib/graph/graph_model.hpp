@@ -141,7 +141,7 @@ class GraphModel {
   };
 
   struct NodeRuntimeState {
-    YAML::Node& runtime_parameters;
+    plugin::ParameterMap& runtime_parameters;
     std::vector<OutputPort>& outputs;
     std::vector<CacheEntry>& caches;
     bool& preserved;
@@ -330,8 +330,7 @@ class GraphModel {
  *         dependency-cache identity.
  * @throws GraphError with MissingDependency when a required parameter input or
  *         named output is unavailable.
- * @throws std::invalid_argument for malformed/colliding YAML mapping keys.
- * @throws std::bad_alloc unchanged from cloning or recursive conversion.
+ * @throws std::bad_alloc unchanged from copying recursive parameter values.
  * @note The function never trusts graph-node runtime_parameters because compute
  *       may resolve those values only on an execution-local node copy.
  */

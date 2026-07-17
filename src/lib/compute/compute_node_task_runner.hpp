@@ -192,12 +192,13 @@ class NodeTaskRunner {
   /**
    * @brief Builds request-local runtime parameters from ready upstream values.
    * @param target_node Node whose static parameters and bindings are read.
-   * @return Cloned YAML map with parameter-input values overlaid.
+   * @return Owned ParameterMap with parameter-input values overlaid.
    * @throws GraphError when a connected parameter output is unavailable.
-   * @throws YAML::Exception or std::bad_alloc from value copying.
+   * @throws std::bad_alloc from recursive value copying.
    * @note The committed node parameter state is never mutated.
    */
-  YAML::Node resolve_runtime_parameters(const Node& target_node) const;
+  plugin::ParameterMap resolve_runtime_parameters(
+      const Node& target_node) const;
 
   /**
    * @brief Resolves image bindings without compressing destination slots.

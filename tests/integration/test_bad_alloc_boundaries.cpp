@@ -20,6 +20,7 @@
 #include "benchmark/benchmark_service.hpp"
 #include "compute/dirty_update_executor.hpp"
 #include "compute/realtime_proxy_graph.hpp"
+#include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "graph/node.hpp"            // NOLINT(build/include_subdir)
@@ -586,8 +587,8 @@ void register_bad_alloc_boundary_operations() {
         "bad_alloc_boundary_test", "dirty_source",
         MonolithicOpFunc(
             [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const int width = node.parameters["width"].as<int>(16);
-              const int height = node.parameters["height"].as<int>(16);
+              const int width = as_int_flexible(node.parameters, "width", 16);
+              const int height = as_int_flexible(node.parameters, "height", 16);
               NodeOutput output;
               output.image_buffer = make_aligned_cpu_image_buffer(
                   width, height, 1, DataType::FLOAT32);
@@ -880,7 +881,7 @@ HostComputeRequest make_dirty_host_request(const GraphSessionId& session,
  * @param cache_root Graph cache root used by the test model.
  * @param subtype Registered HP or RT dirty operation subtype.
  * @return GraphModel containing one source and one 16x16 tiled target.
- * @throws std::bad_alloc if graph, node, or YAML storage exhausts memory.
+ * @throws std::bad_alloc if graph, node, or parameter storage exhausts memory.
  * @note Returning the model transfers all topology/cache ownership to the
  * caller; no Host or Kernel object is involved in this focused executor test.
  */
@@ -892,7 +893,6 @@ std::unique_ptr<GraphModel> make_dirty_boundary_graph(
   source.name = "dirty_source";
   source.type = "bad_alloc_boundary_test";
   source.subtype = "dirty_source";
-  source.parameters = YAML::Node(YAML::NodeType::Map);
   source.parameters["width"] = 16;
   source.parameters["height"] = 16;
   graph->add_node(std::move(source));
@@ -902,7 +902,6 @@ std::unique_ptr<GraphModel> make_dirty_boundary_graph(
   target.name = "dirty_resource_exhausted";
   target.type = "bad_alloc_boundary_test";
   target.subtype = subtype;
-  target.parameters = YAML::Node(YAML::NodeType::Map);
   target.parameters["width"] = 16;
   target.parameters["height"] = 16;
   target.image_inputs.push_back({1, "image"});

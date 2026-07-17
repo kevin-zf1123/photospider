@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
 #include <atomic>
 #endif
@@ -219,103 +220,221 @@ static std::array<double, 9> make_translation_matrix(double tx, double ty) {
 }
 
 /**
+ * @brief Selects the request-effective parameter map for one built-in op.
+ *
+ * @param node Node whose execution-local values take precedence.
+ * @return Borrowed runtime map when populated, otherwise the static map.
+ * @throws Nothing.
+ * @note The returned reference must not outlive node.
+ */
+static const plugin::ParameterMap& effective_parameters(
+    const Node& node) noexcept {
+  return node.runtime_parameters.empty() ? node.parameters
+                                         : node.runtime_parameters;
+}
+
+/**
  * @brief Reads an optional integer parameter without hiding memory exhaustion.
  *
- * @param node Node whose runtime parameters take precedence over static YAML.
+ * @param node Node whose runtime parameters take precedence over static values.
  * @param key Parameter key to resolve.
- * @return Parsed integer, or nullopt for a missing/invalid parameter.
- * @throws std::bad_alloc if YAML lookup or conversion exhausts memory.
- * @note Other conversion failures preserve the built-in operation fallback
- * semantics and are converted to nullopt.
+ * @return Representable integer, or nullopt for a missing/invalid parameter.
+ * @throws Nothing.
+ * @note Double is accepted only when finite, integral, and int-representable.
  */
 static std::optional<int> node_param_int(const Node& node,
                                          const std::string& key) {
-  if (node.runtime_parameters && node.runtime_parameters[key]) {
-    try {
-      return node.runtime_parameters[key].as<int>();
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (...) {
-      return std::nullopt;
-    }
-  }
-  if (node.parameters && node.parameters[key]) {
-    try {
-      return node.parameters[key].as<int>();
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (...) {
-      return std::nullopt;
-    }
-  }
-  return std::nullopt;
+  const plugin::ParameterValue* value =
+      find_parameter(effective_parameters(node), key);
+  return value == nullptr ? std::nullopt : parameter_value_as_int(*value);
 }
 
 /**
  * @brief Reads an optional floating-point parameter without hiding exhaustion.
  *
- * @param node Node whose runtime parameters take precedence over static YAML.
+ * @param node Node whose runtime parameters take precedence over static values.
  * @param key Parameter key to resolve.
- * @return Parsed value, or nullopt for a missing/invalid parameter.
- * @throws std::bad_alloc if YAML lookup or conversion exhausts memory.
- * @note Other conversion failures preserve the built-in operation fallback
- * semantics and are converted to nullopt.
+ * @return Numeric value, or nullopt for a missing/non-numeric parameter.
+ * @throws Nothing.
+ * @note Int64 values are converted using ordinary double precision.
  */
 static std::optional<double> node_param_double(const Node& node,
                                                const std::string& key) {
-  if (node.runtime_parameters && node.runtime_parameters[key]) {
-    try {
-      return node.runtime_parameters[key].as<double>();
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (...) {
-      return std::nullopt;
-    }
-  }
-  if (node.parameters && node.parameters[key]) {
-    try {
-      return node.parameters[key].as<double>();
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (...) {
-      return std::nullopt;
-    }
-  }
-  return std::nullopt;
+  const plugin::ParameterValue* value =
+      find_parameter(effective_parameters(node), key);
+  return value == nullptr ? std::nullopt : parameter_value_as_double(*value);
 }
 
 /**
  * @brief Reads an optional string parameter without hiding memory exhaustion.
  *
- * @param node Node whose runtime parameters take precedence over static YAML.
+ * @param node Node whose runtime parameters take precedence over static values.
  * @param key Parameter key to resolve.
- * @return Parsed string, or nullopt for a missing/invalid parameter.
- * @throws std::bad_alloc if YAML lookup, conversion, or copying exhausts
- * memory.
- * @note Other conversion failures preserve the built-in operation fallback
- * semantics and are converted to nullopt.
+ * @return Scalar text, or nullopt for a missing/null/container parameter.
+ * @throws std::bad_alloc if string copying or numeric formatting allocates.
+ * @note Bool, Int64, and Double preserve the legacy built-in scalar-to-text
+ * behavior without weakening the strict public SDK accessors.
  */
 static std::optional<std::string> node_param_string(const Node& node,
                                                     const std::string& key) {
-  if (node.runtime_parameters && node.runtime_parameters[key]) {
-    try {
-      return node.runtime_parameters[key].as<std::string>();
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (...) {
-      return std::nullopt;
+  const plugin::ParameterMap& parameters = effective_parameters(node);
+  const plugin::ParameterValue* value = find_parameter(parameters, key);
+  if (value == nullptr || value->is_null() || value->is_array() ||
+      value->is_object()) {
+    return std::nullopt;
+  }
+  return as_str(parameters, key);
+}
+
+/**
+ * @brief Borrows an object-valued entry from a ParameterMap.
+ *
+ * @param parameters Parameter map to inspect.
+ * @param key Object entry name.
+ * @return Borrowed object pointer, or nullptr when absent/wrongly typed.
+ * @throws Nothing.
+ * @note The pointer remains valid only while parameters is alive and unchanged.
+ */
+static const plugin::ParameterValue::Object* parameter_object(
+    const plugin::ParameterMap& parameters, std::string_view key) noexcept {
+  const plugin::ParameterValue* value = find_parameter(parameters, key);
+  return value != nullptr && value->is_object() ? &value->as_object() : nullptr;
+}
+
+/**
+ * @brief Borrows one nested object from an optional parent object.
+ *
+ * @param parent Parent object, or nullptr.
+ * @param key Nested entry name.
+ * @return Borrowed nested object pointer, or nullptr when unavailable.
+ * @throws Nothing.
+ * @note The pointer shares the parent ParameterValue lifetime.
+ */
+static const plugin::ParameterValue::Object* nested_parameter_object(
+    const plugin::ParameterValue::Object* parent,
+    std::string_view key) noexcept {
+  if (parent == nullptr) {
+    return nullptr;
+  }
+  const auto value = parent->find(key);
+  return value != parent->end() && value->second.is_object()
+             ? &value->second.as_object()
+             : nullptr;
+}
+
+/**
+ * @brief Parses one string-keyed source-channel index.
+ *
+ * @param text Complete decimal key text.
+ * @return Exact int on success, otherwise std::nullopt.
+ * @throws Nothing.
+ * @note Leading/trailing characters and overflow are rejected.
+ */
+static std::optional<int> parse_channel_index(std::string_view text) noexcept {
+  int index = -1;
+  const char* begin = text.data();
+  const char* end = begin + text.size();
+  const auto parsed = std::from_chars(begin, end, index);
+  if (parsed.ec != std::errc{} || parsed.ptr != end) {
+    return std::nullopt;
+  }
+  return index;
+}
+
+/**
+ * @brief Finds the largest valid destination channel in one mapping object.
+ *
+ * @param mapping Source-channel keys mapped to destination-index arrays.
+ * @return Largest int-representable destination, or -1 when none exists.
+ * @throws Nothing.
+ * @note Invalid entries are skipped to preserve the existing optional mapping
+ * semantics.
+ */
+static int max_destination_channel(
+    const plugin::ParameterValue::Object* mapping) noexcept {
+  int maximum = -1;
+  if (mapping == nullptr) {
+    return maximum;
+  }
+  for (const auto& [source, destinations] : *mapping) {
+    (void)source;
+    if (!destinations.is_array()) {
+      continue;
+    }
+    for (const plugin::ParameterValue& destination : destinations.as_array()) {
+      const std::optional<int> index = parameter_value_as_int(destination);
+      if (index) {
+        maximum = std::max(maximum, *index);
+      }
     }
   }
-  if (node.parameters && node.parameters[key]) {
-    try {
-      return node.parameters[key].as<std::string>();
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (...) {
-      return std::nullopt;
+  return maximum;
+}
+
+/**
+ * @brief Marks valid mapped destinations in an existing coverage vector.
+ *
+ * @param mapping Optional source-to-destination mapping.
+ * @param covered Destination flags to update in place.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Out-of-range and incorrectly typed entries are ignored.
+ */
+static void mark_mapped_channels(const plugin::ParameterValue::Object* mapping,
+                                 std::vector<char>& covered) noexcept {
+  if (mapping == nullptr) {
+    return;
+  }
+  for (const auto& [source, destinations] : *mapping) {
+    (void)source;
+    if (!destinations.is_array()) {
+      continue;
+    }
+    for (const plugin::ParameterValue& destination : destinations.as_array()) {
+      const std::optional<int> index = parameter_value_as_int(destination);
+      if (index && *index >= 0 && *index < static_cast<int>(covered.size())) {
+        covered[*index] = 1;
+      }
     }
   }
-  return std::nullopt;
+}
+
+/**
+ * @brief Accumulates mapped source planes into destination planes.
+ *
+ * @param mapping Optional source-to-destination mapping.
+ * @param source_planes Immutable source channel matrices.
+ * @param weight Scalar applied to each mapped source contribution.
+ * @param destination_planes Destination matrices updated in place.
+ * @return Nothing.
+ * @throws cv::Exception if OpenCV multiplication or addition fails.
+ * @throws std::bad_alloc if OpenCV temporary storage cannot allocate.
+ * @note Invalid source keys, destination values, and indexes are skipped.
+ */
+static void apply_channel_mapping(const plugin::ParameterValue::Object* mapping,
+                                  const std::vector<cv::Mat>& source_planes,
+                                  double weight,
+                                  std::vector<cv::Mat>& destination_planes) {
+  if (mapping == nullptr) {
+    return;
+  }
+  for (const auto& [source_text, destinations] : *mapping) {
+    const std::optional<int> source = parse_channel_index(source_text);
+    if (!source || *source < 0 ||
+        *source >= static_cast<int>(source_planes.size()) ||
+        !destinations.is_array()) {
+      continue;
+    }
+    for (const plugin::ParameterValue& destination : destinations.as_array()) {
+      const std::optional<int> index = parameter_value_as_int(destination);
+      if (!index || *index < 0 ||
+          *index >= static_cast<int>(destination_planes.size())) {
+        continue;
+      }
+      cv::add(destination_planes[*index], source_planes[*source] * weight,
+              destination_planes[*index]);
+    }
+  }
 }
 
 /**
@@ -556,7 +675,7 @@ static int interpolation_padding(const Node& node) {
  * @param inputs Unused resolved input snapshots.
  * @return Clipped kernel-native source ROI, or empty when required dimensions
  *         are unavailable or invalid.
- * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @throws std::bad_alloc if parameter string formatting exhausts memory.
  * @note Floating-point scale edges round outward and checked geometry rejects
  *       non-representable results.
  */
@@ -618,7 +737,7 @@ static PixelRect resize_dirty_roi(
  * @param inputs Unused resolved input snapshots.
  * @return Kernel-native source ROI clipped to known bounds, or empty for
  *         invalid crop geometry.
- * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @throws std::bad_alloc if parameter string formatting exhausts memory.
  * @note Ratio-mode truncation matches execution; intersections and translation
  *       use checked half-open geometry.
  */
@@ -833,7 +952,7 @@ static PixelRect resize_forward_roi(
  * @param input_extents Unused input extent list.
  * @param parameters Unused effective parameter snapshot.
  * @return Kernel-native crop-local intersection or empty for invalid geometry.
- * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @throws std::bad_alloc if parameter string formatting exhausts memory.
  * @note Ratio-mode truncation matches crop execution; checked translation
  *       prevents overflow at extreme origins.
  */
@@ -956,7 +1075,7 @@ static PixelRect identity_dirty_roi(
  * @param inputs Unused resolved input snapshots.
  * @return Expanded kernel-native demand or unchanged ROI when no displacement
  *         is declared.
- * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @throws std::bad_alloc if parameter string formatting exhausts memory.
  * @note The callback is currently retained for future built-in registration.
  */
 [[maybe_unused]] static PixelRect conservative_dirty_roi(
@@ -1389,17 +1508,21 @@ static NodeOutput op_get_dimensions(
 static NodeOutput op_divide(const Node& node,
                             const std::vector<const NodeOutput*>&) {
   const auto& P = node.runtime_parameters;
-  if (!P["operand1"] || !P["operand2"])
+  const plugin::ParameterValue* operand1 = find_parameter(P, "operand1");
+  const plugin::ParameterValue* operand2 = find_parameter(P, "operand2");
+  const std::optional<double> op1 =
+      operand1 == nullptr ? std::nullopt : parameter_value_as_double(*operand1);
+  const std::optional<double> op2 =
+      operand2 == nullptr ? std::nullopt : parameter_value_as_double(*operand2);
+  if (!op1 || !op2)
     throw GraphError(GraphErrc::InvalidParameter,
-                     "math:divide requires 'operand1' and 'operand2'.");
-  double op1 = P["operand1"].as<double>();
-  double op2 = P["operand2"].as<double>();
-  if (op2 == 0)
+                     "math:divide requires numeric 'operand1' and 'operand2'.");
+  if (*op2 == 0)
     throw GraphError(GraphErrc::InvalidParameter,
                      "math:divide attempted to divide by zero.");
 
   NodeOutput out;
-  out.data["result"] = op1 / op2;
+  out.data["result"] = *op1 / *op2;
   return out;
 }
 
@@ -1532,13 +1655,13 @@ static NodeOutput op_gaussian_blur_monolithic(
 }
 
 /**
- * @brief Blends two input tiles with optional per-channel YAML mappings.
+ * @brief Blends two input tiles with optional per-channel value mappings.
  *
  * @param node Operation node providing weights, mapping, and alpha strategy.
  * @param output_tile Writable output tile.
  * @param input_tiles Two normalized input tiles.
  * @return Nothing.
- * @throws std::bad_alloc if YAML conversion or temporary channel storage
+ * @throws std::bad_alloc if parameter copying or temporary channel storage
  * exhausts memory.
  * @throws GraphError for missing/mismatched inputs or invalid strategy data.
  * @throws cv::Exception for OpenCV blending/channel failures.
@@ -1575,8 +1698,9 @@ static void op_add_weighted_tiled(const Node& node,
 
   // Optional per-channel mapping: parameters.channel_mapping.input0 / input1: {
   // src_channel: [dst_channels] }
-  YAML::Node chmap = P["channel_mapping"];
-  bool has_mapping = chmap && (chmap.IsMap());
+  const plugin::ParameterValue::Object* channel_mapping =
+      parameter_object(P, "channel_mapping");
+  const bool has_mapping = channel_mapping != nullptr;
 
   if (!has_mapping) {
     // Default: weighted blend per channel
@@ -1588,35 +1712,12 @@ static void op_add_weighted_tiled(const Node& node,
   int in_ch = input_a.channels();
   int out_ch = in_ch;
 
-  auto infer_max_dest = [&](const YAML::Node& n) -> int {
-    int m = -1;
-    if (!n || !n.IsMap())
-      return -1;
-    for (auto it = n.begin(); it != n.end(); ++it) {
-      // Use value copies of YAML::Node to avoid lifetime issues with
-      // temporaries
-      YAML::Node dsts = it->second;
-      if (dsts && dsts.IsSequence()) {
-        for (size_t i = 0; i < dsts.size(); ++i) {
-          try {
-            m = std::max(m, dsts[i].as<int>());
-          } catch (const std::bad_alloc&) {
-            throw;
-          } catch (...) {
-          }
-        }
-      }
-    }
-    return m;
-  };
-  // Avoid passing temporaries into lambdas that iterate; store as lvalues first
-  // to prevent any stack lifetime ambiguity observed under ASan with yaml-cpp
-  // temporaries.
-  YAML::Node ch_input0 = chmap["input0"];
-  YAML::Node ch_input1 = chmap["input1"];
-
-  int max0 = infer_max_dest(ch_input0);
-  int max1 = infer_max_dest(ch_input1);
+  const plugin::ParameterValue::Object* ch_input0 =
+      nested_parameter_object(channel_mapping, "input0");
+  const plugin::ParameterValue::Object* ch_input1 =
+      nested_parameter_object(channel_mapping, "input1");
+  int max0 = max_destination_channel(ch_input0);
+  int max1 = max_destination_channel(ch_input1);
   int maxd = std::max({max0, max1, in_ch - 1});
   out_ch = std::max(out_ch, maxd + 1);
 
@@ -1645,29 +1746,8 @@ static void op_add_weighted_tiled(const Node& node,
 
   // Build covered destination set; override defaults for covered channels
   std::vector<char> covered(out_ch, 0);
-  auto mark_covered = [&](const YAML::Node& n) {
-    if (!n || !n.IsMap())
-      return;
-    for (auto it = n.begin(); it != n.end(); ++it) {
-      YAML::Node dsts = it->second;
-      if (!dsts || !dsts.IsSequence())
-        continue;
-      for (size_t i = 0; i < dsts.size(); ++i) {
-        int d = -1;
-        try {
-          d = dsts[i].as<int>();
-        } catch (const std::bad_alloc&) {
-          throw;
-        } catch (...) {
-          continue;
-        }
-        if (d >= 0 && d < out_ch)
-          covered[d] = 1;
-      }
-    }
-  };
-  mark_covered(ch_input0);
-  mark_covered(ch_input1);
+  mark_mapped_channels(ch_input0, covered);
+  mark_mapped_channels(ch_input1, covered);
   for (int d = 0; d < out_ch; ++d) {
     if (covered[d]) {
       if (gamma != 0.0)
@@ -1677,43 +1757,8 @@ static void op_add_weighted_tiled(const Node& node,
     }
   }
 
-  auto apply_map = [&](const YAML::Node& n,
-                       const std::vector<cv::Mat>& src_planes, double w) {
-    if (!n || !n.IsMap())
-      return;
-    for (auto it = n.begin(); it != n.end(); ++it) {
-      int src = -1;
-      try {
-        src = it->first.as<int>();
-      } catch (const std::bad_alloc&) {
-        throw;
-      } catch (...) {
-        continue;
-      }
-      YAML::Node dsts = it->second;
-      if (!dsts || !dsts.IsSequence())
-        continue;
-      for (size_t i = 0; i < dsts.size(); ++i) {
-        int d = -1;
-        try {
-          d = dsts[i].as<int>();
-        } catch (const std::bad_alloc&) {
-          throw;
-        } catch (...) {
-          continue;
-        }
-        if (src < 0 || src >= static_cast<int>(src_planes.size()))
-          continue;
-        if (d < 0 || d >= static_cast<int>(O.size()))
-          continue;
-        // O[d] := O[d] + w*src
-        cv::add(O[d], src_planes[src] * w, O[d]);
-      }
-    }
-  };
-
-  apply_map(ch_input0, A, alpha);
-  apply_map(ch_input1, B, beta);
+  apply_channel_mapping(ch_input0, A, alpha, O);
+  apply_channel_mapping(ch_input1, B, beta, O);
 
   // Optional alpha_strategy for dest alpha channel
   std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
@@ -1898,12 +1943,12 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
 }
 
 /**
- * @brief Blends two full images with optional per-channel YAML mappings.
+ * @brief Blends two full images with optional per-channel value mappings.
  *
  * @param node Operation node providing weights, mapping, and alpha strategy.
  * @param inputs Two resolved full-image inputs.
  * @return Blended NodeOutput with an owned image buffer.
- * @throws std::bad_alloc if YAML conversion, channel storage, or result
+ * @throws std::bad_alloc if parameter copying, channel storage, or result
  * allocation exhausts memory.
  * @throws GraphError for missing/empty/mismatched inputs or invalid strategy
  * data.
@@ -1935,8 +1980,9 @@ static NodeOutput op_add_weighted_monolithic(
   normalize_to_base(input_b, input_a, strategy);
 
   // Optional per-channel mapping
-  YAML::Node chmap = P["channel_mapping"];
-  bool has_mapping = chmap && chmap.IsMap();
+  const plugin::ParameterValue::Object* channel_mapping =
+      parameter_object(P, "channel_mapping");
+  const bool has_mapping = channel_mapping != nullptr;
 
   cv::Mat output(input_a.rows, input_a.cols,
                  CV_MAKETYPE(CV_32F, input_a.channels()));
@@ -1945,28 +1991,12 @@ static NodeOutput op_add_weighted_monolithic(
   } else {
     int in_ch = input_a.channels();
     int out_ch = in_ch;
-    auto infer_max_dest = [&](const YAML::Node& n) -> int {
-      int m = -1;
-      if (!n || !n.IsMap())
-        return -1;
-      for (auto it = n.begin(); it != n.end(); ++it) {
-        YAML::Node dsts = it->second;
-        if (!dsts || !dsts.IsSequence())
-          continue;
-        for (size_t i = 0; i < dsts.size(); ++i) {
-          try {
-            m = std::max(m, dsts[i].as<int>());
-          } catch (const std::bad_alloc&) {
-            throw;
-          } catch (...) {
-          }
-        }
-      }
-      return m;
-    };
-    YAML::Node ch_input0 = chmap["input0"], ch_input1 = chmap["input1"];
-    int max0 = infer_max_dest(ch_input0);
-    int max1 = infer_max_dest(ch_input1);
+    const plugin::ParameterValue::Object* ch_input0 =
+        nested_parameter_object(channel_mapping, "input0");
+    const plugin::ParameterValue::Object* ch_input1 =
+        nested_parameter_object(channel_mapping, "input1");
+    int max0 = max_destination_channel(ch_input0);
+    int max1 = max_destination_channel(ch_input1);
     int maxd = std::max({max0, max1, in_ch - 1});
     out_ch = std::max(out_ch, maxd + 1);
 
@@ -1986,70 +2016,16 @@ static NodeOutput op_add_weighted_monolithic(
         O[c] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
     }
     std::vector<char> covered(out_ch, 0);
-    auto mark_covered = [&](const YAML::Node& n) {
-      if (!n || !n.IsMap())
-        return;
-      for (auto it = n.begin(); it != n.end(); ++it) {
-        YAML::Node dsts = it->second;
-        if (!dsts || !dsts.IsSequence())
-          continue;
-        for (size_t i = 0; i < dsts.size(); ++i) {
-          int d = -1;
-          try {
-            d = dsts[i].as<int>();
-          } catch (const std::bad_alloc&) {
-            throw;
-          } catch (...) {
-            continue;
-          }
-          if (d >= 0 && d < out_ch)
-            covered[d] = 1;
-        }
-      }
-    };
-    mark_covered(ch_input0);
-    mark_covered(ch_input1);
+    mark_mapped_channels(ch_input0, covered);
+    mark_mapped_channels(ch_input1, covered);
     for (int d = 0; d < out_ch; ++d)
       if (covered[d])
         O[d] = (gamma != 0.0)
                    ? cv::Mat(input_a.rows, input_a.cols, CV_32FC1,
                              cv::Scalar(gamma))
                    : cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
-    auto apply_map = [&](const YAML::Node& n,
-                         const std::vector<cv::Mat>& src_planes, double w) {
-      if (!n || !n.IsMap())
-        return;
-      for (auto it = n.begin(); it != n.end(); ++it) {
-        int src = -1;
-        try {
-          src = it->first.as<int>();
-        } catch (const std::bad_alloc&) {
-          throw;
-        } catch (...) {
-          continue;
-        }
-        YAML::Node dsts = it->second;
-        if (!dsts || !dsts.IsSequence())
-          continue;
-        for (size_t i = 0; i < dsts.size(); ++i) {
-          int d = -1;
-          try {
-            d = dsts[i].as<int>();
-          } catch (const std::bad_alloc&) {
-            throw;
-          } catch (...) {
-            continue;
-          }
-          if (src < 0 || src >= static_cast<int>(src_planes.size()))
-            continue;
-          if (d < 0 || d >= static_cast<int>(O.size()))
-            continue;
-          cv::add(O[d], src_planes[src] * w, O[d]);
-        }
-      }
-    };
-    apply_map(ch_input0, A, alpha);
-    apply_map(ch_input1, B, beta);
+    apply_channel_mapping(ch_input0, A, alpha, O);
+    apply_channel_mapping(ch_input1, B, beta, O);
     std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
     if ((alpha_strategy != "weighted") && out_ch >= 4) {
       int aidx = 3;

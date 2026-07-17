@@ -11,7 +11,6 @@
 
 #include "compute/compute_geometry.hpp"
 #include "core/param_utils.hpp"
-#include "core/parameter_value_adapter.hpp"
 
 namespace ps::compute {
 namespace {
@@ -59,8 +58,8 @@ std::pair<int, DataType> infer_channels_and_type(
  * @param inputs Normalized tiled inputs in execution order.
  * @param config Optional execution size override.
  * @return Output size for allocation or existing-buffer iteration.
- * @throws YAML conversion exceptions when generator width/height parameters are
- * present but invalid.
+ * @throws Nothing from parameter lookup; invalid width/height kinds fall back
+ * to the legacy default extent.
  * @note The first connected normalized input remains the size source when no
  * explicit output_size is supplied; null slots remain visible to callbacks.
  */
@@ -423,13 +422,10 @@ PixelRect NodeExecutor::input_roi_for_tile(
       input_extents.front() =
           PixelSize{input_buffer.width, input_buffer.height};
     }
-    plugin::ParameterMap execution_parameter_storage;
     if (!known_effective_parameters) {
-      const YAML::Node& execution_parameters =
-          node.runtime_parameters ? node.runtime_parameters : node.parameters;
-      execution_parameter_storage =
-          core::parameter_map_from_yaml(execution_parameters);
-      known_effective_parameters = &execution_parameter_storage;
+      known_effective_parameters = node.runtime_parameters.empty()
+                                       ? &node.parameters
+                                       : &node.runtime_parameters;
     }
     input_roi = prop_fn(node, output_roi, graph, output_extent, input_extents,
                         *known_effective_parameters, available_inputs);

@@ -41,7 +41,7 @@ struct NodeMetadataSummary {
 /**
  * @brief Internal value snapshot for one inspected graph node.
  *
- * @throws std::bad_alloc when copied string, YAML, or metadata storage
+ * @throws std::bad_alloc when copied string, parameter, or metadata storage
  * exhausts memory.
  * @note The snapshot owns copied values and exposes no mutable Node reference.
  */
@@ -58,8 +58,8 @@ struct GraphNodeInspectInfo {
   /** @brief Registered operation subtype. */
   std::string subtype;
 
-  /** @brief Cloned static parameter map. */
-  YAML::Node parameters;
+  /** @brief Deep-copied static parameter map. */
+  plugin::ParameterMap parameters;
 
   /** @brief Optional copied cache/spatial metadata. */
   std::optional<NodeMetadataSummary> metadata;
@@ -154,8 +154,8 @@ class GraphInspectService {
    * @param node Node to inspect during serialized graph access.
    * @param include_metadata Whether formal HP cache metadata is copied.
    * @return Owned node inspection value.
-   * @throws std::bad_alloc if strings, YAML clone, or metadata copy allocates.
-   * @throws YAML::Exception if parameter cloning fails for another reason.
+   * @throws std::bad_alloc if strings, recursive parameter values, or metadata
+   * copy allocates.
    * @note No Node or NodeOutput reference escapes through the result.
    */
   GraphNodeInspectInfo inspect_node(const Node& node,
@@ -167,10 +167,9 @@ class GraphInspectService {
    * @param graph Graph to inspect during serialized graph access.
    * @param include_metadata Whether formal HP cache metadata is copied.
    * @return Owned graph inspection snapshot in deterministic node-id order.
-   * @throws std::bad_alloc if traversal, YAML clone, or result storage
-   * exhausts memory.
+   * @throws std::bad_alloc if traversal, recursive parameter copying, or result
+   * storage exhausts memory.
    * @throws GraphError if a node id disappears during caller-unsafe mutation.
-   * @throws YAML::Exception if parameter cloning fails for another reason.
    * @note BUILD_TESTING may compile an internal immutable-input failpoint in
    * the collection loop; no callable test seam is installed or exported.
    */
@@ -183,8 +182,8 @@ class GraphInspectService {
    * @param graph Graph whose upstream topology is traversed.
    * @param include_metadata Whether node cache metadata is copied.
    * @return Owned flattened dependency tree.
-   * @throws std::bad_alloc if traversal path or result storage grows.
-   * @throws YAML::Exception if copied parameter conversion fails.
+   * @throws std::bad_alloc if traversal path, copied parameters, or result
+   * storage grows.
    * @note The caller must serialize graph mutation for the full call.
    */
   DependencyTree dependency_tree(const GraphModel& graph,
@@ -198,8 +197,8 @@ class GraphInspectService {
    * @param include_metadata Whether node cache metadata is copied.
    * @return Owned flattened dependency tree, with start_node_found=false when
    * the requested id is absent.
-   * @throws std::bad_alloc if traversal path or result storage grows.
-   * @throws YAML::Exception if copied parameter conversion fails.
+   * @throws std::bad_alloc if traversal path, copied parameters, or result
+   * storage grows.
    * @note The caller must serialize graph mutation for the full call.
    */
   DependencyTree dependency_tree(const GraphModel& graph, int start_node_id,

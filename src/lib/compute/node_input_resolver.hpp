@@ -43,7 +43,7 @@ class NodeInputResolver {
 
   /**
    * @brief Resolves effective parameters and ordered image-input slots.
-   * @param node Node receiving a cloned runtime parameter map and input-size
+   * @param node Node receiving a copied runtime parameter map and input-size
    * hint.
    * @param lookup Source-output lookup valid throughout this call.
    * @param missing_context Human-readable prefix for dependency diagnostics.
@@ -51,7 +51,6 @@ class NodeInputResolver {
    * disconnected slots contain nullptr.
    * @throws GraphError when a connected source output or named parameter is
    * unavailable.
-   * @throws YAML::Exception when parameter cloning or assignment fails.
    * @throws std::bad_alloc when copied parameter/vector storage cannot grow.
    * @note The node's static parameters remain unchanged. `last_input_size_hp`
    * uses the first connected input with a positive extent.
@@ -69,7 +68,7 @@ class NodeInputResolver {
    * @return Borrowed image pointers aligned with node.image_inputs.
    * @throws GraphError when a connected source output or named parameter is
    * unavailable.
-   * @throws YAML::Exception or std::bad_alloc from parameter/vector copying.
+   * @throws std::bad_alloc from parameter/vector copying.
    * @note Dirty RT execution uses this overload so exact HP-stabilized
    * parameter values do not replace RT-domain image inputs from the same node.
    */

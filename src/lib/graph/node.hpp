@@ -117,13 +117,13 @@ struct DependencyLutCache {
 /**
  * @brief Owns one private graph node's topology, configuration, and HP state.
  *
- * A Node stores declared image/parameter edges, static and request-local YAML
- * parameters, output/cache descriptors, the authoritative reusable HP output,
- * and dependency-LUT identity. Real-time proxy outputs remain outside Node in
- * compute-service runtime state.
+ * A Node stores declared image/parameter edges, static and request-local
+ * `ParameterValue` maps, output/cache descriptors, the authoritative reusable
+ * HP output, and dependency-LUT identity. Real-time proxy outputs remain
+ * outside Node in compute-service runtime state.
  *
- * @throws std::bad_alloc when copied strings, YAML trees, vectors, optional
- * output payloads, or cache identities cannot allocate.
+ * @throws std::bad_alloc when copied strings, parameter trees, vectors,
+ * optional output payloads, or cache identities cannot allocate.
  * @note GraphModel owns Node objects and serializes structural mutation. Cache
  * fields are private backend state, not operation SDK values; callers must use
  * GraphModel/runtime synchronization rather than mutate a shared Node from
@@ -145,15 +145,19 @@ class Node {
   /** @brief Declared parameter edges in effective-parameter merge order. */
   std::vector<ParameterInput> parameter_inputs;
 
-  /** @brief Static YAML parameter map owned by the graph definition. */
-  YAML::Node parameters;
+  /**
+   * @brief Static format-neutral parameter map owned by the graph definition.
+   * @note Graph document adapters populate this value exactly once during
+   * ingestion; Graph and compute code never retain the source YAML tree.
+   */
+  plugin::ParameterMap parameters;
 
   /**
-   * @brief Execution-local effective YAML parameters for the current request.
+   * @brief Execution-local effective parameters for the current request.
    * @note Executors populate this snapshot from parameters and connected
    * parameter inputs; it must not be treated as committed reusable graph state.
    */
-  YAML::Node runtime_parameters;
+  plugin::ParameterMap runtime_parameters;
 
   /** @brief Declared output ports serialized with the graph definition. */
   std::vector<OutputPort> outputs;
@@ -191,16 +195,18 @@ class Node {
    *
    * @param n YAML mapping containing identity, edges, parameters, outputs, and
    * cache descriptors.
-   * @return Fully owned Node value; runtime and computed cache fields retain
-   * their defaults.
+   * @return Fully owned Node value whose static parameters no longer alias the
+   * source YAML tree; runtime and computed cache fields retain their defaults.
    * @throws YAML::Exception when a present field has an incompatible YAML
    * shape or scalar conversion.
    * @throws GraphError with `GraphErrc::InvalidParameter` when a parameter edge
-   * omits either endpoint name.
-   * @throws std::bad_alloc when strings, YAML nodes, or vectors cannot
-   * allocate.
-   * @note Parsing does not validate graph-wide topology or resolve operation
-   * callbacks; GraphModel performs those later stages.
+   * omits either endpoint name or the parameters field is not a representable
+   * string-keyed map.
+   * @throws std::bad_alloc when strings, parameter values, YAML adapter state,
+   * or vectors cannot allocate.
+   * @note YAML scalar inference and overflow validation occur at this document
+   * boundary. GraphModel and operation invocation receive only ParameterValue
+   * storage. Graph-wide topology and operation lookup remain later stages.
    */
   static Node from_yaml(const YAML::Node& n);
 
@@ -210,6 +216,8 @@ class Node {
    * @return YAML mapping containing identity, declared edges, static
    * parameters, outputs, cache descriptors, and the preserved flag.
    * @throws YAML::Exception when yaml-cpp cannot construct or assign a value.
+   * @throws std::invalid_argument if a stored parameter reports an unknown
+   * kind.
    * @throws std::bad_alloc when YAML/container storage cannot allocate.
    * @note Runtime parameters, computed outputs, revisions, ROIs, and dependency
    * LUT state are deliberately excluded from graph serialization.

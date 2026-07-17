@@ -356,6 +356,40 @@ TEST(GraphDocumentLoadErrors,
 }
 
 /**
+ * @brief Proves document integer overflow fails before Graph publication.
+ *
+ * @throws Nothing when the public error and publication contract hold.
+ * @note The scalar is valid YAML text but cannot be represented by the
+ * canonical signed Int64 ParameterValue alternative.
+ */
+TEST(GraphDocumentLoadErrors,
+     ParameterOverflowReturnsInvalidYamlWithoutPublishingSession) {
+  ScopedGraphDocumentDirectory directory;
+  const std::filesystem::path overflow =
+      directory.root() / "source" / "parameter_overflow.yaml";
+  write_document(overflow,
+                 "- id: 1\n"
+                 "  name: parameter_overflow\n"
+                 "  type: fixture\n"
+                 "  subtype: source\n"
+                 "  parameters:\n"
+                 "    count: 9223372036854775808\n");
+
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  configure_document_host(*host);
+
+  const Result<GraphSessionId> loaded = host->load_graph(
+      make_load_request(directory.root(), "parameter_overflow", overflow));
+  ASSERT_FALSE(loaded.status.ok);
+  EXPECT_EQ(checked_graph_error_code(loaded.status), GraphErrc::InvalidYaml);
+
+  const Result<std::vector<GraphSessionId>> sessions = host->list_graphs();
+  ASSERT_TRUE(sessions.status.ok) << sessions.status.message;
+  EXPECT_TRUE(sessions.value.empty());
+}
+
+/**
  * @brief Proves semantic node-schema validation remains a document failure.
  *
  * @throws Nothing when the public error and publication contract hold.

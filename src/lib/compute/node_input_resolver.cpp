@@ -13,7 +13,7 @@ namespace ps::compute {
  * @param missing_context Diagnostic prefix for unresolved dependencies.
  * @return Image pointers aligned one-for-one with declared input slots.
  * @throws GraphError when a connected image or parameter output is missing.
- * @throws YAML::Exception or std::bad_alloc from parameter/vector copying.
+ * @throws std::bad_alloc from parameter/vector copying.
  * @note Disconnected image slots remain nullptr so later execution preserves
  * graph input indexes instead of compacting the vector.
  */
@@ -31,15 +31,14 @@ ResolvedNodeInputs NodeInputResolver::resolve(
  * @param missing_context Diagnostic prefix for unresolved dependencies.
  * @return Image pointers aligned one-for-one with declared image slots.
  * @throws GraphError when a connected image or parameter output is missing.
- * @throws YAML::Exception or std::bad_alloc from parameter/vector copying.
+ * @throws std::bad_alloc from parameter/vector copying.
  * @note Keeping lookups separate prevents an HP-stabilized image payload from
  * crossing into RT execution merely because the same node also exports data.
  */
 ResolvedNodeInputs NodeInputResolver::resolve(
     Node& node, const OutputLookup& image_lookup,
     const OutputLookup& parameter_lookup, const std::string& missing_context) {
-  node.runtime_parameters = node.parameters ? YAML::Clone(node.parameters)
-                                            : YAML::Node(YAML::NodeType::Map);
+  node.runtime_parameters = node.parameters;
 
   for (const auto& p_input : node.parameter_inputs) {
     if (p_input.from_node_id < 0)
@@ -58,7 +57,8 @@ ResolvedNodeInputs NodeInputResolver::resolve(
                            " did not produce output '" +
                            p_input.from_output_name + "'");
     }
-    node.runtime_parameters[p_input.to_parameter_name] = it->second;
+    node.runtime_parameters.insert_or_assign(p_input.to_parameter_name,
+                                             it->second);
   }
 
   ResolvedNodeInputs resolved;

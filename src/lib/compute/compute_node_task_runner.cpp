@@ -406,16 +406,14 @@ void NodeTaskRunner::try_load_disk_cache(const Node& target_node,
 /**
  * @brief Builds execution parameters from static and same-request outputs.
  * @param target_node Node whose effective parameters are resolved.
- * @return Deep YAML clone with connected parameter values overlaid.
+ * @return Deep ParameterMap copy with connected parameter values overlaid.
  * @throws GraphError when a connected parameter output is unavailable.
- * @throws YAML::Exception or std::bad_alloc from cloning and assignment.
+ * @throws std::bad_alloc from recursive value copying.
  * @note The result is request-local and does not mutate committed node state.
  */
-YAML::Node NodeTaskRunner::resolve_runtime_parameters(
+plugin::ParameterMap NodeTaskRunner::resolve_runtime_parameters(
     const Node& target_node) const {
-  YAML::Node runtime_params = target_node.parameters
-                                  ? YAML::Clone(target_node.parameters)
-                                  : YAML::Node(YAML::NodeType::Map);
+  plugin::ParameterMap runtime_params = target_node.parameters;
   for (const auto& p_input : target_node.parameter_inputs) {
     if (p_input.from_node_id < 0) {
       continue;
@@ -433,7 +431,7 @@ YAML::Node NodeTaskRunner::resolve_runtime_parameters(
                            " missing output '" + p_input.from_output_name +
                            "'");
     }
-    runtime_params[p_input.to_parameter_name] = it->second;
+    runtime_params.insert_or_assign(p_input.to_parameter_name, it->second);
   }
   return runtime_params;
 }
@@ -507,7 +505,7 @@ void NodeTaskRunner::compute_uncached_node(const Node& target_node,
                                                  ":" + target_node.subtype);
   }
 
-  YAML::Node runtime_params = resolve_runtime_parameters(target_node);
+  plugin::ParameterMap runtime_params = resolve_runtime_parameters(target_node);
   std::vector<const NodeOutput*> inputs_ready =
       resolve_image_inputs(target_node);
   BenchmarkEvent current_event = start_event(target_node);

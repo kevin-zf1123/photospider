@@ -30,9 +30,6 @@ namespace ps {
 /** @brief Private filesystem namespace shorthand used by backend contracts. */
 namespace fs = std::filesystem;
 
-/** @brief Private YAML payload stored for one named non-image node output. */
-using OutputValue = YAML::Node;
-
 /**
  * @brief Declares one destination image input's upstream source.
  * @throws std::bad_alloc when copied output-name storage cannot allocate.
@@ -133,16 +130,17 @@ struct DebugMeta {
  *
  * Private operation callbacks and compute services exchange this value after
  * the operation host adapter has converted the public `OperationOutput`.
- * Besides image, YAML data, spatial, and debug state, the host may attach a
- * dynamic-library lease so plugin-provided image deleters cannot run after
- * their library is unmapped.
+ * Besides image, format-neutral named data, spatial, and debug state, the host
+ * may attach a dynamic-library lease so plugin-provided image deleters cannot
+ * run after their library is unmapped.
  *
  * Copy construction first retains the source lease and then copies payload
  * state. Copy assignment stages a complete replacement before swapping, while
  * move construction and move assignment transfer complete states only through
  * no-throw swaps. Retired state is always destroyed in reverse member order.
  *
- * @throws std::bad_alloc when copied image/YAML/debug storage cannot allocate.
+ * @throws std::bad_alloc when copied image/parameter/debug storage cannot
+ * allocate.
  * @note `plugin_library_lifetime` is declared first and therefore destroyed
  *       last. Operation plugins must leave it empty; the host registrar wrapper
  *       owns lease attachment after the callback returns. This declaration
@@ -186,8 +184,8 @@ struct NodeOutput {
    * @brief Destroys payload state before releasing its plugin lease.
    *
    * @throws Nothing under member destructor contracts.
-   * @note Reverse declaration order destroys debug, spatial, YAML, and image
-   *       state before `plugin_library_lifetime` can unmap plugin code.
+   * @note Reverse declaration order destroys debug, spatial, named values, and
+   *       image state before `plugin_library_lifetime` can unmap plugin code.
    */
   ~NodeOutput() = default;
 
@@ -273,12 +271,12 @@ struct NodeOutput {
   ps::ImageBuffer image_buffer;
 
   /**
-   * @brief Named non-image outputs represented as owned YAML values.
+   * @brief Named non-image outputs represented as owned ParameterValue values.
    *
-   * @note Values may contain plugin-instantiated control state and therefore
-   *       retire before `plugin_library_lifetime`.
+   * @note Values are copied or moved without YAML conversion and retire before
+   *       `plugin_library_lifetime`.
    */
-  std::unordered_map<std::string, OutputValue> data;
+  plugin::ParameterMap data;
 
   /**
    * @brief Output spatial transform and ROI metadata.

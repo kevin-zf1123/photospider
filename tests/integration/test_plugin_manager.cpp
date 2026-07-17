@@ -1472,7 +1472,6 @@ TEST_F(PluginManagerLifecycleTest,
   node.name = "plugin_task_shape_generation";
   node.type = kLifecycleType;
   node.subtype = kLifecycleTaskShapeSubtype;
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = 64;
   node.parameters["height"] = 16;
   graph.add_node(node);
@@ -3207,13 +3206,13 @@ TEST_F(PluginManagerLifecycleTest,
 /**
  * @brief Proves loaded callbacks fence only the actual DSO invocation frame.
  *
- * @throws Nothing when host pre-entry YAML conversion and post-return output
- * validation preserve their original host-owned exception types.
- * @note The release file already exists, so any accidental callback entry is
- * visible in the lifecycle trace without blocking the test.
+ * @throws Nothing when host post-return output validation preserves its
+ * original host-owned exception type.
+ * @note Graph parameters are already format-neutral, so callback entry has no
+ * late document conversion stage.
  */
 TEST_F(PluginManagerLifecycleTest,
-       LoadedCallbackPreservesHostAdapterExceptionTypesOutsideDsoFence) {
+       LoadedCallbackPreservesHostPostReturnValidationOutsideDsoFence) {
   const auto plugin_path = lifecycle_plugin_path();
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
   const auto trace_path = lifecycle_trace_path("host-adapter-exceptions");
@@ -3241,12 +3240,7 @@ TEST_F(PluginManagerLifecycleTest,
   node.id = 1;
   node.type = kLifecycleType;
   node.subtype = kLifecycleSubtype;
-  node.parameters = YAML::Load("{bad: !unsupported value}");
-  EXPECT_THROW((void)callback(node, {}), YAML::Exception);
-  EXPECT_EQ(read_lifecycle_trace(trace_path),
-            (std::vector<std::string>{"registrar_return"}));
-
-  node.parameters = YAML::Node(YAML::NodeType::Map);
+  node.parameters["bad"] = "opaque";
   {
     ScopedEnvironmentVariable invalid_result_environment(
         kLifecycleInvalidResultEnvironment, "1");
@@ -3301,14 +3295,12 @@ TEST_F(PluginManagerLifecycleTest,
   source.name = "roi_source";
   source.type = "test";
   source.subtype = "source";
-  source.parameters = YAML::Node(YAML::NodeType::Map);
   graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "roi_child";
   child.type = kLifecycleType;
   child.subtype = kLifecycleSubtype;
-  child.parameters = YAML::Node(YAML::NodeType::Map);
   child.image_inputs = {ImageInput{1, "image"}};
   graph.add_node(child);
   graph.validate_topology();
@@ -3877,14 +3869,17 @@ TEST_F(PluginManagerLifecycleTest,
   source.name = "dependency_source";
   source.type = "image_generator";
   source.subtype = "constant";
-  source.parameters = YAML::Load("{width: 8, height: 8, value: 0}");
+  source.parameters["width"] = 8;
+  source.parameters["height"] = 8;
+  source.parameters["value"] = 0;
   graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "plugin_dependency";
   child.type = "plugin_lifecycle";
   child.subtype = "op";
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
@@ -3940,14 +3935,17 @@ TEST_F(PluginManagerLifecycleTest,
   source.name = "dependency_source";
   source.type = "image_generator";
   source.subtype = "constant";
-  source.parameters = YAML::Load("{width: 8, height: 8, value: 0}");
+  source.parameters["width"] = 8;
+  source.parameters["height"] = 8;
+  source.parameters["value"] = 0;
   graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "plugin_dependency";
   child.type = kLifecycleType;
   child.subtype = kLifecycleSubtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();

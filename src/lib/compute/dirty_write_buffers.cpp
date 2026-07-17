@@ -58,7 +58,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
  * @return Independent output with cloned image payload and copied metadata.
  * @throws std::bad_alloc when output or metadata copying exhausts memory.
  * @throws GraphError when image payload cloning otherwise fails.
- * @note YAML payload, spatial context, and debug metadata are value-copied.
+ * @note Named ParameterValue data, spatial context, and debug metadata are
+ * value-copied.
  */
 NodeOutput clone_node_output(const NodeOutput& source,
                              const std::string& label) {
