@@ -159,6 +159,13 @@ forwarding layer。
 
 ## 依赖中立内核
 
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
+约束本目标。维护中的当前基线由[内核术语](../../kernel-architecture/zh/Terminology.zh.md)、
+[内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
+[脏区传播与工作选择](../../kernel-architecture/zh/Dirty-Region-Propagation.zh.md)和
+[图生命周期与变更语义](../../kernel-architecture/zh/Graph-Lifecycle.zh.md)记录。迁移期间，这些
+当前状态文档仍是权威来源。
+
 内核只拥有表达和执行自身语义所需的小型原语：
 
 - checked rectangle、extent、clip、union/intersection、scale、halo、grid、tile alignment 和
@@ -169,14 +176,17 @@ forwarding layer。
 
 OpenCV 继续作为可选 operation provider、image codec 和公共 image adapter。它不得定义 Graph、
 ROI、dirty propagation、planning、cache 或 runtime interface。当前仓库自有 CPU provider 已遵循
-ADR 0004 的 provider 并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU
-threading 固定为一，把外层并行交给已准入 scheduler worker，并让真实共享 backend 同步保持
-provider-local。目标架构会保留这些所有权规则，同时把全部 OpenCV 初始化、异常、algorithm、codec
-与进程级状态完整移入可选 OpenCV provider。
+[ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md) 的 provider
+并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU threading 固定为一，把
+外层并行交给已准入 scheduler worker，并让真实共享 backend 同步保持 provider-local。目标架构
+会保留这些所有权规则，同时把全部 OpenCV 初始化、异常、algorithm、codec 与进程级状态完整移入
+可选 OpenCV provider。
 
 YAML 继续作为受支持的 document adapter；`YAML::Node` 不再作为 runtime parameter、output、
-cache metadata 或 graph-state value model。Graph load/save 是具有显式 transaction 和 error
-contract 的注入行为。
+cache metadata 或 graph-state value model。Graph load/save 是具有显式 transaction 与 error
+contract 的注入行为；
+[ADR 0005](../../adr/zh/0005-graph-document-ingestion-is-a-classified-transaction.zh.md) 固定了
+load 边界必须保留的分类摄取事务。
 
 ## 通用数据与 Region
 

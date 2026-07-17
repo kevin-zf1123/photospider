@@ -193,6 +193,15 @@ is a breaking replacement, not a permanent forwarding layer.
 
 ## Dependency-Neutral Kernel
 
+[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
+governs this target. The maintained current baseline is documented in
+[Kernel Terminology](../kernel-architecture/Terminology.md),
+[Kernel Data Model](../kernel-architecture/Data-Model.md),
+[Dirty Region Propagation and Work Selection](../kernel-architecture/Dirty-Region-Propagation.md),
+and [Graph Lifecycle and Mutation Semantics](../kernel-architecture/Graph-Lifecycle.md).
+Those current-state documents remain authoritative while the migration
+proceeds.
+
 The kernel owns only the small primitives needed to express and execute its
 semantics:
 
@@ -206,18 +215,21 @@ semantics:
 OpenCV remains valuable as an optional operation provider, image codec, and
 public image adapter. It must not define Graph, ROI, dirty propagation,
 planning, cache, or runtime interfaces. The current repository-owned CPU
-provider already follows the provider concurrency direction from ADR 0004: it
-uses reentrant `cv::Mat` callbacks, fixes OpenCV internal CPU threading at one
-before publication, leaves outer parallelism to admitted scheduler workers,
-and keeps genuine shared backend synchronization provider-local. The target
-architecture preserves those ownership rules while moving all OpenCV
+provider already follows the provider concurrency direction from
+[ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md):
+it uses reentrant `cv::Mat` callbacks, fixes OpenCV internal CPU threading at
+one before publication, leaves outer parallelism to admitted scheduler
+workers, and keeps genuine shared backend synchronization provider-local. The
+target architecture preserves those ownership rules while moving all OpenCV
 initialization, exceptions, algorithms, codecs, and process-wide state fully
 inside the optional OpenCV provider.
 
 YAML remains a supported document adapter. `YAML::Node` must not remain the
 runtime parameter, output, cache metadata, or graph-state value model. Graph
 loading and saving are injected behaviors with explicit transaction and error
-contracts.
+contracts. [ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
+fixes the classified ingestion transaction that the loading boundary must
+preserve.
 
 ## General Data and Regions
 
