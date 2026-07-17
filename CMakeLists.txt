@@ -1256,6 +1256,8 @@ if(BUILD_TESTING)
         photospider_cli_common)
     add_ps_test(test_compute_service_split
         tests/integration/test_compute_service_split.cpp)
+    add_ps_test(test_stride_aware_compute_paths
+        tests/integration/test_stride_aware_compute_paths.cpp)
     add_ps_test(test_node_editor_layout
         tests/unit/test_node_editor_layout.cpp)
     target_include_directories(test_node_editor_layout PRIVATE
@@ -1486,6 +1488,9 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_cli_scheduler_config
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 60)
+    gtest_discover_tests(test_stride_aware_compute_paths
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
