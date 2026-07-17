@@ -381,7 +381,7 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
     if(BUILD_TESTING)
         target_compile_definitions(
             photospider_opencv_operation_provider_internal PRIVATE
-            PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
     endif()
 endif()
 
@@ -519,7 +519,7 @@ if(BUILD_TESTING)
         PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
-        PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING
+        PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 endif()
 target_compile_features(photospider PUBLIC cxx_std_17)
@@ -1257,9 +1257,14 @@ if(BUILD_TESTING)
         add_ps_test(test_opencv_operation_concurrency
             tests/integration/test_opencv_operation_concurrency.cpp)
         target_compile_definitions(test_opencv_operation_concurrency PRIVATE
-            PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         target_link_libraries(test_opencv_operation_concurrency PRIVATE
             photospider_cli_common)
+        add_ps_test(test_opencv_operation_provider_exceptions
+            tests/integration/test_opencv_operation_provider_exceptions.cpp)
+        target_compile_definitions(
+            test_opencv_operation_provider_exceptions PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         add_executable(opencv_operation_concurrency_benchmark
             tests/verification/opencv_operation_concurrency_benchmark.cpp)
         set_target_properties(opencv_operation_concurrency_benchmark PROPERTIES
@@ -1271,7 +1276,7 @@ if(BUILD_TESTING)
             ${OpenCV_INCLUDE_DIRS})
         target_compile_definitions(
             opencv_operation_concurrency_benchmark PRIVATE
-            PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+            PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
         target_link_libraries(opencv_operation_concurrency_benchmark PRIVATE
             photospider_cli_common
             yaml-cpp::yaml-cpp
@@ -1577,6 +1582,9 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        gtest_discover_tests(test_opencv_operation_provider_exceptions
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
         gtest_discover_tests(test_opencv_operation_concurrency
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)

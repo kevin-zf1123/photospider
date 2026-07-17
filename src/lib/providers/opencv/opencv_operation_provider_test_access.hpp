@@ -1,6 +1,6 @@
 #pragma once
 
-#if !defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+#if !defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #error "OpenCV operation test access is available only in testing builds"
 #endif
 
@@ -12,7 +12,7 @@ namespace ps::providers::opencv {
  * @throws Nothing; implementations must not let exceptions cross observation
  *         callbacks.
  * @note The interface is private, is not installed, and exists only when the
- *       product is compiled with its internal concurrency-test definition.
+ *       product is compiled with its internal provider-test definition.
  *       Tests own synchronization and must keep the observer alive until every
  *       callback that can have loaded it has exited.
  */
@@ -57,5 +57,54 @@ class OpenCvOperationObserver {
  */
 void set_opencv_operation_observer_for_testing(
     OpenCvOperationObserver* observer) noexcept;
+
+/**
+ * @brief Arms one deterministic OpenCV process-initialization failure.
+ *
+ * @param error_code OpenCV status to throw from the next initialization
+ *        attempt; zero clears an unconsumed injection.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The status is consumed exactly once inside the provider's
+ *       `std::call_once` body before `cv::setNumThreads(1)`. Tests must use an
+ *       isolated process whose provider has not initialized successfully; no
+ *       production build contains this hook.
+ */
+void set_opencv_process_initialization_failure_for_testing(
+    int error_code) noexcept;
+
+/**
+ * @brief Drives the real monolithic OpenCV exception fence with one status.
+ *
+ * @param error_code OpenCV status thrown by the injected callback body.
+ * @return Nothing; under the intended fence contract the injected callback
+ *         exits by throwing.
+ * @throws std::bad_alloc as a fresh host-owned exception for
+ *         `cv::Error::StsNoMem`, including callback-wrapper allocation
+ *         exhaustion.
+ * @throws GraphError with `GraphErrc::ComputeError` for every other injected
+ *         OpenCV status.
+ * @note This private entry invokes the same wrapper used by registered
+ *       monolithic callbacks. It injects an exception directly and never
+ *       attempts real resource exhaustion.
+ */
+void invoke_monolithic_opencv_exception_fence_for_testing(int error_code);
+
+/**
+ * @brief Drives the real tiled OpenCV exception fence with one status.
+ *
+ * @param error_code OpenCV status thrown by the injected callback body.
+ * @return Nothing; under the intended fence contract the injected callback
+ *         exits by throwing.
+ * @throws std::bad_alloc as a fresh host-owned exception for
+ *         `cv::Error::StsNoMem`, including callback-wrapper allocation
+ *         exhaustion.
+ * @throws GraphError with `GraphErrc::ComputeError` for every other injected
+ *         OpenCV status.
+ * @note This private entry invokes the same wrapper used by registered tiled
+ *       callbacks with borrowed empty tile views. It performs no image work
+ *       and never attempts real resource exhaustion.
+ */
+void invoke_tiled_opencv_exception_fence_for_testing(int error_code);
 
 }  // namespace ps::providers::opencv

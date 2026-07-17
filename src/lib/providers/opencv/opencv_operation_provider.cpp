@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #include <atomic>
 #endif
 #include <cmath>
@@ -22,7 +22,7 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
-#if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #endif
 #include "compute/compute_geometry.hpp"  // NOLINT(build/include_subdir)
@@ -36,11 +36,19 @@ namespace ps::providers::opencv {
 // ==                         全局资源与辅助函数                           ==
 // =============================================================================
 
-#if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 namespace {
 
 /** @brief Borrowed observer published only by serialized integration tests. */
 std::atomic<OpenCvOperationObserver*> g_opencv_operation_observer{nullptr};
+
+/**
+ * @brief One-shot OpenCV status injected into process initialization.
+ *
+ * @note Zero means disabled. Test publication and provider initialization are
+ *       serialized by the isolated exception-contract test process.
+ */
+std::atomic<int> g_opencv_process_initialization_failure{cv::Error::StsOk};
 
 /**
  * @brief Brackets one built-in OpenCV callback body for deterministic tests.
@@ -106,6 +114,13 @@ class OpenCvOperationObservationScope final {
 void set_opencv_operation_observer_for_testing(
     OpenCvOperationObserver* observer) noexcept {
   g_opencv_operation_observer.store(observer, std::memory_order_release);
+}
+
+/** @copydoc set_opencv_process_initialization_failure_for_testing */
+void set_opencv_process_initialization_failure_for_testing(
+    int error_code) noexcept {
+  g_opencv_process_initialization_failure.store(error_code,
+                                                std::memory_order_release);
 }
 #define PHOTOSPIDER_OBSERVE_OPENCV_OPERATION(operation_key) \
   OpenCvOperationObservationScope opencv_observation(operation_key)
@@ -184,6 +199,39 @@ static TileOpFunc fence_tiled_operation(const char* operation_key,
   };
 }
 
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+/** @copydoc invoke_monolithic_opencv_exception_fence_for_testing */
+void invoke_monolithic_opencv_exception_fence_for_testing(int error_code) {
+  MonolithicOpFunc callback = fence_monolithic_operation(
+      "testing:monolithic_exception_fence",
+      [error_code](const Node&,
+                   const std::vector<const NodeOutput*>&) -> NodeOutput {
+        throw cv::Exception(
+            error_code, "deterministic injected provider exception",
+            "invoke_monolithic_opencv_exception_fence_for_testing", __FILE__,
+            __LINE__);
+      });
+  const Node node;
+  (void)callback(node, {});
+}
+
+/** @copydoc invoke_tiled_opencv_exception_fence_for_testing */
+void invoke_tiled_opencv_exception_fence_for_testing(int error_code) {
+  TileOpFunc callback = fence_tiled_operation(
+      "testing:tiled_exception_fence",
+      [error_code](const Node&, const OutputTile&,
+                   const std::vector<InputTile>&) {
+        throw cv::Exception(error_code,
+                            "deterministic injected provider exception",
+                            "invoke_tiled_opencv_exception_fence_for_testing",
+                            __FILE__, __LINE__);
+      });
+  const Node node;
+  const OutputTile output;
+  callback(node, output, {});
+}
+#endif
+
 /**
  * @brief Applies the provider-owned OpenCV process policy exactly once.
  *
@@ -194,12 +242,26 @@ static TileOpFunc fence_tiled_operation(const char* operation_key,
  * @throws std::system_error when `std::call_once` synchronization fails.
  * @note OpenCV internal CPU threading is fixed at one before any provider
  *       callback is published. A throwing initialization remains retryable
- *       under ordinary `std::call_once` semantics.
+ *       under ordinary `std::call_once` semantics. Test builds may consume one
+ *       private injected OpenCV status inside the same once body before the
+ *       real process call; production builds contain no injection state.
  */
 static void initialize_opencv_process_policy() {
   static std::once_flag init_once;
   try {
-    std::call_once(init_once, [] { cv::setNumThreads(1); });
+    std::call_once(init_once, [] {
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
+      const int injected_error =
+          g_opencv_process_initialization_failure.exchange(
+              cv::Error::StsOk, std::memory_order_acq_rel);
+      if (injected_error != cv::Error::StsOk) {
+        throw cv::Exception(
+            injected_error, "deterministic injected initialization failure",
+            "initialize_opencv_process_policy", __FILE__, __LINE__);
+      }
+#endif
+      cv::setNumThreads(1);
+    });
   } catch (const cv::Exception& error) {
     throw_translated_opencv_exception("initialization", error);
   }
