@@ -268,9 +268,10 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
  *
  * The recursive path preserves the legacy single-threaded behavior: it checks
  * HP memory cache, optionally loads disk cache, detects cycles, resolves
- * parameter and image inputs, dispatches the selected HP operator through
- * NodeExecutor, commits the HP cache, records timing/events, and saves disk
- * cache when configured.
+ * parameter and image inputs on a request-local Node snapshot, dispatches that
+ * snapshot to the selected HP operator through NodeExecutor, commits the HP
+ * cache, records timing/events, and saves disk cache when configured. Effective
+ * runtime parameters are never written into the graph-owned Node.
  *
  * @param graph Graph whose nodes and caches are read and mutated.
  * @param node_id Node id to compute.
@@ -283,7 +284,9 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
  * cache failure, or compute failure occurs.
  * @note This method is used only by the sequential HP path and HP callbacks
  * that explicitly select sequential execution. Scheduler-backed dispatch does
- * not call this method as a compatibility fallback.
+ * not call this method as a compatibility fallback. The resolved input-size
+ * hint retains its existing Graph state behavior, while runtime parameters and
+ * other operation-facing state remain request-local.
  */
 NodeOutput& ComputeService::compute_internal(
     GraphModel& graph, int node_id, const RecursiveComputeContext& context) {
@@ -317,27 +320,30 @@ NodeOutput& ComputeService::compute_internal(
     }
     context.visiting[node_id] = true;
 
+    Node execution_node = target_node;
     auto resolved_inputs = compute::NodeInputResolver::resolve(
-        target_node,
+        execution_node,
         [&](int upstream_id) -> const NodeOutput* {
           return &compute_internal(graph, upstream_id, context);
         },
         "Sequential compute");
+    target_node.last_input_size_hp = execution_node.last_input_size_hp;
     monolithic_inputs = resolved_inputs.image_inputs;
 
     auto op_opt = OpRegistry::instance().resolve_for_intent(
-        target_node.type, target_node.subtype,
+        execution_node.type, execution_node.subtype,
         ComputeIntent::GlobalHighPrecision);
     if (!op_opt) {
-      throw GraphError(GraphErrc::NoOperation, "No op for " + target_node.type +
-                                                   ":" + target_node.subtype);
+      throw GraphError(
+          GraphErrc::NoOperation,
+          "No op for " + execution_node.type + ":" + execution_node.subtype);
     }
 
     current_event.execution_start_time =
         std::chrono::high_resolution_clock::now();
 
     target_node.cached_output_high_precision = compute::NodeExecutor::execute(
-        graph, target_node, *op_opt, monolithic_inputs);
+        graph, execution_node, *op_opt, monolithic_inputs);
 
     current_event.execution_end_time =
         std::chrono::high_resolution_clock::now();

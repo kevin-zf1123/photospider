@@ -482,6 +482,34 @@ NodeOutput execute_spatial_parameter_source(
 }
 
 /**
+ * @brief Writes the connected request-local radius into every output pixel.
+ *
+ * @param node Execution snapshot whose effective runtime parameters must
+ * contain the connected radius.
+ * @param output_tile Writable HP tile used as the operation-visible witness.
+ * @param input_tiles Destination-indexed input tiles supplied by the executor.
+ * @return Nothing.
+ * @throws GraphError when the effective radius is absent.
+ * @throws plugin::ParameterTypeError when radius is not an exact Int64.
+ * @throws std::invalid_argument or std::runtime_error from CPU adaptation.
+ * @throws cv::Exception when the output tile cannot be filled.
+ * @note The owning regression keeps the graph's static radius at zero and
+ * connects radius seven, so output pixels equal to seven prove that the
+ * operation received the request-local parameter overlay.
+ */
+void execute_request_local_parameter_probe_tile(
+    const Node& node, const OutputTile& output_tile,
+    const std::vector<InputTile>& input_tiles) {
+  (void)input_tiles;
+  const auto radius = node.runtime_parameters.find("radius");
+  if (radius == node.runtime_parameters.end()) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "request-local parameter probe is missing radius");
+  }
+  toCvMat(output_tile).setTo(static_cast<double>(radius->second.as_int64()));
+}
+
+/**
  * @brief Registers deterministic split-test operations once per process.
  *
  * The registration set supplies HP/RT source, tiled, random-access, cache,
@@ -636,6 +664,9 @@ void register_split_ops() {
           toCvMat(output_tile).setTo(2.0f);
         }),
         micro_meta);
+    registry.register_op_hp_tiled(
+        "split_plan", "request_local_parameter_probe",
+        TileOpFunc(execute_request_local_parameter_probe_tile), micro_meta);
     registry.register_op_hp_tiled(
         "image_generator", "spatial_uncached_tiled_source",
         TileOpFunc(execute_spatial_generator_tile), micro_meta);
@@ -1790,7 +1821,7 @@ TEST(TaskGraphPlanningSplit,
 }
 
 TEST(TaskGraphPlanningSplit,
-     SpatialAlignedConsumerPlansAndExecutesWithUncachedParameterProducer) {
+     SpatialAlignedConsumerUsesUncachedRequestLocalParameterOverlay) {
   register_split_ops();
   g_spatial_generator_hp_calls.store(0, std::memory_order_relaxed);
   g_spatial_parameter_hp_calls.store(0, std::memory_order_relaxed);
@@ -1803,7 +1834,7 @@ TEST(TaskGraphPlanningSplit,
       make_node(3, "split_plan", "spatial_uncached_parameter_source");
   parameter_source.parameters["width"] = 1;
   parameter_source.parameters["height"] = 1;
-  Node downstream = make_node(2, "split_plan", "tile");
+  Node downstream = make_node(2, "split_plan", "request_local_parameter_probe");
   downstream.parameters["width"] = 32;
   downstream.parameters["height"] = 16;
   downstream.parameters["radius"] = 0;
@@ -1874,8 +1905,8 @@ TEST(TaskGraphPlanningSplit,
   double output_min = 0.0;
   double output_max = 0.0;
   cv::minMaxLoc(toCvMat(output.image_buffer), &output_min, &output_max);
-  EXPECT_DOUBLE_EQ(output_min, 2.0);
-  EXPECT_DOUBLE_EQ(output_max, 2.0);
+  EXPECT_DOUBLE_EQ(output_min, 7.0);
+  EXPECT_DOUBLE_EQ(output_max, 7.0);
   EXPECT_EQ(g_spatial_generator_hp_calls.load(std::memory_order_relaxed), 1)
       << "inline execution computes the generator node once, while the "
          "separately inspected task graph retains two source tiles";
@@ -1890,8 +1921,11 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_DOUBLE_EQ(source_min, 3.0);
   EXPECT_DOUBLE_EQ(source_max, 3.0);
   ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
-  ASSERT_FALSE(graph.node(2).runtime_parameters.empty());
-  EXPECT_EQ(graph.node(2).runtime_parameters.at("radius").as_int64(), 7);
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+  EXPECT_EQ(graph.node(2).parameters.at("radius").as_int64(), 0);
+  EXPECT_TRUE(graph.node(1).runtime_parameters.empty());
+  EXPECT_TRUE(graph.node(2).runtime_parameters.empty());
+  EXPECT_TRUE(graph.node(3).runtime_parameters.empty());
 }
 
 TEST(TaskGraphPlanningSplit,
