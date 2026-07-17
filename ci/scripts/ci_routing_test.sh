@@ -284,7 +284,7 @@ validate_published_image_base_fetch() {
   local fetch_script="$TEST_ROOT/healthcheck-published-image-base-fetch.sh"
   local checkout_line
   local fetch_step_line
-  local first_run_line
+  local fetch_command_line
   local verify_line
   local healthcheck_step_line
   local healthcheck_run_line
@@ -322,7 +322,8 @@ validate_published_image_base_fetch() {
   fetch_step_line=$(grep -nF -- \
     "- name: Fetch pull request base history" "$job_file" |
     head -n 1 | cut -d: -f1)
-  first_run_line=$(grep -nE -- '^[[:space:]]+run:' "$job_file" |
+  fetch_command_line=$(grep -nF -- \
+    '"https://github.com/${CI_BASE_REPOSITORY}.git" \' "$job_file" |
     head -n 1 | cut -d: -f1)
   verify_line=$(grep -nF -- \
     'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null' "$job_file" |
@@ -333,12 +334,12 @@ validate_published_image_base_fetch() {
     'run: bash ci/scripts/healthcheck.sh' "$job_file" |
     head -n 1 | cut -d: -f1)
   [[ -n "$checkout_line" && -n "$fetch_step_line" &&
-    -n "$first_run_line" && -n "$verify_line" &&
+    -n "$fetch_command_line" && -n "$verify_line" &&
     -n "$healthcheck_step_line" && -n "$healthcheck_run_line" ]] ||
     fail "healthcheck-published-image lacks a complete exact-base execution order"
   ((checkout_line < fetch_step_line &&
-    fetch_step_line < first_run_line &&
-    first_run_line < verify_line &&
+    fetch_step_line < fetch_command_line &&
+    fetch_command_line < verify_line &&
     verify_line < healthcheck_step_line &&
     healthcheck_step_line < healthcheck_run_line)) ||
     fail "healthcheck-published-image runs healthcheck before exact-base verification"
@@ -397,6 +398,156 @@ validate_published_image_fetch_shells() {
   done
 
   pass healthcheck-published-image-fetch-steps-explicit-bash
+}
+
+# @brief Require the published container to trust only its exact workspace.
+# @param $1 Healthcheck workflow YAML path.
+# @return Zero after the scoped source, order, and isolated Git checks pass.
+# @throws Nothing; missing, broadened, or misordered trust exits through fail.
+# @note The extracted production block runs with an isolated HOME and Git
+#   repository. This proves its exact global entry and HEAD access, but does not
+#   simulate cross-UID ownership or the hosted container runtime.
+validate_published_image_workspace_trust() {
+  local workflow=$1
+  local job_file="$TEST_ROOT/healthcheck-published-image-trust-job.yml"
+  local trust_step_file="$TEST_ROOT/healthcheck-published-image-trust-step.yml"
+  local trust_script="$TEST_ROOT/healthcheck-published-image-trust.sh"
+  local trust_repository="$TEST_ROOT/published-image-trust-repository"
+  local trust_home="$TEST_ROOT/published-image-trust-home"
+  local trusted_directories_file="$TEST_ROOT/published-image-safe-directories.txt"
+  local shell_key_count
+  local shell_bash_count
+  local run_key_count
+  local literal_run_count
+  local executable_line_count
+  local strict_mode_count
+  local job_safe_directory_count
+  local step_safe_directory_count
+  local exact_safe_directory_count
+  local head_verify_count
+  local checkout_line
+  local trust_step_line
+  local first_run_line
+  local trust_config_line
+  local trust_verify_line
+  local pull_request_fetch_line
+  local ci_branch_fetch_line
+  local healthcheck_step_line
+  local healthcheck_run_line
+  local -a trusted_directories=()
+
+  extract_job_block "$workflow" healthcheck-published-image "$job_file" ||
+    fail "healthcheck-published-image job could not be extracted for workspace trust validation"
+  extract_step_block "$job_file" "Trust checked-out workspace" \
+    "$trust_step_file" ||
+    fail "healthcheck-published-image workspace-trust step is not unique"
+  extract_step_run_block "$trust_step_file" "Trust checked-out workspace" \
+    "$trust_script" ||
+    fail "healthcheck-published-image workspace-trust run block could not be extracted"
+
+  shell_key_count=$(grep -Ec -- '^        shell:' "$trust_step_file" || true)
+  ((shell_key_count == 1)) ||
+    fail "healthcheck-published-image workspace trust must bind exactly one step shell"
+  shell_bash_count=$(grep -Fxc -- '        shell: bash' \
+    "$trust_step_file" || true)
+  ((shell_bash_count == 1)) ||
+    fail "healthcheck-published-image workspace trust must bind shell: bash"
+  run_key_count=$(grep -Ec -- '^        run:' "$trust_step_file" || true)
+  ((run_key_count == 1)) ||
+    fail "healthcheck-published-image workspace trust must contain exactly one run block"
+  literal_run_count=$(grep -Fxc -- '        run: |' \
+    "$trust_step_file" || true)
+  ((literal_run_count == 1)) ||
+    fail "healthcheck-published-image workspace trust must use one literal run block"
+
+  executable_line_count=$(grep -Ec -- \
+    '^[[:space:]]*[^[:space:]#]' "$trust_script" || true)
+  strict_mode_count=$(grep -Fxc -- 'set -Eeuo pipefail' \
+    "$trust_script" || true)
+  job_safe_directory_count=$(grep -Fc -- 'safe.directory' "$job_file" || true)
+  step_safe_directory_count=$(grep -Fc -- \
+    'safe.directory' "$trust_script" || true)
+  exact_safe_directory_count=$(grep -Fxc -- \
+    'git config --global --add safe.directory "$GITHUB_WORKSPACE"' \
+    "$trust_script" || true)
+  head_verify_count=$(grep -Fxc -- \
+    'git -C "$GITHUB_WORKSPACE" rev-parse --verify "HEAD^{commit}" >/dev/null' \
+    "$trust_script" || true)
+  ((executable_line_count == 3 && strict_mode_count == 1)) ||
+    fail "healthcheck-published-image workspace trust may execute only its three locked commands"
+  ((job_safe_directory_count == 1 &&
+    step_safe_directory_count == 1 &&
+    exact_safe_directory_count == 1)) ||
+    fail "healthcheck-published-image must trust only the exact GITHUB_WORKSPACE without a wildcard"
+  ((head_verify_count == 1)) ||
+    fail "healthcheck-published-image workspace trust must verify HEAD read-only"
+  bash -n "$trust_script"
+
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  trust_step_line=$(grep -nF -- "- name: Trust checked-out workspace" \
+    "$job_file" | head -n 1 | cut -d: -f1)
+  first_run_line=$(grep -nE -- '^[[:space:]]+run:' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  trust_config_line=$(grep -nF -- \
+    'git config --global --add safe.directory "$GITHUB_WORKSPACE"' \
+    "$job_file" | head -n 1 | cut -d: -f1)
+  trust_verify_line=$(grep -nF -- \
+    'git -C "$GITHUB_WORKSPACE" rev-parse --verify "HEAD^{commit}" >/dev/null' \
+    "$job_file" | head -n 1 | cut -d: -f1)
+  pull_request_fetch_line=$(grep -nF -- \
+    "- name: Fetch pull request base history" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  ci_branch_fetch_line=$(grep -nF -- \
+    "- name: Fetch CI branch main history" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  healthcheck_step_line=$(grep -nF -- "- name: Run healthcheck" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  healthcheck_run_line=$(grep -nF -- \
+    'run: bash ci/scripts/healthcheck.sh' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  [[ -n "$checkout_line" && -n "$trust_step_line" &&
+    -n "$first_run_line" && -n "$trust_config_line" &&
+    -n "$trust_verify_line" && -n "$pull_request_fetch_line" &&
+    -n "$ci_branch_fetch_line" && -n "$healthcheck_step_line" &&
+    -n "$healthcheck_run_line" ]] ||
+    fail "healthcheck-published-image lacks a complete workspace-trust execution order"
+  ((checkout_line < trust_step_line &&
+    trust_step_line < first_run_line &&
+    first_run_line < trust_config_line &&
+    trust_config_line < trust_verify_line &&
+    trust_verify_line < pull_request_fetch_line &&
+    trust_verify_line < ci_branch_fetch_line &&
+    trust_verify_line < healthcheck_step_line &&
+    healthcheck_step_line < healthcheck_run_line)) ||
+    fail "healthcheck-published-image does not establish trust before fetch and healthcheck"
+
+  mkdir -p "$trust_home"
+  git init -q -b main "$trust_repository"
+  git -C "$trust_repository" config user.name "CI Routing Test"
+  git -C "$trust_repository" config user.email "ci-routing@example.invalid"
+  printf 'baseline\n' > "$trust_repository/seed.txt"
+  git -C "$trust_repository" add seed.txt
+  git -C "$trust_repository" commit -qm baseline
+  if ! env HOME="$trust_home" \
+    GIT_CONFIG_GLOBAL="$trust_home/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+    GITHUB_WORKSPACE="$trust_repository" \
+    bash --noprofile --norc -e -o pipefail "$trust_script"; then
+    fail "healthcheck-published-image workspace-trust block failed in isolation"
+  fi
+  if ! env HOME="$trust_home" \
+    GIT_CONFIG_GLOBAL="$trust_home/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+    "$REAL_GIT" config --global --get-all safe.directory \
+    > "$trusted_directories_file"; then
+    fail "isolated workspace-trust global configuration could not be read"
+  fi
+  mapfile -t trusted_directories < "$trusted_directories_file"
+  ((${#trusted_directories[@]} == 1)) ||
+    fail "isolated workspace trust did not add exactly one global directory"
+  [[ "${trusted_directories[0]}" == "$trust_repository" ]] ||
+    fail "isolated workspace trust broadened the configured directory"
+
+  pass healthcheck-published-image-exact-workspace-trust-before-execution
 }
 
 # @brief Require one healthcheck job to use cumulative main on CI/** pushes.
@@ -1227,6 +1378,7 @@ main() {
   validate_workflow_contract "$integration_workflow" "Report integration gate"
   validate_published_image_base_fetch "$health_workflow"
   validate_published_image_fetch_shells "$health_workflow"
+  validate_published_image_workspace_trust "$health_workflow"
   validate_local_image_base_fetch "$health_workflow"
   validate_ci_branch_healthcheck_base "$health_workflow" \
     healthcheck-published-image

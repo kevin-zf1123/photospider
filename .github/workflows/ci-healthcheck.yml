@@ -219,6 +219,13 @@ jobs:
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
+      - name: Trust checked-out workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" rev-parse --verify "HEAD^{commit}" >/dev/null
+
       - name: Fetch pull request base history
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
         shell: bash
