@@ -115,7 +115,7 @@ class ComputeService {
     std::optional<ComputeIntent> intent;
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
-    std::optional<cv::Rect> dirty_roi;
+    std::optional<PixelRect> dirty_roi;
   };
 
   /**

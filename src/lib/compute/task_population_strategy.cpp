@@ -1,10 +1,12 @@
 #include "compute/task_population_strategy.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 #include <utility>
 #include <variant>
 
+#include "compute/compute_geometry.hpp"
 #include "compute/domain_op_metadata.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -12,21 +14,31 @@
 namespace ps::compute {
 namespace {
 
-cv::Rect merge_optional_rect(const cv::Rect& current, const cv::Rect& next) {
-  if (next.width <= 0 || next.height <= 0) {
-    return current;
-  }
-  if (current.width <= 0 || current.height <= 0) {
-    return next;
-  }
-  const int x0 = std::min(current.x, next.x);
-  const int y0 = std::min(current.y, next.y);
-  const int x1 = std::max(current.x + current.width, next.x + next.width);
-  const int y1 = std::max(current.y + current.height, next.y + next.height);
-  return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+/**
+ * @brief Merges two optional ROI values using empty-as-missing semantics.
+ *
+ * @param current Accumulated ROI or empty.
+ * @param next ROI to include or empty.
+ * @return Checked bounding union, or the non-empty operand.
+ * @throws Nothing.
+ * @note compute::merge_rect performs wide endpoint arithmetic and treats empty
+ *       rectangles as the union identity.
+ */
+PixelRect merge_optional_rect(const PixelRect& current,
+                              const PixelRect& next) noexcept {
+  return merge_rect(current, next);
 }
 
-bool is_dirty_source(const DirtyRegionSnapshot* snapshot, int node_id) {
+/**
+ * @brief Checks whether one planned node is a dirty-source boundary.
+ * @param snapshot Optional graph-scoped dirty snapshot.
+ * @param node_id Planned node id to inspect.
+ * @return True when snapshot identifies node_id as a dirty source.
+ * @throws Nothing.
+ * @note A null snapshot describes ordinary non-dirty task population.
+ */
+bool is_dirty_source(const DirtyRegionSnapshot* snapshot,
+                     int node_id) noexcept {
   if (!snapshot) {
     return false;
   }
@@ -35,12 +47,22 @@ bool is_dirty_source(const DirtyRegionSnapshot* snapshot, int node_id) {
                    node_id) != snapshot->dirty_source_nodes.end();
 }
 
-cv::Rect dirty_roi_for_node(const DirtyRegionSnapshot* snapshot, int node_id,
-                            DirtyDomain domain) {
+/**
+ * @brief Conservatively merges every dirty record relevant to one node/domain.
+ * @param snapshot Optional graph-scoped dirty snapshot.
+ * @param node_id Node whose dirty records are collected.
+ * @param domain HP or RT task domain being populated.
+ * @return Checked bounding ROI, or empty when no matching record exists.
+ * @throws Nothing.
+ * @note Source, actual, per-node, tile, and monolithic records are value-only;
+ *       the helper neither mutates the snapshot nor creates task shapes.
+ */
+PixelRect dirty_roi_for_node(const DirtyRegionSnapshot* snapshot, int node_id,
+                             DirtyDomain domain) noexcept {
   if (!snapshot) {
-    return cv::Rect();
+    return PixelRect{};
   }
-  cv::Rect merged;
+  PixelRect merged;
   auto actual_it = snapshot->actual_dirty_rois.find(node_id);
   if (actual_it != snapshot->actual_dirty_rois.end()) {
     for (const auto& roi : actual_it->second) {
@@ -74,12 +96,21 @@ cv::Rect dirty_roi_for_node(const DirtyRegionSnapshot* snapshot, int node_id,
   return merged;
 }
 
+/**
+ * @brief Decides whether one pre-expanded task intersects selected dirty work.
+ * @param task Planned task whose output geometry is checked.
+ * @param snapshot Optional graph-scoped dirty snapshot.
+ * @return True for ordinary planning, unknown task ROI, or a positive dirty
+ *         intersection; false when dirty planning selects no matching area.
+ * @throws Nothing.
+ * @note Intersection uses checked kernel geometry and never creates new tasks.
+ */
 bool intersects_dirty_roi(const PlannedTask& task,
-                          const DirtyRegionSnapshot* snapshot) {
+                          const DirtyRegionSnapshot* snapshot) noexcept {
   if (!snapshot) {
     return true;
   }
-  const cv::Rect dirty_roi =
+  const PixelRect dirty_roi =
       dirty_roi_for_node(snapshot, task.node_id, task.domain);
   if (dirty_roi.width <= 0 || dirty_roi.height <= 0) {
     return false;
@@ -87,7 +118,7 @@ bool intersects_dirty_roi(const PlannedTask& task,
   if (task.output_roi.width <= 0 || task.output_roi.height <= 0) {
     return true;
   }
-  return (task.output_roi & dirty_roi).area() > 0;
+  return !is_rect_empty(intersect_rect(task.output_roi, dirty_roi));
 }
 
 /**
@@ -174,10 +205,21 @@ class DomainTaskShapeStrategy {
 };
 
 /**
- * @brief Creates a PlannedTask with shared defaults for all branch strategies.
+ * @brief Creates a planned task with shared defaults for every shape strategy.
+ * @param node_id Graph node executed by the task.
+ * @param kind Node, monolithic, or tile task kind.
+ * @param domain HP or RT compute domain.
+ * @param output_roi Domain-local output ROI represented by the task.
+ * @param tile_x Tile column index, or -1 for non-tile work.
+ * @param tile_y Tile row index, or -1 for non-tile work.
+ * @param tile_size Tile edge length, or zero for non-tile work.
+ * @param whole_output Whether the task represents the complete node output.
+ * @return Value-only task awaiting id/dependency assignment.
+ * @throws Nothing for current fixed-size field initialization.
+ * @note The helper does not inspect graph state or attach dirty metadata.
  */
 PlannedTask make_task(int node_id, PlannedTaskKind kind, DirtyDomain domain,
-                      const cv::Rect& output_roi, int tile_x, int tile_y,
+                      const PixelRect& output_roi, int tile_x, int tile_y,
                       int tile_size, bool whole_output) {
   PlannedTask task;
   task.node_id = node_id;
@@ -252,7 +294,7 @@ class GraphTaskPopulationStrategy {
     TaskAppender appender(result, snapshot);
     DomainTaskShapeStrategy shape_strategy(domain);
     GraphExtentResolver extent_resolver;
-    std::unordered_map<int, cv::Size> extent_cache;
+    std::unordered_map<int, PixelSize> extent_cache;
     for (const auto& work : result.planned_work) {
       if (!graph.has_node(work.node_id)) {
         continue;
@@ -286,14 +328,14 @@ class GraphTaskPopulationStrategy {
       ComputePlan& result, const GraphModel& graph, const PlannedNodeWork& work,
       DirtyDomain domain, const DomainTaskShapeStrategy& shape_strategy,
       GraphExtentResolver& extent_resolver,
-      std::unordered_map<int, cv::Size>& extent_cache,
+      std::unordered_map<int, PixelSize>& extent_cache,
       TaskAppender& appender) const {
     (void)result;
     const Node& node = graph.node(work.node_id);
-    cv::Size extent = extent_resolver.resolve_output_extent(
-        const_cast<GraphModel&>(graph), work.node_id, extent_cache);
-    cv::Rect full_output(0, 0, std::max(0, extent.width),
-                         std::max(0, extent.height));
+    PixelSize extent = extent_resolver.resolve_output_extent(
+        graph, work.node_id, extent_cache);
+    PixelRect full_output{0, 0, std::max(0, extent.width),
+                          std::max(0, extent.height)};
     const PlannedTaskKind selected_kind =
         shape_strategy.selected_task_kind(node);
     if (selected_kind == PlannedTaskKind::Tile && full_output.width > 0 &&
@@ -306,25 +348,43 @@ class GraphTaskPopulationStrategy {
     const PlannedTaskKind kind = selected_kind == PlannedTaskKind::Tile
                                      ? PlannedTaskKind::Node
                                      : selected_kind;
-    const cv::Rect output_roi =
+    const PixelRect output_roi =
         full_output.width > 0 ? full_output : work.execution_roi;
     appender.add(make_task(work.node_id, kind, domain, output_roi, -1, -1, 0,
                            kind == PlannedTaskKind::Monolithic));
   }
 
-  /** @brief Splits one full output extent into domain-local tile tasks. */
+  /**
+   * @brief Splits one positive full-output rectangle into domain-local tiles.
+   * @param work Planned node work whose node id is copied to each task.
+   * @param domain HP or RT task domain.
+   * @param full_output Positive output bounds in domain-local pixels.
+   * @param shape_strategy Domain-bound tile-size selector.
+   * @param node Graph node whose operation metadata selects tile size.
+   * @param appender Task sink assigning task ids and dirty metadata.
+   * @return Nothing.
+   * @throws std::bad_alloc when registry snapshots or task storage allocate.
+   * @throws Any exception raised while copying registered metadata callbacks.
+   * @note Iteration uses signed 64-bit coordinates so the final partial tile
+   *       cannot overflow when a valid extent approaches INT_MAX.
+   */
   void append_tiled_tasks(const PlannedNodeWork& work, DirtyDomain domain,
-                          const cv::Rect& full_output,
+                          const PixelRect& full_output,
                           const DomainTaskShapeStrategy& shape_strategy,
                           const Node& node, TaskAppender& appender) const {
     const int tile_size = shape_strategy.tile_size_for_node(node);
-    for (int y = 0; y < full_output.height; y += tile_size) {
-      for (int x = 0; x < full_output.width; x += tile_size) {
-        cv::Rect tile_roi(x, y, std::min(tile_size, full_output.width - x),
-                          std::min(tile_size, full_output.height - y));
+    for (std::int64_t y = 0; y < full_output.height; y += tile_size) {
+      for (std::int64_t x = 0; x < full_output.width; x += tile_size) {
+        PixelRect tile_roi{
+            static_cast<int>(x), static_cast<int>(y),
+            static_cast<int>(std::min<std::int64_t>(
+                tile_size, static_cast<std::int64_t>(full_output.width) - x)),
+            static_cast<int>(std::min<std::int64_t>(
+                tile_size, static_cast<std::int64_t>(full_output.height) - y))};
         appender.add(make_task(work.node_id, PlannedTaskKind::Tile, domain,
-                               tile_roi, x / tile_size, y / tile_size,
-                               tile_size, false));
+                               tile_roi, static_cast<int>(x / tile_size),
+                               static_cast<int>(y / tile_size), tile_size,
+                               false));
       }
     }
   }

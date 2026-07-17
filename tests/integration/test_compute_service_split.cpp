@@ -4,9 +4,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <future>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -722,8 +724,9 @@ void register_split_ops() {
                                   micro_meta);
     registry.register_dirty_propagator(
         "split_plan", "random_tile",
-        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
-                            const cv::Size&, const std::vector<cv::Size>&,
+        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
+                            const GraphModel&, const PixelSize&,
+                            const std::vector<PixelSize>&,
                             const plugin::ParameterMap& parameters,
                             const std::vector<const NodeOutput*>*) {
           const auto found = parameters.find("radius");
@@ -734,8 +737,9 @@ void register_split_ops() {
         }));
     registry.register_dirty_propagator(
         "split_plan", "domain_random_tile",
-        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
-                            const cv::Size&, const std::vector<cv::Size>&,
+        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
+                            const GraphModel&, const PixelSize&,
+                            const std::vector<PixelSize>&,
                             const plugin::ParameterMap& parameters,
                             const std::vector<const NodeOutput*>*) {
           const auto found = parameters.find("radius");
@@ -917,18 +921,26 @@ TEST(ComputeGeometrySplit, CoversClippingAlignmentScalingMergingAndHalo) {
   using compute::scale_down_rect;
   using compute::scale_down_size;
   using compute::scale_up_rect;
+  using compute::translate_rect;
 
-  EXPECT_TRUE(is_rect_empty(cv::Rect(0, 0, 0, 5)));
-  EXPECT_EQ(clip_rect(cv::Rect(-5, 2, 12, 10), cv::Size(10, 8)),
-            cv::Rect(0, 2, 7, 6));
-  EXPECT_EQ(align_rect(cv::Rect(5, 6, 10, 11), 8), cv::Rect(0, 0, 16, 24));
-  EXPECT_EQ(merge_rect(cv::Rect(2, 3, 4, 5), cv::Rect(10, 1, 2, 4)),
-            cv::Rect(2, 1, 10, 7));
-  EXPECT_EQ(scale_down_size(cv::Size(65, 33), 4), cv::Size(17, 9));
-  EXPECT_EQ(scale_down_rect(cv::Rect(3, 5, 10, 11), 4), cv::Rect(0, 1, 4, 3));
-  EXPECT_EQ(scale_up_rect(cv::Rect(2, 3, 4, 5), 4), cv::Rect(8, 12, 16, 20));
-  EXPECT_EQ(calculate_halo(cv::Rect(4, 4, 8, 8), 3, cv::Size(14, 20)),
-            cv::Rect(1, 1, 13, 14));
+  EXPECT_TRUE(is_rect_empty((PixelRect{0, 0, 0, 5})));
+  EXPECT_EQ(clip_rect((PixelRect{-5, 2, 12, 10}), (PixelSize{10, 8})),
+            (PixelRect{0, 2, 7, 6}));
+  EXPECT_EQ(align_rect((PixelRect{5, 6, 10, 11}), 8),
+            (PixelRect{0, 0, 16, 24}));
+  EXPECT_EQ(merge_rect((PixelRect{2, 3, 4, 5}), (PixelRect{10, 1, 2, 4})),
+            (PixelRect{2, 1, 10, 7}));
+  EXPECT_EQ(scale_down_size((PixelSize{65, 33}), 4), (PixelSize{17, 9}));
+  EXPECT_EQ(scale_down_rect((PixelRect{3, 5, 10, 11}), 4),
+            (PixelRect{0, 1, 4, 3}));
+  EXPECT_EQ(scale_up_rect((PixelRect{2, 3, 4, 5}), 4),
+            (PixelRect{8, 12, 16, 20}));
+  EXPECT_EQ(calculate_halo((PixelRect{4, 4, 8, 8}), 3, (PixelSize{14, 20})),
+            (PixelRect{1, 1, 13, 14}));
+  EXPECT_TRUE(is_rect_empty(translate_rect(
+      (PixelRect{1, 1, 2, 2}), std::numeric_limits<std::int64_t>::max(), 0)));
+  EXPECT_TRUE(is_rect_empty(translate_rect(
+      (PixelRect{1, 1, 2, 2}), 0, std::numeric_limits<std::int64_t>::min())));
 }
 
 TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
@@ -979,7 +991,7 @@ TEST(NodeInputResolverSplit,
   EXPECT_EQ(child.parameters["threshold"].as<int>(), 1)
       << "runtime parameter cloning must not mutate static parameters";
   ASSERT_TRUE(child.last_input_size_hp.has_value());
-  EXPECT_EQ(*child.last_input_size_hp, cv::Size(12, 7));
+  EXPECT_EQ(*child.last_input_size_hp, (PixelSize{12, 7}));
 
   Node missing_named_output = child;
   missing_named_output.parameter_inputs[0].from_output_name = "missing";
@@ -1034,13 +1046,13 @@ TEST(NodeExecutorSplit,
                                       input_tiles[1].buffer->channels == 3;
         saw_normalized_second_spatial =
             input_tiles[1].spatial != nullptr &&
-            input_tiles[1].spatial->absolute_roi == cv::Rect(3, 4, 4, 4);
+            input_tiles[1].spatial->absolute_roi == (PixelRect{3, 4, 4, 4});
         toCvMat(output_tile).setTo(3.0f);
       });
   NodeOutput base = make_image_output(8, 8, 3);
   NodeOutput secondary = make_image_output(4, 4, 1);
   secondary.data["normalization_marker"] = 17;
-  secondary.space.absolute_roi = cv::Rect(3, 4, 4, 4);
+  secondary.space.absolute_roi = (PixelRect{3, 4, 4, 4});
   secondary.plugin_library_lifetime = std::make_shared<int>(42);
   std::vector<const NodeOutput*> tiled_inputs{&base, &secondary};
   const compute::TiledInputContext normalized_context =
@@ -1070,8 +1082,8 @@ TEST(NodeExecutorSplit,
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
       "split_exec", "random_tile",
-      DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
-                          const cv::Size&, const std::vector<cv::Size>&,
+      DirtyRoiPropFunc([](const Node&, const PixelRect& roi, const GraphModel&,
+                          const PixelSize&, const std::vector<PixelSize>&,
                           const plugin::ParameterMap&,
                           const std::vector<const NodeOutput*>*) {
         return compute::expand_rect(roi, 2);
@@ -1082,9 +1094,9 @@ TEST(NodeExecutorSplit,
   random_config.metadata->access_pattern =
       OpMetadata::InputAccessPattern::RandomAccess;
   EXPECT_EQ(compute::NodeExecutor::input_roi_for_tile(
-                graph, random_node, cv::Rect(1, 1, 4, 4), base.image_buffer,
+                graph, random_node, (PixelRect{1, 1, 4, 4}), base.image_buffer,
                 random_config),
-            cv::Rect(0, 0, 7, 7));
+            (PixelRect{0, 0, 7, 7}));
 
   OpRegistry::OpVariant failing_op =
       MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
@@ -1112,7 +1124,7 @@ TEST(NodeExecutorSplit,
     state.cached_output_high_precision = make_image_output(40, 20);
     state.cached_output_high_precision->data["generation"] = 1;
     state.cached_output_high_precision->space.absolute_roi =
-        cv::Rect(1, 1, 40, 20);
+        (PixelRect{1, 1, 40, 20});
   });
 
   auto exact_context_count = std::make_shared<int>(0);
@@ -1148,7 +1160,7 @@ TEST(NodeExecutorSplit,
   execution_node.runtime_parameters["radius"] = 3;
   NodeOutput left = make_image_output(40, 20);
   left.data["generation"] = 99;
-  left.space.absolute_roi = cv::Rect(7, 8, 40, 20);
+  left.space.absolute_roi = (PixelRect{7, 8, 40, 20});
   NodeOutput right = make_image_output(3, 4);
   const std::vector<const NodeOutput*> inputs{&left, &right};
   OpRegistry::OpVariant operation = TileOpFunc(
@@ -1193,7 +1205,7 @@ TEST(NodeExecutorSplit,
   EXPECT_EQ(resolved.image_inputs[0], nullptr);
   EXPECT_EQ(resolved.image_inputs[1], &connected);
   ASSERT_TRUE(execution_node.last_input_size_hp.has_value());
-  EXPECT_EQ(*execution_node.last_input_size_hp, cv::Size(7, 5));
+  EXPECT_EQ(*execution_node.last_input_size_hp, (PixelSize{7, 5}));
 
   bool roi_context_preserved_index = false;
   OpRegistry::instance().register_dirty_propagator(
@@ -1234,7 +1246,7 @@ TEST(NodeExecutorSplit,
 
 TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
   NodeOutput input = make_image_output(3, 3, 1, 2.0f);
-  input.space.absolute_roi = cv::Rect(5, 6, 3, 3);
+  input.space.absolute_roi = (PixelRect{5, 6, 3, 3});
   NodeOutput output = make_image_output(3, 3, 1, 4.0f);
 
   compute::ComputeMetricsRecorder::finalize_output_metadata(output, {&input},
@@ -1285,10 +1297,10 @@ TEST(DirtyRegionPlannerSplit,
   GraphTraversalService traversal;
   RoiPropagationService propagation;
   compute::DirtyRegionPlanner planner(traversal, propagation);
-  auto plan = planner.plan_high_precision(graph, 42, cv::Rect(5, 5, 10, 10));
+  auto plan = planner.plan_high_precision(graph, 42, (PixelRect{5, 5, 10, 10}));
 
   ASSERT_TRUE(plan.entries.count(42));
-  EXPECT_EQ(plan.entries.at(42).roi_hp, cv::Rect(0, 0, 128, 128))
+  EXPECT_EQ(plan.entries.at(42).roi_hp, (PixelRect{0, 0, 128, 128}))
       << "monolithic nodes must escalate local dirty work to the full output";
   EXPECT_FALSE(plan.snapshot.empty());
   EXPECT_FALSE(plan.snapshot.dirty_monolithic_nodes.empty());
@@ -1300,7 +1312,7 @@ TEST(DirtyRegionPlannerSplit,
                 .find("edges="),
             std::string::npos);
 
-  EXPECT_THROW(planner.plan_real_time(graph, 42, cv::Rect()), GraphError);
+  EXPECT_THROW(planner.plan_real_time(graph, 42, (PixelRect{})), GraphError);
 }
 
 TEST(DirtyRegionPlannerSplit, PreservesDomainSpecificHpAndRtProjection) {
@@ -1319,52 +1331,53 @@ TEST(DirtyRegionPlannerSplit, PreservesDomainSpecificHpAndRtProjection) {
   RoiPropagationService propagation;
   compute::DirtyRegionPlanner planner(traversal, propagation);
 
-  auto hp_plan = planner.plan_high_precision(graph, 20, cv::Rect(5, 5, 10, 10));
+  auto hp_plan =
+      planner.plan_high_precision(graph, 20, (PixelRect{5, 5, 10, 10}));
   ASSERT_EQ(hp_plan.entries.size(), 2u);
   ASSERT_TRUE(hp_plan.entries.count(10));
   ASSERT_TRUE(hp_plan.entries.count(20));
-  EXPECT_EQ(hp_plan.entries.at(20).roi_hp, cv::Rect(0, 0, 64, 64));
-  EXPECT_EQ(hp_plan.entries.at(10).roi_hp, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(hp_plan.entries.at(20).roi_hp, (PixelRect{0, 0, 64, 64}));
+  EXPECT_EQ(hp_plan.entries.at(10).roi_hp, (PixelRect{0, 0, 64, 64}));
   ASSERT_EQ(hp_plan.snapshot.edge_mappings.size(), 1u);
   EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().domain,
             compute::DirtyDomain::HighPrecision);
   EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().from_roi,
-            cv::Rect(0, 0, 64, 64));
+            (PixelRect{0, 0, 64, 64}));
   EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().to_roi,
-            cv::Rect(0, 0, 64, 64));
+            (PixelRect{0, 0, 64, 64}));
   ASSERT_EQ(hp_plan.snapshot.dirty_tiles.size(), 2u);
   for (const auto& tile : hp_plan.snapshot.dirty_tiles) {
     EXPECT_EQ(tile.domain, compute::DirtyDomain::HighPrecision);
     EXPECT_EQ(tile.tile_size, compute::kHpMicroTileSize);
-    EXPECT_EQ(tile.pixel_roi, cv::Rect(0, 0, 64, 64));
+    EXPECT_EQ(tile.pixel_roi, (PixelRect{0, 0, 64, 64}));
   }
 
-  auto rt_plan = planner.plan_real_time(graph, 20, cv::Rect(5, 5, 10, 10));
+  auto rt_plan = planner.plan_real_time(graph, 20, (PixelRect{5, 5, 10, 10}));
   ASSERT_EQ(rt_plan.entries.size(), 2u);
   ASSERT_TRUE(rt_plan.entries.count(10));
   ASSERT_TRUE(rt_plan.entries.count(20));
-  EXPECT_EQ(rt_plan.entries.at(20).hp_size, cv::Size(128, 128));
-  EXPECT_EQ(rt_plan.entries.at(20).rt_size, cv::Size(32, 32));
-  EXPECT_EQ(rt_plan.entries.at(20).roi_hp, cv::Rect(0, 0, 64, 64));
-  EXPECT_EQ(rt_plan.entries.at(20).roi_rt, cv::Rect(0, 0, 16, 16));
-  EXPECT_EQ(rt_plan.entries.at(10).roi_hp, cv::Rect(0, 0, 64, 64));
-  EXPECT_EQ(rt_plan.entries.at(10).roi_rt, cv::Rect(0, 0, 16, 16));
+  EXPECT_EQ(rt_plan.entries.at(20).hp_size, (PixelSize{128, 128}));
+  EXPECT_EQ(rt_plan.entries.at(20).rt_size, (PixelSize{32, 32}));
+  EXPECT_EQ(rt_plan.entries.at(20).roi_hp, (PixelRect{0, 0, 64, 64}));
+  EXPECT_EQ(rt_plan.entries.at(20).roi_rt, (PixelRect{0, 0, 16, 16}));
+  EXPECT_EQ(rt_plan.entries.at(10).roi_hp, (PixelRect{0, 0, 64, 64}));
+  EXPECT_EQ(rt_plan.entries.at(10).roi_rt, (PixelRect{0, 0, 16, 16}));
   ASSERT_EQ(rt_plan.snapshot.edge_mappings.size(), 1u);
   EXPECT_EQ(rt_plan.snapshot.edge_mappings.front().domain,
             compute::DirtyDomain::RealTime);
   EXPECT_EQ(rt_plan.snapshot.edge_mappings.front().from_roi,
-            cv::Rect(0, 0, 64, 64));
+            (PixelRect{0, 0, 64, 64}));
   EXPECT_EQ(rt_plan.snapshot.edge_mappings.front().to_roi,
-            cv::Rect(0, 0, 64, 64));
+            (PixelRect{0, 0, 64, 64}));
   ASSERT_EQ(rt_plan.snapshot.dirty_tiles.size(), 2u);
   for (const auto& tile : rt_plan.snapshot.dirty_tiles) {
     EXPECT_EQ(tile.domain, compute::DirtyDomain::RealTime);
     EXPECT_EQ(tile.tile_size, compute::kRtTileSize);
-    EXPECT_EQ(tile.pixel_roi, cv::Rect(0, 0, 16, 16));
+    EXPECT_EQ(tile.pixel_roi, (PixelRect{0, 0, 16, 16}));
   }
   ASSERT_TRUE(rt_plan.snapshot.per_node_dirty_rois.count(20));
   EXPECT_EQ(rt_plan.snapshot.per_node_dirty_rois.at(20).front(),
-            cv::Rect(0, 0, 64, 64));
+            (PixelRect{0, 0, 64, 64}));
 }
 
 TEST(DirtyRegionPlannerSplit,
@@ -1383,14 +1396,15 @@ TEST(DirtyRegionPlannerSplit,
 
   EXPECT_THROW(
       planner.begin_dirty_source(graph, 99, compute::DirtyDomain::HighPrecision,
-                                 cv::Rect(0, 0, 8, 8)),
+                                 (PixelRect{0, 0, 8, 8})),
       GraphError);
-  EXPECT_THROW(planner.begin_dirty_source(
-                   graph, 10, compute::DirtyDomain::HighPrecision, cv::Rect()),
-               GraphError);
+  EXPECT_THROW(
+      planner.begin_dirty_source(graph, 10, compute::DirtyDomain::HighPrecision,
+                                 (PixelRect{})),
+      GraphError);
 
   auto begin = planner.begin_dirty_source(
-      graph, 10, compute::DirtyDomain::HighPrecision, cv::Rect(1, 2, 8, 8));
+      graph, 10, compute::DirtyDomain::HighPrecision, (PixelRect{1, 2, 8, 8}));
   EXPECT_EQ(begin.dirty_source_nodes, (std::vector<int>{10}));
   ASSERT_TRUE(begin.dirty_source_state.count(10));
   EXPECT_EQ(begin.dirty_source_state.at(10).lifecycle,
@@ -1433,17 +1447,18 @@ TEST(TaskGraphPlanningSplit, PreservesSequentialParallelPlanParity) {
   compute::DirtyRegionSnapshot snapshot;
   snapshot.graph_generation = 7;
   snapshot.dirty_source_nodes.push_back(42);
-  snapshot.per_node_dirty_rois[42].push_back(cv::Rect(0, 0, 16, 16));
-  snapshot.per_node_dirty_rois[100].push_back(cv::Rect(0, 0, 8, 8));
+  snapshot.per_node_dirty_rois[42].push_back((PixelRect{0, 0, 16, 16}));
+  snapshot.per_node_dirty_rois[100].push_back((PixelRect{0, 0, 8, 8}));
   snapshot.actual_dirty_rois = snapshot.per_node_dirty_rois;
   snapshot.dirty_tiles.push_back({42, compute::DirtyDomain::HighPrecision,
                                   compute::DirtyTileLevel::Micro, 0, 0, 16,
-                                  cv::Rect(0, 0, 16, 16)});
+                                  (PixelRect{0, 0, 16, 16})});
   snapshot.dirty_monolithic_nodes.push_back(
-      {100, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 8, 8), true});
+      {100, compute::DirtyDomain::HighPrecision, (PixelRect{0, 0, 8, 8}),
+       true});
   snapshot.edge_mappings.push_back(
-      {42, 100, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 16, 16),
-       cv::Rect(0, 0, 8, 8), compute::DirtyEdgeDirection::BackwardDemand});
+      {42, 100, compute::DirtyDomain::HighPrecision, (PixelRect{0, 0, 16, 16}),
+       (PixelRect{0, 0, 8, 8}), compute::DirtyEdgeDirection::BackwardDemand});
   std::vector<int> execution_order{10, 42, 100};
 
   compute::ComputeRequest sequential;
@@ -1466,9 +1481,9 @@ TEST(TaskGraphPlanningSplit, PreservesSequentialParallelPlanParity) {
   ASSERT_EQ(sequential_plan.planned_work.size(), 3u);
   EXPECT_EQ(sequential_plan.planned_work[1].node_id, 42);
   EXPECT_EQ(sequential_plan.planned_work[1].represented_hp_roi,
-            cv::Rect(0, 0, 16, 16));
+            (PixelRect{0, 0, 16, 16}));
   EXPECT_EQ(sequential_plan.planned_work[1].execution_roi,
-            cv::Rect(0, 0, 16, 16));
+            (PixelRect{0, 0, 16, 16}));
   EXPECT_EQ(sequential_plan.planned_work[2].node_id, 100);
   EXPECT_TRUE(sequential_plan.planned_work[2].whole_output);
   ASSERT_EQ(sequential_plan.task_graph.dependencies.size(), 1u);
@@ -1567,18 +1582,19 @@ TEST(TaskGraphPlanningSplit,
   compute::PlannedNodeWork work;
   work.node_id = 1;
   work.domain = compute::DirtyDomain::HighPrecision;
-  work.execution_roi = cv::Rect(0, 0, 64, 64);
+  work.execution_roi = (PixelRect{0, 0, 64, 64});
   plan.planned_work.push_back(work);
 
   compute::DirtyRegionSnapshot snapshot;
   snapshot.graph_generation = 9;
   snapshot.dirty_source_nodes.push_back(1);
-  snapshot.per_node_dirty_rois[1].push_back(cv::Rect(0, 0, 16, 16));
+  snapshot.per_node_dirty_rois[1].push_back((PixelRect{0, 0, 16, 16}));
   snapshot.dirty_tiles.push_back({1, compute::DirtyDomain::HighPrecision,
                                   compute::DirtyTileLevel::Micro, 0, 0, 16,
-                                  cv::Rect(0, 0, 16, 16)});
+                                  (PixelRect{0, 0, 16, 16})});
   snapshot.dirty_monolithic_nodes.push_back(
-      {1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 64, 64), true});
+      {1, compute::DirtyDomain::HighPrecision, (PixelRect{0, 0, 64, 64}),
+       true});
 
   compute::TaskPopulationStrategy strategy;
   strategy.populate(plan, &snapshot, compute::DirtyDomain::HighPrecision,
@@ -1588,7 +1604,7 @@ TEST(TaskGraphPlanningSplit,
   const auto& task = plan.task_graph.tasks.front();
   EXPECT_EQ(task.kind, compute::PlannedTaskKind::Node);
   EXPECT_EQ(task.node_id, 1);
-  EXPECT_EQ(task.output_roi, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(task.output_roi, (PixelRect{0, 0, 64, 64}));
   EXPECT_EQ(task.tile_size, 0);
   EXPECT_EQ(task.tile_x, -1);
   EXPECT_EQ(task.tile_y, -1);
@@ -1629,7 +1645,8 @@ TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
     const auto& upstream_task =
         plan.task_graph.tasks.at(task->dependency_task_ids.front());
     EXPECT_EQ(upstream_task.node_id, 1);
-    EXPECT_GT((upstream_task.output_roi & task->output_roi).area(), 0);
+    EXPECT_FALSE(compute::is_rect_empty(
+        compute::intersect_rect(upstream_task.output_roi, task->output_roi)));
     dependency_edges += task->dependency_task_ids.size();
   }
   EXPECT_EQ(dependency_edges, 2u)
@@ -1702,7 +1719,7 @@ TEST(TaskGraphPlanningSplit, TileDependenciesUseRandomAccessInputRoi) {
 
   const compute::PlannedTask* middle_downstream_task = nullptr;
   for (const auto& task : plan.task_graph.tasks) {
-    if (task.node_id == 2 && task.output_roi == cv::Rect(16, 0, 16, 16)) {
+    if (task.node_id == 2 && task.output_roi == (PixelRect{16, 0, 16, 16})) {
       middle_downstream_task = &task;
       break;
     }
@@ -1900,16 +1917,17 @@ TEST(TaskGraphPlanningSplit,
     const bool realtime = intent == ComputeIntent::RealTimeUpdate;
     const auto snapshot =
         realtime
-            ? planner.plan_real_time(graph, 2, cv::Rect(31, 0, 2, 2)).snapshot
-            : planner.plan_high_precision(graph, 2, cv::Rect(31, 0, 2, 2))
+            ? planner.plan_real_time(graph, 2, (PixelRect{31, 0, 2, 2}))
+                  .snapshot
+            : planner.plan_high_precision(graph, 2, (PixelRect{31, 0, 2, 2}))
                   .snapshot;
     ASSERT_TRUE(snapshot.per_node_dirty_rois.count(1));
     ASSERT_TRUE(snapshot.per_node_dirty_rois.count(2));
     ASSERT_TRUE(snapshot.per_node_dirty_rois.count(3));
     EXPECT_EQ(snapshot.per_node_dirty_rois.at(1).front(),
-              cv::Rect(0, 0, 64, 16));
+              (PixelRect{0, 0, 64, 16}));
     EXPECT_EQ(snapshot.per_node_dirty_rois.at(2).front(),
-              cv::Rect(0, 0, 64, 16));
+              (PixelRect{0, 0, 64, 16}));
 
     compute::ComputeRequest request;
     request.intent = intent;
@@ -1974,12 +1992,12 @@ TEST(ComputeServiceSplit,
     g_dynamic_blur_ksize.store(kernel_size, std::memory_order_release);
     ComputeService::Request dirty = full;
     dirty.intent = ComputeIntent::GlobalHighPrecision;
-    dirty.dirty_roi = cv::Rect(270, 16, 3, 3);
+    dirty.dirty_roi = (PixelRect{270, 16, 3, 3});
     NodeOutput& output = service.compute(graph, dirty);
     const cv::Mat source =
         toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
     cv::Mat expected;
-    cv::GaussianBlur(source, expected, cv::Size(kernel_size, kernel_size), 0, 0,
+    cv::GaussianBlur(source, expected, cv::Size{kernel_size, kernel_size}, 0, 0,
                      cv::BORDER_REPLICATE);
     EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
               1e-6);
@@ -2018,7 +2036,7 @@ TEST(ComputeServiceSplit,
   const auto verify_generation = [&](int generation) {
     g_staged_source_generation.store(generation, std::memory_order_release);
     request.intent = ComputeIntent::GlobalHighPrecision;
-    request.dirty_roi = cv::Rect(270, 16, 3, 3);
+    request.dirty_roi = (PixelRect{270, 16, 3, 3});
     NodeOutput& output = service.compute(graph, request);
     EXPECT_EQ(
         g_derived_parameter_seen_generation.load(std::memory_order_acquire),
@@ -2029,13 +2047,13 @@ TEST(ComputeServiceSplit,
     ASSERT_TRUE(snapshot.dirty_source_state.count(1));
     const auto& source_rois = snapshot.dirty_source_state.at(1).source_rois;
     EXPECT_NE(std::find(source_rois.begin(), source_rois.end(),
-                        cv::Rect(0, 0, 320, 64)),
+                        (PixelRect{0, 0, 320, 64})),
               source_rois.end())
         << "staged A is represented as a complete HP source boundary";
     ASSERT_TRUE(snapshot.actual_dirty_rois.count(2));
     const auto& target_rois = snapshot.actual_dirty_rois.at(2);
     EXPECT_NE(std::find(target_rois.begin(), target_rois.end(),
-                        cv::Rect(0, 0, 320, 64)),
+                        (PixelRect{0, 0, 320, 64})),
               target_rois.end())
         << "phase two conservatively selects the complete dependent output";
     ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
@@ -2046,7 +2064,7 @@ TEST(ComputeServiceSplit,
     const cv::Mat staged_source =
         toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
     cv::Mat expected;
-    cv::GaussianBlur(staged_source, expected, cv::Size(generation, generation),
+    cv::GaussianBlur(staged_source, expected, cv::Size{generation, generation},
                      0, 0, cv::BORDER_REPLICATE);
     EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
               1e-6)
@@ -2079,7 +2097,7 @@ TEST(ComputeServiceSplit,
 
     g_dynamic_extent_width.store(16, std::memory_order_release);
     request.intent = intent;
-    request.dirty_roi = cv::Rect(48, 0, 8, 8);
+    request.dirty_roi = (PixelRect{48, 0, 8, 8});
     NodeOutput& result = service.compute(graph, request);
     ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
     EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
@@ -2129,7 +2147,7 @@ TEST(ComputeServiceSplit,
   g_image_parameter_hp_calls.store(0, std::memory_order_relaxed);
   g_image_parameter_rt_calls.store(0, std::memory_order_relaxed);
   request.intent = ComputeIntent::RealTimeUpdate;
-  request.dirty_roi = cv::Rect(8, 0, 4, 4);
+  request.dirty_roi = (PixelRect{8, 0, 4, 4});
   (void)service.compute(graph, request);
   EXPECT_EQ(g_image_parameter_hp_calls.load(std::memory_order_relaxed), 1)
       << "HP preflight result is imported rather than recomputed by HP phase";
@@ -2159,7 +2177,7 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
 
   g_dynamic_parameter_fail.store(true, std::memory_order_release);
   request.intent = ComputeIntent::GlobalHighPrecision;
-  request.dirty_roi = cv::Rect(10, 10, 2, 2);
+  request.dirty_roi = (PixelRect{10, 10, 2, 2});
   EXPECT_THROW(service.compute(graph, request), GraphError);
   g_dynamic_parameter_fail.store(false, std::memory_order_release);
   EXPECT_EQ(graph.node(2).hp_version, target_version);
@@ -2209,7 +2227,7 @@ TEST(ComputeServiceSplit,
     g_host_preparation_hp_target_calls.store(0, std::memory_order_relaxed);
     g_host_preparation_rt_target_calls.store(0, std::memory_order_relaxed);
     request.intent = intent;
-    request.dirty_roi = cv::Rect(8, 0, 4, 4);
+    request.dirty_roi = (PixelRect{8, 0, 4, 4});
     (void)service.compute_parallel(graph, runtime, request);
     ASSERT_GT(g_host_preparation_source_calls.load(std::memory_order_relaxed),
               0);
@@ -2239,15 +2257,15 @@ TEST(ComputeServiceSplit,
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
-    const std::optional<cv::Rect> source_roi_before = graph.node(1).hp_roi;
-    const std::optional<cv::Rect> target_roi_before = graph.node(2).hp_roi;
-    const std::optional<cv::Rect> parameter_roi_before = graph.node(3).hp_roi;
+    const std::optional<PixelRect> source_roi_before = graph.node(1).hp_roi;
+    const std::optional<PixelRect> target_roi_before = graph.node(2).hp_roi;
+    const std::optional<PixelRect> parameter_roi_before = graph.node(3).hp_roi;
 
     const compute::RealtimeProxyGraph::NodeState* proxy_before_ptr =
         runtime.realtime_proxy_graph().find_state(2);
     ASSERT_NE(proxy_before_ptr, nullptr);
     const int proxy_version_before = proxy_before_ptr->version;
-    const std::optional<cv::Rect> proxy_roi_before = proxy_before_ptr->roi_hp;
+    const std::optional<PixelRect> proxy_roi_before = proxy_before_ptr->roi_hp;
     const std::optional<std::uint64_t> proxy_generation_before =
         proxy_before_ptr->dirty_source_generation;
     const bool proxy_had_output_before = proxy_before_ptr->output.has_value();
@@ -2377,7 +2395,7 @@ TEST(ComputeServiceSplit,
   ComputeService::Request request;
   request.node_id = 2;
   request.intent = ComputeIntent::RealTimeUpdate;
-  request.dirty_roi = cv::Rect(1, 1, 2, 2);
+  request.dirty_roi = (PixelRect{1, 1, 2, 2});
   request.cache.disable_disk_cache = true;
   EXPECT_THROW(service.compute_parallel(graph, runtime, request), GraphError);
   EXPECT_EQ(graph.dirty_generation_counter, generation_before);
@@ -2422,7 +2440,7 @@ TEST(ComputeServiceSplit,
     ComputeService::Request request;
     request.node_id = 2;
     request.intent = ComputeIntent::RealTimeUpdate;
-    request.dirty_roi = cv::Rect(1, 1, 2, 2);
+    request.dirty_roi = (PixelRect{1, 1, 2, 2});
     request.cache.disable_disk_cache = true;
 
     EXPECT_THROW((void)service.compute_parallel(graph, runtime, request),
@@ -2467,7 +2485,7 @@ TEST(ComputeServiceSplit,
   g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
   g_dynamic_blur_ksize.store(21, std::memory_order_release);
   request.intent = ComputeIntent::RealTimeUpdate;
-  request.dirty_roi = cv::Rect(270, 16, 3, 3);
+  request.dirty_roi = (PixelRect{270, 16, 3, 3});
   auto compute_future = std::async(std::launch::async, [&]() {
     return &service.compute_parallel(graph, runtime, request);
   });
@@ -2513,7 +2531,7 @@ TEST(ComputeServiceSplit,
   g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
 
   request.intent = ComputeIntent::RealTimeUpdate;
-  request.dirty_roi = cv::Rect(270, 16, 3, 3);
+  request.dirty_roi = (PixelRect{270, 16, 3, 3});
   g_dynamic_parameter_fail.store(true, std::memory_order_release);
   auto failed = std::async(std::launch::async, [&]() {
     return &service.compute_parallel(graph, runtime, request);
@@ -2599,7 +2617,7 @@ TEST(TaskGraphPlanningSplit, RtDependencyPlanningUsesRtMetadata) {
 
   const compute::PlannedTask* middle_downstream_task = nullptr;
   for (const auto& task : plan.task_graph.tasks) {
-    if (task.node_id == 2 && task.output_roi == cv::Rect(16, 0, 16, 16)) {
+    if (task.node_id == 2 && task.output_roi == (PixelRect{16, 0, 16, 16})) {
       middle_downstream_task = &task;
       break;
     }
@@ -2732,10 +2750,10 @@ TEST(DownsampleExecutorSplit,
   proxy.synchronize_with_graph(graph);
   GraphEventService events;
   compute::DownsampleExecutor downsample(graph, proxy, nullptr, events);
-  downsample.execute({{1, cv::Rect(8, 4, 16, 8), 5}});
+  downsample.execute({{1, (PixelRect{8, 4, 16, 8}), 5}});
 
   const auto assert_passthrough = [&](int version,
-                                      const cv::Rect& expected_roi) {
+                                      const PixelRect& expected_roi) {
     const auto* state = proxy.find_state(1);
     ASSERT_NE(state, nullptr);
     ASSERT_TRUE(state->output.has_value());
@@ -2755,11 +2773,11 @@ TEST(DownsampleExecutorSplit,
     ASSERT_TRUE(state->roi_hp.has_value());
     EXPECT_EQ(*state->roi_hp, expected_roi);
   };
-  assert_passthrough(5, cv::Rect(8, 4, 16, 8));
+  assert_passthrough(5, (PixelRect{8, 4, 16, 8}));
 
   graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 6; });
-  downsample.execute({{1, cv::Rect(40, 20, 8, 4), 6}});
-  assert_passthrough(6, cv::Rect(8, 4, 40, 20));
+  downsample.execute({{1, (PixelRect{40, 20, 8, 4}), 6}});
+  assert_passthrough(6, (PixelRect{8, 4, 40, 20}));
 
   const ComputeEventBatch recorded = events.drain(kComputeEventDrainMaxLimit);
   ASSERT_EQ(recorded.events.size(), 2u);
@@ -2849,14 +2867,14 @@ TEST(TaskGraphPlanningSplit,
   snapshot.graph_generation = 3;
   snapshot.dirty_source_nodes.push_back(1);
   snapshot.source_roi_records[1].push_back(
-      {1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 16, 16), 3});
-  snapshot.per_node_dirty_rois[2].push_back(cv::Rect(0, 0, 16, 16));
+      {1, compute::DirtyDomain::HighPrecision, (PixelRect{0, 0, 16, 16}), 3});
+  snapshot.per_node_dirty_rois[2].push_back((PixelRect{0, 0, 16, 16}));
   snapshot.actual_dirty_rois = snapshot.per_node_dirty_rois;
 
   compute::ComputeRequest request;
   request.intent = ComputeIntent::GlobalHighPrecision;
   request.target_node_id = 2;
-  request.dirty_roi = cv::Rect(0, 0, 16, 16);
+  request.dirty_roi = (PixelRect{0, 0, 16, 16});
   const auto base_plan = node_cache_pruned_plan(graph, request, {1, 2});
   const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot, graph);
 
@@ -2870,7 +2888,7 @@ TEST(TaskGraphPlanningSplit,
   const auto& source_task =
       base_plan.task_graph.tasks.at(work_set.dirty_source_task_ids.front());
   EXPECT_EQ(source_task.node_id, 1);
-  EXPECT_EQ(source_task.output_roi, cv::Rect(0, 0, 16, 16));
+  EXPECT_EQ(source_task.output_roi, (PixelRect{0, 0, 16, 16}));
   EXPECT_TRUE(selection.active_task_flags.at(source_task.task_id));
   EXPECT_TRUE(selection.source_boundary_task_flags.at(source_task.task_id));
   ASSERT_EQ(work_set.downstream_task_ids.size(), 1u);
@@ -2907,25 +2925,25 @@ TEST(TaskGraphPlanningSplit,
 
   compute::DirtyRegionSnapshot snapshot;
   snapshot.graph_generation = 11;
-  snapshot.per_node_dirty_rois[1].push_back(cv::Rect(0, 0, 64, 64));
-  snapshot.per_node_dirty_rois[2].push_back(cv::Rect(0, 0, 64, 64));
+  snapshot.per_node_dirty_rois[1].push_back((PixelRect{0, 0, 64, 64}));
+  snapshot.per_node_dirty_rois[2].push_back((PixelRect{0, 0, 64, 64}));
   snapshot.dirty_tiles.push_back({1, compute::DirtyDomain::RealTime,
                                   compute::DirtyTileLevel::Micro, 0, 0, 16,
-                                  cv::Rect(0, 0, 16, 16)});
+                                  (PixelRect{0, 0, 16, 16})});
   snapshot.dirty_tiles.push_back({2, compute::DirtyDomain::RealTime,
                                   compute::DirtyTileLevel::Micro, 1, 0, 16,
-                                  cv::Rect(16, 0, 16, 16)});
+                                  (PixelRect{16, 0, 16, 16})});
   snapshot.edge_mappings.push_back(
-      {1, 2, compute::DirtyDomain::RealTime, cv::Rect(0, 0, 64, 64),
-       cv::Rect(0, 0, 64, 64), compute::DirtyEdgeDirection::BackwardDemand});
+      {1, 2, compute::DirtyDomain::RealTime, (PixelRect{0, 0, 64, 64}),
+       (PixelRect{0, 0, 64, 64}), compute::DirtyEdgeDirection::BackwardDemand});
   snapshot.edge_mappings.push_back(
-      {1, 2, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 64, 64),
-       cv::Rect(0, 0, 64, 64), compute::DirtyEdgeDirection::BackwardDemand});
+      {1, 2, compute::DirtyDomain::HighPrecision, (PixelRect{0, 0, 64, 64}),
+       (PixelRect{0, 0, 64, 64}), compute::DirtyEdgeDirection::BackwardDemand});
 
   compute::ComputeRequest request;
   request.intent = ComputeIntent::RealTimeUpdate;
   request.target_node_id = 2;
-  request.dirty_roi = cv::Rect(0, 0, 64, 64);
+  request.dirty_roi = (PixelRect{0, 0, 64, 64});
 
   const auto base_plan = node_cache_pruned_plan(graph, request, {1, 2});
   const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot, graph);
@@ -2935,10 +2953,11 @@ TEST(TaskGraphPlanningSplit,
   ASSERT_EQ(plan.task_graph.dependencies.size(), 1u);
   EXPECT_EQ(plan.task_graph.dependencies[0].domain,
             compute::DirtyDomain::RealTime);
-  EXPECT_EQ(plan.task_graph.dependencies[0].from_roi, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(plan.task_graph.dependencies[0].from_roi,
+            (PixelRect{0, 0, 64, 64}));
   ASSERT_EQ(selection.dependencies.size(), 1u);
   EXPECT_EQ(selection.dependencies[0].domain, compute::DirtyDomain::RealTime);
-  EXPECT_EQ(selection.dependencies[0].from_roi, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(selection.dependencies[0].from_roi, (PixelRect{0, 0, 64, 64}));
   ASSERT_EQ(plan.task_graph.tasks.size(), 8u);
   for (const auto& task : plan.task_graph.tasks) {
     EXPECT_EQ(task.domain, compute::DirtyDomain::RealTime);
@@ -2951,7 +2970,7 @@ TEST(IntentUpdateCoordinatorSplit,
                    ComputeIntent::RealTimeUpdate, std::nullopt),
                GraphError);
   EXPECT_NO_THROW(compute::IntentUpdateCoordinator::validate(
-      ComputeIntent::RealTimeUpdate, cv::Rect(0, 0, 4, 4)));
+      ComputeIntent::RealTimeUpdate, (PixelRect{0, 0, 4, 4})));
 
   auto decision = compute::IntentUpdateCoordinator::decide(
       ComputeIntent::RealTimeUpdate, true, true);
@@ -3011,8 +3030,8 @@ TEST(IntentUpdateCoordinatorSplit,
 
   NodeOutput& coordinated =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, nullptr, nullptr, cv::Rect(0, 0, 4, 4),
-          callbacks);
+          ComputeIntent::RealTimeUpdate, nullptr, nullptr,
+          (PixelRect{0, 0, 4, 4}), callbacks);
   EXPECT_EQ(&coordinated, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3038,7 +3057,7 @@ TEST(IntentUpdateCoordinatorSplit,
   NodeOutput& coordinated_global_dirty =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
           ComputeIntent::GlobalHighPrecision, nullptr, nullptr,
-          cv::Rect(0, 0, 4, 4), callbacks);
+          (PixelRect{0, 0, 4, 4}), callbacks);
   EXPECT_EQ(&coordinated_global_dirty, &rt_output);
   EXPECT_TRUE(ran_global_dirty);
   EXPECT_NE(std::find(stages.begin(), stages.end(),
@@ -3054,8 +3073,8 @@ TEST(IntentUpdateCoordinatorSplit,
   stages.clear();
   NodeOutput& coordinated_without_runtime =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, nullptr, nullptr, cv::Rect(0, 0, 4, 4),
-          callbacks);
+          ComputeIntent::RealTimeUpdate, nullptr, nullptr,
+          (PixelRect{0, 0, 4, 4}), callbacks);
   EXPECT_EQ(&coordinated_without_runtime, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3115,7 +3134,7 @@ TEST(IntentUpdateCoordinatorSplit,
   NodeOutput& coordinated_with_runtimes =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
           ComputeIntent::RealTimeUpdate, &hp_runtime, &rt_runtime,
-          cv::Rect(0, 0, 4, 4), callbacks);
+          (PixelRect{0, 0, 4, 4}), callbacks);
   EXPECT_EQ(&coordinated_with_runtimes, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3148,13 +3167,13 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   compute::RealtimeProxyGraph::NodeState initial_state;
   initial_state.output = make_image_output(4, 4, 1, 3.0f);
   initial_state.version = 7;
-  initial_state.roi_hp = cv::Rect(0, 0, 1, 1);
+  initial_state.roi_hp = (PixelRect{0, 0, 1, 1});
   proxy_graph.commit_node_state(1, std::move(initial_state));
 
   compute::RealtimeProxyWriteBuffer buffer(proxy_graph);
   NodeOutput& staged = buffer.ensure_output(1);
   toCvMat(staged.image_buffer).setTo(9.0f);
-  buffer.mark_updated(1, cv::Rect(1, 1, 2, 2), cv::Size(4, 4), true, 42);
+  buffer.mark_updated(1, (PixelRect{1, 1, 2, 2}), (PixelSize{4, 4}), true, 42);
 
   ASSERT_NE(proxy_graph.find_output(1), nullptr);
   EXPECT_FLOAT_EQ(
@@ -3169,7 +3188,7 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   EXPECT_FLOAT_EQ(
       toCvMat(committed_state->output->image_buffer).at<float>(0, 0), 9.0f);
   EXPECT_EQ(committed_state->version, 8);
-  EXPECT_EQ(committed_state->roi_hp, cv::Rect(0, 0, 3, 3));
+  EXPECT_EQ(committed_state->roi_hp, (PixelRect{0, 0, 3, 3}));
   ASSERT_TRUE(committed_state->dirty_source_generation.has_value());
   EXPECT_EQ(*committed_state->dirty_source_generation, 42u);
 }
@@ -3184,7 +3203,7 @@ TEST(RealtimeProxyGraph, PreservesWithinGenerationAndResetsOnGraphReplacement) {
   compute::RealtimeProxyGraph::NodeState initial_state;
   initial_state.output = make_image_output(4, 4, 1, 3.0f);
   initial_state.version = 7;
-  initial_state.roi_hp = cv::Rect(0, 0, 4, 4);
+  initial_state.roi_hp = (PixelRect{0, 0, 4, 4});
   initial_state.dirty_source_generation = 42;
   proxy_graph.commit_node_state(1, std::move(initial_state));
 
@@ -3236,14 +3255,14 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
   Node node = make_node(1, "split_plan", "tile");
   node.cached_output_high_precision = make_image_output(4, 4, 1, 2.0f);
   node.hp_version = 3;
-  node.hp_roi = cv::Rect(0, 0, 1, 1);
+  node.hp_roi = (PixelRect{0, 0, 1, 1});
   graph.add_node(node);
 
   compute::HighPrecisionDirtyWriteBuffer buffer;
   NodeOutput& staged = buffer.ensure_output(graph.node(1));
   toCvMat(staged.image_buffer).setTo(6.0f);
-  buffer.mark_updated(graph.node(1), cv::Rect(1, 1, 2, 2), cv::Size(4, 4), true,
-                      77);
+  buffer.mark_updated(graph.node(1), (PixelRect{1, 1, 2, 2}), (PixelSize{4, 4}),
+                      true, 77);
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
   EXPECT_FLOAT_EQ(
@@ -3251,7 +3270,7 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
           .at<float>(0, 0),
       2.0f);
   EXPECT_EQ(graph.node(1).hp_version, 3);
-  EXPECT_EQ(graph.node(1).hp_roi, cv::Rect(0, 0, 1, 1));
+  EXPECT_EQ(graph.node(1).hp_roi, (PixelRect{0, 0, 1, 1}));
   EXPECT_FALSE(graph.dirty_source_hp_commit_generation.count(1));
 
   buffer.commit_to_graph(graph);
@@ -3262,7 +3281,7 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
           .at<float>(0, 0),
       6.0f);
   EXPECT_EQ(graph.node(1).hp_version, 4);
-  EXPECT_EQ(graph.node(1).hp_roi, cv::Rect(0, 0, 3, 3));
+  EXPECT_EQ(graph.node(1).hp_roi, (PixelRect{0, 0, 3, 3}));
   EXPECT_EQ(graph.dirty_source_hp_commit_generation[1], 77u);
 }
 
@@ -3288,7 +3307,7 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   request.cache.precision = "float32";
   request.cache.disable_disk_cache = true;
   request.intent = ComputeIntent::GlobalHighPrecision;
-  request.dirty_roi = cv::Rect(8, 8, 16, 16);
+  request.dirty_roi = (PixelRect{8, 8, 16, 16});
   NodeOutput& output = compute.compute(graph, request);
 
   EXPECT_EQ(output.image_buffer.width, 64);
@@ -3364,7 +3383,7 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   dirty_request.cache.force_recache = true;
   dirty_request.cache.disable_disk_cache = true;
   dirty_request.intent = ComputeIntent::GlobalHighPrecision;
-  dirty_request.dirty_roi = cv::Rect(16, 16, 16, 16);
+  dirty_request.dirty_roi = (PixelRect{16, 16, 16, 16});
   NodeOutput& forced_output = compute.compute(graph, dirty_request);
 
   ASSERT_EQ(forced_output.image_buffer.width, 128);
@@ -3381,7 +3400,7 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
   ASSERT_TRUE(graph.last_dirty_region_snapshot->actual_dirty_rois.count(2));
   EXPECT_EQ(graph.last_dirty_region_snapshot->actual_dirty_rois.at(2).front(),
-            cv::Rect(0, 0, 128, 128));
+            (PixelRect{0, 0, 128, 128}));
   ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
   EXPECT_EQ(graph.last_compute_plan_summary->active_task_count,
             graph.last_compute_plan_summary->task_count);
@@ -3423,7 +3442,7 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   rt_request.cache.force_recache = true;
   rt_request.cache.disable_disk_cache = true;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
-  rt_request.dirty_roi = cv::Rect(16, 16, 16, 16);
+  rt_request.dirty_roi = (PixelRect{16, 16, 16, 16});
   NodeOutput& rt_output = compute.compute(graph, rt_request);
 
   EXPECT_GT(rt_output.image_buffer.width, 0);
@@ -3442,7 +3461,7 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
   ASSERT_TRUE(graph.last_dirty_region_snapshot->actual_dirty_rois.count(2));
   EXPECT_EQ(graph.last_dirty_region_snapshot->actual_dirty_rois.at(2).front(),
-            cv::Rect(0, 0, 128, 128));
+            (PixelRect{0, 0, 128, 128}));
 }
 
 TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
@@ -3557,7 +3576,7 @@ TEST(KernelComputeRuntimeSplit,
   rt_request.cache.force_recache = false;
   rt_request.execution.parallel = false;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
-  rt_request.dirty_roi = cv::Rect(8, 8, 16, 16);
+  rt_request.dirty_roi = (PixelRect{8, 8, 16, 16});
   auto rt_image = interaction.cmd_compute_and_get_image(rt_request);
   ASSERT_TRUE(rt_image.has_value());
   EXPECT_GT(rt_image->cols, 0);
@@ -3675,7 +3694,7 @@ TEST(KernelComputeRuntimeSplit,
   graph.add_node(target);
   graph.validate_topology();
 
-  const cv::Rect dirty_roi(3, 4, 5, 6);
+  const PixelRect dirty_roi{3, 4, 5, 6};
   const auto forward = interaction.cmd_project_roi(kGraphName, 1, dirty_roi, 2);
   const auto backward =
       interaction.cmd_project_roi_backward(kGraphName, 2, dirty_roi, 1);
@@ -3707,7 +3726,7 @@ TEST(DirtySourceLifecycleFacade, UsesHostPublicBoundary) {
 
   const auto begin = host->begin_dirty_source(loaded.value, NodeId{1},
                                               DirtyDomain::HighPrecision,
-                                              PixelRect{0, 0, 32, 32});
+                                              (PixelRect{0, 0, 32, 32}));
   ASSERT_TRUE(begin.status.ok) << begin.status.message;
   EXPECT_EQ(begin.value.graph_generation, 1u);
   ASSERT_EQ(begin.value.sources.size(), 1u);
@@ -3717,7 +3736,7 @@ TEST(DirtySourceLifecycleFacade, UsesHostPublicBoundary) {
 
   const auto update = host->update_dirty_source(loaded.value, NodeId{1},
                                                 DirtyDomain::HighPrecision,
-                                                PixelRect{16, 16, 16, 16});
+                                                (PixelRect{16, 16, 16, 16}));
   ASSERT_TRUE(update.status.ok) << update.status.message;
   EXPECT_EQ(update.value.graph_generation, begin.value.graph_generation);
   ASSERT_EQ(update.value.sources.size(), 1u);
@@ -3747,7 +3766,8 @@ TEST(DirtyControlLaneFacade, ExposesWakeupAndCutoffThroughInteractionService) {
   ASSERT_TRUE(loaded.has_value());
 
   auto begin = svc.cmd_begin_dirty_source_control(
-      *loaded, 1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 32, 32));
+      *loaded, 1, compute::DirtyDomain::HighPrecision,
+      (PixelRect{0, 0, 32, 32}));
   ASSERT_TRUE(begin.has_value());
   EXPECT_EQ(begin->event, compute::DirtyControlEvent::Begin);
   EXPECT_EQ(begin->generation, 1u);
@@ -3757,7 +3777,7 @@ TEST(DirtyControlLaneFacade, ExposesWakeupAndCutoffThroughInteractionService) {
 
   auto update = svc.cmd_update_dirty_source_control(
       *loaded, 1, compute::DirtyDomain::HighPrecision,
-      cv::Rect(16, 16, 16, 16));
+      (PixelRect{16, 16, 16, 16}));
   ASSERT_TRUE(update.has_value());
   EXPECT_EQ(update->event, compute::DirtyControlEvent::Update);
   EXPECT_EQ(update->generation, begin->generation);

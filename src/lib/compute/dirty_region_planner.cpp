@@ -42,7 +42,7 @@ bool requires_conservative_parameter_geometry(const Node& node) noexcept {
  * @note RT conversion uses int64 arithmetic, so this bounded value cannot
  *       overflow while preserving conservative whole-input coverage.
  */
-int full_extent_halo(const cv::Size& extent) noexcept {
+int full_extent_halo(const PixelSize& extent) noexcept {
   return std::max({0, extent.width, extent.height});
 }
 
@@ -74,7 +74,7 @@ DirtyRegionPlanner::DirtyRegionPlanner(
 template <typename Policy>
 typename Policy::Entry& DirtyRegionPlanner::ensure_plan_entry(
     GraphModel& graph, typename Policy::Plan& plan, int node_id,
-    std::unordered_map<int, cv::Size>& hp_size_cache) {
+    std::unordered_map<int, PixelSize>& hp_size_cache) {
   auto [it, inserted] = plan.entries.emplace(node_id, typename Policy::Entry{});
   typename Policy::Entry& entry = it->second;
   if (inserted || !has_valid_size(entry.hp_size)) {
@@ -91,8 +91,8 @@ typename Policy::Entry& DirtyRegionPlanner::ensure_plan_entry(
 template <typename Policy>
 void DirtyRegionPlanner::propagate_dirty_entries(
     GraphModel& graph, typename Policy::Plan& plan,
-    std::unordered_map<int, cv::Size>& hp_size_cache) {
-  std::unordered_map<int, cv::Size> size_cache;
+    std::unordered_map<int, PixelSize>& hp_size_cache) {
+  std::unordered_map<int, PixelSize> size_cache;
   for (auto it = plan.execution_order.rbegin();
        it != plan.execution_order.rend(); ++it) {
     const int current_id = *it;
@@ -120,7 +120,7 @@ void DirtyRegionPlanner::propagate_dirty_entries(
         typename Policy::Entry& parameter_entry = ensure_plan_entry<Policy>(
             graph, plan, input.from_node_id, hp_size_cache);
         if (!has_valid_size(parameter_entry.hp_size)) {
-          parameter_entry.hp_size = cv::Size(1, 1);
+          parameter_entry.hp_size = PixelSize{1, 1};
           Policy::refresh_size_fields(parameter_entry);
         }
         parameter_entry.roi_hp =
@@ -140,7 +140,7 @@ void DirtyRegionPlanner::propagate_dirty_entries(
         current_entry.halo_hp = std::max(
             current_entry.halo_hp, full_extent_halo(parent_entry.hp_size));
         Policy::refresh_halo_fields(current_entry);
-        const cv::Rect parent_roi =
+        const PixelRect parent_roi =
             detail::full_extent_roi(parent_entry.hp_size);
         parent_entry.roi_hp = parent_roi;
         plan.snapshot.edge_mappings.push_back(
@@ -163,13 +163,13 @@ void DirtyRegionPlanner::propagate_dirty_entries(
         continue;
       typename Policy::Entry& parent_entry = ensure_plan_entry<Policy>(
           graph, plan, edge.from_node_id, hp_size_cache);
-      cv::Rect upstream_roi_hp = Policy::normalize_upstream_roi(
+      PixelRect upstream_roi_hp = Policy::normalize_upstream_roi(
           upstream_projection.roi_for_input(edge.input_index,
                                             parent_entry.hp_size),
           current_entry);
       if (Policy::skip_empty_upstream_roi(upstream_roi_hp))
         continue;
-      cv::Rect parent_roi =
+      PixelRect parent_roi =
           Policy::parent_hp_roi(upstream_roi_hp, parent_entry);
       if (is_rect_empty(parent_roi))
         continue;
@@ -224,7 +224,7 @@ void DirtyRegionPlanner::finalize_dirty_entries(GraphModel& graph,
 
 template <typename Policy>
 typename Policy::Plan DirtyRegionPlanner::plan_dirty_domain(
-    GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
+    GraphModel& graph, int node_id, const PixelRect& dirty_roi) {
   if (!graph.has_node(node_id)) {
     throw GraphError(GraphErrc::NotFound,
                      std::string("Cannot compute ") + Policy::kIntentLabel +
@@ -243,7 +243,7 @@ typename Policy::Plan DirtyRegionPlanner::plan_dirty_domain(
     result.execution_order.push_back(node_id);
   result.snapshot.graph_generation = select_plan_generation(graph);
 
-  std::unordered_map<int, cv::Size> hp_size_cache;
+  std::unordered_map<int, PixelSize> hp_size_cache;
   typename Policy::Entry& target_entry =
       ensure_plan_entry<Policy>(graph, result, node_id, hp_size_cache);
   target_entry.roi_hp = has_stabilized_geometry(node_id)
@@ -268,7 +268,7 @@ typename Policy::Plan DirtyRegionPlanner::plan_dirty_domain(
       typename Policy::Entry& producer_entry =
           ensure_plan_entry<Policy>(graph, result, producer_id, hp_size_cache);
       if (!has_valid_size(producer_entry.hp_size)) {
-        producer_entry.hp_size = cv::Size(1, 1);
+        producer_entry.hp_size = PixelSize{1, 1};
         Policy::refresh_size_fields(producer_entry);
       }
       producer_entry.roi_hp = detail::full_extent_roi(producer_entry.hp_size);
@@ -286,25 +286,25 @@ typename Policy::Plan DirtyRegionPlanner::plan_dirty_domain(
 }
 
 HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
-    GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
+    GraphModel& graph, int node_id, const PixelRect& dirty_roi) {
   return plan_dirty_domain<HighPrecisionDirtyPolicy>(graph, node_id, dirty_roi);
 }
 
 RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
-    GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
+    GraphModel& graph, int node_id, const PixelRect& dirty_roi) {
   return plan_dirty_domain<RealTimeDirtyPolicy>(graph, node_id, dirty_roi);
 }
 
 DirtyRegionSnapshot DirtyRegionPlanner::begin_dirty_source(
     GraphModel& graph, int node_id, DirtyDomain domain,
-    const cv::Rect& source_roi) {
+    const PixelRect& source_roi) {
   return update_dirty_source_snapshot(graph, node_id, domain, &source_roi,
                                       DirtySourceLifecycleState::Updating);
 }
 
 DirtyRegionSnapshot DirtyRegionPlanner::update_dirty_source(
     GraphModel& graph, int node_id, DirtyDomain domain,
-    const cv::Rect& source_roi) {
+    const PixelRect& source_roi) {
   return update_dirty_source_snapshot(graph, node_id, domain, &source_roi,
                                       DirtySourceLifecycleState::Updating);
 }
@@ -318,7 +318,7 @@ DirtyRegionSnapshot DirtyRegionPlanner::end_dirty_source(GraphModel& graph,
 
 DirtyRegionSnapshot DirtyRegionPlanner::update_dirty_source_snapshot(
     GraphModel& graph, int node_id, DirtyDomain domain,
-    const cv::Rect* source_roi, DirtySourceLifecycleState lifecycle) {
+    const PixelRect* source_roi, DirtySourceLifecycleState lifecycle) {
   DirtyRegionSnapshot snapshot =
       graph.last_dirty_region_snapshot.value_or(DirtyRegionSnapshot{});
   if (snapshot.graph_generation == 0) {
@@ -392,13 +392,13 @@ void DirtyRegionPlanner::populate_dirty_source_metadata(
   snapshot.dirty_updating_count = 0;
 }
 
-cv::Size DirtyRegionPlanner::infer_hp_size(
+PixelSize DirtyRegionPlanner::infer_hp_size(
     GraphModel& graph, int node_id,
-    std::unordered_map<int, cv::Size>& cache) const {
+    std::unordered_map<int, PixelSize>& cache) const {
   if (cache.count(node_id))
     return cache.at(node_id);
 
-  cv::Size size{0, 0};
+  PixelSize size{0, 0};
   size = extent_resolver_.resolve_output_extent(graph, node_id, cache);
   return size;
 }

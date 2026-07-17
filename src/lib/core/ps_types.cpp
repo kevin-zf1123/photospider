@@ -1467,8 +1467,8 @@ DirtyRoiPropFunc OpRegistry::get_dirty_propagator(
     }
   }
   static const DirtyRoiPropFunc kIdentity =
-      [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
-         const std::vector<cv::Size>&, const plugin::ParameterMap&,
+      [](const Node&, const PixelRect& roi, const GraphModel&, const PixelSize&,
+         const std::vector<PixelSize>&, const plugin::ParameterMap&,
          const std::vector<const NodeOutput*>*) { return roi; };
   return kIdentity;
 }
@@ -1485,8 +1485,8 @@ ForwardRoiPropFunc OpRegistry::get_forward_propagator(
     }
   }
   static const ForwardRoiPropFunc kIdentity =
-      [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
-         const cv::Size&, size_t, const std::vector<cv::Size>&,
+      [](const Node&, const PixelRect& roi, const GraphModel&, const PixelSize&,
+         const PixelSize&, size_t, const std::vector<PixelSize>&,
          const plugin::ParameterMap&) { return roi; };
   return kIdentity;
 }

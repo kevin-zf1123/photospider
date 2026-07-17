@@ -100,7 +100,7 @@ NodeOutput& HighPrecisionDirtyWriteBuffer::ensure_output(const Node& node) {
 /** @copydoc HighPrecisionDirtyWriteBuffer::import_precomputed_output */
 void HighPrecisionDirtyWriteBuffer::import_precomputed_output(
     const Node& node, const NodeOutput& output, int hp_version,
-    const std::optional<cv::Rect>& hp_roi,
+    const std::optional<PixelRect>& hp_roi,
     std::optional<uint64_t> dirty_source_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
   Entry& entry = ensure_entry_locked(node);
@@ -111,9 +111,10 @@ void HighPrecisionDirtyWriteBuffer::import_precomputed_output(
   entry.dirty_source_generation = dirty_source_generation;
 }
 
+/** @copydoc HighPrecisionDirtyWriteBuffer::mark_updated */
 int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,
-                                                const cv::Rect& roi_hp,
-                                                const cv::Size& hp_size,
+                                                const PixelRect& roi_hp,
+                                                const PixelSize& hp_size,
                                                 bool dirty_source,
                                                 uint64_t dirty_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -208,8 +209,9 @@ NodeOutput& RealtimeProxyWriteBuffer::ensure_output(int node_id) {
   return *entry.state.output;
 }
 
-int RealtimeProxyWriteBuffer::mark_updated(int node_id, const cv::Rect& roi_hp,
-                                           const cv::Size& hp_size,
+/** @copydoc RealtimeProxyWriteBuffer::mark_updated */
+int RealtimeProxyWriteBuffer::mark_updated(int node_id, const PixelRect& roi_hp,
+                                           const PixelSize& hp_size,
                                            bool dirty_source,
                                            uint64_t dirty_generation) {
   std::lock_guard<std::mutex> lock(mutex_);

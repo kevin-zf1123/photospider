@@ -947,7 +947,7 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   rt_request.cache.precision = "int8";
   rt_request.cache.force_recache = true;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
-  rt_request.dirty_roi = cv::Rect(0, 0, 64, 64);
+  rt_request.dirty_roi = PixelRect{0, 0, 64, 64};
   NodeOutput& rt_result =
       compute.compute_parallel(runtime.model(), runtime, rt_request);
 

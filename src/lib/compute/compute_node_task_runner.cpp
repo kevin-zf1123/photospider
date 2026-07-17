@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -84,12 +86,19 @@ std::exception_ptr compute_failure(const GraphModel& graph, int node_id,
  * @note The planner emits tile ROIs in output coordinates, so the max extents
  * across all tile tasks reconstruct the full node output size.
  */
-cv::Size merge_task_extent(const cv::Size& current, const cv::Rect& roi) {
+PixelSize merge_task_extent(const PixelSize& current,
+                            const PixelRect& roi) noexcept {
   if (roi.width <= 0 || roi.height <= 0) {
     return current;
   }
-  return cv::Size(std::max(current.width, roi.x + roi.width),
-                  std::max(current.height, roi.y + roi.height));
+  const std::int64_t right = static_cast<std::int64_t>(roi.x) + roi.width;
+  const std::int64_t bottom = static_cast<std::int64_t>(roi.y) + roi.height;
+  if (right <= 0 || bottom <= 0 || right > std::numeric_limits<int>::max() ||
+      bottom > std::numeric_limits<int>::max()) {
+    return current;
+  }
+  return PixelSize{std::max(current.width, static_cast<int>(right)),
+                   std::max(current.height, static_cast<int>(bottom))};
 }
 
 /**
@@ -130,7 +139,7 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
       enable_timing_(context.enable_timing),
       disable_disk_cache_(context.disable_disk_cache),
       benchmark_events_(context.benchmark_events) {
-  planned_output_sizes_.assign(execution_order_.size(), cv::Size());
+  planned_output_sizes_.assign(execution_order_.size(), PixelSize{});
   tile_task_counts_.assign(execution_order_.size(), 0);
   completed_tile_counts_ =
       std::vector<std::atomic<int>>(execution_order_.size());
@@ -162,7 +171,8 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
  * @param node_idx Dense index into the borrowed execution plan.
  * @return Nothing.
  * @throws std::bad_alloc when node execution exhausts memory.
- * @throws GraphError wrapping other OpenCV, standard, and unknown failures.
+ * @throws GraphError wrapping other standard and unknown failures, including
+ * provider exceptions derived from std::exception.
  * @note Resource exhaustion retains its type for scheduler/future transport;
  * all other failures retain the existing node-context diagnostic contract.
  */
@@ -172,8 +182,6 @@ void NodeTaskRunner::run_node(int node_idx) {
     compute_node(node_idx, node_id);
   } catch (const std::bad_alloc&) {
     throw;
-  } catch (const cv::Exception& e) {
-    std::rethrow_exception(compute_failure(graph_, node_id, e.what()));
   } catch (const std::exception& e) {
     std::rethrow_exception(compute_failure(graph_, node_id, e.what()));
   } catch (...) {
@@ -189,8 +197,8 @@ void NodeTaskRunner::run_node(int node_idx) {
  * @return Nothing.
  * @throws std::bad_alloc when task execution or dependency access exhausts
  * memory.
- * @throws GraphError wrapping other range, OpenCV, standard, and unknown
- * failures.
+ * @throws GraphError wrapping other range, standard, and unknown failures,
+ * including provider exceptions derived from std::exception.
  * @note Tile tasks execute directly; node and monolithic tasks delegate to
  * run_node(), while scheduler transport remains outside this runner.
  */
@@ -210,8 +218,6 @@ void NodeTaskRunner::run_task(int task_id) {
     run_node(idx_it->second);
   } catch (const std::bad_alloc&) {
     throw;
-  } catch (const cv::Exception& e) {
-    std::rethrow_exception(compute_failure(graph_, task.node_id, e.what()));
   } catch (const std::exception& e) {
     std::rethrow_exception(compute_failure(graph_, task.node_id, e.what()));
   } catch (...) {
@@ -350,14 +356,14 @@ ImageBuffer* NodeTaskRunner::ensure_tile_output_buffer(
     return nullptr;
   }
   if (!temp_results_[node_idx].has_value()) {
-    const cv::Size planned_size = planned_output_sizes_.at(node_idx);
-    const cv::Size output_size =
+    const PixelSize planned_size = planned_output_sizes_.at(node_idx);
+    const PixelSize output_size =
         planned_size.width > 0 && planned_size.height > 0
             ? planned_size
-            : cv::Size(
+            : PixelSize{
                   as_int_flexible(target_node.runtime_parameters, "width", 256),
                   as_int_flexible(target_node.runtime_parameters, "height",
-                                  256));
+                                  256)};
     auto [channels, dtype] = infer_tile_channels_and_type(image_inputs);
     temp_results_[node_idx] = NodeOutput{};
     temp_results_[node_idx]->image_buffer = make_aligned_cpu_image_buffer(
@@ -478,7 +484,7 @@ TiledExecutionConfig NodeTaskRunner::tiled_config_for(
       tiled_config.tile_size = 256;
     }
   }
-  tiled_config.on_tile = [this, node_id = target_node.id](const cv::Rect&) {
+  tiled_config.on_tile = [this, node_id = target_node.id](const PixelRect&) {
     task_runtime_.log_event(SchedulerTraceAction::ExecuteTile, node_id);
   };
   return tiled_config;

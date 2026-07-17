@@ -276,8 +276,8 @@ void validate_rt_source_boundaries_ready(
  * buffer, so their dirty plan must cover the entire authoritative HP frame
  * before commit.
  */
-cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
-                                     const DirtyUpdateRequest& request) {
+PixelRect hp_planning_roi_for_request(const GraphModel& graph,
+                                      const DirtyUpdateRequest& request) {
   if (!request.force_recache) {
     return request.dirty_roi;
   }
@@ -292,13 +292,13 @@ cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
           ComputeCachePolicy::reusable_output(*target)) {
     const ImageBuffer& buffer = target_output->image_buffer;
     if (buffer.width > 0 && buffer.height > 0) {
-      return cv::Rect(0, 0, buffer.width, buffer.height);
+      return PixelRect{0, 0, buffer.width, buffer.height};
     }
   }
 
   GraphExtentResolver extent_resolver;
-  std::unordered_map<int, cv::Size> extent_cache;
-  const cv::Size target_extent = extent_resolver.resolve_output_extent(
+  std::unordered_map<int, PixelSize> extent_cache;
+  const PixelSize target_extent = extent_resolver.resolve_output_extent(
       graph, request.node_id, extent_cache);
   if (target_extent.width <= 0 || target_extent.height <= 0) {
     throw GraphError(GraphErrc::InvalidParameter,
@@ -306,7 +306,7 @@ cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
                          std::to_string(request.node_id) +
                          ": HP output extent is unavailable.");
   }
-  return cv::Rect(0, 0, target_extent.width, target_extent.height);
+  return PixelRect{0, 0, target_extent.width, target_extent.height};
 }
 
 /**
@@ -580,10 +580,10 @@ stabilize_connected_dirty_parameters(GraphModel& graph,
             "Connected-parameter preflight produced no output for " +
                 node_for_exec.type + ":" + node_for_exec.subtype);
       }
-      std::optional<cv::Rect> hp_roi;
+      std::optional<PixelRect> hp_roi;
       if (has_image_payload(output)) {
-        hp_roi = cv::Rect(0, 0, output.image_buffer.width,
-                          output.image_buffer.height);
+        hp_roi = PixelRect{0, 0, output.image_buffer.width,
+                           output.image_buffer.height};
       }
       result->staged_outputs_.emplace(
           node_id,
@@ -728,7 +728,7 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
           ? std::optional<uint64_t>(
                 request.stabilized_parameters->request_generation())
           : std::nullopt);
-  const cv::Rect planning_roi =
+  const PixelRect planning_roi =
       hp_planning_roi_for_request(*planning_graph, request);
   HighPrecisionDirtyPlan dirty_plan = dirty_planner.plan_high_precision(
       *planning_graph, request.node_id, planning_roi);

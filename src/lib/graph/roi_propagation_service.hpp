@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <opencv2/core.hpp>
 #include <optional>
 #include <unordered_map>
 
@@ -22,11 +21,11 @@ namespace ps {
  */
 struct UpstreamRoiProjection {
   /** @brief Operator/spatial demand shared by all image-input edges. */
-  cv::Rect shared_roi;
+  PixelRect shared_roi;
   /** @brief Input index selected by the dependency table, when present. */
   std::optional<std::size_t> dependency_input_index;
   /** @brief LUT-derived ROI applied only to dependency_input_index. */
-  cv::Rect dependency_roi;
+  PixelRect dependency_roi;
 
   /**
    * @brief Returns demand routed to one destination image-input index.
@@ -34,7 +33,7 @@ struct UpstreamRoiProjection {
    * @return Shared ROI merged with dependency_roi only for its selected input.
    * @throws Nothing.
    */
-  cv::Rect roi_for_input(std::size_t input_index) const noexcept;
+  PixelRect roi_for_input(std::size_t input_index) const noexcept;
 
   /**
    * @brief Returns safely bounded demand for one destination image input.
@@ -47,8 +46,8 @@ struct UpstreamRoiProjection {
    *       completely out-of-bounds shared ROI from discarding a valid LUT ROI
    *       through an unrepresentable intermediate union.
    */
-  cv::Rect roi_for_input(std::size_t input_index,
-                         const cv::Size& input_extent) const noexcept;
+  PixelRect roi_for_input(std::size_t input_index,
+                          const PixelSize& input_extent) const noexcept;
 
   /**
    * @brief Returns a conservative union for legacy single-ROI callers.
@@ -56,7 +55,7 @@ struct UpstreamRoiProjection {
    * @throws Nothing.
    * @note Graph traversal must prefer roi_for_input() to preserve LUT routing.
    */
-  cv::Rect combined_roi() const noexcept;
+  PixelRect combined_roi() const noexcept;
 };
 
 /**
@@ -86,8 +85,9 @@ class RoiPropagationService {
    *       once and shared by dirty and dependency callbacks for this request.
    */
   UpstreamRoiProjection compute_upstream_projection(
-      const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
-      std::unordered_map<int, cv::Size>& size_cache) const;
+      const Node& node, const PixelRect& downstream_roi,
+      const GraphModel& graph,
+      std::unordered_map<int, PixelSize>& size_cache) const;
 
   /**
    * @brief Computes the upstream input ROI required by one node output ROI.
@@ -109,9 +109,10 @@ class RoiPropagationService {
    * @note This conservative compatibility view unions input-selected LUT
    * demand. Graph traversal uses compute_upstream_projection() instead.
    */
-  cv::Rect compute_upstream_roi(
-      const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
-      std::unordered_map<int, cv::Size>& size_cache) const;
+  PixelRect compute_upstream_roi(
+      const Node& node, const PixelRect& downstream_roi,
+      const GraphModel& graph,
+      std::unordered_map<int, PixelSize>& size_cache) const;
 
   /**
    * @brief Projects a dirty ROI forward through downstream image-input edges.
@@ -127,10 +128,10 @@ class RoiPropagationService {
    * @note Traversal stores stable node ids and value ROIs only; it does not
    * mutate dirty-region snapshots.
    */
-  std::optional<cv::Rect> project_roi_forward(const GraphModel& graph,
-                                              int start_node_id,
-                                              const cv::Rect& start_roi,
-                                              int target_node_id) const;
+  std::optional<PixelRect> project_roi_forward(const GraphModel& graph,
+                                               int start_node_id,
+                                               const PixelRect& start_roi,
+                                               int target_node_id) const;
 
   /**
    * @brief Projects a target output ROI backward to an upstream source node.
@@ -146,10 +147,10 @@ class RoiPropagationService {
    * @note This is graph-level demand projection; graph traversal remains
    * topology-only and does not own ROI propagation semantics.
    */
-  std::optional<cv::Rect> project_roi_backward(const GraphModel& graph,
-                                               int target_node_id,
-                                               const cv::Rect& target_roi,
-                                               int source_node_id) const;
+  std::optional<PixelRect> project_roi_backward(const GraphModel& graph,
+                                                int target_node_id,
+                                                const PixelRect& target_roi,
+                                                int source_node_id) const;
 
  private:
   GraphExtentResolver extent_resolver_;

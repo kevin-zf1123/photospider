@@ -219,8 +219,8 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
 
   const auto& start_node = model.node(start_node_id);
   int tile_size = get_tile_size(start_node);
-  cv::Rect initial_roi(tile_x * tile_size, tile_y * tile_size, tile_size,
-                       tile_size);
+  ps::PixelRect initial_roi{tile_x * tile_size, tile_y * tile_size, tile_size,
+                            tile_size};
   std::cout << "Triggering dirty region at Node " << start_node_id << " tile ("
             << tile_x << "," << tile_y << ") -> pixel ROI " << initial_roi.x
             << "," << initial_roi.y << "," << initial_roi.width << ","
@@ -241,7 +241,7 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
               << ")" << std::endl;
     return;
   }
-  cv::Rect target_roi = *projected_roi_opt;
+  ps::PixelRect target_roi = *projected_roi_opt;
   std::cout << "Projected Forward to End Node " << target_end_node
             << " -> pixel ROI " << target_roi.x << "," << target_roi.y << ","
             << target_roi.width << "," << target_roi.height << std::endl;
@@ -254,10 +254,11 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
             << " to Source Node " << start_node_id << ")\n"
             << std::endl;
 
-  std::function<void(int, const cv::Rect&, int)> trace_backward;
+  std::function<void(int, const ps::PixelRect&, int)> trace_backward;
   std::set<int> visited_in_trace;
 
-  trace_backward = [&](int current_id, const cv::Rect& current_roi, int depth) {
+  trace_backward = [&](int current_id, const ps::PixelRect& current_roi,
+                       int depth) {
     std::string indent(depth * 2, ' ');
     const auto& node = model.node(current_id);
 

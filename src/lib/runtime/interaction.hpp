@@ -426,33 +426,39 @@ class InteractionService {
     return kernel_.recent_compute_planning_snapshots(graph);
   }
 
+  /** @copydoc Kernel::begin_dirty_source */
   std::optional<compute::DirtyRegionSnapshot> cmd_begin_dirty_source(
       const std::string& graph, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi) {
+      const PixelRect& source_roi) {
     return kernel_.begin_dirty_source(graph, node_id, domain, source_roi);
   }
+  /** @copydoc Kernel::begin_dirty_source_control */
   std::optional<compute::DirtyControlLaneResult> cmd_begin_dirty_source_control(
       const std::string& graph, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi) {
+      const PixelRect& source_roi) {
     return kernel_.begin_dirty_source_control(graph, node_id, domain,
                                               source_roi);
   }
+  /** @copydoc Kernel::update_dirty_source */
   std::optional<compute::DirtyRegionSnapshot> cmd_update_dirty_source(
       const std::string& graph, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi) {
+      const PixelRect& source_roi) {
     return kernel_.update_dirty_source(graph, node_id, domain, source_roi);
   }
+  /** @copydoc Kernel::update_dirty_source_control */
   std::optional<compute::DirtyControlLaneResult>
   cmd_update_dirty_source_control(const std::string& graph, int node_id,
                                   compute::DirtyDomain domain,
-                                  const cv::Rect& source_roi) {
+                                  const PixelRect& source_roi) {
     return kernel_.update_dirty_source_control(graph, node_id, domain,
                                                source_roi);
   }
+  /** @copydoc Kernel::end_dirty_source */
   std::optional<compute::DirtyRegionSnapshot> cmd_end_dirty_source(
       const std::string& graph, int node_id, compute::DirtyDomain domain) {
     return kernel_.end_dirty_source(graph, node_id, domain);
   }
+  /** @copydoc Kernel::end_dirty_source_control */
   std::optional<compute::DirtyControlLaneResult> cmd_end_dirty_source_control(
       const std::string& graph, int node_id, compute::DirtyDomain domain) {
     return kernel_.end_dirty_source_control(graph, node_id, domain);
@@ -543,10 +549,10 @@ class InteractionService {
    * @note Embedded Host retains its close admission while endpoint lookup and
    *       projection execute in one graph-state work item.
    */
-  std::optional<cv::Rect> cmd_project_roi(const std::string& graph,
-                                          int start_node_id,
-                                          const cv::Rect& start_roi,
-                                          int target_node_id) {
+  std::optional<PixelRect> cmd_project_roi(const std::string& graph,
+                                           int start_node_id,
+                                           const PixelRect& start_roi,
+                                           int target_node_id) {
     return kernel_.project_roi_forward(graph, start_node_id, start_roi,
                                        target_node_id);
   }
@@ -568,10 +574,10 @@ class InteractionService {
    * @note Embedded Host retains its close admission while endpoint lookup and
    *       projection execute in one graph-state work item.
    */
-  std::optional<cv::Rect> cmd_project_roi_backward(const std::string& graph,
-                                                   int target_node_id,
-                                                   const cv::Rect& target_roi,
-                                                   int source_node_id) {
+  std::optional<PixelRect> cmd_project_roi_backward(const std::string& graph,
+                                                    int target_node_id,
+                                                    const PixelRect& target_roi,
+                                                    int source_node_id) {
     return kernel_.project_roi_backward(graph, target_node_id, target_roi,
                                         source_node_id);
   }

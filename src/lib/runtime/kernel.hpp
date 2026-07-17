@@ -203,7 +203,7 @@ class Kernel {
     std::optional<ComputeIntent> intent;
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
-    std::optional<cv::Rect> dirty_roi;
+    std::optional<PixelRect> dirty_roi;
   };
 
   /**
@@ -347,10 +347,10 @@ class Kernel {
    *       item. Existing-session diagnostics are mirrored to LastError, while
    *       Embedded Host retains a lifecycle admission against close.
    */
-  std::optional<cv::Rect> project_roi_forward(const std::string& name,
-                                              int start_node_id,
-                                              const cv::Rect& start_roi,
-                                              int target_node_id);
+  std::optional<PixelRect> project_roi_forward(const std::string& name,
+                                               int start_node_id,
+                                               const PixelRect& start_roi,
+                                               int target_node_id);
 
   /**
    * @brief Projects one ROI backward between required graph nodes.
@@ -372,10 +372,10 @@ class Kernel {
    *       item. Existing-session diagnostics are mirrored to LastError, while
    *       Embedded Host retains a lifecycle admission against close.
    */
-  std::optional<cv::Rect> project_roi_backward(const std::string& name,
-                                               int target_node_id,
-                                               const cv::Rect& target_roi,
-                                               int source_node_id);
+  std::optional<PixelRect> project_roi_backward(const std::string& name,
+                                                int target_node_id,
+                                                const PixelRect& target_roi,
+                                                int source_node_id);
 
   /**
    * @brief Reloads an existing graph session from YAML through graph-state
@@ -541,20 +541,95 @@ class Kernel {
   std::optional<std::vector<compute::ComputePlanSummary>>
   recent_compute_planning_snapshots(const std::string& name);
 
+  /**
+   * @brief Begins one dirty-source lifecycle and returns its updated snapshot.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node entering the updating state.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Updated snapshot, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note Other failures are recorded in LastError. The convenience facade
+   *       discards control hints returned by begin_dirty_source_control().
+   */
   std::optional<compute::DirtyRegionSnapshot> begin_dirty_source(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Begins one dirty-source lifecycle and preserves dispatch hints.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node entering the updating state.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Control result, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note The complete transition runs as one serialized graph-state work
+   *       item; it does not submit scheduler work itself.
+   */
   std::optional<compute::DirtyControlLaneResult> begin_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Appends one dirty-source ROI and returns the updated snapshot.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node receiving the incremental ROI.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Updated snapshot, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note Other failures are recorded in LastError. The convenience facade
+   *       discards control hints returned by update_dirty_source_control().
+   */
   std::optional<compute::DirtyRegionSnapshot> update_dirty_source(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Appends one dirty-source ROI and preserves dispatch hints.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node receiving the incremental ROI.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Control result, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note The complete transition runs as one serialized graph-state work
+   *       item and keeps geometry as PixelRect.
+   */
   std::optional<compute::DirtyControlLaneResult> update_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Ends one dirty-source lifecycle and returns the updated snapshot.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node leaving the updating state.
+   * @param domain HP or RT dirty domain.
+   * @return Updated snapshot, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note No new ROI is appended. The convenience facade discards control
+   *       hints returned by end_dirty_source_control().
+   */
   std::optional<compute::DirtyRegionSnapshot> end_dirty_source(
       const std::string& name, int node_id, compute::DirtyDomain domain);
+
+  /**
+   * @brief Ends one dirty-source lifecycle and preserves cutoff hints.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node leaving the updating state.
+   * @param domain HP or RT dirty domain.
+   * @return Control result, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note cutoff_after_downstream is derived only after serialized snapshot
+   *       rebuilding; this facade does not own a scheduler queue.
+   */
   std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain);
   /**

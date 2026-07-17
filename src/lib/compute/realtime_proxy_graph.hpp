@@ -43,7 +43,7 @@ class RealtimeProxyGraph {
     std::optional<NodeOutput> output;
 
     /** @brief Most recent or merged HP-space ROI represented by RT output. */
-    std::optional<cv::Rect> roi_hp;
+    std::optional<PixelRect> roi_hp;
 
     /** @brief Version counter advanced on every RT proxy update. */
     int version = 0;

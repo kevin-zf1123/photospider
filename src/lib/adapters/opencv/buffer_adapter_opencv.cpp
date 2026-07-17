@@ -6,6 +6,23 @@
 
 #include "photospider/plugin/opencv_adapter.hpp"
 
+namespace {
+
+/**
+ * @brief Converts kernel-native geometry at an OpenCV matrix boundary.
+ *
+ * @param rectangle Kernel-native pixel rectangle.
+ * @return Equivalent OpenCV rectangle used only for matrix slicing.
+ * @throws Nothing.
+ * @note This single file-local conversion serves both private and public
+ *       OpenCV adapter views; callers and kernel planning retain PixelRect.
+ */
+cv::Rect to_opencv_rect(const ps::PixelRect& rectangle) noexcept {
+  return cv::Rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+}
+
+}  // namespace
+
 namespace ps {
 namespace {
 
@@ -163,7 +180,7 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
     throw std::runtime_error(
         "OpenCV adapter cannot interpret an opaque backend-only context");
   }
-  return full_mat(tile.roi);
+  return full_mat(to_opencv_rect(tile.roi));
 }
 
 /**
@@ -198,7 +215,7 @@ cv::UMat to_cv_umat_for_tile(const TileView& tile, const char* missing_message,
     throw std::runtime_error(
         "OpenCV adapter cannot interpret an opaque backend-only context");
   }
-  return full_umat(tile.roi);
+  return full_umat(to_opencv_rect(tile.roi));
 }
 
 }  // namespace
@@ -327,16 +344,6 @@ namespace ps::plugin::opencv {
 namespace {
 
 /**
- * @brief Converts public geometry to the OpenCV adapter rectangle.
- * @param rectangle Public pixel rectangle.
- * @return Equivalent OpenCV rectangle.
- * @throws Nothing.
- */
-cv::Rect to_opencv_rect(const PixelRect& rectangle) noexcept {
-  return cv::Rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-}
-
-/**
  * @brief Validates one public tile ROI without overflow-prone edge arithmetic.
  * @param buffer Image extent containing the tile.
  * @param rectangle Public ROI to validate.
@@ -370,7 +377,7 @@ cv::Mat to_mat(const InputTileView& tile) {
     throw std::runtime_error("to_mat: input tile has no image buffer");
   }
   validate_public_tile_roi(*tile.buffer, tile.roi);
-  return ps::toCvMat(InputTile{tile.buffer, to_opencv_rect(tile.roi), nullptr});
+  return ps::toCvMat(InputTile{tile.buffer, tile.roi, nullptr});
 }
 
 /** @copydoc to_mat(const OutputTileView&) */
@@ -393,8 +400,7 @@ cv::UMat to_umat(const InputTileView& tile) {
     throw std::runtime_error("to_umat: input tile has no image buffer");
   }
   validate_public_tile_roi(*tile.buffer, tile.roi);
-  return ps::toCvUMat(
-      InputTile{tile.buffer, to_opencv_rect(tile.roi), nullptr});
+  return ps::toCvUMat(InputTile{tile.buffer, tile.roi, nullptr});
 }
 
 /** @copydoc to_umat(const OutputTileView&) */

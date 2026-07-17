@@ -37,7 +37,7 @@ struct StabilizedDirtyNodeOutput {
   int hp_version = 0;
 
   /** @brief Full HP image ROI represented by output, when it has an image. */
-  std::optional<cv::Rect> hp_roi;
+  std::optional<PixelRect> hp_roi;
 };
 
 /**
@@ -291,7 +291,7 @@ struct DirtyUpdateRequest {
   std::vector<BenchmarkEvent>* benchmark_events = nullptr;
 
   /** @brief Dirty ROI in high-precision graph coordinates. */
-  cv::Rect dirty_roi;
+  PixelRect dirty_roi;
 
   /**
    * @brief Suppresses direct graph RT downsample writes after HP dirty work.

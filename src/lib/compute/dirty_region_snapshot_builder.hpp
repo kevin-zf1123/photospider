@@ -1,6 +1,5 @@
 #pragma once
 
-#include <opencv2/core.hpp>
 #include <unordered_map>
 
 #include "compute/dirty_region_snapshot.hpp"
@@ -24,7 +23,7 @@ struct DirtySourceLifecycleUpdate {
   DirtyDomain domain = DirtyDomain::HighPrecision;
 
   /** @brief Optional source ROI appended for begin/update transitions. */
-  const cv::Rect* source_roi = nullptr;
+  const PixelRect* source_roi = nullptr;
 
   /** @brief New lifecycle state for the source node. */
   DirtySourceLifecycleState lifecycle = DirtySourceLifecycleState::Idle;
@@ -47,7 +46,7 @@ struct DirtyNodeWorkRecord {
   DirtyDomain domain = DirtyDomain::HighPrecision;
 
   /** @brief Domain-local ROI to record. */
-  cv::Rect work_roi;
+  PixelRect work_roi;
 
   /** @brief Domain-local tile size for tiled records. */
   int tile_size = 0;
@@ -70,7 +69,7 @@ struct DirtyTileEnumeration {
   DirtyTileLevel level = DirtyTileLevel::Micro;
 
   /** @brief Domain-local ROI to tile. */
-  cv::Rect roi;
+  PixelRect roi;
 
   /** @brief Domain-local tile edge length. */
   int tile_size = 0;
@@ -179,10 +178,10 @@ class DirtyRegionSnapshotBuilder {
    * projects RT snapshots down to proxy space. This preserves existing dirty
    * source semantics.
    */
-  cv::Rect normalize_source_roi(
+  PixelRect normalize_source_roi(
       const GraphModel& graph, int node_id, DirtyDomain domain,
-      const cv::Rect& source_roi,
-      std::unordered_map<int, cv::Size>& hp_size_cache) const;
+      const PixelRect& source_roi,
+      std::unordered_map<int, PixelSize>& hp_size_cache) const;
 
   /**
    * @brief Resolves the HP-authoritative output extent for one node.
@@ -194,8 +193,8 @@ class DirtyRegionSnapshotBuilder {
    * @throws GraphError from GraphExtentResolver on invalid graph metadata.
    * @note RT source snapshots still derive from HP-authoritative extents.
    */
-  cv::Size infer_hp_size(const GraphModel& graph, int node_id,
-                         std::unordered_map<int, cv::Size>& cache) const;
+  PixelSize infer_hp_size(const GraphModel& graph, int node_id,
+                          std::unordered_map<int, PixelSize>& cache) const;
 
   /**
    * @brief Returns the micro tile size for a dirty domain.
@@ -206,6 +205,7 @@ class DirtyRegionSnapshotBuilder {
    */
   int tile_size_for_domain(DirtyDomain domain) const;
 
+  /** @brief Dependency-neutral HP extent resolver used during normalization. */
   GraphExtentResolver extent_resolver_;
 };
 

@@ -98,7 +98,7 @@ class IntentUpdateCoordinator {
    * @throws GraphError when RealTimeUpdate lacks a non-empty dirty ROI.
    */
   static void validate(ComputeIntent intent,
-                       const std::optional<cv::Rect>& dirty_roi);
+                       const std::optional<PixelRect>& dirty_roi);
 
   /**
    * @brief Executes the callbacks required by one compute intent.
@@ -122,7 +122,7 @@ class IntentUpdateCoordinator {
    */
   static NodeOutput& coordinate_intent_update(
       ComputeIntent intent, IScheduler* hp_scheduler, IScheduler* rt_scheduler,
-      const std::optional<cv::Rect>& dirty_roi,
+      const std::optional<PixelRect>& dirty_roi,
       const IntentUpdateCallbacks& callbacks);
 };
 

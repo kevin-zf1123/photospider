@@ -86,7 +86,7 @@ class HighPrecisionDirtyWriteBuffer {
    */
   void import_precomputed_output(
       const Node& node, const NodeOutput& output, int hp_version,
-      const std::optional<cv::Rect>& hp_roi,
+      const std::optional<PixelRect>& hp_roi,
       std::optional<uint64_t> dirty_source_generation = std::nullopt);
 
   /**
@@ -102,8 +102,8 @@ class HighPrecisionDirtyWriteBuffer {
    * @note Version increments once per dirty task, preserving prior executor
    * semantics while hiding the increment until graph commit.
    */
-  int mark_updated(const Node& node, const cv::Rect& roi_hp,
-                   const cv::Size& hp_size, bool dirty_source,
+  int mark_updated(const Node& node, const PixelRect& roi_hp,
+                   const PixelSize& hp_size, bool dirty_source,
                    uint64_t dirty_generation);
 
   /**
@@ -137,7 +137,7 @@ class HighPrecisionDirtyWriteBuffer {
     bool initialized = false;
     bool has_output = false;
     NodeOutput output;
-    std::optional<cv::Rect> hp_roi;
+    std::optional<PixelRect> hp_roi;
     int hp_version = 0;
     std::optional<uint64_t> dirty_source_generation;
   };
@@ -228,8 +228,9 @@ class RealtimeProxyWriteBuffer {
    * @return New staged RT proxy version after incrementing.
    * @throws std::bad_alloc if the staged entry must be created.
    */
-  int mark_updated(int node_id, const cv::Rect& roi_hp, const cv::Size& hp_size,
-                   bool dirty_source, uint64_t dirty_generation);
+  int mark_updated(int node_id, const PixelRect& roi_hp,
+                   const PixelSize& hp_size, bool dirty_source,
+                   uint64_t dirty_generation);
 
   /**
    * @brief Moves all staged RT proxy state into RealtimeProxyGraph.

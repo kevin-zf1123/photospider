@@ -619,8 +619,8 @@ void register_bad_alloc_boundary_operations() {
     registry.register_dirty_propagator(
         "bad_alloc_boundary_test", "hp_dirty_resource_exhausted",
         DirtyRoiPropFunc(
-            [](const Node&, const cv::Rect& roi, const GraphModel&,
-               const cv::Size&, const std::vector<cv::Size>&,
+            [](const Node&, const PixelRect& roi, const GraphModel&,
+               const PixelSize&, const std::vector<PixelSize>&,
                const plugin::ParameterMap&,
                const std::vector<const NodeOutput*>* available_inputs) {
               (void)available_inputs;
@@ -629,8 +629,8 @@ void register_bad_alloc_boundary_operations() {
     registry.register_dirty_propagator(
         "bad_alloc_boundary_test", "rt_dirty_resource_exhausted",
         DirtyRoiPropFunc(
-            [](const Node&, const cv::Rect& roi, const GraphModel&,
-               const cv::Size&, const std::vector<cv::Size>&,
+            [](const Node&, const PixelRect& roi, const GraphModel&,
+               const PixelSize&, const std::vector<PixelSize>&,
                const plugin::ParameterMap&,
                const std::vector<const NodeOutput*>* available_inputs) {
               (void)available_inputs;
@@ -1165,7 +1165,7 @@ TEST(DirtyExecutorBadAllocBoundary,
   request.node_id = 2;
   request.cache_precision = "float32";
   request.disable_disk_cache = true;
-  request.dirty_roi = cv::Rect(0, 0, 16, 16);
+  request.dirty_roi = PixelRect{0, 0, 16, 16};
 
   EXPECT_THROW((void)executor.execute(*graph, proxy_graph, nullptr, request),
                std::bad_alloc);
@@ -1192,7 +1192,7 @@ TEST(DirtyExecutorBadAllocBoundary,
   request.node_id = 2;
   request.cache_precision = "float32";
   request.disable_disk_cache = true;
-  request.dirty_roi = cv::Rect(0, 0, 16, 16);
+  request.dirty_roi = PixelRect{0, 0, 16, 16};
 
   EXPECT_THROW((void)executor.execute(*graph, proxy_graph, nullptr, request),
                std::bad_alloc);

@@ -41,8 +41,9 @@ IntentUpdateDecision IntentUpdateCoordinator::decide(
   return decision;
 }
 
+/** @copydoc IntentUpdateCoordinator::validate */
 void IntentUpdateCoordinator::validate(
-    ComputeIntent intent, const std::optional<cv::Rect>& dirty_roi) {
+    ComputeIntent intent, const std::optional<PixelRect>& dirty_roi) {
   if (intent != ComputeIntent::RealTimeUpdate)
     return;
   if (!dirty_roi.has_value()) {
@@ -73,7 +74,7 @@ void IntentUpdateCoordinator::validate(
  */
 NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
     ComputeIntent intent, IScheduler* hp_scheduler, IScheduler* rt_scheduler,
-    const std::optional<cv::Rect>& dirty_roi,
+    const std::optional<PixelRect>& dirty_roi,
     const IntentUpdateCallbacks& callbacks) {
   switch (intent) {
     case ComputeIntent::GlobalHighPrecision:

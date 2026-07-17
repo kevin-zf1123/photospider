@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <opencv2/core.hpp>
 
 #include "compute/compute_geometry.hpp"
 #include "compute/dirty_region_planner.hpp"
@@ -18,7 +17,7 @@ namespace ps::compute::detail {
  * @note Dirty planning erases entries with invalid extents before snapshot
  * materialization.
  */
-inline bool has_valid_size(const cv::Size& size) {
+inline bool has_valid_size(const PixelSize& size) {
   return size.width > 0 && size.height > 0;
 }
 
@@ -30,8 +29,8 @@ inline bool has_valid_size(const cv::Size& size) {
  * @throws Nothing.
  * @note Callers are responsible for validating size before using the ROI.
  */
-inline cv::Rect full_extent_roi(const cv::Size& size) {
-  return cv::Rect(0, 0, size.width, size.height);
+inline PixelRect full_extent_roi(const PixelSize& size) {
+  return PixelRect{0, 0, size.width, size.height};
 }
 
 /**
@@ -101,7 +100,8 @@ struct HighPrecisionDirtyPolicy {
    * @throws Nothing.
    * @note HP planning aligns directly to HP micro tiles.
    */
-  static cv::Rect target_hp_roi(const cv::Rect& dirty_roi, const Entry& entry) {
+  static PixelRect target_hp_roi(const PixelRect& dirty_roi,
+                                 const Entry& entry) {
     return clip_rect(align_rect(dirty_roi, kHpMicroTileSize), entry.hp_size);
   }
 
@@ -138,8 +138,8 @@ struct HighPrecisionDirtyPolicy {
    * @note HP preserves the previous behavior of aligning before parent
    * clipping.
    */
-  static cv::Rect normalize_upstream_roi(const cv::Rect& upstream_roi_hp,
-                                         const Entry& current_entry) {
+  static PixelRect normalize_upstream_roi(const PixelRect& upstream_roi_hp,
+                                          const Entry& current_entry) {
     (void)current_entry;
     return align_rect(upstream_roi_hp, kHpMicroTileSize);
   }
@@ -153,7 +153,7 @@ struct HighPrecisionDirtyPolicy {
    * @note HP keeps the prior side effect of creating then erasing empty parent
    * entries when propagation returns no area.
    */
-  static bool skip_empty_upstream_roi(const cv::Rect& upstream_roi_hp) {
+  static bool skip_empty_upstream_roi(const PixelRect& upstream_roi_hp) {
     (void)upstream_roi_hp;
     return false;
   }
@@ -166,8 +166,8 @@ struct HighPrecisionDirtyPolicy {
    * @return Parent HP ROI, or empty when demand does not intersect the parent.
    * @throws Nothing.
    */
-  static cv::Rect parent_hp_roi(const cv::Rect& upstream_roi_hp,
-                                const Entry& parent_entry) {
+  static PixelRect parent_hp_roi(const PixelRect& upstream_roi_hp,
+                                 const Entry& parent_entry) {
     return clip_rect(upstream_roi_hp, parent_entry.hp_size);
   }
 
@@ -179,8 +179,8 @@ struct HighPrecisionDirtyPolicy {
    * @return HP micro-aligned and clipped ROI.
    * @throws Nothing.
    */
-  static cv::Rect finalize_hp_roi(const cv::Rect& roi_hp,
-                                  const cv::Size& hp_size) {
+  static PixelRect finalize_hp_roi(const PixelRect& roi_hp,
+                                   const PixelSize& hp_size) {
     return clip_rect(align_rect(roi_hp, kHpMicroTileSize), hp_size);
   }
 
@@ -202,7 +202,9 @@ struct HighPrecisionDirtyPolicy {
    * @return HP work ROI.
    * @throws Nothing.
    */
-  static cv::Rect snapshot_work_roi(const Entry& entry) { return entry.roi_hp; }
+  static PixelRect snapshot_work_roi(const Entry& entry) {
+    return entry.roi_hp;
+  }
 
   /**
    * @brief Returns the tile size used for HP dirty micro tiles.
@@ -270,7 +272,8 @@ struct RealTimeDirtyPolicy {
    * @throws Nothing.
    * @note The HP alignment equals the RT tile size scaled into HP space.
    */
-  static cv::Rect target_hp_roi(const cv::Rect& dirty_roi, const Entry& entry) {
+  static PixelRect target_hp_roi(const PixelRect& dirty_roi,
+                                 const Entry& entry) {
     return clip_rect(align_rect(dirty_roi, kHpAlignment), entry.hp_size);
   }
 
@@ -311,8 +314,8 @@ struct RealTimeDirtyPolicy {
    * @note RT preserves the previous behavior of clipping before parent
    * alignment.
    */
-  static cv::Rect normalize_upstream_roi(const cv::Rect& upstream_roi_hp,
-                                         const Entry& current_entry) {
+  static PixelRect normalize_upstream_roi(const PixelRect& upstream_roi_hp,
+                                          const Entry& current_entry) {
     return clip_rect(upstream_roi_hp, current_entry.hp_size);
   }
 
@@ -324,7 +327,7 @@ struct RealTimeDirtyPolicy {
    * @throws Nothing.
    * @note RT keeps the prior early-exit behavior after current-node clipping.
    */
-  static bool skip_empty_upstream_roi(const cv::Rect& upstream_roi_hp) {
+  static bool skip_empty_upstream_roi(const PixelRect& upstream_roi_hp) {
     return is_rect_empty(upstream_roi_hp);
   }
 
@@ -336,8 +339,8 @@ struct RealTimeDirtyPolicy {
    * @return Parent HP ROI aligned to the HP representation of RT tiles.
    * @throws Nothing.
    */
-  static cv::Rect parent_hp_roi(const cv::Rect& upstream_roi_hp,
-                                const Entry& parent_entry) {
+  static PixelRect parent_hp_roi(const PixelRect& upstream_roi_hp,
+                                 const Entry& parent_entry) {
     return clip_rect(align_rect(upstream_roi_hp, kHpAlignment),
                      parent_entry.hp_size);
   }
@@ -350,8 +353,8 @@ struct RealTimeDirtyPolicy {
    * @return HP ROI aligned to the RT projection grid and clipped to hp_size.
    * @throws Nothing.
    */
-  static cv::Rect finalize_hp_roi(const cv::Rect& roi_hp,
-                                  const cv::Size& hp_size) {
+  static PixelRect finalize_hp_roi(const PixelRect& roi_hp,
+                                   const PixelSize& hp_size) {
     return clip_rect(align_rect(roi_hp, kHpAlignment), hp_size);
   }
 
@@ -374,7 +377,9 @@ struct RealTimeDirtyPolicy {
    * @return RT proxy work ROI.
    * @throws Nothing.
    */
-  static cv::Rect snapshot_work_roi(const Entry& entry) { return entry.roi_rt; }
+  static PixelRect snapshot_work_roi(const Entry& entry) {
+    return entry.roi_rt;
+  }
 
   /**
    * @brief Returns the tile size used for RT dirty micro tiles.

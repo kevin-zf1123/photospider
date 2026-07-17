@@ -82,7 +82,7 @@ ResolvedNodeInputs NodeInputResolver::resolve(
     if (input && input->image_buffer.width > 0 &&
         input->image_buffer.height > 0) {
       node.last_input_size_hp =
-          cv::Size(input->image_buffer.width, input->image_buffer.height);
+          PixelSize{input->image_buffer.width, input->image_buffer.height};
       break;
     }
   }

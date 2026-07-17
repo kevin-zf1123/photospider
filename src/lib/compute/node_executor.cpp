@@ -1,6 +1,8 @@
 #include "compute/node_executor.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <new>
 #include <string>
 #include <type_traits>
@@ -62,16 +64,16 @@ std::pair<int, DataType> infer_channels_and_type(
  * @note The first connected normalized input remains the size source when no
  * explicit output_size is supplied; null slots remain visible to callbacks.
  */
-cv::Size infer_output_size(const Node& node,
-                           const std::vector<const NodeOutput*>& inputs,
-                           const TiledExecutionConfig& config) {
+PixelSize infer_output_size(const Node& node,
+                            const std::vector<const NodeOutput*>& inputs,
+                            const TiledExecutionConfig& config) {
   if (config.output_size)
     return *config.output_size;
   if (const NodeOutput* input = first_connected_input(inputs)) {
-    return cv::Size(input->image_buffer.width, input->image_buffer.height);
+    return PixelSize{input->image_buffer.width, input->image_buffer.height};
   }
-  return cv::Size(as_int_flexible(node.runtime_parameters, "width", 256),
-                  as_int_flexible(node.runtime_parameters, "height", 256));
+  return PixelSize{as_int_flexible(node.runtime_parameters, "width", 256),
+                   as_int_flexible(node.runtime_parameters, "height", 256)};
 }
 
 /**
@@ -130,14 +132,14 @@ void require_tiled_inputs(const Node& node,
  * come from same-batch temporary results and intentionally do not consult
  * committed GraphModel caches.
  */
-std::vector<cv::Size> actual_input_extents(
+std::vector<PixelSize> actual_input_extents(
     const TiledInputContext& input_context) {
-  std::vector<cv::Size> extents;
+  std::vector<PixelSize> extents;
   extents.reserve(input_context.inputs.size());
   for (const NodeOutput* input : input_context.inputs) {
     extents.push_back(
-        input ? cv::Size(input->image_buffer.width, input->image_buffer.height)
-              : cv::Size());
+        input ? PixelSize{input->image_buffer.width, input->image_buffer.height}
+              : PixelSize{});
   }
   return extents;
 }
@@ -152,11 +154,11 @@ std::vector<cv::Size> actual_input_extents(
  * @note Dirty HP/RT paths pass output_size so iteration can use planned domain
  * extents even when the destination buffer was just allocated.
  */
-cv::Size output_size_for_buffer(const ImageBuffer& output_buffer,
-                                const TiledExecutionConfig& config) {
+PixelSize output_size_for_buffer(const ImageBuffer& output_buffer,
+                                 const TiledExecutionConfig& config) {
   return config.output_size
              ? *config.output_size
-             : cv::Size(output_buffer.width, output_buffer.height);
+             : PixelSize{output_buffer.width, output_buffer.height};
 }
 
 /**
@@ -168,9 +170,9 @@ cv::Size output_size_for_buffer(const ImageBuffer& output_buffer,
  * @throws Nothing.
  * @note Missing output_roi means the whole output image is recomputed.
  */
-cv::Rect clipped_work_roi(const cv::Size& output_size,
-                          const TiledExecutionConfig& config) {
-  const cv::Rect full_roi(0, 0, output_size.width, output_size.height);
+PixelRect clipped_work_roi(const PixelSize& output_size,
+                           const TiledExecutionConfig& config) {
+  const PixelRect full_roi{0, 0, output_size.width, output_size.height};
   return config.output_roi ? clip_rect(*config.output_roi, output_size)
                            : full_roi;
 }
@@ -187,11 +189,17 @@ cv::Rect clipped_work_roi(const cv::Size& output_size,
  * @throws Nothing.
  * @note Edge tiles are shortened to the remaining work region size.
  */
-cv::Rect make_output_tile_roi(int x, int y, const cv::Rect& work_roi,
-                              const cv::Size& output_size, int tile_size) {
-  const int width = std::min(tile_size, work_roi.x + work_roi.width - x);
-  const int height = std::min(tile_size, work_roi.y + work_roi.height - y);
-  return clip_rect(cv::Rect(x, y, width, height), output_size);
+PixelRect make_output_tile_roi(int x, int y, const PixelRect& work_roi,
+                               const PixelSize& output_size, int tile_size) {
+  const std::int64_t work_right =
+      static_cast<std::int64_t>(work_roi.x) + work_roi.width;
+  const std::int64_t work_bottom =
+      static_cast<std::int64_t>(work_roi.y) + work_roi.height;
+  const std::int64_t right =
+      std::min(work_right, static_cast<std::int64_t>(x) + tile_size);
+  const std::int64_t bottom =
+      std::min(work_bottom, static_cast<std::int64_t>(y) + tile_size);
+  return clip_rect(rect_from_edges(x, y, right, bottom), output_size);
 }
 
 /**
@@ -227,9 +235,9 @@ void validate_tile_size(const TiledExecutionConfig& config) {
  */
 void populate_input_tiles(GraphModel& graph, const Node& node,
                           const TiledInputContext& input_context,
-                          const cv::Rect& output_roi,
+                          const PixelRect& output_roi,
                           const TiledExecutionConfig& config,
-                          const std::vector<cv::Size>& input_extents,
+                          const std::vector<PixelSize>& input_extents,
                           std::vector<InputTile>* input_tiles) {
   input_tiles->clear();
   input_tiles->reserve(input_context.inputs.size());
@@ -267,9 +275,9 @@ void execute_tiled_context_into(GraphModel& graph, Node& node,
                                 ImageBuffer& output_buffer,
                                 const TiledExecutionConfig& config) {
   validate_tile_size(config);
-  const cv::Size output_size = output_size_for_buffer(output_buffer, config);
-  const cv::Rect work_roi = clipped_work_roi(output_size, config);
-  const std::vector<cv::Size> input_extents =
+  const PixelSize output_size = output_size_for_buffer(output_buffer, config);
+  const PixelRect work_roi = clipped_work_roi(output_size, config);
+  const std::vector<PixelSize> input_extents =
       actual_input_extents(input_context);
   TiledExecutionConfig roi_mapping_config = config;
   roi_mapping_config.output_size = output_size;
@@ -279,12 +287,15 @@ void execute_tiled_context_into(GraphModel& graph, Node& node,
   task.output_tile.buffer = &output_buffer;
   task.input_tiles.reserve(input_context.inputs.size());
 
-  for (int y = work_roi.y; y < work_roi.y + work_roi.height;
-       y += config.tile_size) {
-    for (int x = work_roi.x; x < work_roi.x + work_roi.width;
-         x += config.tile_size) {
+  const std::int64_t work_right =
+      static_cast<std::int64_t>(work_roi.x) + work_roi.width;
+  const std::int64_t work_bottom =
+      static_cast<std::int64_t>(work_roi.y) + work_roi.height;
+  for (std::int64_t y = work_roi.y; y < work_bottom; y += config.tile_size) {
+    for (std::int64_t x = work_roi.x; x < work_right; x += config.tile_size) {
       task.output_tile.roi =
-          make_output_tile_roi(x, y, work_roi, output_size, config.tile_size);
+          make_output_tile_roi(static_cast<int>(x), static_cast<int>(y),
+                               work_roi, output_size, config.tile_size);
       if (is_rect_empty(task.output_tile.roi)) {
         continue;
       }
@@ -332,7 +343,7 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
                 TiledInputNormalizer::normalize(node, inputs);
             require_tiled_inputs(node, input_context);
 
-            const cv::Size output_size =
+            const PixelSize output_size =
                 infer_output_size(node, input_context.inputs, config);
             auto [channels, dtype] =
                 infer_channels_and_type(input_context.inputs);
@@ -349,8 +360,6 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
     throw;
   } catch (const GraphError&) {
     throw;
-  } catch (const cv::Exception& e) {
-    wrap_node_exception(node, e);
   } catch (const std::exception& e) {
     wrap_node_exception(node, e);
   } catch (...) {
@@ -371,10 +380,11 @@ void NodeExecutor::execute_tiled_into(
                              output_buffer, config);
 }
 
-cv::Rect NodeExecutor::input_roi_for_tile(
-    GraphModel& graph, const Node& node, const cv::Rect& output_roi,
+/** @copydoc NodeExecutor::input_roi_for_tile */
+PixelRect NodeExecutor::input_roi_for_tile(
+    GraphModel& graph, const Node& node, const PixelRect& output_roi,
     const ImageBuffer& input_buffer, const TiledExecutionConfig& config,
-    const std::vector<cv::Size>& known_input_extents,
+    const std::vector<PixelSize>& known_input_extents,
     const plugin::ParameterMap* known_effective_parameters,
     const std::vector<const NodeOutput*>* available_inputs) {
   OpMetadata meta;
@@ -385,21 +395,33 @@ cv::Rect NodeExecutor::input_roi_for_tile(
     meta = *op_meta;
   }
 
-  cv::Rect input_roi;
+  PixelRect input_roi;
   if (meta.access_pattern == OpMetadata::InputAccessPattern::RandomAccess) {
     auto prop_fn =
         OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
-    const cv::Size output_extent = config.output_size.value_or(
-        cv::Size(std::max(0, output_roi.x + output_roi.width),
-                 std::max(0, output_roi.y + output_roi.height)));
-    std::vector<cv::Size> input_extents =
+    const std::int64_t output_right =
+        static_cast<std::int64_t>(output_roi.x) + output_roi.width;
+    const std::int64_t output_bottom =
+        static_cast<std::int64_t>(output_roi.y) + output_roi.height;
+    const bool output_extent_representable =
+        output_right > 0 && output_bottom > 0 &&
+        output_right <= std::numeric_limits<int>::max() &&
+        output_bottom <= std::numeric_limits<int>::max();
+    const PixelSize inferred_output_extent =
+        output_extent_representable ? PixelSize{static_cast<int>(output_right),
+                                                static_cast<int>(output_bottom)}
+                                    : PixelSize{};
+    const PixelSize output_extent =
+        config.output_size.value_or(inferred_output_extent);
+    std::vector<PixelSize> input_extents =
         known_input_extents.empty() ? cached_image_input_extents(node, graph)
                                     : known_input_extents;
     if (input_extents.size() < node.image_inputs.size()) {
       input_extents.resize(node.image_inputs.size());
     }
     if (input_extents.size() == 1) {
-      input_extents.front() = cv::Size(input_buffer.width, input_buffer.height);
+      input_extents.front() =
+          PixelSize{input_buffer.width, input_buffer.height};
     }
     plugin::ParameterMap execution_parameter_storage;
     if (!known_effective_parameters) {
@@ -419,11 +441,10 @@ cv::Rect NodeExecutor::input_roi_for_tile(
     input_roi = output_roi;
   }
 
-  input_roi =
-      clip_rect(input_roi, cv::Size(input_buffer.width, input_buffer.height));
+  const PixelSize input_size{input_buffer.width, input_buffer.height};
+  input_roi = clip_rect(input_roi, input_size);
   if (is_rect_empty(input_roi)) {
-    input_roi = clip_rect(output_roi,
-                          cv::Size(input_buffer.width, input_buffer.height));
+    input_roi = clip_rect(output_roi, input_size);
   }
   return input_roi;
 }

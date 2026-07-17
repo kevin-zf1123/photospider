@@ -37,7 +37,7 @@ bool is_default_space(const SpatialContext& ctx) {
 void ensure_absolute_roi(SpatialContext& ctx, const ImageBuffer& buffer) {
   if ((ctx.absolute_roi.width <= 0 || ctx.absolute_roi.height <= 0) &&
       buffer.width > 0 && buffer.height > 0) {
-    ctx.absolute_roi = cv::Rect(0, 0, buffer.width, buffer.height);
+    ctx.absolute_roi = PixelRect{0, 0, buffer.width, buffer.height};
   }
 }
 

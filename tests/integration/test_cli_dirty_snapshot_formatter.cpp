@@ -49,7 +49,7 @@ void register_cli_command_ops() {
               output.image_buffer = make_aligned_cpu_image_buffer(
                   width, height, 1, DataType::FLOAT32);
               toCvMat(output.image_buffer).setTo(3.0f);
-              output.space.absolute_roi = cv::Rect(0, 0, width, height);
+              output.space.absolute_roi = PixelRect{0, 0, width, height};
               output.debug.compute_device = "cli-dirty-test-source";
               return output;
             }));
@@ -74,12 +74,12 @@ void register_cli_command_ops() {
     OpRegistry::instance().register_dirty_propagator(
         "cli_dirty_test", "offset_identity",
         DirtyRoiPropFunc(
-            [](const Node&, const cv::Rect& roi, const GraphModel&,
-               const cv::Size&, const std::vector<cv::Size>&,
+            [](const Node&, const PixelRect& roi, const GraphModel&,
+               const PixelSize&, const std::vector<PixelSize>&,
                const plugin::ParameterMap&,
                const std::vector<const NodeOutput*>* available_inputs) {
               (void)available_inputs;
-              return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+              return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
             }));
     OpRegistry::instance().register_op_hp_monolithic(
         "cli_dirty_test", "empty_output",

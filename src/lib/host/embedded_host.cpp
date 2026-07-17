@@ -1320,28 +1320,6 @@ OperationStatus failure_from_last_error(const EmbeddedHostState& state,
 }
 
 /**
- * @brief Converts a public PixelRect into an OpenCV rectangle.
- *
- * @param rect Public rectangle.
- * @return cv::Rect with identical coordinates and size.
- * @throws Nothing.
- */
-cv::Rect to_cv_rect(const PixelRect& rect) {
-  return cv::Rect(rect.x, rect.y, rect.width, rect.height);
-}
-
-/**
- * @brief Converts an OpenCV rectangle into a public PixelRect.
- *
- * @param rect Internal rectangle.
- * @return Public rectangle with identical coordinates and size.
- * @throws Nothing.
- */
-PixelRect to_pixel_rect(const cv::Rect& rect) {
-  return PixelRect{rect.x, rect.y, rect.width, rect.height};
-}
-
-/**
  * @brief Converts a public dirty domain into the compute-service domain enum.
  *
  * @param domain Public dirty domain.
@@ -1470,7 +1448,7 @@ DebugMetadataSnapshot to_public_debug(const DebugMeta& debug) {
 SpatialSnapshot to_public_space(const SpatialContext& space, int output_width,
                                 int output_height) {
   SpatialSnapshot snapshot;
-  snapshot.absolute_roi = to_pixel_rect(space.absolute_roi);
+  snapshot.absolute_roi = space.absolute_roi;
   snapshot.extent = PixelSize{output_width, output_height};
   snapshot.global_scale_x = space.global_scale_x;
   snapshot.global_scale_y = space.global_scale_y;
@@ -1824,7 +1802,7 @@ ComputePlanningTaskSnapshot to_public_planning_task(
   snapshot.node = NodeId{task.node_id};
   snapshot.kind = to_public_planning_task_kind(task.kind);
   snapshot.domain = to_public_dirty_domain(task.domain);
-  snapshot.output_roi = to_pixel_rect(task.output_roi);
+  snapshot.output_roi = task.output_roi;
   snapshot.tile_x = task.tile_x;
   snapshot.tile_y = task.tile_y;
   snapshot.tile_size = task.tile_size;
@@ -1908,7 +1886,7 @@ DirtySourceSnapshot to_public_dirty_source(
   snapshot.generation = state.generation;
   snapshot.source_rois.reserve(state.source_rois.size());
   for (const auto& roi : state.source_rois) {
-    snapshot.source_rois.push_back(to_pixel_rect(roi));
+    snapshot.source_rois.push_back(roi);
   }
   return snapshot;
 }
@@ -1927,7 +1905,7 @@ DirtyTileSnapshot to_public_dirty_tile(const compute::DirtyTileKey& tile) {
   snapshot.tile_x = tile.tile_x;
   snapshot.tile_y = tile.tile_y;
   snapshot.tile_size = tile.tile_size;
-  snapshot.pixel_roi = to_pixel_rect(tile.pixel_roi);
+  snapshot.pixel_roi = tile.pixel_roi;
   return snapshot;
 }
 
@@ -1961,7 +1939,7 @@ DirtyMonolithicRegionSnapshot to_public_dirty_monolithic_region(
   DirtyMonolithicRegionSnapshot snapshot;
   snapshot.node = NodeId{region.node_id};
   snapshot.domain = to_public_dirty_domain(region.domain);
-  snapshot.pixel_roi = to_pixel_rect(region.pixel_roi);
+  snapshot.pixel_roi = region.pixel_roi;
   snapshot.whole_output = region.whole_output;
   return snapshot;
 }
@@ -1979,8 +1957,8 @@ DirtyEdgeMappingSnapshot to_public_dirty_edge_mapping(
   snapshot.from_node = NodeId{mapping.from_node_id};
   snapshot.to_node = NodeId{mapping.to_node_id};
   snapshot.domain = to_public_dirty_domain(mapping.domain);
-  snapshot.from_roi = to_pixel_rect(mapping.from_roi);
-  snapshot.to_roi = to_pixel_rect(mapping.to_roi);
+  snapshot.from_roi = mapping.from_roi;
+  snapshot.to_roi = mapping.to_roi;
   snapshot.direction = to_public_dirty_edge_direction(mapping.direction);
   return snapshot;
 }
@@ -2026,7 +2004,7 @@ DirtyRegionInspectionSnapshot to_public_dirty_snapshot(
     auto& converted = out.actual_dirty_rois[node_id];
     converted.reserve(rois.size());
     for (const auto& roi : rois) {
-      converted.push_back(to_pixel_rect(roi));
+      converted.push_back(roi);
     }
   }
 
@@ -2041,7 +2019,7 @@ DirtyRegionInspectionSnapshot to_public_dirty_snapshot(
  * @brief Converts public compute request values into the Kernel request.
  *
  * @param request Public Host compute request.
- * @return Kernel request with internal OpenCV dirty ROI.
+ * @return Kernel request with kernel-native dirty ROI.
  * @throws std::bad_alloc if copying strings allocates and fails.
  */
 Kernel::ComputeRequest to_kernel_compute_request(
@@ -2058,7 +2036,7 @@ Kernel::ComputeRequest to_kernel_compute_request(
   kernel_request.telemetry.enable_timing = request.telemetry.enable_timing;
   kernel_request.intent = request.intent;
   if (request.dirty_roi) {
-    kernel_request.dirty_roi = to_cv_rect(*request.dirty_roi);
+    kernel_request.dirty_roi = *request.dirty_roi;
   }
   return kernel_request;
 }
@@ -2885,14 +2863,13 @@ class EmbeddedHost final : public Host {
               EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
           auto roi = state_->interaction.cmd_project_roi(
-              session.value, start_node.value, to_cv_rect(start_roi),
-              target_node.value);
+              session.value, start_node.value, start_roi, target_node.value);
           if (!roi) {
             return failure_result<PixelRect>(
                 GraphErrc::InvalidParameter,
                 "failed to project ROI for session: " + session.value);
           }
-          return success_result(to_pixel_rect(*roi));
+          return success_result(*roi);
         });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
     if (admission) {
@@ -2941,14 +2918,13 @@ class EmbeddedHost final : public Host {
               EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
           auto roi = state_->interaction.cmd_project_roi_backward(
-              session.value, target_node.value, to_cv_rect(target_roi),
-              source_node.value);
+              session.value, target_node.value, target_roi, source_node.value);
           if (!roi) {
             return failure_result<PixelRect>(
                 GraphErrc::InvalidParameter,
                 "failed to project ROI backward for session: " + session.value);
           }
-          return success_result(to_pixel_rect(*roi));
+          return success_result(*roi);
         });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
     if (admission) {
@@ -3071,7 +3047,7 @@ class EmbeddedHost final : public Host {
           }
           auto snapshot = state_->interaction.cmd_begin_dirty_source(
               session.value, node.value, to_compute_dirty_domain(domain),
-              to_cv_rect(source_roi));
+              source_roi);
           if (!snapshot) {
             Result<DirtyRegionInspectionSnapshot> result;
             result.status = failure_from_last_error(
@@ -3109,7 +3085,7 @@ class EmbeddedHost final : public Host {
           }
           auto snapshot = state_->interaction.cmd_update_dirty_source(
               session.value, node.value, to_compute_dirty_domain(domain),
-              to_cv_rect(source_roi));
+              source_roi);
           if (!snapshot) {
             Result<DirtyRegionInspectionSnapshot> result;
             result.status = failure_from_last_error(

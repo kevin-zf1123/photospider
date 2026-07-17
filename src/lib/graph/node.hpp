@@ -59,7 +59,7 @@ struct DependencyLutCacheIdentity {
   /** @brief Image source node/output identities by destination input index. */
   std::vector<DependencyImageInputIdentity> image_input_sources;
   /** @brief Image-input extents indexed by destination input index. */
-  std::vector<cv::Size> input_extents;
+  std::vector<PixelSize> input_extents;
   /** @brief Data-dependent image-parent HP revisions by input index. */
   std::vector<uint64_t> upstream_content_revisions;
   /** @brief Whether upstream content revisions participate in equality. */
@@ -171,10 +171,10 @@ class Node {
   /** @brief Monotonic content revision of the reusable HP output. */
   int hp_version = 0;
   /** @brief Most recent dirty or updated ROI committed to the HP output. */
-  std::optional<cv::Rect> hp_roi;
+  std::optional<PixelRect> hp_roi;
 
   /** @brief Last committed full-resolution input extent for ROI propagation. */
-  std::optional<cv::Size> last_input_size_hp;
+  std::optional<PixelSize> last_input_size_hp;
 
   /**
    * @brief Validated dependency LUT and exact private reuse identity.

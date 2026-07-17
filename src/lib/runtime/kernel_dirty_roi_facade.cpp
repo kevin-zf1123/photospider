@@ -12,10 +12,10 @@
 namespace ps {
 
 /** @copydoc Kernel::project_roi_forward */
-std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
-                                                    int start_node_id,
-                                                    const cv::Rect& start_roi,
-                                                    int target_node_id) {
+std::optional<PixelRect> Kernel::project_roi_forward(const std::string& name,
+                                                     int start_node_id,
+                                                     const PixelRect& start_roi,
+                                                     int target_node_id) {
   return with_required_graph_state_last_error(
       name, "ROI projection failed: ",
       [this, start_node_id, start_roi, target_node_id](GraphModel& graph) {
@@ -40,10 +40,9 @@ std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
 }
 
 /** @copydoc Kernel::project_roi_backward */
-std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
-                                                     int target_node_id,
-                                                     const cv::Rect& target_roi,
-                                                     int source_node_id) {
+std::optional<PixelRect> Kernel::project_roi_backward(
+    const std::string& name, int target_node_id, const PixelRect& target_roi,
+    int source_node_id) {
   return with_required_graph_state_last_error(
       name, "ROI back-projection failed: ",
       [this, target_node_id, target_roi, source_node_id](GraphModel& graph) {
@@ -67,9 +66,10 @@ std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
       true);
 }
 
+/** @copydoc Kernel::begin_dirty_source */
 std::optional<compute::DirtyRegionSnapshot> Kernel::begin_dirty_source(
     const std::string& name, int node_id, compute::DirtyDomain domain,
-    const cv::Rect& source_roi) {
+    const PixelRect& source_roi) {
   auto result = begin_dirty_source_control(name, node_id, domain, source_roi);
   if (!result) {
     return std::nullopt;
@@ -77,10 +77,11 @@ std::optional<compute::DirtyRegionSnapshot> Kernel::begin_dirty_source(
   return result->snapshot;
 }
 
+/** @copydoc Kernel::begin_dirty_source_control */
 std::optional<compute::DirtyControlLaneResult>
 Kernel::begin_dirty_source_control(const std::string& name, int node_id,
                                    compute::DirtyDomain domain,
-                                   const cv::Rect& source_roi) {
+                                   const PixelRect& source_roi) {
   return with_graph_state_last_error(
       name, "Dirty source begin failed: ",
       [this, node_id, domain, source_roi](GraphModel& graph) {
@@ -90,9 +91,10 @@ Kernel::begin_dirty_source_control(const std::string& name, int node_id,
       });
 }
 
+/** @copydoc Kernel::update_dirty_source */
 std::optional<compute::DirtyRegionSnapshot> Kernel::update_dirty_source(
     const std::string& name, int node_id, compute::DirtyDomain domain,
-    const cv::Rect& source_roi) {
+    const PixelRect& source_roi) {
   auto result = update_dirty_source_control(name, node_id, domain, source_roi);
   if (!result) {
     return std::nullopt;
@@ -100,10 +102,11 @@ std::optional<compute::DirtyRegionSnapshot> Kernel::update_dirty_source(
   return result->snapshot;
 }
 
+/** @copydoc Kernel::update_dirty_source_control */
 std::optional<compute::DirtyControlLaneResult>
 Kernel::update_dirty_source_control(const std::string& name, int node_id,
                                     compute::DirtyDomain domain,
-                                    const cv::Rect& source_roi) {
+                                    const PixelRect& source_roi) {
   return with_graph_state_last_error(
       name, "Dirty source update failed: ",
       [this, node_id, domain, source_roi](GraphModel& graph) {
@@ -113,6 +116,7 @@ Kernel::update_dirty_source_control(const std::string& name, int node_id,
       });
 }
 
+/** @copydoc Kernel::end_dirty_source */
 std::optional<compute::DirtyRegionSnapshot> Kernel::end_dirty_source(
     const std::string& name, int node_id, compute::DirtyDomain domain) {
   auto result = end_dirty_source_control(name, node_id, domain);
@@ -122,6 +126,7 @@ std::optional<compute::DirtyRegionSnapshot> Kernel::end_dirty_source(
   return result->snapshot;
 }
 
+/** @copydoc Kernel::end_dirty_source_control */
 std::optional<compute::DirtyControlLaneResult> Kernel::end_dirty_source_control(
     const std::string& name, int node_id, compute::DirtyDomain domain) {
   return with_graph_state_last_error(

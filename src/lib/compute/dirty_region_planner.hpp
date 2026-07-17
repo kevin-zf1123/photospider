@@ -30,10 +30,10 @@ namespace ps::compute {
  */
 struct HpPlanEntry {
   /** @brief HP-space dirty ROI that should be recomputed for this node. */
-  cv::Rect roi_hp;
+  PixelRect roi_hp;
 
   /** @brief Resolved HP output extent used to clip roi_hp. */
-  cv::Size hp_size;
+  PixelSize hp_size;
 
   /** @brief HP-space halo radius required by neighborhood operators. */
   int halo_hp = 0;
@@ -51,16 +51,16 @@ struct HpPlanEntry {
  */
 struct RtPlanEntry {
   /** @brief HP-space dirty ROI used for propagation and debug metadata. */
-  cv::Rect roi_hp;
+  PixelRect roi_hp;
 
   /** @brief RT proxy-space dirty ROI used for RT tile execution. */
-  cv::Rect roi_rt;
+  PixelRect roi_rt;
 
   /** @brief Resolved HP output extent used to clip roi_hp. */
-  cv::Size hp_size;
+  PixelSize hp_size;
 
   /** @brief RT proxy output extent derived from hp_size. */
-  cv::Size rt_size;
+  PixelSize rt_size;
 
   /** @brief HP-space halo radius required by the source operator. */
   int halo_hp = 0;
@@ -159,7 +159,7 @@ class DirtyRegionPlanner {
    * @note The returned plan keeps all ROI metadata in HP coordinates.
    */
   HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
-                                             const cv::Rect& dirty_roi);
+                                             const PixelRect& dirty_roi);
 
   /**
    * @brief Plans an RT dirty update rooted at a target node.
@@ -178,7 +178,7 @@ class DirtyRegionPlanner {
    * used only for propagation and inspection metadata.
    */
   RealTimeDirtyPlan plan_real_time(GraphModel& graph, int node_id,
-                                   const cv::Rect& dirty_roi);
+                                   const PixelRect& dirty_roi);
 
   /**
    * @brief Records the beginning of a dirty source lifecycle event.
@@ -193,7 +193,7 @@ class DirtyRegionPlanner {
    */
   DirtyRegionSnapshot begin_dirty_source(GraphModel& graph, int node_id,
                                          DirtyDomain domain,
-                                         const cv::Rect& source_roi);
+                                         const PixelRect& source_roi);
 
   /**
    * @brief Records an incremental dirty source ROI update.
@@ -208,7 +208,7 @@ class DirtyRegionPlanner {
    */
   DirtyRegionSnapshot update_dirty_source(GraphModel& graph, int node_id,
                                           DirtyDomain domain,
-                                          const cv::Rect& source_roi);
+                                          const PixelRect& source_roi);
 
   /**
    * @brief Records the end of a dirty source lifecycle event.
@@ -252,7 +252,7 @@ class DirtyRegionPlanner {
    */
   template <typename Policy>
   typename Policy::Plan plan_dirty_domain(GraphModel& graph, int node_id,
-                                          const cv::Rect& dirty_roi);
+                                          const PixelRect& dirty_roi);
 
   /**
    * @brief Ensures a per-node plan entry has extent and halo metadata.
@@ -271,7 +271,7 @@ class DirtyRegionPlanner {
   template <typename Policy>
   typename Policy::Entry& ensure_plan_entry(
       GraphModel& graph, typename Policy::Plan& plan, int node_id,
-      std::unordered_map<int, cv::Size>& hp_size_cache);
+      std::unordered_map<int, PixelSize>& hp_size_cache);
 
   /**
    * @brief Propagates dirty demand backward through image-input edges.
@@ -287,7 +287,7 @@ class DirtyRegionPlanner {
   template <typename Policy>
   void propagate_dirty_entries(
       GraphModel& graph, typename Policy::Plan& plan,
-      std::unordered_map<int, cv::Size>& hp_size_cache);
+      std::unordered_map<int, PixelSize>& hp_size_cache);
 
   /**
    * @brief Finalizes dirty entries into snapshot tiles and monolithic records.
@@ -318,7 +318,7 @@ class DirtyRegionPlanner {
    */
   DirtyRegionSnapshot update_dirty_source_snapshot(
       GraphModel& graph, int node_id, DirtyDomain domain,
-      const cv::Rect* source_roi, DirtySourceLifecycleState lifecycle);
+      const PixelRect* source_roi, DirtySourceLifecycleState lifecycle);
 
   /**
    * @brief Populates dirty source metadata from finalized plan entries.
@@ -349,8 +349,8 @@ class DirtyRegionPlanner {
    * @note HP extent remains the authoritative propagation bound for RT
    * planning.
    */
-  cv::Size infer_hp_size(GraphModel& graph, int node_id,
-                         std::unordered_map<int, cv::Size>& cache) const;
+  PixelSize infer_hp_size(GraphModel& graph, int node_id,
+                          std::unordered_map<int, PixelSize>& cache) const;
 
   /**
    * @brief Infers an HP-space operator halo for dirty tiled execution.

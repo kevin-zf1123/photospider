@@ -25,7 +25,7 @@ namespace {
  * @note The helper deliberately does not add origins and dimensions, so even
  * hostile int endpoints cannot trigger signed overflow.
  */
-bool is_rect_empty(const cv::Rect& rect) noexcept {
+bool is_rect_empty(const PixelRect& rect) noexcept {
   return rect.width <= 0 || rect.height <= 0;
 }
 
@@ -39,7 +39,7 @@ bool is_rect_empty(const cv::Rect& rect) noexcept {
  * @note Callers treat an empty unrepresentable result as a rejected unsafe
  * contribution and retain already accumulated state.
  */
-cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) noexcept {
+PixelRect merge_rect(const PixelRect& a, const PixelRect& b) noexcept {
   if (is_rect_empty(a)) {
     return b;
   }
@@ -58,10 +58,10 @@ cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) noexcept {
       y1 > std::numeric_limits<int>::max() ||
       x1 - x0 > std::numeric_limits<int>::max() ||
       y1 - y0 > std::numeric_limits<int>::max()) {
-    return cv::Rect();
+    return PixelRect{};
   }
-  return cv::Rect(static_cast<int>(x0), static_cast<int>(y0),
-                  static_cast<int>(x1 - x0), static_cast<int>(y1 - y0));
+  return PixelRect{static_cast<int>(x0), static_cast<int>(y0),
+                   static_cast<int>(x1 - x0), static_cast<int>(y1 - y0)};
 }
 
 /**
@@ -74,10 +74,10 @@ cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) noexcept {
  * @note Origins and dimensions are added in signed 64-bit space before
  * clipping, avoiding signed-int overflow from plugin-controlled rectangles.
  */
-cv::Rect clamp_rect_to_bounds(const cv::Rect& rect,
-                              const cv::Size& bounds) noexcept {
+PixelRect clamp_rect_to_bounds(const PixelRect& rect,
+                               const PixelSize& bounds) noexcept {
   if (bounds.width <= 0 || bounds.height <= 0 || is_rect_empty(rect)) {
-    return cv::Rect();
+    return PixelRect{};
   }
   const std::int64_t right = static_cast<std::int64_t>(rect.x) + rect.width;
   const std::int64_t bottom = static_cast<std::int64_t>(rect.y) + rect.height;
@@ -86,10 +86,10 @@ cv::Rect clamp_rect_to_bounds(const cv::Rect& rect,
   const std::int64_t x1 = std::clamp<std::int64_t>(right, 0, bounds.width);
   const std::int64_t y1 = std::clamp<std::int64_t>(bottom, 0, bounds.height);
   if (x1 <= x0 || y1 <= y0) {
-    return cv::Rect();
+    return PixelRect{};
   }
-  return cv::Rect(static_cast<int>(x0), static_cast<int>(y0),
-                  static_cast<int>(x1 - x0), static_cast<int>(y1 - y0));
+  return PixelRect{static_cast<int>(x0), static_cast<int>(y0),
+                   static_cast<int>(x1 - x0), static_cast<int>(y1 - y0)};
 }
 
 /**
@@ -103,8 +103,8 @@ cv::Rect clamp_rect_to_bounds(const cv::Rect& rect,
  * @note Invalid historical/private spatial state is rejected defensively even
  * though the v2 operation output adapter validates newly returned snapshots.
  */
-std::optional<cv::Point2d> apply_matrix(const std::array<double, 9>& mat,
-                                        double x, double y) noexcept {
+std::optional<std::array<double, 2>> apply_matrix(
+    const std::array<double, 9>& mat, double x, double y) noexcept {
   if (!std::isfinite(x) || !std::isfinite(y) ||
       !std::all_of(mat.begin(), mat.end(),
                    [](double value) { return std::isfinite(value); })) {
@@ -120,7 +120,7 @@ std::optional<cv::Point2d> apply_matrix(const std::array<double, 9>& mat,
   if (!std::isfinite(tx) || !std::isfinite(ty)) {
     return std::nullopt;
   }
-  return cv::Point2d(tx, ty);
+  return std::array<double, 2>{tx, ty};
 }
 
 /**
@@ -133,14 +133,14 @@ std::optional<cv::Point2d> apply_matrix(const std::array<double, 9>& mat,
  * @note Every floating value is checked before floor/ceil and int conversion;
  * no NaN, infinity, or out-of-range double reaches a cast to int.
  */
-cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
-                                    const std::array<double, 9>& mat) noexcept {
+PixelRect transform_rect_with_matrix(
+    const PixelRect& rect, const std::array<double, 9>& mat) noexcept {
   if (is_rect_empty(rect)) {
-    return cv::Rect();
+    return PixelRect{};
   }
   const std::int64_t right = static_cast<std::int64_t>(rect.x) + rect.width;
   const std::int64_t bottom = static_cast<std::int64_t>(rect.y) + rect.height;
-  std::array<std::optional<cv::Point2d>, 4> transformed{
+  std::array<std::optional<std::array<double, 2>>, 4> transformed{
       apply_matrix(mat, rect.x, rect.y),
       apply_matrix(mat, static_cast<double>(right), rect.y),
       apply_matrix(mat, rect.x, static_cast<double>(bottom)),
@@ -148,19 +148,19 @@ cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
                    static_cast<double>(bottom))};
   if (std::any_of(transformed.begin(), transformed.end(),
                   [](const auto& point) { return !point.has_value(); })) {
-    return cv::Rect();
+    return PixelRect{};
   }
-  std::array<cv::Point2d, 4> pts{*transformed[0], *transformed[1],
-                                 *transformed[2], *transformed[3]};
-  double min_x = pts[0].x;
-  double max_x = pts[0].x;
-  double min_y = pts[0].y;
-  double max_y = pts[0].y;
+  std::array<std::array<double, 2>, 4> pts{*transformed[0], *transformed[1],
+                                           *transformed[2], *transformed[3]};
+  double min_x = pts[0][0];
+  double max_x = pts[0][0];
+  double min_y = pts[0][1];
+  double max_y = pts[0][1];
   for (size_t i = 1; i < pts.size(); ++i) {
-    min_x = std::min(min_x, pts[i].x);
-    max_x = std::max(max_x, pts[i].x);
-    min_y = std::min(min_y, pts[i].y);
-    max_y = std::max(max_y, pts[i].y);
+    min_x = std::min(min_x, pts[i][0]);
+    max_x = std::max(max_x, pts[i][0]);
+    min_y = std::min(min_y, pts[i][1]);
+    max_y = std::max(max_y, pts[i][1]);
   }
   const double rounded_x0 = std::floor(min_x);
   const double rounded_y0 = std::floor(min_y);
@@ -175,11 +175,11 @@ cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
       rounded_x1 <= rounded_x0 || rounded_y1 <= rounded_y0 ||
       rounded_x1 - rounded_x0 > std::numeric_limits<int>::max() ||
       rounded_y1 - rounded_y0 > std::numeric_limits<int>::max()) {
-    return cv::Rect();
+    return PixelRect{};
   }
-  return cv::Rect(static_cast<int>(rounded_x0), static_cast<int>(rounded_y0),
-                  static_cast<int>(rounded_x1 - rounded_x0),
-                  static_cast<int>(rounded_y1 - rounded_y0));
+  return PixelRect{static_cast<int>(rounded_x0), static_cast<int>(rounded_y0),
+                   static_cast<int>(rounded_x1 - rounded_x0),
+                   static_cast<int>(rounded_y1 - rounded_y0)};
 }
 
 /**
@@ -200,7 +200,7 @@ const NodeOutput* pick_cached_output(const Node& node) noexcept {
 /**
  * @brief Accumulates alternative upstream ROI contributions for one node.
  *
- * RoiAccumulator keeps the "no ROI yet" state separate from an empty cv::Rect
+ * RoiAccumulator keeps the "no ROI yet" state separate from an empty PixelRect
  * so operator propagation, spatial metadata, and dependency LUT lookup can be
  * merged without losing the distinction between "no contribution" and "empty
  * contribution".
@@ -220,11 +220,11 @@ class RoiAccumulator {
    * accepted ROI.
    * @note Empty ROIs are ignored to preserve existing fallback behavior.
    */
-  void include(const cv::Rect& roi) {
+  void include(const PixelRect& roi) {
     if (is_rect_empty(roi)) {
       return;
     }
-    const cv::Rect merged = has_roi_ ? merge_rect(roi_, roi) : roi;
+    const PixelRect merged = has_roi_ ? merge_rect(roi_, roi) : roi;
     if (is_rect_empty(merged)) {
       return;
     }
@@ -240,11 +240,11 @@ class RoiAccumulator {
    * @throws Nothing.
    * @note The returned value is a copy and cannot mutate accumulator state.
    */
-  cv::Rect value() const { return has_roi_ ? roi_ : cv::Rect(); }
+  PixelRect value() const { return has_roi_ ? roi_ : PixelRect{}; }
 
  private:
   /** @brief Current representable bounding union. */
-  cv::Rect roi_;
+  PixelRect roi_;
   /** @brief Whether roi_ contains at least one accepted contribution. */
   bool has_roi_ = false;
 };
@@ -258,7 +258,7 @@ class RoiAccumulator {
  * projection directions.
  *
  * @throws std::bad_alloc when the ROI map or pending queue grows.
- * @note The frontier stores node ids and value-type cv::Rect records only; it
+ * @note The frontier stores node ids and value-type PixelRect records only; it
  * never stores GraphModel pointers or scheduler/runtime state.
  */
 class RoiFrontier {
@@ -274,8 +274,8 @@ class RoiFrontier {
    * @note Existing state for node_id is replaced because seed starts a new
    * traversal.
    */
-  bool seed(int node_id, const cv::Rect& roi, const cv::Size& bounds) {
-    const cv::Rect clipped = clamp_rect_to_bounds(roi, bounds);
+  bool seed(int node_id, const PixelRect& roi, const PixelSize& bounds) {
+    const PixelRect clipped = clamp_rect_to_bounds(roi, bounds);
     if (is_rect_empty(clipped))
       return false;
     roi_map_[node_id] = clipped;
@@ -315,12 +315,12 @@ class RoiFrontier {
    * @throws Nothing.
    * @note The returned rectangle is a value copy of frontier state.
    */
-  std::optional<cv::Rect> clipped_roi(int node_id,
-                                      const cv::Size& bounds) const {
+  std::optional<PixelRect> clipped_roi(int node_id,
+                                       const PixelSize& bounds) const {
     const auto it = roi_map_.find(node_id);
     if (it == roi_map_.end())
       return std::nullopt;
-    const cv::Rect clipped = clamp_rect_to_bounds(it->second, bounds);
+    const PixelRect clipped = clamp_rect_to_bounds(it->second, bounds);
     if (is_rect_empty(clipped))
       return std::nullopt;
     return clipped;
@@ -337,9 +337,9 @@ class RoiFrontier {
    * @note The method preserves prior behavior where only changed bounding boxes
    * are requeued.
    */
-  bool merge_or_enqueue(int node_id, const cv::Rect& roi,
-                        const cv::Size& bounds) {
-    const cv::Rect clipped = clamp_rect_to_bounds(roi, bounds);
+  bool merge_or_enqueue(int node_id, const PixelRect& roi,
+                        const PixelSize& bounds) {
+    const PixelRect clipped = clamp_rect_to_bounds(roi, bounds);
     if (is_rect_empty(clipped))
       return false;
 
@@ -350,7 +350,7 @@ class RoiFrontier {
       return true;
     }
 
-    const cv::Rect merged =
+    const PixelRect merged =
         clamp_rect_to_bounds(merge_rect(it->second, clipped), bounds);
     if (merged == it->second || is_rect_empty(merged))
       return false;
@@ -361,7 +361,7 @@ class RoiFrontier {
 
  private:
   /** @brief Best known clipped ROI keyed by graph node id. */
-  std::unordered_map<int, cv::Rect> roi_map_;
+  std::unordered_map<int, PixelRect> roi_map_;
   /** @brief Node ids whose current ROI still needs propagation. */
   std::queue<int> pending_;
 };
@@ -374,7 +374,7 @@ class RoiFrontier {
  */
 struct DependencyInputState {
   /** @brief Known image-input extents by destination input index. */
-  std::vector<cv::Size> extents;
+  std::vector<PixelSize> extents;
   /** @brief Parent HP content revisions by destination input index. */
   std::vector<uint64_t> content_revisions;
 };
@@ -389,13 +389,13 @@ struct DependencyRoiContribution {
   /** @brief Destination image-input index selected by the cached LUT. */
   std::size_t input_index = 0;
   /** @brief Upstream ROI returned for the requested output cells. */
-  cv::Rect roi;
+  PixelRect roi;
 };
 
 /**
  * @brief Builds all image-input extents and content revisions for one node.
  *
- * @tparam SizeResolver Callable taking a node id and returning cv::Size.
+ * @tparam SizeResolver Callable taking a node id and returning PixelSize.
  * @param graph Graph containing image-input edges and parent revisions.
  * @param node_id Destination node id.
  * @param get_size Extent resolver with request-local caching.
@@ -433,9 +433,10 @@ DependencyInputState dependency_input_state(const GraphModel& graph,
  * @return True when one width and height pair is positive.
  * @throws Nothing.
  */
-bool has_valid_dependency_input(const std::vector<cv::Size>& extents) noexcept {
+bool has_valid_dependency_input(
+    const std::vector<PixelSize>& extents) noexcept {
   return std::any_of(extents.begin(), extents.end(),
-                     [](const cv::Size& extent) {
+                     [](const PixelSize& extent) {
                        return extent.width > 0 && extent.height > 0;
                      });
 }
@@ -496,8 +497,8 @@ std::vector<DependencyImageInputIdentity> image_input_source_identities(
  * @note Validation happens before either LUT or identity cache publication.
  */
 void validate_dependency_lut(const SpatialDependencyMap& lut,
-                             const std::vector<cv::Size>& input_extents,
-                             const cv::Size& child_size) {
+                             const std::vector<PixelSize>& input_extents,
+                             const PixelSize& child_size) {
   if (!lut.is_valid_for(child_size)) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Dependency LUT is invalid for the output extent.");
@@ -506,7 +507,7 @@ void validate_dependency_lut(const SpatialDependencyMap& lut,
     throw GraphError(GraphErrc::InvalidParameter,
                      "Dependency LUT names an unknown image input.");
   }
-  const cv::Size& upstream = input_extents[lut.upstream_input_index];
+  const PixelSize& upstream = input_extents[lut.upstream_input_index];
   if (upstream.width <= 0 || upstream.height <= 0) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Dependency LUT names an input with unknown extent.");
@@ -537,8 +538,8 @@ void validate_dependency_lut(const SpatialDependencyMap& lut,
 std::optional<DependencyRoiContribution> dependency_lookup(
     const Node& node, const GraphModel& graph,
     const DependencyBuilderSnapshot& builder_snapshot,
-    const cv::Rect& current_roi, DependencyInputState input_state,
-    const cv::Size& child_size,
+    const PixelRect& current_roi, DependencyInputState input_state,
+    const PixelSize& child_size,
     const plugin::ParameterMap& effective_parameters) {
   if (is_rect_empty(current_roi) ||
       !has_valid_dependency_input(input_state.extents) ||
@@ -596,9 +597,9 @@ std::optional<DependencyRoiContribution> dependency_lookup(
  * @throws Exceptions propagated by registered operator propagators.
  */
 void append_operator_upstream_roi(
-    const Node& node, const cv::Rect& clamped_roi,
-    const cv::Size& output_extent, const GraphModel& graph,
-    const std::vector<cv::Size>& input_extents,
+    const Node& node, const PixelRect& clamped_roi,
+    const PixelSize& output_extent, const GraphModel& graph,
+    const std::vector<PixelSize>& input_extents,
     const plugin::ParameterMap& effective_parameters,
     RoiAccumulator& accumulator) {
   auto propagate_fn =
@@ -618,7 +619,7 @@ void append_operator_upstream_roi(
  * @note Spatial metadata contributes only for single-image-input nodes with a
  * high-precision cached output, preserving the existing HP-authoritative rule.
  */
-void append_spatial_metadata_roi(const Node& node, const cv::Rect& clamped_roi,
+void append_spatial_metadata_roi(const Node& node, const PixelRect& clamped_roi,
                                  RoiAccumulator& accumulator) {
   if (node.image_inputs.size() != 1)
     return;
@@ -644,8 +645,8 @@ void append_spatial_metadata_roi(const Node& node, const cv::Rect& clamped_roi,
  * matching destination image-input edge.
  */
 std::optional<DependencyRoiContribution> dependency_lut_roi(
-    const Node& node, const GraphModel& graph, const cv::Rect& clamped_roi,
-    const cv::Size& downstream_size, DependencyInputState input_state,
+    const Node& node, const GraphModel& graph, const PixelRect& clamped_roi,
+    const PixelSize& downstream_size, DependencyInputState input_state,
     const plugin::ParameterMap& effective_parameters) {
   const auto builder_snapshot =
       OpRegistry::instance().get_dependency_builder_snapshot(node.type,
@@ -677,15 +678,15 @@ std::optional<DependencyRoiContribution> dependency_lut_roi(
  * affected.
  * @throws Exceptions propagated by registered forward propagators.
  */
-std::optional<cv::Rect> propagate_forward_edge_roi(
+std::optional<PixelRect> propagate_forward_edge_roi(
     const GraphModel& graph, const GraphTopologyEdge& edge,
-    const cv::Rect& parent_roi, const cv::Size& parent_size,
-    const cv::Size& child_size, const std::vector<cv::Size>& input_extents,
+    const PixelRect& parent_roi, const PixelSize& parent_size,
+    const PixelSize& child_size, const std::vector<PixelSize>& input_extents,
     const plugin::ParameterMap& effective_parameters) {
   const Node& child = graph.node(edge.to_node_id);
   auto forward_fn =
       OpRegistry::instance().get_forward_propagator(child.type, child.subtype);
-  const cv::Rect propagated = clamp_rect_to_bounds(
+  const PixelRect propagated = clamp_rect_to_bounds(
       forward_fn(child, parent_roi, graph, parent_size, child_size,
                  edge.input_index, input_extents, effective_parameters),
       child_size);
@@ -697,7 +698,7 @@ std::optional<cv::Rect> propagate_forward_edge_roi(
 /**
  * @brief Enqueues parent ROIs produced by a backward propagation step.
  *
- * @tparam SizeResolver Callable taking a node id and returning cv::Size.
+ * @tparam SizeResolver Callable taking a node id and returning PixelSize.
  * @param graph Graph containing the current node's image-input edges.
  * @param current_id Node whose parents receive upstream demand.
  * @param projection Shared and input-selected upstream contributions.
@@ -718,7 +719,7 @@ void enqueue_backward_parent_rois(const GraphModel& graph, int current_id,
       continue;
     }
     const int parent_id = edge.from_node_id;
-    const cv::Size parent_extent = get_size(parent_id);
+    const PixelSize parent_extent = get_size(parent_id);
     frontier.merge_or_enqueue(
         parent_id, projection.roi_for_input(edge.input_index, parent_extent),
         parent_extent);
@@ -727,7 +728,7 @@ void enqueue_backward_parent_rois(const GraphModel& graph, int current_id,
 
 }  // namespace
 
-cv::Rect UpstreamRoiProjection::roi_for_input(
+PixelRect UpstreamRoiProjection::roi_for_input(
     std::size_t input_index) const noexcept {
   if (dependency_input_index && *dependency_input_index == input_index) {
     return merge_rect(shared_roi, dependency_roi);
@@ -735,37 +736,37 @@ cv::Rect UpstreamRoiProjection::roi_for_input(
   return shared_roi;
 }
 
-cv::Rect UpstreamRoiProjection::roi_for_input(
-    std::size_t input_index, const cv::Size& input_extent) const noexcept {
-  const cv::Rect bounded_shared =
+PixelRect UpstreamRoiProjection::roi_for_input(
+    std::size_t input_index, const PixelSize& input_extent) const noexcept {
+  const PixelRect bounded_shared =
       clamp_rect_to_bounds(shared_roi, input_extent);
   if (!dependency_input_index || *dependency_input_index != input_index) {
     return bounded_shared;
   }
-  const cv::Rect bounded_dependency =
+  const PixelRect bounded_dependency =
       clamp_rect_to_bounds(dependency_roi, input_extent);
   return merge_rect(bounded_shared, bounded_dependency);
 }
 
-cv::Rect UpstreamRoiProjection::combined_roi() const noexcept {
+PixelRect UpstreamRoiProjection::combined_roi() const noexcept {
   return merge_rect(shared_roi, dependency_roi);
 }
 
 UpstreamRoiProjection RoiPropagationService::compute_upstream_projection(
-    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
-    std::unordered_map<int, cv::Size>& size_cache) const {
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, PixelSize>& size_cache) const {
   if (is_rect_empty(downstream_roi))
     return {};
 
   auto get_size = [&](int nid) {
     return extent_resolver_.resolve_output_extent(graph, nid, size_cache);
   };
-  cv::Rect clamped_roi =
+  PixelRect clamped_roi =
       clamp_rect_to_bounds(downstream_roi, get_size(node.id));
   if (is_rect_empty(clamped_roi))
     return {};
 
-  const cv::Size output_extent = get_size(node.id);
+  const PixelSize output_extent = get_size(node.id);
   DependencyInputState input_state =
       dependency_input_state(graph, node.id, get_size);
   const plugin::ParameterMap effective_parameters =
@@ -787,22 +788,22 @@ UpstreamRoiProjection RoiPropagationService::compute_upstream_projection(
   return projection;
 }
 
-cv::Rect RoiPropagationService::compute_upstream_roi(
-    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
-    std::unordered_map<int, cv::Size>& size_cache) const {
+PixelRect RoiPropagationService::compute_upstream_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, PixelSize>& size_cache) const {
   return compute_upstream_projection(node, downstream_roi, graph, size_cache)
       .combined_roi();
 }
 
-std::optional<cv::Rect> RoiPropagationService::project_roi_forward(
-    const GraphModel& graph, int start_node_id, const cv::Rect& start_roi,
+std::optional<PixelRect> RoiPropagationService::project_roi_forward(
+    const GraphModel& graph, int start_node_id, const PixelRect& start_roi,
     int target_node_id) const {
   if (!graph.has_node(start_node_id) || !graph.has_node(target_node_id))
     return std::nullopt;
   if (is_rect_empty(start_roi))
     return std::nullopt;
 
-  std::unordered_map<int, cv::Size> size_cache;
+  std::unordered_map<int, PixelSize> size_cache;
   auto get_size = [&](int nid) {
     return extent_resolver_.resolve_output_extent(graph, nid, size_cache);
   };
@@ -820,13 +821,13 @@ std::optional<cv::Rect> RoiPropagationService::project_roi_forward(
     if (current == target_node_id)
       break;
 
-    cv::Size parent_size = get_size(current);
+    PixelSize parent_size = get_size(current);
     for (const auto& edge : graph.downstream_edges(current)) {
       if (edge.kind != GraphTopologyEdgeKind::ImageInput) {
         continue;
       }
       int child_id = edge.to_node_id;
-      cv::Size child_size = get_size(child_id);
+      PixelSize child_size = get_size(child_id);
       if (child_size.width <= 0 || child_size.height <= 0)
         continue;
 
@@ -847,15 +848,15 @@ std::optional<cv::Rect> RoiPropagationService::project_roi_forward(
   return frontier.clipped_roi(target_node_id, get_size(target_node_id));
 }
 
-std::optional<cv::Rect> RoiPropagationService::project_roi_backward(
-    const GraphModel& graph, int target_node_id, const cv::Rect& target_roi,
+std::optional<PixelRect> RoiPropagationService::project_roi_backward(
+    const GraphModel& graph, int target_node_id, const PixelRect& target_roi,
     int source_node_id) const {
   if (!graph.has_node(target_node_id) || !graph.has_node(source_node_id))
     return std::nullopt;
   if (is_rect_empty(target_roi))
     return std::nullopt;
 
-  std::unordered_map<int, cv::Size> size_cache;
+  std::unordered_map<int, PixelSize> size_cache;
   auto get_size = [&](int nid) {
     return extent_resolver_.resolve_output_extent(graph, nid, size_cache);
   };

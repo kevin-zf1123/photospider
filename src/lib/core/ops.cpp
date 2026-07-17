@@ -24,6 +24,7 @@
 #if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
 #include "core/opencv_operation_test_access.hpp"
 #endif
+#include "compute/compute_geometry.hpp"  // NOLINT(build/include_subdir)
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -111,12 +112,86 @@ void set_opencv_operation_observer_for_testing(
 #define PHOTOSPIDER_OBSERVE_OPENCV_OPERATION(operation_key) ((void)0)
 #endif
 
-static cv::Rect expand_roi(const cv::Rect& roi, int padding) {
-  if (padding <= 0 || roi.width <= 0 || roi.height <= 0) {
-    return roi;
+/**
+ * @brief Expands one kernel-native propagation ROI with checked arithmetic.
+ *
+ * @param roi Source ROI.
+ * @param padding Non-negative pixels added on every side.
+ * @return Expanded ROI, unchanged for non-positive padding, or empty when the
+ *         expanded half-open range is not int-representable.
+ * @throws Nothing.
+ * @note Clipping remains the caller's responsibility because each operation
+ *       has different input-extent knowledge.
+ */
+static PixelRect expand_roi(const PixelRect& roi, int padding) noexcept {
+  return compute::expand_rect(roi, padding);
+}
+
+/**
+ * @brief Builds a PixelRect from floor/ceil transformed floating-point edges.
+ *
+ * @param left Floating-point inclusive left edge.
+ * @param top Floating-point inclusive top edge.
+ * @param right Floating-point exclusive right edge.
+ * @param bottom Floating-point exclusive bottom edge.
+ * @return Checked integer rectangle or empty for non-finite,
+ *         non-representable, or non-positive geometry.
+ * @throws Nothing.
+ * @note This helper centralizes the resize callbacks' outward rounding before
+ *       delegating final narrowing to compute::rect_from_edges.
+ */
+static PixelRect rounded_pixel_rect(double left, double top, double right,
+                                    double bottom) noexcept {
+  const double x0 = std::floor(left);
+  const double y0 = std::floor(top);
+  const double x1 = std::ceil(right);
+  const double y1 = std::ceil(bottom);
+  constexpr double kIntMin =
+      static_cast<double>(std::numeric_limits<int>::min());
+  constexpr double kIntMax =
+      static_cast<double>(std::numeric_limits<int>::max());
+  if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(x1) ||
+      !std::isfinite(y1) || x0 < kIntMin || y0 < kIntMin || x1 > kIntMax ||
+      y1 > kIntMax) {
+    return PixelRect{};
   }
-  return cv::Rect(roi.x - padding, roi.y - padding, roi.width + padding * 2,
-                  roi.height + padding * 2);
+  return compute::rect_from_edges(
+      static_cast<std::int64_t>(x0), static_cast<std::int64_t>(y0),
+      static_cast<std::int64_t>(x1), static_cast<std::int64_t>(y1));
+}
+
+/**
+ * @brief Builds a PixelRect from truncation-based origin and extent values.
+ *
+ * @param x Floating-point origin x.
+ * @param y Floating-point origin y.
+ * @param width Floating-point width.
+ * @param height Floating-point height.
+ * @return Checked integer rectangle or empty for invalid/unrepresentable
+ *         values.
+ * @throws Nothing.
+ * @note Ratio-mode crop execution truncates each scaled component toward zero;
+ *       propagation mirrors that policy before checked endpoint construction.
+ */
+static PixelRect truncated_pixel_rect(double x, double y, double width,
+                                      double height) noexcept {
+  const double tx = std::trunc(x);
+  const double ty = std::trunc(y);
+  const double tw = std::trunc(width);
+  const double th = std::trunc(height);
+  constexpr double kIntMin =
+      static_cast<double>(std::numeric_limits<int>::min());
+  constexpr double kIntMax =
+      static_cast<double>(std::numeric_limits<int>::max());
+  if (!std::isfinite(tx) || !std::isfinite(ty) || !std::isfinite(tw) ||
+      !std::isfinite(th) || tx < kIntMin || ty < kIntMin || tx > kIntMax ||
+      ty > kIntMax || tw <= 0.0 || th <= 0.0 || tw > kIntMax || th > kIntMax) {
+    return PixelRect{};
+  }
+  const auto x0 = static_cast<std::int64_t>(tx);
+  const auto y0 = static_cast<std::int64_t>(ty);
+  return compute::rect_from_edges(x0, y0, x0 + static_cast<std::int64_t>(tw),
+                                  y0 + static_cast<std::int64_t>(th));
 }
 
 static std::array<double, 9> multiply_matrix(const std::array<double, 9>& lhs,
@@ -243,19 +318,36 @@ static std::optional<std::string> node_param_string(const Node& node,
   return std::nullopt;
 }
 
-static cv::Size cached_image_size(const std::optional<NodeOutput>& output_opt) {
+/**
+ * @brief Reads a valid cached image extent without exposing provider geometry.
+ *
+ * @param output_opt Optional cached node output.
+ * @return Positive kernel-native extent, otherwise an empty PixelSize.
+ * @throws Nothing.
+ * @note Pixel storage ownership stays in NodeOutput; only scalar dimensions
+ *       cross into ROI propagation.
+ */
+static PixelSize cached_image_size(
+    const std::optional<NodeOutput>& output_opt) noexcept {
   if (!output_opt)
-    return cv::Size();
+    return PixelSize{};
   const auto& buf = output_opt->image_buffer;
   if (buf.width <= 0 || buf.height <= 0)
-    return cv::Size();
-  return cv::Size(buf.width, buf.height);
+    return PixelSize{};
+  return PixelSize{buf.width, buf.height};
 }
 
-// Best-effort input extent without forcing execution; tries runtime hints,
-// then parent cached outputs.
-static cv::Size infer_input_size_hint(const Node& node,
-                                      const GraphModel& graph) {
+/**
+ * @brief Infers an input extent without forcing graph execution.
+ *
+ * @param node Node whose runtime hint and parent caches are inspected.
+ * @param graph Graph used to resolve image-input parents.
+ * @return First positive kernel-native extent, otherwise empty.
+ * @throws Nothing.
+ * @note Runtime HP history takes precedence over parent cached outputs.
+ */
+static PixelSize infer_input_size_hint(const Node& node,
+                                       const GraphModel& graph) noexcept {
   if (node.last_input_size_hp && node.last_input_size_hp->width > 0 &&
       node.last_input_size_hp->height > 0) {
     return *node.last_input_size_hp;
@@ -266,11 +358,11 @@ static cv::Size infer_input_size_hint(const Node& node,
     const Node* parent = graph.find_node(input.from_node_id);
     if (!parent)
       continue;
-    cv::Size size = cached_image_size(parent->cached_output_high_precision);
+    PixelSize size = cached_image_size(parent->cached_output_high_precision);
     if (size.width > 0 && size.height > 0)
       return size;
   }
-  return cv::Size();
+  return PixelSize{};
 }
 
 /**
@@ -339,7 +431,9 @@ static int infer_radius_from_params(
   for (const char* key : size_keys) {
     auto val = parameter_map_int(parameters, key);
     if (val.has_value()) {
-      int computed = std::max(0, (*val - 1) / 2);
+      const int computed =
+          *val > 0 ? static_cast<int>((static_cast<std::int64_t>(*val) - 1) / 2)
+                   : 0;
       radius = std::max(radius, computed);
     }
   }
@@ -381,23 +475,58 @@ int builtin_input_halo_radius(const std::string& type,
   return 0;
 }
 
-static cv::Rect gaussian_blur_dirty_roi(const Node& node,
-                                        const cv::Rect& downstream_roi,
-                                        const GraphModel&, const cv::Size&,
-                                        const std::vector<cv::Size>&,
-                                        const plugin::ParameterMap& parameters,
-                                        const std::vector<const NodeOutput*>*) {
+/**
+ * @brief Maps Gaussian-blur output dirtiness to its halo-expanded input ROI.
+ *
+ * @param node Blur node supplying operation identity.
+ * @param downstream_roi Dirty output ROI.
+ * @param graph Unused graph context required by the callback contract.
+ * @param output_extent Unused output extent.
+ * @param input_extents Unused input extents.
+ * @param parameters Effective request-local parameters.
+ * @param inputs Unused resolved input snapshots.
+ * @return Kernel-native input demand expanded by the effective blur radius.
+ * @throws Nothing.
+ * @note The planner clips the returned demand to the resolved input extent.
+ */
+static PixelRect gaussian_blur_dirty_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* inputs) noexcept {
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)inputs;
   const int radius =
       builtin_input_halo_radius(node.type, node.subtype, parameters);
   return expand_roi(downstream_roi, radius);
 }
 
-static cv::Rect convolve_dirty_roi(const Node& node,
-                                   const cv::Rect& downstream_roi,
-                                   const GraphModel&, const cv::Size&,
-                                   const std::vector<cv::Size>&,
-                                   const plugin::ParameterMap& parameters,
-                                   const std::vector<const NodeOutput*>*) {
+/**
+ * @brief Maps convolution output dirtiness to its halo-expanded input ROI.
+ *
+ * @param node Convolution node supplying operation identity.
+ * @param downstream_roi Dirty output ROI.
+ * @param graph Unused graph context required by the callback contract.
+ * @param output_extent Unused output extent.
+ * @param input_extents Unused input extents.
+ * @param parameters Effective request-local parameters.
+ * @param inputs Unused resolved input snapshots.
+ * @return Kernel-native input demand expanded by the effective kernel radius.
+ * @throws Nothing.
+ * @note The planner performs extent clipping after this operation-specific
+ *       expansion.
+ */
+static PixelRect convolve_dirty_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* inputs) noexcept {
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)inputs;
   const int radius =
       builtin_input_halo_radius(node.type, node.subtype, parameters);
   return expand_roi(downstream_roi, radius);
@@ -415,25 +544,44 @@ static int interpolation_padding(const Node& node) {
   return 1;  // linear and default
 }
 
-static cv::Rect resize_dirty_roi(const Node& node,
-                                 const cv::Rect& downstream_roi,
-                                 const GraphModel& graph, const cv::Size&,
-                                 const std::vector<cv::Size>&,
-                                 const plugin::ParameterMap&,
-                                 const std::vector<const NodeOutput*>*) {
+/**
+ * @brief Projects a resized output ROI backward into its source extent.
+ *
+ * @param node Resize node with target dimensions and interpolation policy.
+ * @param downstream_roi Dirty ROI in resized output coordinates.
+ * @param graph Graph used for best-effort source extent resolution.
+ * @param output_extent Unused resolved output extent.
+ * @param input_extents Unused callback input extents.
+ * @param parameters Unused effective parameter snapshot.
+ * @param inputs Unused resolved input snapshots.
+ * @return Clipped kernel-native source ROI, or empty when required dimensions
+ *         are unavailable or invalid.
+ * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @note Floating-point scale edges round outward and checked geometry rejects
+ *       non-representable results.
+ */
+static PixelRect resize_dirty_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* inputs) {
+  (void)output_extent;
+  (void)input_extents;
+  (void)parameters;
+  (void)inputs;
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
 
   auto maybe_out_w = node_param_int(node, "width");
   auto maybe_out_h = node_param_int(node, "height");
   if (!maybe_out_w || !maybe_out_h || *maybe_out_w <= 0 || *maybe_out_h <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
 
-  const cv::Size input_size = infer_input_size_hint(node, graph);
+  const PixelSize input_size = infer_input_size_hint(node, graph);
   if (input_size.width <= 0 || input_size.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
 
   const double scale_x =
@@ -447,35 +595,53 @@ static cv::Rect resize_dirty_roi(const Node& node,
   const double top = static_cast<double>(downstream_roi.y) * scale_y -
                      static_cast<double>(pad);
   const double right =
-      static_cast<double>(downstream_roi.x + downstream_roi.width) * scale_x +
+      (static_cast<double>(downstream_roi.x) + downstream_roi.width) * scale_x +
       static_cast<double>(pad);
   const double bottom =
-      static_cast<double>(downstream_roi.y + downstream_roi.height) * scale_y +
+      (static_cast<double>(downstream_roi.y) + downstream_roi.height) *
+          scale_y +
       static_cast<double>(pad);
 
-  int x0 = static_cast<int>(std::floor(left));
-  int y0 = static_cast<int>(std::floor(top));
-  int x1 = static_cast<int>(std::ceil(right));
-  int y1 = static_cast<int>(std::ceil(bottom));
-
-  cv::Rect upstream_roi(x0, y0, x1 - x0, y1 - y0);
-  return upstream_roi & cv::Rect(0, 0, input_size.width, input_size.height);
+  return compute::clip_rect(rounded_pixel_rect(left, top, right, bottom),
+                            input_size);
 }
 
-static cv::Rect crop_dirty_roi(const Node& node, const cv::Rect& downstream_roi,
-                               const GraphModel& graph, const cv::Size&,
-                               const std::vector<cv::Size>&,
-                               const plugin::ParameterMap&,
-                               const std::vector<const NodeOutput*>*) {
+/**
+ * @brief Projects a crop output ROI backward into source coordinates.
+ *
+ * @param node Crop node with ratio- or value-mode geometry.
+ * @param downstream_roi Dirty ROI in cropped output coordinates.
+ * @param graph Graph used for best-effort source extent resolution.
+ * @param output_extent Unused resolved output extent.
+ * @param input_extents Unused callback input extents.
+ * @param parameters Unused effective parameter snapshot.
+ * @param inputs Unused resolved input snapshots.
+ * @return Kernel-native source ROI clipped to known bounds, or empty for
+ *         invalid crop geometry.
+ * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @note Ratio-mode truncation matches execution; intersections and translation
+ *       use checked half-open geometry.
+ */
+static PixelRect crop_dirty_roi(const Node& node,
+                                const PixelRect& downstream_roi,
+                                const GraphModel& graph,
+                                const PixelSize& output_extent,
+                                const std::vector<PixelSize>& input_extents,
+                                const plugin::ParameterMap& parameters,
+                                const std::vector<const NodeOutput*>* inputs) {
+  (void)output_extent;
+  (void)input_extents;
+  (void)parameters;
+  (void)inputs;
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
 
-  const cv::Size input_size = infer_input_size_hint(node, graph);
+  const PixelSize input_size = infer_input_size_hint(node, graph);
   const bool have_input_size = input_size.width > 0 && input_size.height > 0;
-  const cv::Rect input_bounds =
-      have_input_size ? cv::Rect(0, 0, input_size.width, input_size.height)
-                      : cv::Rect();
+  const PixelRect input_bounds =
+      have_input_size ? PixelRect{0, 0, input_size.width, input_size.height}
+                      : PixelRect{};
 
   std::string mode = as_str(node.runtime_parameters, "mode", "");
   if (mode.empty())
@@ -483,106 +649,157 @@ static cv::Rect crop_dirty_roi(const Node& node, const cv::Rect& downstream_roi,
   if (mode.empty())
     mode = "value";
 
-  cv::Rect crop_rect;
+  PixelRect crop_rect;
   if (mode == "ratio") {
     if (!have_input_size) {
-      return cv::Rect();
+      return PixelRect{};
     }
     auto rx_opt = node_param_double(node, "x");
     auto ry_opt = node_param_double(node, "y");
     auto rw_opt = node_param_double(node, "width");
     auto rh_opt = node_param_double(node, "height");
     if (!rx_opt || !ry_opt || !rw_opt || !rh_opt) {
-      return cv::Rect();
+      return PixelRect{};
     }
     double rx = *rx_opt;
     double ry = *ry_opt;
     double rw = *rw_opt;
     double rh = *rh_opt;
     if (rx < 0.0 || ry < 0.0 || rw <= 0.0 || rh <= 0.0) {
-      return cv::Rect();
+      return PixelRect{};
     }
-    int x = static_cast<int>(rx * input_size.width);
-    int y = static_cast<int>(ry * input_size.height);
-    int w = static_cast<int>(rw * input_size.width);
-    int h = static_cast<int>(rh * input_size.height);
-    if (w <= 0 || h <= 0) {
-      return cv::Rect();
-    }
-    crop_rect = cv::Rect(x, y, w, h) & input_bounds;
+    crop_rect =
+        truncated_pixel_rect(rx * input_size.width, ry * input_size.height,
+                             rw * input_size.width, rh * input_size.height);
+    crop_rect = compute::intersect_rect(crop_rect, input_bounds);
     if (crop_rect.width <= 0 || crop_rect.height <= 0) {
-      return cv::Rect();
+      return PixelRect{};
     }
   } else {
     auto w_opt = node_param_int(node, "width");
     auto h_opt = node_param_int(node, "height");
     if (!w_opt || !h_opt || *w_opt <= 0 || *h_opt <= 0) {
-      return cv::Rect();
+      return PixelRect{};
     }
     int x = node_param_int(node, "x").value_or(0);
     int y = node_param_int(node, "y").value_or(0);
-    crop_rect = cv::Rect(x, y, *w_opt, *h_opt);
+    crop_rect =
+        compute::rect_from_edges(x, y, static_cast<std::int64_t>(x) + *w_opt,
+                                 static_cast<std::int64_t>(y) + *h_opt);
     if (have_input_size) {
-      crop_rect = crop_rect & input_bounds;
+      crop_rect = compute::intersect_rect(crop_rect, input_bounds);
       if (crop_rect.width <= 0 || crop_rect.height <= 0) {
-        return cv::Rect();
+        return PixelRect{};
       }
     }
   }
 
-  cv::Rect output_bounds(0, 0, crop_rect.width, crop_rect.height);
-  cv::Rect valid_downstream_roi = downstream_roi & output_bounds;
+  const PixelRect valid_downstream_roi = compute::clip_rect(
+      downstream_roi, PixelSize{crop_rect.width, crop_rect.height});
   if (valid_downstream_roi.width <= 0 || valid_downstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
 
-  cv::Rect upstream_roi(crop_rect.x + valid_downstream_roi.x,
-                        crop_rect.y + valid_downstream_roi.y,
-                        valid_downstream_roi.width,
-                        valid_downstream_roi.height);
-  return upstream_roi;
+  return compute::translate_rect(valid_downstream_roi, crop_rect.x,
+                                 crop_rect.y);
 }
 
-static cv::Rect gaussian_blur_forward_roi(
-    const Node& node, const cv::Rect& upstream_roi, const GraphModel& graph,
-    const cv::Size& parent_size, const cv::Size&, size_t,
-    const std::vector<cv::Size>&, const plugin::ParameterMap& parameters) {
+/**
+ * @brief Projects changed Gaussian-blur input pixels into output coordinates.
+ *
+ * @param node Blur node supplying operation identity.
+ * @param upstream_roi Changed source ROI.
+ * @param graph Unused graph context.
+ * @param parent_size Source extent.
+ * @param child_size Unused destination extent.
+ * @param input_index Unused input slot.
+ * @param input_extents Unused input extent list.
+ * @param parameters Effective request-local parameters.
+ * @return Source-clipped ROI expanded by the effective blur radius.
+ * @throws Nothing.
+ * @note Expansion intentionally follows clipping to preserve prior propagation
+ *       semantics; downstream planning owns destination clipping.
+ */
+static PixelRect gaussian_blur_forward_roi(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_size, const PixelSize& child_size,
+    size_t input_index, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters) noexcept {
   (void)graph;
+  (void)child_size;
+  (void)input_index;
+  (void)input_extents;
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
   const int radius =
       builtin_input_halo_radius(node.type, node.subtype, parameters);
-  return expand_roi(
-      upstream_roi & cv::Rect(0, 0, parent_size.width, parent_size.height),
-      radius);
+  return expand_roi(compute::clip_rect(upstream_roi, parent_size), radius);
 }
 
-static cv::Rect convolve_forward_roi(
-    const Node& node, const cv::Rect& upstream_roi, const GraphModel& graph,
-    const cv::Size& parent_size, const cv::Size&, size_t,
-    const std::vector<cv::Size>&, const plugin::ParameterMap& parameters) {
+/**
+ * @brief Projects changed convolution input pixels into output coordinates.
+ *
+ * @param node Convolution node supplying operation identity.
+ * @param upstream_roi Changed source ROI.
+ * @param graph Unused graph context.
+ * @param parent_size Source extent.
+ * @param child_size Unused destination extent.
+ * @param input_index Unused input slot.
+ * @param input_extents Unused input extent list.
+ * @param parameters Effective request-local parameters.
+ * @return Source-clipped ROI expanded by the effective kernel radius.
+ * @throws Nothing.
+ * @note Downstream planning clips the expanded result to its destination
+ *       extent.
+ */
+static PixelRect convolve_forward_roi(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_size, const PixelSize& child_size,
+    size_t input_index, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters) noexcept {
   (void)graph;
+  (void)child_size;
+  (void)input_index;
+  (void)input_extents;
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
   const int radius =
       builtin_input_halo_radius(node.type, node.subtype, parameters);
-  return expand_roi(
-      upstream_roi & cv::Rect(0, 0, parent_size.width, parent_size.height),
-      radius);
+  return expand_roi(compute::clip_rect(upstream_roi, parent_size), radius);
 }
 
-static cv::Rect resize_forward_roi(
-    const Node& node, const cv::Rect& upstream_roi, const GraphModel&,
-    const cv::Size& parent_size, const cv::Size& child_size, size_t,
-    const std::vector<cv::Size>&, const plugin::ParameterMap&) {
+/**
+ * @brief Projects a source ROI forward through resize geometry.
+ *
+ * @param node Resize node with interpolation policy.
+ * @param upstream_roi Changed source ROI.
+ * @param graph Unused graph context.
+ * @param parent_size Source extent.
+ * @param child_size Destination extent.
+ * @param input_index Unused input slot.
+ * @param input_extents Unused input extent list.
+ * @param parameters Unused effective parameter snapshot.
+ * @return Outward-rounded destination ROI or empty for invalid extents.
+ * @throws std::bad_alloc if interpolation parameter lookup exhausts memory.
+ * @note Destination clipping remains the propagation service's responsibility.
+ */
+static PixelRect resize_forward_roi(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_size, const PixelSize& child_size,
+    size_t input_index, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters) {
+  (void)graph;
+  (void)input_index;
+  (void)input_extents;
+  (void)parameters;
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
   if (parent_size.width <= 0 || parent_size.height <= 0 ||
       child_size.width <= 0 || child_size.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
   const double scale_x = static_cast<double>(child_size.width) /
                          static_cast<double>(parent_size.width);
@@ -595,80 +812,165 @@ static cv::Rect resize_forward_roi(
   const double top =
       static_cast<double>(upstream_roi.y) * scale_y - static_cast<double>(pad);
   const double right =
-      static_cast<double>(upstream_roi.x + upstream_roi.width) * scale_x +
+      (static_cast<double>(upstream_roi.x) + upstream_roi.width) * scale_x +
       static_cast<double>(pad);
   const double bottom =
-      static_cast<double>(upstream_roi.y + upstream_roi.height) * scale_y +
+      (static_cast<double>(upstream_roi.y) + upstream_roi.height) * scale_y +
       static_cast<double>(pad);
 
-  int x0 = static_cast<int>(std::floor(left));
-  int y0 = static_cast<int>(std::floor(top));
-  int x1 = static_cast<int>(std::ceil(right));
-  int y1 = static_cast<int>(std::ceil(bottom));
-
-  return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+  return rounded_pixel_rect(left, top, right, bottom);
 }
 
-static cv::Rect crop_forward_roi(const Node& node, const cv::Rect& upstream_roi,
-                                 const GraphModel&, const cv::Size& parent_size,
-                                 const cv::Size&, size_t,
-                                 const std::vector<cv::Size>&,
-                                 const plugin::ParameterMap&) {
+/**
+ * @brief Projects a source ROI forward into crop-local coordinates.
+ *
+ * @param node Crop node with ratio- or value-mode geometry.
+ * @param upstream_roi Changed source ROI.
+ * @param graph Unused graph context.
+ * @param parent_size Source extent.
+ * @param child_size Unused destination extent.
+ * @param input_index Unused input slot.
+ * @param input_extents Unused input extent list.
+ * @param parameters Unused effective parameter snapshot.
+ * @return Kernel-native crop-local intersection or empty for invalid geometry.
+ * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @note Ratio-mode truncation matches crop execution; checked translation
+ *       prevents overflow at extreme origins.
+ */
+static PixelRect crop_forward_roi(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_size, const PixelSize& child_size,
+    size_t input_index, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters) {
+  (void)graph;
+  (void)child_size;
+  (void)input_index;
+  (void)input_extents;
+  (void)parameters;
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
   std::string mode = node_param_string(node, "mode").value_or("value");
-  cv::Rect crop_rect;
+  PixelRect crop_rect;
   if (mode == "ratio") {
     if (parent_size.width <= 0 || parent_size.height <= 0)
-      return cv::Rect();
+      return PixelRect{};
     auto rx = node_param_double(node, "x");
     auto ry = node_param_double(node, "y");
     auto rw = node_param_double(node, "width");
     auto rh = node_param_double(node, "height");
     if (!rx || !ry || !rw || !rh)
-      return cv::Rect();
-    int x = static_cast<int>(*rx * parent_size.width);
-    int y = static_cast<int>(*ry * parent_size.height);
-    int w = static_cast<int>(*rw * parent_size.width);
-    int h = static_cast<int>(*rh * parent_size.height);
-    if (w <= 0 || h <= 0)
-      return cv::Rect();
-    crop_rect = cv::Rect(x, y, w, h);
+      return PixelRect{};
+    crop_rect =
+        truncated_pixel_rect(*rx * parent_size.width, *ry * parent_size.height,
+                             *rw * parent_size.width, *rh * parent_size.height);
   } else {
     int x = node_param_int(node, "x").value_or(0);
     int y = node_param_int(node, "y").value_or(0);
     auto w = node_param_int(node, "width");
     auto h = node_param_int(node, "height");
     if (!w || !h || *w <= 0 || *h <= 0)
-      return cv::Rect();
-    crop_rect = cv::Rect(x, y, *w, *h);
+      return PixelRect{};
+    crop_rect =
+        compute::rect_from_edges(x, y, static_cast<std::int64_t>(x) + *w,
+                                 static_cast<std::int64_t>(y) + *h);
   }
 
-  cv::Rect intersect = upstream_roi &
-                       cv::Rect(0, 0, parent_size.width, parent_size.height) &
-                       crop_rect;
+  const PixelRect intersect = compute::intersect_rect(
+      compute::clip_rect(upstream_roi, parent_size), crop_rect);
   if (intersect.width <= 0 || intersect.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
-  return cv::Rect(intersect.x - crop_rect.x, intersect.y - crop_rect.y,
-                  intersect.width, intersect.height);
+  return compute::translate_rect(intersect,
+                                 -static_cast<std::int64_t>(crop_rect.x),
+                                 -static_cast<std::int64_t>(crop_rect.y));
 }
 
-static cv::Rect identity_forward_roi(const Node&, const cv::Rect& upstream_roi,
-                                     const GraphModel&, const cv::Size&,
-                                     const cv::Size&, size_t,
-                                     const std::vector<cv::Size>&,
-                                     const plugin::ParameterMap&) {
+/**
+ * @brief Preserves ROI geometry for pointwise or data-only operations.
+ *
+ * @param node Unused operation node.
+ * @param upstream_roi Changed source ROI.
+ * @param graph Unused graph context.
+ * @param parent_size Unused source extent.
+ * @param child_size Unused destination extent.
+ * @param input_index Unused input slot.
+ * @param input_extents Unused input extent list.
+ * @param parameters Unused effective parameter snapshot.
+ * @return The unchanged kernel-native ROI.
+ * @throws Nothing.
+ * @note The propagation service performs graph-level clipping and merging.
+ */
+static PixelRect identity_forward_roi(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_size, const PixelSize& child_size,
+    size_t input_index, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters) noexcept {
+  (void)node;
+  (void)graph;
+  (void)parent_size;
+  (void)child_size;
+  (void)input_index;
+  (void)input_extents;
+  (void)parameters;
   return upstream_roi;
 }
 
-[[maybe_unused]] static cv::Rect conservative_dirty_roi(
-    const Node& node, const cv::Rect& downstream_roi, const GraphModel&,
-    const cv::Size&, const std::vector<cv::Size>&, const plugin::ParameterMap&,
-    const std::vector<const NodeOutput*>*) {
+/**
+ * @brief Preserves downstream dirty demand for pointwise or source operations.
+ *
+ * @param node Unused operation node.
+ * @param downstream_roi Dirty output ROI.
+ * @param graph Unused graph context.
+ * @param output_extent Unused output extent.
+ * @param input_extents Unused input extent list.
+ * @param parameters Unused effective parameter snapshot.
+ * @param inputs Unused resolved input snapshots.
+ * @return The unchanged kernel-native dirty ROI.
+ * @throws Nothing.
+ * @note Graph-level planning performs extent clipping after this callback.
+ */
+static PixelRect identity_dirty_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* inputs) noexcept {
+  (void)node;
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)parameters;
+  (void)inputs;
+  return downstream_roi;
+}
+
+/**
+ * @brief Conservatively expands dirty demand for displacement-style nodes.
+ *
+ * @param node Node with optional displacement or brush radius.
+ * @param downstream_roi Dirty output ROI.
+ * @param graph Unused graph context.
+ * @param output_extent Unused output extent.
+ * @param input_extents Unused input extent list.
+ * @param parameters Unused effective parameter snapshot.
+ * @param inputs Unused resolved input snapshots.
+ * @return Expanded kernel-native demand or unchanged ROI when no displacement
+ *         is declared.
+ * @throws std::bad_alloc if YAML parameter lookup exhausts memory.
+ * @note The callback is currently retained for future built-in registration.
+ */
+[[maybe_unused]] static PixelRect conservative_dirty_roi(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* inputs) {
+  (void)graph;
+  (void)output_extent;
+  (void)input_extents;
+  (void)parameters;
+  (void)inputs;
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
-    return cv::Rect();
+    return PixelRect{};
   }
   int max_disp = 0;
   if (auto val = node_param_int(node, "max_displacement")) {
@@ -949,7 +1251,8 @@ static NodeOutput op_resize(const Node& node,
  * @throws GraphError for missing input or invalid crop dimensions.
  * @throws cv::Exception if OpenCV view, copy, or buffer conversion fails.
  * @note The callback uses only local `cv::Mat` headers and independent output
- *       storage, so scheduler workers may invoke it concurrently.
+ *       storage, so scheduler workers may invoke it concurrently. Spatial ROI
+ *       endpoints are derived with checked kernel geometry before publication.
  */
 static NodeOutput op_crop(const Node& node,
                           const std::vector<const NodeOutput*>& inputs) {
@@ -1007,16 +1310,22 @@ static NodeOutput op_crop(const Node& node,
   result.space.global_scale_x = in_space.global_scale_x;
   result.space.global_scale_y = in_space.global_scale_y;
   if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
-    cv::Rect parent_world = in_space.absolute_roi;
-    cv::Rect world_request(parent_world.x + x, parent_world.y + y, w, h);
-    cv::Rect clipped = world_request & parent_world;
+    const PixelRect parent_world = in_space.absolute_roi;
+    const std::int64_t world_x = static_cast<std::int64_t>(parent_world.x) + x;
+    const std::int64_t world_y = static_cast<std::int64_t>(parent_world.y) + y;
+    const PixelRect world_request =
+        compute::rect_from_edges(world_x, world_y, world_x + w, world_y + h);
+    const PixelRect clipped =
+        compute::intersect_rect(world_request, parent_world);
     if (clipped.width > 0 && clipped.height > 0) {
       result.space.absolute_roi = clipped;
     } else {
       result.space.absolute_roi = world_request;
     }
   } else {
-    result.space.absolute_roi = cv::Rect(x, y, w, h);
+    result.space.absolute_roi =
+        compute::rect_from_edges(x, y, static_cast<std::int64_t>(x) + w,
+                                 static_cast<std::int64_t>(y) + h);
   }
   return result;
 }
@@ -1911,10 +2220,7 @@ void register_builtin() {
   OpMetadata rt_meta;
   rt_meta.tile_preference = TileSizePreference::MICRO;
 
-  DirtyRoiPropFunc identity_roi =
-      [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
-         const std::vector<cv::Size>&, const plugin::ParameterMap&,
-         const std::vector<const NodeOutput*>*) { return roi; };
+  DirtyRoiPropFunc identity_roi = DirtyRoiPropFunc(identity_dirty_roi);
   ForwardRoiPropFunc identity_forward =
       ForwardRoiPropFunc(identity_forward_roi);
 

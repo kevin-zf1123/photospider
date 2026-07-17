@@ -42,7 +42,7 @@ class DownsampleExecutor {
     int node_id = -1;
 
     /** @brief HP-space region that changed during dirty execution. */
-    cv::Rect roi_hp;
+    PixelRect roi_hp;
 
     /** @brief HP version captured after the dirty node update. */
     int hp_version = 0;
@@ -110,8 +110,8 @@ class DownsampleExecutor {
    * @note Empty HP outputs remain empty so passthrough payloads keep their
    * previous metadata behavior.
    */
-  cv::Rect normalize_hp_roi(const cv::Rect& request_roi,
-                            const cv::Size& hp_size) const;
+  PixelRect normalize_hp_roi(const PixelRect& request_roi,
+                             const PixelSize& hp_size) const;
 
   /**
    * @brief Copies HP output directly to RT cache for non-image payloads.
@@ -128,7 +128,7 @@ class DownsampleExecutor {
    * extent.
    */
   void apply_passthrough(Node& node, RealtimeProxyGraph::NodeState& proxy_state,
-                         const cv::Rect& roi_hp, const cv::Size& hp_size,
+                         const PixelRect& roi_hp, const PixelSize& hp_size,
                          int hp_version);
 
   /**
@@ -143,7 +143,7 @@ class DownsampleExecutor {
    */
   ImageBuffer& ensure_rt_buffer(RealtimeProxyGraph::NodeState& proxy_state,
                                 const ImageBuffer& hp_buffer,
-                                const cv::Size& rt_size);
+                                const PixelSize& rt_size);
 
   /**
    * @brief Downsamples one HP ROI into the matching RT ROI.
@@ -158,9 +158,9 @@ class DownsampleExecutor {
    * @note Empty RT ROI is widened to the full RT extent, matching previous
    * dirty downsample behavior.
    */
-  cv::Rect downsample_roi(const ImageBuffer& hp_buffer, ImageBuffer& rt_buffer,
-                          const cv::Rect& roi_hp,
-                          const cv::Size& rt_size) const;
+  PixelRect downsample_roi(const ImageBuffer& hp_buffer, ImageBuffer& rt_buffer,
+                           const PixelRect& roi_hp,
+                           const PixelSize& rt_size) const;
 
   /**
    * @brief Updates RT ROI/version metadata after a successful image refresh.
@@ -173,7 +173,7 @@ class DownsampleExecutor {
    * @note RT ROI remains stored in HP coordinates for inspection consistency.
    */
   void commit_rt_metadata(RealtimeProxyGraph::NodeState& proxy_state,
-                          const cv::Rect& roi_hp, const cv::Size& hp_size,
+                          const PixelRect& roi_hp, const PixelSize& hp_size,
                           int hp_version);
 
   /**

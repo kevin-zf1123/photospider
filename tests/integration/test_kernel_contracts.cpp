@@ -368,7 +368,7 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
   mat.setTo(0.0f);
 
   Node node;
-  OutputTile output_tile{&buffer, cv::Rect(3, 1, 5, 2)};
+  OutputTile output_tile{&buffer, PixelRect{3, 1, 5, 2}};
   TileOpFunc write_tile = [](const Node&, const OutputTile& tile,
                              const std::vector<InputTile>&) {
     cv::Mat tile_mat = toCvMat(tile);
@@ -480,7 +480,7 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   // unchanged.
   ComputeService::Request rt_request = hp_request;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
-  rt_request.dirty_roi = cv::Rect(0, 0, 8, 8);
+  rt_request.dirty_roi = PixelRect{0, 0, 8, 8};
   NodeOutput& rt = compute.compute(graph, rt_request);
 
   // Key contract: RT compute must NOT alter the formal HP cache

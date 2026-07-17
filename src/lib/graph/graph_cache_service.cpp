@@ -5,6 +5,7 @@
 #include <chrono>
 #include <fstream>
 #include <new>
+#include <opencv2/imgcodecs.hpp>
 #include <string>
 #include <unordered_set>
 #include <utility>

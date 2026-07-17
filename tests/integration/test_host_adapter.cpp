@@ -779,7 +779,7 @@ void register_host_adapter_ops() {
                   width, height, 1, DataType::FLOAT32);
               cv::Mat mat = toCvMat(output.image_buffer);
               mat.setTo(7.0f);
-              output.space.absolute_roi = cv::Rect(0, 0, width, height);
+              output.space.absolute_roi = PixelRect{0, 0, width, height};
               output.debug.compute_device = "host-adapter-test";
               return output;
             }));
@@ -799,7 +799,7 @@ void register_host_adapter_ops() {
                   width, height, 1, DataType::FLOAT32);
               cv::Mat mat = toCvMat(output.image_buffer);
               mat.setTo(3.0f);
-              output.space.absolute_roi = cv::Rect(0, 0, width, height);
+              output.space.absolute_roi = PixelRect{0, 0, width, height};
               output.debug.compute_device = "host-adapter-slow-test";
               return output;
             }));
@@ -825,34 +825,34 @@ void register_host_adapter_ops() {
           output.image_buffer = make_aligned_cpu_image_buffer(
               width, height, 1, DataType::FLOAT32);
           toCvMat(output.image_buffer).setTo(4.0f);
-          output.space.absolute_roi = cv::Rect(0, 0, width, height);
+          output.space.absolute_roi = PixelRect{0, 0, width, height};
           output.debug.compute_device = "host-adapter-blocking-test";
           return output;
         }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "resized_extent",
-        MonolithicOpFunc(
-            [](const Node& node, const std::vector<const NodeOutput*>&) {
-              const YAML::Node& params = node.runtime_parameters
-                                             ? node.runtime_parameters
-                                             : node.parameters;
-              const int width = params["width"].as<int>(6);
-              const int height = params["height"].as<int>(4);
-              const int roi_width = params["roi_width"].as<int>(12);
-              const int roi_height = params["roi_height"].as<int>(9);
-              NodeOutput output;
-              output.image_buffer = make_aligned_cpu_image_buffer(
-                  width, height, 1, DataType::FLOAT32);
-              cv::Mat mat = toCvMat(output.image_buffer);
-              mat.setTo(5.0f);
-              output.space.absolute_roi = cv::Rect(0, 0, roi_width, roi_height);
-              output.space.inverse_matrix = {2.0, 0.0, 5.0, 0.0, 3.0,
-                                             7.0, 0.0, 0.0, 1.0};
-              output.space.local_inverse_matrix = {1.0,  0.0, 11.0, 0.0, 1.0,
-                                                   13.0, 0.0, 0.0,  1.0};
-              output.debug.compute_device = "host-adapter-resized-test";
-              return output;
-            }));
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          const YAML::Node& params = node.runtime_parameters
+                                         ? node.runtime_parameters
+                                         : node.parameters;
+          const int width = params["width"].as<int>(6);
+          const int height = params["height"].as<int>(4);
+          const int roi_width = params["roi_width"].as<int>(12);
+          const int roi_height = params["roi_height"].as<int>(9);
+          NodeOutput output;
+          output.image_buffer = make_aligned_cpu_image_buffer(
+              width, height, 1, DataType::FLOAT32);
+          cv::Mat mat = toCvMat(output.image_buffer);
+          mat.setTo(5.0f);
+          output.space.absolute_roi = PixelRect{0, 0, roi_width, roi_height};
+          output.space.inverse_matrix = {2.0, 0.0, 5.0, 0.0, 3.0,
+                                         7.0, 0.0, 0.0, 1.0};
+          output.space.local_inverse_matrix = {1.0,  0.0, 11.0, 0.0, 1.0,
+                                               13.0, 0.0, 0.0,  1.0};
+          output.debug.compute_device = "host-adapter-resized-test";
+          return output;
+        }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "no_image",
         MonolithicOpFunc(
@@ -885,16 +885,16 @@ void register_host_adapter_ops() {
     OpRegistry::instance().register_dirty_propagator(
         "host_adapter_test", "identity",
         DirtyRoiPropFunc(
-            [](const Node&, const cv::Rect& roi, const GraphModel&,
-               const cv::Size&, const std::vector<cv::Size>&,
+            [](const Node&, const PixelRect& roi, const GraphModel&,
+               const PixelSize&, const std::vector<PixelSize>&,
                const plugin::ParameterMap&,
                const std::vector<const NodeOutput*>*) { return roi; }));
     OpRegistry::instance().register_forward_propagator(
         "host_adapter_test", "identity",
-        ForwardRoiPropFunc([](const Node&, const cv::Rect& roi,
-                              const GraphModel&, const cv::Size&,
-                              const cv::Size&, size_t,
-                              const std::vector<cv::Size>&,
+        ForwardRoiPropFunc([](const Node&, const PixelRect& roi,
+                              const GraphModel&, const PixelSize&,
+                              const PixelSize&, size_t,
+                              const std::vector<PixelSize>&,
                               const plugin::ParameterMap&) { return roi; }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "offset_identity",
@@ -917,11 +917,12 @@ void register_host_adapter_ops() {
         }));
     OpRegistry::instance().register_dirty_propagator(
         "host_adapter_test", "offset_identity",
-        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
-                            const cv::Size&, const std::vector<cv::Size>&,
+        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
+                            const GraphModel&, const PixelSize&,
+                            const std::vector<PixelSize>&,
                             const plugin::ParameterMap&,
                             const std::vector<const NodeOutput*>*) {
-          return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
         }));
   });
 }
@@ -4892,7 +4893,17 @@ TEST(EmbeddedHostAdapter,
 }
 #endif
 
-TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
+/**
+ * @brief Verifies the public Host dirty path through planning and execution.
+ *
+ * @return Nothing; GoogleTest assertions report ROI, plan, and trace failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The test submits PixelRect at the Host boundary, observes the same
+ *       kernel-native geometry in dirty/planning snapshots, and requires
+ *       scheduler evidence for both source and downstream execution.
+ */
+TEST(EmbeddedHostAdapter,
+     DirtyComputeCarriesNativeRoiThroughPlanningAndExecution) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_dirty_snapshot_details_test");
   auto host = create_embedded_host();
@@ -4920,8 +4931,20 @@ TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
   HostComputeRequest dirty_request = full_request;
   dirty_request.intent = ComputeIntent::GlobalHighPrecision;
   dirty_request.dirty_roi = PixelRect{70, 10, 20, 20};
+  dirty_request.execution.parallel = true;
   auto dirty_compute = host->compute(dirty_request);
   ASSERT_TRUE(dirty_compute.status.ok) << dirty_compute.status.message;
+
+  auto planning = host->compute_planning_snapshot(request.session);
+  ASSERT_TRUE(planning.status.ok) << planning.status.message;
+  ASSERT_TRUE(planning.value.has_value());
+  EXPECT_EQ(planning.value->intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(planning.value->target_node.value, 2);
+  EXPECT_EQ(planning.value->planned_node_count, 2u);
+  EXPECT_EQ(planning.value->monolithic_task_count, 2u);
+  EXPECT_EQ(planning.value->active_task_count, 2u);
+  EXPECT_EQ(planning.value->dirty_source_task_count, 1u);
+  EXPECT_EQ(planning.value->downstream_task_count, 1u);
 
   auto snapshot = host->dirty_region_snapshot(request.session);
   ASSERT_TRUE(snapshot.status.ok) << snapshot.status.message;
@@ -4958,6 +4981,25 @@ TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
   EXPECT_EQ(edge_mapping->to_roi.y, 0);
   EXPECT_EQ(edge_mapping->to_roi.width, 64);
   EXPECT_EQ(edge_mapping->to_roi.height, 64);
+
+  auto trace =
+      host->scheduler_trace(request.session, 0, kSchedulerTraceMaxLimit);
+  ASSERT_TRUE(trace.status.ok) << trace.status.message;
+  const bool executed_dirty_source = std::any_of(
+      trace.value.events.begin(), trace.value.events.end(),
+      [](const SchedulerTraceEventSnapshot& event) {
+        return event.node.value == 1 &&
+               event.action == HostSchedulerTraceAction::ExecuteDirtySource;
+      });
+  const bool executed_dirty_downstream = std::any_of(
+      trace.value.events.begin(), trace.value.events.end(),
+      [](const SchedulerTraceEventSnapshot& event) {
+        return event.node.value == 2 &&
+               event.action ==
+                   HostSchedulerTraceAction::ExecuteDirtyDownstreamNode;
+      });
+  EXPECT_TRUE(executed_dirty_source);
+  EXPECT_TRUE(executed_dirty_downstream);
 }
 
 TEST(EmbeddedHostAdapter, DirtySourceAndCacheControlsExposeFrontendStatus) {

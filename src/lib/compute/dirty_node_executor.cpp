@@ -1,6 +1,7 @@
 #include "compute/dirty_node_executor.hpp"
 
 #include <new>
+#include <opencv2/imgproc.hpp>
 #include <optional>
 #include <string>
 #include <utility>
@@ -470,6 +471,7 @@ void RealTimeDirtyNodeExecutor::execute_monolithic(
   rt_write_buffer_.ensure_output(node.id).data = std::move(result.data);
 }
 
+/** @copydoc RealTimeDirtyNodeExecutor::copy_monolithic_image_roi */
 void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
     const NodeOutput& result, const RtPlanEntry& entry,
     ImageBuffer& rt_buffer) const {
@@ -502,7 +504,9 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
     result_mat = resized_result;
   }
   cv::Mat dest = toCvMat(rt_buffer);
-  result_mat(entry.roi_rt).copyTo(dest(entry.roi_rt));
+  const cv::Rect copy_roi{entry.roi_rt.x, entry.roi_rt.y, entry.roi_rt.width,
+                          entry.roi_rt.height};
+  result_mat(copy_roi).copyTo(dest(copy_roi));
 }
 
 void RealTimeDirtyNodeExecutor::execute_tiled(

@@ -352,7 +352,7 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   std::cout << "--- SCHEDULER TEST: Simulating a dirty region... ---"
             << std::endl;
 
-  cv::Rect dirty_rect(200, 200, 128, 128);
+  ps::PixelRect dirty_rect{200, 200, 128, 128};
 
   // 修正点: 明确 Lambda 返回类型为 void
   runtime.graph_state()
@@ -365,7 +365,9 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
           cv::Mat mat = ps::toCvMat(
               source_state.cached_output_high_precision->image_buffer);
 
-          mat(dirty_rect).setTo(cv::Scalar(1.0f));
+          mat(cv::Rect{dirty_rect.x, dirty_rect.y, dirty_rect.width,
+                       dirty_rect.height})
+              .setTo(cv::Scalar(1.0f));
         });
 
         // Keep downstream HP outputs as dirty update seeds. The dirty ROI
@@ -507,7 +509,7 @@ TEST(Scheduler,
   stale_hp_request.execution.parallel = true;
   ASSERT_TRUE(svc.cmd_compute(stale_hp_request));
 
-  const cv::Rect dirty_rect(200, 200, 128, 128);
+  const ps::PixelRect dirty_rect{200, 200, 128, 128};
   stale_runtime.graph_state()
       .submit([&](ps::GraphModel& g) -> void {
         g.dirty_source_hp_commit_generation[1] =
@@ -650,7 +652,7 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
           request.cache.precision = "int8";
           request.cache.disable_disk_cache = true;
           request.intent = ps::ComputeIntent::RealTimeUpdate;
-          request.dirty_roi = cv::Rect(200, 200, 128, 128);
+          request.dirty_roi = ps::PixelRect{200, 200, 128, 128};
           return compute_service.compute_parallel(graph, runtime, request);
         });
     ps::NodeOutput output;

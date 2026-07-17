@@ -253,8 +253,8 @@ TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
   seed_hp_extent(graph, 200, 512, 512);
 
   RoiPropagationService propagation;
-  std::optional<cv::Rect> propagated =
-      propagation.project_roi_backward(graph, 200, cv::Rect(10, 20, 30, 40), 1);
+  std::optional<PixelRect> propagated = propagation.project_roi_backward(
+      graph, 200, (PixelRect{10, 20, 30, 40}), 1);
 
   ASSERT_TRUE(propagated.has_value());
   // curve_transform: identity.
@@ -263,7 +263,7 @@ TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
   // propagation; with the default identity matrix, the resize step therefore
   // carries the union of [19,39,62x82] and [10,20,30x40] = [10,20,71x101].
   // gaussian_blur ksize=21 expands by radius 10, producing [0,10,91x121].
-  EXPECT_EQ(*propagated, cv::Rect(0, 10, 91, 121));
+  EXPECT_EQ(*propagated, (PixelRect{0, 10, 91, 121}));
 }
 
 TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
@@ -275,7 +275,7 @@ TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
 
   RoiPropagationService propagation;
   EXPECT_FALSE(
-      propagation.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1)
+      propagation.project_roi_backward(graph, 2, (PixelRect{1, 1, 1, 1}), 1)
           .has_value())
       << "Missing HP state must not provide propagation extent.";
 
@@ -285,10 +285,10 @@ TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
         make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
   });
 
-  std::optional<cv::Rect> propagated =
-      propagation.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1);
+  std::optional<PixelRect> propagated =
+      propagation.project_roi_backward(graph, 2, (PixelRect{1, 1, 1, 1}), 1);
   ASSERT_TRUE(propagated.has_value());
-  EXPECT_EQ(*propagated, cv::Rect(2, 2, 2, 2));
+  EXPECT_EQ(*propagated, (PixelRect{2, 2, 2, 2}));
 }
 
 TEST(OperationParameterAdapter,
@@ -471,26 +471,26 @@ TEST(SpatialDependencyMapContract,
   lut.grid_size_y = 10;
   lut.cols = 2;
   lut.rows = 2;
-  lut.output_extent = cv::Size(20, 20);
-  lut.cell_to_upstream_roi = {cv::Rect(1, 1, 1, 1), cv::Rect(2, 2, 1, 1),
-                              cv::Rect(3, 3, 1, 1), cv::Rect(4, 4, 1, 1)};
+  lut.output_extent = (PixelSize{20, 20});
+  lut.cell_to_upstream_roi = {(PixelRect{1, 1, 1, 1}), (PixelRect{2, 2, 1, 1}),
+                              (PixelRect{3, 3, 1, 1}), (PixelRect{4, 4, 1, 1})};
   ASSERT_TRUE(lut.is_valid());
 
-  EXPECT_EQ(lut.lookup(cv::Rect(-20, 5, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(20, 5, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(5, -20, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(5, 20, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(std::numeric_limits<int>::min(), 0,
-                                std::numeric_limits<int>::max(), 1)),
-            cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(std::numeric_limits<int>::max(), 0,
-                                std::numeric_limits<int>::max(), 1)),
-            cv::Rect());
+  EXPECT_EQ(lut.lookup((PixelRect{-20, 5, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup((PixelRect{20, 5, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup((PixelRect{5, -20, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup((PixelRect{5, 20, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup(PixelRect{std::numeric_limits<int>::min(), 0,
+                                 std::numeric_limits<int>::max(), 1}),
+            (PixelRect{}));
+  EXPECT_EQ(lut.lookup(PixelRect{std::numeric_limits<int>::max(), 0,
+                                 std::numeric_limits<int>::max(), 1}),
+            (PixelRect{}));
 
-  EXPECT_EQ(lut.lookup(cv::Rect(-5, 0, 10, 10)), cv::Rect(1, 1, 1, 1));
-  EXPECT_EQ(lut.lookup(cv::Rect(15, 0, 10, 10)), cv::Rect(2, 2, 1, 1));
-  EXPECT_EQ(lut.lookup(cv::Rect(0, -5, 10, 10)), cv::Rect(1, 1, 1, 1));
-  EXPECT_EQ(lut.lookup(cv::Rect(0, 15, 10, 10)), cv::Rect(3, 3, 1, 1));
+  EXPECT_EQ(lut.lookup((PixelRect{-5, 0, 10, 10})), (PixelRect{1, 1, 1, 1}));
+  EXPECT_EQ(lut.lookup((PixelRect{15, 0, 10, 10})), (PixelRect{2, 2, 1, 1}));
+  EXPECT_EQ(lut.lookup((PixelRect{0, -5, 10, 10})), (PixelRect{1, 1, 1, 1}));
+  EXPECT_EQ(lut.lookup((PixelRect{0, 15, 10, 10})), (PixelRect{3, 3, 1, 1}));
 }
 
 TEST(OperationHostAdapter,
@@ -521,30 +521,30 @@ TEST(OperationHostAdapter,
       });
   const plugin::ParameterMap parameters;
   SpatialDependencyMap normalized = builder(
-      graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4), parameters);
-  ASSERT_TRUE(normalized.is_valid_for(cv::Size(4, 4)));
+      graph.node(2), graph, {(PixelSize{8, 8})}, (PixelSize{4, 4}), parameters);
+  ASSERT_TRUE(normalized.is_valid_for((PixelSize{4, 4})));
   ASSERT_EQ(normalized.cell_to_upstream_roi.size(), 1u);
-  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), cv::Rect(0, 0, 3, 3));
+  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), (PixelRect{0, 0, 3, 3}));
 
   cell = PixelRect{std::numeric_limits<int>::max(), 0,
                    std::numeric_limits<int>::max(), 1};
-  normalized = builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters);
-  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), cv::Rect());
+  normalized = builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters);
+  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), (PixelRect{}));
 
-  cell = PixelRect{0, 0, -1, 1};
-  EXPECT_THROW(builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters),
+  cell = (PixelRect{0, 0, -1, 1});
+  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters),
                std::invalid_argument);
-  cell = PixelRect{0, 0, 1, 1};
-  cell_size = PixelSize{-1, 4};
-  EXPECT_THROW(builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters),
+  cell = (PixelRect{0, 0, 1, 1});
+  cell_size = (PixelSize{-1, 4});
+  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters),
                std::invalid_argument);
-  cell_size = PixelSize{4, 4};
-  output_extent = PixelSize{8, 4};
-  EXPECT_THROW(builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters),
+  cell_size = (PixelSize{4, 4});
+  output_extent = (PixelSize{8, 4});
+  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters),
                std::invalid_argument);
 }
 
@@ -573,7 +573,7 @@ TEST(OperationHostAdapter,
 
   NodeOutput data_only;
   data_only.data.emplace("answer", YAML::Node(42));
-  data_only.space.absolute_roi = cv::Rect(3, 4, 5, 6);
+  data_only.space.absolute_roi = (PixelRect{3, 4, 5, 6});
   data_only.space.global_scale_x = 2.0;
   bool monolithic_saw_data_only = false;
   MonolithicOpFunc inspect_data_only = plugin_host::adapt_monolithic_operation(
@@ -603,9 +603,9 @@ TEST(OperationHostAdapter,
             inputs.size() == 1 && inputs[0].spatial == nullptr;
       });
   ImageBuffer image = make_aligned_cpu_image_buffer(2, 2, 1, DataType::FLOAT32);
-  OutputTile output{&image, cv::Rect(0, 0, 1, 1)};
+  OutputTile output{&image, (PixelRect{0, 0, 1, 1})};
   const std::vector<InputTile> inputs{
-      InputTile{&image, cv::Rect(0, 0, 1, 1), nullptr}};
+      InputTile{&image, (PixelRect{0, 0, 1, 1}), nullptr}};
   tiled(node, output, inputs);
   EXPECT_TRUE(tiled_saw_null_spatial);
 
@@ -640,9 +640,9 @@ TEST(OperationHostAdapter,
       });
   const plugin::ParameterMap effective =
       core::parameter_map_from_yaml(roi_child.parameters);
-  EXPECT_EQ(dirty(graph.node(52), cv::Rect(0, 0, 1, 1), graph, cv::Size(1, 1),
-                  {cv::Size()}, effective, nullptr),
-            cv::Rect(0, 0, 1, 1));
+  EXPECT_EQ(dirty(graph.node(52), (PixelRect{0, 0, 1, 1}), graph,
+                  (PixelSize{1, 1}), {(PixelSize{})}, effective, nullptr),
+            (PixelRect{0, 0, 1, 1}));
   EXPECT_TRUE(roi_saw_data_only_spatial);
 }
 
@@ -695,7 +695,7 @@ TEST(OperationHostAdapter, RejectsInvalidPublicSpatialMetadata) {
       std::numeric_limits<double>::quiet_NaN();
   invalid_snapshots[1].global_scale_y = std::numeric_limits<double>::infinity();
   invalid_snapshots[2].absolute_roi =
-      PixelRect{std::numeric_limits<int>::max(), 0, 2, 1};
+      (PixelRect{std::numeric_limits<int>::max(), 0, 2, 1});
   std::size_t selected = 0;
   MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
       [&](const plugin::NodeView&,
@@ -835,15 +835,16 @@ TEST(OperationHostAdapter,
             mode->is_string() && mode->as_string() == "exact";
         return context.requested_roi;
       });
-  const std::vector<cv::Size> extents{cv::Size(10, 11), cv::Size(20, 21)};
+  const std::vector<PixelSize> extents{(PixelSize{10, 11}),
+                                       (PixelSize{20, 21})};
   const plugin::ParameterMap effective =
       core::parameter_map_from_yaml(child.parameters);
-  const cv::Rect result =
-      forward(graph.node(3), cv::Rect(1, 2, 3, 4), graph, cv::Size(20, 21),
-              cv::Size(20, 21), 1, extents, effective);
+  const PixelRect result =
+      forward(graph.node(3), (PixelRect{1, 2, 3, 4}), graph,
+              (PixelSize{20, 21}), (PixelSize{20, 21}), 1, extents, effective);
 
   EXPECT_TRUE(snapshot_is_exact);
-  EXPECT_EQ(result, cv::Rect(1, 2, 3, 4));
+  EXPECT_EQ(result, (PixelRect{1, 2, 3, 4}));
 }
 
 TEST(OperationHostAdapter, ValidatesReturnedRoiGeometryAfterCallbackReturn) {
@@ -856,26 +857,26 @@ TEST(OperationHostAdapter, ValidatesReturnedRoiGeometryAfterCallbackReturn) {
       core::parameter_map_from_yaml(child.parameters);
 
   DirtyRoiPropFunc negative_origin = plugin_host::adapt_dirty_propagator(
-      [](const plugin::RoiContext&) { return PixelRect{-7, -5, 3, 4}; });
-  EXPECT_EQ(
-      negative_origin(graph.node(2), cv::Rect(0, 0, 1, 1), graph,
-                      cv::Size(10, 11), {cv::Size(10, 11)}, effective, nullptr),
-      cv::Rect(-7, -5, 3, 4));
+      [](const plugin::RoiContext&) { return (PixelRect{-7, -5, 3, 4}); });
+  EXPECT_EQ(negative_origin(graph.node(2), (PixelRect{0, 0, 1, 1}), graph,
+                            (PixelSize{10, 11}), {(PixelSize{10, 11})},
+                            effective, nullptr),
+            (PixelRect{-7, -5, 3, 4}));
 
   DirtyRoiPropFunc negative_size = plugin_host::adapt_dirty_propagator(
-      [](const plugin::RoiContext&) { return PixelRect{0, 0, -1, 2}; });
-  EXPECT_THROW((void)negative_size(graph.node(2), cv::Rect(0, 0, 1, 1), graph,
-                                   cv::Size(10, 11), {cv::Size(10, 11)},
-                                   effective, nullptr),
+      [](const plugin::RoiContext&) { return (PixelRect{0, 0, -1, 2}); });
+  EXPECT_THROW((void)negative_size(graph.node(2), (PixelRect{0, 0, 1, 1}),
+                                   graph, (PixelSize{10, 11}),
+                                   {(PixelSize{10, 11})}, effective, nullptr),
                std::invalid_argument);
 
   ForwardRoiPropFunc overflowing =
       plugin_host::adapt_forward_propagator([](const plugin::RoiContext&) {
-        return PixelRect{std::numeric_limits<int>::max(), 0, 1, 1};
+        return (PixelRect{std::numeric_limits<int>::max(), 0, 1, 1});
       });
-  EXPECT_THROW((void)overflowing(graph.node(2), cv::Rect(0, 0, 1, 1), graph,
-                                 cv::Size(10, 11), cv::Size(10, 11), 0,
-                                 {cv::Size(10, 11)}, effective),
+  EXPECT_THROW((void)overflowing(graph.node(2), (PixelRect{0, 0, 1, 1}), graph,
+                                 (PixelSize{10, 11}), (PixelSize{10, 11}), 0,
+                                 {(PixelSize{10, 11})}, effective),
                std::invalid_argument);
 }
 
@@ -886,7 +887,7 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
   registry.register_dirty_propagator(
       type, subtype,
       plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return PixelRect{0, 0, 1, 1}; }));
+          [](const plugin::RoiContext&) { return (PixelRect{0, 0, 1, 1}); }));
   registry.register_dependency_builder(
       type, subtype,
       plugin_host::adapt_dependency_builder(
@@ -895,7 +896,7 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
             result.upstream_input_index = 1;
             result.cell_size = context.output_extent;
             result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back(PixelRect{5, 0, 1, 1});
+            result.cell_to_upstream_roi.push_back((PixelRect{5, 0, 1, 1}));
             return result;
           }),
       false);
@@ -917,14 +918,14 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
 
   RoiPropagationService propagation;
   const auto left =
-      propagation.project_roi_backward(graph, 3, cv::Rect(0, 0, 1, 1), 1);
+      propagation.project_roi_backward(graph, 3, (PixelRect{0, 0, 1, 1}), 1);
   const auto right =
-      propagation.project_roi_backward(graph, 3, cv::Rect(0, 0, 1, 1), 4);
+      propagation.project_roi_backward(graph, 3, (PixelRect{0, 0, 1, 1}), 4);
 
   ASSERT_TRUE(left.has_value());
-  EXPECT_EQ(*left, cv::Rect(0, 0, 1, 1));
+  EXPECT_EQ(*left, (PixelRect{0, 0, 1, 1}));
   ASSERT_TRUE(right.has_value());
-  EXPECT_EQ(*right, cv::Rect(0, 0, 6, 1));
+  EXPECT_EQ(*right, (PixelRect{0, 0, 6, 1}));
   ASSERT_TRUE(graph.node(3).dependency_lut_cache.has_value());
   EXPECT_EQ(graph.node(3).dependency_lut_cache->lut.upstream_input_index, 1u);
 }
@@ -947,7 +948,7 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
             result.upstream_input_index = 0;
             result.cell_size = context.output_extent;
             result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back(PixelRect{70, 0, 1, 1});
+            result.cell_to_upstream_roi.push_back((PixelRect{70, 0, 1, 1}));
             return result;
           }),
       false);
@@ -967,16 +968,16 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
 
   RoiPropagationService propagation;
   const auto projected =
-      propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+      propagation.project_roi_backward(graph, 2, (PixelRect{0, 0, 1, 1}), 1);
   ASSERT_TRUE(projected.has_value());
-  EXPECT_EQ(*projected, cv::Rect(70, 0, 1, 1));
+  EXPECT_EQ(*projected, (PixelRect{70, 0, 1, 1}));
 
   GraphTraversalService traversal;
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const compute::HighPrecisionDirtyPlan plan =
-      planner.plan_high_precision(graph, 2, cv::Rect(0, 0, 1, 1));
+      planner.plan_high_precision(graph, 2, (PixelRect{0, 0, 1, 1}));
   ASSERT_TRUE(plan.entries.count(1));
-  const cv::Rect planned_parent_roi = plan.entries.at(1).roi_hp;
+  const PixelRect planned_parent_roi = plan.entries.at(1).roi_hp;
   EXPECT_LE(planned_parent_roi.x, 70);
   EXPECT_GT(static_cast<std::int64_t>(planned_parent_roi.x) +
                 planned_parent_roi.width,
@@ -993,7 +994,7 @@ TEST(PropagationContracts,
   registry.register_dirty_propagator(
       type, subtype,
       plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return PixelRect{}; }));
+          [](const plugin::RoiContext&) { return (PixelRect{}); }));
   registry.register_dependency_builder(
       type, subtype,
       plugin_host::adapt_dependency_builder(
@@ -1006,7 +1007,7 @@ TEST(PropagationContracts,
             result.upstream_input_index = value == 99 ? 9 : 0;
             result.cell_size = context.output_extent;
             result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back(PixelRect{value, 0, 1, 1});
+            result.cell_to_upstream_roi.push_back((PixelRect{value, 0, 1, 1}));
             return result;
           }),
       false);
@@ -1024,23 +1025,23 @@ TEST(PropagationContracts,
   RoiPropagationService propagation;
   auto project = [&] {
     const int current_image_source = graph.node(3).image_inputs[0].from_node_id;
-    return propagation.project_roi_backward(graph, 3, cv::Rect(0, 0, 1, 1),
+    return propagation.project_roi_backward(graph, 3, (PixelRect{0, 0, 1, 1}),
                                             current_image_source);
   };
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 1);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 1u);
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 1);
 
   graph.mutate_node_runtime_state(
       3, [](auto& state) { state.parameters_version = 1; });
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 2);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 2u);
 
   seed_parameter_output(graph, 2, 2, 2);
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 3);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 3u);
   ASSERT_TRUE(graph.node(3).dependency_lut_cache.has_value());
@@ -1050,7 +1051,7 @@ TEST(PropagationContracts,
           .dependency_lut_cache->identity.upstream_content_revisions.empty());
 
   seed_parameter_output(graph, 2, 4, 3);
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(4, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{4, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 4);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 4u);
   ASSERT_TRUE(graph.node(3).dependency_lut_cache.has_value());
@@ -1061,7 +1062,7 @@ TEST(PropagationContracts,
       4);
 
   graph.rewire_image_input(3, 0, 4, "image");
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(4, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{4, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 5);
   EXPECT_EQ(*last_source_id, 4);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 5u);
@@ -1109,7 +1110,7 @@ TEST(PropagationContracts,
   registry.register_dirty_propagator(
       type, subtype,
       plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return PixelRect{}; }));
+          [](const plugin::RoiContext&) { return (PixelRect{}); }));
   auto register_builder = [&](int marker, const std::shared_ptr<int>& calls) {
     registry.register_dependency_builder(
         type, subtype,
@@ -1120,7 +1121,8 @@ TEST(PropagationContracts,
               result.upstream_input_index = 0;
               result.cell_size = context.output_extent;
               result.output_extent = context.output_extent;
-              result.cell_to_upstream_roi.push_back(PixelRect{marker, 0, 1, 1});
+              result.cell_to_upstream_roi.push_back(
+                  (PixelRect{marker, 0, 1, 1}));
               return result;
             }),
         false);
@@ -1143,7 +1145,7 @@ TEST(PropagationContracts,
   seed_hp_extent(graph, 1, 8, 8);
   RoiPropagationService propagation;
 
-  (void)propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+  (void)propagation.project_roi_backward(graph, 2, (PixelRect{0, 0, 1, 1}), 1);
   EXPECT_EQ(*first_calls, 1);
   EXPECT_EQ(*second_calls, 0);
   ASSERT_TRUE(graph.node(2).dependency_lut_cache.has_value());
@@ -1153,7 +1155,7 @@ TEST(PropagationContracts,
             1);
 
   register_builder(2, second_calls);
-  (void)propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+  (void)propagation.project_roi_backward(graph, 2, (PixelRect{0, 0, 1, 1}), 1);
   EXPECT_EQ(*first_calls, 1);
   EXPECT_EQ(*second_calls, 1);
   EXPECT_NE(
@@ -1171,8 +1173,8 @@ TEST(OperationRegistryContract,
   registry.unregister_key(make_key(type, subtype));
   const auto builder = [](std::size_t marker) {
     return DependencyLutBuilder(
-        [marker](const Node&, const GraphModel&, const std::vector<cv::Size>&,
-                 const cv::Size&, const plugin::ParameterMap&) {
+        [marker](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+                 const PixelSize&, const plugin::ParameterMap&) {
           SpatialDependencyMap result;
           result.upstream_input_index = marker;
           return result;
@@ -1187,7 +1189,7 @@ TEST(OperationRegistryContract,
   ASSERT_TRUE(initial_snapshot.has_value());
   EXPECT_FALSE(initial_snapshot->data_dependent);
   EXPECT_EQ(initial_snapshot->data_dependent_revision, 0u);
-  EXPECT_EQ(initial_snapshot->callback(node, graph, {}, cv::Size(), {})
+  EXPECT_EQ(initial_snapshot->callback(node, graph, {}, (PixelSize{}), {})
                 .upstream_input_index,
             0u);
   std::atomic<bool> reader_started{false};
@@ -1207,7 +1209,7 @@ TEST(OperationRegistryContract,
         continue;
       }
       const std::size_t marker =
-          snapshot->callback(node, graph, {}, cv::Size(), {})
+          snapshot->callback(node, graph, {}, (PixelSize{}), {})
               .upstream_input_index;
       if (marker == 0) {
         if (snapshot->data_dependent ||
@@ -1245,8 +1247,8 @@ TEST(OperationRegistryContract,
   auto& registry = OpRegistry::instance();
   registry.unregister_key(make_key(type, subtype));
   const DependencyLutBuilder builder =
-      [](const Node&, const GraphModel&, const std::vector<cv::Size>&,
-         const cv::Size&,
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize&,
          const plugin::ParameterMap&) { return SpatialDependencyMap{}; };
   const MonolithicOpFunc operation = [](const Node&,
                                         const std::vector<const NodeOutput*>&) {

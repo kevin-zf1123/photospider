@@ -10,7 +10,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <opencv2/opencv.hpp>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -23,6 +22,7 @@
 
 #include "compute/image_buffer.hpp"
 #include "photospider/core/compute_intent.hpp"
+#include "photospider/core/geometry.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/plugin/node_view.hpp"
 
@@ -99,7 +99,7 @@ struct SpatialContext {
   /** @brief Operation-local inverse transform. */
   std::array<double, 9> local_inverse_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
   /** @brief Absolute pixel region represented by the output. */
-  cv::Rect absolute_roi{0, 0, 0, 0};
+  PixelRect absolute_roi{0, 0, 0, 0};
   /** @brief Finite horizontal scale relative to graph coordinates. */
   double global_scale_x{1.0};
   /** @brief Finite vertical scale relative to graph coordinates. */
@@ -331,7 +331,7 @@ struct SpatialDependencyMap {
   /** @brief Number of lookup rows, bounded by int. */
   int rows = 0;
   /** @brief Exact downstream output extent used to build the table. */
-  cv::Size output_extent{};
+  PixelSize output_extent{};
   /**
    * @brief Image-input index whose upstream coordinates the LUT describes.
    * @note The graph propagation service validates this index against the
@@ -339,7 +339,7 @@ struct SpatialDependencyMap {
    */
   size_t upstream_input_index = 0;
   /** @brief Row-major normalized upstream ROI for every lookup cell. */
-  std::vector<cv::Rect> cell_to_upstream_roi;
+  std::vector<PixelRect> cell_to_upstream_roi;
 
   /**
    * @brief Validates dimensions and exact row-major cell count safely.
@@ -373,7 +373,7 @@ struct SpatialDependencyMap {
         cell_to_upstream_roi.size() != expected) {
       return false;
     }
-    for (const cv::Rect& roi : cell_to_upstream_roi) {
+    for (const PixelRect& roi : cell_to_upstream_roi) {
       if (roi.x < 0 || roi.y < 0 || roi.width < 0 || roi.height < 0) {
         return false;
       }
@@ -393,7 +393,7 @@ struct SpatialDependencyMap {
    * @return True when structure and output extent match.
    * @throws Nothing.
    */
-  bool is_valid_for(const cv::Size& extent) const noexcept {
+  bool is_valid_for(const PixelSize& extent) const noexcept {
     return is_valid() && output_extent == extent;
   }
 
@@ -405,30 +405,30 @@ struct SpatialDependencyMap {
    * table/index or an unrepresentable intermediate coordinate.
    * @throws Nothing.
    * @note Products are evaluated in signed 64-bit space before conversion to
-   * OpenCV's int rectangle representation.
+   * the kernel's signed-int rectangle representation.
    */
-  cv::Rect cell_bounds(int cx, int cy) const noexcept {
+  PixelRect cell_bounds(int cx, int cy) const noexcept {
     if (cx < 0 || cy < 0 || cx >= cols || cy >= rows || grid_size_x <= 0 ||
         grid_size_y <= 0) {
-      return cv::Rect();
+      return PixelRect{};
     }
     const std::int64_t x0 = static_cast<std::int64_t>(cx) * grid_size_x;
     const std::int64_t y0 = static_cast<std::int64_t>(cy) * grid_size_y;
     if (x0 < 0 || y0 < 0 || x0 >= output_extent.width ||
         y0 >= output_extent.height || x0 > std::numeric_limits<int>::max() ||
         y0 > std::numeric_limits<int>::max()) {
-      return cv::Rect();
+      return PixelRect{};
     }
     const std::int64_t right =
         std::min<std::int64_t>(x0 + grid_size_x, output_extent.width);
     const std::int64_t bottom =
         std::min<std::int64_t>(y0 + grid_size_y, output_extent.height);
     if (right <= x0 || bottom <= y0) {
-      return cv::Rect();
+      return PixelRect{};
     }
-    return cv::Rect(static_cast<int>(x0), static_cast<int>(y0),
-                    static_cast<int>(right - x0),
-                    static_cast<int>(bottom - y0));
+    return PixelRect{static_cast<int>(x0), static_cast<int>(y0),
+                     static_cast<int>(right - x0),
+                     static_cast<int>(bottom - y0)};
   }
 
   /**
@@ -439,9 +439,9 @@ struct SpatialDependencyMap {
    * endpoint constraints.
    * @throws Nothing.
    * @note Endpoint arithmetic uses signed 64-bit intermediates and refuses a
-   * result that cannot be represented by cv::Rect.
+   * result that cannot be represented by PixelRect.
    */
-  static cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) noexcept {
+  static PixelRect merge_rect(const PixelRect& a, const PixelRect& b) noexcept {
     if (a.width <= 0 || a.height <= 0) {
       return b;
     }
@@ -459,10 +459,10 @@ struct SpatialDependencyMap {
     if (x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0 ||
         x1 > std::numeric_limits<int>::max() ||
         y1 > std::numeric_limits<int>::max()) {
-      return cv::Rect();
+      return PixelRect{};
     }
-    return cv::Rect(static_cast<int>(x0), static_cast<int>(y0),
-                    static_cast<int>(x1 - x0), static_cast<int>(y1 - y0));
+    return PixelRect{static_cast<int>(x0), static_cast<int>(y0),
+                     static_cast<int>(x1 - x0), static_cast<int>(y1 - y0)};
   }
 
   /**
@@ -476,17 +476,17 @@ struct SpatialDependencyMap {
    * an edge cell. Downstream endpoint and row-major index arithmetic use wide
    * unsigned or signed intermediates before checked conversion.
    */
-  cv::Rect lookup(const cv::Rect& downstream_roi) const noexcept {
+  PixelRect lookup(const PixelRect& downstream_roi) const noexcept {
     if (!is_valid() || downstream_roi.width <= 0 ||
         downstream_roi.height <= 0) {
-      return cv::Rect();
+      return PixelRect{};
     }
     const std::int64_t roi_right =
         static_cast<std::int64_t>(downstream_roi.x) + downstream_roi.width;
     const std::int64_t roi_bottom =
         static_cast<std::int64_t>(downstream_roi.y) + downstream_roi.height;
     if (roi_right <= downstream_roi.x || roi_bottom <= downstream_roi.y) {
-      return cv::Rect();
+      return PixelRect{};
     }
     const std::int64_t clipped_left =
         std::max<std::int64_t>(downstream_roi.x, 0);
@@ -497,18 +497,16 @@ struct SpatialDependencyMap {
     const std::int64_t clipped_bottom =
         std::min<std::int64_t>(roi_bottom, output_extent.height);
     if (clipped_right <= clipped_left || clipped_bottom <= clipped_top) {
-      return cv::Rect();
+      return PixelRect{};
     }
-    const int start_c = static_cast<int>(clipped_left / grid_size_x);
-    const int start_r = static_cast<int>(clipped_top / grid_size_y);
+    const std::int64_t start_column = clipped_left / grid_size_x;
+    const std::int64_t start_row = clipped_top / grid_size_y;
     const std::int64_t end_column = (clipped_right - 1) / grid_size_x;
     const std::int64_t end_row = (clipped_bottom - 1) / grid_size_y;
-    const int end_c = static_cast<int>(end_column);
-    const int end_r = static_cast<int>(end_row);
 
-    cv::Rect merged;
-    for (int r = start_r; r <= end_r; ++r) {
-      for (int c = start_c; c <= end_c; ++c) {
+    PixelRect merged;
+    for (std::int64_t r = start_row; r <= end_row; ++r) {
+      for (std::int64_t c = start_column; c <= end_column; ++c) {
         const size_t index =
             static_cast<size_t>(r) * static_cast<size_t>(cols) +
             static_cast<size_t>(c);
@@ -669,9 +667,9 @@ using TileOpFunc =
  * @note input_extents and effective_parameters describe the same request as
  *       output_extent; adapters must not resolve either value again.
  */
-using DirtyRoiPropFunc = std::function<cv::Rect(
-    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
-    const cv::Size& output_extent, const std::vector<cv::Size>& input_extents,
+using DirtyRoiPropFunc = std::function<PixelRect(
+    const Node& node, const PixelRect& downstream_roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
     const plugin::ParameterMap& effective_parameters,
     const std::vector<const NodeOutput*>* available_inputs)>;
 
@@ -692,10 +690,10 @@ using DirtyRoiPropFunc = std::function<cv::Rect(
  * @note active_input_index identifies the traversed edge. input_extents and
  *       effective_parameters are resolved once by the caller for this request.
  */
-using ForwardRoiPropFunc = std::function<cv::Rect(
-    const Node& node, const cv::Rect& upstream_roi, const GraphModel& graph,
-    const cv::Size& parent_size, const cv::Size& child_size,
-    size_t active_input_index, const std::vector<cv::Size>& input_extents,
+using ForwardRoiPropFunc = std::function<PixelRect(
+    const Node& node, const PixelRect& upstream_roi, const GraphModel& graph,
+    const PixelSize& parent_size, const PixelSize& child_size,
+    size_t active_input_index, const std::vector<PixelSize>& input_extents,
     const plugin::ParameterMap& effective_parameters)>;
 
 /**
@@ -714,8 +712,8 @@ using ForwardRoiPropFunc = std::function<cv::Rect(
  */
 using DependencyLutBuilder = std::function<SpatialDependencyMap(
     const Node& node, const GraphModel& graph,
-    const std::vector<cv::Size>& upstream_extents,
-    const cv::Size& downstream_extent,
+    const std::vector<PixelSize>& upstream_extents,
+    const PixelSize& downstream_extent,
     const plugin::ParameterMap& effective_parameters)>;
 
 /**

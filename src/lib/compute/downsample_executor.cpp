@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <new>
+#include <opencv2/imgproc.hpp>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,6 +72,7 @@ RealtimeProxyGraph::NodeState clone_proxy_state(
 
 }  // namespace
 
+/** @copydoc DownsampleExecutor::DownsampleExecutor */
 DownsampleExecutor::DownsampleExecutor(GraphModel& graph,
                                        RealtimeProxyGraph& proxy_graph,
                                        GraphRuntime* runtime,
@@ -80,12 +82,14 @@ DownsampleExecutor::DownsampleExecutor(GraphModel& graph,
       runtime_(runtime),
       events_(events) {}  // NOLINT
 
+/** @copydoc DownsampleExecutor::execute */
 void DownsampleExecutor::execute(const std::vector<Request>& requests) {
   for (const auto& request : requests) {
     execute_one(request);
   }
 }
 
+/** @copydoc DownsampleExecutor::execute_one */
 void DownsampleExecutor::execute_one(const Request& request) {
   Node* node_ptr = find_current_node(request);
   if (!node_ptr) {
@@ -103,8 +107,9 @@ void DownsampleExecutor::execute_one(const Request& request) {
   }
   const NodeOutput& hp_output = *node.cached_output_high_precision;
   const ImageBuffer& hp_buffer = hp_output.image_buffer;
-  cv::Size hp_size(std::max(hp_buffer.width, 0), std::max(hp_buffer.height, 0));
-  cv::Rect roi_hp = normalize_hp_roi(request.roi_hp, hp_size);
+  const PixelSize hp_size{std::max(hp_buffer.width, 0),
+                          std::max(hp_buffer.height, 0)};
+  const PixelRect roi_hp = normalize_hp_roi(request.roi_hp, hp_size);
 
   if (!proxy_state.output) {
     proxy_state.output = NodeOutput{};
@@ -118,7 +123,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
     return;
   }
 
-  cv::Size rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
+  const PixelSize rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
   if (rt_size.width <= 0 || rt_size.height <= 0) {
     apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
@@ -136,6 +141,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   }
 }
 
+/** @copydoc DownsampleExecutor::find_current_node */
 Node* DownsampleExecutor::find_current_node(const Request& request) {
   Node* node_ptr = graph_.find_node_mutable(request.node_id);
   if (!node_ptr || !node_ptr->cached_output_high_precision) {
@@ -149,26 +155,29 @@ Node* DownsampleExecutor::find_current_node(const Request& request) {
   return node_ptr;
 }
 
-cv::Rect DownsampleExecutor::normalize_hp_roi(const cv::Rect& request_roi,
-                                              const cv::Size& hp_size) const {
-  cv::Rect roi_hp = clip_rect(request_roi, hp_size);
+/** @copydoc DownsampleExecutor::normalize_hp_roi */
+PixelRect DownsampleExecutor::normalize_hp_roi(const PixelRect& request_roi,
+                                               const PixelSize& hp_size) const {
+  PixelRect roi_hp = clip_rect(request_roi, hp_size);
   if (is_rect_empty(roi_hp) && hp_size.width > 0 && hp_size.height > 0) {
-    roi_hp = cv::Rect(0, 0, hp_size.width, hp_size.height);
+    roi_hp = PixelRect{0, 0, hp_size.width, hp_size.height};
   }
   return roi_hp;
 }
 
+/** @copydoc DownsampleExecutor::apply_passthrough */
 void DownsampleExecutor::apply_passthrough(
     Node& node, RealtimeProxyGraph::NodeState& proxy_state,
-    const cv::Rect& roi_hp, const cv::Size& hp_size, int hp_version) {
+    const PixelRect& roi_hp, const PixelSize& hp_size, int hp_version) {
   proxy_state.output = node.cached_output_high_precision;
   commit_rt_metadata(proxy_state, roi_hp, hp_size, hp_version);
   events_.push(node.id, node.name, "downsample_passthrough", 0.0);
 }
 
+/** @copydoc DownsampleExecutor::ensure_rt_buffer */
 ImageBuffer& DownsampleExecutor::ensure_rt_buffer(
     RealtimeProxyGraph::NodeState& proxy_state, const ImageBuffer& hp_buffer,
-    const cv::Size& rt_size) {
+    const PixelSize& rt_size) {
   if (!proxy_state.output) {
     proxy_state.output = NodeOutput{};
   }
@@ -185,29 +194,33 @@ ImageBuffer& DownsampleExecutor::ensure_rt_buffer(
   return rt_buffer;
 }
 
-cv::Rect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
-                                            ImageBuffer& rt_buffer,
-                                            const cv::Rect& roi_hp,
-                                            const cv::Size& rt_size) const {
-  cv::Rect roi_rt =
+/** @copydoc DownsampleExecutor::downsample_roi */
+PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
+                                             ImageBuffer& rt_buffer,
+                                             const PixelRect& roi_hp,
+                                             const PixelSize& rt_size) const {
+  PixelRect roi_rt =
       clip_rect(scale_down_rect(roi_hp, kRtDownscaleFactor), rt_size);
   if (is_rect_empty(roi_rt)) {
-    roi_rt = cv::Rect(0, 0, rt_size.width, rt_size.height);
+    roi_rt = PixelRect{0, 0, rt_size.width, rt_size.height};
   }
 
   cv::Mat hp_mat = toCvMat(hp_buffer);
   cv::Mat rt_mat = toCvMat(rt_buffer);
-  cv::Mat hp_patch = hp_mat(roi_hp);
+  const cv::Rect hp_patch_roi{roi_hp.x, roi_hp.y, roi_hp.width, roi_hp.height};
+  const cv::Rect rt_patch_roi{roi_rt.x, roi_rt.y, roi_rt.width, roi_rt.height};
+  cv::Mat hp_patch = hp_mat(hp_patch_roi);
   cv::Mat downsampled;
   cv::resize(hp_patch, downsampled, cv::Size(roi_rt.width, roi_rt.height), 0, 0,
              cv::INTER_LINEAR);
-  downsampled.copyTo(rt_mat(roi_rt));
+  downsampled.copyTo(rt_mat(rt_patch_roi));
   return roi_rt;
 }
 
+/** @copydoc DownsampleExecutor::commit_rt_metadata */
 void DownsampleExecutor::commit_rt_metadata(
-    RealtimeProxyGraph::NodeState& proxy_state, const cv::Rect& roi_hp,
-    const cv::Size& hp_size, int hp_version) {
+    RealtimeProxyGraph::NodeState& proxy_state, const PixelRect& roi_hp,
+    const PixelSize& hp_size, int hp_version) {
   if (!is_rect_empty(roi_hp)) {
     proxy_state.roi_hp =
         proxy_state.roi_hp.has_value()
@@ -217,6 +230,7 @@ void DownsampleExecutor::commit_rt_metadata(
   proxy_state.version = hp_version;
 }
 
+/** @copydoc DownsampleExecutor::log_stale_generation */
 void DownsampleExecutor::log_stale_generation(int node_id) const {
   if (runtime_) {
     runtime_->log_event(GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION,

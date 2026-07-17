@@ -264,7 +264,7 @@ class NodeTaskRunner {
   const ComputeTaskGraph& task_graph_;
 
   /** @brief Full output size inferred from all tile tasks for each node. */
-  std::vector<cv::Size> planned_output_sizes_;
+  std::vector<PixelSize> planned_output_sizes_;
 
   /** @brief Number of tile tasks planned per node index. */
   std::vector<int> tile_task_counts_;

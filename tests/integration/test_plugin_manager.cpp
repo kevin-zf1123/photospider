@@ -2061,7 +2061,7 @@ TEST_F(PluginManagerLifecycleTest,
   node.type = kDirectCpuOwnerType;
   node.subtype = kDirectCpuTiledSubtype;
   OutputTile output;
-  output.roi = cv::Rect(2, 3, 5, 7);
+  output.roi = PixelRect{2, 3, 5, 7};
   const std::vector<InputTile> inputs(4);
   tracker.last_tiled_result.store(-1, std::memory_order_release);
   std::get<TileOpFunc>(device_snapshot_copy->func)(node, output, inputs);
@@ -3326,16 +3326,16 @@ TEST_F(PluginManagerLifecycleTest,
     ScopedEnvironmentVariable invalid_roi_environment(
         kLifecycleInvalidRoiEnvironment, "negative");
     EXPECT_THROW(
-        (void)dirty(graph.node(2), cv::Rect(1, 2, 3, 4), graph, cv::Size(8, 8),
-                    {cv::Size(8, 8)}, parameters, nullptr),
+        (void)dirty(graph.node(2), PixelRect{1, 2, 3, 4}, graph,
+                    PixelSize{8, 8}, {PixelSize{8, 8}}, parameters, nullptr),
         std::invalid_argument);
   }
   {
     ScopedEnvironmentVariable invalid_roi_environment(
         kLifecycleInvalidRoiEnvironment, "overflow");
-    EXPECT_THROW((void)forward(graph.node(2), cv::Rect(1, 2, 3, 4), graph,
-                               cv::Size(8, 8), cv::Size(8, 8), 0,
-                               {cv::Size(8, 8)}, parameters),
+    EXPECT_THROW((void)forward(graph.node(2), PixelRect{1, 2, 3, 4}, graph,
+                               PixelSize{8, 8}, PixelSize{8, 8}, 0,
+                               {PixelSize{8, 8}}, parameters),
                  std::invalid_argument);
   }
 
@@ -3897,7 +3897,7 @@ TEST_F(PluginManagerLifecycleTest,
 
   RoiPropagationService propagation;
   const auto build_and_read_marker = [&]() {
-    (void)propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+    (void)propagation.project_roi_backward(graph, 2, PixelRect{0, 0, 1, 1}, 1);
     const Node& cached_node = graph.node(2);
     EXPECT_TRUE(cached_node.dependency_lut_cache.has_value());
     return cached_node.dependency_lut_cache->lut.cell_to_upstream_roi.front().x;
@@ -3960,7 +3960,7 @@ TEST_F(PluginManagerLifecycleTest,
 
   RoiPropagationService propagation;
   const auto project = [&]() {
-    return propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+    return propagation.project_roi_backward(graph, 2, PixelRect{0, 0, 1, 1}, 1);
   };
 
   ASSERT_EQ(manager.load_from_dirs_report({plugin_path.parent_path().string()})
