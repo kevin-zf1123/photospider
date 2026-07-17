@@ -9,7 +9,7 @@
 
 /**
  * @file image_buffer.hpp
- * @brief Current two-dimensional image payload and tile-view contracts.
+ * @brief Current image payload, tile-view, and minimal CPU primitive contracts.
  *
  * These values describe image memory, device location, and borrowed tile
  * regions without exposing graph, compute-service, scheduler, adapter, OpenCV,
@@ -72,11 +72,12 @@ enum class DataType : std::uint32_t {
  *       `Device::CPU`; changing only its type/device is invalid. CPU data must
  *       provide a real shared-owner control block; non-null aliases of an
  *       empty shared_ptr are invalid. CPU images require owned `data` and a
- *       stride at least as large as one packed row. Non-CPU backend images may
- *       use an owned context without a CPU pointer. The host rejects invalid
- *       enum values and overflowing descriptor arithmetic before cache
- *       publication; opaque backend allocation capacity is provider
- *       responsibility.
+ *       stride at least as large as one packed row. The producer must ensure
+ *       that CPU storage covers every declared active row because shared_ptr
+ *       does not expose allocation capacity. Non-CPU backend images may use an
+ *       owned context without a CPU pointer. The host rejects invalid enum
+ *       values and overflowing descriptor arithmetic before cache publication;
+ *       opaque backend allocation capacity is provider responsibility.
  */
 struct ImageBuffer {
   /** @brief Width in pixels. */
@@ -116,6 +117,59 @@ struct ImageBuffer {
  * @note The function does not inspect image dimensions or device placement.
  */
 std::size_t image_buffer_bytes_per_channel(DataType type);
+
+/**
+ * @brief Computes the packed byte width of one active image row.
+ *
+ * The result excludes any row padding carried by ImageBuffer::step.
+ *
+ * @param buffer Image descriptor whose width, channels, and scalar type are
+ *        inspected.
+ * @return Exact active row byte count.
+ * @throws std::invalid_argument if width or channels are not positive, or type
+ *         is not a declared DataType value.
+ * @throws std::overflow_error if width, channel, or scalar-size multiplication
+ *         exceeds `std::size_t`.
+ * @note The function does not inspect height, device placement, payload
+ *       ownership, or allocation capacity.
+ */
+std::size_t image_buffer_row_bytes(const ImageBuffer& buffer);
+
+/**
+ * @brief Validates the complete public ImageBuffer descriptor contract.
+ *
+ * Validation checks declared enums, canonical-empty representation, positive
+ * nonempty dimensions, shared-owner consistency, CPU data requirements,
+ * packed-row stride, and representable row-offset arithmetic. Opaque backend
+ * allocation capacity remains the owning provider's responsibility.
+ *
+ * @param buffer Descriptor to validate without retaining or moving its owners.
+ * @return Nothing.
+ * @throws std::invalid_argument for invalid enums, noncanonical empty state,
+ *         incomplete dimensions/payload, ownerless aliases, undersized
+ *         strides, or unrepresentable descriptor arithmetic.
+ * @note The function performs no allocation or synchronization and cannot
+ *       recover allocation capacity from shared_ptr. The producer guarantees
+ *       that CPU storage covers the declared rows. A valid CPU descriptor is
+ *       not automatically writable; access permissions remain a producer
+ *       contract.
+ */
+void validate_image_buffer(const ImageBuffer& buffer);
+
+/**
+ * @brief Returns one active CPU row using the descriptor's declared stride.
+ *
+ * @param buffer Valid nonempty CPU descriptor with owned data.
+ * @param row Zero-based row index.
+ * @return Pointer to the first active byte in the requested row.
+ * @throws std::invalid_argument if the descriptor is malformed, non-CPU,
+ *         canonical-empty, or lacks owned CPU data.
+ * @throws std::out_of_range if row is outside `[0, buffer.height)`.
+ * @note The returned pointer is read-only and borrows buffer.data. It remains
+ *       valid only while the payload owner and its backend synchronization
+ *       requirements remain satisfied.
+ */
+const std::byte* image_buffer_row_data(const ImageBuffer& buffer, int row);
 
 /**
  * @brief Computes an aligned row stride for an image buffer.
@@ -207,5 +261,56 @@ struct OutputTileView {
   /** @brief Pixel ROI inside the borrowed destination buffer. */
   PixelRect roi;
 };
+
+/**
+ * @brief Fills the active bytes of one writable CPU image region.
+ *
+ * Every active byte in output.roi receives the same byte value. Bytes outside
+ * the ROI, including row padding, remain unchanged. A zero byte value is the
+ * numeric-zero representation for every currently declared DataType.
+ *
+ * @param output Borrowed destination descriptor and ROI.
+ * @param value Byte pattern written to each active destination byte.
+ * @return Nothing.
+ * @throws std::invalid_argument if the view has no buffer, the descriptor is
+ *         malformed or non-CPU, or no owned CPU payload is available.
+ * @throws std::out_of_range if output.roi is negative or outside the image
+ *         extent.
+ * @note Validation completes before the first write. After validation, the
+ *       function performs no throwing operation, so descriptor/ROI failures
+ *       leave the destination unchanged. The caller must provide writable
+ *       storage and serialize overlapping writes; the function owns no
+ *       synchronization.
+ */
+void fill_image_buffer_region(const OutputTileView& output, std::byte value);
+
+/**
+ * @brief Copies equal-shaped CPU image regions with stride-aware row access.
+ *
+ * Source and destination must have identical channel counts and scalar types,
+ * and their ROIs must have equal width and height. Only active pixel bytes are
+ * copied; row padding is neither read nor written.
+ *
+ * @param input Borrowed source descriptor and ROI.
+ * @param output Borrowed destination descriptor and ROI.
+ * @return Nothing.
+ * @throws std::invalid_argument if either view is missing a buffer, either
+ *         descriptor is malformed or non-CPU, owned CPU data is unavailable,
+ *         or the region formats/shapes differ.
+ * @throws std::out_of_range if either ROI is negative or outside its image
+ *         extent.
+ * @throws std::overflow_error if the staged active byte count exceeds
+ *         `std::size_t`.
+ * @throws std::bad_alloc if alias-safe staging storage cannot be allocated.
+ * @note Independent payloads copy directly after complete validation.
+ *       Potentially overlapping or aliased views snapshot all source pixels
+ *       before the first destination write, so they have value-copy semantics.
+ *       Validation/allocation failures provide the strong exception guarantee.
+ *       Views are borrowed and must remain alive for the call; writable
+ *       destination permission and cross-thread serialization remain caller
+ *       responsibilities.
+ */
+void copy_image_buffer_region(const InputTileView& input,
+                              const OutputTileView& output);
 
 }  // namespace ps

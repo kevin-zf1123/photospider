@@ -195,89 +195,6 @@ void attach_result_library_lifetime(
 }
 
 /**
- * @brief Validates one plugin-origin image descriptor before publication.
- * @param buffer Public descriptor to inspect without moving its owners.
- * @return Nothing.
- * @throws std::invalid_argument for invalid enums, dimensions, channels,
- * payload shape, or CPU row stride.
- * @throws std::invalid_argument when packed-row or total byte arithmetic
- * exceeds `std::size_t`.
- * @note A completely empty descriptor is the only image-less representation.
- * Backend contexts are opaque, so the host validates their public geometry
- * and enum fields but cannot validate backend allocation capacity.
- */
-void validate_image_descriptor(const ImageBuffer& buffer) {
-  switch (buffer.type) {
-    case DataType::UINT8:
-    case DataType::INT8:
-    case DataType::UINT16:
-    case DataType::INT16:
-    case DataType::FLOAT32:
-    case DataType::FLOAT64:
-      break;
-    default:
-      throw std::invalid_argument("Operation output has invalid image type");
-  }
-  switch (buffer.device) {
-    case Device::CPU:
-    case Device::GPU_METAL:
-    case Device::GPU_CUDA:
-    case Device::ASIC_NPU:
-      break;
-    default:
-      throw std::invalid_argument("Operation output has invalid image device");
-  }
-  const bool invalid_data_owner =
-      (buffer.data.get() == nullptr) != (buffer.data.use_count() == 0);
-  const bool invalid_context_owner =
-      (buffer.context.get() == nullptr) != (buffer.context.use_count() == 0);
-  if (invalid_data_owner || invalid_context_owner) {
-    throw std::invalid_argument(
-        "Operation output image payload has no lifetime owner");
-  }
-  const bool has_data = buffer.data.use_count() != 0;
-  const bool has_context = buffer.context.use_count() != 0;
-  const bool has_payload = has_data || has_context;
-  const bool completely_empty = !has_payload && buffer.width == 0 &&
-                                buffer.height == 0 && buffer.channels == 0 &&
-                                buffer.step == 0;
-  if (completely_empty) {
-    if (buffer.type != DataType::FLOAT32 || buffer.device != Device::CPU) {
-      throw std::invalid_argument(
-          "Operation output empty image descriptor is not canonical");
-    }
-    return;
-  }
-  if (!has_payload || buffer.width <= 0 || buffer.height <= 0 ||
-      buffer.channels <= 0) {
-    throw std::invalid_argument(
-        "Operation output has incomplete image dimensions or payload");
-  }
-  if (buffer.device == Device::CPU && !has_data) {
-    throw std::invalid_argument(
-        "Operation output CPU image requires owned pixel data");
-  }
-  const std::size_t width = static_cast<std::size_t>(buffer.width);
-  const std::size_t channels = static_cast<std::size_t>(buffer.channels);
-  const std::size_t bytes_per_channel =
-      image_buffer_bytes_per_channel(buffer.type);
-  if (channels > std::numeric_limits<std::size_t>::max() / width ||
-      width * channels >
-          std::numeric_limits<std::size_t>::max() / bytes_per_channel) {
-    throw std::invalid_argument("Operation output packed row size overflow");
-  }
-  const std::size_t packed_row = width * channels * bytes_per_channel;
-  if (has_data && buffer.step < packed_row) {
-    throw std::invalid_argument("Operation output CPU row stride is too small");
-  }
-  if (buffer.step != 0 &&
-      static_cast<std::size_t>(buffer.height) >
-          std::numeric_limits<std::size_t>::max() / buffer.step) {
-    throw std::invalid_argument("Operation output image byte size overflow");
-  }
-}
-
-/**
  * @brief Builds callback-scoped public views for private upstream outputs.
  * @param inputs Borrowed private output pointers in image-input order.
  * @return Storage owning every copied non-image value and view.
@@ -328,7 +245,7 @@ OperationInputStorage make_operation_inputs(
  *       Named values remain ParameterValue objects without format conversion.
  */
 NodeOutput operation_output_to_private(plugin::OperationOutput output) {
-  validate_image_descriptor(output.image_buffer);
+  validate_image_buffer(output.image_buffer);
   NodeOutput result;
   result.image_buffer = std::move(output.image_buffer);
   result.data = std::move(output.data);

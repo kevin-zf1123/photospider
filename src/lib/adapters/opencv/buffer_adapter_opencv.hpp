@@ -17,8 +17,8 @@ namespace ps {
  *
  * @param tile Input tile whose buffer and ROI should be viewed.
  * @return cv::Mat covering tile.roi.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when tile has no buffer or the buffer has no
  * readable data payload.
  * @throws cv::Exception when the ROI is invalid.
@@ -35,8 +35,8 @@ cv::Mat toCvMat(const InputTile& tile);
  *
  * @param tile Output tile whose buffer and ROI should be viewed.
  * @return cv::Mat covering tile.roi.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when tile has no buffer or the buffer has no
  * writable data payload.
  * @throws cv::Exception when the ROI is invalid.
@@ -49,8 +49,8 @@ cv::Mat toCvMat(const OutputTile& tile);
  * @brief Converts a CPU image descriptor to a read-only cv::Mat.
  * @param buffer CPU image descriptor with an owned data pointer.
  * @return Zero-copy matrix view over the descriptor's CPU data pointer.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when no CPU payload is present; every non-CPU
  * descriptor and opaque backend-only context is intentionally rejected.
  * @throws cv::Exception when matrix construction fails.
@@ -65,8 +65,8 @@ cv::Mat toCvMat(const ImageBuffer& buffer);
  *
  * @param tile Input tile whose buffer and ROI should be viewed.
  * @return cv::UMat covering tile.roi.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when tile has no buffer or no readable payload.
  * @throws cv::Exception when the ROI or upload fails.
  * @note The returned UMat must be treated as read-only by tiled operators and
@@ -79,8 +79,8 @@ cv::UMat toCvUMat(const InputTile& tile);
  *
  * @param tile Output tile whose buffer and ROI should be viewed.
  * @return cv::UMat covering tile.roi.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when tile has no buffer or no writable payload.
  * @throws cv::Exception when the ROI or upload fails.
  * @note The destination buffer lifetime is owned by the compute service and
@@ -92,8 +92,8 @@ cv::UMat toCvUMat(const OutputTile& tile);
  * @brief Converts an image descriptor to a read-only-by-contract cv::UMat.
  * @param buffer CPU image descriptor with an owned data pointer.
  * @return Unified matrix uploaded from the CPU image data.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when no CPU payload is present; every non-CPU
  * descriptor and opaque backend-only context is intentionally rejected.
  * @throws cv::Exception when matrix construction or backend upload fails.

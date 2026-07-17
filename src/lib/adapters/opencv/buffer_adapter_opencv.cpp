@@ -158,6 +158,7 @@ ImageBuffer* tile_buffer(const OutputTile& tile) noexcept {
  * @param tile Tile view carrying a buffer pointer and ROI.
  * @param missing_message Error text used when the tile has no buffer.
  * @return cv::Mat view covering tile.roi.
+ * @throws std::invalid_argument when the ImageBuffer descriptor is malformed.
  * @throws std::runtime_error when tile has no buffer or the ImageBuffer adapter
  * cannot expose a matrix.
  * @throws cv::Exception when backend mapping or ROI slicing fails.
@@ -170,6 +171,7 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
   if (!buffer) {
     throw std::runtime_error(missing_message);
   }
+  validate_image_buffer(*buffer);
   require_cpu_device(*buffer, "toCvMat");
   cv::Mat full_mat;
   if (buffer->data) {
@@ -191,6 +193,7 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
  * @param missing_message Error text used when the tile has no buffer.
  * @param access OpenCV access intent for upload/backend synchronization.
  * @return cv::UMat view covering tile.roi.
+ * @throws std::invalid_argument when the ImageBuffer descriptor is malformed.
  * @throws std::runtime_error when tile has no buffer or the ImageBuffer adapter
  * cannot expose a UMat.
  * @throws cv::Exception when upload, backend mapping, or ROI slicing fails.
@@ -204,6 +207,7 @@ cv::UMat to_cv_umat_for_tile(const TileView& tile, const char* missing_message,
   if (!buffer) {
     throw std::runtime_error(missing_message);
   }
+  validate_image_buffer(*buffer);
   require_cpu_device(*buffer, "toCvUMat");
   cv::UMat full_umat;
   if (buffer->data) {
@@ -222,6 +226,7 @@ cv::UMat to_cv_umat_for_tile(const TileView& tile, const char* missing_message,
 
 /** @copydoc toCvMat(const ImageBuffer&) */
 cv::Mat toCvMat(const ImageBuffer& buffer) {
+  validate_image_buffer(buffer);
   require_cpu_device(buffer, "toCvMat");
   // CPU storage is exposed as a zero-copy, source-lifetime-bound view.
   if (buffer.data) {
@@ -252,6 +257,7 @@ cv::Mat toCvMat(const OutputTile& tile) {
 
 /** @copydoc toCvUMat(const ImageBuffer&) */
 cv::UMat toCvUMat(const ImageBuffer& buffer) {
+  validate_image_buffer(buffer);
   require_cpu_device(buffer, "toCvUMat");
   // CPU storage is uploaded through a source-lifetime-bound Mat view.
   if (buffer.data) {
