@@ -444,6 +444,8 @@ registry-provided propagators, `GraphModel` topology adjacency, and
 
 Important current behavior:
 
+- Host, graph, dirty-region, planning, and task geometry is represented by
+  `PixelRect` and `PixelSize`, not OpenCV value types
 - identity propagation for source/generator/analyzer/math-style nodes
 - specific propagation for `resize`, `crop`, `convolve`, and `gaussian_blur`
 - forward propagation for downstream dirty-region projection

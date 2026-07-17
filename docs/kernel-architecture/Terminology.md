@@ -181,6 +181,13 @@ The current image payload contract: two-dimensional extent, channel count,
 one scalar type, device, row stride, shared data ownership, and optional
 backend context. It is not a general Tensor, Deep Image, or vector-scene model.
 
+**`PixelRect` / `PixelSize`**
+External-library-neutral integer geometry values used by public Host and
+operation contracts and by private Graph, ROI propagation, dirty-region,
+cache-identity, planning, and task state. OpenCV geometry may be constructed
+only locally in an OpenCV adapter or provider at the actual matrix/library
+call; it is not stored or passed through those kernel contracts.
+
 **Operation provider**
 An implementation source for operation callbacks and metadata. The current
 built-in implementation uses OpenCV in private backend code; public operation

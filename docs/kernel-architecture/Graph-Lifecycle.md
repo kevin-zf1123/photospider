@@ -170,6 +170,11 @@ nodes are `GraphErrc::NotFound`. When both endpoints exist but the ROI is empty,
 the path is unreachable, or propagation produces no valid rectangle, the Host
 returns `GraphErrc::InvalidParameter`.
 
+Host requests and results plus private graph, propagation, dirty, and planning
+state carry `PixelRect` and `PixelSize`. An OpenCV adapter or provider may
+construct library geometry only locally at an actual matrix operation; that
+representation does not enter the graph-state work item or its retained state.
+
 Existing-session propagation exceptions continue to update Kernel's
 best-effort `LastError` mirror, but the current Host result comes directly from
 the same required operation. It is never reconstructed by reading shared

@@ -133,6 +133,10 @@ Missing 或 closing session，以及缺失的 source/target node，都会返回
 `GraphErrc::NotFound`。当两个 endpoint 均存在，但 ROI 为空、路径不可达或 propagation
 无法产生有效 rectangle 时，Host 返回 `GraphErrc::InvalidParameter`。
 
+Host request/result 以及私有 graph、propagation、dirty 与 planning state 都携带 `PixelRect`
+和 `PixelSize`。OpenCV adapter 或 provider 只能在实际 matrix operation 处局部构造 library
+geometry；该表示不会进入 graph-state work item 或其保留状态。
+
 Existing-session propagation exception 仍会更新 Kernel 的 best-effort `LastError` mirror，但当前
 Host result 直接来自同一个 required operation；它绝不会在 operation 结束后通过读取共享
 diagnostic state 重建。

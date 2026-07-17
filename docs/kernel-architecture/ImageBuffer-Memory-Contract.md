@@ -27,9 +27,11 @@ device identity, payload ownership, or backend context. Public
 receive inputs as `OperationTileInputView` values.
 
 The private compute layer separately uses `InputTile`, `OutputTile`, and
-`TileTask`. Those backend-only values carry `cv::Rect`; private `OutputTile`
-uses a mutable `ImageBuffer*` while bridging task-owned output storage to an
-adapter. They do not cross the public operation or Host contract.
+`TileTask`. Those backend-only values also carry `PixelRect`; private
+`OutputTile` uses a mutable `ImageBuffer*` while bridging task-owned output
+storage to an adapter. An OpenCV adapter may translate the rectangle only
+locally when creating a matrix view; it does not retain or return `cv::Rect`
+through these values. They do not cross the public operation or Host contract.
 
 ## CPU Buffer Contract
 

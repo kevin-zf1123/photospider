@@ -24,8 +24,9 @@ identity、payload ownership 或 backend context。公共 `TiledOperation` callb
 `const OutputTileView&` 接收 output，并以 `OperationTileInputView` value 接收 input。
 
 私有 compute 层另行使用 `InputTile`、`OutputTile` 与 `TileTask`。这些只属于 backend 的 value
-携带 `cv::Rect`；私有 `OutputTile` 在把 task-owned output storage 接到 adapter 时使用可变
-`ImageBuffer*`。它们不会跨越公共 operation 或 Host contract。
+也携带 `PixelRect`；私有 `OutputTile` 在把 task-owned output storage 接到 adapter 时使用可变
+`ImageBuffer*`。OpenCV adapter 只能在创建 matrix view 时局部转换该 rectangle，不会通过这些
+value 保留或返回 `cv::Rect`。它们不会跨越公共 operation 或 Host contract。
 
 ## CPU 缓冲区契约
 

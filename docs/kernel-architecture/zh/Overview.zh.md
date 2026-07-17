@@ -357,6 +357,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 
 重要当前行为：
 
+- Host、graph、dirty-region、planning 与 task geometry 使用 `PixelRect` 和 `PixelSize`
+  表示，而不是 OpenCV value type
 - source/generator/analyzer/math 类节点的恒等传播
 - `resize`、`crop`、`convolve` 和 `gaussian_blur` 的特定传播
 - 下游脏区投影的 forward propagation
