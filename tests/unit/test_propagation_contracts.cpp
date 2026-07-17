@@ -1264,43 +1264,50 @@ TEST(OperationRegistryContract,
   EXPECT_EQ(initial_snapshot->callback(node, graph, {}, (PixelSize{}), {})
                 .upstream_input_index,
             0u);
-  std::atomic<bool> reader_started{false};
+  std::atomic<bool> reader_ready{false};
   std::atomic<bool> writer_finished{false};
   std::atomic<bool> saw_replacement{false};
   std::atomic<int> inconsistent_snapshots{0};
   std::thread reader([&] {
-    reader_started.store(true, std::memory_order_release);
-    for (int iteration = 0; iteration < 100000 &&
-                            (!writer_finished.load(std::memory_order_acquire) ||
-                             !saw_replacement.load(std::memory_order_acquire));
-         ++iteration) {
+    bool first_snapshot = true;
+    for (;;) {
+      const bool writer_was_finished =
+          writer_finished.load(std::memory_order_acquire);
       const auto snapshot =
           registry.get_dependency_builder_snapshot(type, subtype);
       if (!snapshot) {
         inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      const std::size_t marker =
-          snapshot->callback(node, graph, {}, (PixelSize{}), {})
-              .upstream_input_index;
-      if (marker == 0) {
-        if (snapshot->data_dependent ||
-            snapshot->data_dependent_revision != 0) {
-          inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
-        }
-      } else if (marker == 1) {
-        saw_replacement.store(true, std::memory_order_release);
-        if (!snapshot->data_dependent ||
-            snapshot->data_dependent_revision !=
-                snapshot->dependency_builder_revision) {
-          inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
-        }
       } else {
-        inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+        const std::size_t marker =
+            snapshot->callback(node, graph, {}, (PixelSize{}), {})
+                .upstream_input_index;
+        if (marker == 0) {
+          if (snapshot->data_dependent ||
+              snapshot->data_dependent_revision != 0) {
+            inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+          }
+        } else if (marker == 1) {
+          saw_replacement.store(true, std::memory_order_release);
+          if (!snapshot->data_dependent ||
+              snapshot->data_dependent_revision !=
+                  snapshot->dependency_builder_revision) {
+            inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+          }
+        } else {
+          inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+        }
       }
+      if (first_snapshot) {
+        reader_ready.store(true, std::memory_order_release);
+        first_snapshot = false;
+      }
+      if (writer_was_finished) {
+        break;
+      }
+      std::this_thread::yield();
     }
   });
-  while (!reader_started.load(std::memory_order_acquire)) {
+  while (!reader_ready.load(std::memory_order_acquire)) {
     std::this_thread::yield();
   }
   registry.register_dependency_builder(type, subtype, builder(1), true);
