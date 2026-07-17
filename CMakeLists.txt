@@ -1481,6 +1481,13 @@ if(BUILD_TESTING)
     set_tests_properties(IpcDisabledInstallSmoke PROPERTIES
         RUN_SERIAL TRUE TIMEOUT 600)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        add_test(NAME OpenCvOperationProviderBuildSmokeSafety
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/optional_opencv_operation_provider_build_smoke_test.py"
+            WORKING_DIRECTORY
+                "${PROJECT_SOURCE_DIR}/tests/integration")
+        set_tests_properties(
+            OpenCvOperationProviderBuildSmokeSafety PROPERTIES TIMEOUT 30)
         add_test(NAME OpenCvOperationProviderDisabledBuild
             COMMAND ${Python3_EXECUTABLE}
                 "${PROJECT_SOURCE_DIR}/tests/integration/optional_opencv_operation_provider_build_smoke.py"
