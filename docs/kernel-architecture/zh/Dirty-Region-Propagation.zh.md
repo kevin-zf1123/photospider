@@ -152,6 +152,12 @@ Dirty execution 会先取得所请求 domain 的 immutable node/cache-pruned pla
 execution ROI、保留 task id、推导 task-level dependency，并分离 source-boundary 与 downstream
 task id。它不会展开 node、创建新 tile shape 或插入 retile task。
 
+在选中的 tiled `image_mixing` node 分派其借用的 `InputTile`/`OutputTile` view 之前，
+`NodeExecutor` 会为该次 node invocation 一次性规范化所需 secondary input。Crop/pad 使用
+stride-aware 内核 fill/copy 原语，因此 active pixel 会通过各 descriptor 的 `step` 复制，padding
+byte 则被排除。临时 normalized `NodeOutput` owner 保持 request-local，并存活到同步 tile callback
+全部结束。该 normalization 不会改变 selected task id 或 dirty ROI geometry。
+
 Dispatcher 会提交 selected source group 并等待其 settle，验证所需 source output 已存在于相关
 staged 或 committed store，随后提交 initially-ready downstream group。Dependency completion 会继续
 释放其他 ready downstream work。
@@ -217,8 +223,11 @@ update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明
 - `src/lib/compute/task_graph_planning.cpp`
 - `src/lib/compute/dirty_execution_common.cpp`
 - `src/lib/compute/dirty_update_executor.cpp`
+- `src/lib/compute/tiled_input_normalizer.cpp`
+- `src/lib/compute/node_executor.cpp`
 - `src/lib/graph/roi_propagation_service.cpp`
 - `tests/integration/test_scheduler.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

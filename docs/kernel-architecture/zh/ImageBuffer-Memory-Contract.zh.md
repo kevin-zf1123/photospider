@@ -80,6 +80,36 @@ auto* row = base + y * width * channels * bytes_per_channel;
 
 OpenCV 适配器必须通过使用提供的 `step` 构造 `cv::Mat` 来保持步长。
 
+## 内核 CPU Buffer 原语
+
+当前仅依赖标准库的 operation runtime 拥有以下最小 CPU buffer 原语：
+
+- `validate_image_buffer()` 校验已声明 enum、规范空状态、非空 descriptor 的正尺寸、
+  shared owner 一致性、CPU payload 要求、packed-row stride，以及 descriptor byte
+  算术是否可表示。Opaque backend 的 allocation capacity 仍由 provider 负责。
+- `image_buffer_row_bytes()` 计算不含 padding 的 active packed-row byte；
+  `image_buffer_row_data()` 则通过 `step` 返回只读 CPU row。
+- `fill_image_buffer_region()` 只填充 `OutputTileView` 的 active byte。ROI 之外的 pixel
+  与 row padding 保持不变。
+- `copy_image_buffer_region()` 逐行复制 shape 和 format 相同的
+  `InputTileView`/`OutputTileView` region。当 payload 可能 alias 时，它会在第一次写 destination
+  前完整快照 source 的 active byte，因此重叠 view 具有 value-copy 语义。经证明互相独立的
+  payload 会在 validation 后直接复制；validation/allocation 失败不会改变 destination。
+
+每次调用只借用 tile view；这些原语不会保留 descriptor、添加同步、推断 backend mapping，
+也不会把 producer 提供的只读 snapshot 变成可写内存。Row/pixel access 要求非空且拥有 CPU
+payload。由于 `shared_ptr` 不公开 allocation capacity，producer 必须保证 storage 覆盖每一条
+已声明 active row。合法的 context-only 或 non-CPU descriptor 会在不解引用的情况下被拒绝。
+Copy 与 fill 会在修改前完整校验 descriptor 和 ROI，并且绝不把 padding 当成 pixel。
+
+当前 tiled `image_mixing` 的 crop/pad normalization 会组合 aligned allocation、zero fill 与
+region copy。Shape 完全匹配的 input 继续作为 descriptor 透传。Resize 与 channel conversion
+仍仅在真实 algorithm call 处使用 OpenCV，并返回保留结果的 `ImageBuffer`。Compute metrics
+recorder 不再创建或 reshape `cv::Mat`：启用 timing statistics 时，它会通过 `step` 遍历 active
+CPU scalar value、排除 padding，并记录 range/non-finite diagnostic。Active payload 全为 NaN
+时，继续保留此前正/负无穷的 empty-range sentinel。Opaque non-CPU resource 继续保留 provider
+提供的 diagnostic，因为只有对应 device adapter 可以映射它们。
+
 ## GPU 缓冲区契约
 
 对于 GPU 缓冲区：
@@ -153,4 +183,5 @@ region 方向记录在精确的
 - `src/lib/ipc/output_store.*`
 - `tests/unit/test_image_buffer_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_ipc_daemon.cpp`

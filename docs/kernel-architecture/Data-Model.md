@@ -109,9 +109,17 @@ Graph state.
 | `image_buffer` | Image payload as the public `ImageBuffer` contract. |
 | `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
 | `space` | Spatial transform, scale, and ROI metadata. |
-| `debug` | Worker/device/timing/range diagnostics. |
+| `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through `ImageBuffer::step`; padding is excluded and opaque device values retain provider diagnostics. |
 
 Operators may return image data, named data, or both.
+
+For tiled `image_mixing`, a secondary input that requires crop/pad is
+materialized as a request-local `NodeOutput`: named data, spatial/debug
+provenance, and plugin-library lifetime are copied, while its image descriptor
+is replaced by aligned storage produced through kernel fill/copy primitives.
+Resize and channel conversion remain local OpenCV algorithm calls. The
+normalization context owns these temporary outputs until every synchronous tile
+callback finishes; exact-shape inputs continue to borrow the upstream output.
 
 ## Cache Fields
 
@@ -213,6 +221,9 @@ neither document changes the current fields described above.
 - `src/lib/core/parameter_value_adapter.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
+- `src/lib/compute/tiled_input_normalizer.*`
+- `src/lib/compute/compute_metrics_recorder.*`
 - `tests/unit/test_graph_topology_boundaries.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`

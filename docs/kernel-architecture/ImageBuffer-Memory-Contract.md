@@ -95,6 +95,46 @@ auto* row = base + y * width * channels * bytes_per_channel;
 OpenCV adapters must preserve stride by constructing `cv::Mat` with the
 provided `step`.
 
+## Kernel CPU Buffer Primitives
+
+The standard-library-only operation runtime owns the current minimum CPU buffer
+primitives:
+
+- `validate_image_buffer()` validates declared enums, canonical empty state,
+  positive nonempty dimensions, shared-owner consistency, CPU payload
+  requirements, packed-row stride, and representable descriptor byte
+  arithmetic. Opaque backend allocation capacity remains provider-owned.
+- `image_buffer_row_bytes()` computes active packed-row bytes without padding,
+  while `image_buffer_row_data()` returns a read-only CPU row through `step`.
+- `fill_image_buffer_region()` fills only the active bytes of an
+  `OutputTileView`. Pixels outside the ROI and row padding are unchanged.
+- `copy_image_buffer_region()` copies equal-shaped, equal-format
+  `InputTileView`/`OutputTileView` regions row by row. It snapshots all source
+  active bytes before the first destination write when the payloads may alias,
+  so overlapping views have value-copy semantics. Proven-independent payloads
+  copy directly after validation; validation/allocation failures leave the
+  destination unchanged.
+
+The tile views are borrowed for each call. The primitives do not retain
+descriptors, add synchronization, infer backend mappings, or turn a read-only
+producer snapshot into writable memory. Row/pixel access requires a nonempty
+owned CPU payload. Because `shared_ptr` does not expose allocation capacity, the
+producer must ensure that storage covers every declared active row. Valid
+context-only or non-CPU descriptors are rejected without dereferencing them.
+Copy and fill validate the complete descriptor and ROI before mutation, and
+never treat padding as pixels.
+
+Current tiled `image_mixing` crop/pad normalization composes aligned allocation,
+zero fill, and region copy. Exact-shape inputs remain pass-through descriptors.
+Resize and channel conversion still use OpenCV only at the actual algorithm
+call and return an `ImageBuffer` retaining the result. The compute metrics
+recorder no longer creates or reshapes `cv::Mat`: when timing statistics are
+enabled, it walks active CPU scalar values through `step`, excludes padding,
+and records range/non-finite diagnostics. An all-NaN active payload retains the
+previous positive/negative infinity empty-range sentinels. Opaque non-CPU
+resources retain provider-supplied diagnostics because only their device
+adapter may map them.
+
 ## GPU Buffer Contract
 
 For GPU buffers:
@@ -179,4 +219,5 @@ becoming part of the operation ABI.
 - `src/lib/ipc/output_store.*`
 - `tests/unit/test_image_buffer_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_ipc_daemon.cpp`

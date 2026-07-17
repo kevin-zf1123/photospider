@@ -177,6 +177,14 @@ on already-expanded tasks, clips execution ROIs, preserves task ids, derives
 task-level dependencies, and separates source-boundary and downstream task ids.
 It does not expand nodes, create a new tile shape, or insert a retile task.
 
+Before a selected tiled `image_mixing` node dispatches its borrowed
+`InputTile`/`OutputTile` views, `NodeExecutor` normalizes required secondary
+inputs once for that node invocation. Crop/pad uses stride-aware kernel
+fill/copy primitives, so active pixels are copied through each descriptor's
+`step` and padded bytes are excluded. Temporary normalized `NodeOutput` owners
+remain request-local and live until synchronous tile callbacks finish. This
+normalization changes neither the selected task ids nor dirty ROI geometry.
+
 The dispatcher submits the selected source group and waits for it to settle,
 validates that required source outputs exist in the relevant staged or committed
 store, then submits the initially ready downstream group. Dependency completion
@@ -256,8 +264,11 @@ what generation and epoch checks can currently guarantee.
 - `src/lib/compute/task_graph_planning.cpp`
 - `src/lib/compute/dirty_execution_common.cpp`
 - `src/lib/compute/dirty_update_executor.cpp`
+- `src/lib/compute/tiled_input_normalizer.cpp`
+- `src/lib/compute/node_executor.cpp`
 - `src/lib/graph/roi_propagation_service.cpp`
 - `tests/integration/test_scheduler.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
