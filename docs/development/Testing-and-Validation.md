@@ -320,14 +320,21 @@ configuration check; it emits commands/results to CTest and retains no
 per-run report. This stage disables the operation provider, not the separate
 OpenCV codec, normalization, adapter, or embedded-product dependencies.
 
-Before removing its transient tree, the nested-build driver resolves both the
-repository and work paths, rejects the repository, every repository ancestor,
-filesystem roots, and symlinks resolving to those locations, propagates
-recursive-removal failures, and verifies that the tree is absent afterward.
+Before removing its transient tree, the nested-build driver derives an
+absolute work spelling without resolving it for deletion. It rejects parent
+traversal, the repository, every repository ancestor, filesystem roots, and
+every symlink in the final work path or an existing parent component. Canonical
+resolution is used only for protected-location comparison; the same checks are
+repeated immediately before recursive removal, which always receives the
+validated absolute spelling rather than a symlink target. Recursive-removal
+failures propagate, and an lstat-style postcondition verifies that no directory
+or dangling link remains.
 `OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
-failure propagation, and postcondition only against a synthetic repository and
-ancestors under a disposable temporary root; it never passes the real checkout
-or its parents to the remover. The driver also reads the nested
+failure propagation, and postcondition only against a synthetic repository,
+ancestors, and unrelated symlink targets under a disposable temporary root.
+Its final-symlink and symlinked-parent cases require each unrelated target and
+marker to survive; the test never passes the real checkout or its parents to
+the remover. The driver also reads the nested
 `CMakeCache.txt`: a nonempty `CMAKE_CONFIGURATION_TYPES` selects
 `tests/<config>/`, while a single-config cache must contain the exact requested
 `CMAKE_BUILD_TYPE`. Missing or contradictory cache state fails explicitly, and

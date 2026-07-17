@@ -12,6 +12,27 @@ from unittest import mock
 import optional_opencv_operation_provider_build_smoke as subject
 
 
+def synthetic_temporary_directory(
+    prefix: str,
+) -> tempfile.TemporaryDirectory:
+    """@brief Create one disposable sandbox below a symlink-free temp root.
+
+    @param prefix Unique test-purpose prefix for the sandbox basename.
+    @return Temporary-directory context manager yielding a synthetic root.
+    @throws OSError If the system temporary root cannot be resolved or the
+      sandbox cannot be created.
+    @throws RuntimeError If resolving the system temporary root encounters a
+      symlink loop.
+    @note macOS commonly exposes its real temporary root through `/var`, which
+      is itself a symlink. Canonicalizing only the test-owned parent prevents
+      that host alias from masking the explicit final- and parent-symlink
+      cases. No real checkout path or parent is returned.
+    """
+
+    temporary_root = pathlib.Path(tempfile.gettempdir()).resolve()
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=temporary_root)
+
+
 class WorkDirectorySafetyTest(unittest.TestCase):
     """@brief Verifies destructive work-path handling in an isolated tree.
 
@@ -30,7 +51,7 @@ class WorkDirectorySafetyTest(unittest.TestCase):
           Photospider checkout or one of its parents.
         """
 
-        with tempfile.TemporaryDirectory(
+        with synthetic_temporary_directory(
             prefix="photospider-provider-work-safety-"
         ) as temporary:
             sandbox = pathlib.Path(temporary)
@@ -49,16 +70,16 @@ class WorkDirectorySafetyTest(unittest.TestCase):
                     )
 
     def test_rejects_symlinks_to_synthetic_protected_paths(self) -> None:
-        """@brief Require resolved symlinks to protected paths to be rejected.
+        """@brief Require symlinks naming protected paths to be rejected.
 
         @return None after both synthetic targets remain intact.
         @throws AssertionError If a symlink target is accepted or mutated.
         @note The case is skipped only when the host cannot create directory
-          symlinks. Any created link and target remain inside the temporary
-          sandbox.
+          symlinks. No work-path symlink is accepted, and every created link
+          and target remains inside the temporary sandbox.
         """
 
-        with tempfile.TemporaryDirectory(
+        with synthetic_temporary_directory(
             prefix="photospider-provider-work-symlink-"
         ) as temporary:
             sandbox = pathlib.Path(temporary)
@@ -89,6 +110,87 @@ class WorkDirectorySafetyTest(unittest.TestCase):
                         marker.read_text(encoding="utf-8"), "synthetic"
                     )
 
+    def test_rejects_final_symlink_to_unrelated_directory(self) -> None:
+        """@brief Reject a final work symlink without deleting its target.
+
+        @return None after the unrelated target, marker, and link survive.
+        @throws AssertionError If the helper accepts or mutates the synthetic
+          symlink or target.
+        @note The repository, symlink, and unrelated target are independent
+          children of one disposable test-owned sandbox. The real checkout and
+          its parents are never passed to the destructive helper.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-work-final-symlink-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            synthetic_repo = sandbox / "checkout" / "photospider"
+            synthetic_repo.mkdir(parents=True)
+            unrelated_target = sandbox / "unrelated-target"
+            unrelated_target.mkdir()
+            marker = unrelated_target / "must-survive"
+            marker.write_text("unrelated", encoding="utf-8")
+            work_link = sandbox / "work-link"
+            try:
+                work_link.symlink_to(
+                    unrelated_target, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            with self.assertRaises(ValueError) as raised:
+                subject.remove_work_tree(work_link, synthetic_repo)
+
+            self.assertIn(str(work_link), str(raised.exception))
+            self.assertTrue(work_link.is_symlink())
+            self.assertTrue(unrelated_target.is_dir())
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"), "unrelated"
+            )
+
+    def test_rejects_symlinked_parent_of_unrelated_directory(self) -> None:
+        """@brief Reject a symlinked work parent without deleting its target.
+
+        @return None after the unrelated target tree, marker, and link survive.
+        @throws AssertionError If the helper accepts or mutates the synthetic
+          symlink component or target tree.
+        @note The repository and unrelated target tree are separate children
+          of one disposable test-owned sandbox. The real checkout and its
+          parents are never passed to the destructive helper.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-work-parent-symlink-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            synthetic_repo = sandbox / "checkout" / "photospider"
+            synthetic_repo.mkdir(parents=True)
+            unrelated_parent = sandbox / "unrelated-parent"
+            work_target = unrelated_parent / "work"
+            work_target.mkdir(parents=True)
+            marker = work_target / "must-survive"
+            marker.write_text("unrelated", encoding="utf-8")
+            parent_link = sandbox / "parent-link"
+            try:
+                parent_link.symlink_to(
+                    unrelated_parent, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            with self.assertRaises(ValueError) as raised:
+                subject.remove_work_tree(
+                    parent_link / "work", synthetic_repo
+                )
+
+            self.assertIn(str(parent_link), str(raised.exception))
+            self.assertTrue(parent_link.is_symlink())
+            self.assertTrue(work_target.is_dir())
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"), "unrelated"
+            )
+
     def test_propagates_removal_failure_and_checks_postcondition(self) -> None:
         """@brief Require deletion errors and silent no-op deletion to fail.
 
@@ -98,7 +200,7 @@ class WorkDirectorySafetyTest(unittest.TestCase):
           delete anything outside its synthetic work directory.
         """
 
-        with tempfile.TemporaryDirectory(
+        with synthetic_temporary_directory(
             prefix="photospider-provider-work-failure-"
         ) as temporary:
             sandbox = pathlib.Path(temporary)
@@ -135,7 +237,7 @@ class WorkDirectorySafetyTest(unittest.TestCase):
           the test-owned temporary sandbox.
         """
 
-        with tempfile.TemporaryDirectory(
+        with synthetic_temporary_directory(
             prefix="photospider-provider-work-success-"
         ) as temporary:
             sandbox = pathlib.Path(temporary)
@@ -170,7 +272,7 @@ class ConfigurationLayoutTest(unittest.TestCase):
         @note Platform identity is used only for the executable suffix.
         """
 
-        with tempfile.TemporaryDirectory(
+        with synthetic_temporary_directory(
             prefix="photospider-provider-cache-layout-"
         ) as temporary:
             sandbox = pathlib.Path(temporary)
@@ -217,7 +319,7 @@ class ConfigurationLayoutTest(unittest.TestCase):
           multi-config mismatch, and a missing cache file.
         """
 
-        with tempfile.TemporaryDirectory(
+        with synthetic_temporary_directory(
             prefix="photospider-provider-cache-errors-"
         ) as temporary:
             sandbox = pathlib.Path(temporary)

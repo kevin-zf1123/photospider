@@ -246,12 +246,16 @@ operation 仍被 seed、OpenCV-backed operation key 不存在，并要求 replac
 写入 CTest，不保留逐次运行报告。当前阶段禁用的是 operation provider，不是彼此独立的 OpenCV
 codec、normalization、adapter 或 embedded-product 依赖。
 
-嵌套 build driver 在移除临时目录前，会解析 repository 与 work 两条路径，拒绝 repository、
-任一 repository ancestor、filesystem root，以及解析到这些位置的 symlink；recursive removal
-失败会原样传播，删除返回后还会确认目录确实不存在。
+嵌套 build driver 在移除临时目录前，会得到绝对的 work 路径拼写，但不会把它解析成 symlink
+目标后再删除。它会拒绝 parent traversal、repository、任一 repository ancestor、filesystem
+root，以及最终 work 路径或任一现存 parent component 中的 symlink。Canonical resolution
+只用于受保护位置比较；recursive removal 前会立即重复同一组检查，并且始终把通过验证的绝对
+路径拼写而不是 symlink 目标交给删除函数。Recursive removal 失败会原样传播，lstat 风格的
+postcondition 还会确认目录或 dangling link 都没有残留。
 `OpenCvOperationProviderBuildSmokeSafety` 只针对 disposable temporary root 下的 synthetic
-repository 与 ancestor，验证这些破坏性 guard、失败传播和 postcondition；它绝不会把真实
-checkout 或其 parent 传给 remover。Driver 还会读取嵌套 `CMakeCache.txt`：非空的
+repository、ancestor 和无关 symlink target，验证这些破坏性 guard、失败传播和 postcondition。
+它的 final-symlink 与 symlinked-parent case 要求每个无关 target 和 marker 都存活；测试绝不会把
+真实 checkout 或其 parent 传给 remover。Driver 还会读取嵌套 `CMakeCache.txt`：非空的
 `CMAKE_CONFIGURATION_TYPES` 选择 `tests/<config>/`，single-config cache 则必须包含与请求完全
 一致的 `CMAKE_BUILD_TYPE`。缺失或互相矛盾的 cache state 会显式失败；safety regression 会在
 不依赖 host platform 的情况下覆盖两种 layout。
