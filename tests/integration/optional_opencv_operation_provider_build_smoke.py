@@ -61,6 +61,10 @@ def resolve_work_directory(
 
     resolved_repo = repo.resolve()
     comparison_work = absolute_work.resolve()
+    if comparison_work.parent == comparison_work:
+        raise ValueError(
+            f"refusing to remove filesystem root: {comparison_work}"
+        )
     if (
         comparison_work == resolved_repo
         or comparison_work in resolved_repo.parents
@@ -68,10 +72,6 @@ def resolve_work_directory(
         raise ValueError(
             "refusing to remove repository or ancestor as work path: "
             f"{comparison_work}"
-        )
-    if comparison_work.parent == comparison_work:
-        raise ValueError(
-            f"refusing to remove filesystem root: {comparison_work}"
         )
 
     components = (*reversed(absolute_work.parents), absolute_work)

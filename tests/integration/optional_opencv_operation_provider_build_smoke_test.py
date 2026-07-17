@@ -69,6 +69,86 @@ class WorkDirectorySafetyTest(unittest.TestCase):
                         marker.read_text(encoding="utf-8"), "synthetic"
                     )
 
+    def test_rejects_absolute_parent_traversal_before_removal(self) -> None:
+        """@brief Reject an absolute work spelling containing parent traversal.
+
+        The test creates a disposable work tree, spells that same tree through
+        an absolute `..` component, and invokes only the path-resolution guard.
+
+        @return None after the guard rejects the spelling while the marker and
+          mocked recursive remover remain untouched.
+        @throws OSError If the synthetic tree cannot be created or inspected.
+        @throws AssertionError If the spelling is not absolute, omits `..`, is
+          accepted, reaches recursive removal, or changes the marker.
+        @note Every path is synthetic and test-owned. The mocked remover is a
+          safety sentinel; this test never requests recursive deletion.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-work-parent-traversal-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            synthetic_repo = sandbox / "checkout" / "photospider"
+            synthetic_repo.mkdir(parents=True)
+            work_parent = sandbox / "work-parent"
+            work_parent.mkdir()
+            work = sandbox / "work"
+            work.mkdir()
+            marker = work / "must-survive"
+            marker.write_text("synthetic", encoding="utf-8")
+            traversal_work = work_parent / os.pardir / work.name
+
+            self.assertTrue(traversal_work.is_absolute())
+            self.assertIn(os.pardir, traversal_work.parts)
+            with mock.patch.object(subject.shutil, "rmtree") as remover:
+                with self.assertRaisesRegex(ValueError, "parent traversal"):
+                    subject.resolve_work_directory(
+                        traversal_work, synthetic_repo
+                    )
+                remover.assert_not_called()
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"), "synthetic"
+            )
+
+    def test_rejects_current_filesystem_root_during_resolution(self) -> None:
+        """@brief Reject the current filesystem root through its dedicated guard.
+
+        The test derives the active root from a disposable absolute path's
+        anchor, then calls only `resolve_work_directory` with that root.
+
+        @return None after the dedicated root diagnostic is observed and the
+          synthetic repository marker remains unchanged.
+        @throws OSError If the synthetic repository cannot be created or read.
+        @throws AssertionError If anchor derivation is invalid, the root is
+          accepted, recursive removal is reached, or the marker changes.
+        @note The root is inspected only by the non-destructive parsing guard.
+          No recursive-removal helper receives or operates on the root.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-work-filesystem-root-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            synthetic_repo = sandbox / "checkout" / "photospider"
+            synthetic_repo.mkdir(parents=True)
+            marker = synthetic_repo / "must-survive"
+            marker.write_text("synthetic", encoding="utf-8")
+            synthetic_absolute_path = sandbox / "anchor-probe"
+            filesystem_root = pathlib.Path(synthetic_absolute_path.anchor)
+
+            self.assertTrue(synthetic_absolute_path.is_absolute())
+            self.assertTrue(filesystem_root.is_absolute())
+            self.assertEqual(filesystem_root.parent, filesystem_root)
+            with mock.patch.object(subject.shutil, "rmtree") as remover:
+                with self.assertRaisesRegex(ValueError, "filesystem root"):
+                    subject.resolve_work_directory(
+                        filesystem_root, synthetic_repo
+                    )
+                remover.assert_not_called()
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"), "synthetic"
+            )
+
     def test_rejects_symlinks_to_synthetic_protected_paths(self) -> None:
         """@brief Require symlinks naming protected paths to be rejected.
 
