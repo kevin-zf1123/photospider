@@ -443,15 +443,22 @@ report intentional deduplication; fork or missing identity fails closed.
 `healthcheck-published-image` is a container job, and published-image
 healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
-gates remain on `ubuntu-latest`. Its `Fetch pull request base history` and
-`Fetch CI branch main history` steps each bind `shell: bash`, making their
-`set -Eeuo pipefail` prologues valid without relying on the container default
-shell. If a change modifies an image input, the
-workflow builds `photospider-ci:local` and runs the same repository scripts in
-that image so validation does not race image publication. For pull requests,
-the published-image and local-image healthcheck jobs each fetch the target
-branch from the base-repository URL, verify `CI_BASE_SHA` as the event's exact
-base commit inside their own job, and supply that exact SHA as `CI_BASE_REF`
+gates remain on `ubuntu-latest`. Immediately after checkout, the published
+container's unique `Trust checked-out workspace` step binds `shell: bash`,
+adds only the exact `$GITHUB_WORKSPACE` to the job-persistent global
+`safe.directory`, and verifies `HEAD^{commit}` read-only. It neither configures
+`safe.directory=*` nor executes a checked-out repository script. This trust
+boundary precedes both conditional history fetches and `healthcheck.sh`,
+including `main` push and `workflow_dispatch` routes where neither fetch runs,
+instead of relying on checkout's temporary HOME-scoped configuration. The
+`Fetch pull request base history` and `Fetch CI branch main history` steps each
+also bind `shell: bash`, making their `set -Eeuo pipefail` prologues valid
+without relying on the container default shell. If a change modifies an image
+input, the workflow builds `photospider-ci:local` and runs the same repository
+scripts in that image so validation does not race image publication. For pull
+requests, the published-image and local-image healthcheck jobs each fetch the
+target branch from the base-repository URL, verify `CI_BASE_SHA` as the event's
+exact base commit inside their own job, and supply that exact SHA as `CI_BASE_REF`
 independently of the fork checkout's `origin`. For every `CI/**` push, each job
 instead fetches and verifies `origin/main`, then supplies it as `CI_BASE_REF`
 so the static scope remains cumulative from the `main` merge base across
@@ -481,13 +488,19 @@ The maintained entry points are:
   `protected-ci-paths.if` expressions; execution of the real stable-gate,
   fork-rejection, and protected-path blocks; job/step-scoped locking of both
   published-image history-fetch steps' own `shell: bash` metadata;
+  job/step-scoped locking of the unique published-image workspace-trust step,
+  its exact non-wildcard global `safe.directory`, read-only HEAD verification,
+  and checkout-before-trust-before-fetch/healthcheck order;
   published/local job-scoped pull-request exact-base and `CI/**`
   cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
   newline-path artifacts; and detector/reader/producer failure propagation. It
+  executes the production trust block with an isolated HOME/repository and
+  requires exactly that repository in the resulting global trust list. It also
   executes both production main-fetch blocks, while an isolated Git history
   proves cumulative main scope retains earlier C++ and event-before scope sees
-  only the later docs increment. The source lock does not emulate GitHub's
-  expression evaluator or the hosted runner.
+  only the later docs increment. The local source/shell lock does not emulate
+  GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
+  container runner.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
