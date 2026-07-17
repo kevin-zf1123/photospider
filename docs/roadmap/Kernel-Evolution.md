@@ -220,9 +220,12 @@ provider already follows the provider concurrency direction from
 it uses reentrant `cv::Mat` callbacks, fixes OpenCV internal CPU threading at
 one before publication, leaves outer parallelism to admitted scheduler
 workers, and keeps genuine shared backend synchronization provider-local. The
-target architecture preserves those ownership rules while moving all OpenCV
-initialization, exceptions, algorithms, codecs, and process-wide state fully
-inside the optional OpenCV provider.
+repository-owned operation algorithms, their OpenCV initialization, and their
+exception translation now live in a separately switchable provider module;
+the provider-disabled profile proves a stdlib-only v2 provider can supply and
+execute an absent operation. The target architecture preserves those ownership
+rules while the remaining codec, normalization, adapter, and process-wide
+dependencies continue through their dedicated slices.
 
 YAML remains a supported document adapter. `YAML::Node` must not remain the
 runtime parameter, output, cache metadata, or graph-state value model. Graph

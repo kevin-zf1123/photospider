@@ -178,9 +178,11 @@ OpenCV 继续作为可选 operation provider、image codec 和公共 image adapt
 ROI、dirty propagation、planning、cache 或 runtime interface。当前仓库自有 CPU provider 已遵循
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md) 的 provider
 并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU threading 固定为一，把
-外层并行交给已准入 scheduler worker，并让真实共享 backend 同步保持 provider-local。目标架构
-会保留这些所有权规则，同时把全部 OpenCV 初始化、异常、algorithm、codec 与进程级状态完整移入
-可选 OpenCV provider。
+外层并行交给已准入 scheduler worker，并让真实共享 backend 同步保持 provider-local。仓库自有
+operation algorithm、对应 OpenCV 初始化与异常翻译现已位于可独立开关的 provider module 中；
+provider-disabled profile 会证明 stdlib-only v2 provider 能提供并执行缺失 operation。目标架构会
+保留这些所有权规则，同时让剩余 codec、normalization、adapter 与进程级依赖继续通过各自专用
+纵向切片迁移。
 
 YAML 继续作为受支持的 document adapter；`YAML::Node` 不再作为 runtime parameter、output、
 cache metadata 或 graph-state value model。Graph load/save 是具有显式 transaction 与 error

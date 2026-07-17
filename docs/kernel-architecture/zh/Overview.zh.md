@@ -30,8 +30,9 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | Target | 角色 |
 | --- | --- |
 | `photospider_core_internal` | 仅用于构建的 private core value 与 public/private parameter-value conversion。 |
-| `photospider_graph_internal` | 仅用于构建的内置 operation registry source、`GraphModel`、graph IO、遍历、缓存、传播与 inspect 服务。 |
-| `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、v2 loader、value adapter 与 DSO lifetime owner。 |
+| `photospider_graph_internal` | 仅用于构建的依赖中立 core operation source、`GraphModel`、registry behavior、graph IO、遍历、缓存、传播与 inspect 服务。 |
+| `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
+| `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、configured-provider composition、v2 loader、value adapter 与 DSO lifetime owner。 |
 | `photospider_scheduler_internal` | 仅用于构建的 scheduler factory、handshake loader 与内置 scheduler 实现。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction 与 event 实现；它单向依赖 scheduler owner。 |
 | `photospider_operation_runtime` | 可安装的 public image-buffer factory 静态实现；不依赖 OpenCV、yaml-cpp、Threads、graph、registry 或 embedded product。 |
@@ -95,6 +96,9 @@ Package 边界：
   flag 来自 Apple-only 的 private product link block。Public Host/core 头避免暴露 OpenCV 和
   `yaml-cpp` 类型；Windows consumer 会收到 `PHOTOSPIDER_STATIC`，因此 declaration 不使用 DLL
   import/export 标注。
+  当前阶段的 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` 只控制 builtin operation provider；
+  image codec、cache/normalization 实现、public adapter 与最终无依赖 product profile 仍是彼此
+  独立的迁移边界。
 - FTXUI、`photospider_cli_common`、operation plugin、scheduler plugin 及其实现特定依赖，都不会作为
   embedded static package 的依赖导出。
 - `apps/graph_cli/include/graph_cli/**` 下的 CLI header 是 private build input，不会安装；public
@@ -374,8 +378,13 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
   不暴露后端对象。
 - 仓库自有 CPU OpenCV provider 使用可重入 `cv::Mat` callback，并在发布前把 OpenCV 内部 CPU
-  threading 固定为一；已准入 scheduler grant 拥有外层 callback parallelism，真实共享 backend
-  state 则继续在对应 provider 内同步。
+  threading 固定为一。注册算法抛出的每个 `cv::Exception` 都在 provider 内翻译为 host-owned
+  `GraphError`；若 OpenCV 报告资源耗尽，则翻译为新建的 `std::bad_alloc`。已准入 scheduler
+  grant 拥有外层 callback parallelism，真实共享 backend state 则继续在对应 provider 内同步。
+- `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 会省略这些 builtin image operation
+  callback，同时保留依赖中立 core operation。此时 v2 operation plugin 可以提供缺失 key。启用
+  provider 时，同一 registration transaction 可以替换 active key，卸载后恢复 builtin
+  predecessor。
 - 当前 scheduler 按 graph 和 intent 拥有物理 worker，但受单实例 grant 与共享 32-slot admission
   ledger 约束。ADR 0003 记录了已接受的替代所有权，但 shared `ExecutionService` 不是当前行为。
 

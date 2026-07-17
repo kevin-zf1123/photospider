@@ -287,6 +287,26 @@ maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
 
+## Optional OpenCV Operation Provider Validation
+
+`test_optional_opencv_operation_provider` is a CTest-registered integration
+binary built against both provider configurations. In the normal configuration
+it seeds the repository OpenCV provider, executes its real resize callback,
+proves an invalid OpenCV matrix shape is translated to host-owned
+`GraphErrc::ComputeError`, loads a stdlib-only v2 provider that takes complete
+ownership of the resize execution/dirty/forward slots, executes the replacement
+sentinel output, unloads it, and executes the restored OpenCV predecessor.
+
+`OpenCvOperationProviderDisabledBuild` configures a transient nested build with
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, builds only that focused
+binary and its stdlib-only fixture, and runs it. The disabled profile requires
+dependency-neutral analyzer/math operations to remain seeded, OpenCV-backed
+operation keys to be absent, and the replacement provider to publish, execute,
+and fully retire its resize key. The transient build is a long-lived product
+configuration check; it emits commands/results to CTest and retains no
+per-run report. This stage disables the operation provider, not the separate
+OpenCV codec, normalization, adapter, or embedded-product dependencies.
+
 ## OpenCV Operation Concurrency Validation
 
 `test_opencv_operation_concurrency` is a CTest-registered integration binary

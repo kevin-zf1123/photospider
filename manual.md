@@ -416,7 +416,10 @@ plugin_dirs:
 
 ## 11. Built-In Operations
 
-Built-ins are registered in `src/lib/core/ops.cpp`.
+Dependency-neutral built-ins are registered in `src/lib/core/ops.cpp`.
+OpenCV-backed entries are provided by the optional
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` module in
+`src/lib/providers/opencv/`.
 
 | Type | Subtype | Description |
 | --- | --- | --- |
@@ -430,7 +433,6 @@ Built-ins are registered in `src/lib/core/ops.cpp`.
 | `image_process` | `crop` | Crop a rectangular region. |
 | `image_process` | `extract_channel` | Extract B/G/R/A or numeric channel. |
 | `image_process` | `gaussian_blur` | Gaussian blur with monolithic and tiled implementations. |
-| `image_process` | `gaussian_blur_tiled` | Tiled blur alias retained for older graphs. |
 | `image_process` | `curve_transform` | Apply the curve transform kernel. |
 | `image_mixing` | `add_weighted` | Weighted blend of two images. |
 | `image_mixing` | `diff` | Absolute difference of two images. |

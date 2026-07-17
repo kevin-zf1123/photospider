@@ -221,6 +221,22 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
 因此不会依赖失败 load 发布状态。每个场景都使用相互隔离的临时 session 与 history
 存储，并在脚本退出时删除。
 
+## 可选 OpenCV Operation Provider 验证
+
+`test_optional_opencv_operation_provider` 是针对两种 provider 配置构建并注册到 CTest 的
+integration binary。在普通配置中，它会 seed 仓库 OpenCV provider，执行真实 resize callback，
+证明无效 OpenCV matrix shape 会被翻译为 host-owned `GraphErrc::ComputeError`，再加载一个
+stdlib-only v2 provider，使其完整拥有 resize 的 execution/dirty/forward slot，执行 replacement
+sentinel output，卸载该 provider，最后执行已恢复的 OpenCV predecessor。
+
+`OpenCvOperationProviderDisabledBuild` 会使用
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 配置一个临时嵌套 build，只构建上述聚焦
+binary 与 stdlib-only fixture，然后运行该 binary。禁用 profile 要求依赖中立 analyzer/math
+operation 仍被 seed、OpenCV-backed operation key 不存在，并要求 replacement provider 能发布、
+执行且完整退役其 resize key。该临时 build 是长期 product configuration 检查；它把命令与结果
+写入 CTest，不保留逐次运行报告。当前阶段禁用的是 operation provider，不是彼此独立的 OpenCV
+codec、normalization、adapter 或 embedded-product 依赖。
+
 ## OpenCV Operation 并发验证
 
 `test_opencv_operation_concurrency` 是注册到 CTest 的 integration binary，用于验证长期

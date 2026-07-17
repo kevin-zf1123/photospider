@@ -183,12 +183,22 @@ make its callback reentrant or synchronize its own shared mutable state. A
 shared operation key, device, intent, or callback owner never implies
 single-threaded execution.
 
-`register_builtin()` calls `cv::setNumThreads(1)` exactly once before publishing
-built-in callbacks. Repository-owned CPU providers use `cv::Mat`; repository
-code does not call `cv::ocl::setUseOpenCL(false)` and does not reconfigure
-OpenCV threading while callbacks may be active. The admitted scheduler worker
-grant is therefore the repository-owned outer CPU parallelism layer, while
-OpenCV internal CPU parallelism remains disabled.
+The optional OpenCV provider calls `cv::setNumThreads(1)` exactly once before
+publishing its callbacks. It uses `cv::Mat`, does not call
+`cv::ocl::setUseOpenCL(false)`, and does not reconfigure OpenCV threading while
+callbacks may be active. Its callback fence catches every `cv::Exception`
+raised by a registered algorithm while still inside provider code. OpenCV
+resource exhaustion becomes a fresh `std::bad_alloc`; every other OpenCV
+failure becomes a host-owned `GraphError` with `GraphErrc::ComputeError`. The
+admitted scheduler worker grant is therefore the repository-owned outer CPU
+parallelism layer, while OpenCV internal CPU parallelism remains disabled.
+
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits this provider's
+callbacks but leaves dependency-neutral core operations registered. The
+registry and v2 registrar do not depend on OpenCV: another provider can publish
+the absent operation, or replace an enabled OpenCV operation through the same
+slots. Manager-driven unload retires the replacement and restores the captured
+predecessor.
 
 Synchronization around genuine backend state remains provider-local. The
 Metal Perlin provider retains a DSO-private mutex around its shared Metal

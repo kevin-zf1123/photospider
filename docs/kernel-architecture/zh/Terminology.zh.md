@@ -155,8 +155,11 @@ adapter 或 provider 实际调用 matrix/library 时局部构造 OpenCV geometry
 存储或传递该类型。
 
 **Operation provider**
-operation callback 和 metadata 的实现来源。当前 built-in 实现在私有后端代码中使用 OpenCV；
-公共 operation 契约使用 Photospider 值类型。
+operation callback、propagation contract 与 metadata 的实现来源。依赖中立 core operation
+始终在进程 seed 时组合。仓库 OpenCV CPU provider 是独立的可选 build module，拥有自身
+algorithm、进程初始化与异常翻译。它与 v2 DSO provider 都向相同的 provider-neutral registry
+slot 发布，因此 DSO 可以替换 active operation，并在卸载后恢复其 predecessor。公共 operation
+契约使用 Photospider 值类型。
 
 **Adapter**
 位于外部库、transport 或产品边缘的窄转换。Adapter 转换表示，但不会成为 graph、planning、

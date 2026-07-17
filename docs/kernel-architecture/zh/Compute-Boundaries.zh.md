@@ -153,10 +153,17 @@ capture 与卸载，但会在 callback invocation 前释放。因此，每个 pr
 可重入，或自行同步其共享可变状态。共享 operation key、device、intent 或 callback owner 绝不
 意味着单线程执行。
 
-`register_builtin()` 会在发布 builtin callback 前恰好一次调用 `cv::setNumThreads(1)`。仓库自有
-CPU provider 使用 `cv::Mat`；仓库代码不调用 `cv::ocl::setUseOpenCL(false)`，也不会在 callback
-可能活跃时重新配置 OpenCV threading。因此，已准入的 scheduler worker grant 是仓库自有的外层
-CPU parallelism，而 OpenCV 内部 CPU parallelism 保持禁用。
+可选 OpenCV provider 会在发布自身 callback 前恰好一次调用 `cv::setNumThreads(1)`。它使用
+`cv::Mat`，不调用 `cv::ocl::setUseOpenCL(false)`，也不会在 callback 可能活跃时重新配置
+OpenCV threading。其 callback fence 会在仍处于 provider 代码内部时捕获注册算法抛出的每个
+`cv::Exception`。OpenCV 资源耗尽会变成新建的 `std::bad_alloc`；其他 OpenCV failure 会变成
+携带 `GraphErrc::ComputeError` 的 host-owned `GraphError`。因此，已准入的 scheduler worker
+grant 是仓库自有的外层 CPU parallelism，而 OpenCV 内部 CPU parallelism 保持禁用。
+
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 会省略该 provider 的 callback，但依赖中立
+core operation 仍保持注册。Registry 与 v2 registrar 不依赖 OpenCV：其他 provider 可以发布
+缺失 operation，也可以通过相同 slot 替换已启用的 OpenCV operation。由 manager 驱动的卸载会
+退役 replacement，并恢复已捕获的 predecessor。
 
 围绕真实 backend state 的同步仍由 provider 局部负责。Metal Perlin provider 保留一个
 DSO-private mutex，保护其共享 Metal device、queue、pipeline 与 buffer；该 mutex 既不是 OpenCV

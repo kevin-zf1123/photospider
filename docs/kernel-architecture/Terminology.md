@@ -189,9 +189,13 @@ only locally in an OpenCV adapter or provider at the actual matrix/library
 call; it is not stored or passed through those kernel contracts.
 
 **Operation provider**
-An implementation source for operation callbacks and metadata. The current
-built-in implementation uses OpenCV in private backend code; public operation
-contracts use Photospider values.
+An implementation source for operation callbacks, propagation contracts, and
+metadata. Dependency-neutral core operations are always composed at process
+seed. The repository OpenCV CPU provider is a separate optional build module
+that owns its algorithms, process initialization, and exception translation.
+Both it and v2 DSO providers publish into the same provider-neutral registry
+slots, so a DSO can replace an active operation and unload restores its
+predecessor. Public operation contracts use Photospider values.
 
 **Adapter**
 A narrow translation at an external library, transport, or product edge. An

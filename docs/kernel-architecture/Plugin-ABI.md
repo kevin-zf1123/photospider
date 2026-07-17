@@ -226,8 +226,13 @@ single-threaded execution from a shared operation key, device, or intent.
 
 Repository-owned CPU OpenCV providers implement that contract with immutable
 inputs, callback-local or task-owned `cv::Mat` state, and no process-wide outer
-operation mutex. Built-in registration fixes OpenCV internal CPU threading at
-one before callback publication, so scheduler grants own the outer parallelism.
+operation mutex. The optional built-in provider fixes OpenCV internal CPU
+threading at one before callback publication, so scheduler grants own the outer
+parallelism. Its provider-local fence converts OpenCV resource exhaustion to a
+fresh `std::bad_alloc` and all other `cv::Exception` values to host-owned
+`GraphError`. Building with
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits those slots while the
+registry and public v2 registrar remain usable by another provider.
 Provider-local synchronization is still required for actual shared backend
 state: the Metal Perlin DSO mutex protects only its shared Metal lifecycle.
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
@@ -241,6 +246,10 @@ legacy, metadata, implementation, and ownership map nodes together, then
 destroys the extracted values outside the guard. Device implementation values
 and their revision vector therefore remain parallel, and a direct device
 registration after whole-key unregister cannot inherit a stale plugin token.
+Manager-driven v2 registration applies those same slot semantics to the
+optional OpenCV provider: a DSO may own every active resize slot, execute
+without OpenCV through public `ImageBuffer` values, and restore the captured
+OpenCV predecessor on unload.
 
 The transaction has three outcomes:
 

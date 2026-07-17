@@ -39,8 +39,9 @@ The root `CMakeLists.txt` builds these internal modules:
 | Target | Role |
 | --- | --- |
 | `photospider_core_internal` | Build-only private core values and public/private parameter-value conversion. |
-| `photospider_graph_internal` | Build-only builtin operation registry source, `GraphModel`, graph IO, traversal, cache, propagation, and inspection services. |
-| `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, v2 loader, value adapter, and DSO lifetime ownership. |
+| `photospider_graph_internal` | Build-only dependency-neutral core operation source, `GraphModel`, registry behavior, graph IO, traversal, cache, propagation, and inspection services. |
+| `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
+| `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
 | `photospider_scheduler_internal` | Build-only scheduler factory, handshake loader, and built-in scheduler implementations. |
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, and event implementation; it depends one-way on scheduler ownership. |
 | `photospider_operation_runtime` | Installable static implementation of public image-buffer factories with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
@@ -117,6 +118,10 @@ Package boundary:
   block. Public Host/core headers avoid OpenCV and `yaml-cpp` types; Windows
   consumers receive `PHOTOSPIDER_STATIC` so declarations do not use DLL
   import/export attributes.
+  `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` controls only the built-in
+  operation provider in this stage; image codecs, cache/normalization
+  implementation, the public adapter, and the final dependency-free product
+  profile remain separate migration boundaries.
 - FTXUI, `photospider_cli_common`, operation plugins, scheduler plugins, and
   their implementation-specific dependencies are not exported as dependencies
   of the embedded static package.
@@ -464,9 +469,17 @@ Important current behavior:
   embedded Host adapter, and rendered by frontend code without exposing backend
   objects.
 - Repository-owned CPU OpenCV providers use reentrant `cv::Mat` callbacks with
-  OpenCV internal CPU threading fixed at one before publication; admitted
-  scheduler grants own outer callback parallelism, while genuine shared backend
-  state remains synchronized inside its provider.
+  OpenCV internal CPU threading fixed at one before publication. Every
+  `cv::Exception` raised by a registered algorithm is translated inside the
+  provider to a host-owned `GraphError`, or to a fresh `std::bad_alloc` for
+  OpenCV resource exhaustion. Admitted scheduler grants own outer callback
+  parallelism, while genuine shared backend state remains synchronized inside
+  its provider.
+- `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits those built-in image
+  operation callbacks while retaining dependency-neutral core operations.
+  A v2 operation plugin may then supply the absent key. With the provider
+  enabled, the same registration transaction can replace an active key and
+  unload restores the built-in predecessor.
 - Current schedulers own physical workers per graph and intent, subject to
   bounded per-instance grants and the shared 32-slot admission ledger. The
   accepted replacement for that ownership is recorded in ADR 0003, but the
