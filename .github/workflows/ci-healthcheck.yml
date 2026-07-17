@@ -221,6 +221,7 @@ jobs:
 
       - name: Fetch pull request base history
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        shell: bash
         env:
           CI_BASE_REPOSITORY: ${{ github.repository }}
           CI_BASE_BRANCH: ${{ github.base_ref }}
@@ -234,6 +235,7 @@ jobs:
 
       - name: Fetch CI branch main history
         if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')
+        shell: bash
         run: |
           set -Eeuo pipefail
           git fetch --no-tags --no-recurse-submodules origin \

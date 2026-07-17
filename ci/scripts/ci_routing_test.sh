@@ -138,6 +138,37 @@ extract_job_block() {
   ' "$workflow" > "$destination"
 }
 
+# @brief Extract one exact named step from one previously scoped job fragment.
+# @param $1 Extracted top-level job YAML fragment.
+# @param $2 Exact step name within that job.
+# @param $3 Destination YAML fragment.
+# @return Zero only when the named step occurs exactly once and is written.
+# @throws Nothing; missing or duplicate steps are represented by nonzero status.
+# @note The next same-indentation step closes the fragment, so metadata from a
+#   neighboring step cannot satisfy assertions on the selected production step.
+extract_step_block() {
+  local job_file=$1
+  local step_name=$2
+  local destination=$3
+  awk -v target="      - name: $step_name" '
+    $0 == target {
+      match_count++
+      capture = (match_count == 1)
+    }
+    capture && $0 != target && $0 ~ /^      - / {
+      capture = 0
+    }
+    capture {
+      print
+    }
+    END {
+      if (match_count != 1) {
+        exit 1
+      }
+    }
+  ' "$job_file" > "$destination"
+}
+
 # @brief Extract the one folded top-level condition from a workflow job block.
 # @param $1 Extracted top-level job YAML fragment.
 # @param $2 Destination containing the condition block with original spacing.
@@ -313,6 +344,59 @@ validate_published_image_base_fetch() {
     fail "healthcheck-published-image runs healthcheck before exact-base verification"
 
   pass healthcheck-published-image-exact-base-before-execution
+}
+
+# @brief Require both published-image history fetches to select Bash explicitly.
+# @param $1 Healthcheck workflow YAML path.
+# @return Zero after both exact production steps bind one top-level Bash shell.
+# @throws Nothing; missing, duplicate, misplaced, or non-Bash shell metadata
+#   exits through fail.
+# @note Job and step extraction prevents a shell key in another job or sibling
+#   step from satisfying the container fetch contract accidentally.
+validate_published_image_fetch_shells() {
+  local workflow=$1
+  local job_file="$TEST_ROOT/healthcheck-published-image-shell-job.yml"
+  local pull_request_step_file
+  local ci_branch_step_file
+  local container_count
+  local shell_key_count
+  local shell_bash_count
+  local step_index
+  local -a step_files=()
+  local -a step_names=(
+    "Fetch pull request base history"
+    "Fetch CI branch main history"
+  )
+
+  pull_request_step_file="$TEST_ROOT/healthcheck-published-image-pr-fetch-step.yml"
+  ci_branch_step_file="$TEST_ROOT/healthcheck-published-image-ci-main-fetch-step.yml"
+  step_files=("$pull_request_step_file" "$ci_branch_step_file")
+
+  extract_job_block "$workflow" healthcheck-published-image "$job_file" ||
+    fail "healthcheck-published-image job could not be extracted for shell validation"
+  container_count=$(grep -Fxc -- "    container:" "$job_file" || true)
+  ((container_count == 1)) ||
+    fail "healthcheck-published-image must remain exactly one container job"
+
+  extract_step_block "$job_file" "${step_names[0]}" \
+    "$pull_request_step_file" ||
+    fail "healthcheck-published-image pull-request fetch step is not unique"
+  extract_step_block "$job_file" "${step_names[1]}" \
+    "$ci_branch_step_file" ||
+    fail "healthcheck-published-image CI-main fetch step is not unique"
+
+  for step_index in "${!step_files[@]}"; do
+    shell_key_count=$(grep -Ec -- '^        shell:' \
+      "${step_files[$step_index]}" || true)
+    ((shell_key_count == 1)) ||
+      fail "healthcheck-published-image ${step_names[$step_index]} must bind exactly one step shell"
+    shell_bash_count=$(grep -Fxc -- '        shell: bash' \
+      "${step_files[$step_index]}" || true)
+    ((shell_bash_count == 1)) ||
+      fail "healthcheck-published-image ${step_names[$step_index]} must bind shell: bash"
+  done
+
+  pass healthcheck-published-image-fetch-steps-explicit-bash
 }
 
 # @brief Require one healthcheck job to use cumulative main on CI/** pushes.
@@ -1142,6 +1226,7 @@ main() {
   validate_workflow_contract "$health_workflow" "Report healthcheck gate"
   validate_workflow_contract "$integration_workflow" "Report integration gate"
   validate_published_image_base_fetch "$health_workflow"
+  validate_published_image_fetch_shells "$health_workflow"
   validate_local_image_base_fetch "$health_workflow"
   validate_ci_branch_healthcheck_base "$health_workflow" \
     healthcheck-published-image
