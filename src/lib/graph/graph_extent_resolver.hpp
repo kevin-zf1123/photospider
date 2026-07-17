@@ -26,10 +26,14 @@ class GraphExtentResolver {
    * @return Positive dependency-neutral extent, or an empty extent when none
    * can be inferred.
    * @throws GraphError when node_id or a traversed parent is missing.
-   * @throws YAML::Exception when an effective dimension cannot be converted.
-   * @throws std::bad_alloc when cache insertion or parameter access allocates.
-   * @note Callers must keep graph topology and effective parameter state stable
-   * for the lifetime of cache.
+   * @throws std::bad_alloc when memoization or missing-node diagnostics
+   * allocate.
+   * @note Dimension lookup accepts representable Int64 or exact integral Double
+   * values from typed parameter maps. A missing or incompatible request-local
+   * value falls back to the static parameter; an absent or nonpositive
+   * effective extent then falls through to image-parent resolution without
+   * document-format conversion. Callers must keep graph topology and effective
+   * parameter state stable for the lifetime of cache.
    */
   PixelSize resolve_output_extent(
       const GraphModel& graph, int node_id,
