@@ -10,16 +10,21 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/dirty_region_planner.hpp"
+#include "compute/image_buffer.hpp"
+#include "compute/task_graph_planning.hpp"
 #include "core/ops.hpp"
 #include "core/parameter_value_adapter.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
+#include "photospider/core/inspection_types.hpp"
+#include "photospider/host/compute_request.hpp"
 #include "photospider/plugin/opencv_adapter.hpp"
 #include "photospider/plugin/plugin_api.hpp"
 #include "plugin/operation_host_adapter.hpp"
@@ -35,6 +40,82 @@ static_assert(static_cast<std::uint32_t>(DataType::UINT8) == 0U);
 static_assert(static_cast<std::uint32_t>(DataType::FLOAT64) == 5U);
 static_assert(static_cast<std::uint32_t>(plugin::ParameterKind::Null) == 0U);
 static_assert(static_cast<std::uint32_t>(plugin::ParameterKind::Object) == 6U);
+
+static_assert(std::is_same_v<decltype(InputTileView::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(OutputTileView::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(InputTile::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(OutputTile::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(Node::hp_roi), std::optional<PixelRect>>);
+static_assert(std::is_same_v<decltype(Node::last_input_size_hp),
+                             std::optional<PixelSize>>);
+static_assert(std::is_same_v<typename decltype(DependencyLutCacheIdentity::
+                                                   input_extents)::value_type,
+                             PixelSize>);
+static_assert(
+    std::is_same_v<decltype(UpstreamRoiProjection::shared_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(UpstreamRoiProjection::dependency_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::HpPlanEntry::roi_hp), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::HpPlanEntry::hp_size), PixelSize>);
+static_assert(
+    std::is_same_v<decltype(compute::RtPlanEntry::roi_rt), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::RtPlanEntry::rt_size), PixelSize>);
+static_assert(std::is_same_v<
+              decltype(compute::DirtySourceRoiRecord::source_roi), PixelRect>);
+static_assert(std::is_same_v<typename decltype(compute::DirtySourceNodeState::
+                                                   source_rois)::value_type,
+                             PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyTileKey::pixel_roi), PixelRect>);
+static_assert(std::is_same_v<
+              decltype(compute::DirtyMonolithicRegion::pixel_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyEdgeMapping::from_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyEdgeMapping::to_roi), PixelRect>);
+static_assert(
+    std::is_same_v<
+        typename decltype(compute::DirtyRegionSnapshot::per_node_dirty_rois)::
+            mapped_type::value_type,
+        PixelRect>);
+static_assert(std::is_same_v<
+              typename decltype(compute::DirtyRegionSnapshot::
+                                    actual_dirty_rois)::mapped_type::value_type,
+              PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::PlannedDependency::to_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::PlannedTask::output_roi), PixelRect>);
+static_assert(
+    std::is_same_v<
+        typename decltype(compute::PlannedNodeWork::dirty_rois)::value_type,
+        PixelRect>);
+static_assert(std::is_same_v<
+              decltype(compute::DirtyNodeSelection::execution_roi), PixelRect>);
+static_assert(std::is_same_v<decltype(compute::ComputeRequest::dirty_roi),
+                             std::optional<PixelRect>>);
+static_assert(std::is_same_v<decltype(HostComputeRequest::dirty_roi),
+                             std::optional<PixelRect>>);
+static_assert(std::is_same_v<decltype(SpatialSnapshot::extent), PixelSize>);
+static_assert(
+    std::is_same_v<decltype(DirtyTileSnapshot::pixel_roi), PixelRect>);
+static_assert(std::is_same_v<
+              typename decltype(DirtyRegionInspectionSnapshot::
+                                    actual_dirty_rois)::mapped_type::value_type,
+              PixelRect>);
+static_assert(
+    std::is_same_v<decltype(plugin::RoiContext::requested_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(plugin::RoiContext::output_extent), PixelSize>);
+static_assert(
+    std::is_same_v<decltype(plugin::SpatialSnapshot::absolute_roi), PixelRect>);
+static_assert(
+    std::is_same_v<typename decltype(plugin::DependencyLutSnapshot::
+                                         cell_to_upstream_roi)::value_type,
+                   PixelRect>);
 
 TEST(OperationPluginRegistrar,
      RejectsInvalidNamesAndEmptyCallbacksBeforeRawHostCallbacks) {
@@ -928,7 +1009,9 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
       false);
 
   GraphModel graph = make_graph();
-  graph.add_node(make_source_node(1, "bounded_source", 128, 128));
+  Node source = make_source_node(1, "bounded_source", 128, 128);
+  source.subtype = "bounded_source";
+  graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "bounded_dependency_union";
@@ -951,12 +1034,25 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const compute::HighPrecisionDirtyPlan plan =
       planner.plan_high_precision(graph, 2, (PixelRect{0, 0, 1, 1}));
-  ASSERT_TRUE(plan.entries.count(1));
-  const PixelRect planned_parent_roi = plan.entries.at(1).roi_hp;
-  EXPECT_LE(planned_parent_roi.x, 70);
-  EXPECT_GT(static_cast<std::int64_t>(planned_parent_roi.x) +
-                planned_parent_roi.width,
-            70);
+  ASSERT_EQ(plan.entries.size(), 2u);
+  EXPECT_EQ(plan.entries.at(1).roi_hp, (PixelRect{64, 0, 64, 64}));
+  EXPECT_EQ(plan.entries.at(2).roi_hp, (PixelRect{0, 0, 8, 8}));
+
+  ASSERT_EQ(plan.snapshot.actual_dirty_rois.size(), 2u);
+  EXPECT_EQ(plan.snapshot.actual_dirty_rois.at(1),
+            (std::vector<PixelRect>{{64, 0, 64, 64}}));
+  EXPECT_EQ(plan.snapshot.actual_dirty_rois.at(2),
+            (std::vector<PixelRect>{{0, 0, 8, 8}}));
+
+  ASSERT_EQ(plan.snapshot.edge_mappings.size(), 1u);
+  const compute::DirtyEdgeMapping& mapping =
+      plan.snapshot.edge_mappings.front();
+  EXPECT_EQ(mapping.from_node_id, 1);
+  EXPECT_EQ(mapping.to_node_id, 2);
+  EXPECT_EQ(mapping.domain, compute::DirtyDomain::HighPrecision);
+  EXPECT_EQ(mapping.from_roi, (PixelRect{64, 0, 64, 64}));
+  EXPECT_EQ(mapping.to_roi, (PixelRect{0, 0, 8, 8}));
+  EXPECT_EQ(mapping.direction, compute::DirtyEdgeDirection::BackwardDemand);
 }
 
 TEST(PropagationContracts,
