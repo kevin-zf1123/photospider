@@ -473,6 +473,12 @@ std::shared_future<void> g_host_blocking_source_release;
 /** @brief Publishes entry into the blocking Host operation callback. */
 std::atomic<bool> g_host_blocking_source_started{false};
 
+/** @brief Fill value written by the offset tiled Host test operation. */
+std::atomic<int> g_offset_tiled_output_value{3};
+
+/** @brief Number of offset tiled Host test operation invocations. */
+std::atomic<int> g_offset_tiled_invocation_count{0};
+
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
  * @brief Events published by the current embedded close coordination hook.
@@ -924,6 +930,33 @@ void register_host_adapter_ops() {
                             const std::vector<const NodeOutput*>*) {
           return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
         }));
+    OpMetadata offset_tiled_metadata;
+    offset_tiled_metadata.tile_preference = TileSizePreference::MICRO;
+    OpRegistry::instance().register_op_hp_tiled(
+        "host_adapter_test", "offset_tiled_identity",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>& input_tiles) {
+          if (input_tiles.size() != 1u) {
+            throw GraphError(
+                GraphErrc::InvalidParameter,
+                "host adapter offset_tiled_identity requires one input");
+          }
+          g_offset_tiled_invocation_count.fetch_add(1,
+                                                    std::memory_order_relaxed);
+          const float output_value = static_cast<float>(
+              g_offset_tiled_output_value.load(std::memory_order_relaxed));
+          toCvMat(output_tile).setTo(output_value);
+        }),
+        offset_tiled_metadata);
+    OpRegistry::instance().register_dirty_propagator(
+        "host_adapter_test", "offset_tiled_identity",
+        DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
+                            const GraphModel&, const PixelSize&,
+                            const std::vector<PixelSize>&,
+                            const plugin::ParameterMap&,
+                            const std::vector<const NodeOutput*>*) {
+          return PixelRect{roi.x + 64, roi.y, roi.width, roi.height};
+        }));
   });
 }
 
@@ -1180,9 +1213,10 @@ void write_host_adapter_roi_graph(
  * @param path YAML file path to create.
  * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
  *         creation fails.
- * @note Node 2 uses a deterministic test-only dirty propagator that shifts the
- *       upstream demand by one HP micro-tile, so Host conversion tests can
- *       catch accidental swaps of `from_roi` and `to_roi`.
+ * @note Node 2 uses a tiled callback plus a deterministic test-only dirty
+ *       propagator that shifts the upstream demand by one HP micro-tile, so
+ *       Host conversion tests can observe generic tiled execution and catch
+ *       accidental swaps of `from_roi` and `to_roi`.
  */
 void write_host_adapter_offset_roi_graph(const std::filesystem::path& path) {
   std::filesystem::create_directories(path.parent_path());
@@ -1197,7 +1231,7 @@ void write_host_adapter_offset_roi_graph(const std::filesystem::path& path) {
       << "- id: 2\n"
       << "  name: roi_offset_identity\n"
       << "  type: host_adapter_test\n"
-      << "  subtype: offset_identity\n"
+      << "  subtype: offset_tiled_identity\n"
       << "  image_inputs:\n"
       << "    - from_node_id: 1\n";
 }
@@ -4896,11 +4930,13 @@ TEST(EmbeddedHostAdapter,
 /**
  * @brief Verifies the public Host dirty path through planning and execution.
  *
- * @return Nothing; GoogleTest assertions report ROI, plan, and trace failures.
+ * @return Nothing; GoogleTest assertions report ROI, plan, execution, commit,
+ *         and trace failures.
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
  * @note The test submits PixelRect at the Host boundary, observes the same
- *       kernel-native geometry in dirty/planning snapshots, and requires
- *       scheduler evidence for both source and downstream execution.
+ *       kernel-native geometry in dirty/planning snapshots, requires a real
+ *       NodeExecutor tiled callback, and distinguishes the committed dirty HP
+ *       output from the pre-request authoritative cache.
  */
 TEST(EmbeddedHostAdapter,
      DirtyComputeCarriesNativeRoiThroughPlanningAndExecution) {
@@ -4925,15 +4961,34 @@ TEST(EmbeddedHostAdapter,
   full_request.session = request.session;
   full_request.node = NodeId{2};
   full_request.cache.precision = "fp32";
-  auto initial_compute = host->compute(full_request);
+  g_offset_tiled_output_value.store(3, std::memory_order_relaxed);
+  g_offset_tiled_invocation_count.store(0, std::memory_order_relaxed);
+  auto initial_compute = host->compute_and_get_image(full_request);
   ASSERT_TRUE(initial_compute.status.ok) << initial_compute.status.message;
+  ASSERT_NE(initial_compute.value.data, nullptr);
+  EXPECT_GT(g_offset_tiled_invocation_count.load(std::memory_order_relaxed), 0);
+  const cv::Mat initial_image = toCvMat(initial_compute.value);
+  ASSERT_EQ(initial_image.type(), CV_32FC1);
+  EXPECT_FLOAT_EQ(initial_image.at<float>(10, 70), 3.0f);
+  auto initial_events =
+      host->drain_compute_events(request.session, kComputeEventDrainMaxLimit);
+  ASSERT_TRUE(initial_events.status.ok) << initial_events.status.message;
 
   HostComputeRequest dirty_request = full_request;
   dirty_request.intent = ComputeIntent::GlobalHighPrecision;
   dirty_request.dirty_roi = PixelRect{70, 10, 20, 20};
   dirty_request.execution.parallel = true;
-  auto dirty_compute = host->compute(dirty_request);
+  g_offset_tiled_output_value.store(11, std::memory_order_relaxed);
+  g_offset_tiled_invocation_count.store(0, std::memory_order_relaxed);
+  auto dirty_compute = host->compute_and_get_image(dirty_request);
   ASSERT_TRUE(dirty_compute.status.ok) << dirty_compute.status.message;
+  ASSERT_NE(dirty_compute.value.data, nullptr);
+  EXPECT_EQ(g_offset_tiled_invocation_count.load(std::memory_order_relaxed),
+            16);
+  const cv::Mat committed_image = toCvMat(dirty_compute.value);
+  ASSERT_EQ(committed_image.type(), CV_32FC1);
+  EXPECT_FLOAT_EQ(committed_image.at<float>(10, 70), 11.0f);
+  EXPECT_FLOAT_EQ(committed_image.at<float>(10, 10), 3.0f);
 
   auto planning = host->compute_planning_snapshot(request.session);
   ASSERT_TRUE(planning.status.ok) << planning.status.message;
@@ -4941,29 +4996,51 @@ TEST(EmbeddedHostAdapter,
   EXPECT_EQ(planning.value->intent, ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(planning.value->target_node.value, 2);
   EXPECT_EQ(planning.value->planned_node_count, 2u);
-  EXPECT_EQ(planning.value->monolithic_task_count, 2u);
-  EXPECT_EQ(planning.value->active_task_count, 2u);
+  EXPECT_EQ(planning.value->tile_task_count, 128u);
+  EXPECT_EQ(planning.value->monolithic_task_count, 1u);
+  EXPECT_EQ(planning.value->active_task_count, 17u);
   EXPECT_EQ(planning.value->dirty_source_task_count, 1u);
-  EXPECT_EQ(planning.value->downstream_task_count, 1u);
+  EXPECT_EQ(planning.value->downstream_task_count, 16u);
+  const auto planned_tiled_downstream = std::find_if(
+      planning.value->task_sample.begin(), planning.value->task_sample.end(),
+      [](const ComputePlanningTaskSnapshot& task) {
+        return task.node.value == 2 && task.kind == "tile" &&
+               task.output_roi.x == 64 && task.output_roi.y == 0;
+      });
+  ASSERT_NE(planned_tiled_downstream, planning.value->task_sample.end());
+  EXPECT_EQ(planned_tiled_downstream->tile_size, 16);
+  EXPECT_EQ(planned_tiled_downstream->output_roi.x, 64);
+  EXPECT_EQ(planned_tiled_downstream->output_roi.y, 0);
+  EXPECT_EQ(planned_tiled_downstream->output_roi.width, 16);
+  EXPECT_EQ(planned_tiled_downstream->output_roi.height, 16);
 
   auto snapshot = host->dirty_region_snapshot(request.session);
   ASSERT_TRUE(snapshot.status.ok) << snapshot.status.message;
   EXPECT_FALSE(snapshot.value.dirty_monolithic_nodes.empty());
+  EXPECT_FALSE(snapshot.value.dirty_tiles.empty());
   EXPECT_FALSE(snapshot.value.edge_mappings.empty());
 
-  const auto monolithic_node =
-      std::find_if(snapshot.value.dirty_monolithic_nodes.begin(),
-                   snapshot.value.dirty_monolithic_nodes.end(),
-                   [](const DirtyMonolithicRegionSnapshot& region) {
-                     return region.node.value == 2 &&
-                            region.domain == DirtyDomain::HighPrecision;
-                   });
-  ASSERT_NE(monolithic_node, snapshot.value.dirty_monolithic_nodes.end());
-  EXPECT_TRUE(monolithic_node->whole_output);
-  EXPECT_EQ(monolithic_node->pixel_roi.x, 0);
-  EXPECT_EQ(monolithic_node->pixel_roi.y, 0);
-  EXPECT_EQ(monolithic_node->pixel_roi.width, 256);
-  EXPECT_EQ(monolithic_node->pixel_roi.height, 128);
+  const auto downstream_tile = std::find_if(
+      snapshot.value.dirty_tiles.begin(), snapshot.value.dirty_tiles.end(),
+      [](const DirtyTileSnapshot& tile) {
+        return tile.node.value == 2 &&
+               tile.domain == DirtyDomain::HighPrecision;
+      });
+  ASSERT_NE(downstream_tile, snapshot.value.dirty_tiles.end());
+  EXPECT_EQ(downstream_tile->tile_x, 1);
+  EXPECT_EQ(downstream_tile->tile_y, 0);
+  EXPECT_EQ(downstream_tile->tile_size, 64);
+  EXPECT_EQ(downstream_tile->pixel_roi.x, 64);
+  EXPECT_EQ(downstream_tile->pixel_roi.y, 0);
+  EXPECT_EQ(downstream_tile->pixel_roi.width, 64);
+  EXPECT_EQ(downstream_tile->pixel_roi.height, 64);
+  EXPECT_EQ(std::count_if(snapshot.value.dirty_monolithic_nodes.begin(),
+                          snapshot.value.dirty_monolithic_nodes.end(),
+                          [](const DirtyMonolithicRegionSnapshot& region) {
+                            return region.node.value == 2 &&
+                                   region.domain == DirtyDomain::HighPrecision;
+                          }),
+            0);
 
   const auto edge_mapping = std::find_if(
       snapshot.value.edge_mappings.begin(), snapshot.value.edge_mappings.end(),
@@ -4998,8 +5075,25 @@ TEST(EmbeddedHostAdapter,
                event.action ==
                    HostSchedulerTraceAction::ExecuteDirtyDownstreamNode;
       });
+  const bool executed_dirty_downstream_tile = std::any_of(
+      trace.value.events.begin(), trace.value.events.end(),
+      [](const SchedulerTraceEventSnapshot& event) {
+        return event.node.value == 2 &&
+               event.action ==
+                   HostSchedulerTraceAction::ExecuteDirtyDownstreamTile;
+      });
   EXPECT_TRUE(executed_dirty_source);
   EXPECT_TRUE(executed_dirty_downstream);
+  EXPECT_TRUE(executed_dirty_downstream_tile);
+
+  auto dirty_events =
+      host->drain_compute_events(request.session, kComputeEventDrainMaxLimit);
+  ASSERT_TRUE(dirty_events.status.ok) << dirty_events.status.message;
+  EXPECT_TRUE(std::any_of(
+      dirty_events.value.events.begin(), dirty_events.value.events.end(),
+      [](const ComputeEventSnapshot& event) {
+        return event.node.value == 2 && event.source == "hp_update";
+      }));
 }
 
 TEST(EmbeddedHostAdapter, DirtySourceAndCacheControlsExposeFrontendStatus) {
