@@ -442,14 +442,19 @@ Published-image healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
 gates remain on `ubuntu-latest`. If a change modifies an image input, the
 workflow builds `photospider-ci:local` and runs the same repository scripts in
-that image so validation does not race image publication. The pull-request
-published-image and local-image healthcheck jobs each fetch the target branch
-from the base-repository URL and verify `CI_BASE_SHA` as the event's exact base
-commit inside their own job. Published-image verification precedes
-`healthcheck.sh`; local-image verification precedes the head Dockerfile build
-and mounted-workspace execution. Fetch or parse failure therefore stops before
-the script's fallback base selection, while the verified exact SHA is supplied
-as `CI_BASE_REF` independently of the fork checkout's `origin`.
+that image so validation does not race image publication. For pull requests,
+the published-image and local-image healthcheck jobs each fetch the target
+branch from the base-repository URL, verify `CI_BASE_SHA` as the event's exact
+base commit inside their own job, and supply that exact SHA as `CI_BASE_REF`
+independently of the fork checkout's `origin`. For every `CI/**` push, each job
+instead fetches and verifies `origin/main`, then supplies it as `CI_BASE_REF`
+so the static scope remains cumulative from the `main` merge base across
+successive pushes. A later documentation-only push therefore cannot hide an
+earlier unformatted C++ commit. An ordinary `main` push retains
+`github.event.before` as its incremental `CI_BASE_REF`. Published-image
+verification precedes `healthcheck.sh`; local-image verification precedes the
+head Dockerfile build and mounted-workspace execution. Required fetch or parse
+failure therefore stops before the script's fallback base selection.
 `Dockerfile.ci` installs the C++ toolchain, CMake, OpenCV, yaml-cpp, GTest,
 nlohmann-json, clang-format, Python, and cpplint required by those scripts.
 The image detector uses no Git status filter. The healthcheck static-scope
@@ -468,9 +473,13 @@ The maintained entry points are:
   routing and its durable event/path regression matrix.
 - `ci/scripts/ci_routing_test.sh` for exact canonical locking of both
   `protected-ci-paths.if` expressions; execution of the real stable-gate,
-  fork-rejection, and protected-path blocks; published/local job-scoped exact
-  base ordering; newline-path artifacts; and detector/reader/producer failure
-  propagation. The source lock does not emulate GitHub's expression evaluator.
+  fork-rejection, and protected-path blocks; published/local job-scoped pull-
+  request exact-base and `CI/**` cumulative-main ordering; exact three-way
+  `CI_BASE_REF` source routing; newline-path artifacts; and detector/reader/
+  producer failure propagation. It executes both production main-fetch blocks,
+  while an isolated Git history proves cumulative main scope retains earlier
+  C++ and event-before scope sees only the later docs increment. The source
+  lock does not emulate GitHub's expression evaluator.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
