@@ -178,9 +178,11 @@ script must not depend on personal development content.
 Validation is proportional. During implementation, run scoped static checks,
 affected build targets, and focused regressions. A native clean configure, full
 build, or complete CTest/JUnit pass is optional and should be chosen only when
-the change's risk warrants it. Do not use Docker or local `linux/amd64`
-emulation as a routine local preflight. Current-head GitHub Actions remains the
-authoritative remote integration environment.
+the change's risk warrants it. Local workflow-source, YAML, and shell checks are
+developer preflight only; they do not emulate the hosted GitHub Actions runner.
+Do not use Docker or local `linux/amd64` emulation as a routine local preflight.
+Current-head GitHub Actions remains the authoritative remote integration
+environment.
 
 ## CLI Option-Action Validation
 
@@ -438,9 +440,13 @@ could leave a configured required check pending. Stable gates take the same
 repository-identity decision: only a same-repository `CI/**` pull request can
 report intentional deduplication; fork or missing identity fails closed.
 
-Published-image healthcheck execution and build/test integration jobs run in
+`healthcheck-published-image` is a container job, and published-image
+healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
-gates remain on `ubuntu-latest`. If a change modifies an image input, the
+gates remain on `ubuntu-latest`. Its `Fetch pull request base history` and
+`Fetch CI branch main history` steps each bind `shell: bash`, making their
+`set -Eeuo pipefail` prologues valid without relying on the container default
+shell. If a change modifies an image input, the
 workflow builds `photospider-ci:local` and runs the same repository scripts in
 that image so validation does not race image publication. For pull requests,
 the published-image and local-image healthcheck jobs each fetch the target
@@ -473,13 +479,15 @@ The maintained entry points are:
   routing and its durable event/path regression matrix.
 - `ci/scripts/ci_routing_test.sh` for exact canonical locking of both
   `protected-ci-paths.if` expressions; execution of the real stable-gate,
-  fork-rejection, and protected-path blocks; published/local job-scoped pull-
-  request exact-base and `CI/**` cumulative-main ordering; exact three-way
-  `CI_BASE_REF` source routing; newline-path artifacts; and detector/reader/
-  producer failure propagation. It executes both production main-fetch blocks,
-  while an isolated Git history proves cumulative main scope retains earlier
-  C++ and event-before scope sees only the later docs increment. The source
-  lock does not emulate GitHub's expression evaluator.
+  fork-rejection, and protected-path blocks; job/step-scoped locking of both
+  published-image history-fetch steps' own `shell: bash` metadata;
+  published/local job-scoped pull-request exact-base and `CI/**`
+  cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
+  newline-path artifacts; and detector/reader/producer failure propagation. It
+  executes both production main-fetch blocks, while an isolated Git history
+  proves cumulative main scope retains earlier C++ and event-before scope sees
+  only the later docs increment. The source lock does not emulate GitHub's
+  expression evaluator or the hosted runner.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
