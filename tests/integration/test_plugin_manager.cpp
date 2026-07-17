@@ -20,10 +20,10 @@
 #include <vector>
 
 #include "compute/task_graph_planning.hpp"
-#include "core/ops.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "plugin/plugin_manager.hpp"
+#include "providers/configured_operation_providers.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "core/op_registry_test_access.hpp"
 #include "plugin/plugin_loader_test_access.hpp"
@@ -2829,8 +2829,8 @@ TEST_F(PluginManagerLifecycleTest,
  * @brief Proves repeated public seed calls never replay built-ins over a later
  * registry replacement.
  * @throws Nothing when the replacement remains active until explicit cleanup.
- * @note `ops::register_builtin()` is called directly only after the assertion
- * to restore the test's core-operation callback for subsequent tests.
+ * @note Configured provider registration is called directly only after the
+ * assertion to restore the provider callback for subsequent tests.
  */
 TEST_F(PluginManagerLifecycleTest,
        RepeatedSeedDoesNotOverwritePostSeedRegistryReplacement) {
@@ -2856,7 +2856,7 @@ TEST_F(PluginManagerLifecycleTest,
   const NodeOutput output = std::get<MonolithicOpFunc>(*resolved)(node, {});
   EXPECT_EQ(output.debug.compute_device, "POST_SEED_REPLACEMENT");
 
-  ops::register_builtin();
+  providers::register_configured_operation_providers();
 }
 
 /**

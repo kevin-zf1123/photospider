@@ -33,7 +33,6 @@
 #include "compute/task_graph_planning.hpp"
 #include "compute/task_population_strategy.hpp"
 #include "compute/tiled_input_normalizer.hpp"
-#include "core/ops.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -41,6 +40,7 @@
 #include "graph/roi_propagation_service.hpp"
 #include "photospider/host/host.hpp"
 #include "plugin/operation_host_adapter.hpp"
+#include "providers/configured_operation_providers.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
@@ -526,7 +526,7 @@ void execute_request_local_parameter_probe_tile(
 void register_split_ops() {
   static std::once_flag once;
   std::call_once(once, [] {
-    ops::register_builtin();
+    providers::register_configured_operation_providers();
     auto& registry = OpRegistry::instance();
     registry.register_op_hp_monolithic(
         "split_plan", "source",

@@ -4,8 +4,7 @@
 #error "OpenCV operation test access is available only in testing builds"
 #endif
 
-namespace ps {
-namespace ops {
+namespace ps::providers::opencv {
 
 /**
  * @brief Observes built-in OpenCV callback body entry and exit in tests.
@@ -59,5 +58,4 @@ class OpenCvOperationObserver {
 void set_opencv_operation_observer_for_testing(
     OpenCvOperationObserver* observer) noexcept;
 
-}  // namespace ops
-}  // namespace ps
+}  // namespace ps::providers::opencv

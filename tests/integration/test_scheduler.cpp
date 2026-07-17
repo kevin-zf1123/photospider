@@ -32,7 +32,7 @@ namespace {
 void register_micro_blur_for_dirty_scheduler_tests() {
   auto& registry = ps::OpRegistry::instance();
   const auto base_impl =
-      registry.get_implementations("image_process", "gaussian_blur_tiled");
+      registry.get_implementations("image_process", "gaussian_blur");
   ASSERT_TRUE(base_impl && base_impl->tiled_hp);
 
   ps::OpMetadata micro_meta;

@@ -25,6 +25,8 @@ endif()
 option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
 option(BUILD_TESTING "Build tests" ON)
+option(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER
+    "Build the repository-owned OpenCV CPU operation provider" ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
    CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PHOTOSPIDER_IPC_PLATFORM_SUPPORTED ON)
@@ -356,11 +358,39 @@ target_link_libraries(photospider_graph_internal PRIVATE
     Photospider::operation_opencv
     yaml-cpp::yaml-cpp)
 
+# Module: optional repository-owned OpenCV CPU operation provider. The graph
+# registry remains provider-neutral; only this target owns algorithm callbacks,
+# OpenCV process initialization, and OpenCV exception translation.
+set(PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES "")
+if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+    list(APPEND PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES
+        src/lib/providers/opencv/opencv_operation_provider.cpp)
+    add_library(photospider_opencv_operation_provider_internal STATIC
+        ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES})
+    target_include_directories(
+        photospider_opencv_operation_provider_internal PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
+        ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(
+        photospider_opencv_operation_provider_internal PRIVATE
+        photospider_graph_internal
+        Photospider::operation_opencv
+        ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET}
+        ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET}
+        yaml-cpp::yaml-cpp)
+    if(BUILD_TESTING)
+        target_compile_definitions(
+            photospider_opencv_operation_provider_internal PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+    endif()
+endif()
+
 # Module: host-side operation plugin loading and lifetime ownership.
 set(PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES
     src/lib/plugin/plugin_manager.cpp
     src/lib/plugin/plugin_loader.cpp
     src/lib/plugin/operation_host_adapter.cpp
+    src/lib/providers/configured_operation_providers.cpp
 )
 
 add_library(photospider_plugin_host_internal STATIC
@@ -374,6 +404,12 @@ target_link_libraries(photospider_plugin_host_internal PRIVATE
     Photospider::operation_sdk
     yaml-cpp::yaml-cpp
     ${CMAKE_DL_LIBS})
+if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+    target_compile_definitions(photospider_plugin_host_internal PRIVATE
+        PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
+    target_link_libraries(photospider_plugin_host_internal PRIVATE
+        photospider_opencv_operation_provider_internal)
+endif()
 
 # Module: built-in schedulers, scheduler factory, and scheduler DSO loader.
 set(PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES
@@ -464,6 +500,7 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
+    ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES}
     ${KERNEL_FACADE_SOURCES}
@@ -472,6 +509,10 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
 add_library(photospider STATIC ${PHOTOSPIDER_PRODUCT_SOURCES})
 
 target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
+if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+    target_compile_definitions(photospider PRIVATE
+        PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
+endif()
 if(BUILD_TESTING)
     target_compile_definitions(photospider PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
@@ -1190,26 +1231,30 @@ if(BUILD_TESTING)
         tests/integration/test_scheduler_worker_budget.cpp)
     target_compile_definitions(test_scheduler_worker_budget PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-    add_ps_test(test_opencv_operation_concurrency
-        tests/integration/test_opencv_operation_concurrency.cpp)
-    target_compile_definitions(test_opencv_operation_concurrency PRIVATE
-        PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
-    target_link_libraries(test_opencv_operation_concurrency PRIVATE
-        photospider_cli_common)
-    add_executable(opencv_operation_concurrency_benchmark
-        tests/verification/opencv_operation_concurrency_benchmark.cpp)
-    set_target_properties(opencv_operation_concurrency_benchmark PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
-    target_include_directories(opencv_operation_concurrency_benchmark PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src/lib"
-        ${OpenCV_INCLUDE_DIRS})
-    target_compile_definitions(opencv_operation_concurrency_benchmark PRIVATE
-        PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
-    target_link_libraries(opencv_operation_concurrency_benchmark PRIVATE
-        photospider_cli_common
-        yaml-cpp::yaml-cpp
-        ${OpenCV_LIBS})
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        add_ps_test(test_opencv_operation_concurrency
+            tests/integration/test_opencv_operation_concurrency.cpp)
+        target_compile_definitions(test_opencv_operation_concurrency PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+        target_link_libraries(test_opencv_operation_concurrency PRIVATE
+            photospider_cli_common)
+        add_executable(opencv_operation_concurrency_benchmark
+            tests/verification/opencv_operation_concurrency_benchmark.cpp)
+        set_target_properties(opencv_operation_concurrency_benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+        target_include_directories(
+            opencv_operation_concurrency_benchmark PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(
+            opencv_operation_concurrency_benchmark PRIVATE
+            PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+        target_link_libraries(opencv_operation_concurrency_benchmark PRIVATE
+            photospider_cli_common
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
+    endif()
     add_ps_test(test_scheduler_worker_budget_unit
         tests/unit/test_scheduler_worker_budget.cpp)
     add_ps_test(test_scheduler_factory_plan
@@ -1467,9 +1512,11 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_scheduler_worker_budget
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_opencv_operation_concurrency
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        PROPERTIES TIMEOUT 60)
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        gtest_discover_tests(test_opencv_operation_concurrency
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 60)
+    endif()
     gtest_discover_tests(test_scheduler_worker_budget_unit
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -1510,6 +1557,7 @@ message(STATUS "  Output Bin        : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
 message(STATUS "  Scheduler Plugins : ${SCHEDULER_PLUGIN_DIR}")
+message(STATUS "  OpenCV Op Provider: ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER}")
 if(APPLE)
     message(STATUS "  Metal Plugins     : ${METAL_ROOT_DIR}")
 endif()

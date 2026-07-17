@@ -18,7 +18,6 @@
 #include "compute/dirty_region_planner.hpp"
 #include "compute/image_buffer.hpp"
 #include "compute/task_graph_planning.hpp"
-#include "core/ops.hpp"
 #include "core/parameter_value_adapter.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
@@ -28,6 +27,7 @@
 #include "photospider/plugin/opencv_adapter.hpp"
 #include "photospider/plugin/plugin_api.hpp"
 #include "plugin/operation_host_adapter.hpp"
+#include "providers/configured_operation_providers.hpp"
 
 namespace ps {
 namespace {
@@ -316,7 +316,7 @@ void seed_parameter_output(GraphModel& graph, int node_id, int value,
 }  // namespace
 
 TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
-  ops::register_builtin();
+  providers::register_configured_operation_providers();
   GraphModel graph = make_graph();
   graph.add_node(make_source_node(1, "source", 1024, 1024));
   graph.add_node(make_blur_node(2, 1, 21));
@@ -342,7 +342,7 @@ TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
 }
 
 TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
-  ops::register_builtin();
+  providers::register_configured_operation_providers();
   GraphModel graph = make_graph();
   graph.add_node(make_unparameterized_source_node(1, "source_without_hp"));
   graph.add_node(make_resize_node(2, 1, 4, 4, "nearest"));
