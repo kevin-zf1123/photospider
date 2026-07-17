@@ -189,10 +189,14 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 - 自动启动 compute 的 node-to-backend dirty subscription；
 - 通用 `ComputeRun`、graph revision、deadline、supersession 或 cooperative cancellation contract。
 
-当前 dirty geometry 还在 graph、propagation、planning、snapshot 与 execution interface 中直接依赖
-OpenCV type。这是已接受的当前限制。[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
-与精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)定义了已接受的
-替代方向：使用 kernel-owned checked geometry，并只在 adapter/provider 层使用 OpenCV。
+当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
+task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和
+`PixelSize` value。Checked geometry helper 会先在更宽的整数表示中完成 endpoint arithmetic，
+再窄化结果。只有 provider 或算法实现在真实 matrix slicing、resize、crop 或 blur call
+处才会创建 OpenCV rectangle 与 size。这并不表示所有私有 OpenCV 算法依赖都已移除；
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)与精确的
+[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)仍约束剩余的 provider
+migration。
 
 把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
 update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明确限制界定了当前 generation

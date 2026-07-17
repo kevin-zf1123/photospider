@@ -14,7 +14,10 @@ transport, or process-wide operation plugin lifetime.
 The public caller reaches compute only through `ps::Host`. The embedded adapter
 translates public `HostComputeRequest` values into internal Kernel and
 `ComputeService` requests. No public API exposes a `ComputeService`, plan, task
-graph, or scheduler pointer.
+graph, or scheduler pointer. Request, propagation, planning, and execution
+geometry remains `PixelRect`/`PixelSize` through `NodeExecutor`; OpenCV geometry
+exists only inside a provider or algorithm implementation at the library call
+that consumes it.
 
 ## Ownership Map
 
@@ -121,6 +124,8 @@ private implementation modules and do not form an installable API.
   from it may still execute.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
+- Host, graph, planning, dirty work-set, staged-write, and `NodeExecutor`
+  boundaries carry kernel-owned `PixelRect`/`PixelSize`, never OpenCV geometry.
 - Tiled input normalization occurs once per node invocation where possible,
   rather than once per tile callback.
 

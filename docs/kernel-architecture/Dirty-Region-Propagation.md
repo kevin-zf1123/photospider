@@ -223,13 +223,17 @@ The current implementation does not provide:
 - a general `ComputeRun`, graph revision, deadline, supersession, or
   cooperative cancellation contract.
 
-Current dirty geometry also depends directly on OpenCV types in graph,
-propagation, planning, snapshot, and execution interfaces. This is an accepted
-current limitation. [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
+Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
+across the Host request, graph state, ROI propagation, planning, snapshot,
+task/work-set, write-buffer, and `NodeExecutor` boundaries. Checked geometry
+helpers perform endpoint arithmetic in a wider integer representation before
+narrowing. OpenCV rectangles and sizes are created only inside provider or
+algorithm implementations at actual matrix slicing, resize, crop, or blur
+calls. This does not mean that all private OpenCV algorithm dependencies have
+been removed; [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
 and the exact
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
-define the accepted replacement with kernel-owned checked geometry and
-adapter-only OpenCV use.
+still govern that remaining provider migration.
 
 Keeping dirty facts, static task shape, ready dispatch, and staged commit as
 separate values prevents ROI updates from rewriting topology or transferring

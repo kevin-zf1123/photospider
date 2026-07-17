@@ -11,7 +11,9 @@ transport 或进程级 operation plugin
 
 公共调用方只能通过 `ps::Host` 进入计算。Embedded adapter 把公共 `HostComputeRequest` 值
 转换为内部 Kernel 和 `ComputeService` 请求。公共 API 不暴露 `ComputeService`、plan、任务图
-或 scheduler pointer。
+或 scheduler pointer。Request、propagation、planning 与 execution geometry 直到
+`NodeExecutor` 都保持为 `PixelRect`/`PixelSize`；OpenCV geometry 只存在于 provider 或
+算法实现内部，并且位于真正消费它的 library call 处。
 
 ## 所有权图
 
@@ -100,6 +102,8 @@ Compute collaborator 位于 `src/lib/compute/`；三个 admission/ownership coll
 - 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。
 - 只要仍有由 `ComputeTaskGraph` 派生的 scheduler-visible callback 可能执行，该图就不可变。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
+- Host、graph、planning、dirty work-set、staged-write 与 `NodeExecutor` 边界携带内核自有的
+  `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。
 - 在可行时，tiled input normalization 每次 node invocation 只执行一次，而不是每个 tile callback
   执行一次。
 

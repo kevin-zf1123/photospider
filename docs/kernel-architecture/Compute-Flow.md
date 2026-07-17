@@ -42,6 +42,13 @@ mapping. It then translates the internal request to
 intent, and dirty ROI data. Parallel/runtime selection is carried separately as
 `ComputeService::ExecutionStrategy`.
 
+The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
+`HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
+planning, task selection, staged execution, and `NodeExecutor`. Extents use
+`PixelSize`. No OpenCV geometry conversion occurs on this path; a provider may
+create a local OpenCV rectangle or size only at an actual matrix or algorithm
+call.
+
 The CLI/REPL frontend is a permanent batch-oriented surface. It does not expose
 RT intent commands, dirty ROI creation, or dirty source lifecycle commands such
 as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
@@ -288,6 +295,11 @@ keeping non-forced dirty ROI requests local.
 Dirty-region state planning runs through the graph-scoped
 `DirtyRegionPlanner`, and the resulting `DirtyRegionSnapshot` feeds dirty
 work-set materialization and interaction-facing inspection summaries.
+
+Consequently, one public Host HP dirty request exercises one continuous
+kernel-native geometry path: request validation, graph-scoped backward
+projection, immutable plan selection, source-first ready dispatch, node
+execution, and staged HP commit all observe `PixelRect`/`PixelSize` values.
 
 ## RealTimeUpdate
 

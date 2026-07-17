@@ -182,13 +182,15 @@ propagation.
   visible as one coherent graph state.
 - Schedulers receive ready-task metadata and never own node storage,
   parameters, output values, topology, or cache authority.
-- `YAML::Node`, `cv::Rect`, and `cv::Size` remain current private graph and
-  spatial representations. This is an explicit current limitation, not an
-  adapter boundary that has already landed.
+- `YAML::Node` remains the current private graph-document and parameter
+  representation. Graph extents, spatial metadata, ROI propagation, dirty
+  snapshots, and compute-task geometry use kernel-owned `PixelSize` and
+  `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
+  or algorithm implementation when a matrix slice or library call requires it.
 
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. The accepted replacement
-for the private OpenCV/YAML representations is governed by
+for the remaining YAML and provider-library dependencies is governed by
 [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel);
 neither document changes the current fields described above.
