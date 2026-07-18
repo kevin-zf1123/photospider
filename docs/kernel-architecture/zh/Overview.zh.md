@@ -29,9 +29,9 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 
 | Target | 角色 |
 | --- | --- |
-| `photospider_core_internal` | 仅用于构建的 target，在当前产品组合边界内，把依赖中立的 private core value 与 public/private parameter-value conversion，同已配置的 image-artifact codec provider 及其 OpenCV adapter 组合在一起。因此它仍链接 `Photospider::operation_opencv` 与 OpenCV `imgcodecs`；完整的 OpenCV-free product profile 仍属于 issue #63。 |
+| `photospider_core_internal` | 仅用于构建的 target，在当前产品组合边界内，把依赖中立的 private core value 与中立 parameter-value inspection formatting，同已配置的 image-artifact codec provider 及其 OpenCV adapter 组合在一起。因此它仍链接 `Photospider::operation_opencv` 与 OpenCV `imgcodecs`；完整的 OpenCV-free product profile 仍属于 issue #63。 |
 | `photospider_graph_internal` | 仅用于构建的依赖中立 core operation source、`GraphModel`、registry behavior、graph IO、遍历、缓存、传播与 inspect 服务。 |
-| `photospider_yaml_graph_document_adapter_internal` | 仅用于构建的已配置 YAML graph-document adapter。它拥有 graph-document yaml-cpp translation 与直接 filesystem read/write 行为；格式中立的 GraphIO 与 Kernel contract 不会暴露 parser value。 |
+| `photospider_yaml_adapter_internal` | 仅用于构建的已配置 YAML adapter。它拥有共享 parameter-value translation、graph-document parsing/emission、cache-metadata parsing/emission 及其直接 filesystem 行为；格式中立的 GraphIO、Kernel、runtime 与 cache contract 不声明 parser value。 |
 | `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、configured-provider composition、v2 loader、value adapter 与 DSO lifetime owner。 |
 | `photospider_scheduler_internal` | 仅用于构建的 scheduler factory、handshake loader 与内置 scheduler 实现。 |
@@ -126,6 +126,8 @@ graph TD
     DaemonHost --> InteractionService
     EmbeddedHost --> YamlGraphDocumentAdapter["一个共享 YAML document adapter"]
     DaemonHost --> YamlGraphDocumentAdapter
+    EmbeddedHost --> YamlCacheMetadataCodec["一个共享 YAML cache-metadata adapter"]
+    DaemonHost --> YamlCacheMetadataCodec
     EmbeddedHost --> PluginManager["进程级 PluginManager"]
     InteractionService --> Kernel
 
@@ -137,6 +139,8 @@ graph TD
     YamlGraphDocumentAdapter -. implements .-> GraphDocumentWriter
     Kernel --> GraphTraversalService
     Kernel --> GraphCacheService
+    GraphCacheService --> CacheMetadataCodec
+    YamlCacheMetadataCodec -. implements .-> CacheMetadataCodec
     Kernel --> GraphInspectService
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
@@ -160,10 +164,12 @@ graph TD
 ```
 
 `create_embedded_host()` 是已配置的 persistence composition root。它构造一个
-`YamlGraphDocumentAdapter`，把同一个共享 owner 转换为格式中立的 reader 与 writer contract，并把
-这些 owner 连同已配置的 image codec 注入 `Kernel`。Kernel 与 `GraphIOService` 都没有默认
-persistence constructor 或 fallback adapter。私有的显式依赖 Host root 供替换测试使用。IPC Host
-仍是 client-side transport adapter；只有 daemon-owned embedded Host 会组合 backend persistence。
+`YamlGraphDocumentAdapter` 与一个 `YamlCacheMetadataCodec`，把 document owner 转换为格式中立的
+reader 与 writer contract，并将这三个 contract 连同已配置的 image codec 注入 `Kernel`。
+`GraphIOService` 保留 document owner，`GraphCacheService` 则保留 image 与 metadata owner。
+Kernel 和这些 service 都没有默认 persistence constructor 或 fallback adapter。私有的显式依赖
+Host root 供替换测试使用。IPC Host 仍是 client-side transport adapter；只有 daemon-owned
+embedded Host 会组合 backend persistence。
 
 每个 embedded Host 都拥有自己的 Kernel、graph runtime 和异步协调状态，但 operation plugin 不同：
 所有 Host 与 Kernel 都访问同一个进程寿命 `PluginManager` 和 `OpRegistry`。Host 析构绝不会卸载
@@ -200,7 +206,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
 | `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
-| `GraphCacheService` | 内存/磁盘缓存操作和缓存同步。 |
+| `GraphCacheService` | 内存/磁盘缓存操作和缓存同步；磁盘 image 与中立 metadata 经过必需的注入 codec contract。 |
 | `GraphInspectService` | 基于图拓扑构建结构化缓存/空间元数据 inspect 和 dependency-tree snapshot。 |
 | `GraphEventService` | 线程安全、固定容量的每节点 compute-event ring，提供带 sequence 的破坏性 batch 与饱和 drop accounting。 |
 | `PluginManager` | 唯一的进程寿命 operation plugin owner；串行化 load/seed/unload/inspection 并拥有 source/restoration/handle 状态。Load 会注册并记录动态插件，seed 会初始化或对齐 built-in，只有显式全局 unload 才会移除动态插件。 |
@@ -362,7 +368,7 @@ snapshot 注册；public callback 不会获得可变 `Node`、`GraphModel`、`Op
 - HP version/ROI 字段位于 `Node`；RT version/ROI 字段位于 proxy node state。
 - 配置缓存根目录下的磁盘缓存文件。
 
-`GraphCacheService` 将缓存命令集中化。HP 代码应使用 `cached_output_high_precision`；RT 代码只能将 `RealtimeProxyGraph` 用作交互式状态。Dirty RT worker 写入会先通过 `RealtimeProxyWriteBuffer` stage，再提交到 proxy；dirty HP worker 写入会先通过 `HighPrecisionDirtyWriteBuffer` stage，再提交到 graph。正式缓存保存、加载和同步行为、后续 HP 计算以及长期存储应使用 HP 输出。
+`GraphCacheService` 将缓存命令集中化。HP 代码应使用 `cached_output_high_precision`；RT 代码只能将 `RealtimeProxyGraph` 用作交互式状态。Dirty RT worker 写入会先通过 `RealtimeProxyWriteBuffer` stage，再提交到 proxy；dirty HP worker 写入会先通过 `HighPrecisionDirtyWriteBuffer` stage，再提交到 graph。正式缓存保存、加载和同步行为、后续 HP 计算以及长期存储应使用 HP 输出。该 service 要求非空的 `ImageArtifactCodec` 与 `CacheMetadataCodec` owner，绝不构造或声明 YAML value。已配置的 `YamlCacheMetadataCodec` 负责 YAML syntax、filesystem metadata IO，并把 parser/emitter failure 翻译为现有 graph error taxonomy。
 
 ### ImageBuffer 契约
 
@@ -427,6 +433,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/graph/graph_document_reader.hpp`
 - `src/lib/graph/graph_document_writer.hpp`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`

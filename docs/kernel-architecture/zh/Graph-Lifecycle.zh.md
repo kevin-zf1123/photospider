@@ -1,8 +1,8 @@
 # 图生命周期与变更语义
 
 本文描述图 session 当前的所有权、发布、变更和失败行为。文中会如实记录已实现行为及已知边界。
-内存 GraphDefinition seam 与注入的 YAML filesystem adapter 已是当前行为；dependency-disabled
-persistence 仍属于内核演进路线图。
+内存 GraphDefinition seam 与注入的 YAML document/cache adapter 已是当前行为；
+dependency-disabled persistence 仍属于内核演进路线图。
 
 ## 所有权
 
@@ -153,10 +153,11 @@ diagnostic state 重建。
 
 ## 注入的持久化依赖生命周期
 
-持久化依赖按 `Kernel` 组合一次。Embedded product root 提供共享 `ImageArtifactCodec`，以及一个从
-reader/writer contract 两个视角使用的共享 `YamlGraphDocumentAdapter`。`GraphCacheService` 保留
-codec；`GraphIOService` 保留 reader 与 writer。Kernel 和 GraphIO 会在构造时拒绝空 owner，也不提供
-configured fallback。
+持久化依赖按 `Kernel` 组合一次。Embedded product root 提供共享 `ImageArtifactCodec`、共享
+`YamlCacheMetadataCodec`，以及一个从 reader/writer contract 两个视角使用的共享
+`YamlGraphDocumentAdapter`。`GraphCacheService` 保留两个 codec owner；`GraphIOService` 保留
+reader 与 writer。Kernel、GraphCache 和 GraphIO 会在构造时拒绝空 owner，也不提供 configured
+fallback。
 
 这些依赖不是 graph state：reload、clear 与 close 不会替换它们。`Kernel::~Kernel()` 会在普通
 member teardown 到达 cache、traversal、diagnostic、IO 或 ROI collaborator 前显式清空自有 runtime
@@ -263,9 +264,11 @@ state 当作 transaction log。
 ingestion contract。`GraphDefinition`、`InMemoryGraphDocumentAdapter`、注入的
 graph-document contract 与已配置的 YAML filesystem adapter 现在共同构成当前 persistence
 boundary。Issue #61 已实现 filesystem adapter 注入与格式中立的私有 Host composition，同时保留
-public YAML-named ABI；Issue #62 和 #63 仍负责精确
-[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)中描述的剩余
-runtime/cache YAML value 与 dependency-disabled product profile。
+public YAML-named ABI；Issue #62 将共享 YAML value conversion 与 cache metadata 移到
+adapter-owned contract 后方，因此 runtime、graph、compute、inspection 与 cache declaration
+保持 YAML 中立。Issue #63 仍负责精确
+[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)中描述的
+dependency-disabled product profile。
 
 ## 实现与验证入口
 
@@ -282,6 +285,11 @@ runtime/cache YAML value 与 dependency-disabled product profile。
 - `src/lib/graph/in_memory_graph_document_adapter.*`
 - `src/lib/adapters/yaml/graph_definition_yaml.*`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
+- `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_io_service.cpp`
 - `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`

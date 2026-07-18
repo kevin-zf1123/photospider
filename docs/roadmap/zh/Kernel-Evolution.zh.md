@@ -172,7 +172,7 @@ forwarding layer。
   transform bound；
 - stride-aware buffer view、copy、fill、crop-to-view、pad、最小 conversion 和 validation；
 - format-neutral parameter value 和 typed graph definition；
-- 注入式 graph document reader/writer 和 image/artifact codec。
+- 注入式 graph document reader/writer、image/artifact codec 与 cache metadata codec。
 
 OpenCV 继续作为可选 operation provider、image codec 和公共 image adapter。它不得定义 Graph、
 ROI、dirty propagation、planning、cache 或 runtime interface。当前仓库自有 CPU provider 已遵循
@@ -189,6 +189,11 @@ cache metadata 或 graph-state value model。Graph load/save 是具有显式 tra
 contract 的注入行为；
 [ADR 0005](../../adr/zh/0005-graph-document-ingestion-is-a-classified-transaction.zh.md) 固定了
 load 边界必须保留的分类摄取事务。
+
+Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML conversion 归 adapter
+所有，cache metadata 经过注入的格式中立 codec，inspection 使用中立的递归 formatter。已配置
+product 仍链接 yaml-cpp；Issue #63 负责 dependency-disabled product/static/install consumer
+profile。
 
 ## 通用数据与 Region
 

@@ -41,8 +41,8 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 
 `GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。
 图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。
-内存中的命名 data 始终是 `ParameterMap`；`GraphCacheService` 只在读取或写入这一 persistence
-boundary 时递归转换。
+内存中的命名 data 始终是脱离 adapter 的 `plugin::ParameterMap`；
+`GraphCacheService` 绝不构造 YAML value。
 
 对于 CLI 加载的 graph，`GraphModel::cache_root` 会在 graph load 前由 `cache_root_dir`
 配置决定，并解析为 `<cache_root_dir>/<graph_name>`。相对 `cache_root_dir` 按进程当前工作目录解析。
@@ -55,6 +55,16 @@ boundary 时递归转换。
 规范化整数精度。当前生产 adapter 使用 OpenCV imgcodecs，并把 provider failure 翻译为
 `GraphErrc::Io`，同时让 OpenCV `StsNoMem` 保持为 `std::bad_alloc`。测试会注入确定性 fake，
 在不读取或写入真实图像格式的情况下验证调用顺序、生命周期保持、精度选择、可恢复错误与资源耗尽。
+
+Named value 独立通过私有、依赖中立的 `CacheMetadataCodec` contract，只交换 path 和脱离
+adapter 的 `ParameterMap` value。`Kernel` 注入、`GraphCacheService` 保留第二个不可变 shared
+owner，且其 service lifetime 与 image codec 相同。Cache policy 仍负责推导同级 `.yml` path、
+创建目录、选择 entry、记录计时和诊断、保持 HP 权威性，以及移除陈旧文件。只有已配置的
+`YamlCacheMetadataCodec` 拥有 YAML node、递归 value conversion、stream IO 与 provider
+exception translation。Null document 解码为空 map；无效 representation 变成
+`GraphErrc::InvalidYaml`，可恢复 write/emission failure 变成 `GraphErrc::Io`，
+`std::bad_alloc` 原样传播。确定性 fake 会验证精确 path、value、保留生命周期、error category
+与资源耗尽，而 cache code 不声明 YAML type。
 
 磁盘缓存加载尝试会保留既有 try-load 布尔返回契约，同时通过 GraphModel 专用的
 disk-cache diagnostic mutex 记录最新诊断。调用方通过 snapshot API 检查该状态，
@@ -89,10 +99,11 @@ miss 混在一起。
 只有一个正式缓存权威，可以防止低分辨率 preview 静默变成 HP dependency 或 persistence source。
 Request-local staging 会让尚未组装完成的 dirty output 保持不可见，直到相应 domain 的工作 settle。
 
-当前私有 disk-cache 实现不再直接调用 OpenCV image codec。它依赖注入的
-`ImageArtifactCodec`，而配置好的生产 adapter 拥有 OpenCV decode/encode、conversion 与
-exception translation。具名 output metadata 仍通过 YAML persistence adapter 保存；移除这项剩余
-文档依赖属于后续 graph-definition/YAML 切片。
+当前私有 disk-cache 实现既不调用 OpenCV image codec，也不调用 YAML API。它依赖注入的
+`ImageArtifactCodec` 与 `CacheMetadataCodec` contract；已配置的私有 adapter 拥有 provider
+decode/encode、递归 conversion、stream IO 与 exception translation。Issue #62 完成了这条
+runtime/cache value 边界。正常 configured product 仍会为其具体 adapter 发现并链接 yaml-cpp；
+dependency-disabled product/build evidence 仍属于 Issue #63。
 [ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
 和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述最终 adapter 与
 document boundary。
@@ -100,11 +111,13 @@ document boundary。
 ## 实现与验证入口
 
 - `src/lib/core/image_artifact_codec.hpp`
+- `src/lib/core/cache_metadata_codec.hpp`
 - `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
-- `src/lib/core/parameter_value_adapter.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_kernel_contracts.cpp`

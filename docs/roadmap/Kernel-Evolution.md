@@ -210,7 +210,8 @@ semantics:
 - stride-aware buffer view, copy, fill, crop-to-view, pad, minimal conversion,
   and validation primitives;
 - format-neutral parameter values and typed graph definitions;
-- injected graph document readers/writers and image/artifact codecs.
+- injected graph document readers/writers, image/artifact codecs, and cache
+  metadata codecs.
 
 OpenCV remains valuable as an optional operation provider, image codec, and
 public image adapter. It must not define Graph, ROI, dirty propagation,
@@ -233,6 +234,12 @@ loading and saving are injected behaviors with explicit transaction and error
 contracts. [ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
 fixes the classified ingestion transaction that the loading boundary must
 preserve.
+
+Issue #62 makes the runtime/cache value slice current: shared YAML conversion
+is adapter-owned, cache metadata crosses an injected format-neutral codec, and
+inspection uses a neutral recursive formatter. The configured product still
+links yaml-cpp; Issue #63 owns the dependency-disabled product/static/install
+consumer profile.
 
 ## General Data and Regions
 

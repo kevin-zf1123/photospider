@@ -3,8 +3,8 @@
 This document describes the current ownership, publication, mutation, and
 failure behavior of graph sessions. It records implemented behavior, including
 known boundary limitations. The in-memory GraphDefinition seam and injected
-YAML filesystem adapter are current; dependency-disabled persistence remains
-in the kernel evolution roadmap.
+YAML document/cache adapters are current; dependency-disabled persistence
+remains in the kernel evolution roadmap.
 
 ## Ownership
 
@@ -198,10 +198,11 @@ diagnostic state after the operation.
 ## Injected Persistence Lifetime
 
 Persistence dependencies are composed once per `Kernel`. The embedded product
-root supplies a shared `ImageArtifactCodec` and one shared
-`YamlGraphDocumentAdapter` viewed through the reader and writer contracts.
-`GraphCacheService` retains the codec; `GraphIOService` retains the reader and
-writer. Kernel and GraphIO reject absent owners at construction and provide no
+root supplies a shared `ImageArtifactCodec`, a shared
+`YamlCacheMetadataCodec`, and one shared `YamlGraphDocumentAdapter` viewed
+through the reader and writer contracts. `GraphCacheService` retains both
+codec owners; `GraphIOService` retains the reader and writer. Kernel,
+GraphCache, and GraphIO reject absent owners at construction and provide no
 configured fallback.
 
 These dependencies are not graph state: reload, clear, and close do not replace
@@ -332,9 +333,11 @@ governs the current ingestion contract. `GraphDefinition`,
 `InMemoryGraphDocumentAdapter`, the injected graph-document contracts, and the
 configured YAML filesystem adapter are now the current persistence boundary.
 Issue #61 implements filesystem-adapter injection and format-neutral private
-Host composition while preserving the public YAML-named ABI. Issues #62 and
-#63 still own remaining runtime/cache YAML values and the dependency-disabled
-product profile described by the exact
+Host composition while preserving the public YAML-named ABI. Issue #62 moves
+shared YAML value conversion and cache metadata behind adapter-owned
+contracts, so runtime, graph, compute, inspection, and cache declarations are
+YAML-neutral. Issue #63 still owns the dependency-disabled product profile
+described by the exact
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel).
 
 ## Implementation and Validation Entry Points
@@ -352,6 +355,11 @@ product profile described by the exact
 - `src/lib/graph/in_memory_graph_document_adapter.*`
 - `src/lib/adapters/yaml/graph_definition_yaml.*`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
+- `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_io_service.cpp`
 - `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`

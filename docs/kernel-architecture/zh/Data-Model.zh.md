@@ -68,8 +68,9 @@ emitter 或 graph-document stream。
 conversion、完整 emission，以及直接 open/write/flush/close 行为。`create_embedded_host()` 构造一个
 adapter，并把同一个共享 owner 作为两个 contract 通过 `Kernel` 注入；Kernel 与 GraphIO 都没有默认
 persistence construction。一个私有的显式依赖 Host root 支持确定性的 fake 替换，不增加可安装 API。
-Issue #61 已实现该边界。剩余 runtime/cache YAML value 与 dependency-disabled product profile
-分别仍属于 Issue #62 与 #63。
+Issue #61 已实现该 document 边界。Issue #62 将共享 YAML value translator 移入该私有 adapter
+区域，并从 runtime 与 cache contract 中移除 YAML type。现在只剩 Issue #63 负责
+dependency-disabled product profile。
 
 ## 拓扑邻接
 
@@ -111,6 +112,10 @@ document 一次转换为脱离运行态的 definition；in-memory adapter 随后
 Graph state。Definition 与 Graph storage 都不会保留源 YAML tree。Value 使用精确的
 `ParameterValue` alternative：`Null`、`Bool`、`Int64`、`Double`、`String`、`Array`
 和以 string 为键的 `Object`。
+
+Inspection 通过格式中立的 `format_parameter_value_for_inspection()` helper 渲染这些 value。
+Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 ordered-map 顺序；string 会被
+加引号并转义，整个过程不会构造 YAML node 或 emitter。
 
 `Node::runtime_parameters` 是另一个 `ParameterMap`，在执行时通过复制静态 value 并应用
 `parameter_inputs` 重建。连接的命名 output 会替换同名静态 value，期间不发生格式转换。
@@ -211,15 +216,18 @@ RT proxy commit 之后。
 - 结构变更必须经过 model helper，使节点存储、两个方向的邻接、topology generation 与缓存的
   planning state 作为一份一致图状态变为可见。
 - Scheduler 只接收 ready-task metadata，绝不拥有节点存储、参数、输出值、拓扑或缓存权威。
-- `YAML::Node` 仍位于私有 YAML graph-document adapter 与 disk-cache metadata boundary 内；它不由
-  `GraphDefinition`、持久 `Node` 字段或 `OutputPort` 拥有。静态/有效参数、output-port
+- `YAML::Node` 只保留在用于 graph document、共享 value translation 与已配置 cache metadata 的
+  私有 YAML adapter 内。Runtime、graph、compute、inspection 或 cache contract 不再声明它，
+  `GraphDefinition`、持久 `Node` 字段与 `OutputPort` 也不拥有它。静态/有效参数、output-port
   configuration 与 operation 命名 output 都是 `ParameterValue` tree。Graph extent、spatial
   metadata、dirty snapshot 与 compute-task geometry 使用内核自有的 `PixelSize` 和
   `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
-mutation 观察同一个 generation。剩余 YAML 与 provider-library 依赖的已接受替代方向由
+mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
+前提下完成 runtime/cache YAML value 边界。剩余 configured-product 与 provider-library
+dependency 工作由
 [ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)和精确的
 [依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)约束；这两份文档都不会
 改变上文描述的当前字段。
@@ -234,7 +242,10 @@ mutation 观察同一个 generation。剩余 YAML 与 provider-library 依赖的
 - `src/lib/graph/in_memory_graph_document_adapter.*`
 - `src/lib/adapters/yaml/graph_definition_yaml.*`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
-- `src/lib/core/parameter_value_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`

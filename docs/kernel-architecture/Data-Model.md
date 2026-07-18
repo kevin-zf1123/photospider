@@ -92,9 +92,10 @@ open/write/flush/close behavior. `create_embedded_host()` constructs one
 adapter and injects the same shared owner as both contracts through `Kernel`;
 Kernel and GraphIO have no default persistence construction. A private
 explicit-dependency Host root supports deterministic fake substitution without
-adding an installed API. Issue #61 implements this boundary. Remaining
-runtime/cache YAML values and the dependency-disabled product profile remain
-Issues #62 and #63.
+adding an installed API. Issue #61 implements this document boundary. Issue
+#62 moves the shared YAML value translator into that private adapter area and
+removes YAML types from runtime and cache contracts. Only the
+dependency-disabled product profile remains for Issue #63.
 
 ## Topology Adjacency
 
@@ -143,6 +144,12 @@ definition once; the in-memory adapter then copies that definition into Graph
 state. Neither the definition nor Graph storage retains the source YAML tree.
 Values use the exact `ParameterValue` alternatives `Null`, `Bool`, `Int64`,
 `Double`, `String`, `Array`, and string-keyed `Object`.
+
+Inspection renders these values through the format-neutral
+`format_parameter_value_for_inspection()` helper. Scalar spellings remain
+stable, arrays and objects are rendered recursively, object keys keep their
+ordered-map order, and strings are quoted and escaped without constructing a
+YAML node or emitter.
 
 `Node::runtime_parameters` is another `ParameterMap`, rebuilt for execution by
 copying static values and applying `parameter_inputs`. Connected named outputs
@@ -259,18 +266,21 @@ propagation.
   visible as one coherent graph state.
 - Schedulers receive ready-task metadata and never own node storage,
   parameters, output values, topology, or cache authority.
-- `YAML::Node` remains inside the private YAML graph-document adapter and
-  disk-cache metadata boundaries; it is not owned by `GraphDefinition`,
-  persistent `Node` fields, or `OutputPort`. Static/effective parameters,
-  output-port configuration, and named operation outputs are `ParameterValue`
-  trees. Graph extents, spatial metadata, dirty snapshots, and compute-task
-  geometry use kernel-owned `PixelSize` and `PixelRect` values. OpenCV geometry
-  is created only inside an OpenCV provider or algorithm implementation when a
-  matrix slice or library call requires it.
+- `YAML::Node` remains only inside private YAML adapters for graph documents,
+  shared value translation, and configured cache metadata. It is not declared
+  by runtime, graph, compute, inspection, or cache contracts and is not owned
+  by `GraphDefinition`, persistent `Node` fields, or `OutputPort`.
+  Static/effective parameters, output-port configuration, and named operation
+  outputs are `ParameterValue` trees. Graph extents, spatial metadata, dirty
+  snapshots, and compute-task geometry use kernel-owned `PixelSize` and
+  `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
+  or algorithm implementation when a matrix slice or library call requires it.
 
 Keeping graph identity and topology in one model makes traversal, compute,
-inspection, and mutation observe the same generation. The accepted replacement
-for the remaining YAML and provider-library dependencies is governed by
+inspection, and mutation observe the same generation. Issue #62 completes the
+runtime/cache YAML value boundary without making the configured product
+dependency-optional. The remaining configured-product and provider-library
+dependency work is governed by
 [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel);
 neither document changes the current fields described above.
@@ -285,7 +295,10 @@ neither document changes the current fields described above.
 - `src/lib/graph/in_memory_graph_document_adapter.*`
 - `src/lib/adapters/yaml/graph_definition_yaml.*`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
-- `src/lib/core/parameter_value_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`

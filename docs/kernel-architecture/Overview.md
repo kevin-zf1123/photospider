@@ -38,9 +38,9 @@ The root `CMakeLists.txt` builds these internal modules:
 
 | Target | Role |
 | --- | --- |
-| `photospider_core_internal` | Build-only target combining dependency-neutral private core values and public/private parameter-value conversion with the configured image-artifact codec provider and its OpenCV adapter at the current product-composition boundary. It therefore still links `Photospider::operation_opencv` and OpenCV `imgcodecs`; the complete OpenCV-free product profile remains issue #63. |
+| `photospider_core_internal` | Build-only target combining dependency-neutral private core values and neutral parameter-value inspection formatting with the configured image-artifact codec provider and its OpenCV adapter at the current product-composition boundary. It therefore still links `Photospider::operation_opencv` and OpenCV `imgcodecs`; the complete OpenCV-free product profile remains issue #63. |
 | `photospider_graph_internal` | Build-only dependency-neutral core operation source, `GraphModel`, registry behavior, graph IO, traversal, cache, propagation, and inspection services. |
-| `photospider_yaml_graph_document_adapter_internal` | Build-only configured YAML graph-document adapter. It owns graph-document yaml-cpp translation and direct filesystem read/write behavior; format-neutral GraphIO and Kernel do not link parser values into their contracts. |
+| `photospider_yaml_adapter_internal` | Build-only configured YAML adapter. It owns shared parameter-value translation, graph-document parsing/emission, cache-metadata parsing/emission, and their direct filesystem behavior; format-neutral GraphIO, Kernel, runtime, and cache contracts do not declare parser values. |
 | `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
 | `photospider_scheduler_internal` | Build-only scheduler factory, handshake loader, and built-in scheduler implementations. |
@@ -153,6 +153,8 @@ graph TD
     DaemonHost --> InteractionService
     EmbeddedHost --> YamlGraphDocumentAdapter["one shared YAML document adapter"]
     DaemonHost --> YamlGraphDocumentAdapter
+    EmbeddedHost --> YamlCacheMetadataCodec["one shared YAML cache-metadata adapter"]
+    DaemonHost --> YamlCacheMetadataCodec
     EmbeddedHost --> PluginManager["process PluginManager"]
     InteractionService --> Kernel
 
@@ -164,6 +166,8 @@ graph TD
     YamlGraphDocumentAdapter -. implements .-> GraphDocumentWriter
     Kernel --> GraphTraversalService
     Kernel --> GraphCacheService
+    GraphCacheService --> CacheMetadataCodec
+    YamlCacheMetadataCodec -. implements .-> CacheMetadataCodec
     Kernel --> GraphInspectService
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
@@ -187,13 +191,15 @@ graph TD
 ```
 
 `create_embedded_host()` is the configured persistence composition root. It
-constructs one `YamlGraphDocumentAdapter`, converts the same shared owner to
-the format-neutral reader and writer contracts, and injects those owners
-together with the configured image codec into `Kernel`. Kernel and
-`GraphIOService` have no default persistence constructors or fallback adapter.
-The private explicit-dependency Host root is used by substitution tests. The
-IPC Host remains a client-side transport adapter; only the daemon-owned
-embedded Host composes backend persistence.
+constructs one `YamlGraphDocumentAdapter` and one
+`YamlCacheMetadataCodec`, converts the document owner to the format-neutral
+reader and writer contracts, and injects all three contracts together with the
+configured image codec into `Kernel`. `GraphIOService` retains the document
+owners, while `GraphCacheService` retains the image and metadata owners.
+Kernel and those services have no default persistence constructors or fallback
+adapters. The private explicit-dependency Host root is used by substitution
+tests. The IPC Host remains a client-side transport adapter; only the
+daemon-owned embedded Host composes backend persistence.
 
 Each embedded Host owns its Kernel, graph runtimes, and async coordination, but
 operation plugins are different: every Host and Kernel reaches the same
@@ -237,7 +243,7 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
-| `GraphCacheService` | Memory/disk cache operations and cache synchronization. |
+| `GraphCacheService` | Memory/disk cache operations and cache synchronization; disk images and neutral metadata cross required injected codec contracts. |
 | `GraphInspectService` | Structured cache/spatial metadata inspection and dependency-tree snapshots built from graph topology. |
 | `GraphEventService` | Thread-safe, fixed-capacity per-node compute-event ring with sequenced destructive batches and saturating drop accounting. |
 | `PluginManager` | Unique process-lifetime operation plugin owner; serializes load/seed/unload/inspection and owns source/restoration/handle state. Load registers and records dynamic plugins, seed initializes or reconciles built-ins, and only explicit global unload removes dynamic plugins. |
@@ -447,7 +453,11 @@ interactive state. Dirty RT worker writes are staged through
 `RealtimeProxyWriteBuffer` before proxy commit; dirty HP worker writes are
 staged through `HighPrecisionDirtyWriteBuffer` before graph commit. Formal
 cache save, load, synchronization behavior, subsequent HP compute, and
-long-term storage use HP output.
+long-term storage use HP output. The service requires non-null
+`ImageArtifactCodec` and `CacheMetadataCodec` owners and never constructs or
+declares a YAML value. The configured `YamlCacheMetadataCodec` is responsible
+for YAML syntax, filesystem metadata IO, and translating parser/emitter
+failures into the existing graph error taxonomy.
 
 ### ImageBuffer Contract
 
@@ -531,6 +541,10 @@ this current-state document.
 - `src/lib/graph/graph_document_reader.hpp`
 - `src/lib/graph/graph_document_writer.hpp`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
