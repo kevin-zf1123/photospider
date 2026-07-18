@@ -319,7 +319,11 @@ endif()
 # 1. Internal Static Modules (The Building Blocks)
 # ==============================================================================
 
-# Module: low-level private values and public/private value conversion.
+# Module: dependency-neutral private core values and public/private value
+# conversion sources, combined at the current product-composition boundary with
+# the configured image-artifact codec provider and its OpenCV adapter. This
+# target still links Photospider::operation_opencv and OpenCV imgcodecs; the
+# complete OpenCV-free product profile remains issue #63.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
     src/lib/core/ps_types.cpp
     src/lib/core/parameter_value_adapter.cpp

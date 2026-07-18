@@ -29,7 +29,7 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 
 | Target | 角色 |
 | --- | --- |
-| `photospider_core_internal` | 仅用于构建的 private core value 与 public/private parameter-value conversion。 |
+| `photospider_core_internal` | 仅用于构建的 target，在当前产品组合边界内，把依赖中立的 private core value 与 public/private parameter-value conversion，同已配置的 image-artifact codec provider 及其 OpenCV adapter 组合在一起。因此它仍链接 `Photospider::operation_opencv` 与 OpenCV `imgcodecs`；完整的 OpenCV-free product profile 仍属于 issue #63。 |
 | `photospider_graph_internal` | 仅用于构建的依赖中立 core operation source、`GraphModel`、registry behavior、graph IO、遍历、缓存、传播与 inspect 服务。 |
 | `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、configured-provider composition、v2 loader、value adapter 与 DSO lifetime owner。 |

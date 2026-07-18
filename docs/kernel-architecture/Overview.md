@@ -38,7 +38,7 @@ The root `CMakeLists.txt` builds these internal modules:
 
 | Target | Role |
 | --- | --- |
-| `photospider_core_internal` | Build-only private core values and public/private parameter-value conversion. |
+| `photospider_core_internal` | Build-only target combining dependency-neutral private core values and public/private parameter-value conversion with the configured image-artifact codec provider and its OpenCV adapter at the current product-composition boundary. It therefore still links `Photospider::operation_opencv` and OpenCV `imgcodecs`; the complete OpenCV-free product profile remains issue #63. |
 | `photospider_graph_internal` | Build-only dependency-neutral core operation source, `GraphModel`, registry behavior, graph IO, traversal, cache, propagation, and inspection services. |
 | `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
