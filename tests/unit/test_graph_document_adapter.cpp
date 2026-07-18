@@ -11,6 +11,7 @@
 #include "graph/graph_io_service.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"       // NOLINT(build/include_subdir)
 #include "graph/in_memory_graph_document_adapter.hpp"  // NOLINT(build/include_subdir)
+#include "support/graph_document_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -362,7 +363,7 @@ TEST(GraphDocumentAdapter, YamlProductPathRoundTripsOutputParameters) {
                  "    - output_id: 2\n"
                  "      output_type: absent\n");
 
-  const GraphIOService io;
+  const GraphIOService io = ps::testing::make_yaml_graph_io_service();
   GraphModel loaded;
   ASSERT_NO_THROW(io.load(loaded, source));
   ASSERT_NO_THROW(io.save(loaded, saved));

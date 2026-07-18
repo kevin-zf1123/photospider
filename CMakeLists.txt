@@ -345,10 +345,10 @@ target_link_libraries(photospider_core_internal PRIVATE
     ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET}
     yaml-cpp::yaml-cpp)
 
-# Module: private graph model, registry behavior, YAML, and graph services.
+# Module: private graph model, registry behavior, cache metadata, and
+# format-neutral graph services.
 set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/core/ops.cpp
-    src/lib/graph/graph_definition_yaml.cpp
     src/lib/graph/in_memory_graph_document_adapter.cpp
     src/lib/graph/graph_model.cpp
     src/lib/graph/graph_state_executor.cpp
@@ -368,6 +368,24 @@ target_include_directories(photospider_graph_internal PRIVATE
 target_link_libraries(photospider_graph_internal PRIVATE
     photospider_core_internal
     Photospider::operation_opencv
+    yaml-cpp::yaml-cpp)
+
+# Module: configured YAML graph-document translation and direct filesystem IO.
+# GraphIO and Kernel see only the neutral graph-document contracts; the
+# embedded Host root selects this adapter for the current product profile.
+set(PHOTOSPIDER_YAML_GRAPH_DOCUMENT_ADAPTER_SOURCES
+    src/lib/adapters/yaml/graph_definition_yaml.cpp
+    src/lib/adapters/yaml/yaml_graph_document_adapter.cpp
+)
+
+add_library(photospider_yaml_graph_document_adapter_internal STATIC
+    ${PHOTOSPIDER_YAML_GRAPH_DOCUMENT_ADAPTER_SOURCES})
+target_include_directories(
+    photospider_yaml_graph_document_adapter_internal PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+target_link_libraries(
+    photospider_yaml_graph_document_adapter_internal PRIVATE
+    photospider_core_internal
     yaml-cpp::yaml-cpp)
 
 # Module: optional repository-owned OpenCV CPU operation provider. The graph
@@ -512,6 +530,7 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES}
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
+    ${PHOTOSPIDER_YAML_GRAPH_DOCUMENT_ADAPTER_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES}
@@ -529,7 +548,7 @@ endif()
 if(BUILD_TESTING)
     target_compile_definitions(photospider PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
-        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING
+        PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING
@@ -1239,7 +1258,7 @@ if(BUILD_TESTING)
     add_ps_test(test_kernel_contracts
         tests/integration/test_kernel_contracts.cpp)
     target_compile_definitions(test_kernel_contracts PRIVATE
-        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+        PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
     add_ps_test(test_event_stream_boundaries
@@ -1263,7 +1282,9 @@ if(BUILD_TESTING)
     add_ps_test(test_graph_document_errors
         tests/integration/test_graph_document_errors.cpp)
     target_compile_definitions(test_graph_document_errors PRIVATE
-        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+        PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
+    add_ps_test(test_graph_document_injection
+        tests/integration/test_graph_document_injection.cpp)
     add_ps_test(test_scheduler_worker_budget
         tests/integration/test_scheduler_worker_budget.cpp)
     target_compile_definitions(test_scheduler_worker_budget PRIVATE

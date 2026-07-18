@@ -24,7 +24,6 @@
 #include <vector>
 
 #include "photospider/core/graph_error.hpp"
-#include "providers/configured_image_artifact_codec.hpp"
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/scheduler_worker_budget.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
@@ -92,12 +91,13 @@ void notify_required_target_test_hook(RequiredTargetTestEvent event) noexcept {
 }  // namespace testing
 #endif
 
-/** @copydoc Kernel::Kernel() */
-Kernel::Kernel() : Kernel(providers::make_configured_image_artifact_codec()) {}
-
-/** @copydoc Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec>) */
-Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec)
-    : cache_service_(std::move(image_codec)) {}
+/** @copydoc Kernel::Kernel */
+Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
+               std::shared_ptr<const GraphDocumentReader> document_reader,
+               std::shared_ptr<const GraphDocumentWriter> document_writer)
+    : cache_service_(std::move(image_codec)),
+      io_service_(std::move(document_reader), std::move(document_writer)) {
+}  // NOLINT
 
 /** @copydoc Kernel::~Kernel */
 Kernel::~Kernel() noexcept {

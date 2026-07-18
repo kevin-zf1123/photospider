@@ -79,21 +79,19 @@ class KernelTestAccess;
 class Kernel {
  public:
   /**
-   * @brief Creates a Kernel with the configured production artifact codec.
-   * @throws std::bad_alloc if codec ownership allocation fails.
-   * @note The configured codec is injected once into GraphCacheService and
-   * retained for the complete Kernel lifetime.
+   * @brief Creates a Kernel with every configured persistence dependency.
+   *
+   * @param image_codec Shared codec owner used by graph cache operations.
+   * @param document_reader Shared reader owner used by graph and node loads.
+   * @param document_writer Shared writer owner used by graph and node saves.
+   * @throws std::invalid_argument when any required owner is empty.
+   * @note The embedded product composition root selects concrete
+   *       implementations. Kernel retains them through its cache and graph IO
+   *       services for the complete lifetime of every admitted operation.
    */
-  Kernel();
-
-  /**
-   * @brief Creates a Kernel with an explicitly supplied artifact codec.
-   * @param image_codec Shared codec owner used by all graph cache operations.
-   * @throws std::invalid_argument when the codec owner is empty.
-   * @note This internal composition seam enables deterministic fake-codec tests
-   * without adding a public Host or installed ABI surface.
-   */
-  explicit Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec);
+  Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
+         std::shared_ptr<const GraphDocumentReader> document_reader,
+         std::shared_ptr<const GraphDocumentWriter> document_writer);
 
   /**
    * @brief Drains every owned graph runtime before releasing Kernel services.
@@ -407,11 +405,11 @@ class Kernel {
                                                 int source_node_id);
 
   /**
-   * @brief Reloads an existing graph session from YAML through graph-state
-   * serialization.
+   * @brief Reloads an existing graph session from a document through
+   * graph-state serialization.
    *
    * @param name Graph session name to reload.
-   * @param yaml_path Source YAML file path.
+   * @param document_path Source document path.
    * @return true when reload succeeds; false when the graph is missing or the
    *         reload fails with a handled document error.
    * @throws std::bad_alloc if reload execution or handled-failure LastError
@@ -427,18 +425,18 @@ class Kernel {
    *       generation, runtime graph state, and session identity unchanged;
    *       `std::bad_alloc` propagates with the same preservation guarantee.
    */
-  bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
+  bool reload_graph_document(const std::string& name,
+                             const std::string& document_path);
   /**
    * @brief Saves one required graph session through graph-state serialization.
    *
    * @param name Graph session name to save.
-   * @param yaml_path Destination YAML file path.
+   * @param document_path Destination document path.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` when the session is absent,
-   *         or `GraphErrc::Io` when recoverable node serialization, YAML
-   *         emission, or destination preparation/open/write/flush/close
-   *         fails.
-   * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+   *         or `GraphErrc::Io` when recoverable document emission or
+   *         destination preparation/open/write/flush/close fails.
+   * @throws std::bad_alloc if graph-state submission, document serialization,
    *         path handling, or diagnostic construction exhausts memory.
    * @throws std::exception for other graph-state submission or future failures.
    * @note The embedded Host holds a session admission across this call so
@@ -451,7 +449,8 @@ class Kernel {
    *       while a post-open failure may leave created, truncated, or partial
    *       output.
    */
-  void save_graph_yaml(const std::string& name, const std::string& yaml_path);
+  void save_graph_document(const std::string& name,
+                           const std::string& document_path);
   bool clear_drive_cache(const std::string& name);
   bool clear_memory_cache(const std::string& name);
   bool clear_cache(const std::string& name);
@@ -678,28 +677,28 @@ class Kernel {
 
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
   /**
-   * @brief Serializes one required node's persistent definition as YAML.
+   * @brief Serializes one required node's persistent definition as text.
    *
    * @param name Loaded graph session name.
    * @param node_id Required node identifier.
-   * @return Serialized node mapping, or nullopt when the graph-state facade
+   * @return Serialized node document, or nullopt when the graph-state facade
    *         reports a recoverable missing graph/node failure.
    * @throws std::bad_alloc if graph-state submission, detached definition
-   *         capture, YAML conversion, or result storage exhausts memory.
+   *         capture, document conversion, or result storage exhausts memory.
    * @note Capture runs under GraphStateExecutor serialization and excludes
    *       runtime parameters, computed outputs, revisions, ROIs, and LUT state.
-   *       YAML conversion proceeds through the same private GraphDefinition
-   *       translator used by graph-file operations.
+   *       Conversion proceeds through the injected document writer used by
+   *       complete graph operations.
    */
-  std::optional<std::string> get_node_yaml(const std::string& name,
-                                           int node_id);
+  std::optional<std::string> get_node_document(const std::string& name,
+                                               int node_id);
   /**
-   * @brief Replaces one required node from YAML under graph-state
+   * @brief Replaces one required node from document text under graph-state
    *        serialization.
    *
    * @param name Required graph session name.
    * @param node_id Required existing node id whose identity is preserved.
-   * @param yaml_text Candidate replacement YAML mapping.
+   * @param document_text Candidate replacement node document.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` when the session or node is
    *         absent, or `GraphErrc::InvalidYaml` when parsing or complete
@@ -707,14 +706,14 @@ class Kernel {
    * @throws std::bad_alloc if parsing, validation, graph-state submission, or
    *         replacement exhausts memory.
    * @throws std::exception for other graph-state executor failures.
-   * @note Required-node lookup, YAML-to-NodeDefinition conversion, forced id
+   * @note Required-node lookup, injected reader conversion, forced id
    *       assignment, in-memory materialization, validation, and replacement
    *       execute in one GraphStateExecutor work item. Embedded Host retains a
    *       session admission across the call so concurrent close cannot erase
    *       the runtime.
    */
-  void set_node_yaml(const std::string& name, int node_id,
-                     const std::string& yaml_text);
+  void set_node_document(const std::string& name, int node_id,
+                         const std::string& document_text);
 
   std::optional<std::vector<int>> trees_containing_node(const std::string& name,
                                                         int node_id);
@@ -1275,6 +1274,11 @@ class Kernel {
    * joined.
    */
   GraphCacheService cache_service_;
+  /**
+   * @brief Format-neutral service retaining the Kernel-injected document IO.
+   * @note The service outlives every admitted graph-state work item because
+   *       runtime drainage precedes ordinary Kernel member destruction.
+   */
   GraphIOService io_service_;
   RoiPropagationService roi_propagation_service_;
 

@@ -16,10 +16,10 @@ std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
 }
 
 /**
- * @brief Reloads one existing graph from a YAML file and records load errors.
+ * @brief Reloads one existing graph document and records load errors.
  *
  * @param name Graph session name to reload.
- * @param yaml_path Source YAML file path.
+ * @param document_path Source document path.
  * @return true when GraphIOService loads and replaces graph nodes; false when
  *         the graph is missing or reload fails.
  * @throws std::bad_alloc if reload execution or handled-failure LastError
@@ -34,10 +34,10 @@ std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
  *       std::bad_alloc preserves the published nodes, topology adjacency/
  *       generation, runtime graph state, and session identity.
  */
-bool Kernel::reload_graph_yaml(const std::string& name,
-                               const std::string& yaml_path) {
-  const std::filesystem::path path = yaml_path;
-  return with_graph_state_last_error(name, "Reload graph YAML failed: ",
+bool Kernel::reload_graph_document(const std::string& name,
+                                   const std::string& document_path) {
+  const std::filesystem::path path = document_path;
+  return with_graph_state_last_error(name, "Reload graph document failed: ",
                                      [this, path](GraphModel& graph) {
                                        io_service_.load(graph, path);
                                        return true;
@@ -49,13 +49,13 @@ bool Kernel::reload_graph_yaml(const std::string& name,
  * @brief Saves one required graph through its serialized graph-state lane.
  *
  * @param name Graph session name to save.
- * @param yaml_path Destination YAML file path copied into the worker request.
+ * @param document_path Destination path copied into the worker request.
  * @return Nothing.
  * @throws GraphError with `GraphErrc::NotFound` when required-session
  *         resolution fails, or `GraphErrc::Io` when recoverable node
- *         serialization, YAML emission, or destination
+ *         document serialization or destination
  *         preparation/open/write/flush/close fails.
- * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+ * @throws std::bad_alloc if graph-state submission, document serialization,
  *         path handling, or diagnostic construction exhausts memory.
  * @throws std::exception for other graph-state submission or future failures.
  * @note with_required_graph_state() resolves and executes the save in the
@@ -64,9 +64,9 @@ bool Kernel::reload_graph_yaml(const std::string& name,
  *       directly: pre-open failure preserves existing bytes, but post-open
  *       failure may leave created, truncated, or partial output.
  */
-void Kernel::save_graph_yaml(const std::string& name,
-                             const std::string& yaml_path) {
-  const std::filesystem::path path = yaml_path;
+void Kernel::save_graph_document(const std::string& name,
+                                 const std::string& document_path) {
+  const std::filesystem::path path = document_path;
   with_required_graph_state(name, [this, path](GraphModel& graph) {
     try {
       io_service_.save(graph, path);
@@ -75,8 +75,9 @@ void Kernel::save_graph_yaml(const std::string& name,
     } catch (const GraphError& error) {
       throw GraphError(GraphErrc::Io, error.what());
     } catch (const std::exception& error) {
-      throw GraphError(GraphErrc::Io,
-                       std::string("Graph YAML save failed: ") + error.what());
+      throw GraphError(
+          GraphErrc::Io,
+          std::string("Graph document save failed: ") + error.what());
     }
   });
 }

@@ -13,6 +13,7 @@
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 // =============================================================================
 // M3.4: SchedulerFactory Tests
@@ -55,7 +56,7 @@ TEST(M34_SchedulerFactory, IsSupported) {
 // =============================================================================
 
 TEST(M34_KernelScheduler, DefaultSchedulerConfig) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   const auto& config = kernel.get_scheduler_config();
 
   EXPECT_EQ(config.hp_type, "cpu_work_stealing");
@@ -64,7 +65,7 @@ TEST(M34_KernelScheduler, DefaultSchedulerConfig) {
 }
 
 TEST(M34_KernelScheduler, SetSchedulerConfig) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
 
   ps::Kernel::SchedulerConfig custom_config;
   custom_config.hp_type = "serial_debug";
@@ -84,7 +85,7 @@ TEST(M34_KernelScheduler, LoadGraphInjectsSchedulers) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -113,7 +114,7 @@ TEST(M34_KernelScheduler, CustomSchedulerConfigOnLoad) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
 
   // Set custom config before loading
   ps::Kernel::SchedulerConfig custom_config;
@@ -149,7 +150,7 @@ TEST(M34_KernelScheduler, ReplaceScheduler) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -183,7 +184,7 @@ TEST(M34_KernelScheduler, ReplaceSchedulerInvalidType) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -207,7 +208,7 @@ TEST(M34_KernelScheduler, ReplaceSchedulerInvalidType) {
 }
 
 TEST(M34_KernelScheduler, GetSchedulerInfoNonExistentGraph) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
 
   auto info = kernel.get_scheduler_info("non_existent",
                                         ps::ComputeIntent::GlobalHighPrecision);
@@ -250,7 +251,7 @@ TEST(M34_Integration, ComputeWithInjectedScheduler) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -286,7 +287,7 @@ TEST(M34_Integration, ComputeWithSerialScheduler) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
 
   // Use serial scheduler for easier debugging/verification
   ps::Kernel::SchedulerConfig config;

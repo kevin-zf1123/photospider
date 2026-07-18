@@ -48,6 +48,7 @@
 #include "scheduler/cpu_work_stealing_scheduler.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -3510,7 +3511,7 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   register_split_ops();
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-hp-parity");
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   Kernel::SchedulerConfig scheduler_config;
   scheduler_config.worker_count = 2;
   kernel.set_scheduler_config(scheduler_config);
@@ -3573,7 +3574,7 @@ TEST(KernelComputeRuntimeSplit,
   register_split_ops();
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-async-inline-dirty");
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   Kernel::SchedulerConfig scheduler_config;
   scheduler_config.worker_count = 2;
   kernel.set_scheduler_config(scheduler_config);
@@ -3673,7 +3674,7 @@ TEST(KernelComputeRuntimeSplit,
   register_split_ops();
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-parallel-error");
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   Kernel::SchedulerConfig scheduler_config;
   scheduler_config.worker_count = 2;
   kernel.set_scheduler_config(scheduler_config);
@@ -3718,7 +3719,7 @@ TEST(KernelComputeRuntimeSplit,
   register_split_ops();
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-identity-projection");
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService interaction(kernel);
   constexpr char kGraphName[] = "split_identity_projection";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
@@ -3798,7 +3799,7 @@ TEST(DirtySourceLifecycleFacade, UsesHostPublicBoundary) {
 }
 
 TEST(DirtyControlLaneFacade, ExposesWakeupAndCutoffThroughInteractionService) {
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
 

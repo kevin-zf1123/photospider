@@ -45,6 +45,7 @@
 #include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
 #include "scheduler/serial_debug_scheduler.hpp"  // NOLINT(build/include_subdir)
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
 #define PS_TEST_OP_PLUGIN_DIR "build/test_plugins"
@@ -2988,7 +2989,7 @@ TEST(GraphStateExecutorLane, KernelCloseJoinsLaneBeforeSchedulerShutdown) {
   std::atomic<bool> shutdown_called{false};
   std::atomic<bool> shutdown_after_lane_stopped{false};
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   const std::string graph_name = "graph_state_kernel_close_order";
   const auto loaded =
       kernel.load_graph(graph_name, (temp.root() / "sessions").string(), "", "",
@@ -4663,7 +4664,7 @@ TEST(EmbeddedHostAdapter, SetNodeYamlLookupAndMutationExcludeConcurrentClear) {
   const std::string replacement =
       replacement_node_yaml("replacement_before_clear", 10, 6);
   const auto race = run_required_target_race(
-      testing::RequiredTargetTestEvent::SetNodeYamlTargetResolved,
+      testing::RequiredTargetTestEvent::SetNodeDocumentTargetResolved,
       "set_node_yaml", "clear_graph",
       [&] { return host->set_node_yaml(session, NodeId{1}, replacement); },
       [&] { return host->clear_graph(session); });
@@ -4707,7 +4708,7 @@ TEST(EmbeddedHostAdapter, SetNodeYamlLookupAndMutationExcludeConcurrentReload) {
   const std::string replacement =
       replacement_node_yaml("replacement_before_reload", 10, 6);
   const auto race = run_required_target_race(
-      testing::RequiredTargetTestEvent::SetNodeYamlTargetResolved,
+      testing::RequiredTargetTestEvent::SetNodeDocumentTargetResolved,
       "set_node_yaml", "reload_graph",
       [&] { return host->set_node_yaml(session, NodeId{1}, replacement); },
       [&] { return host->reload_graph(session, reload_path.string()); });

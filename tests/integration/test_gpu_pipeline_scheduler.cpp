@@ -37,6 +37,7 @@
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -851,7 +852,7 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -906,7 +907,7 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();

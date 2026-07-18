@@ -15,6 +15,7 @@
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 /** @brief Micro-tile fallback edge length used by the scriptable test tool. */
 const int TILE_SIZE_MICRO = 64;
@@ -364,7 +365,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
   svc.cmd_plugins_load({"build/plugins"});

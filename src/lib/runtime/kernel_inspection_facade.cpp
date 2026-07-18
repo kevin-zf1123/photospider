@@ -1,18 +1,16 @@
 /**
  * @file kernel_inspection_facade.cpp
- * @brief Implements Kernel inspection, traversal, node YAML, runtime-event, and
- * graph-state snapshot facades.
+ * @brief Implements Kernel inspection, traversal, node-document, runtime-event,
+ * and graph-state snapshot facades.
  */
 #include <filesystem>
 #include <map>
 #include <new>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "graph/graph_definition_yaml.hpp"  // NOLINT(build/include_subdir)
 #include "graph/in_memory_graph_document_adapter.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/kernel.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
@@ -159,45 +157,40 @@ std::optional<std::vector<int>> Kernel::list_node_ids(const std::string& name) {
                           [](GraphModel& graph) { return graph.node_ids(); });
 }
 
-/** @copydoc Kernel::get_node_yaml */
-std::optional<std::string> Kernel::get_node_yaml(const std::string& name,
-                                                 int node_id) {
-  return with_graph_state(name, [node_id](GraphModel& graph) {
+/** @copydoc Kernel::get_node_document */
+std::optional<std::string> Kernel::get_node_document(const std::string& name,
+                                                     int node_id) {
+  return with_graph_state(name, [this, node_id](GraphModel& graph) {
     if (!graph.has_node(node_id)) {
       throw std::runtime_error("node not found");
     }
     const InMemoryGraphDocumentAdapter adapter;
     const NodeDefinition definition = adapter.capture_node(graph.node(node_id));
-    const YAML::Node yaml = node_definition_to_yaml(definition);
-    std::stringstream ss;
-    ss << yaml;
-    return ss.str();
+    return io_service_.write_node_document(definition);
   });
 }
 
-/** @copydoc Kernel::set_node_yaml */
-void Kernel::set_node_yaml(const std::string& name, int node_id,
-                           const std::string& yaml_text) {
-  with_required_graph_state(name, [node_id, yaml_text](GraphModel& graph) {
+/** @copydoc Kernel::set_node_document */
+void Kernel::set_node_document(const std::string& name, int node_id,
+                               const std::string& document_text) {
+  with_required_graph_state(name, [this, node_id,
+                                   document_text](GraphModel& graph) {
     if (!graph.has_node(node_id)) {
       throw GraphError(GraphErrc::NotFound,
                        "Node " + std::to_string(node_id) + " not in graph.");
     }
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
     testing::notify_required_target_test_hook(
-        testing::RequiredTargetTestEvent::SetNodeYamlTargetResolved);
+        testing::RequiredTargetTestEvent::SetNodeDocumentTargetResolved);
 #endif
     try {
-      const YAML::Node root = YAML::Load(yaml_text);
-      NodeDefinition definition = node_definition_from_yaml(root);
+      NodeDefinition definition = io_service_.read_node_document(document_text);
       definition.id = node_id;
       const InMemoryGraphDocumentAdapter adapter;
       const Node updated = adapter.materialize_node(definition);
       graph.replace_node(updated);
     } catch (const std::bad_alloc&) {
       throw;
-    } catch (const YAML::Exception& error) {
-      throw GraphError(GraphErrc::InvalidYaml, error.what());
     } catch (const GraphError& error) {
       throw GraphError(GraphErrc::InvalidYaml, error.what());
     }

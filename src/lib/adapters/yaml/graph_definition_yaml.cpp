@@ -1,8 +1,8 @@
-#include "graph/graph_definition_yaml.hpp"
+#include "adapters/yaml/graph_definition_yaml.hpp"
 
 /**
  * @file graph_definition_yaml.cpp
- * @brief Implements private YAML translation for detached graph definitions.
+ * @brief Implements YAML-adapter translation for detached graph definitions.
  */
 
 #include <new>
@@ -13,7 +13,7 @@
 
 #include "core/parameter_value_adapter.hpp"
 
-namespace ps {
+namespace ps::adapters::yaml::internal {
 
 namespace {
 
@@ -267,4 +267,4 @@ YAML::Node graph_definition_to_yaml(const GraphDefinition& definition) {
   return result;
 }
 
-}  // namespace ps
+}  // namespace ps::adapters::yaml::internal

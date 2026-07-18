@@ -9,8 +9,8 @@ namespace ps::testing {
  * @note Production builds compile out this test-access contract completely.
  */
 enum class RequiredTargetTestEvent {
-  /** @brief set_node_yaml resolved its required existing node. */
-  SetNodeYamlTargetResolved,
+  /** @brief set_node_document resolved its required existing node. */
+  SetNodeDocumentTargetResolved,
   /** @brief Forward ROI projection resolved both required endpoints. */
   ForwardRoiEndpointsResolved,
   /** @brief Backward ROI projection resolved both required endpoints. */

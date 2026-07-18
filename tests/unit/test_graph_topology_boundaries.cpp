@@ -10,6 +10,7 @@
 #include "graph/graph_io_service.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
+#include "support/graph_document_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -197,7 +198,7 @@ TEST(GraphTopologyBoundaries, FailedLoadDoesNotExposePartialTopology) {
              "      from_output_name: image\n");
 
   GraphModel graph(temp_file("photospider-topology-load-cache"));
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   io.load(graph, valid_path);
 
   GraphTraversalService traversal;

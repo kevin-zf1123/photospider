@@ -27,6 +27,7 @@
 #include "scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
 #include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 namespace {
 
@@ -208,7 +209,7 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -254,7 +255,7 @@ TEST(SchedulerTest, ParallelLogToJson) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -298,7 +299,7 @@ TEST(SchedulerTest, ParallelLogToJson) {
 }
 
 TEST(Scheduler, DirtyRegionTiledComputation) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
   register_micro_blur_for_dirty_scheduler_tests();
@@ -493,7 +494,7 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
 
 TEST(Scheduler,
      DirtyRegionProductionTraceCoversStaleGenerationAndExceptionRethrow) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
   register_micro_blur_for_dirty_scheduler_tests();
@@ -622,7 +623,7 @@ TEST(Scheduler,
  *       without serializing operation bodies or persisting into GraphRuntime.
  */
 TEST(Scheduler, ConcurrentDirtySiblingsPreserveParameterValueState) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::Kernel::SchedulerConfig scheduler_config;
   scheduler_config.worker_count = 8;
   kernel.set_scheduler_config(scheduler_config);

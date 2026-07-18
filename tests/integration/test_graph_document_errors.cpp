@@ -12,12 +12,13 @@
 #include <vector>
 
 #include "graph/graph_io_service.hpp"  // NOLINT(build/include_subdir)
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
-#include "graph/graph_io_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#if defined(PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
+#include "adapters/yaml/yaml_graph_document_adapter_test_access.hpp"  // NOLINT(build/include_subdir)
 #endif
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
+#include "support/graph_document_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -884,7 +885,7 @@ TEST(GraphDocumentReloadErrors,
   EXPECT_EQ(graph.value.nodes.front().name, "committed_replacement");
 }
 
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+#if defined(PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
 /**
  * @brief Preserves destination and Graph owner state on pre-open save failure.
  *
@@ -912,11 +913,13 @@ TEST(GraphDocumentSaveErrors,
   constexpr char kOriginalDestination[] = "original destination bytes\n";
   write_document(destination, kOriginalDestination);
 
-  testing::arm_graph_io_save_failure(
-      destination, testing::GraphIoSaveFailureStage::BeforeDestinationOpen);
+  testing::arm_yaml_graph_document_save_failure(
+      destination,
+      testing::YamlGraphDocumentSaveFailureStage::BeforeDestinationOpen);
   const VoidResult failed = host->save_graph(session, destination.string());
-  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
-  testing::clear_graph_io_save_failure();
+  const std::size_t hit_count =
+      testing::yaml_graph_document_save_failure_hit_count();
+  testing::clear_yaml_graph_document_save_failure();
 
   EXPECT_FALSE(failed.status.ok);
   if (!failed.status.ok) {
@@ -960,17 +963,18 @@ TEST(GraphDocumentSaveErrors,
   constexpr char kOriginalDestination[] = "resource sentinel bytes\n";
   write_document(destination, kOriginalDestination);
 
-  testing::arm_graph_io_save_failure(
-      destination,
-      testing::GraphIoSaveFailureStage::BeforeDestinationOpenBadAlloc);
+  testing::arm_yaml_graph_document_save_failure(
+      destination, testing::YamlGraphDocumentSaveFailureStage::
+                       BeforeDestinationOpenBadAlloc);
   bool bad_alloc_propagated = false;
   try {
     (void)host->save_graph(session, destination.string());
   } catch (const std::bad_alloc&) {
     bad_alloc_propagated = true;
   }
-  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
-  testing::clear_graph_io_save_failure();
+  const std::size_t hit_count =
+      testing::yaml_graph_document_save_failure_hit_count();
+  testing::clear_yaml_graph_document_save_failure();
 
   EXPECT_TRUE(bad_alloc_propagated);
   EXPECT_EQ(hit_count, 1U);
@@ -1025,7 +1029,7 @@ TEST(GraphDocumentModelTransaction,
                  "  subtype: source\n");
 
   GraphModel graph(std::filesystem::path{});
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   io.load(graph, valid);
   const std::uint64_t generation = graph.topology_generation();
   ASSERT_EQ(graph.upstream_edges(2).size(), 1U);

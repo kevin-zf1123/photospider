@@ -68,8 +68,9 @@ class KernelTestAccess {
    * @return The helper result if resource exhaustion is incorrectly recorded
    *         as LastError; the correct contract propagates std::bad_alloc.
    * @throws std::bad_alloc through the submitted graph-state future.
-   * @note `reload_graph_yaml()` uses this exact private wrapper; the injection
-   *       isolates its catch ordering without adding a production debug hook.
+   * @note `reload_graph_document()` uses this exact private wrapper; the
+   * injection isolates its catch ordering without adding a production debug
+   * hook.
    */
   static std::optional<int> inject_bad_alloc_through_last_error_graph_state(
       Kernel& kernel, const std::string& name) {

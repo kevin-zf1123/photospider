@@ -2,14 +2,14 @@
 
 /**
  * @file graph_definition_yaml.hpp
- * @brief Declares private YAML translation for detached graph definitions.
+ * @brief Declares YAML-adapter translation for detached graph definitions.
  */
 
 #include <yaml-cpp/yaml.h>
 
 #include "graph/graph_definition.hpp"  // NOLINT(build/include_subdir)
 
-namespace ps {
+namespace ps::adapters::yaml::internal {
 
 /**
  * @brief Converts one YAML node mapping into a detached node definition.
@@ -70,4 +70,4 @@ GraphDefinition graph_definition_from_yaml(const YAML::Node& yaml_root);
  */
 YAML::Node graph_definition_to_yaml(const GraphDefinition& definition);
 
-}  // namespace ps
+}  // namespace ps::adapters::yaml::internal

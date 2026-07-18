@@ -23,8 +23,8 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_io_service.hpp"
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
-#include "graph/graph_io_service_test_access.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
+#include "adapters/yaml/yaml_graph_document_adapter_test_access.hpp"
 #endif
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor_test_access.hpp"
@@ -36,6 +36,7 @@
 #include "runtime/kernel.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -717,7 +718,7 @@ class KernelCodecTeardownScenario final {
           encode_finished_.store(true, std::memory_order_release);
         });
     weak_codec_ = codec;
-    kernel_ = std::make_unique<Kernel>(codec);
+    kernel_ = ps::testing::make_unique_kernel_with_yaml_graph_documents(codec);
     codec.reset();
 
     const auto loaded =
@@ -1091,7 +1092,7 @@ TEST(InteractionInspectionContracts,
       from_output_name: image
 )YAML");
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
   auto loaded =
       svc.cmd_load_graph("inspect_contract", root.string(), yaml_path.string());
@@ -1176,7 +1177,7 @@ TEST(ParameterValuePath, DocumentGraphAndOperationsStayFormatNeutral) {
     label: consumer
 )YAML");
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   const auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -1260,7 +1261,7 @@ TEST(ParameterValuePath, ExactTypeMismatchFailsInsideOperation) {
     label: "007"
 )YAML");
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   const auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -1690,7 +1691,7 @@ TEST(KernelExceptionContracts, BadAllocEscapesRuntimeAndGraphStateWrappers) {
   const auto yaml_path = temp_path("photospider-contract-bad-alloc.yaml");
   write_missing_op_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   const auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -1719,7 +1720,7 @@ TEST(ComputeContracts, SyncFailureRestoresRequestScopedGraphState) {
   const auto yaml_path = temp_path("photospider-contract-sync-state.yaml");
   write_missing_op_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -1761,7 +1762,7 @@ TEST(ComputeContracts, AsyncParallelFailureRestoresRequestScopedGraphState) {
   const auto yaml_path = temp_path("photospider-contract-async-state.yaml");
   write_missing_op_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -1819,7 +1820,7 @@ TEST(ComputeContracts, OverlappingAsyncFailuresOwnExactKernelResults) {
   const auto yaml_path = temp_path("photospider-contract-async-exact.yaml");
   write_missing_op_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -1871,7 +1872,7 @@ TEST(ComputeContracts, ParallelComputeSerializesGraphStateOperations) {
   const auto yaml_path = temp_path("photospider-contract-parallel-state.yaml");
   write_blocking_source_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -1933,7 +1934,7 @@ TEST(ComputeContracts, SchedulerObservationAndReplacementWaitForCompute) {
   const auto yaml_path = temp_path("photospider-contract-scheduler-life.yaml");
   write_blocking_source_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -2023,7 +2024,7 @@ TEST(ComputeContracts, CloseWaitsForAcceptedAsyncGraphStateWork) {
   const auto yaml_path = temp_path("photospider-contract-close-life.yaml");
   write_blocking_source_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -2091,7 +2092,7 @@ TEST(ComputeContracts, RuntimeRestartWaitsForGraphStateSerialization) {
       temp_path("photospider-contract-serialized-restart.yaml");
   write_blocking_source_graph(yaml_path);
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -2186,7 +2187,7 @@ TEST(GraphIoContract, FailedReloadPreservesPreviousGraph) {
              "    - from_node_id: 99\n");
 
   GraphModel graph(temp_path("photospider-contract-reload-cache"));
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   io.load(graph, valid_path);
   ASSERT_EQ(graph.node(1).name, "valid");
 
@@ -2211,7 +2212,7 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
              "  subtype: source\n");
 
   GraphModel graph(temp_path("photospider-contract-reload-runtime-cache"));
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   io.load(graph, valid_path);
   ASSERT_EQ(graph.node(1).name, "old_graph");
 
@@ -2251,7 +2252,7 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
   EXPECT_TRUE(graph.recent_compute_plans.empty());
 }
 
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+#if defined(PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
 /**
  * @brief Reports a stream failure that occurs after the destination opens.
  *
@@ -2259,26 +2260,27 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
  * @note The private failpoint marks the real stream bad only after its YAML
  * write. It does not throw or replace the writer, so this test remains red
- * unless GraphIOService observes the late stream state itself.
+ * unless the configured YAML adapter observes the late stream state itself.
  */
 TEST(GraphIoContract, SaveReportsPostOpenWriteFailureAsIo) {
   GraphModel graph(temp_path("photospider-contract-save-late-write-cache"));
   graph.add_node(make_contract_node());
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   const auto output_path =
       temp_path("photospider-contract-save-late-write.yaml");
   std::filesystem::remove(output_path);
 
-  testing::arm_graph_io_save_failure(
-      output_path, testing::GraphIoSaveFailureStage::AfterWrite);
+  testing::arm_yaml_graph_document_save_failure(
+      output_path, testing::YamlGraphDocumentSaveFailureStage::AfterWrite);
   bool caught_io = false;
   try {
     io.save(graph, output_path);
   } catch (const GraphError& error) {
     caught_io = error.code() == GraphErrc::Io;
   }
-  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
-  testing::clear_graph_io_save_failure();
+  const std::size_t hit_count =
+      testing::yaml_graph_document_save_failure_hit_count();
+  testing::clear_yaml_graph_document_save_failure();
 
   EXPECT_TRUE(caught_io);
   EXPECT_EQ(hit_count, 1u);
@@ -2292,25 +2294,26 @@ TEST(GraphIoContract, SaveReportsPostOpenWriteFailureAsIo) {
  * @return Nothing; GoogleTest assertions report exception-category mismatch.
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
  * @note The private failpoint changes only the real stream state after flush,
- * so a passing test proves GraphIOService observes that late status.
+ * so a passing test proves the configured YAML adapter observes that status.
  */
 TEST(GraphIoContract, SaveReportsPostWriteFlushFailureAsIo) {
   GraphModel graph(temp_path("photospider-contract-save-flush-cache"));
   graph.add_node(make_contract_node());
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   const auto output_path = temp_path("photospider-contract-save-flush.yaml");
   std::filesystem::remove(output_path);
 
-  testing::arm_graph_io_save_failure(
-      output_path, testing::GraphIoSaveFailureStage::AfterFlush);
+  testing::arm_yaml_graph_document_save_failure(
+      output_path, testing::YamlGraphDocumentSaveFailureStage::AfterFlush);
   bool caught_io = false;
   try {
     io.save(graph, output_path);
   } catch (const GraphError& error) {
     caught_io = error.code() == GraphErrc::Io;
   }
-  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
-  testing::clear_graph_io_save_failure();
+  const std::size_t hit_count =
+      testing::yaml_graph_document_save_failure_hit_count();
+  testing::clear_yaml_graph_document_save_failure();
 
   EXPECT_TRUE(caught_io);
   EXPECT_EQ(hit_count, 1u);
@@ -2329,20 +2332,21 @@ TEST(GraphIoContract, SaveReportsPostWriteFlushFailureAsIo) {
 TEST(GraphIoContract, SaveReportsPostFlushCloseFailureAsIo) {
   GraphModel graph(temp_path("photospider-contract-save-close-cache"));
   graph.add_node(make_contract_node());
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   const auto output_path = temp_path("photospider-contract-save-close.yaml");
   std::filesystem::remove(output_path);
 
-  testing::arm_graph_io_save_failure(
-      output_path, testing::GraphIoSaveFailureStage::AfterClose);
+  testing::arm_yaml_graph_document_save_failure(
+      output_path, testing::YamlGraphDocumentSaveFailureStage::AfterClose);
   bool caught_io = false;
   try {
     io.save(graph, output_path);
   } catch (const GraphError& error) {
     caught_io = error.code() == GraphErrc::Io;
   }
-  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
-  testing::clear_graph_io_save_failure();
+  const std::size_t hit_count =
+      testing::yaml_graph_document_save_failure_hit_count();
+  testing::clear_yaml_graph_document_save_failure();
 
   EXPECT_TRUE(caught_io);
   EXPECT_EQ(hit_count, 1u);
@@ -2372,7 +2376,7 @@ TEST(GraphMutationContract, InvalidNodeReplacementPreservesPreviousNode) {
              "  type: kernel_contract_test\n"
              "  subtype: source\n");
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph("contract_graph", root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
@@ -2385,13 +2389,13 @@ TEST(GraphMutationContract, InvalidNodeReplacementPreservesPreviousNode) {
       "image_inputs:\n"
       "  - from_node_id: 99\n";
   try {
-    kernel.set_node_yaml("contract_graph", 1, invalid_replacement);
+    kernel.set_node_document("contract_graph", 1, invalid_replacement);
     FAIL() << "invalid node replacement unexpectedly succeeded";
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::InvalidYaml);
   }
 
-  auto node_yaml = kernel.get_node_yaml("contract_graph", 1);
+  auto node_yaml = kernel.get_node_document("contract_graph", 1);
   ASSERT_TRUE(node_yaml.has_value());
   EXPECT_NE(node_yaml->find("valid"), std::string::npos);
   kernel.close_graph("contract_graph");

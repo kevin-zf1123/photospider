@@ -21,9 +21,12 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/yaml/yaml_graph_document_adapter.hpp"
 #include "compute/dirty_region_snapshot.hpp"
 #include "core/parameter_value_adapter.hpp"
+#include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
 #include "yaml-cpp/yaml.h"
@@ -372,8 +375,22 @@ struct EmbeddedHostState {
   /** @brief Internal interaction facade used only by this Host adapter. */
   InteractionService interaction;
 
-  /** @brief Creates the interaction facade after constructing the Kernel. */
-  EmbeddedHostState() : interaction(kernel) {}
+  /**
+   * @brief Creates backend state from explicit retained dependencies.
+   *
+   * @param image_codec Shared artifact codec owner.
+   * @param document_reader Shared graph/node document reader owner.
+   * @param document_writer Shared graph/node document writer owner.
+   * @throws std::invalid_argument when any required owner is empty.
+   * @throws std::bad_alloc if backend ownership allocation fails.
+   * @note Kernel is fully composed before InteractionService borrows it.
+   */
+  EmbeddedHostState(std::shared_ptr<const ImageArtifactCodec> image_codec,
+                    std::shared_ptr<const GraphDocumentReader> document_reader,
+                    std::shared_ptr<const GraphDocumentWriter> document_writer)
+      : kernel(std::move(image_codec), std::move(document_reader),
+               std::move(document_writer)),
+        interaction(kernel) {}
 
   /**
    * @brief Waits for all tracked async computes before destroying the backend.
@@ -2091,14 +2108,23 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
 class EmbeddedHost final : public Host {
  public:
   /**
-   * @brief Creates a Host with a fresh embedded backend state.
+   * @brief Creates a Host with a fresh explicitly composed backend state.
    *
+   * @param image_codec Shared artifact codec owner.
+   * @param document_reader Shared graph/node document reader owner.
+   * @param document_writer Shared graph/node document writer owner.
+   * @throws std::invalid_argument when any required owner is empty.
    * @throws std::bad_alloc if backend state allocation fails.
    * @note The state owns per-Host implementation objects and outlives adapter
    *       futures captured by compute_async(). It does not own or unload the
    *       process operation plugin manager.
    */
-  EmbeddedHost() : state_(std::make_shared<EmbeddedHostState>()) {}
+  EmbeddedHost(std::shared_ptr<const ImageArtifactCodec> image_codec,
+               std::shared_ptr<const GraphDocumentReader> document_reader,
+               std::shared_ptr<const GraphDocumentWriter> document_writer)
+      : state_(std::make_shared<EmbeddedHostState>(
+            std::move(image_codec), std::move(document_reader),
+            std::move(document_writer))) {}
 
   /**
    * @brief Loads one graph through the embedded backend.
@@ -2237,7 +2263,8 @@ class EmbeddedHost final : public Host {
         return failure_void(GraphErrc::NotFound,
                             "graph session not found: " + session.value);
       }
-      if (!state_->interaction.cmd_reload_yaml(session.value, yaml_path)) {
+      if (!state_->interaction.cmd_reload_graph_document(session.value,
+                                                         yaml_path)) {
         return VoidResult{failure_from_last_error(
             *state_, session, GraphErrc::InvalidYaml,
             "failed to reload graph session: " + session.value)};
@@ -2291,7 +2318,7 @@ class EmbeddedHost final : public Host {
           session, EmbeddedOperationTestEvent::SaveGraph,
           EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
-      state_->interaction.cmd_save_yaml(session.value, yaml_path);
+      state_->interaction.cmd_save_graph_document(session.value, yaml_path);
       return success_void();
     });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
@@ -2632,8 +2659,8 @@ class EmbeddedHost final : public Host {
                                     NodeId node) override {
     return guarded_result<std::string>(
         "get_node_yaml", GraphErrc::NotFound, [&] {
-          auto yaml =
-              state_->interaction.cmd_get_node_yaml(session.value, node.value);
+          auto yaml = state_->interaction.cmd_get_node_document(session.value,
+                                                                node.value);
           if (!yaml) {
             return failure_result<std::string>(
                 GraphErrc::NotFound, "node YAML not available for node " +
@@ -2675,8 +2702,8 @@ class EmbeddedHost final : public Host {
               session, EmbeddedOperationTestEvent::SetNodeYaml,
               EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
-          state_->interaction.cmd_set_node_yaml(session.value, node.value,
-                                                yaml_text);
+          state_->interaction.cmd_set_node_document(session.value, node.value,
+                                                    yaml_text);
           return success_void();
         });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
@@ -3702,8 +3729,23 @@ void set_embedded_host_operation_test_hook(
 }
 #endif
 
+/** @copydoc ps::internal::create_embedded_host_with_dependencies */
+std::unique_ptr<Host> internal::create_embedded_host_with_dependencies(
+    std::shared_ptr<const ImageArtifactCodec> image_codec,
+    std::shared_ptr<const GraphDocumentReader> document_reader,
+    std::shared_ptr<const GraphDocumentWriter> document_writer) {
+  return std::make_unique<EmbeddedHost>(std::move(image_codec),
+                                        std::move(document_reader),
+                                        std::move(document_writer));
+}
+
+/** @copydoc ps::create_embedded_host */
 std::unique_ptr<Host> create_embedded_host() {
-  return std::make_unique<EmbeddedHost>();
+  auto document_adapter =
+      std::make_shared<adapters::yaml::YamlGraphDocumentAdapter>();
+  return internal::create_embedded_host_with_dependencies(
+      providers::make_configured_image_artifact_codec(), document_adapter,
+      document_adapter);
 }
 
 }  // namespace ps
