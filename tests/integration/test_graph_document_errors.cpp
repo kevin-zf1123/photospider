@@ -393,8 +393,9 @@ TEST(GraphDocumentLoadErrors,
  * @brief Proves semantic node-schema validation remains a document failure.
  *
  * @throws Nothing when the public error and publication contract hold.
- * @note Empty parameter-edge names reach Node::from_yaml's explicit schema
- *       validator, which must not leak its lower-level InvalidParameter code.
+ * @note Empty parameter-edge names reach the in-memory definition adapter's
+ *       explicit schema validator, which must not leak its lower-level
+ *       InvalidParameter code.
  */
 TEST(GraphDocumentLoadErrors,
      SemanticSchemaFailureReturnsInvalidYamlWithoutPublishingSession) {

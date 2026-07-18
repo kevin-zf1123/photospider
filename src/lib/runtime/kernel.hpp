@@ -677,6 +677,20 @@ class Kernel {
   std::optional<cv::Mat> compute_and_get_image(const ComputeRequest& request);
 
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
+  /**
+   * @brief Serializes one required node's persistent definition as YAML.
+   *
+   * @param name Loaded graph session name.
+   * @param node_id Required node identifier.
+   * @return Serialized node mapping, or nullopt when the graph-state facade
+   *         reports a recoverable missing graph/node failure.
+   * @throws std::bad_alloc if graph-state submission, detached definition
+   *         capture, YAML conversion, or result storage exhausts memory.
+   * @note Capture runs under GraphStateExecutor serialization and excludes
+   *       runtime parameters, computed outputs, revisions, ROIs, and LUT state.
+   *       YAML conversion proceeds through the same private GraphDefinition
+   *       translator used by graph-file operations.
+   */
   std::optional<std::string> get_node_yaml(const std::string& name,
                                            int node_id);
   /**
@@ -693,10 +707,11 @@ class Kernel {
    * @throws std::bad_alloc if parsing, validation, graph-state submission, or
    *         replacement exhausts memory.
    * @throws std::exception for other graph-state executor failures.
-   * @note Required-node lookup, parsing, validation, and replacement execute in
-   *       one GraphStateExecutor work item. Embedded Host retains a session
-   *       admission across the call so concurrent close cannot erase the
-   *       runtime.
+   * @note Required-node lookup, YAML-to-NodeDefinition conversion, forced id
+   *       assignment, in-memory materialization, validation, and replacement
+   *       execute in one GraphStateExecutor work item. Embedded Host retains a
+   *       session admission across the call so concurrent close cannot erase
+   *       the runtime.
    */
   void set_node_yaml(const std::string& name, int node_id,
                      const std::string& yaml_text);

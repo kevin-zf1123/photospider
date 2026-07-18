@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "graph/graph_definition_yaml.hpp"  // NOLINT(build/include_subdir)
+#include "graph/in_memory_graph_document_adapter.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/kernel.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 #include "runtime/kernel_required_target_test_access.hpp"
@@ -157,13 +159,16 @@ std::optional<std::vector<int>> Kernel::list_node_ids(const std::string& name) {
                           [](GraphModel& graph) { return graph.node_ids(); });
 }
 
+/** @copydoc Kernel::get_node_yaml */
 std::optional<std::string> Kernel::get_node_yaml(const std::string& name,
                                                  int node_id) {
   return with_graph_state(name, [node_id](GraphModel& graph) {
     if (!graph.has_node(node_id)) {
       throw std::runtime_error("node not found");
     }
-    auto yaml = graph.node(node_id).to_yaml();
+    const InMemoryGraphDocumentAdapter adapter;
+    const NodeDefinition definition = adapter.capture_node(graph.node(node_id));
+    const YAML::Node yaml = node_definition_to_yaml(definition);
     std::stringstream ss;
     ss << yaml;
     return ss.str();
@@ -183,9 +188,11 @@ void Kernel::set_node_yaml(const std::string& name, int node_id,
         testing::RequiredTargetTestEvent::SetNodeYamlTargetResolved);
 #endif
     try {
-      YAML::Node root = YAML::Load(yaml_text);
-      ps::Node updated = ps::Node::from_yaml(root);
-      updated.id = node_id;
+      const YAML::Node root = YAML::Load(yaml_text);
+      NodeDefinition definition = node_definition_from_yaml(root);
+      definition.id = node_id;
+      const InMemoryGraphDocumentAdapter adapter;
+      const Node updated = adapter.materialize_node(definition);
       graph.replace_node(updated);
     } catch (const std::bad_alloc&) {
       throw;

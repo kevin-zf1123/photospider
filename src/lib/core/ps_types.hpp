@@ -1,5 +1,4 @@
 #pragma once
-#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <array>
@@ -58,16 +57,19 @@ struct ParameterInput {
 
 /**
  * @brief Persistent declaration of one node output port.
- * @throws std::bad_alloc when copied strings or YAML storage cannot allocate.
+ * @throws std::bad_alloc when copied strings or recursive parameter storage
+ *         cannot allocate.
  * @note Runtime output values are stored in NodeOutput, not in this descriptor.
+ *       An empty optional means the field was absent; an engaged null
+ *       ParameterValue preserves an explicitly present null.
  */
 struct OutputPort {
   /** @brief Graph-local output identifier, or -1 when unspecified. */
   int output_id = -1;
   /** @brief Output semantic/type label persisted in graph YAML. */
   std::string output_type;
-  /** @brief Optional output-specific YAML configuration. */
-  YAML::Node output_parameters;
+  /** @brief Optional deep-owned, format-neutral output configuration. */
+  std::optional<plugin::ParameterValue> output_parameters;
 };
 
 /**

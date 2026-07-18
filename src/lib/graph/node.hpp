@@ -189,40 +189,6 @@ class Node {
   mutable uint64_t dependency_lut_version = 0;
   /** @brief Monotonic revision of the node's static parameter document. */
   uint64_t parameters_version = 0;
-
-  /**
-   * @brief Parses one private graph node from its YAML representation.
-   *
-   * @param n YAML mapping containing identity, edges, parameters, outputs, and
-   * cache descriptors.
-   * @return Fully owned Node value whose static parameters no longer alias the
-   * source YAML tree; runtime and computed cache fields retain their defaults.
-   * @throws YAML::Exception when a present field has an incompatible YAML
-   * shape or scalar conversion.
-   * @throws GraphError with `GraphErrc::InvalidParameter` when a parameter edge
-   * omits either endpoint name or the parameters field is not a representable
-   * string-keyed map.
-   * @throws std::bad_alloc when strings, parameter values, YAML adapter state,
-   * or vectors cannot allocate.
-   * @note YAML scalar inference and overflow validation occur at this document
-   * boundary. GraphModel and operation invocation receive only ParameterValue
-   * storage. Graph-wide topology and operation lookup remain later stages.
-   */
-  static Node from_yaml(const YAML::Node& n);
-
-  /**
-   * @brief Serializes persistent node configuration to a YAML mapping.
-   *
-   * @return YAML mapping containing identity, declared edges, static
-   * parameters, outputs, cache descriptors, and the preserved flag.
-   * @throws YAML::Exception when yaml-cpp cannot construct or assign a value.
-   * @throws std::invalid_argument if a stored parameter reports an unknown
-   * kind.
-   * @throws std::bad_alloc when YAML/container storage cannot allocate.
-   * @note Runtime parameters, computed outputs, revisions, ROIs, and dependency
-   * LUT state are deliberately excluded from graph serialization.
-   */
-  YAML::Node to_yaml() const;
 };
 
 }  // namespace ps

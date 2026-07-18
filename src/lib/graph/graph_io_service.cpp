@@ -2,7 +2,6 @@
 
 #include <yaml-cpp/yaml.h>
 
-#include <algorithm>
 #include <exception>
 #include <fstream>
 #include <mutex>
@@ -11,7 +10,9 @@
 #include <string>
 #include <utility>
 
-#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_definition_yaml.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"            // NOLINT(build/include_subdir)
+#include "graph/in_memory_graph_document_adapter.hpp"  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
 #include "graph/graph_io_service_test_access.hpp"  // NOLINT(build/include_subdir)
 #endif
@@ -111,72 +112,90 @@ void inject_graph_io_save_failure(std::ios& stream,
 namespace {
 
 /**
- * @brief Converts one parsed sequence item into a graph-document node.
+ * @brief Converts one parsed YAML root into a detached graph definition.
  *
- * @param node_yaml Parsed node representation owned by yaml-cpp.
+ * @param yaml_root Parsed graph-document representation owned by yaml-cpp.
  * @param yaml_path Source path used only for diagnostic context.
- * @return Fully owned graph node.
+ * @return Fully owned graph definition.
  * @throws std::bad_alloc If conversion or diagnostic allocation exhausts
  *         memory.
  * @throws GraphError with `GraphErrc::InvalidYaml` for YAML conversion and
- *         node-schema rejection.
+ *         definition-schema rejection.
  * @throws GraphError with the original category for explicit non-schema graph
  *         failures.
  * @throws GraphError with `GraphErrc::Unknown` for unexpected conversion
  *         failures.
- * @note This boundary deliberately translates Node::from_yaml's
- *       InvalidParameter schema detail into the public document category.
+ * @note This boundary deliberately translates definition translator
+ *       InvalidParameter details into the public document category.
  */
-Node convert_graph_document_node(const YAML::Node& node_yaml,
-                                 const std::filesystem::path& yaml_path) {
+GraphDefinition convert_graph_document(const YAML::Node& yaml_root,
+                                       const std::filesystem::path& yaml_path) {
   try {
-    return Node::from_yaml(node_yaml);
+    return graph_definition_from_yaml(yaml_root);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const YAML::Exception& error) {
-    throw GraphError(GraphErrc::InvalidYaml, "Invalid node in YAML file " +
-                                                 yaml_path.string() + ": " +
-                                                 error.what());
+    throw GraphError(GraphErrc::InvalidYaml,
+                     "Invalid graph definition in YAML file " +
+                         yaml_path.string() + ": " + error.what());
   } catch (const GraphError& error) {
     if (error.code() != GraphErrc::InvalidParameter) {
       throw;
     }
     throw GraphError(GraphErrc::InvalidYaml,
-                     "Invalid node schema in YAML file " + yaml_path.string() +
+                     "Invalid graph schema in YAML file " + yaml_path.string() +
                          ": " + error.what());
   } catch (const std::exception& error) {
     throw GraphError(GraphErrc::Unknown,
-                     "Unexpected node conversion failure in YAML file " +
+                     "Unexpected graph conversion failure in YAML file " +
                          yaml_path.string() + ": " + error.what());
   } catch (...) {
     throw GraphError(
         GraphErrc::Unknown,
-        "Unknown node conversion failure in YAML file " + yaml_path.string());
+        "Unknown graph conversion failure in YAML file " + yaml_path.string());
   }
 }
 
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
- * @brief Injects selected failures at real graph-node YAML conversion.
+ * @brief Applies a detached definition with product-path schema translation.
  *
- * @param node_yaml Sequence item returned by YAML::LoadFile.
+ * @param graph Graph replaced only after complete staging and validation.
+ * @param definition Detached graph document to apply.
+ * @param yaml_path Source path used only for diagnostic context.
  * @return Nothing.
- * @throws std::bad_alloc when node_yaml carries the resource probe tag.
- * @throws std::runtime_error when node_yaml carries the unexpected-failure
- *         probe tag.
- * @note This helper has translation-unit-local linkage and is compiled only
- * when BUILD_TESTING is enabled. The immutable YAML tags make the probes
- * deterministic and thread-safe without adding an installed or exported API.
+ * @throws std::bad_alloc if staging, topology preparation, or diagnostics
+ *         cannot allocate.
+ * @throws GraphError with `GraphErrc::InvalidYaml` for definition schema
+ *         rejection, `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for
+ *         topology rejection, and `GraphErrc::Unknown` for unexpected apply
+ *         failures.
+ * @note InMemoryGraphDocumentAdapter invokes GraphModel::replace_nodes()
+ *       exactly once, after every Node has been staged.
  */
-void throw_if_graph_load_failure_probe(const YAML::Node& node_yaml) {
-  if (node_yaml.Tag() == "!photospider-test-reload-bad-alloc") {
-    throw std::bad_alloc{};
-  }
-  if (node_yaml.Tag() == "!photospider-test-load-unknown") {
-    throw std::runtime_error("injected unexpected graph load failure");
+void apply_graph_document(GraphModel& graph, const GraphDefinition& definition,
+                          const std::filesystem::path& yaml_path) {
+  try {
+    InMemoryGraphDocumentAdapter adapter;
+    adapter.apply(graph, definition);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const GraphError& error) {
+    if (error.code() != GraphErrc::InvalidParameter) {
+      throw;
+    }
+    throw GraphError(GraphErrc::InvalidYaml,
+                     "Invalid graph schema in YAML file " + yaml_path.string() +
+                         ": " + error.what());
+  } catch (const std::exception& error) {
+    throw GraphError(GraphErrc::Unknown,
+                     "Unexpected graph apply failure for YAML file " +
+                         yaml_path.string() + ": " + error.what());
+  } catch (...) {
+    throw GraphError(
+        GraphErrc::Unknown,
+        "Unknown graph apply failure for YAML file " + yaml_path.string());
   }
 }
-#endif
 
 }  // namespace
 
@@ -186,7 +205,7 @@ void throw_if_graph_load_failure_probe(const YAML::Node& node_yaml) {
  * @param graph Graph whose topology is replaced after complete validation.
  * @param yaml_path Source YAML sequence path.
  * @return Nothing.
- * @throws std::bad_alloc if parsing, diagnostics, node conversion, or
+ * @throws std::bad_alloc if parsing, diagnostics, definition conversion, or
  *         temporary storage exhausts memory.
  * @throws GraphError with `GraphErrc::InvalidParameter` for an empty path,
  *         `GraphErrc::Io` for an inaccessible source,
@@ -194,11 +213,12 @@ void throw_if_graph_load_failure_probe(const YAML::Node& node_yaml) {
  *         rejection, `GraphErrc::MissingDependency` or `GraphErrc::Cycle`
  *         for topology rejection, and `GraphErrc::Unknown` for unexpected
  *         ingestion failures.
- * @note Replacement occurs only after every temporary node has parsed and
- * topology validation has succeeded, so failed load preserves the complete
- * prior graph and runtime state. BUILD_TESTING may compile immutable YAML-tag
- * failpoints immediately before Node::from_yaml; production builds compile out
- * the probes and expose no callable test seam.
+ * @note Replacement occurs only after every definition node has converted and
+ *       topology validation has succeeded, so failed load preserves the
+ *       complete prior graph and runtime state. BUILD_TESTING may compile
+ *       immutable YAML-tag failpoints immediately before real definition
+ *       conversion; production builds compile out the probes and expose no
+ *       callable test seam.
  */
 void GraphIOService::load(GraphModel& graph,
                           const std::filesystem::path& yaml_path) const {
@@ -226,28 +246,12 @@ void GraphIOService::load(GraphModel& graph,
     throw GraphError(GraphErrc::Unknown,
                      "Unknown YAML load failure for " + yaml_path.string());
   }
-  if (!config.IsSequence()) {
-    throw GraphError(GraphErrc::InvalidYaml,
-                     "YAML root is not a sequence of nodes.");
-  }
-  GraphModel::NodeMap loaded_nodes;
-  for (const auto& node_yaml : config) {
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-    throw_if_graph_load_failure_probe(node_yaml);
-#endif
-    Node node = convert_graph_document_node(node_yaml, yaml_path);
-    if (loaded_nodes.count(node.id)) {
-      throw GraphError(
-          GraphErrc::InvalidYaml,
-          "Duplicate node id " + std::to_string(node.id) + " in graph YAML.");
-    }
-    loaded_nodes[node.id] = std::move(node);
-  }
-  graph.replace_nodes(std::move(loaded_nodes));
+  const GraphDefinition definition = convert_graph_document(config, yaml_path);
+  apply_graph_document(graph, definition, yaml_path);
 }
 
 /**
- * @brief Serializes the graph's current nodes to a YAML sequence.
+ * @brief Captures and serializes current persistent graph state to YAML.
  *
  * @param graph Graph to serialize.
  * @param yaml_path Destination YAML path.
@@ -255,8 +259,8 @@ void GraphIOService::load(GraphModel& graph,
  * @throws std::bad_alloc if path, YAML, or stream storage exhausts memory.
  * @throws GraphError with `GraphErrc::Io` if destination preparation/open or
  *         write, flush, or close reports a recoverable failure.
- * @throws std::exception for YAML node serialization failures outside those
- *         stream phases.
+ * @throws std::exception for definition/YAML serialization failures outside
+ *         those stream phases.
  * @note This operation does not create parent directories or mutate graph,
  *       topology, runtime, or session-owner state on success or failure. It
  *       writes directly to `yaml_path`: failure before open preserves existing
@@ -269,10 +273,9 @@ void GraphIOService::load(GraphModel& graph,
  */
 void GraphIOService::save(const GraphModel& graph,
                           const std::filesystem::path& yaml_path) const {
-  YAML::Node root(YAML::NodeType::Sequence);
-  for (int id : graph.node_ids()) {
-    root.push_back(graph.node(id).to_yaml());
-  }
+  const InMemoryGraphDocumentAdapter adapter;
+  const GraphDefinition definition = adapter.capture(graph);
+  const YAML::Node root = graph_definition_to_yaml(definition);
 
   std::ofstream fout;
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)

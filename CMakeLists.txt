@@ -348,7 +348,8 @@ target_link_libraries(photospider_core_internal PRIVATE
 # Module: private graph model, registry behavior, YAML, and graph services.
 set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/core/ops.cpp
-    src/lib/graph/node_yaml.cpp
+    src/lib/graph/graph_definition_yaml.cpp
+    src/lib/graph/in_memory_graph_document_adapter.cpp
     src/lib/graph/graph_model.cpp
     src/lib/graph/graph_state_executor.cpp
     src/lib/graph/graph_extent_resolver.cpp
@@ -1233,6 +1234,8 @@ if(BUILD_TESTING)
         tests/unit/test_propagation_contracts.cpp)
     add_ps_test(test_graph_topology_boundaries
         tests/unit/test_graph_topology_boundaries.cpp)
+    add_ps_test(test_graph_document_adapter
+        tests/unit/test_graph_document_adapter.cpp)
     add_ps_test(test_kernel_contracts
         tests/integration/test_kernel_contracts.cpp)
     target_compile_definitions(test_kernel_contracts PRIVATE
@@ -1591,6 +1594,9 @@ if(BUILD_TESTING)
     # gtest discovery on it.
     gtest_discover_tests(test_propagation_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_graph_document_adapter
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_event_stream_boundaries
