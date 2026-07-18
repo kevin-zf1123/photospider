@@ -99,6 +99,11 @@ Kernel::Kernel() : Kernel(providers::make_configured_image_artifact_codec()) {}
 Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec)
     : cache_service_(std::move(image_codec)) {}
 
+/** @copydoc Kernel::~Kernel */
+Kernel::~Kernel() noexcept {
+  graphs_.clear();
+}
+
 /**
  * @copydoc Kernel::clear_last_error
  */

@@ -187,9 +187,15 @@ per `Kernel`. The product composition root supplies a shared
 `ImageArtifactCodec`; `GraphCacheService` retains that owner and performs cache
 policy, path resolution, metadata handling, and diagnostics without direct
 OpenCV codec calls. The codec is not graph state: reload, clear, and close do
-not replace it, while Kernel destruction releases it only after graph runtimes
-and admitted work have drained. Codec `GraphError` values retain their exact
-category in disk-cache diagnostics, and `std::bad_alloc` propagates unchanged.
+not replace it. `Kernel::~Kernel()` explicitly clears the owned runtime map
+before ordinary member teardown reaches cache, traversal, diagnostic, IO, or ROI
+collaborators. Each `GraphRuntime` therefore stops graph-state admission, drains
+admitted work, and joins its worker while those borrowed Kernel services and the
+codec are still alive; only the later service destruction releases the codec.
+The owning Host must stop external Kernel-call admission before Kernel
+destruction, because the private graph map is not a concurrent-destruction API.
+Codec `GraphError` values retain their exact category in disk-cache diagnostics,
+and `std::bad_alloc` propagates unchanged.
 
 ## Clear
 
@@ -236,10 +242,13 @@ generation wake, but those waiters still return and no second worker is created.
 A later close drains and joins the replacement lane before retrying scheduler
 stop. On successful close, concrete schedulers shut down and are destroyed
 before their slots return. Destroying an embedded Host without explicit close
-follows the same synchronous ownership chain: `GraphRuntime` drains and joins
-its lane before scheduler teardown and returns all graph reservations before
-Host destruction completes. `NotFound` is reserved for a session that is
-actually absent.
+follows the same synchronous ownership chain. The adapter first waits its joined
+async status workers and stops external admission; `Kernel::~Kernel()` then
+clears the runtime map while Kernel services remain alive. Every `GraphRuntime`
+drains and joins its lane before scheduler teardown, and all graph reservations
+return before Host destruction completes. Direct internal Kernel owners have the
+same duty to stop concurrent callers before destruction. `NotFound` is reserved
+for a session that is actually absent.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,

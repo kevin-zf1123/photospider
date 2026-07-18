@@ -146,8 +146,12 @@ diagnostic state 重建。
 Compute 与 cache command 使用的 disk-cache image persistence 会按 `Kernel` 组合一次。产品组合根提供
 共享的 `ImageArtifactCodec`；`GraphCacheService` 保持该 owner，并在不直接调用 OpenCV codec 的
 情况下负责 cache policy、path 解析、metadata 处理与 diagnostic。Codec 不是 graph state：reload、
-clear 与 close 都不会替换它；只有全部 graph runtime 与已准入工作排空后，Kernel 析构才释放它。
-Codec `GraphError` 会在 disk-cache diagnostic 中保持精确类别，`std::bad_alloc` 也会原样传播。
+clear 与 close 都不会替换它。`Kernel::~Kernel()` 会在普通成员析构到达 cache、traversal、diagnostic、
+IO 或 ROI collaborator 之前，显式清空其拥有的 runtime map。因此，每个 `GraphRuntime` 都会在这些
+被借用的 Kernel service 与 codec 仍存活时停止 graph-state admission、排空已准入工作并 join worker；
+之后 service 析构才会释放 codec。由于私有 graph map 不支持与析构并发访问，拥有 Kernel 的 Host
+必须在 Kernel 析构前停止外部 Kernel call admission。Codec `GraphError` 会在 disk-cache diagnostic
+中保持精确类别，`std::bad_alloc` 也会原样传播。
 
 ## Clear
 
@@ -182,9 +186,11 @@ Kernel 会在返回 stop failure 前创建一个 replacement worker；随后 Hos
 重新开放 admission。即使该 restart 早于上一 generation 的延迟 waiter 被唤醒，这些 waiter 仍会
 返回，也不会创建第二个 worker。之后再次 close 时，会先排空并 join 该 replacement lane，再重试
 scheduler stop。Close 成功时，concrete scheduler 会先 shutdown 并销毁，随后才归还 slot。
-Embedded Host 未显式 close 就销毁时，也会走相同的同步 ownership chain：`GraphRuntime` 会在
-scheduler teardown 之前排空并 join lane，并在 Host 析构完成前归还所有 graph reservation。只有
-session 确实不存在时才返回 `NotFound`。
+Embedded Host 未显式 close 就销毁时，也会走相同的同步 ownership chain。Adapter 会先等待其
+joined async status worker 并停止外部 admission；随后 `Kernel::~Kernel()` 会在 Kernel service
+仍存活时清空 runtime map。每个 `GraphRuntime` 都会在 scheduler teardown 之前排空并 join lane，
+并在 Host 析构完成前归还所有 graph reservation。直接拥有内部 Kernel 的调用方同样必须在析构前
+停止并发调用。只有 session 确实不存在时才返回 `NotFound`。
 
 `photospiderd` 围绕该 embedded Host contract 拥有 daemon session identity、job admission、Host
 serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shutdown 规则定义在

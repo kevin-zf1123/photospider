@@ -290,12 +290,18 @@ session and history storage that is removed when the script exits.
 ## Injected Image Artifact Codec Validation
 
 `test_kernel_contracts` owns the long-lived fake-codec cache boundary. Its
-`CacheSemantics.InjectedCodec*` cases create `GraphCacheService` with a shared
-`FakeImageArtifactCodec` and verify exact decode/encode paths, service-retained
-codec lifetime, `int16` precision selection, recoverable `GraphErrc::Io`
-diagnostics without HP-cache mutation, and exact `std::bad_alloc` propagation.
-The fake performs no real image-format IO, so those tests remain independent of
-OpenCV codec behavior while exercising the production cache service.
+`CacheSemantics.InjectedCodec*` cases create `GraphCacheService` or a real
+`Kernel` with a shared `FakeImageArtifactCodec` and verify exact decode/encode
+paths, service-retained codec lifetime, `int16` precision selection, recoverable
+`GraphErrc::Io` diagnostics without HP-cache mutation, and exact
+`std::bad_alloc` propagation. The Kernel-lifetime case blocks the real
+`GraphStateExecutor`, admits a second cache-save work item that borrows
+`Kernel::cache_service_`, releases the caller's only codec owner, and destroys
+Kernel on another thread. Executor checkpoints and futures require destruction
+to wait, the admitted encode to observe a live codec, and codec release to occur
+only after Kernel destruction completes. The fake performs no real image-format
+IO, so these tests remain independent of OpenCV codec behavior while exercising
+the production runtime and cache service.
 
 `ImageArtifactCodecDependencyDisabledBuild` configures a fresh nested build with
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`,

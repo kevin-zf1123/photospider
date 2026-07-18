@@ -26,6 +26,7 @@
 #include "graph/graph_io_service_test_access.hpp"
 #endif
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_state_executor_test_access.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "plugin/operation_host_adapter.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
@@ -364,6 +365,114 @@ Node make_cached_process_node(const std::string& location) {
   Node node = make_contract_process_node();
   node.caches.push_back({"image", location});
   return node;
+}
+
+/**
+ * @brief Observes when a graph-state close begins waiting for worker drainage.
+ *
+ * @note The callback performs one atomic store only, satisfying the executor
+ * hook's no-allocation, nonblocking, and no-reentry contract. Tests install the
+ * observer only after all setup work for the target runtime has completed.
+ */
+struct CloseWaitingObserver {
+  /** @brief True after the target executor publishes CloseCallerWaiting. */
+  std::atomic<bool> observed{false};
+
+  /**
+   * @brief Records the close-waiting checkpoint from a test-enabled executor.
+   * @param context Borrowed observer supplied by the installed hook.
+   * @param snapshot Allocation-free executor lifecycle snapshot.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void notify(
+      void* context,
+      const testing::GraphStateExecutorTestSnapshot& snapshot) noexcept {
+    if (snapshot.event ==
+        testing::GraphStateExecutorTestEvent::CloseCallerWaiting) {
+      static_cast<CloseWaitingObserver*>(context)->observed.store(
+          true, std::memory_order_release);
+    }
+  }
+};
+
+/**
+ * @brief Installs one executor observer and clears it at scope exit.
+ *
+ * @param observer Observer retained by the scope owner.
+ * @throws Nothing.
+ * @note Tests using this guard must not run another executor-hook test in
+ * parallel. Destruction clears the process-local borrowed hook before observer
+ * storage leaves scope.
+ */
+class ScopedGraphStateExecutorHook {
+ public:
+  /**
+   * @brief Installs a borrowed close-waiting observer for this scope.
+   * @param observer Observer that remains alive through this guard's lifetime.
+   * @throws Nothing.
+   * @note Installation replaces the process-local executor test hook, so
+   * callers must serialize guards that use this seam.
+   */
+  explicit ScopedGraphStateExecutorHook(CloseWaitingObserver& observer)
+      : hook_{&observer, &CloseWaitingObserver::notify} {
+    testing::set_graph_state_executor_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the installed borrowed hook before observer storage expires.
+   * @throws Nothing.
+   * @note Every affected executor callback must have completed before this
+   * guard leaves scope.
+   */
+  ~ScopedGraphStateExecutorHook() noexcept {
+    testing::set_graph_state_executor_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Disables copying of process-local hook ownership.
+   * @param other Guard whose borrowed hook must remain uniquely scoped.
+   * @throws Nothing because construction is unavailable.
+   * @note A copied guard could clear another guard's installed hook
+   * prematurely.
+   */
+  ScopedGraphStateExecutorHook(const ScopedGraphStateExecutorHook& other) =
+      delete;
+
+  /**
+   * @brief Disables copy assignment of process-local hook ownership.
+   * @param other Guard whose borrowed hook must remain uniquely scoped.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   * @note Assignment could invalidate the process-local hook lifetime boundary.
+   */
+  ScopedGraphStateExecutorHook& operator=(
+      const ScopedGraphStateExecutorHook& other) = delete;
+
+ private:
+  /** @brief Borrowed hook installed for this scope. */
+  testing::GraphStateExecutorTestHook hook_;
+};
+
+/**
+ * @brief Waits a bounded interval for an atomic lifecycle checkpoint.
+ * @param value Atomic flag published by the observed worker or close path.
+ * @param timeout Maximum interval to wait.
+ * @return True when the flag becomes set before the deadline.
+ * @throws Nothing directly.
+ * @note The helper is test-only synchronization fallback; ordering assertions
+ * use explicit futures and executor checkpoints rather than operation sleeps.
+ */
+bool wait_for_atomic_true(const std::atomic<bool>& value,
+                          std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (value.load(std::memory_order_acquire)) {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+  return value.load(std::memory_order_acquire);
 }
 
 /**
@@ -952,6 +1061,134 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
 
   EXPECT_TRUE(weak_codec.expired());
   std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves Kernel drains admitted cache work before releasing its codec.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle-ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note A first graph-state work item blocks the real runtime worker while a
+ * second admitted item captures `Kernel::cache_service_` and performs a real
+ * fake-codec encode. The caller releases its only codec owner before destroying
+ * Kernel. Executor checkpoints prove destruction is waiting for drainage; after
+ * release, encode completes while the codec is alive, and only completed Kernel
+ * destruction releases the codec.
+ */
+TEST(CacheSemantics,
+     InjectedCodecKernelDestructionDrainsWorkBeforeCodecRelease) {
+  const std::string graph_name = "contract_kernel_codec_lifetime";
+  const auto root =
+      clean_temp_path("photospider-contract-kernel-codec-lifetime-root");
+  const auto yaml_path =
+      temp_path("photospider-contract-kernel-codec-lifetime.yaml");
+  write_text(yaml_path, R"YAML(
+- id: 1
+  name: cached_source
+  type: kernel_contract_test
+  subtype: source
+  parameters:
+    width: 2
+    height: 1
+)YAML");
+
+  std::weak_ptr<testing::FakeImageArtifactCodec> weak_codec;
+  std::atomic<bool> codec_alive_during_encode{false};
+  std::atomic<bool> encode_finished{false};
+  auto codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [&weak_codec, &codec_alive_during_encode, &encode_finished](
+          const std::filesystem::path&, const ImageBuffer&,
+          ImageArtifactPrecision) {
+        codec_alive_during_encode.store(!weak_codec.expired(),
+                                        std::memory_order_release);
+        encode_finished.store(true, std::memory_order_release);
+      });
+  weak_codec = codec;
+
+  auto kernel = std::make_unique<Kernel>(codec);
+  codec.reset();
+  ASSERT_FALSE(weak_codec.expired());
+  const auto loaded =
+      kernel->load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  testing::KernelTestAccess::submit_graph_state(
+      *kernel, graph_name,
+      [](GraphModel& graph) {
+        graph.mutate_node_runtime_state(
+            1, [](GraphModel::NodeRuntimeState& state) {
+              state.caches.push_back({"image", "output.png"});
+              state.cached_output_high_precision = NodeOutput{};
+              state.cached_output_high_precision->image_buffer =
+                  make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+            });
+      })
+      .get();
+
+  std::promise<void> release_blocker;
+  const std::shared_future<void> blocker_release =
+      release_blocker.get_future().share();
+  std::promise<void> blocker_entered;
+  auto blocker_entered_future = blocker_entered.get_future();
+  auto blocker = testing::KernelTestAccess::submit_graph_state(
+      *kernel, graph_name, [&blocker_entered, blocker_release](GraphModel&) {
+        blocker_entered.set_value();
+        blocker_release.wait();
+      });
+  if (blocker_entered_future.wait_for(std::chrono::seconds(2)) !=
+      std::future_status::ready) {
+    release_blocker.set_value();
+    blocker.get();
+    (void)kernel->close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    std::filesystem::remove(yaml_path);
+    FAIL() << "graph-state lifetime blocker did not start";
+  }
+
+  auto cache_work = testing::KernelTestAccess::submit_cache_save(
+      *kernel, graph_name, 1, "int16");
+  EXPECT_EQ(cache_work.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+
+  CloseWaitingObserver close_observer;
+  ScopedGraphStateExecutorHook close_hook(close_observer);
+  std::promise<void> destruction_entered;
+  auto destruction_entered_future = destruction_entered.get_future();
+  auto destruction =
+      std::async(std::launch::async,
+                 [&destruction_entered, kernel = std::move(kernel)]() mutable {
+                   destruction_entered.set_value();
+                   kernel.reset();
+                 });
+  if (destruction_entered_future.wait_for(std::chrono::seconds(2)) !=
+      std::future_status::ready) {
+    release_blocker.set_value();
+    blocker.get();
+    cache_work.get();
+    destruction.get();
+    std::filesystem::remove_all(root);
+    std::filesystem::remove(yaml_path);
+    FAIL() << "Kernel destruction worker did not start";
+  }
+  const bool close_waiting = wait_for_atomic_true(
+      close_observer.observed, std::chrono::milliseconds(2000));
+  EXPECT_TRUE(close_waiting);
+  EXPECT_EQ(destruction.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  EXPECT_FALSE(weak_codec.expired());
+  EXPECT_FALSE(encode_finished.load(std::memory_order_acquire));
+
+  release_blocker.set_value();
+  blocker.get();
+  cache_work.get();
+  destruction.get();
+
+  EXPECT_TRUE(encode_finished.load(std::memory_order_acquire));
+  EXPECT_TRUE(codec_alive_during_encode.load(std::memory_order_acquire));
+  EXPECT_TRUE(weak_codec.expired());
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
 }
 
 TEST(CacheSemantics, DiskCacheDiagnosticSnapshotSupportsConcurrentWriters) {

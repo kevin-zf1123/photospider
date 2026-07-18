@@ -225,10 +225,13 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
 
 `test_kernel_contracts` 负责长期 fake-codec cache 边界。它的
 `CacheSemantics.InjectedCodec*` 用例会用共享 `FakeImageArtifactCodec` 构造
-`GraphCacheService`，并验证精确 decode/encode path、service 保持的 codec 生命周期、`int16`
-精度选择、不会变更 HP cache 的可恢复 `GraphErrc::Io` diagnostic，以及精确的
-`std::bad_alloc` 传播。Fake 不执行真实图像格式 IO，因此这些测试不依赖 OpenCV codec 行为，
-但会执行生产 cache service。
+`GraphCacheService` 或真实 `Kernel`，并验证精确 decode/encode path、service 保持的 codec
+生命周期、`int16` 精度选择、不会变更 HP cache 的可恢复 `GraphErrc::Io` diagnostic，以及精确的
+`std::bad_alloc` 传播。Kernel 生命周期用例会阻塞真实 `GraphStateExecutor`，再准入第二个借用
+`Kernel::cache_service_` 的 cache-save work item，释放 caller 的唯一 codec owner，并在另一线程
+销毁 Kernel。Executor checkpoint 与 future 会要求析构保持等待、已准入 encode 观察到仍存活的
+codec，并且 codec 只能在 Kernel 析构完成后释放。Fake 不执行真实图像格式 IO，因此这些测试不
+依赖 OpenCV codec 行为，但会执行生产 runtime 与 cache service。
 
 `ImageArtifactCodecDependencyDisabledBuild` 会用
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 与 `PHOTOSPIDER_BUILD_IPC=OFF`

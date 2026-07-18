@@ -217,8 +217,9 @@ void load_metadata_cache_file(const fs::path& metadata_file,
  * @param image_codec Injected codec used to decode image bytes.
  * @return Hit, Miss, or Error attempt with diagnostic details.
  * @throws std::bad_alloc from result/message allocation.
- * @note Exceptions from filesystem, OpenCV, YAML, and validation helpers are
- * converted into Error results instead of being silently collapsed into miss.
+ * @note Exceptions from filesystem, the injected codec, YAML, and validation
+ * helpers are converted into Error results instead of being silently collapsed
+ * into miss.
  */
 DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
                                       const CacheEntry& cache_entry,

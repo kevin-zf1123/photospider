@@ -19,7 +19,6 @@
 #include <new>
 #include <opencv2/opencv.hpp>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -95,6 +94,18 @@ class Kernel {
    * without adding a public Host or installed ABI surface.
    */
   explicit Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec);
+
+  /**
+   * @brief Drains every owned graph runtime before releasing Kernel services.
+   * @throws Nothing.
+   * @note Destruction clears `graphs_` explicitly while cache, traversal,
+   * diagnostic, IO, and ROI collaborators are still alive. Each
+   * `GraphRuntime` first stops graph-state admission, drains admitted work, and
+   * joins its worker, so work items that captured this Kernel cannot observe
+   * destroyed collaborators. External callers must stop Kernel API admission
+   * before destruction; concurrent unadmitted public calls are unsupported.
+   */
+  ~Kernel() noexcept;
 
   /**
    * @brief Last backend error recorded for one graph session.
@@ -1211,6 +1222,13 @@ class Kernel {
   void setup_schedulers_for_runtime(const std::string& name,
                                     GraphRuntime& runtime);
 
+  /**
+   * @brief Graph-name map owning every runtime and admitted graph-state lane.
+   * @note `Kernel::~Kernel()` clears this map explicitly before ordinary member
+   * destruction so runtime drainage completes while every borrowed Kernel
+   * collaborator remains alive. External lifecycle admission must already have
+   * stopped calls that could access this unsynchronized map.
+   */
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
 
   /**
@@ -1236,8 +1254,10 @@ class Kernel {
   GraphInspectService inspect_service_;
   /**
    * @brief Cache service retaining the Kernel-injected artifact codec.
-   * @note Declared after stateless graph collaborators and before services that
-   * borrow it during compute; destruction occurs after all GraphRuntime owners.
+   * @note `Kernel::~Kernel()` drains and destroys every `GraphRuntime` before
+   * ordinary member teardown reaches this service. Admitted graph-state work
+   * may therefore borrow the service and codec until its runtime worker is
+   * joined.
    */
   GraphCacheService cache_service_;
   GraphIOService io_service_;
