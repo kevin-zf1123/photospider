@@ -3019,6 +3019,14 @@ TEST(EmbeddedHostAdapter,
 
   const GraphLoadRequest load_request = make_load_request(temp.root());
   const GraphSessionId session = load_request.session;
+  {
+    std::ofstream graph(load_request.yaml_path, std::ios::app);
+    ASSERT_TRUE(graph.is_open());
+    graph << "    recursive:\n"
+          << "      - \"line\\n\\\"quoted\\\"\\\\slash\\x01\"\n"
+          << "      - z: true\n"
+          << "        a: null\n";
+  }
   auto loaded = host->load_graph(load_request);
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
   EXPECT_EQ(loaded.value.value, session.value);
@@ -3044,11 +3052,15 @@ TEST(EmbeddedHostAdapter,
   EXPECT_EQ(graph_view.value.session.value, session.value);
   EXPECT_EQ(graph_view.value.nodes.front().name, "host_source");
   EXPECT_EQ(graph_view.value.nodes.front().parameters.at("width"), "6");
+  EXPECT_EQ(graph_view.value.nodes.front().parameters.at("recursive"),
+            R"(["line\n\"quoted\"\\slash\u0001", {"a": null, "z": true}])");
 
   auto node_view = host->inspect_node(session, NodeId{1});
   ASSERT_TRUE(node_view.status.ok) << node_view.status.message;
   EXPECT_EQ(node_view.value.type, "host_adapter_test");
   EXPECT_EQ(node_view.value.subtype, "source");
+  EXPECT_EQ(node_view.value.parameters.at("recursive"),
+            graph_view.value.nodes.front().parameters.at("recursive"));
 
   auto tree = host->dependency_tree(session, std::nullopt, true);
   ASSERT_TRUE(tree.status.ok) << tree.status.message;

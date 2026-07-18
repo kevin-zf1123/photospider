@@ -1,9 +1,6 @@
 #include "graph/graph_cache_service.hpp"
 
-#include <yaml-cpp/yaml.h>
-
 #include <chrono>
-#include <fstream>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -11,7 +8,6 @@
 #include <unordered_set>
 #include <utility>
 
-#include "core/parameter_value_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps {
@@ -113,7 +109,7 @@ void add_io_duration(GraphModel& graph,
  * @param node_id Node id whose cache entry is being inspected.
  * @param cache_entry Optional cache entry that supplied type and location.
  * @param cache_file Resolved image path, when available.
- * @param metadata_file Resolved YAML metadata path, when available.
+ * @param metadata_file Resolved metadata path, when available.
  * @param status Outcome status for the attempt.
  * @param code Error category when the attempt failed.
  * @param message Human-readable diagnostic text.
@@ -184,46 +180,22 @@ DiskCacheReadAttempt make_error_attempt(int node_id,
 }
 
 /**
- * @brief Loads YAML metadata next to an image cache file into NodeOutput data.
- *
- * @param metadata_file Existing YAML metadata path to parse.
- * @param output Output object receiving format-neutral named data entries.
- * @throws GraphError when the metadata root is not a map.
- * @throws std::invalid_argument when metadata keys cannot be normalized.
- * @throws YAML::Exception from YAML parser failures.
- * @note Null or empty YAML files are accepted as empty metadata, preserving the
- * previous best-effort metadata behavior.
- */
-void load_metadata_cache_file(const fs::path& metadata_file,
-                              NodeOutput& output) {
-  YAML::Node meta = YAML::LoadFile(metadata_file.string());
-  if (!meta || meta.IsNull()) {
-    return;
-  }
-  if (!meta.IsMap()) {
-    throw GraphError(
-        GraphErrc::InvalidYaml,
-        "Disk cache metadata is not a map: " + metadata_file.string());
-  }
-  output.data = core::parameter_map_from_yaml(meta);
-}
-
-/**
  * @brief Reads one concrete disk-cache entry and converts failures to results.
  *
  * @param graph Graph whose cache root anchors the cache entry.
  * @param node Node that owns the cache entry.
  * @param cache_entry Image cache entry to inspect.
  * @param image_codec Injected codec used to decode image bytes.
+ * @param metadata_codec Injected codec used to decode named-value metadata.
  * @return Hit, Miss, or Error attempt with diagnostic details.
  * @throws std::bad_alloc from result/message allocation.
- * @note Exceptions from filesystem, the injected codec, YAML, and validation
- * helpers are converted into Error results instead of being silently collapsed
- * into miss.
+ * @note Exceptions from filesystem and injected codecs are converted into
+ * Error results instead of being silently collapsed into miss.
  */
-DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
-                                      const CacheEntry& cache_entry,
-                                      const ImageArtifactCodec& image_codec) {
+DiskCacheReadAttempt read_cache_entry(
+    const GraphModel& graph, const Node& node, const CacheEntry& cache_entry,
+    const ImageArtifactCodec& image_codec,
+    const CacheMetadataCodec& metadata_codec) {
   auto cache_file =
       graph.cache_root / std::to_string(node.id) / cache_entry.location;
   auto metadata_file = cache_file;
@@ -246,7 +218,7 @@ DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
       attempt.output.image_buffer = image_codec.decode(cache_file);
     }
     if (has_metadata_file) {
-      load_metadata_cache_file(metadata_file, attempt.output);
+      attempt.output.data = metadata_codec.read(metadata_file);
     }
     attempt.result =
         make_load_result(node.id, &cache_entry, cache_file, metadata_file,
@@ -255,14 +227,6 @@ DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
     return attempt;
   } catch (const std::bad_alloc&) {
     throw;
-  } catch (const YAML::Exception& e) {
-    return make_error_attempt(
-        node.id, cache_entry, cache_file, metadata_file, GraphErrc::InvalidYaml,
-        std::string("Failed to parse disk cache metadata: ") + e.what());
-  } catch (const std::invalid_argument& e) {
-    return make_error_attempt(
-        node.id, cache_entry, cache_file, metadata_file, GraphErrc::InvalidYaml,
-        std::string("Invalid disk cache metadata: ") + e.what());
   } catch (const fs::filesystem_error& e) {
     return make_error_attempt(
         node.id, cache_entry, cache_file, metadata_file, GraphErrc::Io,
@@ -288,6 +252,7 @@ DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
  * @param graph Graph whose cache root anchors the entries.
  * @param node Node whose cache entries should be inspected.
  * @param image_codec Injected codec used for every supported image entry.
+ * @param metadata_codec Injected codec used for every existing metadata file.
  * @return Hit/Error for the first existing or failing entry, Miss when all
  * supported entries are absent, or Skipped when no load should be attempted.
  * @throws std::bad_alloc from diagnostic construction.
@@ -296,7 +261,8 @@ DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
  */
 DiskCacheReadAttempt read_first_disk_cache_entry(
     const GraphModel& graph, const Node& node,
-    const ImageArtifactCodec& image_codec) {
+    const ImageArtifactCodec& image_codec,
+    const CacheMetadataCodec& metadata_codec) {
   if (graph.cache_root.empty()) {
     return make_skipped_attempt(node.id, "Graph has no disk cache root.");
   }
@@ -314,7 +280,7 @@ DiskCacheReadAttempt read_first_disk_cache_entry(
 
     saw_supported_entry = true;
     DiskCacheReadAttempt attempt =
-        read_cache_entry(graph, node, cache_entry, image_codec);
+        read_cache_entry(graph, node, cache_entry, image_codec, metadata_codec);
     if (attempt.result.status != DiskCacheLoadStatus::Miss) {
       return attempt;
     }
@@ -372,11 +338,17 @@ bool finalize_disk_cache_load(
 }  // namespace
 
 GraphCacheService::GraphCacheService(
-    std::shared_ptr<const ImageArtifactCodec> image_codec)
-    : image_codec_(std::move(image_codec)) {
+    std::shared_ptr<const ImageArtifactCodec> image_codec,
+    std::shared_ptr<const CacheMetadataCodec> metadata_codec)
+    : image_codec_(std::move(image_codec)),
+      metadata_codec_(std::move(metadata_codec)) {
   if (!image_codec_) {
     throw std::invalid_argument(
         "GraphCacheService requires an image artifact codec");
+  }
+  if (!metadata_codec_) {
+    throw std::invalid_argument(
+        "GraphCacheService requires a cache metadata codec");
   }
 }
 
@@ -417,9 +389,7 @@ void GraphCacheService::save_cache_if_configured(
     if (!output->data.empty()) {
       fs::path meta_path = final_path;
       meta_path.replace_extension(".yml");
-      YAML::Node meta_node = core::parameter_map_to_yaml(output->data);
-      std::ofstream fout(meta_path);
-      fout << meta_node;
+      metadata_codec_->write(meta_path, output->data);
     }
 
     add_io_duration(graph, start_io);
@@ -438,7 +408,7 @@ bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
 
   auto start_io = std::chrono::high_resolution_clock::now();
   DiskCacheReadAttempt attempt =
-      read_first_disk_cache_entry(graph, node, *image_codec_);
+      read_first_disk_cache_entry(graph, node, *image_codec_, *metadata_codec_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io, [&](NodeOutput output) {
         node.cached_output_high_precision = std::move(output);
@@ -450,7 +420,7 @@ bool GraphCacheService::try_load_from_disk_cache_into(GraphModel& graph,
                                                       NodeOutput& out) const {
   auto start_io = std::chrono::high_resolution_clock::now();
   DiskCacheReadAttempt attempt =
-      read_first_disk_cache_entry(graph, node, *image_codec_);
+      read_first_disk_cache_entry(graph, node, *image_codec_, *metadata_codec_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io,
       [&](NodeOutput output) { out = std::move(output); });

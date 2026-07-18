@@ -4,7 +4,7 @@
 
 #include "photospider/plugin/node_view.hpp"
 
-namespace ps::core {
+namespace ps::adapters::yaml::internal {
 
 /**
  * @brief Recursively copies one YAML value into the public owned value tree.
@@ -58,4 +58,4 @@ YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value);
  */
 YAML::Node parameter_map_to_yaml(const plugin::ParameterMap& values);
 
-}  // namespace ps::core
+}  // namespace ps::adapters::yaml::internal

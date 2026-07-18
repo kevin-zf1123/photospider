@@ -16,6 +16,7 @@
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/configured_image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
+#include "support/cache_test_dependencies.hpp"
 #include "support/fake_graph_document_adapter.hpp"
 
 namespace ps {
@@ -158,20 +159,24 @@ std::size_t count_operations(
  */
 TEST(GraphDocumentInjection, RejectsMissingReaderOrWriterBeforeUse) {
   auto fake = std::make_shared<testing::FakeGraphDocumentAdapter>();
+  EXPECT_THROW(internal::create_embedded_host_with_dependencies(
+                   providers::make_configured_image_artifact_codec(), nullptr,
+                   fake, fake),
+               std::invalid_argument);
   EXPECT_THROW(
       GraphIOService(nullptr, std::shared_ptr<const GraphDocumentWriter>(fake)),
       std::invalid_argument);
   EXPECT_THROW(
       GraphIOService(std::shared_ptr<const GraphDocumentReader>(fake), nullptr),
       std::invalid_argument);
-  EXPECT_THROW(
-      internal::create_embedded_host_with_dependencies(
-          providers::make_configured_image_artifact_codec(), nullptr, fake),
-      std::invalid_argument);
-  EXPECT_THROW(
-      internal::create_embedded_host_with_dependencies(
-          providers::make_configured_image_artifact_codec(), fake, nullptr),
-      std::invalid_argument);
+  EXPECT_THROW(internal::create_embedded_host_with_dependencies(
+                   providers::make_configured_image_artifact_codec(),
+                   testing::make_yaml_cache_metadata_codec(), nullptr, fake),
+               std::invalid_argument);
+  EXPECT_THROW(internal::create_embedded_host_with_dependencies(
+                   providers::make_configured_image_artifact_codec(),
+                   testing::make_yaml_cache_metadata_codec(), fake, nullptr),
+               std::invalid_argument);
   EXPECT_TRUE(fake->observations().empty());
 }
 
@@ -300,7 +305,8 @@ TEST(GraphDocumentInjection,
   });
 
   auto host = internal::create_embedded_host_with_dependencies(
-      providers::make_configured_image_artifact_codec(), fake, fake);
+      providers::make_configured_image_artifact_codec(),
+      testing::make_yaml_cache_metadata_codec(), fake, fake);
   fake.reset();
   ASSERT_FALSE(retained.expired());
 

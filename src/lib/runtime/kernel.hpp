@@ -26,6 +26,7 @@
 
 #include "compute/compute_service.hpp"
 #include "compute/dirty_control_lane.hpp"
+#include "core/cache_metadata_codec.hpp"
 #include "core/image_artifact_codec.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_inspect_service.hpp"
@@ -82,6 +83,7 @@ class Kernel {
    * @brief Creates a Kernel with every configured persistence dependency.
    *
    * @param image_codec Shared codec owner used by graph cache operations.
+   * @param metadata_codec Shared metadata owner used by graph cache operations.
    * @param document_reader Shared reader owner used by graph and node loads.
    * @param document_writer Shared writer owner used by graph and node saves.
    * @throws std::invalid_argument when any required owner is empty.
@@ -90,6 +92,7 @@ class Kernel {
    *       services for the complete lifetime of every admitted operation.
    */
   Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
+         std::shared_ptr<const CacheMetadataCodec> metadata_codec,
          std::shared_ptr<const GraphDocumentReader> document_reader,
          std::shared_ptr<const GraphDocumentWriter> document_writer);
 
@@ -1267,10 +1270,10 @@ class Kernel {
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
   /**
-   * @brief Cache service retaining the Kernel-injected artifact codec.
+   * @brief Cache service retaining the Kernel-injected artifact codecs.
    * @note `Kernel::~Kernel()` drains and destroys every `GraphRuntime` before
    * ordinary member teardown reaches this service. Admitted graph-state work
-   * may therefore borrow the service and codec until its runtime worker is
+   * may therefore borrow the service and codecs until its runtime worker is
    * joined.
    */
   GraphCacheService cache_service_;

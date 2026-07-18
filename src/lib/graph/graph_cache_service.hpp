@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "core/cache_metadata_codec.hpp"
 #include "core/image_artifact_codec.hpp"
 #include "graph/graph_model.hpp"
 
@@ -21,23 +22,26 @@ namespace ps {
  * @note Disk-cache load wrappers keep their historical bool return contract:
  * true means a reusable output is available, false means the caller should
  * compute normally. Detailed miss/error diagnostics are recorded through
- * GraphModel's locked disk-cache diagnostic API. Image bytes cross an injected
- * `ImageArtifactCodec`; this service contains no OpenCV image-codec calls or
- * provider-library types.
+ * GraphModel's locked disk-cache diagnostic API. Image bytes and detached
+ * named values cross injected `ImageArtifactCodec` and `CacheMetadataCodec`
+ * boundaries; this service contains no OpenCV/YAML calls or provider-library
+ * types.
  */
 class GraphCacheService {
  public:
   /**
-   * @brief Creates a cache service with an explicitly owned artifact codec.
+   * @brief Creates a cache service with explicitly owned artifact codecs.
    *
    * @param image_codec Shared codec used for every image cache read and write.
-   * @throws std::invalid_argument when the codec owner is empty.
-   * @note The immutable codec owner is retained for the complete service
-   * lifetime and may be shared by independent graph services. The codec owns no
-   * graph state or cache policy.
+   * @param metadata_codec Shared codec used for every named-value metadata
+   * read and write.
+   * @throws std::invalid_argument when either codec owner is empty.
+   * @note Both immutable codec owners are retained for the complete service
+   * lifetime and may be shared by independent graph services. They own no graph
+   * state, path derivation, timing, diagnostic, or cache policy.
    */
-  explicit GraphCacheService(
-      std::shared_ptr<const ImageArtifactCodec> image_codec);
+  GraphCacheService(std::shared_ptr<const ImageArtifactCodec> image_codec,
+                    std::shared_ptr<const CacheMetadataCodec> metadata_codec);
 
   /**
    * @brief Builds the per-node cache directory path under a graph cache root.
@@ -90,7 +94,7 @@ class GraphCacheService {
    * @param graph Graph whose nodes are scanned for HP cache outputs.
    * @param cache_precision Precision label used for image serialization.
    * @return Number of nodes for which a save attempt was issued.
-   * @throws codec, YAML, filesystem, or allocation exceptions from saving.
+   * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note RT-only state is ignored because disk cache authority is HP-only.
    */
   GraphModel::CacheSaveResult cache_all_nodes(
@@ -113,7 +117,7 @@ class GraphCacheService {
    * @param graph Graph whose disk cache should be synchronized.
    * @param cache_precision Precision label used for image serialization.
    * @return Counts for saved HP nodes and removed stale files/directories.
-   * @throws Filesystem, codec, YAML, or graph access exceptions.
+   * @throws Filesystem, codec, or graph access exceptions.
    * @note Nodes with only RT state do not protect existing disk cache files.
    */
   GraphModel::DiskSyncResult synchronize_disk_cache(
@@ -125,13 +129,13 @@ class GraphCacheService {
    * @param graph Graph providing cache root and IO timing counters.
    * @param node Node whose HP output and cache entries should be saved.
    * @param cache_precision Precision label used for image serialization.
-   * @throws codec, YAML, filesystem, or allocation exceptions from saving.
+   * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
    * unsupported cache entries, empty locations, or nodes without HP output.
    * Image serialization accepts only CPU buffers with owned data. Opaque
    * non-CPU images are skipped without unsafe mapping, while named
-   * ParameterValue outputs are serialized as YAML metadata; a future device
-   * adapter may add explicit download.
+   * ParameterValue outputs cross the metadata codec; a future device adapter
+   * may add explicit download.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
@@ -176,6 +180,14 @@ class GraphCacheService {
    * provider-local synchronization when needed.
    */
   std::shared_ptr<const ImageArtifactCodec> image_codec_;
+
+  /**
+   * @brief Shared immutable codec used by every metadata artifact operation.
+   * @note The owner is non-null after construction. The codec may be called by
+   * different graph-state lanes concurrently and owns no cache policy or
+   * diagnostic state.
+   */
+  std::shared_ptr<const CacheMetadataCodec> metadata_codec_;
 };
 
 }  // namespace ps

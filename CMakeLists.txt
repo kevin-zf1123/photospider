@@ -319,14 +319,14 @@ endif()
 # 1. Internal Static Modules (The Building Blocks)
 # ==============================================================================
 
-# Module: dependency-neutral private core values and public/private value
-# conversion sources, combined at the current product-composition boundary with
-# the configured image-artifact codec provider and its OpenCV adapter. This
-# target still links Photospider::operation_opencv and OpenCV imgcodecs; the
-# complete OpenCV-free product profile remains issue #63.
+# Module: dependency-neutral private core values and display formatting,
+# combined at the current product-composition boundary with the configured
+# image-artifact codec provider and its OpenCV adapter. This target still links
+# Photospider::operation_opencv and OpenCV imgcodecs; the complete OpenCV-free
+# product profile remains issue #63.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
     src/lib/core/ps_types.cpp
-    src/lib/core/parameter_value_adapter.cpp
+    src/lib/core/parameter_value_text.cpp
 )
 
 set(PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES
@@ -342,11 +342,10 @@ target_include_directories(photospider_core_internal PRIVATE
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(photospider_core_internal PRIVATE
     Photospider::operation_opencv
-    ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET}
-    yaml-cpp::yaml-cpp)
+    ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
 
-# Module: private graph model, registry behavior, cache metadata, and
-# format-neutral graph services.
+# Module: private graph model, registry behavior, dependency-neutral cache
+# coordination, and format-neutral graph services.
 set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/core/ops.cpp
     src/lib/graph/in_memory_graph_document_adapter.cpp
@@ -367,24 +366,25 @@ target_include_directories(photospider_graph_internal PRIVATE
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(photospider_graph_internal PRIVATE
     photospider_core_internal
-    Photospider::operation_opencv
-    yaml-cpp::yaml-cpp)
+    Photospider::operation_opencv)
 
-# Module: configured YAML graph-document translation and direct filesystem IO.
-# GraphIO and Kernel see only the neutral graph-document contracts; the
-# embedded Host root selects this adapter for the current product profile.
-set(PHOTOSPIDER_YAML_GRAPH_DOCUMENT_ADAPTER_SOURCES
+# Module: configured YAML value translation, graph-document IO, and cache
+# metadata persistence. GraphIO, cache, and Kernel see only neutral contracts;
+# the embedded Host root selects these adapters for the current product profile.
+set(PHOTOSPIDER_YAML_ADAPTER_SOURCES
+    src/lib/adapters/yaml/parameter_value_yaml.cpp
     src/lib/adapters/yaml/graph_definition_yaml.cpp
     src/lib/adapters/yaml/yaml_graph_document_adapter.cpp
+    src/lib/adapters/yaml/yaml_cache_metadata_codec.cpp
 )
 
-add_library(photospider_yaml_graph_document_adapter_internal STATIC
-    ${PHOTOSPIDER_YAML_GRAPH_DOCUMENT_ADAPTER_SOURCES})
+add_library(photospider_yaml_adapter_internal STATIC
+    ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 target_include_directories(
-    photospider_yaml_graph_document_adapter_internal PRIVATE
+    photospider_yaml_adapter_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(
-    photospider_yaml_graph_document_adapter_internal PRIVATE
+    photospider_yaml_adapter_internal PRIVATE
     photospider_core_internal
     yaml-cpp::yaml-cpp)
 
@@ -406,8 +406,7 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         photospider_graph_internal
         Photospider::operation_opencv
         ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET}
-        ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET}
-        yaml-cpp::yaml-cpp)
+        ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
     if(BUILD_TESTING)
         target_compile_definitions(
             photospider_opencv_operation_provider_internal PRIVATE
@@ -432,7 +431,6 @@ target_link_libraries(photospider_plugin_host_internal PRIVATE
     photospider_core_internal
     photospider_graph_internal
     Photospider::operation_sdk
-    yaml-cpp::yaml-cpp
     ${CMAKE_DL_LIBS})
 if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
     target_compile_definitions(photospider_plugin_host_internal PRIVATE
@@ -519,8 +517,7 @@ target_link_libraries(photospider_compute_internal PRIVATE
     photospider_graph_internal
     photospider_plugin_host_internal
     photospider_scheduler_internal
-    Photospider::operation_opencv
-    yaml-cpp::yaml-cpp)
+    Photospider::operation_opencv)
 
 # ==============================================================================
 # 2. Installable Static Library (The Embedded Frontend Product)
@@ -530,7 +527,7 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES}
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
-    ${PHOTOSPIDER_YAML_GRAPH_DOCUMENT_ADAPTER_SOURCES}
+    ${PHOTOSPIDER_YAML_ADAPTER_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES}

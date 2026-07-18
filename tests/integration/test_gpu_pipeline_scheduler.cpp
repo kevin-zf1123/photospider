@@ -564,7 +564,8 @@ TEST_F(GpuPipelineSchedulerTest, ProductionComputeUsesDeviceImplementation) {
   runtime.model().add_node(node);
 
   GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
   ComputeService::Request request;
   request.node_id = node.id;
@@ -627,7 +628,8 @@ TEST_F(GpuPipelineSchedulerTest,
   runtime.model().add_node(node);
 
   GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
   ComputeService::Request request;
   request.node_id = node.id;
@@ -941,7 +943,8 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   int node_id = (*endings)[0];
 
   GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
 
   ComputeService::Request rt_request;

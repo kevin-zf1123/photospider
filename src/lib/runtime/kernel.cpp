@@ -93,9 +93,10 @@ void notify_required_target_test_hook(RequiredTargetTestEvent event) noexcept {
 
 /** @copydoc Kernel::Kernel */
 Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
+               std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                std::shared_ptr<const GraphDocumentReader> document_reader,
                std::shared_ptr<const GraphDocumentWriter> document_writer)
-    : cache_service_(std::move(image_codec)),
+    : cache_service_(std::move(image_codec), std::move(metadata_codec)),
       io_service_(std::move(document_reader), std::move(document_writer)) {
 }  // NOLINT
 

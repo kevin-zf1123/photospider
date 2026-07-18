@@ -34,6 +34,7 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
+#include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
@@ -970,7 +971,7 @@ class KernelCodecTeardownScenario final {
 struct DiskCacheDiagnosticContext {
   /** @brief Fake codec owner retained for call and failure assertions. */
   std::shared_ptr<testing::FakeImageArtifactCodec> codec;
-  /** @brief Cache service under test, injected with `codec`. */
+  /** @brief Cache service under test, injected with configured test codecs. */
   GraphCacheService cache;
   std::filesystem::path root;
   GraphModel graph;
@@ -991,7 +992,7 @@ struct DiskCacheDiagnosticContext {
       testing::FakeImageArtifactCodec::DecodeCallback decode = {})
       : codec(std::make_shared<testing::FakeImageArtifactCodec>(
             std::move(decode))),
-        cache(codec),
+        cache(codec, testing::make_yaml_cache_metadata_codec()),
         root(clean_temp_path(root_name)),
         graph(root),
         node(make_cached_process_node(cache_location)) {}
@@ -1289,7 +1290,8 @@ TEST(ParameterValuePath, ExactTypeMismatchFailsInsideOperation) {
 TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   register_contract_ops();
   GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
@@ -1339,7 +1341,8 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
 TEST(CacheSemantics, DiskSaveAndSyncIgnoreNodesWithoutHpState) {
   register_contract_ops();
   GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
@@ -1449,6 +1452,42 @@ TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
   EXPECT_EQ(result->metadata_file, metadata_file);
 }
 
+/**
+ * @brief Verifies configured metadata save/load keeps the existing `.yml`
+ * schema and detached recursive values.
+ */
+TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
+  const auto root =
+      clean_temp_path("photospider-contract-metadata-configured-round-trip");
+  GraphModel graph(root);
+  Node saved = make_cached_process_node("output.png");
+  saved.cached_output_high_precision = NodeOutput{};
+
+  plugin::ParameterValue::Object nested;
+  nested.emplace("enabled", plugin::ParameterValue(true));
+  nested.emplace("label", plugin::ParameterValue("cached"));
+  plugin::ParameterMap expected;
+  expected.emplace("answer", plugin::ParameterValue(42));
+  expected.emplace("nested", plugin::ParameterValue(std::move(nested)));
+  saved.cached_output_high_precision->data = expected;
+
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  cache.save_cache_if_configured(graph, saved, "int8");
+
+  std::filesystem::path metadata_file =
+      cache.node_cache_dir(graph, saved.id) / saved.caches.front().location;
+  metadata_file.replace_extension(".yml");
+  ASSERT_TRUE(std::filesystem::exists(metadata_file));
+
+  Node loaded = make_cached_process_node("output.png");
+  ASSERT_TRUE(cache.try_load_from_disk_cache(graph, loaded));
+  ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
+  EXPECT_EQ(loaded.cached_output_high_precision->data, expected);
+
+  std::filesystem::remove_all(root);
+}
+
 TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
   DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-bad-yaml",
                                  "output.png");
@@ -1511,6 +1550,131 @@ TEST(CacheSemantics, InjectedCodecBadAllocPropagatesWithoutHpMutation) {
   ASSERT_EQ(ctx.codec->calls().size(), 1u);
 }
 
+/**
+ * @brief Verifies the metadata codec is required, retained, and receives exact
+ * cache-owned paths and detached values for both directions.
+ */
+TEST(CacheSemantics,
+     InjectedMetadataCodecLifetimePathAndValuesFollowCacheService) {
+  const auto root =
+      clean_temp_path("photospider-contract-metadata-codec-lifetime");
+  GraphModel graph(root);
+  Node saved = make_cached_process_node("output.png");
+  saved.cached_output_high_precision = NodeOutput{};
+  saved.cached_output_high_precision->data.emplace(
+      "written", plugin::ParameterValue("value"));
+  const plugin::ParameterMap read_values{
+      {"loaded", plugin::ParameterValue(73)}};
+
+  std::filesystem::path expected_path =
+      root / std::to_string(saved.id) / saved.caches.front().location;
+  expected_path.replace_extension(".yml");
+
+  EXPECT_THROW(
+      GraphCacheService(nullptr, testing::make_yaml_cache_metadata_codec()),
+      std::invalid_argument);
+  EXPECT_THROW(GraphCacheService(
+                   providers::make_configured_image_artifact_codec(), nullptr),
+               std::invalid_argument);
+
+  std::weak_ptr<testing::FakeCacheMetadataCodec> weak_codec;
+  {
+    auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
+        [read_values](const std::filesystem::path&) { return read_values; });
+    weak_codec = metadata_codec;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            metadata_codec};
+    metadata_codec.reset();
+    ASSERT_FALSE(weak_codec.expired());
+
+    cache.save_cache_if_configured(graph, saved, "int8");
+    write_text(expected_path, "fake metadata presence");
+
+    Node loaded = make_cached_process_node("output.png");
+    NodeOutput output;
+    ASSERT_TRUE(cache.try_load_from_disk_cache_into(graph, loaded, output));
+    EXPECT_EQ(output.data, read_values);
+
+    const auto retained = weak_codec.lock();
+    ASSERT_TRUE(retained);
+    const auto calls = retained->calls();
+    ASSERT_EQ(calls.size(), 2U);
+    EXPECT_EQ(calls[0].kind,
+              testing::FakeCacheMetadataCodec::Call::Kind::Write);
+    EXPECT_EQ(calls[0].path, expected_path);
+    EXPECT_EQ(calls[0].values, saved.cached_output_high_precision->data);
+    EXPECT_EQ(calls[1].kind, testing::FakeCacheMetadataCodec::Call::Kind::Read);
+    EXPECT_EQ(calls[1].path, expected_path);
+    EXPECT_TRUE(calls[1].values.empty());
+  }
+
+  EXPECT_TRUE(weak_codec.expired());
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies categorized metadata failures are recorded without
+ * publishing partial HP output.
+ */
+TEST(CacheSemantics,
+     InjectedMetadataCodecGraphErrorPreservesDiagnosticAndHpState) {
+  const auto root =
+      clean_temp_path("photospider-contract-metadata-codec-error");
+  GraphModel graph(root);
+  Node node = make_cached_process_node("output.png");
+  std::filesystem::path metadata_file =
+      root / std::to_string(node.id) / node.caches.front().location;
+  metadata_file.replace_extension(".yml");
+  write_text(metadata_file, "fake metadata presence");
+
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [](const std::filesystem::path&) -> plugin::ParameterMap {
+        throw GraphError(GraphErrc::InvalidYaml,
+                         "injected metadata representation failure");
+      });
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          metadata_codec};
+
+  EXPECT_FALSE(cache.try_load_from_disk_cache(graph, node));
+  EXPECT_FALSE(node.cached_output_high_precision.has_value());
+  const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(diagnostic.has_value());
+  EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(diagnostic->code, GraphErrc::InvalidYaml);
+  EXPECT_EQ(diagnostic->metadata_file, metadata_file);
+  EXPECT_EQ(diagnostic->message, "injected metadata representation failure");
+
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies metadata resource exhaustion crosses cache wrappers
+ * unchanged and leaves HP state empty.
+ */
+TEST(CacheSemantics, InjectedMetadataCodecBadAllocPropagatesUnchanged) {
+  const auto root =
+      clean_temp_path("photospider-contract-metadata-codec-bad-alloc");
+  GraphModel graph(root);
+  Node node = make_cached_process_node("output.png");
+  std::filesystem::path metadata_file =
+      root / std::to_string(node.id) / node.caches.front().location;
+  metadata_file.replace_extension(".yml");
+  write_text(metadata_file, "fake metadata presence");
+
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [](const std::filesystem::path&) -> plugin::ParameterMap {
+        throw std::bad_alloc();
+      });
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          metadata_codec};
+
+  EXPECT_THROW(cache.try_load_from_disk_cache(graph, node), std::bad_alloc);
+  EXPECT_FALSE(node.cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.last_disk_cache_load_result_snapshot().has_value());
+
+  std::filesystem::remove_all(root);
+}
+
 TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
   const auto root = clean_temp_path("photospider-contract-codec-lifetime");
   GraphModel graph(root);
@@ -1525,7 +1689,7 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
   {
     auto codec = std::make_shared<testing::FakeImageArtifactCodec>();
     weak_codec = codec;
-    GraphCacheService cache(codec);
+    GraphCacheService cache(codec, testing::make_yaml_cache_metadata_codec());
     codec.reset();
     ASSERT_FALSE(weak_codec.expired());
 
@@ -1670,7 +1834,8 @@ TEST(CacheSemantics, DiskCacheDiagnosticSnapshotSupportsConcurrentWriters) {
 TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   register_contract_ops();
   GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 

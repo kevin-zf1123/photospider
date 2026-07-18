@@ -6,30 +6,26 @@
 #include <exception>
 #include <filesystem>
 #include <future>
-#include <iomanip>
-#include <limits>
-#include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/yaml/yaml_cache_metadata_codec.hpp"
 #include "adapters/yaml/yaml_graph_document_adapter.hpp"
 #include "compute/dirty_region_snapshot.hpp"
-#include "core/parameter_value_adapter.hpp"
+#include "core/parameter_value_text.hpp"
 #include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
-#include "yaml-cpp/yaml.h"
 
 namespace ps {
 
@@ -379,6 +375,7 @@ struct EmbeddedHostState {
    * @brief Creates backend state from explicit retained dependencies.
    *
    * @param image_codec Shared artifact codec owner.
+   * @param metadata_codec Shared metadata codec owner.
    * @param document_reader Shared graph/node document reader owner.
    * @param document_writer Shared graph/node document writer owner.
    * @throws std::invalid_argument when any required owner is empty.
@@ -386,10 +383,11 @@ struct EmbeddedHostState {
    * @note Kernel is fully composed before InteractionService borrows it.
    */
   EmbeddedHostState(std::shared_ptr<const ImageArtifactCodec> image_codec,
+                    std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                     std::shared_ptr<const GraphDocumentReader> document_reader,
                     std::shared_ptr<const GraphDocumentWriter> document_writer)
-      : kernel(std::move(image_codec), std::move(document_reader),
-               std::move(document_writer)),
+      : kernel(std::move(image_codec), std::move(metadata_codec),
+               std::move(document_reader), std::move(document_writer)),
         interaction(kernel) {}
 
   /**
@@ -1059,23 +1057,6 @@ OperationStatus status_from_exception(const char* operation,
 }
 
 /**
- * @brief Maps a caught YAML exception into a Host operation status.
- *
- * @param operation Frontend operation name used in the diagnostic prefix.
- * @param error YAML parser or emitter exception.
- * @return InvalidYaml failure status with diagnostic text.
- * @throws std::bad_alloc if diagnostic string allocation fails.
- * @note YAML remains an implementation dependency; Host callers only receive a
- *       stable status value.
- */
-OperationStatus status_from_exception(const char* operation,
-                                      const YAML::Exception& error) {
-  return failure_status(
-      GraphErrc::InvalidYaml,
-      std::string(operation) + " YAML failed: " + error.what());
-}
-
-/**
  * @brief Maps a filesystem exception into a Host operation status.
  *
  * @param operation Frontend operation name used in the diagnostic prefix.
@@ -1166,8 +1147,8 @@ OperationStatus await_async_compute_status(
  *         caught.
  * @throws std::bad_alloc when allocation failure prevents reliable status
  *         construction.
- * @note This is the public seam guard for backend and serialization
- *       exceptions.
+ * @note Concrete adapters translate provider exceptions before this public
+ * seam; the guard handles only dependency-neutral failures.
  */
 template <typename Value, typename Fn>
 Result<Value> guarded_result(const char* operation, GraphErrc fallback_code,
@@ -1177,10 +1158,6 @@ Result<Value> guarded_result(const char* operation, GraphErrc fallback_code,
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& error) {
-    Result<Value> result;
-    result.status = status_from_exception(operation, error);
-    return result;
-  } catch (const YAML::Exception& error) {
     Result<Value> result;
     result.status = status_from_exception(operation, error);
     return result;
@@ -1221,8 +1198,6 @@ VoidResult guarded_void(const char* operation, GraphErrc fallback_code,
     throw;
   } catch (const GraphError& error) {
     return VoidResult{status_from_exception(operation, error)};
-  } catch (const YAML::Exception& error) {
-    return VoidResult{status_from_exception(operation, error)};
   } catch (const std::filesystem::filesystem_error& error) {
     return VoidResult{status_from_exception(operation, error)};
   } catch (const std::exception& error) {
@@ -1238,8 +1213,8 @@ VoidResult guarded_void(const char* operation, GraphErrc fallback_code,
  * @tparam Fn Callable returning VoidResult and explicitly producing NotFound
  *         only when Kernel reports that no graph map entry exists.
  * @param fn Close body to execute after Host admission coordination.
- * @return Callable result, the exact recoverable Graph/YAML/filesystem
- *         category, or Graph Unknown for scheduler NotFound and otherwise
+ * @return Callable result, the exact recoverable Graph/filesystem category, or
+ *         Graph Unknown for scheduler NotFound and otherwise
  *         unclassified exceptions raised while stopping an existing runtime.
  * @throws std::bad_alloc when backend execution or status construction exhausts
  *         memory.
@@ -1257,8 +1232,6 @@ VoidResult guarded_graph_close(Fn&& fn) {
       return VoidResult{
           status_from_exception("close_graph", GraphErrc::Unknown, error)};
     }
-    return VoidResult{status_from_exception("close_graph", error)};
-  } catch (const YAML::Exception& error) {
     return VoidResult{status_from_exception("close_graph", error)};
   } catch (const std::filesystem::filesystem_error& error) {
     return VoidResult{status_from_exception("close_graph", error)};
@@ -1290,8 +1263,6 @@ OperationStatus guarded_status(const char* operation, GraphErrc fallback_code,
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& error) {
-    return status_from_exception(operation, error);
-  } catch (const YAML::Exception& error) {
     return status_from_exception(operation, error);
   } catch (const std::filesystem::filesystem_error& error) {
     return status_from_exception(operation, error);
@@ -1395,53 +1366,20 @@ DirtySourceLifecycleState to_public_dirty_lifecycle(
 }
 
 /**
- * @brief Removes trailing newline characters from formatted YAML text.
- *
- * @param text Text to normalize.
- * @return Text without trailing newline or carriage-return characters.
- * @throws std::bad_alloc if string move/copy allocation fails.
- * @note YAML::Dump often appends a newline; frontend parameter maps are easier
- *       to compare when scalar values are normalized.
- */
-std::string trim_trailing_newlines(std::string text) {
-  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
-    text.pop_back();
-  }
-  return text;
-}
-
-/**
  * @brief Converts a format-neutral parameter map into public display strings.
  *
  * @param parameters Backend ParameterValue parameters.
  * @return Map from parameter name to display/serialization text.
- * @throws YAML::Exception or std::bad_alloc if recursive display conversion
- * fails.
- * @note Scalar strings retain their exact text. Arrays and objects are dumped
- * through the document adapter so Host clients remain independent of yaml-cpp.
+ * @throws std::bad_alloc if recursive display conversion allocates and fails.
+ * @throws std::logic_error if a value reports an unknown parameter kind.
+ * @note Scalar strings retain their exact text. Arrays and objects use the
+ * dependency-neutral deterministic inspection grammar.
  */
 std::map<std::string, std::string> parameter_strings_from_values(
     const plugin::ParameterMap& parameters) {
   std::map<std::string, std::string> out;
   for (const auto& [key, value] : parameters) {
-    if (value.is_null()) {
-      out[key] = "null";
-    } else if (value.is_bool()) {
-      out[key] = value.as_bool() ? "true" : "false";
-    } else if (value.is_int64()) {
-      out[key] = std::to_string(value.as_int64());
-    } else if (value.is_double()) {
-      std::ostringstream stream;
-      stream.imbue(std::locale::classic());
-      stream << std::setprecision(std::numeric_limits<double>::max_digits10)
-             << value.as_double();
-      out[key] = stream.str();
-    } else if (value.is_string()) {
-      out[key] = value.as_string();
-    } else {
-      out[key] = trim_trailing_newlines(
-          YAML::Dump(core::parameter_value_to_yaml(value)));
-    }
+    out[key] = core::format_parameter_value_for_inspection(value);
   }
   return out;
 }
@@ -1497,8 +1435,9 @@ SpatialSnapshot to_public_space(const SpatialContext& space, int output_width,
  *
  * @param info Backend node inspection result.
  * @return Public node inspection view.
- * @throws YAML::Exception or std::bad_alloc if recursive parameter display
- * conversion allocates or fails.
+ * @throws std::bad_alloc if recursive parameter display conversion allocates
+ * and fails.
+ * @throws std::logic_error if a parameter reports an unknown kind.
  * @note Backend Node values are copied into public value fields.
  */
 NodeInspectionView to_public_node(const GraphNodeInspectInfo& info) {
@@ -1550,8 +1489,7 @@ void throw_if_graph_adapter_bad_alloc_probe(const GraphNodeInspectInfo& info) {
  * @return Public graph inspection view.
  * @throws std::bad_alloc when public node, parameter, or result storage
  * exhausts memory.
- * @throws YAML::Exception when recursive parameter display values cannot be
- * serialized.
+ * @throws std::logic_error if a recursive parameter reports an unknown kind.
  * @note BUILD_TESTING may compile an immutable-name failpoint inside the real
  * adapter loop. Production builds compile out the probe and expose no callable
  * test seam.
@@ -1627,7 +1565,7 @@ HostDependencyTreeScope to_public_tree_scope(DependencyTree::Scope scope) {
  *
  * @param tree Backend dependency tree.
  * @return Public dependency tree snapshot.
- * @throws YAML::Exception/std::bad_alloc from node conversion.
+ * @throws std::logic_error or std::bad_alloc from node conversion.
  */
 HostDependencyTreeSnapshot to_public_dependency_tree(
     const DependencyTree& tree) {
@@ -2111,6 +2049,7 @@ class EmbeddedHost final : public Host {
    * @brief Creates a Host with a fresh explicitly composed backend state.
    *
    * @param image_codec Shared artifact codec owner.
+   * @param metadata_codec Shared metadata codec owner.
    * @param document_reader Shared graph/node document reader owner.
    * @param document_writer Shared graph/node document writer owner.
    * @throws std::invalid_argument when any required owner is empty.
@@ -2120,11 +2059,12 @@ class EmbeddedHost final : public Host {
    *       process operation plugin manager.
    */
   EmbeddedHost(std::shared_ptr<const ImageArtifactCodec> image_codec,
+               std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                std::shared_ptr<const GraphDocumentReader> document_reader,
                std::shared_ptr<const GraphDocumentWriter> document_writer)
       : state_(std::make_shared<EmbeddedHostState>(
-            std::move(image_codec), std::move(document_reader),
-            std::move(document_writer))) {}
+            std::move(image_codec), std::move(metadata_codec),
+            std::move(document_reader), std::move(document_writer))) {}
 
   /**
    * @brief Loads one graph through the embedded backend.
@@ -3732,20 +3672,23 @@ void set_embedded_host_operation_test_hook(
 /** @copydoc ps::internal::create_embedded_host_with_dependencies */
 std::unique_ptr<Host> internal::create_embedded_host_with_dependencies(
     std::shared_ptr<const ImageArtifactCodec> image_codec,
+    std::shared_ptr<const CacheMetadataCodec> metadata_codec,
     std::shared_ptr<const GraphDocumentReader> document_reader,
     std::shared_ptr<const GraphDocumentWriter> document_writer) {
-  return std::make_unique<EmbeddedHost>(std::move(image_codec),
-                                        std::move(document_reader),
-                                        std::move(document_writer));
+  return std::make_unique<EmbeddedHost>(
+      std::move(image_codec), std::move(metadata_codec),
+      std::move(document_reader), std::move(document_writer));
 }
 
 /** @copydoc ps::create_embedded_host */
 std::unique_ptr<Host> create_embedded_host() {
+  auto metadata_adapter =
+      std::make_shared<adapters::yaml::YamlCacheMetadataCodec>();
   auto document_adapter =
       std::make_shared<adapters::yaml::YamlGraphDocumentAdapter>();
   return internal::create_embedded_host_with_dependencies(
-      providers::make_configured_image_artifact_codec(), document_adapter,
-      document_adapter);
+      providers::make_configured_image_artifact_codec(), metadata_adapter,
+      document_adapter, document_adapter);
 }
 
 }  // namespace ps

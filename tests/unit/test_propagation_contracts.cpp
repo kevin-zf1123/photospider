@@ -15,10 +15,11 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/yaml/parameter_value_yaml.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/image_buffer.hpp"
 #include "compute/task_graph_planning.hpp"
-#include "core/parameter_value_adapter.hpp"
+#include "core/parameter_value_text.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
@@ -373,7 +374,8 @@ TEST(OperationParameterAdapter,
       "quoted: \"12\"\n"
       "enabled: true\n"
       "items: [null, 2.5, {name: original}]\n");
-  plugin::ParameterMap parameters = core::parameter_map_from_yaml(source);
+  plugin::ParameterMap parameters =
+      adapters::yaml::internal::parameter_map_from_yaml(source);
 
   ASSERT_TRUE(parameters.at("plain").is_int64());
   EXPECT_EQ(parameters.at("plain").as_int64(), 12);
@@ -392,7 +394,8 @@ TEST(OperationParameterAdapter,
   EXPECT_THROW(parameters.at("quoted").as_double(), plugin::ParameterTypeError);
 
   const YAML::Node collision = YAML::Load("{1: first, 1.0: second}");
-  EXPECT_THROW(core::parameter_map_from_yaml(collision), std::invalid_argument);
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(collision),
+               std::invalid_argument);
 
   GraphModel graph = make_graph();
   Node disconnected = make_public_dependency_node(7, -1, -1);
@@ -452,6 +455,34 @@ TEST(OperationParameterValue,
   }
 }
 
+/**
+ * @brief Verifies provider-independent scalar and recursive inspection text.
+ */
+TEST(OperationParameterValue,
+     InspectionTextPreservesScalarsAndEscapesRecursiveValues) {
+  EXPECT_EQ(core::format_parameter_value_for_inspection(
+                plugin::ParameterValue("007")),
+            "007");
+  EXPECT_EQ(
+      core::format_parameter_value_for_inspection(plugin::ParameterValue(1.25)),
+      "1.25");
+
+  plugin::ParameterValue::Object object;
+  object.emplace("z", plugin::ParameterValue(true));
+  object.emplace("a\n",
+                 plugin::ParameterValue(std::string("quote\" slash\\\x01")));
+  plugin::ParameterValue::Array array;
+  array.emplace_back("plain");
+  array.emplace_back(std::move(object));
+  array.emplace_back(nullptr);
+  array.emplace_back(1.25);
+
+  EXPECT_EQ(
+      core::format_parameter_value_for_inspection(
+          plugin::ParameterValue(std::move(array))),
+      R"(["plain", {"a\n": "quote\" slash\\\u0001", "z": true}, null, 1.25])");
+}
+
 TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
   plugin::ParameterValue::Object object;
   object.emplace("numeric_text", plugin::ParameterValue("123"));
@@ -465,10 +496,10 @@ TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
   object.emplace("infinity", plugin::ParameterValue(
                                  std::numeric_limits<double>::infinity()));
 
-  const YAML::Node yaml =
-      core::parameter_value_to_yaml(plugin::ParameterValue(std::move(object)));
+  const YAML::Node yaml = adapters::yaml::internal::parameter_value_to_yaml(
+      plugin::ParameterValue(std::move(object)));
   const plugin::ParameterValue round_trip =
-      core::parameter_value_from_yaml(yaml);
+      adapters::yaml::internal::parameter_value_from_yaml(yaml);
   const auto& values = round_trip.as_object();
   EXPECT_EQ(values.at("numeric_text").as_string(), "123");
   EXPECT_EQ(values.at("boolean_text").as_string(), "true");
@@ -481,8 +512,9 @@ TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
   EXPECT_TRUE(values.at("infinity").is_double());
   EXPECT_TRUE(std::isinf(values.at("infinity").as_double()));
 
-  const plugin::ParameterMap plain = core::parameter_map_from_yaml(
-      YAML::Load("{nan: .nan, infinity: .inf, hex: 0x10, octal: 012}"));
+  const plugin::ParameterMap plain =
+      adapters::yaml::internal::parameter_map_from_yaml(
+          YAML::Load("{nan: .nan, infinity: .inf, hex: 0x10, octal: 012}"));
   EXPECT_TRUE(plain.at("nan").is_double());
   EXPECT_TRUE(std::isnan(plain.at("nan").as_double()));
   EXPECT_TRUE(plain.at("infinity").is_double());
@@ -493,34 +525,37 @@ TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
 
 TEST(OperationParameterAdapter,
      RejectsOutOfRangePlainIntegersBeforeDoubleInference) {
-  const plugin::ParameterMap boundaries = core::parameter_map_from_yaml(
-      YAML::Load("{maximum: 9223372036854775807, "
-                 "minimum: -9223372036854775808, scientific: 9.25e2}"));
+  const plugin::ParameterMap boundaries =
+      adapters::yaml::internal::parameter_map_from_yaml(
+          YAML::Load("{maximum: 9223372036854775807, "
+                     "minimum: -9223372036854775808, scientific: 9.25e2}"));
   EXPECT_EQ(boundaries.at("maximum").as_int64(),
             std::numeric_limits<std::int64_t>::max());
   EXPECT_EQ(boundaries.at("minimum").as_int64(),
             std::numeric_limits<std::int64_t>::min());
   EXPECT_DOUBLE_EQ(boundaries.at("scientific").as_double(), 925.0);
 
-  EXPECT_THROW(
-      core::parameter_map_from_yaml(YAML::Load("{value: 9223372036854775808}")),
-      YAML::Exception);
-  EXPECT_THROW(
-      core::parameter_map_from_yaml(YAML::Load("{value: 9223372036854775809}")),
-      YAML::Exception);
-  EXPECT_THROW(core::parameter_map_from_yaml(
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
+                   YAML::Load("{value: 9223372036854775808}")),
+               YAML::Exception);
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
+                   YAML::Load("{value: 9223372036854775809}")),
+               YAML::Exception);
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
                    YAML::Load("{value: -9223372036854775809}")),
                YAML::Exception);
-  EXPECT_THROW(core::parameter_map_from_yaml(YAML::Load("{value: 1e9999}")),
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
+                   YAML::Load("{value: 1e9999}")),
                YAML::Exception);
 }
 
 TEST(OperationParameterAdapter,
      HonorsEveryExplicitScalarTagAndRejectsUnknownTags) {
-  const plugin::ParameterMap tagged = core::parameter_map_from_yaml(
-      YAML::Load("{null_value: !!null null, bool_value: !!bool true, "
-                 "int_value: !!int 1, float_value: !!float 1, "
-                 "string_value: !!str 1}"));
+  const plugin::ParameterMap tagged =
+      adapters::yaml::internal::parameter_map_from_yaml(
+          YAML::Load("{null_value: !!null null, bool_value: !!bool true, "
+                     "int_value: !!int 1, float_value: !!float 1, "
+                     "string_value: !!str 1}"));
   EXPECT_TRUE(tagged.at("null_value").is_null());
   EXPECT_TRUE(tagged.at("bool_value").is_bool());
   EXPECT_TRUE(tagged.at("bool_value").as_bool());
@@ -531,10 +566,10 @@ TEST(OperationParameterAdapter,
   EXPECT_TRUE(tagged.at("string_value").is_string());
   EXPECT_EQ(tagged.at("string_value").as_string(), "1");
 
-  EXPECT_THROW(core::parameter_map_from_yaml(
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
                    YAML::Load("{value: !photospider/custom opaque}")),
                YAML::Exception);
-  EXPECT_THROW(core::parameter_map_from_yaml(
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
                    YAML::Load("{value: !!timestamp 2026-07-13}")),
                YAML::Exception);
 }
@@ -731,13 +766,14 @@ TEST(OperationParameterAdapter,
       "{value: !!float nope}", "{value: 9223372036854775808}"};
   for (const std::string& document : malformed_documents) {
     SCOPED_TRACE(document);
-    EXPECT_THROW(core::parameter_map_from_yaml(YAML::Load(document)),
-                 YAML::Exception);
+    EXPECT_THROW(
+        adapters::yaml::internal::parameter_map_from_yaml(YAML::Load(document)),
+        YAML::Exception);
     EXPECT_TRUE(node.parameters.empty());
   }
 
-  node.parameters =
-      core::parameter_map_from_yaml(YAML::Load("{value: !!float 1}"));
+  node.parameters = adapters::yaml::internal::parameter_map_from_yaml(
+      YAML::Load("{value: !!float 1}"));
   EXPECT_TRUE(node.parameters.at("value").is_double());
   EXPECT_DOUBLE_EQ(node.parameters.at("value").as_double(), 1.0);
 }

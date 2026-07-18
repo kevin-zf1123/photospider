@@ -391,7 +391,8 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
         // 修正点: 直接构造服务类，不访问 kernel 的私有成员
         ps::GraphTraversalService traversal_service;
         ps::GraphCacheService cache_service{
-            ps::providers::make_configured_image_artifact_codec()};
+            ps::providers::make_configured_image_artifact_codec(),
+            ps::testing::make_yaml_cache_metadata_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        runtime.event_service());
 
@@ -533,7 +534,8 @@ TEST(Scheduler,
       [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
         ps::GraphCacheService cache_service{
-            ps::providers::make_configured_image_artifact_codec()};
+            ps::providers::make_configured_image_artifact_codec(),
+            ps::testing::make_yaml_cache_metadata_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        stale_runtime.event_service());
         ps::ComputeService::Request request;
@@ -582,7 +584,8 @@ TEST(Scheduler,
       [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
         ps::GraphCacheService cache_service{
-            ps::providers::make_configured_image_artifact_codec()};
+            ps::providers::make_configured_image_artifact_codec(),
+            ps::testing::make_yaml_cache_metadata_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        exception_runtime.event_service());
         ps::ComputeService::Request request;
@@ -651,7 +654,8 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveParameterValueState) {
         [&](ps::GraphModel& graph) -> ps::NodeOutput {
           ps::GraphTraversalService traversal_service;
           ps::GraphCacheService cache_service{
-              ps::providers::make_configured_image_artifact_codec()};
+              ps::providers::make_configured_image_artifact_codec(),
+              ps::testing::make_yaml_cache_metadata_codec()};
           ps::ComputeService compute_service(traversal_service, cache_service,
                                              runtime.event_service());
           ps::ComputeService::Request request;

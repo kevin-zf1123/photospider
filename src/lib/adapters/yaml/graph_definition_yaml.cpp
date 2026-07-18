@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/parameter_value_adapter.hpp"
+#include "adapters/yaml/parameter_value_yaml.hpp"
 
 namespace ps::adapters::yaml::internal {
 
@@ -79,7 +79,7 @@ YAML::Node output_ports_to_yaml(const std::vector<OutputPort>& outputs) {
     item["output_type"] = output.output_type;
     if (output.output_parameters.has_value()) {
       item["output_parameters"] =
-          core::parameter_value_to_yaml(*output.output_parameters);
+          parameter_value_to_yaml(*output.output_parameters);
     }
     result.push_back(item);
   }
@@ -163,7 +163,7 @@ NodeDefinition node_definition_from_yaml(const YAML::Node& yaml_node) {
   if (const YAML::Node parameters = yaml_node["parameters"];
       parameters.IsDefined()) {
     try {
-      definition.parameters = core::parameter_map_from_yaml(parameters);
+      definition.parameters = parameter_map_from_yaml(parameters);
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const YAML::Exception&) {
@@ -184,7 +184,7 @@ NodeDefinition node_definition_from_yaml(const YAML::Node& yaml_node) {
       if (output_parameters.IsDefined()) {
         try {
           output.output_parameters =
-              core::parameter_value_from_yaml(output_parameters);
+              parameter_value_from_yaml(output_parameters);
         } catch (const std::bad_alloc&) {
           throw;
         } catch (const YAML::Exception&) {
@@ -230,7 +230,7 @@ YAML::Node node_definition_to_yaml(const NodeDefinition& definition) {
     result["parameter_inputs"] =
         parameter_inputs_to_yaml(definition.parameter_inputs);
   }
-  result["parameters"] = core::parameter_map_to_yaml(definition.parameters);
+  result["parameters"] = parameter_map_to_yaml(definition.parameters);
   if (!definition.outputs.empty()) {
     result["outputs"] = output_ports_to_yaml(definition.outputs);
   }
