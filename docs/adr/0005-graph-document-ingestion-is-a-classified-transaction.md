@@ -47,9 +47,9 @@ never falls back to local content. Kernel maps source/session filesystem
 inspection and copy failures to `Io`.
 
 `GraphIOService` owns document classification because it can distinguish file
-access, YAML representation, node conversion, and topology validation. It
-converts `Node::from_yaml()` parameter-detail failures into document-schema
-`InvalidYaml`, while preserving topology `GraphError` values.
+access, YAML representation, definition conversion, and topology validation.
+It converts GraphDefinition translator/adapter schema-detail failures into
+document-schema `InvalidYaml`, while preserving topology `GraphError` values.
 `InteractionService` is the defensive final embedded boundary: it preserves
 `GraphError`, maps residual file/YAML exceptions, converts other standard and
 non-standard failures to `Unknown`, and always rethrows `std::bad_alloc`.
@@ -60,12 +60,13 @@ session into its graph map. Failure destroys unpublished ownership and returns
 scheduler reservations. Directory and copied-file scratch side effects may
 remain because they are not published session ownership.
 
-Reload parses nodes into temporary ownership. `GraphModel::replace_nodes()`
-validates dependencies/cycles and constructs replacement adjacency before
-swapping nodes and topology. Failure therefore preserves nodes, adjacency,
-topology generation, runtime graph state, and session identity. Successful
-replacement is the only commit that resets runtime graph state and advances
-topology generation.
+Reload parses a detached `GraphDefinition` into temporary ownership. The
+in-memory adapter stages every private node before its single
+`GraphModel::replace_nodes()` call; that call validates dependencies/cycles and
+constructs replacement adjacency before swapping nodes and topology. Failure
+therefore preserves nodes, adjacency, topology generation, runtime graph state,
+and session identity. Successful replacement is the only commit that resets
+runtime graph state and advances topology generation.
 
 IPC adds no second taxonomy. It serializes the exact Host status and rolls
 back a reserved session name when Host load fails.

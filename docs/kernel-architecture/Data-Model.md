@@ -1,7 +1,8 @@
 # Kernel Data Model
 
 This document describes the graph and node data structures used by the current
-kernel. `GraphModel` and `Node` are private backend state, not shared public
+kernel. `GraphDefinition` is the detached persistent document value;
+`GraphModel` and `Node` are private backend runtime state, not shared public
 contracts. Frontends use `ps::Host` values, operation plugins use the operation
 SDK, and schedulers receive only ready-task metadata. This document explains
 the internal behavior those boundaries ultimately operate on.
@@ -47,6 +48,38 @@ Clearing a graph resets nodes, topology adjacency, timing results,
 accumulated IO time, skip-save state, and other per-run state so reload behavior
 is not polluted by stale metadata.
 
+## GraphDefinition and the In-Memory Adapter
+
+`GraphDefinition` is a deep-owned, format-neutral value for one complete graph
+document. It owns an ordered vector of `NodeDefinition` values. Each
+`NodeDefinition` contains only persistent identity, operation type/subtype,
+image and parameter edges, static `ParameterMap`, output and cache descriptors,
+and the `preserved` flag. It has no runtime parameters, computed outputs,
+revisions, ROI/LUT state, timing, dirty state, or cache results.
+
+`InMemoryGraphDocumentAdapter` is the only translator between that detached
+value and private `Node`/`GraphModel` state:
+
+- apply validates duplicate ids and required parameter-edge names while
+  staging a complete `GraphModel::NodeMap`, then calls
+  `GraphModel::replace_nodes()` exactly once;
+- capture visits graph nodes in ascending id order and copies only persistent
+  fields into an independent definition;
+- single-node materialization/capture supports the existing node-YAML
+  inspection operations without restoring YAML methods on `Node`.
+
+The adapter owns no graph, file, parser tree, cache, or thread. Callers retain
+the existing `GraphStateExecutor` serialization responsibility. A definition
+or topology failure before replacement preserves the prior node map, topology,
+generation, and runtime state.
+
+YAML conversion is isolated in the private `graph_definition_yaml` translation
+module. `GraphIOService` remains the concrete file/path orchestrator and routes
+the current load/reload/save product path through that translator plus the
+in-memory adapter. Filesystem-adapter injection and public format-neutral Host
+operations remain Issue #61 work; remaining runtime/cache YAML values and the
+dependency-disabled product profile remain Issues #62 and #63.
+
 ## Topology Adjacency
 
 `GraphModel` owns `GraphTopologyIndex`, which records both directions of graph
@@ -87,11 +120,13 @@ Node inputs are split by data kind:
 
 ## Parameters
 
-`Node::parameters` is a `plugin::ParameterMap` containing deep-owned static
-values. `Node::from_yaml()` converts the graph document once at ingestion;
-Graph storage does not retain the source YAML tree. Values use the exact
-`ParameterValue` alternatives `Null`, `Bool`, `Int64`, `Double`, `String`,
-`Array`, and string-keyed `Object`.
+`NodeDefinition::parameters` and `Node::parameters` are
+`plugin::ParameterMap` values containing deep-owned static data. The private
+YAML translator converts a graph document into a detached definition once;
+the in-memory adapter then copies that definition into Graph state. Neither
+the definition nor Graph storage retains the source YAML tree. Values use the
+exact `ParameterValue` alternatives `Null`, `Bool`, `Int64`, `Double`,
+`String`, `Array`, and string-keyed `Object`.
 
 `Node::runtime_parameters` is another `ParameterMap`, rebuilt for execution by
 copying static values and applying `parameter_inputs`. Connected named outputs
@@ -112,6 +147,12 @@ Graph state.
 | `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through `ImageBuffer::step`; padding is excluded and opaque device values retain provider diagnostics. |
 
 Operators may return image data, named data, or both.
+
+Persistent `OutputPort::output_parameters` is an optional deep-owned
+`ParameterValue`. An empty optional means the document field was absent; an
+engaged null value preserves an explicitly present YAML null. Nested output
+configuration therefore survives parser destruction without retaining
+`YAML::Node`.
 
 For tiled `image_mixing`, a secondary input that requires crop/pad is
 materialized as a request-local `NodeOutput`: named data, spatial/debug
@@ -163,14 +204,18 @@ Graph YAML root is a sequence of node objects. Supported node fields:
   outputs:
     - output_id: 0
       output_type: image
+      output_parameters:
+        color_space: linear
+        channels: [red, green, blue]
   caches:
     - cache_type: image
       location: output.png
 ```
 
-`id` is required. Other fields default according to `Node::from_yaml`.
-`parameter_inputs` require non-empty `from_output_name` and
-`to_parameter_name`.
+`id` is required. Other fields use the private GraphDefinition/YAML
+translator's established defaults. `parameter_inputs` require non-empty
+`from_output_name` and `to_parameter_name`. `output_parameters` may be absent,
+explicitly null, or any representable recursive `ParameterValue`.
 
 ## Spatial Metadata
 
@@ -190,21 +235,22 @@ propagation.
 
 ## Boundaries and Rationale
 
-- `GraphModel` and `Node` are private backend state. Public Host callers and
-  operation plugins receive copied public values rather than model references.
+- `GraphDefinition` is a detached private document value; `GraphModel` and
+  `Node` are private backend runtime state. Public Host callers and operation
+  plugins receive copied public values rather than model references.
 - Structural mutation goes through model helpers so node storage, both
   adjacency directions, topology generation, and cached planning state become
   visible as one coherent graph state.
 - Schedulers receive ready-task metadata and never own node storage,
   parameters, output values, topology, or cache authority.
-- `YAML::Node` remains a graph-document, legacy output-port configuration, and
-  disk-cache metadata representation at adapter boundaries. Static/effective
-  parameters and named operation outputs are `ParameterValue` trees throughout
-  Graph, compute, ROI, and operation invocation. Graph extents, spatial
-  metadata, dirty snapshots, and compute-task geometry use kernel-owned
-  `PixelSize` and `PixelRect` values. OpenCV geometry is created only inside an
-  OpenCV provider or algorithm implementation when a matrix slice or library
-  call requires it.
+- `YAML::Node` remains inside the private graph-format translator and
+  disk-cache metadata boundaries; it is not owned by `GraphDefinition`,
+  persistent `Node` fields, or `OutputPort`. Static/effective parameters,
+  output-port configuration, and named operation outputs are `ParameterValue`
+  trees. Graph extents, spatial metadata, dirty snapshots, and compute-task
+  geometry use kernel-owned `PixelSize` and `PixelRect` values. OpenCV geometry
+  is created only inside an OpenCV provider or algorithm implementation when a
+  matrix slice or library call requires it.
 
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. The accepted replacement
@@ -217,13 +263,16 @@ neither document changes the current fields described above.
 
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
-- `src/lib/graph/node_yaml.cpp`
+- `src/lib/graph/graph_definition.hpp`
+- `src/lib/graph/in_memory_graph_document_adapter.*`
+- `src/lib/graph/graph_definition_yaml.*`
 - `src/lib/core/parameter_value_adapter.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`
 - `src/lib/compute/compute_metrics_recorder.*`
 - `tests/unit/test_graph_topology_boundaries.cpp`
+- `tests/unit/test_graph_document_adapter.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`

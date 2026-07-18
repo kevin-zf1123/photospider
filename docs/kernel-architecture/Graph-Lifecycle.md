@@ -2,8 +2,9 @@
 
 This document describes the current ownership, publication, mutation, and
 failure behavior of graph sessions. It records implemented behavior, including
-known boundary limitations; proposed persistence abstractions belong in the
-kernel evolution roadmap.
+known boundary limitations. The in-memory GraphDefinition seam is current;
+filesystem injection and dependency-disabled persistence remain in the kernel
+evolution roadmap.
 
 ## Ownership
 
@@ -48,19 +49,23 @@ constructed and no session is published.
 
 Graph document loading is a prepare-then-publish transaction:
 
-1. `GraphIOService` parses all YAML sequence entries into a temporary node map.
-   `Node::from_yaml()` recursively converts each `parameters` mapping to a
-   deep-owned `ParameterMap`; the candidate nodes retain no YAML parameter
-   aliases.
-2. Parser, root-shape, duplicate-id, and node-schema failures are classified
-   before replacement. Parameter non-map values, unsupported tags, normalized
-   key collisions, and Int64/Double overflow are document failures.
-3. Dependencies and cycles are validated and replacement adjacency is built.
-4. `GraphModel::replace_nodes()` installs nodes and topology together, resets
-   graph runtime metadata, and advances topology generation.
+1. `GraphIOService` parses the YAML sequence through the private
+   GraphDefinition/YAML translator. The result is an ordered, detached
+   `GraphDefinition`; static parameters and optional output parameters are
+   deep-owned `ParameterValue` trees with no YAML aliases.
+2. Parser, root-shape, parameter representation, and node-field failures are
+   classified while producing the definition. Non-map parameter values,
+   unsupported tags, normalized key collisions, and Int64/Double overflow are
+   document failures.
+3. `InMemoryGraphDocumentAdapter` rejects duplicate ids and empty required
+   parameter-edge names while staging the complete temporary node map.
+4. The adapter calls `GraphModel::replace_nodes()` exactly once. That call
+   validates dependencies and cycles, builds replacement adjacency, installs
+   nodes and topology together, resets graph runtime metadata, and advances
+   topology generation.
 5. `Kernel` inserts the runtime into its map only after the load completes.
 
-A path, parser, node-construction, topology, unexpected, or resource failure
+A path, parser, definition conversion, topology, unexpected, or resource failure
 therefore publishes neither a partial graph nor a new session.
 `std::bad_alloc` propagates unchanged; other failures use the stable matrix
 below. Directory creation and file-copy side effects that happened before
@@ -83,8 +88,9 @@ diagnostic state after accepting the reload. Every nonempty source uses the
 same IO, syntax/schema, topology, unexpected-failure, and resource-exhaustion
 classification as initial load.
 
-`GraphIOService` builds and validates a temporary replacement exactly as it
-does for initial loading. Until `replace_nodes()` succeeds, the visible node
+`GraphIOService` builds a detached definition and the in-memory adapter stages
+and validates a temporary replacement exactly as they do for initial loading.
+Until the adapter's single `replace_nodes()` call succeeds, the visible node
 map, topology, topology generation, cache, timing, dirty/planning state,
 runtime state, and session identity remain unchanged. This guarantee covers
 handled failures and propagated `std::bad_alloc`.
@@ -119,10 +125,13 @@ still returns the displaced reservation exactly once.
 
 `Host::save_graph()` admits the session against concurrent close, requires the
 session map entry, and serializes the visible node snapshot through the same
-`GraphStateExecutor` used by graph mutation and compute. A missing or closing
-session is `GraphErrc::NotFound`, and resolution stops before destination
-access. For an existing session, recoverable node-serialization, YAML-emission,
-and destination preparation/open/write/flush/close failures are normalized to
+`GraphStateExecutor` used by graph mutation and compute. The in-memory adapter
+first captures a detached definition in ascending node-id order and excludes
+all runtime state; the private YAML translator then emits that definition
+before destination open. A missing or closing session is
+`GraphErrc::NotFound`, and resolution stops before destination access. For an
+existing session, recoverable definition capture, YAML emission, and
+destination preparation/open/write/flush/close failures are normalized to
 `GraphErrc::Io`. Resource exhaustion remains the exact `std::bad_alloc`
 exception channel rather than becoming an `Io` status.
 
@@ -142,12 +151,14 @@ rollback is therefore not part of the graph-owner transaction.
 ## Node Replacement and Structural Edits
 
 `Host::set_node_yaml()` admits the session against concurrent close. Required
-node lookup, candidate parsing, forced replacement-id assignment, and
-`GraphModel::replace_node()` execute in one graph-state work item, so clear or
-reload cannot enter between lookup and mutation. A missing or closing session,
-or a missing requested node, is `GraphErrc::NotFound`. Parsing and complete
-candidate-topology validation for an existing target are
-`GraphErrc::InvalidYaml`.
+node lookup, candidate `NodeDefinition` parsing, forced replacement-id
+assignment, in-memory materialization, and `GraphModel::replace_node()` execute
+in one graph-state work item, so clear or reload cannot enter between lookup
+and mutation. `get_node_yaml()` uses the inverse single-node capture plus the
+same private YAML translator. `Node` exposes no YAML conversion methods. A
+missing or closing session, or a missing requested node, is
+`GraphErrc::NotFound`. Parsing and complete candidate-topology validation for
+an existing target are `GraphErrc::InvalidYaml`.
 
 Replacement copies the current node map, validates the complete candidate
 topology, and only then swaps it into visible state. Parse,
@@ -299,6 +310,9 @@ taxonomy.
 - Prepare-before-publish load and prepare-before-swap reload keep incomplete
   topology out of the graph map and preserve the prior graph on classified
   failure.
+- Detached definitions and the in-memory adapter keep format conversion,
+  persistent values, model materialization, and topology publication as
+  separate testable stages without changing the public path contract.
 - The graph-owner transaction and destination-file side effects are separate:
   save preserves graph state but does not promise atomic destination replace.
 - `GraphStateExecutor` serializes visible graph ownership, while scheduler
@@ -307,10 +321,12 @@ taxonomy.
 These boundaries make publication, mutation, and resource ownership testable
 without using shared diagnostic state as a transaction log.
 [ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
-governs the current ingestion contract. The accepted injected persistence
-boundary remains in the exact
-[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
-until source and durable tests make it current behavior.
+governs the current ingestion contract. `GraphDefinition` and
+`InMemoryGraphDocumentAdapter` are now the current in-memory document boundary.
+Issue #61 still owns filesystem-adapter injection and public format-neutral
+Host composition; Issues #62 and #63 still own remaining runtime/cache YAML
+values and the dependency-disabled product profile described by the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel).
 
 ## Implementation and Validation Entry Points
 
@@ -321,12 +337,16 @@ until source and durable tests make it current behavior.
 - `src/lib/runtime/kernel_io_cache_facade.cpp`
 - `src/lib/runtime/kernel_inspection_facade.cpp`
 - `src/lib/runtime/kernel_dirty_roi_facade.cpp`
+- `src/lib/graph/graph_definition.hpp`
+- `src/lib/graph/in_memory_graph_document_adapter.*`
+- `src/lib/graph/graph_definition_yaml.*`
 - `src/lib/graph/graph_io_service.cpp`
 - `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
+- `tests/unit/test_graph_document_adapter.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
