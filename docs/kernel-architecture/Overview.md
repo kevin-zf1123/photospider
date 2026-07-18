@@ -40,6 +40,7 @@ The root `CMakeLists.txt` builds these internal modules:
 | --- | --- |
 | `photospider_core_internal` | Build-only target combining dependency-neutral private core values and public/private parameter-value conversion with the configured image-artifact codec provider and its OpenCV adapter at the current product-composition boundary. It therefore still links `Photospider::operation_opencv` and OpenCV `imgcodecs`; the complete OpenCV-free product profile remains issue #63. |
 | `photospider_graph_internal` | Build-only dependency-neutral core operation source, `GraphModel`, registry behavior, graph IO, traversal, cache, propagation, and inspection services. |
+| `photospider_yaml_graph_document_adapter_internal` | Build-only configured YAML graph-document adapter. It owns graph-document yaml-cpp translation and direct filesystem read/write behavior; format-neutral GraphIO and Kernel do not link parser values into their contracts. |
 | `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
 | `photospider_scheduler_internal` | Build-only scheduler factory, handshake loader, and built-in scheduler implementations. |
@@ -150,11 +151,17 @@ graph TD
     Daemon --> DaemonHost["daemon-owned embedded Host"]
     EmbeddedHost --> InteractionService
     DaemonHost --> InteractionService
+    EmbeddedHost --> YamlGraphDocumentAdapter["one shared YAML document adapter"]
+    DaemonHost --> YamlGraphDocumentAdapter
     EmbeddedHost --> PluginManager["process PluginManager"]
     InteractionService --> Kernel
 
     Kernel --> GraphRuntime
     Kernel --> GraphIOService
+    GraphIOService --> GraphDocumentReader
+    GraphIOService --> GraphDocumentWriter
+    YamlGraphDocumentAdapter -. implements .-> GraphDocumentReader
+    YamlGraphDocumentAdapter -. implements .-> GraphDocumentWriter
     Kernel --> GraphTraversalService
     Kernel --> GraphCacheService
     Kernel --> GraphInspectService
@@ -178,6 +185,15 @@ graph TD
 
     PluginManager --> OpRegistry
 ```
+
+`create_embedded_host()` is the configured persistence composition root. It
+constructs one `YamlGraphDocumentAdapter`, converts the same shared owner to
+the format-neutral reader and writer contracts, and injects those owners
+together with the configured image codec into `Kernel`. Kernel and
+`GraphIOService` have no default persistence constructors or fallback adapter.
+The private explicit-dependency Host root is used by substitution tests. The
+IPC Host remains a client-side transport adapter; only the daemon-owned
+embedded Host composes backend persistence.
 
 Each embedded Host owns its Kernel, graph runtimes, and async coordination, but
 operation plugins are different: every Host and Kernel reaches the same
@@ -512,10 +528,15 @@ this current-state document.
 
 - `CMakeLists.txt`
 - `include/photospider/host/host.hpp`
+- `src/lib/graph/graph_document_reader.hpp`
+- `src/lib/graph/graph_document_writer.hpp`
+- `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/graph/graph_io_service.*`
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/static_product_consumer_smoke.py`

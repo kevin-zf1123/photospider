@@ -47,17 +47,28 @@ timing、dirty state 或 cache result。
 - apply 会在 stage 完整 `GraphModel::NodeMap` 时校验重复 id 和参数边的必需名称，随后精确调用
   一次 `GraphModel::replace_nodes()`；
 - capture 会按 node id 升序访问图节点，只把持久字段复制到独立 definition；
-- 单节点 materialization/capture 为现有 node-YAML inspect 操作提供支持，而不会在 `Node` 上恢复
-  YAML method。
+- 单节点 materialization/capture 为 ABI 稳定的 `Host::get_node_yaml()` /
+  `Host::set_node_yaml()` 操作提供支持，而不会在 `Node` 上恢复 YAML method。
 
 该 adapter 不拥有 graph、file、parser tree、cache 或 thread。Caller 仍负责使用现有
 `GraphStateExecutor` 完成串行化。在 replacement 前发生 definition 或 topology failure，会保留
 先前的 node map、topology、generation 与 runtime state。
 
-YAML conversion 被隔离在私有 `graph_definition_yaml` translation module 中。
-`GraphIOService` 仍是具体的 file/path orchestrator，并让当前 load/reload/save 产品路径经过该
-translator 和 in-memory adapter。Filesystem adapter 注入和 public format-neutral Host operation
-仍属于 Issue #61；剩余 runtime/cache YAML value 与 dependency-disabled product profile
+`GraphDocumentReader` 与 `GraphDocumentWriter` 是两个独立的格式中立 contract。完整图 method
+只交换 filesystem path 与脱离运行态的 `GraphDefinition` value；节点 method 只交换拥有所有权的
+文本与脱离运行态的 `NodeDefinition` value。两个 contract 都不暴露 yaml-cpp、`GraphModel`、
+`Node`、cache state 或 provider-library type。
+
+`GraphIOService` 要求非空的共享 reader/writer owner。它只保留 model orchestration：load 让 reader
+返回脱离运行态的 definition，再通过 `InMemoryGraphDocumentAdapter` 应用；save 会先 capture
+definition，再调用 writer；node-document operation 也经过同一个注入边界。它不会构造 parser、
+emitter 或 graph-document stream。
+
+已配置的 `YamlGraphDocumentAdapter` 拥有私有 YAML translator、filesystem read、node-text
+conversion、完整 emission，以及直接 open/write/flush/close 行为。`create_embedded_host()` 构造一个
+adapter，并把同一个共享 owner 作为两个 contract 通过 `Kernel` 注入；Kernel 与 GraphIO 都没有默认
+persistence construction。一个私有的显式依赖 Host root 支持确定性的 fake 替换，不增加可安装 API。
+Issue #61 已实现该边界。剩余 runtime/cache YAML value 与 dependency-disabled product profile
 分别仍属于 Issue #62 与 #63。
 
 ## 拓扑邻接
@@ -95,10 +106,11 @@ translator 和 in-memory adapter。Filesystem adapter 注入和 public format-ne
 ## 参数
 
 `NodeDefinition::parameters` 与 `Node::parameters` 都是包含深度拥有静态数据的
-`plugin::ParameterMap` value。私有 YAML translator 会把 graph document 一次转换为脱离运行态的
-definition；in-memory adapter 随后把该 definition 复制进 Graph state。Definition 与 Graph
-storage 都不会保留源 YAML tree。Value 使用精确的 `ParameterValue` alternative：`Null`、
-`Bool`、`Int64`、`Double`、`String`、`Array` 和以 string 为键的 `Object`。
+`plugin::ParameterMap` value。已配置 YAML adapter 内部的私有 translator 会把 graph
+document 一次转换为脱离运行态的 definition；in-memory adapter 随后把该 definition 复制进
+Graph state。Definition 与 Graph storage 都不会保留源 YAML tree。Value 使用精确的
+`ParameterValue` alternative：`Null`、`Bool`、`Int64`、`Double`、`String`、`Array`
+和以 string 为键的 `Object`。
 
 `Node::runtime_parameters` 是另一个 `ParameterMap`，在执行时通过复制静态 value 并应用
 `parameter_inputs` 重建。连接的命名 output 会替换同名静态 value，期间不发生格式转换。
@@ -173,7 +185,7 @@ RT proxy commit 之后。
       location: output.png
 ```
 
-`id` 是必需字段。其他字段使用私有 GraphDefinition/YAML translator 的既有默认值。
+`id` 是必需字段。其他字段使用已配置 YAML adapter translator 的既有默认值。
 `parameter_inputs` 要求 `from_output_name` 和 `to_parameter_name` 非空。
 `output_parameters` 可以缺失、显式为 null，或者是任意可表示的递归 `ParameterValue`。
 
@@ -199,7 +211,7 @@ RT proxy commit 之后。
 - 结构变更必须经过 model helper，使节点存储、两个方向的邻接、topology generation 与缓存的
   planning state 作为一份一致图状态变为可见。
 - Scheduler 只接收 ready-task metadata，绝不拥有节点存储、参数、输出值、拓扑或缓存权威。
-- `YAML::Node` 仍位于私有 graph-format translator 与 disk-cache metadata boundary 内；它不由
+- `YAML::Node` 仍位于私有 YAML graph-document adapter 与 disk-cache metadata boundary 内；它不由
   `GraphDefinition`、持久 `Node` 字段或 `OutputPort` 拥有。静态/有效参数、output-port
   configuration 与 operation 命名 output 都是 `ParameterValue` tree。Graph extent、spatial
   metadata、dirty snapshot 与 compute-task geometry 使用内核自有的 `PixelSize` 和
@@ -217,8 +229,11 @@ mutation 观察同一个 generation。剩余 YAML 与 provider-library 依赖的
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/graph_definition.hpp`
+- `src/lib/graph/graph_document_reader.hpp`
+- `src/lib/graph/graph_document_writer.hpp`
 - `src/lib/graph/in_memory_graph_document_adapter.*`
-- `src/lib/graph/graph_definition_yaml.*`
+- `src/lib/adapters/yaml/graph_definition_yaml.*`
+- `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
 - `src/lib/core/parameter_value_adapter.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
@@ -226,6 +241,7 @@ mutation 观察同一个 generation。剩余 YAML 与 provider-library 依赖的
 - `src/lib/compute/compute_metrics_recorder.*`
 - `tests/unit/test_graph_topology_boundaries.cpp`
 - `tests/unit/test_graph_document_adapter.cpp`
+- `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`

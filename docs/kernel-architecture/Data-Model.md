@@ -65,20 +65,36 @@ value and private `Node`/`GraphModel` state:
   `GraphModel::replace_nodes()` exactly once;
 - capture visits graph nodes in ascending id order and copies only persistent
   fields into an independent definition;
-- single-node materialization/capture supports the existing node-YAML
-  inspection operations without restoring YAML methods on `Node`.
+- single-node materialization/capture supports the ABI-stable
+  `Host::get_node_yaml()` / `Host::set_node_yaml()` operations without
+  restoring YAML methods on `Node`.
 
 The adapter owns no graph, file, parser tree, cache, or thread. Callers retain
 the existing `GraphStateExecutor` serialization responsibility. A definition
 or topology failure before replacement preserves the prior node map, topology,
 generation, and runtime state.
 
-YAML conversion is isolated in the private `graph_definition_yaml` translation
-module. `GraphIOService` remains the concrete file/path orchestrator and routes
-the current load/reload/save product path through that translator plus the
-in-memory adapter. Filesystem-adapter injection and public format-neutral Host
-operations remain Issue #61 work; remaining runtime/cache YAML values and the
-dependency-disabled product profile remain Issues #62 and #63.
+`GraphDocumentReader` and `GraphDocumentWriter` are separate format-neutral
+contracts. Complete-graph methods exchange filesystem paths and detached
+`GraphDefinition` values; node methods exchange owned text and detached
+`NodeDefinition` values. Neither contract exposes yaml-cpp, `GraphModel`,
+`Node`, cache state, or provider-library types.
+
+`GraphIOService` requires non-null shared reader/writer owners. It retains
+model orchestration only: load asks the reader for a detached definition and
+applies it through `InMemoryGraphDocumentAdapter`; save captures a definition
+before calling the writer; node-document operations cross the same injected
+boundary. It constructs no parser, emitter, or graph-document stream.
+
+The configured `YamlGraphDocumentAdapter` owns the private YAML translator,
+filesystem read, node-text conversion, complete emission, and direct
+open/write/flush/close behavior. `create_embedded_host()` constructs one
+adapter and injects the same shared owner as both contracts through `Kernel`;
+Kernel and GraphIO have no default persistence construction. A private
+explicit-dependency Host root supports deterministic fake substitution without
+adding an installed API. Issue #61 implements this boundary. Remaining
+runtime/cache YAML values and the dependency-disabled product profile remain
+Issues #62 and #63.
 
 ## Topology Adjacency
 
@@ -121,12 +137,12 @@ Node inputs are split by data kind:
 ## Parameters
 
 `NodeDefinition::parameters` and `Node::parameters` are
-`plugin::ParameterMap` values containing deep-owned static data. The private
-YAML translator converts a graph document into a detached definition once;
-the in-memory adapter then copies that definition into Graph state. Neither
-the definition nor Graph storage retains the source YAML tree. Values use the
-exact `ParameterValue` alternatives `Null`, `Bool`, `Int64`, `Double`,
-`String`, `Array`, and string-keyed `Object`.
+`plugin::ParameterMap` values containing deep-owned static data. The configured
+YAML adapter's private translator converts a graph document into a detached
+definition once; the in-memory adapter then copies that definition into Graph
+state. Neither the definition nor Graph storage retains the source YAML tree.
+Values use the exact `ParameterValue` alternatives `Null`, `Bool`, `Int64`,
+`Double`, `String`, `Array`, and string-keyed `Object`.
 
 `Node::runtime_parameters` is another `ParameterMap`, rebuilt for execution by
 copying static values and applying `parameter_inputs`. Connected named outputs
@@ -212,8 +228,8 @@ Graph YAML root is a sequence of node objects. Supported node fields:
       location: output.png
 ```
 
-`id` is required. Other fields use the private GraphDefinition/YAML
-translator's established defaults. `parameter_inputs` require non-empty
+`id` is required. Other fields use the configured YAML adapter translator's
+established defaults. `parameter_inputs` require non-empty
 `from_output_name` and `to_parameter_name`. `output_parameters` may be absent,
 explicitly null, or any representable recursive `ParameterValue`.
 
@@ -243,7 +259,7 @@ propagation.
   visible as one coherent graph state.
 - Schedulers receive ready-task metadata and never own node storage,
   parameters, output values, topology, or cache authority.
-- `YAML::Node` remains inside the private graph-format translator and
+- `YAML::Node` remains inside the private YAML graph-document adapter and
   disk-cache metadata boundaries; it is not owned by `GraphDefinition`,
   persistent `Node` fields, or `OutputPort`. Static/effective parameters,
   output-port configuration, and named operation outputs are `ParameterValue`
@@ -264,8 +280,11 @@ neither document changes the current fields described above.
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/graph_definition.hpp`
+- `src/lib/graph/graph_document_reader.hpp`
+- `src/lib/graph/graph_document_writer.hpp`
 - `src/lib/graph/in_memory_graph_document_adapter.*`
-- `src/lib/graph/graph_definition_yaml.*`
+- `src/lib/adapters/yaml/graph_definition_yaml.*`
+- `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
 - `src/lib/core/parameter_value_adapter.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
@@ -273,6 +292,7 @@ neither document changes the current fields described above.
 - `src/lib/compute/compute_metrics_recorder.*`
 - `tests/unit/test_graph_topology_boundaries.cpp`
 - `tests/unit/test_graph_document_adapter.cpp`
+- `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`

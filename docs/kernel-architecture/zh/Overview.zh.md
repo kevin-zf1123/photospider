@@ -31,6 +31,7 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | --- | --- |
 | `photospider_core_internal` | 仅用于构建的 target，在当前产品组合边界内，把依赖中立的 private core value 与 public/private parameter-value conversion，同已配置的 image-artifact codec provider 及其 OpenCV adapter 组合在一起。因此它仍链接 `Photospider::operation_opencv` 与 OpenCV `imgcodecs`；完整的 OpenCV-free product profile 仍属于 issue #63。 |
 | `photospider_graph_internal` | 仅用于构建的依赖中立 core operation source、`GraphModel`、registry behavior、graph IO、遍历、缓存、传播与 inspect 服务。 |
+| `photospider_yaml_graph_document_adapter_internal` | 仅用于构建的已配置 YAML graph-document adapter。它拥有 graph-document yaml-cpp translation 与直接 filesystem read/write 行为；格式中立的 GraphIO 与 Kernel contract 不会暴露 parser value。 |
 | `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、configured-provider composition、v2 loader、value adapter 与 DSO lifetime owner。 |
 | `photospider_scheduler_internal` | 仅用于构建的 scheduler factory、handshake loader 与内置 scheduler 实现。 |
@@ -123,11 +124,17 @@ graph TD
     Daemon --> DaemonHost["daemon-owned embedded Host"]
     EmbeddedHost --> InteractionService
     DaemonHost --> InteractionService
+    EmbeddedHost --> YamlGraphDocumentAdapter["一个共享 YAML document adapter"]
+    DaemonHost --> YamlGraphDocumentAdapter
     EmbeddedHost --> PluginManager["进程级 PluginManager"]
     InteractionService --> Kernel
 
     Kernel --> GraphRuntime
     Kernel --> GraphIOService
+    GraphIOService --> GraphDocumentReader
+    GraphIOService --> GraphDocumentWriter
+    YamlGraphDocumentAdapter -. implements .-> GraphDocumentReader
+    YamlGraphDocumentAdapter -. implements .-> GraphDocumentWriter
     Kernel --> GraphTraversalService
     Kernel --> GraphCacheService
     Kernel --> GraphInspectService
@@ -151,6 +158,12 @@ graph TD
 
     PluginManager --> OpRegistry
 ```
+
+`create_embedded_host()` 是已配置的 persistence composition root。它构造一个
+`YamlGraphDocumentAdapter`，把同一个共享 owner 转换为格式中立的 reader 与 writer contract，并把
+这些 owner 连同已配置的 image codec 注入 `Kernel`。Kernel 与 `GraphIOService` 都没有默认
+persistence constructor 或 fallback adapter。私有的显式依赖 Host root 供替换测试使用。IPC Host
+仍是 client-side transport adapter；只有 daemon-owned embedded Host 会组合 backend persistence。
 
 每个 embedded Host 都拥有自己的 Kernel、graph runtime 和异步协调状态，但 operation plugin 不同：
 所有 Host 与 Kernel 都访问同一个进程寿命 `PluginManager` 和 `OpRegistry`。Host 析构绝不会卸载
@@ -411,10 +424,15 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 
 - `CMakeLists.txt`
 - `include/photospider/host/host.hpp`
+- `src/lib/graph/graph_document_reader.hpp`
+- `src/lib/graph/graph_document_writer.hpp`
+- `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/graph/graph_io_service.*`
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
