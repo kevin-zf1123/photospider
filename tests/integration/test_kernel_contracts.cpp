@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -474,6 +475,486 @@ bool wait_for_atomic_true(const std::atomic<bool>& value,
   }
   return value.load(std::memory_order_acquire);
 }
+
+/**
+ * @brief Test-only work item that destroys a caller-retained Kernel owner.
+ *
+ * @return Nothing.
+ * @throws Any exception raised while publishing the worker checkpoint or
+ * destroying Kernel.
+ * @note A launcher may move this callable into worker storage, but the callable
+ * borrows the scenario-owned `std::unique_ptr`; it never owns Kernel itself.
+ */
+using KernelDestructionTask = std::function<void()>;
+
+/**
+ * @brief Injectable launcher for one Kernel-destruction work item.
+ *
+ * @param task Borrowing work item whose invocation is transferred to the
+ * returned future.
+ * @return Future that joins the launched work item.
+ * @throws Any launch failure selected by the implementation or test.
+ * @note On an exceptional return, the launcher must not retain or later invoke
+ * `task`. This matches `std::async(std::launch::async, ...)` launch failure and
+ * permits deterministic pre-launch failure injection without production hooks.
+ */
+using KernelDestructionLauncher = std::function<std::future<void>(
+    KernelDestructionTask task)>;  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Captures lifecycle and cleanup checkpoints from one teardown scenario.
+ *
+ * @note Fields are written only by the calling test thread after
+ * synchronization with the relevant future or atomic publication.
+ */
+struct KernelCodecTeardownEvidence {
+  /** @brief True after the first real graph-state work item starts blocking. */
+  bool blocker_entered = false;
+  /** @brief True when cache work is admitted and still queued behind blocker.
+   */
+  bool cache_work_pending = false;
+  /** @brief True immediately before the injected launcher is invoked. */
+  bool launcher_invoked = false;
+  /** @brief True only when the launcher returns an owning future normally. */
+  bool launcher_returned = false;
+  /** @brief True after the successful destruction worker starts. */
+  bool destruction_entered = false;
+  /** @brief True when production teardown reaches its close-wait checkpoint. */
+  bool close_waiting = false;
+  /** @brief True when successful Kernel destruction remains blocked on work. */
+  bool destruction_pending = false;
+  /** @brief True when the codec remains retained before blocker release. */
+  bool codec_alive_before_release = false;
+  /** @brief True when encode has not run before blocker release. */
+  bool encode_pending_before_release = false;
+  /** @brief True after the test releases the graph-state blocker exactly once.
+   */
+  bool blocker_released = false;
+  /** @brief True when the blocker future became ready within the bounded wait.
+   */
+  bool blocker_future_recovered = false;
+  /** @brief True when admitted cache work became ready within the bounded wait.
+   */
+  bool cache_future_recovered = false;
+  /** @brief True when a returned destruction future was joined successfully. */
+  bool destruction_future_recovered = false;
+  /** @brief True after the scenario no longer owns a Kernel. */
+  bool kernel_destroyed = false;
+  /** @brief True after the admitted fake-codec encode callback completes. */
+  bool encode_finished = false;
+  /** @brief True when the encode callback observed its codec owner alive. */
+  bool codec_alive_during_encode = false;
+  /** @brief True after Kernel teardown releases the last codec owner. */
+  bool codec_released = false;
+  /** @brief True after both scenario-owned temporary paths are absent. */
+  bool temporary_paths_removed = false;
+};
+
+/**
+ * @brief Runs the real Kernel/cache teardown lifecycle with injectable launch.
+ *
+ * The scenario creates a real Kernel, GraphRuntime, GraphStateExecutor, and
+ * GraphCacheService with a fake codec. It blocks one graph-state work item,
+ * admits a cache-save behind it, and invokes a launcher whose task borrows the
+ * caller-retained Kernel owner. A normal launcher may destroy Kernel on its
+ * worker. If launch throws before returning a future, the caller still owns
+ * Kernel; cleanup releases the blocker, recovers admitted futures, destroys
+ * Kernel and codec, removes temporary paths, then rethrows the original error.
+ *
+ * @note One instance is single-use and not thread-safe. Worker callbacks borrow
+ * members only while `run()` is active; every returned future is joined before
+ * `run()` returns or propagates an exception.
+ */
+class KernelCodecTeardownScenario final {
+ public:
+  /**
+   * @brief Creates one single-use scenario with isolated temporary names.
+   * @param suffix Stable suffix distinguishing concurrent or repeated tests.
+   * @throws std::bad_alloc if path, string, promise, or future state allocation
+   * fails.
+   * @note Construction performs no filesystem mutation and creates no Kernel.
+   */
+  explicit KernelCodecTeardownScenario(const std::string& suffix)
+      : graph_name_("contract_kernel_codec_lifetime_" + suffix),
+        root_(temp_path("photospider-contract-kernel-codec-lifetime-root-" +
+                        suffix)),
+        yaml_path_(temp_path("photospider-contract-kernel-codec-lifetime-" +
+                             suffix + ".yaml")),
+        blocker_release_(release_blocker_.get_future().share()),
+        blocker_entered_future_(blocker_entered_.get_future()),
+        destruction_entered_future_(destruction_entered_.get_future()) {}
+
+  /**
+   * @brief Removes temporary paths after a fully recovered scenario.
+   * @throws Nothing.
+   * @note `run()` owns ordered blocker/future/Kernel recovery. The destructor
+   * performs filesystem fallback only; destroying a live Kernel here would be
+   * unsafe if an earlier cleanup invariant were broken.
+   */
+  ~KernelCodecTeardownScenario() noexcept { (void)cleanup_temporary_paths(); }
+
+  /**
+   * @brief Disables copying of futures, promises, and the unique Kernel owner.
+   * @param other Scenario whose single-use synchronization state cannot be
+   * shared.
+   * @throws Nothing because construction is unavailable.
+   */
+  KernelCodecTeardownScenario(const KernelCodecTeardownScenario& other) =
+      delete;
+
+  /**
+   * @brief Disables assignment of single-use teardown state.
+   * @param other Scenario whose ownership state cannot replace this instance.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  KernelCodecTeardownScenario& operator=(
+      const KernelCodecTeardownScenario& other) = delete;
+
+  /**
+   * @brief Executes one success or launcher-failure teardown scenario.
+   *
+   * Setup prepares the graph and admitted work. The launcher receives a task
+   * that borrows `kernel_`; ownership therefore remains recoverable until the
+   * launcher returns a future. Success observes real close/drain ordering
+   * before releasing work. Failure first releases and joins all admitted work,
+   * then destroys owners and temporary paths before propagating the original
+   * error.
+   *
+   * @param launcher Callable that either returns one joining future or throws
+   * before retaining/invoking its task.
+   * @param evidence Caller-owned checkpoint record updated through cleanup.
+   * @return Nothing.
+   * @throws std::bad_alloc for setup/resource failure or injected launch
+   * failure.
+   * @throws std::runtime_error when a bounded synchronization checkpoint is not
+   * reached.
+   * @throws Any other launcher, future, or filesystem exception unchanged after
+   * ordered cleanup.
+   * @note The real success launcher uses `std::launch::async`; deterministic
+   * failure launchers throw before task invocation and require no production
+   * ABI or CMake test macro.
+   */
+  void run(const KernelDestructionLauncher& launcher,
+           KernelCodecTeardownEvidence& evidence) {
+    evidence = KernelCodecTeardownEvidence{};
+    try {
+      prepare_admitted_work(evidence);
+
+      CloseWaitingObserver close_observer;
+      ScopedGraphStateExecutorHook close_hook(close_observer);
+      KernelDestructionTask task = [this] {
+        destruction_entered_.set_value();
+        kernel_.reset();
+      };
+      evidence.launcher_invoked = true;
+      destruction_ = launcher(std::move(task));
+      evidence.launcher_returned = true;
+      if (!destruction_.valid()) {
+        throw std::runtime_error(
+            "Kernel destruction launcher returned an invalid future");
+      }
+      if (destruction_entered_future_.wait_for(kCheckpointTimeout) !=
+          std::future_status::ready) {
+        throw std::runtime_error("Kernel destruction worker did not start");
+      }
+      destruction_entered_future_.get();
+      evidence.destruction_entered = true;
+      evidence.close_waiting =
+          wait_for_atomic_true(close_observer.observed, kCheckpointTimeout);
+      evidence.destruction_pending =
+          destruction_.wait_for(std::chrono::milliseconds(0)) ==
+          std::future_status::timeout;
+      evidence.codec_alive_before_release = !weak_codec_.expired();
+      evidence.encode_pending_before_release =
+          !encode_finished_.load(std::memory_order_acquire);
+
+      release_blocker_once(evidence);
+      consume_future(blocker_, evidence.blocker_future_recovered);
+      consume_future(cache_work_, evidence.cache_future_recovered);
+      consume_future(destruction_, evidence.destruction_future_recovered);
+      finalize_owners_and_paths(evidence);
+    } catch (...) {
+      const std::exception_ptr original_failure = std::current_exception();
+      recover_after_failure(&evidence);
+      std::rethrow_exception(original_failure);
+    }
+  }
+
+ private:
+  /** @brief Maximum wait used to prove a lifecycle checkpoint is bounded. */
+  static constexpr std::chrono::milliseconds kCheckpointTimeout{2000};
+
+  /**
+   * @brief Creates the real graph, blocker, and admitted cache-save work.
+   * @param evidence Record receiving setup and admission checkpoints.
+   * @return Nothing.
+   * @throws std::bad_alloc or filesystem/runtime exceptions from real setup.
+   * @throws std::runtime_error when the blocker does not start by the deadline.
+   * @note The external codec owner is released before graph-state work begins;
+   * only Kernel's GraphCacheService retains it afterward.
+   */
+  void prepare_admitted_work(KernelCodecTeardownEvidence& evidence) {
+    if (!cleanup_temporary_paths()) {
+      throw std::runtime_error("Kernel teardown temporary cleanup failed");
+    }
+    write_text(yaml_path_, R"YAML(
+- id: 1
+  name: cached_source
+  type: kernel_contract_test
+  subtype: source
+  parameters:
+    width: 2
+    height: 1
+)YAML");
+
+    auto codec = std::make_shared<testing::FakeImageArtifactCodec>(
+        testing::FakeImageArtifactCodec::DecodeCallback{},
+        [this](const std::filesystem::path&, const ImageBuffer&,
+               ImageArtifactPrecision) {
+          codec_alive_during_encode_.store(!weak_codec_.expired(),
+                                           std::memory_order_release);
+          encode_finished_.store(true, std::memory_order_release);
+        });
+    weak_codec_ = codec;
+    kernel_ = std::make_unique<Kernel>(codec);
+    codec.reset();
+
+    const auto loaded =
+        kernel_->load_graph(graph_name_, root_.string(), yaml_path_.string());
+    if (!loaded.has_value()) {
+      throw std::runtime_error("Kernel teardown graph did not load");
+    }
+    testing::KernelTestAccess::submit_graph_state(
+        *kernel_, graph_name_,
+        [](GraphModel& graph) {
+          graph.mutate_node_runtime_state(
+              1, [](GraphModel::NodeRuntimeState& state) {
+                state.caches.push_back({"image", "output.png"});
+                state.cached_output_high_precision = NodeOutput{};
+                state.cached_output_high_precision->image_buffer =
+                    make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+              });
+        })
+        .get();
+
+    blocker_ = testing::KernelTestAccess::submit_graph_state(
+        *kernel_, graph_name_, [this](GraphModel&) {
+          blocker_entered_.set_value();
+          blocker_release_.wait();
+        });
+    if (blocker_entered_future_.wait_for(kCheckpointTimeout) !=
+        std::future_status::ready) {
+      throw std::runtime_error("graph-state lifetime blocker did not start");
+    }
+    blocker_entered_future_.get();
+    evidence.blocker_entered = true;
+
+    cache_work_ = testing::KernelTestAccess::submit_cache_save(
+        *kernel_, graph_name_, 1, "int16");
+    evidence.cache_work_pending =
+        cache_work_.wait_for(std::chrono::milliseconds(0)) ==
+        std::future_status::timeout;
+  }
+
+  /**
+   * @brief Releases the graph-state blocker exactly once.
+   * @param evidence Record updated after promise publication succeeds.
+   * @return Nothing.
+   * @throws std::future_error if the promise state is unexpectedly invalid.
+   * @note Callers release before waiting on blocker, cache, or destruction
+   * futures so Kernel teardown can never wait on a caller-held gate.
+   */
+  void release_blocker_once(KernelCodecTeardownEvidence& evidence) {
+    if (!blocker_released_) {
+      release_blocker_.set_value();
+      blocker_released_ = true;
+    }
+    evidence.blocker_released = true;
+  }
+
+  /**
+   * @brief Waits for and consumes one admitted future.
+   * @param future Future whose task must complete before owner destruction.
+   * @param recovered Set true only when readiness occurs within the deadline
+   * and `get()` completes normally.
+   * @return Nothing.
+   * @throws std::runtime_error when readiness misses the bounded deadline.
+   * @throws Any exception stored in the future.
+   * @note Consumption is ordered blocker, cache work, then destruction worker.
+   */
+  static void consume_future(std::future<void>& future, bool& recovered) {
+    if (!future.valid()) {
+      throw std::runtime_error("required teardown future is invalid");
+    }
+    if (future.wait_for(kCheckpointTimeout) != std::future_status::ready) {
+      throw std::runtime_error("teardown future missed its bounded deadline");
+    }
+    future.get();
+    recovered = true;
+  }
+
+  /**
+   * @brief Consumes one future during exception recovery without replacing the
+   * original failure.
+   * @param future Future whose admitted task must be joined when valid.
+   * @param recovered Optional evidence field set only for bounded, successful
+   * recovery.
+   * @return Nothing.
+   * @throws Nothing; future exceptions are suppressed after admission cleanup.
+   * @note After recording bounded readiness, the helper still calls `get()` so
+   * no admitted task outlives borrowed scenario state.
+   */
+  static void recover_future_noexcept(std::future<void>& future,
+                                      bool* recovered) noexcept {
+    if (!future.valid()) {
+      return;
+    }
+    bool ready = false;
+    try {
+      ready = future.wait_for(kCheckpointTimeout) == std::future_status::ready;
+      if (ready) {
+        future.get();
+      }
+      if (recovered != nullptr) {
+        *recovered = ready;
+      }
+    } catch (...) {
+      if (recovered != nullptr) {
+        *recovered = false;
+      }
+    }
+  }
+
+  /**
+   * @brief Completes owner release and temporary-path cleanup.
+   * @param evidence Record receiving final codec and filesystem checkpoints.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Callers invoke this only after every admitted future is consumed.
+   */
+  void finalize_owners_and_paths(
+      KernelCodecTeardownEvidence& evidence) noexcept {
+    kernel_.reset();
+    evidence.kernel_destroyed = kernel_ == nullptr;
+    evidence.encode_finished = encode_finished_.load(std::memory_order_acquire);
+    evidence.codec_alive_during_encode =
+        codec_alive_during_encode_.load(std::memory_order_acquire);
+    evidence.codec_released = weak_codec_.expired();
+    evidence.temporary_paths_removed = cleanup_temporary_paths();
+  }
+
+  /**
+   * @brief Recovers every admitted resource before an exception escapes.
+   * @param evidence Optional record updated with successful cleanup
+   * checkpoints.
+   * @return Nothing.
+   * @throws Nothing; the original setup or launcher exception remains primary.
+   * @note Recovery order is blocker release, blocker/cache/destruction future
+   * consumption, Kernel/codec destruction, then filesystem cleanup. Missing the
+   * bounded recovery deadline terminates the test process rather than allowing
+   * Kernel destruction to re-enter the same blocked lane.
+   */
+  void recover_after_failure(KernelCodecTeardownEvidence* evidence) noexcept {
+    const bool has_admitted_work = blocker_.valid() || cache_work_.valid();
+    if (has_admitted_work || destruction_.valid()) {
+      try {
+        if (!blocker_released_) {
+          release_blocker_.set_value();
+          blocker_released_ = true;
+        }
+        if (evidence != nullptr) {
+          evidence->blocker_released = true;
+        }
+      } catch (...) {
+        if (evidence != nullptr) {
+          evidence->blocker_released = false;
+        }
+      }
+    }
+
+    recover_future_noexcept(
+        blocker_,
+        evidence == nullptr ? nullptr : &evidence->blocker_future_recovered);
+    recover_future_noexcept(
+        cache_work_,
+        evidence == nullptr ? nullptr : &evidence->cache_future_recovered);
+    recover_future_noexcept(destruction_,
+                            evidence == nullptr
+                                ? nullptr
+                                : &evidence->destruction_future_recovered);
+    if (destruction_.valid() || blocker_.valid() || cache_work_.valid()) {
+      std::terminate();
+    }
+    if (evidence != nullptr) {
+      finalize_owners_and_paths(*evidence);
+    } else if (kernel_ != nullptr || has_admitted_work) {
+      kernel_.reset();
+      (void)cleanup_temporary_paths();
+    }
+  }
+
+  /**
+   * @brief Removes both deterministic temporary paths without throwing.
+   * @return True when neither path exists after cleanup and no filesystem query
+   * failed.
+   * @throws Nothing.
+   * @note Cleanup uses `std::error_code` so it never masks launcher exceptions.
+   */
+  bool cleanup_temporary_paths() noexcept {
+    std::error_code root_remove_error;
+    std::error_code yaml_remove_error;
+    std::filesystem::remove_all(root_, root_remove_error);
+    std::filesystem::remove(yaml_path_, yaml_remove_error);
+    std::error_code root_exists_error;
+    std::error_code yaml_exists_error;
+    const bool root_exists = std::filesystem::exists(root_, root_exists_error);
+    const bool yaml_exists =
+        std::filesystem::exists(yaml_path_, yaml_exists_error);
+    return !root_remove_error && !yaml_remove_error && !root_exists_error &&
+           !yaml_exists_error && !root_exists && !yaml_exists;
+  }
+
+  /** @brief Loaded graph name unique to this scenario instance. */
+  const std::string graph_name_;
+  /** @brief Temporary session root removed after every outcome. */
+  const std::filesystem::path root_;
+  /** @brief Temporary source YAML removed after every outcome. */
+  const std::filesystem::path yaml_path_;
+  /**
+   * @brief Caller-retained Kernel owner borrowed by a launched task.
+   * @note Declared before blocker synchronization members so unexpected stack
+   * unwinding destroys the blocker state first; `run()` must recover every
+   * admitted future before allowing normal owner teardown.
+   */
+  std::unique_ptr<Kernel> kernel_;
+  /** @brief Weak observer proving final codec release. */
+  std::weak_ptr<testing::FakeImageArtifactCodec> weak_codec_;
+  /** @brief True when encode observes its weak codec owner as live. */
+  std::atomic<bool> codec_alive_during_encode_{false};
+  /** @brief True after the admitted fake encode callback completes. */
+  std::atomic<bool> encode_finished_{false};
+  /** @brief Promise releasing the real graph-state blocker once. */
+  std::promise<void> release_blocker_;
+  /** @brief Shared release signal borrowed by the blocker callback. */
+  std::shared_future<void> blocker_release_;
+  /** @brief Promise publishing entry into the blocker callback. */
+  std::promise<void> blocker_entered_;
+  /** @brief Caller-side future for blocker entry. */
+  std::future<void> blocker_entered_future_;
+  /** @brief Future owning the admitted blocker work item. */
+  std::future<void> blocker_;
+  /** @brief Future owning the admitted cache-save work item. */
+  std::future<void> cache_work_;
+  /** @brief Promise publishing entry into successful Kernel destruction. */
+  std::promise<void> destruction_entered_;
+  /** @brief Caller-side future for destruction-worker entry. */
+  std::future<void> destruction_entered_future_;
+  /** @brief Future returned only after destruction launch succeeds. */
+  std::future<void> destruction_;
+  /** @brief Guards the single blocker promise publication. */
+  bool blocker_released_ = false;
+};
 
 /**
  * @brief Owns common disk-cache diagnostic test state.
@@ -1067,128 +1548,86 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
  * @brief Proves Kernel drains admitted cache work before releasing its codec.
  *
  * @return Nothing; GoogleTest assertions report lifecycle-ordering failures.
- * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
- * @note A first graph-state work item blocks the real runtime worker while a
- * second admitted item captures `Kernel::cache_service_` and performs a real
- * fake-codec encode. The caller releases its only codec owner before destroying
- * Kernel. Executor checkpoints prove destruction is waiting for drainage; after
- * release, encode completes while the codec is alive, and only completed Kernel
- * destruction releases the codec.
+ * @throws std::bad_alloc or filesystem/runtime exceptions if setup or launch
+ * fails.
+ * @note The production-shaped launcher moves only a borrowing task into
+ * `std::async`; the calling thread retains the unique Kernel owner until launch
+ * returns successfully. Executor checkpoints prove destruction waits for real
+ * runtime drainage, encode observes a live codec, and codec release follows
+ * Kernel destruction.
  */
 TEST(CacheSemantics,
      InjectedCodecKernelDestructionDrainsWorkBeforeCodecRelease) {
-  const std::string graph_name = "contract_kernel_codec_lifetime";
-  const auto root =
-      clean_temp_path("photospider-contract-kernel-codec-lifetime-root");
-  const auto yaml_path =
-      temp_path("photospider-contract-kernel-codec-lifetime.yaml");
-  write_text(yaml_path, R"YAML(
-- id: 1
-  name: cached_source
-  type: kernel_contract_test
-  subtype: source
-  parameters:
-    width: 2
-    height: 1
-)YAML");
+  KernelCodecTeardownScenario scenario("success");
+  KernelCodecTeardownEvidence evidence;
+  scenario.run(
+      [](KernelDestructionTask task) {
+        return std::async(std::launch::async, std::move(task));
+      },
+      evidence);
 
-  std::weak_ptr<testing::FakeImageArtifactCodec> weak_codec;
-  std::atomic<bool> codec_alive_during_encode{false};
-  std::atomic<bool> encode_finished{false};
-  auto codec = std::make_shared<testing::FakeImageArtifactCodec>(
-      testing::FakeImageArtifactCodec::DecodeCallback{},
-      [&weak_codec, &codec_alive_during_encode, &encode_finished](
-          const std::filesystem::path&, const ImageBuffer&,
-          ImageArtifactPrecision) {
-        codec_alive_during_encode.store(!weak_codec.expired(),
-                                        std::memory_order_release);
-        encode_finished.store(true, std::memory_order_release);
-      });
-  weak_codec = codec;
+  EXPECT_TRUE(evidence.blocker_entered);
+  EXPECT_TRUE(evidence.cache_work_pending);
+  EXPECT_TRUE(evidence.launcher_invoked);
+  EXPECT_TRUE(evidence.launcher_returned);
+  EXPECT_TRUE(evidence.destruction_entered);
+  EXPECT_TRUE(evidence.close_waiting);
+  EXPECT_TRUE(evidence.destruction_pending);
+  EXPECT_TRUE(evidence.codec_alive_before_release);
+  EXPECT_TRUE(evidence.encode_pending_before_release);
+  EXPECT_TRUE(evidence.blocker_released);
+  EXPECT_TRUE(evidence.blocker_future_recovered);
+  EXPECT_TRUE(evidence.cache_future_recovered);
+  EXPECT_TRUE(evidence.destruction_future_recovered);
+  EXPECT_TRUE(evidence.kernel_destroyed);
+  EXPECT_TRUE(evidence.encode_finished);
+  EXPECT_TRUE(evidence.codec_alive_during_encode);
+  EXPECT_TRUE(evidence.codec_released);
+  EXPECT_TRUE(evidence.temporary_paths_removed);
+}
 
-  auto kernel = std::make_unique<Kernel>(codec);
-  codec.reset();
-  ASSERT_FALSE(weak_codec.expired());
-  const auto loaded =
-      kernel->load_graph(graph_name, root.string(), yaml_path.string());
-  ASSERT_TRUE(loaded.has_value());
-
-  testing::KernelTestAccess::submit_graph_state(
-      *kernel, graph_name,
-      [](GraphModel& graph) {
-        graph.mutate_node_runtime_state(
-            1, [](GraphModel::NodeRuntimeState& state) {
-              state.caches.push_back({"image", "output.png"});
-              state.cached_output_high_precision = NodeOutput{};
-              state.cached_output_high_precision->image_buffer =
-                  make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
-            });
-      })
-      .get();
-
-  std::promise<void> release_blocker;
-  const std::shared_future<void> blocker_release =
-      release_blocker.get_future().share();
-  std::promise<void> blocker_entered;
-  auto blocker_entered_future = blocker_entered.get_future();
-  auto blocker = testing::KernelTestAccess::submit_graph_state(
-      *kernel, graph_name, [&blocker_entered, blocker_release](GraphModel&) {
-        blocker_entered.set_value();
-        blocker_release.wait();
-      });
-  if (blocker_entered_future.wait_for(std::chrono::seconds(2)) !=
-      std::future_status::ready) {
-    release_blocker.set_value();
-    blocker.get();
-    (void)kernel->close_graph(graph_name);
-    std::filesystem::remove_all(root);
-    std::filesystem::remove(yaml_path);
-    FAIL() << "graph-state lifetime blocker did not start";
+/**
+ * @brief Proves launcher allocation failure cannot deadlock Kernel teardown.
+ *
+ * @return Nothing; GoogleTest assertions report propagation or cleanup failure.
+ * @throws std::bad_alloc only when the scenario fails to catch the
+ * deterministic injected launcher error.
+ * @note Failure is injected after a real blocker starts and real cache work is
+ * admitted, but before the borrowing task is invoked or retained. The scenario
+ * must release the blocker, recover both admitted futures, destroy Kernel and
+ * codec, remove temporary paths, and only then propagate the original
+ * `std::bad_alloc` to this test.
+ */
+TEST(CacheSemantics,
+     InjectedCodecKernelDestructionLaunchBadAllocRecoversWithoutHang) {
+  KernelCodecTeardownScenario scenario("launcher-bad-alloc");
+  KernelCodecTeardownEvidence evidence;
+  bool caught_bad_alloc = false;
+  try {
+    scenario.run(
+        [](KernelDestructionTask) -> std::future<void> {
+          throw std::bad_alloc{};
+        },
+        evidence);
+  } catch (const std::bad_alloc&) {
+    caught_bad_alloc = true;
   }
 
-  auto cache_work = testing::KernelTestAccess::submit_cache_save(
-      *kernel, graph_name, 1, "int16");
-  EXPECT_EQ(cache_work.wait_for(std::chrono::milliseconds(0)),
-            std::future_status::timeout);
-
-  CloseWaitingObserver close_observer;
-  ScopedGraphStateExecutorHook close_hook(close_observer);
-  std::promise<void> destruction_entered;
-  auto destruction_entered_future = destruction_entered.get_future();
-  auto destruction =
-      std::async(std::launch::async,
-                 [&destruction_entered, kernel = std::move(kernel)]() mutable {
-                   destruction_entered.set_value();
-                   kernel.reset();
-                 });
-  if (destruction_entered_future.wait_for(std::chrono::seconds(2)) !=
-      std::future_status::ready) {
-    release_blocker.set_value();
-    blocker.get();
-    cache_work.get();
-    destruction.get();
-    std::filesystem::remove_all(root);
-    std::filesystem::remove(yaml_path);
-    FAIL() << "Kernel destruction worker did not start";
-  }
-  const bool close_waiting = wait_for_atomic_true(
-      close_observer.observed, std::chrono::milliseconds(2000));
-  EXPECT_TRUE(close_waiting);
-  EXPECT_EQ(destruction.wait_for(std::chrono::milliseconds(0)),
-            std::future_status::timeout);
-  EXPECT_FALSE(weak_codec.expired());
-  EXPECT_FALSE(encode_finished.load(std::memory_order_acquire));
-
-  release_blocker.set_value();
-  blocker.get();
-  cache_work.get();
-  destruction.get();
-
-  EXPECT_TRUE(encode_finished.load(std::memory_order_acquire));
-  EXPECT_TRUE(codec_alive_during_encode.load(std::memory_order_acquire));
-  EXPECT_TRUE(weak_codec.expired());
-  std::filesystem::remove_all(root);
-  std::filesystem::remove(yaml_path);
+  EXPECT_TRUE(caught_bad_alloc);
+  EXPECT_TRUE(evidence.blocker_entered);
+  EXPECT_TRUE(evidence.cache_work_pending);
+  EXPECT_TRUE(evidence.launcher_invoked);
+  EXPECT_FALSE(evidence.launcher_returned);
+  EXPECT_FALSE(evidence.destruction_entered);
+  EXPECT_TRUE(evidence.blocker_released);
+  EXPECT_TRUE(evidence.blocker_future_recovered);
+  EXPECT_TRUE(evidence.cache_future_recovered);
+  EXPECT_FALSE(evidence.destruction_future_recovered);
+  EXPECT_TRUE(evidence.kernel_destroyed);
+  EXPECT_TRUE(evidence.encode_finished);
+  EXPECT_TRUE(evidence.codec_alive_during_encode);
+  EXPECT_TRUE(evidence.codec_released);
+  EXPECT_TRUE(evidence.temporary_paths_removed);
 }
 
 TEST(CacheSemantics, DiskCacheDiagnosticSnapshotSupportsConcurrentWriters) {
