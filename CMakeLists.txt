@@ -325,13 +325,20 @@ set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
     src/lib/core/parameter_value_adapter.cpp
 )
 
+set(PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES
+    src/lib/adapters/opencv/image_artifact_codec_opencv.cpp
+    src/lib/providers/configured_image_artifact_codec.cpp
+)
+
 add_library(photospider_core_internal STATIC
-    ${PHOTOSPIDER_CORE_INTERNAL_SOURCES})
+    ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
+    ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES})
 target_include_directories(photospider_core_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(photospider_core_internal PRIVATE
     Photospider::operation_opencv
+    ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET}
     yaml-cpp::yaml-cpp)
 
 # Module: private graph model, registry behavior, YAML, and graph services.
@@ -498,6 +505,7 @@ target_link_libraries(photospider_compute_internal PRIVATE
 
 set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
+    ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES}
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
@@ -1485,6 +1493,17 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(IpcDisabledInstallSmoke PROPERTIES
         RUN_SERIAL TRUE TIMEOUT 600)
+    add_test(NAME ImageArtifactCodecDependencyDisabledBuild
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/integration/image_artifact_codec_dependency_disabled_smoke.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --work
+                "${CMAKE_BINARY_DIR}/tests/image_artifact_codec_dependency_disabled"
+            --cmake-executable "${CMAKE_COMMAND}"
+            --config $<CONFIG>
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    set_tests_properties(ImageArtifactCodecDependencyDisabledBuild PROPERTIES
+        RUN_SERIAL TRUE TIMEOUT 900)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         add_test(NAME OpenCvOperationProviderBuildSmokeSafety
             COMMAND ${Python3_EXECUTABLE} -B

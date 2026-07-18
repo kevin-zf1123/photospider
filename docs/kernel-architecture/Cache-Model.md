@@ -73,6 +73,15 @@ not provide a cache root continue to use `<root_dir>/<graph_name>/cache`.
 Disk cache precision currently supports `int8` and `int16` save paths. Loaded
 image cache data is converted into float image buffers.
 
+Image bytes cross the private, dependency-neutral `ImageArtifactCodec` contract.
+`Kernel` obtains one configured shared codec from the product composition root
+and injects it into `GraphCacheService`; Graph/cache code supplies only paths,
+`ImageBuffer`, and normalized integer precision. The current production adapter
+uses OpenCV imgcodecs and translates provider failures to `GraphErrc::Io`, while
+OpenCV `StsNoMem` remains `std::bad_alloc`. Tests inject a deterministic fake to
+verify call order, lifetime retention, precision selection, recoverable errors,
+and resource exhaustion without reading or writing a real image format.
+
 Disk cache load attempts preserve the existing try-load bool contract while also
 recording the latest diagnostic through GraphModel's dedicated disk-cache
 diagnostic mutex. Callers inspect that state through a snapshot API instead of
@@ -117,16 +126,21 @@ becoming an HP dependency or persistence source. Request-local staging keeps
 partially assembled dirty output invisible until its domain-specific work has
 settled.
 
-The current private disk-cache implementation calls OpenCV image codecs and
-stores named output metadata as YAML. YAML is now an explicit persistence
-adapter rather than the in-memory named-value representation; the direct codec
-and document dependencies remain current limitations.
-[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
+The current private disk-cache implementation no longer calls OpenCV image
+codecs directly. It depends on the injected `ImageArtifactCodec`, while the
+configured production adapter owns OpenCV decode/encode, conversion, and
+exception translation. Named output metadata is still stored through the YAML
+persistence adapter; removing that remaining document dependency belongs to the
+later graph-definition/YAML slices. [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
+and the exact
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
-describe the accepted final codec and document boundary.
+describe the final adapter and document boundary.
 
 ## Implementation and Validation Entry Points
 
+- `src/lib/core/image_artifact_codec.hpp`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/core/parameter_value_adapter.*`

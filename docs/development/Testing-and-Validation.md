@@ -287,6 +287,34 @@ maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
 
+## Injected Image Artifact Codec Validation
+
+`test_kernel_contracts` owns the long-lived fake-codec cache boundary. Its
+`CacheSemantics.InjectedCodec*` cases create `GraphCacheService` with a shared
+`FakeImageArtifactCodec` and verify exact decode/encode paths, service-retained
+codec lifetime, `int16` precision selection, recoverable `GraphErrc::Io`
+diagnostics without HP-cache mutation, and exact `std::bad_alloc` propagation.
+The fake performs no real image-format IO, so those tests remain independent of
+OpenCV codec behavior while exercising the production cache service.
+
+`ImageArtifactCodecDependencyDisabledBuild` configures a fresh nested build with
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`,
+builds `test_kernel_contracts`, and runs only the injected-codec cases. This
+proves the Graph/cache injection contract and fake do not depend on the optional
+operation provider. The current production image adapter still uses OpenCV
+imgcodecs; a product that omits all OpenCV discovery remains the separate issue
+#63 dependency-disabled profile.
+
+Run the focused validation with:
+
+```bash
+cmake --build build --target test_kernel_contracts -j 2
+./build/tests/test_kernel_contracts \
+  --gtest_filter='CacheSemantics.InjectedCodec*'
+ctest --test-dir build --output-on-failure \
+  -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
+```
+
 ## Optional OpenCV Operation Provider Validation
 
 `test_optional_opencv_operation_provider` is a CTest-registered integration

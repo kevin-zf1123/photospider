@@ -28,6 +28,7 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_traversal_service.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
@@ -562,7 +563,7 @@ TEST_F(GpuPipelineSchedulerTest, ProductionComputeUsesDeviceImplementation) {
   runtime.model().add_node(node);
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
   ComputeService::Request request;
   request.node_id = node.id;
@@ -625,7 +626,7 @@ TEST_F(GpuPipelineSchedulerTest,
   runtime.model().add_node(node);
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
   ComputeService::Request request;
   request.node_id = node.id;
@@ -939,7 +940,7 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   int node_id = (*endings)[0];
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
 
   ComputeService::Request rt_request;

@@ -180,6 +180,17 @@ best-effort `LastError` mirror, but the current Host result comes directly from
 the same required operation. It is never reconstructed by reading shared
 diagnostic state after the operation.
 
+## Image Artifact Codec Lifetime
+
+Disk-cache image persistence used by compute and cache commands is composed once
+per `Kernel`. The product composition root supplies a shared
+`ImageArtifactCodec`; `GraphCacheService` retains that owner and performs cache
+policy, path resolution, metadata handling, and diagnostics without direct
+OpenCV codec calls. The codec is not graph state: reload, clear, and close do
+not replace it, while Kernel destruction releases it only after graph runtimes
+and admitted work have drained. Codec `GraphError` values retain their exact
+category in disk-cache diagnostics, and `std::bad_alloc` propagates unchanged.
+
 ## Clear
 
 `GraphModel::clear()` performs a model reset, not only node deletion. It clears:
@@ -294,6 +305,9 @@ until source and durable tests make it current behavior.
 
 ## Implementation and Validation Entry Points
 
+- `src/lib/core/image_artifact_codec.hpp`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/runtime/kernel.cpp`
 - `src/lib/runtime/kernel_io_cache_facade.cpp`
 - `src/lib/runtime/kernel_inspection_facade.cpp`

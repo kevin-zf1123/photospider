@@ -50,6 +50,12 @@ boundary 时递归转换。
 
 磁盘缓存精度当前支持 `int8` 和 `int16` 保存路径。加载的图像缓存数据会转换为浮点图像缓冲区。
 
+图像字节通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
+共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、`ImageBuffer` 与
+规范化整数精度。当前生产 adapter 使用 OpenCV imgcodecs，并把 provider failure 翻译为
+`GraphErrc::Io`，同时让 OpenCV `StsNoMem` 保持为 `std::bad_alloc`。测试会注入确定性 fake，
+在不读取或写入真实图像格式的情况下验证调用顺序、生命周期保持、精度选择、可恢复错误与资源耗尽。
+
 磁盘缓存加载尝试会保留既有 try-load 布尔返回契约，同时通过 GraphModel 专用的
 disk-cache diagnostic mutex 记录最新诊断。调用方通过 snapshot API 检查该状态，
 而不是直接读取可变 optional 存储。该诊断结果会区分跳过的尝试、真实 miss、命中以及读取/解析错误。
@@ -83,15 +89,19 @@ miss 混在一起。
 只有一个正式缓存权威，可以防止低分辨率 preview 静默变成 HP dependency 或 persistence source。
 Request-local staging 会让尚未组装完成的 dirty output 保持不可见，直到相应 domain 的工作 settle。
 
-当前私有 disk-cache 实现会直接调用 OpenCV image codec，并把具名 output metadata 保存为 YAML。
-YAML 现在是显式 persistence adapter，而不是内存中的 named-value representation；直接 codec 与
-document dependency 仍是当前限制。
+当前私有 disk-cache 实现不再直接调用 OpenCV image codec。它依赖注入的
+`ImageArtifactCodec`，而配置好的生产 adapter 拥有 OpenCV decode/encode、conversion 与
+exception translation。具名 output metadata 仍通过 YAML persistence adapter 保存；移除这项剩余
+文档依赖属于后续 graph-definition/YAML 切片。
 [ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
-和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述已接受的最终
-codec 与 document boundary。
+和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述最终 adapter 与
+document boundary。
 
 ## 实现与验证入口
 
+- `src/lib/core/image_artifact_codec.hpp`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/core/parameter_value_adapter.*`

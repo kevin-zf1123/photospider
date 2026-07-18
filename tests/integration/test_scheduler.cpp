@@ -21,6 +21,7 @@
 #include "graph/graph_cache_service.hpp"      // <--- 修正点: 添加缺失的头文件
 #include "graph/graph_model.hpp"              // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
+#include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
 #include "scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
@@ -388,7 +389,8 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
       runtime.graph_state().submit([&](ps::GraphModel& g) -> ps::NodeOutput {
         // 修正点: 直接构造服务类，不访问 kernel 的私有成员
         ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service;
+        ps::GraphCacheService cache_service{
+            ps::providers::make_configured_image_artifact_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        runtime.event_service());
 
@@ -529,7 +531,8 @@ TEST(Scheduler,
   auto stale_future = stale_runtime.graph_state().submit(
       [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service;
+        ps::GraphCacheService cache_service{
+            ps::providers::make_configured_image_artifact_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        stale_runtime.event_service());
         ps::ComputeService::Request request;
@@ -577,7 +580,8 @@ TEST(Scheduler,
   auto exception_future = exception_runtime.graph_state().submit(
       [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service;
+        ps::GraphCacheService cache_service{
+            ps::providers::make_configured_image_artifact_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        exception_runtime.event_service());
         ps::ComputeService::Request request;
@@ -645,7 +649,8 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveParameterValueState) {
     auto update_future = runtime.graph_state().submit(
         [&](ps::GraphModel& graph) -> ps::NodeOutput {
           ps::GraphTraversalService traversal_service;
-          ps::GraphCacheService cache_service;
+          ps::GraphCacheService cache_service{
+              ps::providers::make_configured_image_artifact_codec()};
           ps::ComputeService compute_service(traversal_service, cache_service,
                                              runtime.event_service());
           ps::ComputeService::Request request;

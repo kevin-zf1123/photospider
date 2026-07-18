@@ -13,7 +13,6 @@
 #include <mutex>
 #include <new>
 #include <numeric>
-#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <optional>
 #include <random>
@@ -22,6 +21,7 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #endif
@@ -1198,10 +1198,12 @@ static PixelRect identity_dirty_roi(
  * @return Owned CPU image normalized to `[0,1]` for unsigned 8/16-bit files.
  * @throws GraphError with `GraphErrc::InvalidParameter` for an empty path or
  *         `GraphErrc::Io` when decoding produces no image.
- * @throws cv::Exception internally for codec/conversion failures; the provider
- *         registration fence translates it before registry return.
- * @throws std::bad_alloc for provider or output ownership allocation failure.
- * @note File decoding and OpenCV storage remain entirely provider-owned.
+ * @throws GraphError with `GraphErrc::Io` when the injected production codec
+ * cannot decode or convert the image artifact.
+ * @throws std::bad_alloc for codec or output ownership allocation failure.
+ * @note The operation owns no filesystem codec implementation. It obtains the
+ * configured artifact codec from the product composition boundary and returns
+ * the codec-owned ImageBuffer unchanged.
  */
 static NodeOutput op_image_source_path(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -1212,18 +1214,9 @@ static NodeOutput op_image_source_path(
     throw GraphError(GraphErrc::InvalidParameter,
                      "image_source:path requires parameters.path");
 
-  cv::Mat img = cv::imread(path, cv::IMREAD_UNCHANGED);
-  if (img.empty())
-    throw GraphError(GraphErrc::Io, "Failed to read image: " + path);
-
-  cv::Mat float_img;
-  double scale = (img.depth() == CV_8U)
-                     ? 1.0 / 255.0
-                     : ((img.depth() == CV_16U) ? 1.0 / 65535.0 : 1.0);
-  img.convertTo(float_img, CV_32F, scale);
-
+  const auto codec = providers::make_configured_image_artifact_codec();
   NodeOutput result;
-  result.image_buffer = fromCvMat(float_img);
+  result.image_buffer = codec->decode(path);
   return result;
 }
 

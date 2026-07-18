@@ -40,6 +40,7 @@
 #include "graph/roi_propagation_service.hpp"
 #include "photospider/host/host.hpp"
 #include "plugin/operation_host_adapter.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #include "providers/configured_operation_providers.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
@@ -1890,7 +1891,7 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_EQ(g_spatial_parameter_hp_calls.load(std::memory_order_relaxed), 0);
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
   ComputeService::Request execution_request;
@@ -2014,7 +2015,7 @@ TEST(ComputeServiceSplit,
   GraphModel graph("cache/split-dynamic-connected-kernel");
   populate_dynamic_blur_graph(graph);
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
 
@@ -2062,7 +2063,7 @@ TEST(ComputeServiceSplit,
   GraphModel graph("cache/split-staged-parameter-chain");
   populate_staged_parameter_chain(graph);
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
   ComputeService::Request request;
@@ -2122,7 +2123,7 @@ TEST(ComputeServiceSplit,
     GraphModel graph("cache/split-dynamic-extent-shrink");
     populate_dynamic_extent_graph(graph);
     GraphTraversalService traversal;
-    GraphCacheService cache;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec()};
     GraphEventService events;
     ComputeService service(traversal, cache, events);
     ComputeService::Request request;
@@ -2173,7 +2174,7 @@ TEST(ComputeServiceSplit,
   graph.add_node(target);
   graph.validate_topology();
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
   ComputeService::Request request;
@@ -2200,7 +2201,7 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   GraphModel graph("cache/split-preflight-failure-atomicity");
   populate_dynamic_blur_graph(graph);
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
   ComputeService::Request request;
@@ -2251,7 +2252,7 @@ TEST(ComputeServiceSplit,
     GraphModel& graph = runtime.model();
     populate_host_preparation_failure_graph(graph);
     GraphTraversalService traversal;
-    GraphCacheService cache;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec()};
     GraphEventService events;
     ComputeService service(traversal, cache, events);
     ComputeService::Request request;
@@ -2430,7 +2431,7 @@ TEST(ComputeServiceSplit,
   populate_dynamic_blur_graph(graph);
   const uint64_t generation_before = graph.dirty_generation_counter;
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
   ComputeService::Request request;
@@ -2475,7 +2476,7 @@ TEST(ComputeServiceSplit,
     populate_dynamic_blur_graph(graph);
     const std::uint64_t generation_before = graph.dirty_generation_counter;
     GraphTraversalService traversal;
-    GraphCacheService cache;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec()};
     GraphEventService events;
     ComputeService service(traversal, cache, events);
     ComputeService::Request request;
@@ -2514,7 +2515,7 @@ TEST(ComputeServiceSplit,
   GraphModel& graph = runtime.model();
   populate_dynamic_blur_graph(graph);
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
   ComputeService::Request request;
@@ -2560,7 +2561,7 @@ TEST(ComputeServiceSplit,
   GraphModel& graph = runtime.model();
   populate_dynamic_blur_graph(graph);
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService service(traversal, cache, events);
   ComputeService::Request request;
@@ -2723,7 +2724,7 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   ASSERT_NE(cached_before, nullptr);
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
@@ -2760,7 +2761,7 @@ TEST(GraphCacheServiceSplit,
   node.cached_output_high_precision->data["marker"] = 9;
   graph.add_node(node);
 
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   cache.save_cache_if_configured(graph, graph.node(1), "int8");
   const auto image_path = cache.node_cache_dir(graph, 1) / "output.png";
   auto metadata_path = image_path;
@@ -2854,7 +2855,7 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   graph.validate_topology();
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   cache.save_cache_if_configured(graph, graph.node(1), "int8");
   const auto cache_file = cache.node_cache_dir(graph, 1) / "output.png";
@@ -3339,7 +3340,7 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   graph.rebuild_topology_index();
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
@@ -3401,7 +3402,7 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   graph.rebuild_topology_index();
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
@@ -3460,7 +3461,7 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   graph.rebuild_topology_index();
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 

@@ -221,6 +221,32 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
 因此不会依赖失败 load 发布状态。每个场景都使用相互隔离的临时 session 与 history
 存储，并在脚本退出时删除。
 
+## 注入式图像 Artifact Codec 验证
+
+`test_kernel_contracts` 负责长期 fake-codec cache 边界。它的
+`CacheSemantics.InjectedCodec*` 用例会用共享 `FakeImageArtifactCodec` 构造
+`GraphCacheService`，并验证精确 decode/encode path、service 保持的 codec 生命周期、`int16`
+精度选择、不会变更 HP cache 的可恢复 `GraphErrc::Io` diagnostic，以及精确的
+`std::bad_alloc` 传播。Fake 不执行真实图像格式 IO，因此这些测试不依赖 OpenCV codec 行为，
+但会执行生产 cache service。
+
+`ImageArtifactCodecDependencyDisabledBuild` 会用
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 与 `PHOTOSPIDER_BUILD_IPC=OFF`
+配置 fresh nested build，构建 `test_kernel_contracts`，并只运行注入式 codec 用例。这证明
+Graph/cache 注入契约与 fake 不依赖可选 operation provider。当前生产 image adapter 仍使用
+OpenCV imgcodecs；完全省略 OpenCV discovery 的产品仍属于独立的 issue #63 dependency-disabled
+profile。
+
+聚焦验证命令为：
+
+```bash
+cmake --build build --target test_kernel_contracts -j 2
+./build/tests/test_kernel_contracts \
+  --gtest_filter='CacheSemantics.InjectedCodec*'
+ctest --test-dir build --output-on-failure \
+  -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
+```
+
 ## 可选 OpenCV Operation Provider 验证
 
 `test_optional_opencv_operation_provider` 是针对两种 provider 配置构建并注册到 CTest 的

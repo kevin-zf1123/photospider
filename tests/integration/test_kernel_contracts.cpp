@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <string>
@@ -27,9 +28,11 @@
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "plugin/operation_host_adapter.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
+#include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
 
 namespace ps {
@@ -374,6 +377,9 @@ Node make_cached_process_node(const std::string& location) {
  * distinct miss/hit/error assertions instead of repeating filesystem setup.
  */
 struct DiskCacheDiagnosticContext {
+  /** @brief Fake codec owner retained for call and failure assertions. */
+  std::shared_ptr<testing::FakeImageArtifactCodec> codec;
+  /** @brief Cache service under test, injected with `codec`. */
   GraphCacheService cache;
   std::filesystem::path root;
   GraphModel graph;
@@ -384,12 +390,18 @@ struct DiskCacheDiagnosticContext {
    *
    * @param root_name Temporary directory name for this test case.
    * @param cache_location CacheEntry location to configure on the node.
+   * @param decode Optional fake decode behavior for an existing image file.
    * @throws std::filesystem::filesystem_error if root cleanup or creation
    * fails.
+   * @throws std::bad_alloc if fake codec ownership allocation fails.
    */
-  DiskCacheDiagnosticContext(const std::string& root_name,
-                             const std::string& cache_location)
-      : root(clean_temp_path(root_name)),
+  DiskCacheDiagnosticContext(
+      const std::string& root_name, const std::string& cache_location,
+      testing::FakeImageArtifactCodec::DecodeCallback decode = {})
+      : codec(std::make_shared<testing::FakeImageArtifactCodec>(
+            std::move(decode))),
+        cache(codec),
+        root(clean_temp_path(root_name)),
         graph(root),
         node(make_cached_process_node(cache_location)) {}
 
@@ -686,7 +698,7 @@ TEST(ParameterValuePath, ExactTypeMismatchFailsInsideOperation) {
 TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   register_contract_ops();
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
@@ -736,7 +748,7 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
 TEST(CacheSemantics, DiskSaveAndSyncIgnoreNodesWithoutHpState) {
   register_contract_ops();
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
@@ -799,12 +811,10 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreNodesWithoutHpState) {
   EXPECT_GE(sync_result.removed_files, 1)
       << "Sync should report removed stale files for nodes without HP cache";
 
-  // Contract 3: Node 2 has HP cache, so HP is written to disk.
-  // The disk file for node 2 should exist after sync.
+  // Contract 3: Node 2 has HP cache, so its configured artifact is encoded.
   auto dir2 = cache.node_cache_dir(graph, 2);
-  auto hp_file = dir2 / "output.png";
-  EXPECT_TRUE(std::filesystem::exists(hp_file))
-      << "HP cache file should exist on disk after sync";
+  EXPECT_TRUE(std::filesystem::exists(dir2))
+      << "HP cache directory should exist after sync";
 
   // Clean up
   std::filesystem::remove_all(root);
@@ -867,22 +877,81 @@ TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
             std::string::npos);
 }
 
-TEST(CacheSemantics, DiskCacheCorruptImageRecordsErrorWithoutHpMutation) {
-  DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-bad-image",
-                                 "output.png");
+TEST(CacheSemantics, InjectedCodecIoErrorLeavesHpCacheUnchanged) {
+  DiskCacheDiagnosticContext ctx(
+      "photospider-contract-disk-cache-codec-io", "output.png",
+      [](const std::filesystem::path& path) -> ImageBuffer {
+        throw GraphError(
+            GraphErrc::Io,
+            "fake decode rejected image artifact: " + path.string());
+      });
   auto image_file = ctx.cache_file();
-  write_text(image_file, "not an image");
+  write_text(image_file, "fake image bytes");
 
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(ctx.graph, ctx.node));
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
+
+  const auto calls = ctx.codec->calls();
+  ASSERT_EQ(calls.size(), 1u);
+  EXPECT_EQ(calls.front().kind,
+            testing::FakeImageArtifactCodec::Call::Kind::Decode);
+  EXPECT_EQ(calls.front().path, image_file);
 
   const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Error);
   EXPECT_EQ(result->code, GraphErrc::Io);
   EXPECT_EQ(result->cache_file, image_file);
-  EXPECT_NE(result->message.find("Failed to decode disk cache image"),
+  EXPECT_NE(result->message.find("fake decode rejected image artifact"),
             std::string::npos);
+}
+
+TEST(CacheSemantics, InjectedCodecBadAllocPropagatesWithoutHpMutation) {
+  DiskCacheDiagnosticContext ctx(
+      "photospider-contract-disk-cache-codec-bad-alloc", "output.png",
+      [](const std::filesystem::path&) -> ImageBuffer {
+        throw std::bad_alloc();
+      });
+  write_text(ctx.cache_file(), "fake image bytes");
+
+  EXPECT_THROW(ctx.cache.try_load_from_disk_cache(ctx.graph, ctx.node),
+               std::bad_alloc);
+  EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
+  ASSERT_EQ(ctx.codec->calls().size(), 1u);
+}
+
+TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
+  const auto root = clean_temp_path("photospider-contract-codec-lifetime");
+  GraphModel graph(root);
+  Node node = make_cached_process_node("output.png");
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->image_buffer =
+      make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+  const std::filesystem::path expected_path =
+      root / std::to_string(node.id) / node.caches.front().location;
+
+  std::weak_ptr<testing::FakeImageArtifactCodec> weak_codec;
+  {
+    auto codec = std::make_shared<testing::FakeImageArtifactCodec>();
+    weak_codec = codec;
+    GraphCacheService cache(codec);
+    codec.reset();
+    ASSERT_FALSE(weak_codec.expired());
+
+    cache.save_cache_if_configured(graph, node, "int16");
+    const auto retained = weak_codec.lock();
+    ASSERT_TRUE(retained);
+    const auto calls = retained->calls();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls.front().kind,
+              testing::FakeImageArtifactCodec::Call::Kind::Encode);
+    EXPECT_EQ(calls.front().path, expected_path);
+    ASSERT_TRUE(calls.front().precision.has_value());
+    EXPECT_EQ(*calls.front().precision, ImageArtifactPrecision::UInt16);
+  }
+
+  EXPECT_TRUE(weak_codec.expired());
+  std::filesystem::remove_all(root);
 }
 
 TEST(CacheSemantics, DiskCacheDiagnosticSnapshotSupportsConcurrentWriters) {
@@ -924,7 +993,7 @@ TEST(CacheSemantics, DiskCacheDiagnosticSnapshotSupportsConcurrentWriters) {
 TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   register_contract_ops();
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec()};
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 

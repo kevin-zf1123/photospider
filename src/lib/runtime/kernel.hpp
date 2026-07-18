@@ -27,6 +27,7 @@
 
 #include "compute/compute_service.hpp"
 #include "compute/dirty_control_lane.hpp"
+#include "core/image_artifact_codec.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_inspect_service.hpp"
 #include "graph/graph_io_service.hpp"
@@ -78,6 +79,23 @@ class KernelTestAccess;
  */
 class Kernel {
  public:
+  /**
+   * @brief Creates a Kernel with the configured production artifact codec.
+   * @throws std::bad_alloc if codec ownership allocation fails.
+   * @note The configured codec is injected once into GraphCacheService and
+   * retained for the complete Kernel lifetime.
+   */
+  Kernel();
+
+  /**
+   * @brief Creates a Kernel with an explicitly supplied artifact codec.
+   * @param image_codec Shared codec owner used by all graph cache operations.
+   * @throws std::invalid_argument when the codec owner is empty.
+   * @note This internal composition seam enables deterministic fake-codec tests
+   * without adding a public Host or installed ABI surface.
+   */
+  explicit Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec);
+
   /**
    * @brief Last backend error recorded for one graph session.
    *
@@ -1216,6 +1234,11 @@ class Kernel {
   std::map<std::string, LastError> last_error_;
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
+  /**
+   * @brief Cache service retaining the Kernel-injected artifact codec.
+   * @note Declared after stateless graph collaborators and before services that
+   * borrow it during compute; destruction occurs after all GraphRuntime owners.
+   */
   GraphCacheService cache_service_;
   GraphIOService io_service_;
   RoiPropagationService roi_propagation_service_;
