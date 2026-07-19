@@ -110,7 +110,8 @@ const ImageBuffer& require_non_empty_image(const NodeOutput* output,
  *
  * @param current_buffer Secondary input descriptor.
  * @param base_shape Required output shape.
- * @return CPU descriptor retaining the resized OpenCV result.
+ * @return CPU descriptor retaining the resized result produced by the
+ * selected implementation.
  * @throws std::invalid_argument for a malformed CPU descriptor.
  * @throws std::exception when the selected image-processing implementation
  * cannot resize the image.

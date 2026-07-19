@@ -609,14 +609,14 @@ The maintained entry points are:
   GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
   container runner.
 - `ci/scripts/integration_plan.sh` for capability discovery of the
-  static-product, IPC-disabled, and dependency-disabled build smokes.
-- `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
-  plus CTest discovery and the real kernel/product-only `dependency-disabled`
-  profile.
-- `ci/scripts/ctest_full.sh` for the main CTest suite.
+  static-product and IPC-disabled build smokes.
+- `ci/scripts/build_integrity.sh` for the default and IPC-disabled producer
+  profiles, including required-target/full builds and default CTest discovery.
+- `ci/scripts/ctest_full.sh` for the main CTest suite, including the regular
+  durable `DependencyDisabledInstallSmoke`.
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
-  including the dependency-disabled build/install smoke, CLI, propagation,
-  plugin, and scheduler coverage.
+  using full CTest for dependency-disabled coverage alongside the planned build
+  smokes, CLI, propagation, plugin, and scheduler coverage.
 
 CI source inventories and exclusion lists must describe maintained tests and
 current source paths. Migration-only harness names must not be retained as
