@@ -337,6 +337,7 @@ bool finalize_disk_cache_load(
 
 }  // namespace
 
+/** @copydoc GraphCacheService::GraphCacheService */
 GraphCacheService::GraphCacheService(
     std::shared_ptr<const ImageArtifactCodec> image_codec,
     std::shared_ptr<const CacheMetadataCodec> metadata_codec)
