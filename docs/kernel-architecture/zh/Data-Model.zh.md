@@ -65,12 +65,12 @@ definition，再调用 writer；node-document operation 也经过同一个注入
 emitter 或 graph-document stream。
 
 已配置的 `YamlGraphDocumentAdapter` 拥有私有 YAML translator、filesystem read、node-text
-conversion、完整 emission，以及直接 open/write/flush/close 行为。`create_embedded_host()` 构造一个
-adapter，并把同一个共享 owner 作为两个 contract 通过 `Kernel` 注入；Kernel 与 GraphIO 都没有默认
-persistence construction。一个私有的显式依赖 Host root 支持确定性的 fake 替换，不增加可安装 API。
-Issue #61 已实现该 document 边界。Issue #62 将共享 YAML value translator 移入该私有 adapter
-区域，并从 runtime 与 cache contract 中移除 YAML type。现在只剩 Issue #63 负责
-dependency-disabled product profile。
+conversion、完整 emission，以及直接 open/write/flush/close 行为。`create_embedded_host()` 在 YAML
+启用时选择该 adapter，禁用时选择显式 unavailable document adapter，再把同一个共享 owner 作为
+两个 contract 通过 `Kernel` 注入；Kernel 与 GraphIO 都没有默认 persistence construction。一个私有
+的显式依赖 Host root 支持确定性的 fake 替换，不增加可安装 API。Issue #61 与 #62 建立中立的
+document/value 边界。Issue #63 完成 dependency-disabled product profile；empty/in-memory
+session 保持可用，显式 document IO 返回 `GraphErrc::Io`。
 
 ## 拓扑邻接
 

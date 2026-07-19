@@ -6,8 +6,8 @@ Photospider. For architecture internals, see
 
 ## 1. Build And Setup
 
-Install the required C++ toolchain, OpenCV, yaml-cpp, and test dependencies if
-you plan to run the GoogleTest suite. Initialize submodules when using the
+Install the required C++ toolchain, OpenCV, yaml-cpp, and test dependencies for
+the default CLI and GoogleTest profile. Initialize submodules when using the
 vendored FTXUI source:
 
 ```bash
@@ -15,6 +15,35 @@ git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build --target graph_cli -j
 ```
+
+The two product capabilities default to `ON`. Dependent target defaults follow
+the capability state:
+
+| Option | Default and effect |
+| --- | --- |
+| `PHOTOSPIDER_ENABLE_OPENCV` | `ON`; enables the OpenCV image-processing implementation, image codec, public adapter, and the default OpenCV provider/plugin choices. |
+| `PHOTOSPIDER_ENABLE_YAML` | `ON`; enables YAML graph-document and cache-metadata adapters. |
+| `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` | Follows `PHOTOSPIDER_ENABLE_OPENCV`; explicitly requesting it while OpenCV is disabled is invalid. |
+| `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS` | Follows `PHOTOSPIDER_ENABLE_OPENCV`; explicitly requesting it while OpenCV is disabled is invalid. |
+| `PHOTOSPIDER_BUILD_GRAPH_CLI` | Defaults to `ON` only when both OpenCV and YAML are enabled; explicitly requesting it without both capabilities is invalid. |
+
+A dependency-disabled installed Host build is:
+
+```bash
+cmake -S . -B build/minimal \
+  -DBUILD_TESTING=OFF \
+  -DPHOTOSPIDER_BUILD_IPC=OFF \
+  -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
+  -DPHOTOSPIDER_ENABLE_YAML=OFF
+cmake --build build/minimal --target photospider_kernel photospider -j
+cmake --install build/minimal --prefix /desired/fresh/prefix
+```
+
+Use a fresh build and install prefix when changing capability values. This
+profile supports neutral image allocation plus in-memory and empty-session Host
+lifecycles. Explicit image-artifact or YAML persistence operations return
+`GraphErrc::Io`; `graph_cli` is unavailable because its file-oriented workflow
+requires both capabilities.
 
 The main executable is:
 
@@ -33,7 +62,7 @@ Plugin and runtime outputs:
 
 | Output | Path | Availability |
 | --- | --- | --- |
-| executable | `build/bin/graph_cli` | base build |
+| executable | `build/bin/graph_cli` | when `PHOTOSPIDER_BUILD_GRAPH_CLI=ON` |
 | local daemon | `build/bin/photospiderd` | macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON` |
 | backend libraries | `build/lib` | base build |
 | operation plugins | `build/plugins` | when their targets are built |
@@ -126,10 +155,14 @@ target_link_libraries(app PRIVATE Photospider::photospider_ipc_client)
 ```
 
 This lookup resolves only Threads. The default component-less lookup and
-`COMPONENTS embedded` retain the embedded target's OpenCV, `yaml-cpp`, Threads,
-and applicable Apple framework dependency resolution. Unknown required
-components, or required `ipc_client` against an IPC-disabled install, fail
-package discovery.
+`COMPONENTS embedded` discover only the dependencies enabled in the producer:
+OpenCV and yaml-cpp in the default profile, neither in the
+dependency-disabled profile, plus Threads and applicable Apple framework
+dependencies when required by enabled features. Unknown required components,
+or required `ipc_client` against an IPC-disabled install, fail package
+discovery. An OpenCV-disabled install reports optional `operation_opencv` as
+unavailable and rejects it when required; it does not export the adapter target
+or install its header.
 
 Extension DSOs use separate installed components:
 

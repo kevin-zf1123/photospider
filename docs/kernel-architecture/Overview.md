@@ -38,23 +38,25 @@ The root `CMakeLists.txt` builds these internal modules:
 
 | Target | Role |
 | --- | --- |
-| `photospider_core_internal` | Build-only target combining dependency-neutral private core values and neutral parameter-value inspection formatting with the configured image-artifact codec provider and its OpenCV adapter at the current product-composition boundary. It therefore still links `Photospider::operation_opencv` and OpenCV `imgcodecs`; the complete OpenCV-free product profile remains issue #63. |
+| `photospider_core_internal` | Build-only dependency-neutral core values and neutral parameter formatting plus the build-selected image-processing and image-artifact implementations. `PHOTOSPIDER_ENABLE_OPENCV=ON` selects OpenCV processing/codec adapters; `OFF` selects the standard-library processing implementation and an unavailable codec without discovering OpenCV. |
 | `photospider_graph_internal` | Build-only dependency-neutral core operation source, `GraphModel`, registry behavior, graph IO, traversal, cache, propagation, and inspection services. |
-| `photospider_yaml_adapter_internal` | Build-only configured YAML adapter. It owns shared parameter-value translation, graph-document parsing/emission, cache-metadata parsing/emission, and their direct filesystem behavior; format-neutral GraphIO, Kernel, runtime, and cache contracts do not declare parser values. |
+| `photospider_yaml_adapter_internal` | Build-only YAML adapter present only with `PHOTOSPIDER_ENABLE_YAML=ON`. It owns shared parameter-value translation, graph-document parsing/emission, cache-metadata parsing/emission, and their direct filesystem behavior; format-neutral GraphIO, Kernel, runtime, and cache contracts do not declare parser values. |
 | `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
 | `photospider_scheduler_internal` | Build-only scheduler factory, handshake loader, and built-in scheduler implementations. |
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, and event implementation; it depends one-way on scheduler ownership. |
+| `photospider_host_internal` | Build-only Kernel/Interaction facades and embedded Host composition root. It selects real YAML persistence adapters or explicit unavailable adapters according to the producer capability. |
+| `photospider_kernel` | Buildable aggregate target that compiles the real selected core, graph, plugin, scheduler, compute, Host, and optional provider/adapter modules; it is not an install artifact or a placeholder library. |
 | `photospider_operation_runtime` | Installable static implementation of public image-buffer factories with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
 | `photospider_operation_sdk` | Installable interface target for operation v2 headers; it transitively links `operation_runtime`. |
-| `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component. |
+| `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_scheduler_sdk` | Installable interface target carrying only scheduler headers and the C++17 requirement. |
-| `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It exports `Photospider::photospider`; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
+| `photospider` | Static installable backend product, archived as `libphotospider`, linked by enabled CLI and embedded Host frontends. It exports `Photospider::photospider` and remains buildable with OpenCV and YAML disabled; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
 | `photospider_ipc_client` | Installed static typed Unix IPC client plus the complete IPC Host adapter. It exports `Photospider::photospider_ipc_client`, implements all 55 direct Client methods and all 53 current Host virtuals, and does not link the backend or expose JSON/POSIX implementation types. |
 | `photospider_ipc_server_internal` | Non-installed bounded Unix listener, typed router, and private session/job/snapshot/output registries. It serializes all backend access through one daemon-owned Host. |
 | `photospiderd` | Installed foreground macOS/Linux daemon that owns one embedded Host, a protected per-user socket and output store, and deterministic joined shutdown. |
-| `photospider_cli_common` | Non-installable application helper built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. |
-| `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`. |
+| `photospider_cli_common` | Non-installable application helper, present only with `PHOTOSPIDER_BUILD_GRAPH_CLI=ON`, built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. |
+| `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`; its derived default is `ON` only when both OpenCV and YAML capabilities are enabled. |
 
 The CLI-owned application surface is private to `apps/graph_cli/`, including
 its `include/graph_cli/` headers and `resources/help/` text. The complete CLI
@@ -79,17 +81,19 @@ Output directories:
 
 Package boundary:
 
-- `cmake --install` installs the static `photospider`, operation-runtime, and
-  operation-OpenCV archives; the operation/scheduler interface SDKs; an exact
-  public-header inventory under `include/photospider/**`;
-  the base `PhotospiderTargets.cmake`, OpenCV-dependent
-  `PhotospiderOpenCVTargets.cmake`, embedded-product
-  `PhotospiderEmbeddedTargets.cmake`, and `PhotospiderConfig.cmake`. The main
+- `cmake --install` installs the static `photospider`, operation-runtime,
+  operation/scheduler interface SDKs, the enabled public-header inventory under
+  `include/photospider/**`, the base `PhotospiderTargets.cmake`,
+  `PhotospiderEmbeddedTargets.cmake`, and `PhotospiderConfig.cmake`. When
+  OpenCV is enabled it additionally installs the operation-OpenCV archive,
+  header, and `PhotospiderOpenCVTargets.cmake`; otherwise none of that surface
+  is installed or advertised. The main
   archive is `libphotospider.a` on Unix-like toolchains and `photospider.lib`
   with MSVC. The config completes dependency and required-component checks
-  before importing the base export set. It then imports the OpenCV and embedded
-  sets only when the selected explicit components or the component-less
-  embedded default have usable dependencies.
+  before importing the base export set. It imports only export sets created by
+  the producer and discovers only producer-enabled dependencies. The selected
+  explicit components or component-less embedded default still control which
+  available sets are imported.
 - On macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON`, installation also exports
   `Photospider::photospider_ipc_client`, installs exactly the three
   `include/photospider/ipc/` headers and `photospiderd`, and keeps the server
@@ -111,7 +115,12 @@ Package boundary:
   false, its target is not imported, and dependency-free requested targets
   remain available. Requiring that component instead makes package discovery
   fail.
-- OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
+- Producer capability values are recorded in the package config. An
+  OpenCV-disabled install reports `operation_opencv` unavailable without
+  discovering OpenCV. An embedded consumer of the OpenCV/YAML-disabled product
+  discovers neither package and links/runs the real Host product.
+- When enabled, OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`) and
+  `yaml-cpp`, plus always-required `Threads`,
   platform dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
   flags are implementation link dependencies of the static archive. Library
   dependencies appear as `$<LINK_ONLY:...>` entries on the installed target;
@@ -119,10 +128,11 @@ Package boundary:
   block. Public Host/core headers avoid OpenCV and `yaml-cpp` types; Windows
   consumers receive `PHOTOSPIDER_STATIC` so declarations do not use DLL
   import/export attributes.
-  `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` controls only the built-in
-  operation provider in this stage; image codecs, cache/normalization
-  implementation, the public adapter, and the final dependency-free product
-  profile remain separate migration boundaries.
+  `PHOTOSPIDER_ENABLE_OPENCV` selects image processing, image codec, public
+  adapter, and the derived provider/plugin defaults.
+  `PHOTOSPIDER_ENABLE_YAML` selects graph-document and cache-metadata
+  persistence. Invalid explicit target/capability combinations fail at
+  configure time.
 - FTXUI, `photospider_cli_common`, operation plugins, scheduler plugins, and
   their implementation-specific dependencies are not exported as dependencies
   of the embedded static package.
@@ -190,14 +200,18 @@ graph TD
     PluginManager --> OpRegistry
 ```
 
-`create_embedded_host()` is the configured persistence composition root. It
-constructs one `YamlGraphDocumentAdapter` and one
-`YamlCacheMetadataCodec`, converts the document owner to the format-neutral
-reader and writer contracts, and injects all three contracts together with the
-configured image codec into `Kernel`. `GraphIOService` retains the document
-owners, while `GraphCacheService` retains the image and metadata owners.
-Kernel and those services have no default persistence constructors or fallback
-adapters. The private explicit-dependency Host root is used by substitution
+`create_embedded_host()` is the configured persistence composition root. With
+YAML enabled, it constructs one `YamlGraphDocumentAdapter` and one
+`YamlCacheMetadataCodec`; with YAML disabled, it constructs explicit
+unavailable graph-document and cache-metadata adapters. It converts the
+document owner to the format-neutral reader and writer contracts and injects
+all three contracts together with the configured real or unavailable image
+codec into `Kernel`. Empty and in-memory session lifecycles remain usable in
+the disabled profile; explicit representation IO returns `GraphErrc::Io`.
+`GraphIOService` retains the document owners, while `GraphCacheService` retains
+the image and metadata owners. Kernel and those services have no default
+persistence constructors or implicit fallback adapters. The private
+explicit-dependency Host root is used by substitution
 tests. The IPC Host remains a client-side transport adapter; only the
 daemon-owned embedded Host composes backend persistence.
 
@@ -544,7 +558,11 @@ this current-state document.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/image_buffer_processing.*`
 - `src/lib/core/parameter_value_text.*`
+- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/providers/configured_image_artifact_codec.*`
+- `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
@@ -555,3 +573,5 @@ this current-state document.
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/ipc_disabled_install_smoke.py`
+- `tests/integration/dependency_disabled_install_smoke.py`
+- `tests/unit/test_stdlib_image_buffer_processing.cpp`

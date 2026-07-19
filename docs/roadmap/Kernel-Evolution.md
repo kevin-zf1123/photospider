@@ -224,9 +224,11 @@ workers, and keeps genuine shared backend synchronization provider-local. The
 repository-owned operation algorithms, their OpenCV initialization, and their
 exception translation now live in a separately switchable provider module;
 the provider-disabled profile proves a stdlib-only v2 provider can supply and
-execute an absent operation. The target architecture preserves those ownership
-rules while the remaining codec, normalization, adapter, and process-wide
-dependencies continue through their dedicated slices.
+execute an absent operation. Issue #63 makes image processing, codecs, public
+adapters, provider/plugin defaults, and the embedded product capability
+selected. The dependency-disabled profile discovers no OpenCV and builds the
+real kernel aggregate and Host product with standard-library or explicit
+unavailable adapters.
 
 YAML remains a supported document adapter. `YAML::Node` must not remain the
 runtime parameter, output, cache metadata, or graph-state value model. Graph
@@ -237,9 +239,11 @@ preserve.
 
 Issue #62 makes the runtime/cache value slice current: shared YAML conversion
 is adapter-owned, cache metadata crosses an injected format-neutral codec, and
-inspection uses a neutral recursive formatter. The configured product still
-links yaml-cpp; Issue #63 owns the dependency-disabled product/static/install
-consumer profile.
+inspection uses a neutral recursive formatter. Issue #63 completes the
+dependency-disabled product/static/install consumer slice. Its clean smoke
+build disables both capability discoveries, verifies the real
+`photospider_kernel` and `photospider` targets, installs without dependency
+leakage, and runs an external Host consumer.
 
 ## General Data and Regions
 

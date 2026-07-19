@@ -2,9 +2,9 @@
 
 This document describes the current ownership, publication, mutation, and
 failure behavior of graph sessions. It records implemented behavior, including
-known boundary limitations. The in-memory GraphDefinition seam and injected
-YAML document/cache adapters are current; dependency-disabled persistence
-remains in the kernel evolution roadmap.
+known boundary limitations. The in-memory GraphDefinition seam, injected YAML
+document/cache adapters, and the dependency-disabled unavailable persistence
+adapters are current behavior.
 
 ## Ownership
 
@@ -336,15 +336,17 @@ Issue #61 implements filesystem-adapter injection and format-neutral private
 Host composition while preserving the public YAML-named ABI. Issue #62 moves
 shared YAML value conversion and cache metadata behind adapter-owned
 contracts, so runtime, graph, compute, inspection, and cache declarations are
-YAML-neutral. Issue #63 still owns the dependency-disabled product profile
-described by the exact
-[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel).
+YAML-neutral. Issue #63 completes the dependency-disabled product profile:
+empty and in-memory sessions remain available without yaml-cpp discovery,
+while an explicit graph-document or cache-metadata representation operation
+uses an unavailable adapter and returns `GraphErrc::Io`.
 
 ## Implementation and Validation Entry Points
 
 - `src/lib/core/image_artifact_codec.hpp`
 - `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
+- `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/runtime/kernel.cpp`
 - `src/lib/runtime/kernel_io_cache_facade.cpp`
 - `src/lib/runtime/kernel_inspection_facade.cpp`
@@ -367,6 +369,7 @@ described by the exact
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/unit/test_graph_document_adapter.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/unit/test_ipc_protocol.cpp`

@@ -99,6 +99,19 @@ components fail as well; optional disabled `ipc_client` and unknown components
 remain not-found without failing discovery; omitting components or requesting
 `embedded` retains the existing backend dependency resolution.
 
+The durable `DependencyDisabledInstallSmoke` configures a clean producer with
+OpenCV and YAML capabilities disabled, disables both package discoveries,
+turns off IPC/testing, and builds the real `photospider_kernel` aggregate and
+`photospider` product. It verifies the derived provider/plugin/CLI defaults and
+the precise diagnostics for three invalid explicit combinations. After a clean
+install it rejects OpenCV headers, targets, export references, and yaml-cpp
+link leakage; optional `operation_opencv` remains unavailable while the
+required component fails. An external consumer configures with both discoveries
+disabled, links/runs `Photospider::photospider`, allocates a neutral image,
+loads and closes an empty Host session, and observes `GraphErrc::Io` from an
+explicit YAML operation. CI may reuse a producer only after its cache identity,
+configuration, and complete capability profile are validated.
+
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
 `CMAKE_GENERATOR` and `CMAKE_CONFIGURATION_TYPES` cache value, and resolves the
@@ -124,8 +137,9 @@ the maintained product. The daemon help test uses a CMake script driver to run
 the real configuration-specific `photospiderd --help`, captures stdout and
 stderr, requires a numeric zero process result before matching the stable
 capability sentence, and diagnoses launch failure separately from nonzero exit.
-`IpcDisabledInstallSmoke`, focused `test_ipc_protocol`/`test_ipc_host` cases,
-and real-process `test_ipc_daemon` cases follow the same rule: they exercise
+`IpcDisabledInstallSmoke`, `DependencyDisabledInstallSmoke`, focused
+`test_ipc_protocol`/`test_ipc_host` cases, and real-process `test_ipc_daemon`
+cases follow the same rule: they exercise
 package, framing, typed client, complete IPC Host dispatch/polling/stop/artifact
 ownership, daemon lifecycle, concurrency, and cleanup behavior. Daemon tests
 use CTest timeouts plus bounded
@@ -307,9 +321,9 @@ the production runtime and cache service.
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`,
 builds `test_kernel_contracts`, and runs only the injected-codec cases. This
 proves the Graph/cache injection contract and fake do not depend on the optional
-operation provider. The current production image adapter still uses OpenCV
-imgcodecs; a product that omits all OpenCV discovery remains the separate issue
-#63 dependency-disabled profile.
+operation provider. The separate `DependencyDisabledInstallSmoke` covers the
+complete product profile that omits OpenCV discovery and selects the unavailable
+production codec.
 
 Run the focused validation with:
 
@@ -462,6 +476,12 @@ GoogleTest binary. CMake keeps it buildable for manual scripts and ad hoc
 validation, but CTest does not discover or run it. Do not claim that CTest
 covers `test_propagation`; run the exact manual command separately when needed.
 
+The default full test suite registers `test_stdlib_image_buffer_processing` and
+compiles the standard-library implementation directly even though that producer
+uses OpenCV. It verifies clone independence, stride-safe deterministic bilinear
+border behavior, channel conversions, and ROI copying. The default CTest
+inventory also includes `DependencyDisabledInstallSmoke`.
+
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific
 orchestration. The daemon help driver, static package-consumer smoke, and graph
@@ -588,11 +608,15 @@ The maintained entry points are:
   only the later docs increment. The local source/shell lock does not emulate
   GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
   container runner.
+- `ci/scripts/integration_plan.sh` for capability discovery of the
+  static-product, IPC-disabled, and dependency-disabled build smokes.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
-  plus CTest discovery.
+  plus CTest discovery and the real kernel/product-only `dependency-disabled`
+  profile.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
-  including CLI, propagation, plugin, and scheduler coverage.
+  including the dependency-disabled build/install smoke, CLI, propagation,
+  plugin, and scheduler coverage.
 
 CI source inventories and exclusion lists must describe maintained tests and
 current source paths. Migration-only harness names must not be retained as

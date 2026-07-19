@@ -4,9 +4,10 @@ This document describes the dirty-region behavior implemented by the current
 kernel. It separates graph-scoped dirty facts, request planning, task selection,
 scheduler filtering, and output commit. Proposed Macro retile, adaptive
 coarsening, and Run cancellation belong in the kernel evolution roadmap, not
-in this current-state contract. The current dirty-geometry vertical path is
-already kernel-owned; remaining provider and algorithm migration toward a
-dependency-neutral kernel is still roadmap work.
+in this current-state contract. The dirty-geometry path and the private
+clone/resize/channel/ROI processing contract are kernel-owned. The configured
+build selects either an OpenCV adapter or the standard-library implementation,
+so compute/runtime code does not directly declare OpenCV.
 
 ## Terms and Ownership
 
@@ -241,12 +242,10 @@ across the Host request, graph state, ROI propagation, planning, snapshot,
 task/work-set, write-buffer, and `NodeExecutor` boundaries. Checked geometry
 helpers perform endpoint arithmetic in a wider integer representation before
 narrowing. OpenCV rectangles and sizes are created only inside provider or
-algorithm implementations at actual matrix slicing, resize, crop, or blur
-calls. This does not mean that all private OpenCV algorithm dependencies have
-been removed; [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
-and the exact
-[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
-still govern that remaining provider migration.
+adapter implementations at actual matrix or algorithm calls. Private compute
+helpers use `image_processing::*`; the standard-library profile provides
+stride-safe deterministic bilinear resize, channel conversion, cloning, and ROI
+copy without OpenCV discovery.
 
 Keeping dirty facts, static task shape, ready dispatch, and staged commit as
 separate values prevents ROI updates from rewriting topology or transferring
@@ -256,7 +255,10 @@ what generation and epoch checks can currently guarantee.
 ## Implementation and Validation Entry Points
 
 - `src/lib/compute/compute_geometry.hpp`
+- `src/lib/core/image_buffer_processing.*`
+- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
+- `tests/unit/test_stdlib_image_buffer_processing.cpp`
 - `src/lib/compute/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty_region_planner.cpp`
 - `src/lib/compute/dirty_region_planning_policy.hpp`

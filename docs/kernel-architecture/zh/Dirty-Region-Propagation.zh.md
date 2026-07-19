@@ -2,9 +2,9 @@
 
 本文描述当前内核已经实现的 dirty-region 行为，并区分 graph-scoped dirty facts、request
 planning、task selection、scheduler filtering 与 output commit。拟议的 Macro retile、自适应
-coarsening 与 Run cancellation 属于内核演进路线图，而不是本文的当前行为契约。当前 dirty
-geometry 垂直路径已经由内核自有类型承载；面向依赖中立内核的剩余 provider 与 algorithm
-migration 仍属于路线图工作。
+coarsening 与 Run cancellation 属于内核演进路线图，而不是本文的当前行为契约。Dirty geometry
+路径与私有 clone/resize/channel/ROI processing contract 都由内核拥有；configured build 会选择
+OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声明 OpenCV。
 
 ## 术语与所有权
 
@@ -202,11 +202,10 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
 task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和
 `PixelSize` value。Checked geometry helper 会先在更宽的整数表示中完成 endpoint arithmetic，
-再窄化结果。只有 provider 或算法实现在真实 matrix slicing、resize、crop 或 blur call
-处才会创建 OpenCV rectangle 与 size。这并不表示所有私有 OpenCV 算法依赖都已移除；
-[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)与精确的
-[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)仍约束剩余的 provider
-migration。
+再窄化结果。只有 provider 或 adapter 实现在真实 matrix 或 algorithm call 处才会创建 OpenCV
+rectangle 与 size。私有 compute helper 使用 `image_processing::*`；标准库 profile 在不发现
+OpenCV 的情况下提供 stride-safe、确定性的 bilinear resize、channel conversion、clone 与 ROI
+copy。
 
 把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
 update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明确限制界定了当前 generation
@@ -215,7 +214,10 @@ update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明
 ## 实现与验证入口
 
 - `src/lib/compute/compute_geometry.hpp`
+- `src/lib/core/image_buffer_processing.*`
+- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
+- `tests/unit/test_stdlib_image_buffer_processing.cpp`
 - `src/lib/compute/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty_region_planner.cpp`
 - `src/lib/compute/dirty_region_planning_policy.hpp`

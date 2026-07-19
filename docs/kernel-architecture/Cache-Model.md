@@ -75,9 +75,11 @@ image cache data is converted into float image buffers.
 Image bytes cross the private, dependency-neutral `ImageArtifactCodec` contract.
 `Kernel` obtains one configured shared codec from the product composition root
 and injects it into `GraphCacheService`; Graph/cache code supplies only paths,
-`ImageBuffer`, and normalized integer precision. The current production adapter
-uses OpenCV imgcodecs and translates provider failures to `GraphErrc::Io`, while
-OpenCV `StsNoMem` remains `std::bad_alloc`. Tests inject a deterministic fake to
+`ImageBuffer`, and normalized integer precision. With OpenCV enabled, the
+configured adapter uses OpenCV imgcodecs and translates provider failures to
+`GraphErrc::Io`, while OpenCV `StsNoMem` remains `std::bad_alloc`. With OpenCV
+disabled, the configured unavailable codec returns `GraphErrc::Io` without
+discovering or exporting OpenCV. Tests inject a deterministic fake to
 verify call order, lifetime retention, precision selection, recoverable errors,
 and resource exhaustion without reading or writing a real image format.
 
@@ -143,9 +145,10 @@ The current private disk-cache implementation calls neither OpenCV image codecs
 nor YAML APIs. It depends on injected `ImageArtifactCodec` and
 `CacheMetadataCodec` contracts; configured private adapters own provider
 decode/encode, recursive conversion, stream IO, and exception translation.
-Issue #62 completes this runtime/cache value boundary. The normal configured
-product still discovers and links yaml-cpp for its concrete adapters; the
-dependency-disabled product/build evidence remains Issue #63.
+Issue #62 completes this runtime/cache value boundary. Issue #63 adds
+capability-selected real or unavailable adapters: the default product discovers
+and links yaml-cpp/OpenCV, while the dependency-disabled product discovers
+neither and returns `GraphErrc::Io` for explicit representation IO.
 [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
 describe the final adapter and document boundary.
@@ -158,6 +161,7 @@ describe the final adapter and document boundary.
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
+- `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/compute/realtime_proxy_graph.*`
@@ -165,3 +169,4 @@ describe the final adapter and document boundary.
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`

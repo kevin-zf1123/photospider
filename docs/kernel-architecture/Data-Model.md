@@ -88,14 +88,15 @@ boundary. It constructs no parser, emitter, or graph-document stream.
 
 The configured `YamlGraphDocumentAdapter` owns the private YAML translator,
 filesystem read, node-text conversion, complete emission, and direct
-open/write/flush/close behavior. `create_embedded_host()` constructs one
-adapter and injects the same shared owner as both contracts through `Kernel`;
-Kernel and GraphIO have no default persistence construction. A private
-explicit-dependency Host root supports deterministic fake substitution without
-adding an installed API. Issue #61 implements this document boundary. Issue
-#62 moves the shared YAML value translator into that private adapter area and
-removes YAML types from runtime and cache contracts. Only the
-dependency-disabled product profile remains for Issue #63.
+open/write/flush/close behavior. `create_embedded_host()` selects that adapter
+when YAML is enabled and an explicit unavailable document adapter when it is
+disabled, then injects the same shared owner as both contracts through
+`Kernel`; Kernel and GraphIO have no default persistence construction. A
+private explicit-dependency Host root supports deterministic fake substitution
+without adding an installed API. Issues #61 and #62 establish the neutral
+document/value boundary. Issue #63 completes the dependency-disabled product
+profile and preserves empty/in-memory sessions while explicit document IO
+returns `GraphErrc::Io`.
 
 ## Topology Adjacency
 
