@@ -25,9 +25,11 @@ are authoritative; reader-oriented Chinese copies live under
 ## Current and Target Concepts
 
 Do not describe accepted future objects as if they already exist. In
-particular, `ComputeRun`, process-owned `ExecutionService`, `ResourceLedger`,
-the general `Value` model, heterogeneous executors, server control plane, and
-isolated plugin workers remain target-only until their implementation lands.
+particular, `ComputeRun`, request-owned `RunGroup`,
+`ExecutionService::RunLifecycleRegistry`, process-owned `ExecutionService`,
+`ResourceLedger`, the general `Value` model, heterogeneous executors, server
+control plane, and isolated plugin workers remain target-only until their
+implementation lands.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains
@@ -49,3 +51,7 @@ context document.
   domain.
 - A scheduler epoch or task id is not a `RunId`; target completion identity is
   scoped by one stable Run lease.
+- A target `RunGroup` coordinates results and lifecycle for independent HP/RT
+  Runs; it is not a mixed-domain Run or a cross-domain task graph.
+- A graph-lifetime lease protects a target Graph lifetime; it does not make
+  `GraphRuntime` the owner of admitted Runs or their process registry.

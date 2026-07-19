@@ -366,12 +366,19 @@ CMake 规则：
 在该目标中：
 
 - `GraphRuntime` 仍以 graph 为作用域，拥有 Graph state、graph-state lane、revision capture/commit
-  validation、event 与 platform/session metadata；
+  validation、稳定 graph-instance identity 与 lifetime anchor、event 与 platform/session
+  metadata；
 - `ComputeRun` 拥有 request-local plan/dispatcher storage、staged output、
   exception/cancellation/terminal state 与 reservation；不可伪造的 Run lease 会让该 control
   block 在异步 work 期间保持存活；
+- request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
+  规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - `ExecutionService` 拥有物理 worker、有界 ready storage、admission、可信 policy validation 与
   completion routing，并且只接受 dispatcher-ready submission；
+- 其私有 `RunLifecycleRegistry` 提供唯一 process admission/Graph-close/process-shutdown
+  fence、pending-candidate tracking、按 Graph 建索引且由 registry 持有的 `RunLease` entry 与
+  process enumeration，同时不拥有 Run plan、dispatcher、terminal state、Graph state 或 resource
+  token；
 - 内部 Host 权威 `ResourceLedger` 是唯一的 reservation 与 grant mint；以及
 - `SchedulerPolicy` 排列 work 或建议有界 quantum，但不拥有 worker、queue、token、native
   resource、Run 或 Graph state。

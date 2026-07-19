@@ -166,6 +166,24 @@ planned HP and RT siblings owns a request/run-group identity plus one child Run
 per domain. Group identity coordinates caller-visible completion but does not
 create cross-domain task dependencies.
 
+The request-owned `RunGroup` succeeds only when both children succeed and then
+returns the RT child output. Its control block owns child observation leases,
+the sibling gate, aggregate arbiter, and caller promise, not either child plan,
+dispatcher, staged output, or reservation. Its deterministic aggregate order
+is failure, cancellation, then success; resource exhaustion outranks another
+failure, RT outranks HP within the same failure class, and a group-origin
+cancellation outranks a child-only reason; the first group-origin reason
+accepted by the monotonic group arbiter remains stable, followed by the RT/HP
+child tie-break. Group/lifecycle cancellation reaches both children. RT failure
+or cancellation before RT commit
+permanently denies HP commit and requests HP cancellation; HP failure or
+cancellation does not roll back an already-published RT proxy or request RT
+cancellation, but prevents group success. Caller completion waits for both child
+Runs to become terminal, quiescent, and finalized, for both admission attempts
+to resolve, for exact graph/resource release, and for every installed registry
+entry to unregister. The ready caller future contains only a copied aggregate
+value, not a child `RunLease`.
+
 A Run owns or captures:
 
 - one opaque, non-reused `RunId` and optional request/parent/run-group identity;
@@ -229,12 +247,13 @@ grant. Dropping a caller observer does not implicitly cancel admitted work.
 
 The target `GraphRuntime` owns `GraphModel`, graph-scoped runtime state, the
 graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit
-validation/publication, graph events, platform/session metadata, and Graph
-open/closing lifetime state.
+validation/publication, graph events, stable graph-instance identity, a
+graph-lifetime anchor, and platform/session metadata.
 
-It owns no Run, CPU/device/I/O/plugin worker, process ready store, process
-admission, `ResourceLedger`, `SchedulerPolicy`, or physical scheduler instance.
-A Run may hold a graph-lifetime lease without reversing that ownership.
+It owns no Run, admitted-Run index, CPU/device/I/O/plugin worker, process ready
+store, process admission, `ResourceLedger`, `SchedulerPolicy`, or physical
+scheduler instance. A Run may hold a graph-lifetime lease without reversing that
+ownership.
 
 The target lane is held for immutable revision capture and validated visible
 commit, not for long-running planning/execution. This remains future behavior;
@@ -258,6 +277,29 @@ bounded ready storage, Run/resource admission, policy-result validation,
 execution exception fences, and completion routing. It does not own planning,
 dependency semantics, Graph/document persistence, cache authority, dirty
 propagation, visible commit, or Graph state.
+
+Its private `RunLifecycleRegistry` owns the one process admission fence, service
+accepting/stopping state, graph-indexed open/closing rows, pending admission
+candidates, graph-indexed admitted `RunLease` entries, and process-wide Run
+enumeration. It is neither Graph-owned, Host-adapter-local, nor static.
+Admission first records a pending candidate and obtains a graph-lifetime lease
+under this fence, then captures the immutable revision, plans, and obtains a
+complete resource reservation. A second fenced recheck atomically installs the
+Run in both indexes and is the successful admission linearization point.
+
+Graph close and process shutdown change their lifecycle state through the same
+fence. Registration-before-close is indexed and drained; when close wins before
+registration, the candidate is rejected and exact rollback completes. Registry
+entries hold only a `RunLease` and identity metadata, never the plan,
+dispatcher, terminal arbiter, staged output, Graph state, or resource tokens.
+They unregister only after terminal publication, physical quiescence,
+commit/discard finalization, and exact graph/resource release.
+
+Visible commit enters the graph-state lane before taking the lifecycle fence
+for final open-row/registered-Run validation and publication. Close marks
+closing and releases the fence before waiting for the lane, so commit-first
+publication may finish and close-first validation denies commit without a
+registry/lane lock cycle.
 
 `ExecutionService` exclusively owns a host-authoritative `ResourceLedger`
 initialized from composition-root limits. Only trusted host code mints its
@@ -297,10 +339,10 @@ renamed, or aliased into the target `ResourceLedger`.
 ### Revision, cancellation, and visible commit
 
 A Run captures one immutable `GraphRevision` before planning. The minimum
-serialized commit predicate requires an open Graph, a valid graph-lifetime
-lease, exact equality with the current authoritative revision, a current
-supersession generation, no accepted cancellation/failure, and staged output
-valid for that Run.
+serialized commit predicate requires an `Open` registry graph row, a registered
+Run with a valid graph-lifetime lease, exact equality with the current
+authoritative revision, a current supersession generation, no accepted
+cancellation/failure, and staged output valid for that Run.
 
 Failed validation discards staged output and cannot mutate visible Graph state.
 Supersession selects a newer generation and requests cancellation of older
@@ -311,20 +353,31 @@ cancelled, failed, or overdue output cannot commit.
 Any future compatible-revision optimization requires another explicit decision;
 compatibility is not inferred from equal topology.
 
+Paired RT/HP work additionally uses a monotonic `Pending` / `RtCommitted` /
+`Denied` sibling gate. Valid RT proxy publication alone opens it. RT
+failure/cancellation, graph closing, or process shutdown may permanently deny
+it. HP enters `GraphModel` commit only after `RtCommitted` and after its own Run
+predicate succeeds; later HP failure/cancellation does not roll back an RT
+commit that won first.
+
 ### Close and shutdown scopes
 
-Graph close stops new Run and ordinary external graph-state admission for that
-Graph while preserving a finalization path for already-admitted Runs. It denies
-their visible commits, cancels or drains them, lets their continuations observe
-closing and settle, waits every ready/running/completion/dispatcher/commit/
-resource lease to quiesce, and only then stops the graph-state lane and destroys
-graph state. Unrelated Graph Runs and the shared service continue.
+Graph close marks its row closing under the lifecycle fence, rejects
+new/pending admission, waits prior candidates to register or roll back, and
+enumerates the complete graph Run index. It denies visible commit, cancels or
+drains those Runs, and preserves their finalization paths. Only after terminal
+publication, physical quiescence, commit/discard finalization, exact graph/
+resource release, and admitted-Run unregistration does it remove the empty row,
+stop the graph-state lane, and destroy graph state. Unrelated Graph Runs and the
+shared service continue.
 
-Process execution-domain shutdown first stops new-Run admission. Bounded ready
-submission, execution, completion routing, and graph-state finalization remain
-available only for already-admitted Runs chosen to cancel or drain. After every
-Run settles and releases resources exactly once, shutdown stops remaining work
-admission, joins all physical executors, and destroys the service.
+Process execution-domain shutdown marks the service stopping and all graph rows
+closing under the same fence, resolves pending candidates, and enumerates the
+complete process Run index. Bounded ready submission, execution, completion
+routing, and graph-state finalization remain available only for already-admitted
+Runs chosen to cancel or drain. After every Run settles, releases graph/resource
+leases exactly once, and unregisters, shutdown stops remaining work admission,
+joins all physical executors, and destroys the service.
 Worker/operation exceptions are fenced and routed through the matching Run
 lease; late completion performs cleanup only.
 

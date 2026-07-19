@@ -440,7 +440,9 @@ These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-details the later Run lease, completion, and commit ownership, while the
+details the later independent HP/RT Runs, deterministic `RunGroup` settlement,
+RT-first commit gate, admitted-Run registry, completion, and lease ownership,
+while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 describes the later revision and cancellation boundary without making it part
 of the current flow.

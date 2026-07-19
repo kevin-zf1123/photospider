@@ -429,13 +429,21 @@ backend owners. It will not use a static singleton.
 In that target:
 
 - `GraphRuntime` remains graph-scoped and owns Graph state, the graph-state lane,
-  revision capture/commit validation, events, and platform/session metadata;
+  revision capture/commit validation, stable graph-instance identity and
+  lifetime anchor, events, and platform/session metadata;
 - `ComputeRun` owns request-local plan/dispatcher storage, staged output,
   exception/cancellation/terminal state, and reservations; non-forgeable Run
   leases keep that control block alive across asynchronous work;
+- request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
+  returns RT output only after deterministic two-child settlement, and never
+  creates cross-domain task dependencies;
 - `ExecutionService` owns physical workers, bounded ready storage, admission,
   trusted policy validation, and completion routing, while accepting only
   dispatcher-ready submissions;
+- its private `RunLifecycleRegistry` supplies the single process admission/
+  graph-close/process-shutdown fence, pending-candidate tracking,
+  graph-indexed registry-held `RunLease` entries, and process enumeration without
+  owning Run plans, dispatchers, terminal state, Graph state, or resource tokens;
 - the internal host-authoritative `ResourceLedger` is the only reservation and
   grant mint; and
 - `SchedulerPolicy` ranks work or suggests a bounded quantum but owns no worker,

@@ -339,7 +339,8 @@ embedded Host 与 IPC status 边界保持不变。
 [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)约束当前
 graph-state/dispatch 区分。已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-详细定义后续 Run lease、completion 与 commit 所有权，而
+详细定义后续独立 HP/RT Run、确定性 `RunGroup` settlement、RT-first commit gate、
+admitted-Run registry、completion 与 lease 所有权，而
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述后续 revision 与 cancellation
 边界，但不会让它们成为当前流程的一部分。
 

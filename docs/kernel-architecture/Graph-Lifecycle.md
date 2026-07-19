@@ -341,6 +341,13 @@ empty and in-memory sessions remain available without yaml-cpp discovery,
 while an explicit graph-document or cache-metadata representation operation
 uses an unavailable adapter and returns `GraphErrc::Io`.
 
+The accepted
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+defines a future `ExecutionService`-owned admitted-Run registry and one atomic
+Run-admission/graph-close fence. That target relationship does not change the
+current Host admission, `GraphStateExecutor`, scheduler-drain, or retryable
+close behavior documented here.
+
 ## Implementation and Validation Entry Points
 
 - `src/lib/core/image_artifact_codec.hpp`
