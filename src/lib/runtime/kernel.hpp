@@ -17,9 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
-#include <opencv2/opencv.hpp>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -27,6 +25,8 @@
 
 #include "compute/compute_service.hpp"
 #include "compute/dirty_control_lane.hpp"
+#include "core/cache_metadata_codec.hpp"
+#include "core/image_artifact_codec.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_inspect_service.hpp"
 #include "graph/graph_io_service.hpp"
@@ -78,6 +78,35 @@ class KernelTestAccess;
  */
 class Kernel {
  public:
+  /**
+   * @brief Creates a Kernel with every configured persistence dependency.
+   *
+   * @param image_codec Shared codec owner used by graph cache operations.
+   * @param metadata_codec Shared metadata owner used by graph cache operations.
+   * @param document_reader Shared reader owner used by graph and node loads.
+   * @param document_writer Shared writer owner used by graph and node saves.
+   * @throws std::invalid_argument when any required owner is empty.
+   * @note The embedded product composition root selects concrete
+   *       implementations. Kernel retains them through its cache and graph IO
+   *       services for the complete lifetime of every admitted operation.
+   */
+  Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
+         std::shared_ptr<const CacheMetadataCodec> metadata_codec,
+         std::shared_ptr<const GraphDocumentReader> document_reader,
+         std::shared_ptr<const GraphDocumentWriter> document_writer);
+
+  /**
+   * @brief Drains every owned graph runtime before releasing Kernel services.
+   * @throws Nothing.
+   * @note Destruction clears `graphs_` explicitly while cache, traversal,
+   * diagnostic, IO, and ROI collaborators are still alive. Each
+   * `GraphRuntime` first stops graph-state admission, drains admitted work, and
+   * joins its worker, so work items that captured this Kernel cannot observe
+   * destroyed collaborators. External callers must stop Kernel API admission
+   * before destruction; concurrent unadmitted public calls are unsupported.
+   */
+  ~Kernel() noexcept;
+
   /**
    * @brief Last backend error recorded for one graph session.
    *
@@ -203,7 +232,7 @@ class Kernel {
     std::optional<ComputeIntent> intent;
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
-    std::optional<cv::Rect> dirty_roi;
+    std::optional<PixelRect> dirty_roi;
   };
 
   /**
@@ -347,10 +376,10 @@ class Kernel {
    *       item. Existing-session diagnostics are mirrored to LastError, while
    *       Embedded Host retains a lifecycle admission against close.
    */
-  std::optional<cv::Rect> project_roi_forward(const std::string& name,
-                                              int start_node_id,
-                                              const cv::Rect& start_roi,
-                                              int target_node_id);
+  std::optional<PixelRect> project_roi_forward(const std::string& name,
+                                               int start_node_id,
+                                               const PixelRect& start_roi,
+                                               int target_node_id);
 
   /**
    * @brief Projects one ROI backward between required graph nodes.
@@ -372,17 +401,17 @@ class Kernel {
    *       item. Existing-session diagnostics are mirrored to LastError, while
    *       Embedded Host retains a lifecycle admission against close.
    */
-  std::optional<cv::Rect> project_roi_backward(const std::string& name,
-                                               int target_node_id,
-                                               const cv::Rect& target_roi,
-                                               int source_node_id);
+  std::optional<PixelRect> project_roi_backward(const std::string& name,
+                                                int target_node_id,
+                                                const PixelRect& target_roi,
+                                                int source_node_id);
 
   /**
-   * @brief Reloads an existing graph session from YAML through graph-state
-   * serialization.
+   * @brief Reloads an existing graph session from a document through
+   * graph-state serialization.
    *
    * @param name Graph session name to reload.
-   * @param yaml_path Source YAML file path.
+   * @param document_path Source document path.
    * @return true when reload succeeds; false when the graph is missing or the
    *         reload fails with a handled document error.
    * @throws std::bad_alloc if reload execution or handled-failure LastError
@@ -398,18 +427,18 @@ class Kernel {
    *       generation, runtime graph state, and session identity unchanged;
    *       `std::bad_alloc` propagates with the same preservation guarantee.
    */
-  bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
+  bool reload_graph_document(const std::string& name,
+                             const std::string& document_path);
   /**
    * @brief Saves one required graph session through graph-state serialization.
    *
    * @param name Graph session name to save.
-   * @param yaml_path Destination YAML file path.
+   * @param document_path Destination document path.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` when the session is absent,
-   *         or `GraphErrc::Io` when recoverable node serialization, YAML
-   *         emission, or destination preparation/open/write/flush/close
-   *         fails.
-   * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+   *         or `GraphErrc::Io` when recoverable document emission or
+   *         destination preparation/open/write/flush/close fails.
+   * @throws std::bad_alloc if graph-state submission, document serialization,
    *         path handling, or diagnostic construction exhausts memory.
    * @throws std::exception for other graph-state submission or future failures.
    * @note The embedded Host holds a session admission across this call so
@@ -422,7 +451,8 @@ class Kernel {
    *       while a post-open failure may leave created, truncated, or partial
    *       output.
    */
-  void save_graph_yaml(const std::string& name, const std::string& yaml_path);
+  void save_graph_document(const std::string& name,
+                           const std::string& document_path);
   bool clear_drive_cache(const std::string& name);
   bool clear_memory_cache(const std::string& name);
   bool clear_cache(const std::string& name);
@@ -541,20 +571,95 @@ class Kernel {
   std::optional<std::vector<compute::ComputePlanSummary>>
   recent_compute_planning_snapshots(const std::string& name);
 
+  /**
+   * @brief Begins one dirty-source lifecycle and returns its updated snapshot.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node entering the updating state.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Updated snapshot, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note Other failures are recorded in LastError. The convenience facade
+   *       discards control hints returned by begin_dirty_source_control().
+   */
   std::optional<compute::DirtyRegionSnapshot> begin_dirty_source(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Begins one dirty-source lifecycle and preserves dispatch hints.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node entering the updating state.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Control result, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note The complete transition runs as one serialized graph-state work
+   *       item; it does not submit scheduler work itself.
+   */
   std::optional<compute::DirtyControlLaneResult> begin_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Appends one dirty-source ROI and returns the updated snapshot.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node receiving the incremental ROI.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Updated snapshot, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note Other failures are recorded in LastError. The convenience facade
+   *       discards control hints returned by update_dirty_source_control().
+   */
   std::optional<compute::DirtyRegionSnapshot> update_dirty_source(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Appends one dirty-source ROI and preserves dispatch hints.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node receiving the incremental ROI.
+   * @param domain HP or RT dirty domain.
+   * @param source_roi Positive-area kernel-native source ROI.
+   * @return Control result, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note The complete transition runs as one serialized graph-state work
+   *       item and keeps geometry as PixelRect.
+   */
   std::optional<compute::DirtyControlLaneResult> update_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi);
+      const PixelRect& source_roi);
+
+  /**
+   * @brief Ends one dirty-source lifecycle and returns the updated snapshot.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node leaving the updating state.
+   * @param domain HP or RT dirty domain.
+   * @return Updated snapshot, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note No new ROI is appended. The convenience facade discards control
+   *       hints returned by end_dirty_source_control().
+   */
   std::optional<compute::DirtyRegionSnapshot> end_dirty_source(
       const std::string& name, int node_id, compute::DirtyDomain domain);
+
+  /**
+   * @brief Ends one dirty-source lifecycle and preserves cutoff hints.
+   * @param name Loaded graph/session name.
+   * @param node_id Source node leaving the updating state.
+   * @param domain HP or RT dirty domain.
+   * @return Control result, or nullopt on missing graph/handled failure.
+   * @throws std::bad_alloc when graph-state submission, planning, snapshot
+   *         copying, or LastError construction exhausts memory.
+   * @note cutoff_after_downstream is derived only after serialized snapshot
+   *       rebuilding; this facade does not own a scheduler queue.
+   */
   std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain);
   /**
@@ -562,26 +667,41 @@ class Kernel {
    *
    * @param request Graph name, target node, cache, execution, telemetry, and
    * optional intent/dirty ROI controls.
-   * @return Cloned output image, or nullopt when graph lookup, compute, or
-   * image conversion fails.
+   * @return Cloned output descriptor, or nullopt when graph lookup, compute, or
+   * image cloning fails.
    * @throws std::bad_alloc if compute/image execution or handled-failure
    *         LastError construction exhausts memory.
    * @note The image is cloned out of graph-owned storage before returning.
-   *       Other compute and image-conversion exceptions preserve the historical
+   *       Other compute and image-cloning exceptions preserve the historical
    *       nullopt preview/save contract.
    */
-  std::optional<cv::Mat> compute_and_get_image(const ComputeRequest& request);
+  std::optional<ImageBuffer> compute_and_get_image(
+      const ComputeRequest& request);
 
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
-  std::optional<std::string> get_node_yaml(const std::string& name,
-                                           int node_id);
   /**
-   * @brief Replaces one required node from YAML under graph-state
+   * @brief Serializes one required node's persistent definition as text.
+   *
+   * @param name Loaded graph session name.
+   * @param node_id Required node identifier.
+   * @return Serialized node document, or nullopt when the graph-state facade
+   *         reports a recoverable missing graph/node failure.
+   * @throws std::bad_alloc if graph-state submission, detached definition
+   *         capture, document conversion, or result storage exhausts memory.
+   * @note Capture runs under GraphStateExecutor serialization and excludes
+   *       runtime parameters, computed outputs, revisions, ROIs, and LUT state.
+   *       Conversion proceeds through the injected document writer used by
+   *       complete graph operations.
+   */
+  std::optional<std::string> get_node_document(const std::string& name,
+                                               int node_id);
+  /**
+   * @brief Replaces one required node from document text under graph-state
    *        serialization.
    *
    * @param name Required graph session name.
    * @param node_id Required existing node id whose identity is preserved.
-   * @param yaml_text Candidate replacement YAML mapping.
+   * @param document_text Candidate replacement node document.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` when the session or node is
    *         absent, or `GraphErrc::InvalidYaml` when parsing or complete
@@ -589,13 +709,14 @@ class Kernel {
    * @throws std::bad_alloc if parsing, validation, graph-state submission, or
    *         replacement exhausts memory.
    * @throws std::exception for other graph-state executor failures.
-   * @note Required-node lookup, parsing, validation, and replacement execute in
-   *       one GraphStateExecutor work item. Embedded Host retains a session
-   *       admission across the call so concurrent close cannot erase the
-   *       runtime.
+   * @note Required-node lookup, injected reader conversion, forced id
+   *       assignment, in-memory materialization, validation, and replacement
+   *       execute in one GraphStateExecutor work item. Embedded Host retains a
+   *       session admission across the call so concurrent close cannot erase
+   *       the runtime.
    */
-  void set_node_yaml(const std::string& name, int node_id,
-                     const std::string& yaml_text);
+  void set_node_document(const std::string& name, int node_id,
+                         const std::string& document_text);
 
   std::optional<std::vector<int>> trees_containing_node(const std::string& name,
                                                         int node_id);
@@ -1054,18 +1175,18 @@ class Kernel {
       ComputeRequest request);
 
   /**
-   * @brief Runs compute and returns the target output as an OpenCV image.
+   * @brief Runs compute and returns an owned target image descriptor.
    *
    * @param request Internal compute request with image-returning arguments.
-   * @return Cloned cv::Mat target image, or nullopt on missing graph, compute
-   * failure, or empty output.
+   * @return Cloned CPU ImageBuffer target image, or nullopt on missing graph,
+   * compute failure, or empty output.
    * @throws std::bad_alloc if compute/image execution or handled-failure
    *         LastError construction exhausts memory.
    * @note Missing graphs return nullopt before LastError state is touched.
    * Successful compute paths clear stale LastError state, including the
    * no-image-output case. Other compute/image exceptions become nullopt.
    */
-  std::optional<cv::Mat> compute_and_get_image_request(
+  std::optional<ImageBuffer> compute_and_get_image_request(
       const ComputeRequest& request);
 
   /**
@@ -1118,6 +1239,13 @@ class Kernel {
   void setup_schedulers_for_runtime(const std::string& name,
                                     GraphRuntime& runtime);
 
+  /**
+   * @brief Graph-name map owning every runtime and admitted graph-state lane.
+   * @note `Kernel::~Kernel()` clears this map explicitly before ordinary member
+   * destruction so runtime drainage completes while every borrowed Kernel
+   * collaborator remains alive. External lifecycle admission must already have
+   * stopped calls that could access this unsynchronized map.
+   */
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
 
   /**
@@ -1141,7 +1269,19 @@ class Kernel {
   std::map<std::string, LastError> last_error_;
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
+  /**
+   * @brief Cache service retaining the Kernel-injected artifact codecs.
+   * @note `Kernel::~Kernel()` drains and destroys every `GraphRuntime` before
+   * ordinary member teardown reaches this service. Admitted graph-state work
+   * may therefore borrow the service and codecs until its runtime worker is
+   * joined.
+   */
   GraphCacheService cache_service_;
+  /**
+   * @brief Format-neutral service retaining the Kernel-injected document IO.
+   * @note The service outlives every admitted graph-state work item because
+   *       runtime drainage precedes ordinary Kernel member destruction.
+   */
   GraphIOService io_service_;
   RoiPropagationService roi_propagation_service_;
 

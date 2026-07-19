@@ -6,8 +6,8 @@ Photospider. For architecture internals, see
 
 ## 1. Build And Setup
 
-Install the required C++ toolchain, OpenCV, yaml-cpp, and test dependencies if
-you plan to run the GoogleTest suite. Initialize submodules when using the
+Install the required C++ toolchain, OpenCV, yaml-cpp, and test dependencies for
+the default CLI and GoogleTest profile. Initialize submodules when using the
 vendored FTXUI source:
 
 ```bash
@@ -15,6 +15,42 @@ git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build --target graph_cli -j
 ```
+
+The two product capabilities default to `ON`. Dependent target defaults follow
+the capability state:
+
+| Option | Default and effect |
+| --- | --- |
+| `PHOTOSPIDER_ENABLE_OPENCV` | `ON`; enables the OpenCV image-processing implementation, image codec, public adapter, and the default OpenCV provider/plugin choices. |
+| `PHOTOSPIDER_ENABLE_YAML` | `ON`; enables YAML graph-document and cache-metadata adapters. |
+| `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` | Follows `PHOTOSPIDER_ENABLE_OPENCV`; explicitly requesting it while OpenCV is disabled is invalid. |
+| `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS` | Follows `PHOTOSPIDER_ENABLE_OPENCV`; explicitly requesting it while OpenCV is disabled is invalid. |
+| `PHOTOSPIDER_BUILD_GRAPH_CLI` | Defaults to `ON` only when both OpenCV and YAML are enabled; explicitly requesting it without both capabilities is invalid. |
+
+With `BUILD_TESTING=ON`, the provider-dependent broad suite is available only
+when both capabilities, the graph CLI, the repository OpenCV provider, and the
+repository OpenCV plugins are enabled. Explicitly disabling only the provider
+keeps provider-independent focused targets and
+`DependencyDisabledInstallSmoke` available without registering the broad
+suite.
+
+A dependency-disabled installed Host build is:
+
+```bash
+cmake -S . -B build/minimal \
+  -DBUILD_TESTING=OFF \
+  -DPHOTOSPIDER_BUILD_IPC=OFF \
+  -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
+  -DPHOTOSPIDER_ENABLE_YAML=OFF
+cmake --build build/minimal --target photospider_kernel photospider -j
+cmake --install build/minimal --prefix /desired/fresh/prefix
+```
+
+Use a fresh build and install prefix when changing capability values. This
+profile supports neutral image allocation plus in-memory and empty-session Host
+lifecycles. Explicit image-artifact or YAML persistence operations return
+`GraphErrc::Io`; `graph_cli` is unavailable because its file-oriented workflow
+requires both capabilities.
 
 The main executable is:
 
@@ -33,7 +69,7 @@ Plugin and runtime outputs:
 
 | Output | Path | Availability |
 | --- | --- | --- |
-| executable | `build/bin/graph_cli` | base build |
+| executable | `build/bin/graph_cli` | when `PHOTOSPIDER_BUILD_GRAPH_CLI=ON` |
 | local daemon | `build/bin/photospiderd` | macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON` |
 | backend libraries | `build/lib` | base build |
 | operation plugins | `build/plugins` | when their targets are built |
@@ -126,10 +162,14 @@ target_link_libraries(app PRIVATE Photospider::photospider_ipc_client)
 ```
 
 This lookup resolves only Threads. The default component-less lookup and
-`COMPONENTS embedded` retain the embedded target's OpenCV, `yaml-cpp`, Threads,
-and applicable Apple framework dependency resolution. Unknown required
-components, or required `ipc_client` against an IPC-disabled install, fail
-package discovery.
+`COMPONENTS embedded` discover only the dependencies enabled in the producer:
+OpenCV and yaml-cpp in the default profile, neither in the
+dependency-disabled profile, plus Threads and applicable Apple framework
+dependencies when required by enabled features. Unknown required components,
+or required `ipc_client` against an IPC-disabled install, fail package
+discovery. An OpenCV-disabled install reports optional `operation_opencv` as
+unavailable and rejects it when required; it does not export the adapter target
+or install its header.
 
 Extension DSOs use separate installed components:
 
@@ -416,7 +456,10 @@ plugin_dirs:
 
 ## 11. Built-In Operations
 
-Built-ins are registered in `src/lib/core/ops.cpp`.
+Dependency-neutral built-ins are registered in `src/lib/core/ops.cpp`.
+OpenCV-backed entries are provided by the optional
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` module in
+`src/lib/providers/opencv/`.
 
 | Type | Subtype | Description |
 | --- | --- | --- |
@@ -430,7 +473,6 @@ Built-ins are registered in `src/lib/core/ops.cpp`.
 | `image_process` | `crop` | Crop a rectangular region. |
 | `image_process` | `extract_channel` | Extract B/G/R/A or numeric channel. |
 | `image_process` | `gaussian_blur` | Gaussian blur with monolithic and tiled implementations. |
-| `image_process` | `gaussian_blur_tiled` | Tiled blur alias retained for older graphs. |
 | `image_process` | `curve_transform` | Apply the curve transform kernel. |
 | `image_mixing` | `add_weighted` | Weighted blend of two images. |
 | `image_mixing` | `diff` | Absolute difference of two images. |

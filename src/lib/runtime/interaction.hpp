@@ -14,8 +14,6 @@
  * through the static `photospider` product.
  */
 
-#include <yaml-cpp/yaml.h>
-
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -66,15 +64,16 @@ class InteractionService {
    * @param config_path Optional session configuration source.
    * @param cache_root_dir Optional external cache-root directory.
    * @return Loaded graph label, or nullopt only for a duplicate session name.
-   * @throws GraphError with exact scheduler, IO, YAML, schema, topology, or
-   *         unexpected-internal failure categories before Graph publication.
+   * @throws GraphError with exact scheduler, IO, representation/schema,
+   *         topology, or unexpected-internal failure categories before Graph
+   *         publication.
    * @throws std::bad_alloc If Kernel load or error translation exhausts
    *         memory.
    * @note Kernel plans and atomically admits both scheduler intents before
    *       constructing either candidate. This final embedded boundary keeps
-   *       GraphError unchanged, maps BadFile/filesystem failures to Io,
-   *       residual YAML failures to InvalidYaml, and other exceptions to
-   *       Unknown without adding fallback or partial publication.
+   *       GraphError unchanged, maps filesystem failures to Io, and maps other
+   *       exceptions to Unknown without adding fallback or partial
+   *       publication. The injected reader owns representation classification.
    */
   std::optional<std::string> cmd_load_graph(
       const std::string& name, const std::string& root_dir,
@@ -87,13 +86,6 @@ class InteractionService {
       throw;
     } catch (const GraphError&) {
       throw;
-    } catch (const YAML::BadFile& error) {
-      throw GraphError(GraphErrc::Io, "Graph YAML file access failed: " +
-                                          std::string(error.what()));
-    } catch (const YAML::Exception& error) {
-      throw GraphError(
-          GraphErrc::InvalidYaml,
-          "Graph YAML processing failed: " + std::string(error.what()));
     } catch (const std::filesystem::filesystem_error& error) {
       throw GraphError(GraphErrc::Io, "Graph filesystem preparation failed: " +
                                           std::string(error.what()));
@@ -248,10 +240,10 @@ class InteractionService {
 
   // IO / cache / traversal / printing
   /**
-   * @brief Reloads an existing graph from YAML through the Kernel facade.
+   * @brief Reloads an existing graph document through the Kernel facade.
    *
    * @param graph Existing graph/session name.
-   * @param yaml_path Source YAML file path.
+   * @param document_path Source document path.
    * @return True on success; false for missing graphs or reload failures
    *         recorded in Kernel LastError.
    * @throws std::bad_alloc if reload execution or LastError construction
@@ -264,19 +256,20 @@ class InteractionService {
    *       internal method does not expose Kernel to frontends; public callers
    *       use `ps::Host::reload_graph()`.
    */
-  bool cmd_reload_yaml(const std::string& graph, const std::string& yaml_path) {
-    return kernel_.reload_graph_yaml(graph, yaml_path);
+  bool cmd_reload_graph_document(const std::string& graph,
+                                 const std::string& document_path) {
+    return kernel_.reload_graph_document(graph, document_path);
   }
   /**
    * @brief Saves one required graph session through the Kernel exact boundary.
    *
    * @param graph Graph session name to save.
-   * @param yaml_path Destination YAML file path.
+   * @param document_path Destination document path.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` for an absent session or
-   *         `GraphErrc::Io` for recoverable node serialization, YAML emission,
-   *         or destination preparation/open/write/flush/close failure.
-   * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+   *         `GraphErrc::Io` for recoverable document serialization or
+   *         destination preparation/open/write/flush/close failure.
+   * @throws std::bad_alloc if graph-state submission, document serialization,
    *         path handling, or diagnostic construction exhausts memory.
    * @throws std::exception for other graph-state submission or future failures.
    * @note Embedded Host retains its close admission while this command resolves
@@ -287,8 +280,9 @@ class InteractionService {
    *       preserves existing bytes, while post-open failure may leave created,
    *       truncated, or partial output.
    */
-  void cmd_save_yaml(const std::string& graph, const std::string& yaml_path) {
-    kernel_.save_graph_yaml(graph, yaml_path);
+  void cmd_save_graph_document(const std::string& graph,
+                               const std::string& document_path) {
+    kernel_.save_graph_document(graph, document_path);
   }
   bool cmd_clear_drive_cache(const std::string& graph) {
     return kernel_.clear_drive_cache(graph);
@@ -426,33 +420,39 @@ class InteractionService {
     return kernel_.recent_compute_planning_snapshots(graph);
   }
 
+  /** @copydoc Kernel::begin_dirty_source */
   std::optional<compute::DirtyRegionSnapshot> cmd_begin_dirty_source(
       const std::string& graph, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi) {
+      const PixelRect& source_roi) {
     return kernel_.begin_dirty_source(graph, node_id, domain, source_roi);
   }
+  /** @copydoc Kernel::begin_dirty_source_control */
   std::optional<compute::DirtyControlLaneResult> cmd_begin_dirty_source_control(
       const std::string& graph, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi) {
+      const PixelRect& source_roi) {
     return kernel_.begin_dirty_source_control(graph, node_id, domain,
                                               source_roi);
   }
+  /** @copydoc Kernel::update_dirty_source */
   std::optional<compute::DirtyRegionSnapshot> cmd_update_dirty_source(
       const std::string& graph, int node_id, compute::DirtyDomain domain,
-      const cv::Rect& source_roi) {
+      const PixelRect& source_roi) {
     return kernel_.update_dirty_source(graph, node_id, domain, source_roi);
   }
+  /** @copydoc Kernel::update_dirty_source_control */
   std::optional<compute::DirtyControlLaneResult>
   cmd_update_dirty_source_control(const std::string& graph, int node_id,
                                   compute::DirtyDomain domain,
-                                  const cv::Rect& source_roi) {
+                                  const PixelRect& source_roi) {
     return kernel_.update_dirty_source_control(graph, node_id, domain,
                                                source_roi);
   }
+  /** @copydoc Kernel::end_dirty_source */
   std::optional<compute::DirtyRegionSnapshot> cmd_end_dirty_source(
       const std::string& graph, int node_id, compute::DirtyDomain domain) {
     return kernel_.end_dirty_source(graph, node_id, domain);
   }
+  /** @copydoc Kernel::end_dirty_source_control */
   std::optional<compute::DirtyControlLaneResult> cmd_end_dirty_source_control(
       const std::string& graph, int node_id, compute::DirtyDomain domain) {
     return kernel_.end_dirty_source_control(graph, node_id, domain);
@@ -463,14 +463,15 @@ class InteractionService {
    * @param request Internal graph, target, cache, execution, telemetry, and
    * optional dirty/intent controls produced by the embedded Host adapter from
    * a public HostComputeRequest.
-   * @return Cloned image, or nullopt when compute or image extraction fails.
+   * @return Cloned CPU image descriptor, or nullopt when compute or image
+   * extraction fails.
    * @throws std::bad_alloc if Kernel compute/image execution or handled-
    *         failure LastError construction exhausts memory.
    * @note Frontends submit HostComputeRequest to ps::Host and never construct
    * this Kernel::ComputeRequest directly. The request is not retained after
    * image extraction completes.
    */
-  std::optional<cv::Mat> cmd_compute_and_get_image(
+  std::optional<ImageBuffer> cmd_compute_and_get_image(
       const Kernel::ComputeRequest& request) {
     return kernel_.compute_and_get_image(request);
   }
@@ -483,16 +484,26 @@ class InteractionService {
   std::optional<std::vector<int>> cmd_list_node_ids(const std::string& graph) {
     return kernel_.list_node_ids(graph);
   }
-  std::optional<std::string> cmd_get_node_yaml(const std::string& graph,
-                                               int node_id) {
-    return kernel_.get_node_yaml(graph, node_id);
+  /**
+   * @brief Emits one required node through the injected document writer.
+   *
+   * @param graph Graph session containing the node.
+   * @param node_id Required node identifier.
+   * @return Owned document text, or nullopt for a recoverable missing target.
+   * @throws std::bad_alloc if capture, emission, or result allocation fails.
+   * @note Public Host keeps its ABI-stable YAML method name while this private
+   *       boundary remains format-neutral.
+   */
+  std::optional<std::string> cmd_get_node_document(const std::string& graph,
+                                                   int node_id) {
+    return kernel_.get_node_document(graph, node_id);
   }
   /**
-   * @brief Replaces one required graph node from YAML text.
+   * @brief Replaces one required graph node from document text.
    *
    * @param graph Required graph session name.
    * @param node_id Required existing node id whose identity is preserved.
-   * @param yaml_text Candidate replacement YAML mapping.
+   * @param document_text Candidate replacement node document.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` for an absent graph/node or
    *         `GraphErrc::InvalidYaml` for parsing/topology validation failure.
@@ -502,9 +513,9 @@ class InteractionService {
    * @note Embedded Host retains its close admission while Kernel performs the
    *       required-node lookup and replacement in one graph-state work item.
    */
-  void cmd_set_node_yaml(const std::string& graph, int node_id,
-                         const std::string& yaml_text) {
-    kernel_.set_node_yaml(graph, node_id, yaml_text);
+  void cmd_set_node_document(const std::string& graph, int node_id,
+                             const std::string& document_text) {
+    kernel_.set_node_document(graph, node_id, document_text);
   }
   /**
    * @brief Schedules an asynchronous compute command from a request object.
@@ -543,10 +554,10 @@ class InteractionService {
    * @note Embedded Host retains its close admission while endpoint lookup and
    *       projection execute in one graph-state work item.
    */
-  std::optional<cv::Rect> cmd_project_roi(const std::string& graph,
-                                          int start_node_id,
-                                          const cv::Rect& start_roi,
-                                          int target_node_id) {
+  std::optional<PixelRect> cmd_project_roi(const std::string& graph,
+                                           int start_node_id,
+                                           const PixelRect& start_roi,
+                                           int target_node_id) {
     return kernel_.project_roi_forward(graph, start_node_id, start_roi,
                                        target_node_id);
   }
@@ -568,10 +579,10 @@ class InteractionService {
    * @note Embedded Host retains its close admission while endpoint lookup and
    *       projection execute in one graph-state work item.
    */
-  std::optional<cv::Rect> cmd_project_roi_backward(const std::string& graph,
-                                                   int target_node_id,
-                                                   const cv::Rect& target_roi,
-                                                   int source_node_id) {
+  std::optional<PixelRect> cmd_project_roi_backward(const std::string& graph,
+                                                    int target_node_id,
+                                                    const PixelRect& target_roi,
+                                                    int source_node_id) {
     return kernel_.project_roi_backward(graph, target_node_id, target_roi,
                                         source_node_id);
   }

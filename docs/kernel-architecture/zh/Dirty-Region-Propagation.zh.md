@@ -2,15 +2,19 @@
 
 本文描述当前内核已经实现的 dirty-region 行为，并区分 graph-scoped dirty facts、request
 planning、task selection、scheduler filtering 与 output commit。拟议的 Macro retile、自适应
-coarsening、Run cancellation 与依赖中立 geometry 属于内核演进路线图，而不是本文的当前行为契约。
+coarsening 与 Run cancellation 属于内核演进路线图，而不是本文的当前行为契约。Dirty geometry
+路径与私有 clone/resize/channel/ROI processing contract 都由内核拥有；configured build 会选择
+OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声明 OpenCV。
 
 ## 术语与所有权
 
 **Dirty source** 是一个 graph node，表示某个 snapshot 中 dirty work 的来源。Lifecycle event 可以
 显式指定它；request planner 也可以把选中 dependency cone 的 upstream root 推导为 dirty source。
 
-**Dirty ROI** 是受影响或被请求的矩形区域。当前 private kernel 使用 `cv::Rect` 表示 ROI，使用
-`cv::Size` 表示 output extent。
+**Dirty ROI** 是受影响或被请求的矩形区域。在 Host、graph、propagation、planning、snapshot、
+task/work-set、write-buffer 与 `NodeExecutor` 边界中，内核自有表示为 `PixelRect`，output extent
+使用 `PixelSize`。只有 provider 或算法在真实 matrix 或 algorithm call 处才会局部创建 OpenCV
+rectangle 与 size。
 
 **Dirty generation** 是存储在 `DirtyRegionSnapshot` 中并复制到 selected task metadata 的值，用于
 标识 dirty inspection 与 source commit state。它不是 graph revision、`ComputeRun` 或 scheduler
@@ -148,6 +152,12 @@ Dirty execution 会先取得所请求 domain 的 immutable node/cache-pruned pla
 execution ROI、保留 task id、推导 task-level dependency，并分离 source-boundary 与 downstream
 task id。它不会展开 node、创建新 tile shape 或插入 retile task。
 
+在选中的 tiled `image_mixing` node 分派其借用的 `InputTile`/`OutputTile` view 之前，
+`NodeExecutor` 会为该次 node invocation 一次性规范化所需 secondary input。Crop/pad 使用
+stride-aware 内核 fill/copy 原语，因此 active pixel 会通过各 descriptor 的 `step` 复制，padding
+byte 则被排除。临时 normalized `NodeOutput` owner 保持 request-local，并存活到同步 tile callback
+全部结束。该 normalization 不会改变 selected task id 或 dirty ROI geometry。
+
 Dispatcher 会提交 selected source group 并等待其 settle，验证所需 source output 已存在于相关
 staged 或 committed store，随后提交 initially-ready downstream group。Dependency completion 会继续
 释放其他 ready downstream work。
@@ -174,12 +184,12 @@ edge，也不会让 RT output 成为 authoritative HP cache。它也不是跨 do
 提交成功后若 HP 失败，proxy commit 不会回滚。
 
 在 scheduler-backed sibling 启动前，`ComputeService` 会创建一个 request-owned 的 per-node
-synchronization object，并由两个 domain 共享。只有同一节点的 live `Node` snapshot/YAML parameter
+synchronization object，并由两个 domain 共享。只有同一节点的 live `Node` snapshot/`ParameterMap`
 resolution 与短暂 staging 临界区会被串行化；不同节点与 operation execution 仍可并发。该 owner
 会存活到 sibling failure cleanup 与 scheduler drain 完成，随后随本次 request 销毁；它不会被
 `GraphModel`、`GraphRuntime` 或 process-wide state 保留。
 
-## 明确的当前限制
+## 边界与原理
 
 当前实现不提供：
 
@@ -189,15 +199,25 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 - 自动启动 compute 的 node-to-backend dirty subscription；
 - 通用 `ComputeRun`、graph revision、deadline、supersession 或 cooperative cancellation contract。
 
-当前 dirty geometry 还在 graph、propagation、planning、snapshot 与 execution interface 中直接依赖
-OpenCV type。这是已接受的当前限制。[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
-与[内核演进路线图](../../roadmap/zh/Kernel-Evolution.zh.md)定义了合并后的替代方向：使用 kernel-owned
-checked geometry，并只在 adapter/provider 层使用 OpenCV。
+当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
+task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和
+`PixelSize` value。Checked geometry helper 会先在更宽的整数表示中完成 endpoint arithmetic，
+再窄化结果。只有 provider 或 adapter 实现在真实 matrix 或 algorithm call 处才会创建 OpenCV
+rectangle 与 size。私有 compute helper 使用 `image_processing::*`；标准库 profile 在不发现
+OpenCV 的情况下提供 stride-safe、确定性的 bilinear resize、channel conversion、clone 与 ROI
+copy。
+
+把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
+update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明确限制界定了当前 generation
+与 epoch check 能够保证的范围。
 
 ## 实现与验证入口
 
 - `src/lib/compute/compute_geometry.hpp`
+- `src/lib/core/image_buffer_processing.*`
+- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
+- `tests/unit/test_stdlib_image_buffer_processing.cpp`
 - `src/lib/compute/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty_region_planner.cpp`
 - `src/lib/compute/dirty_region_planning_policy.hpp`
@@ -205,8 +225,11 @@ checked geometry，并只在 adapter/provider 层使用 OpenCV。
 - `src/lib/compute/task_graph_planning.cpp`
 - `src/lib/compute/dirty_execution_common.cpp`
 - `src/lib/compute/dirty_update_executor.cpp`
+- `src/lib/compute/tiled_input_normalizer.cpp`
+- `src/lib/compute/node_executor.cpp`
 - `src/lib/graph/roi_propagation_service.cpp`
 - `tests/integration/test_scheduler.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

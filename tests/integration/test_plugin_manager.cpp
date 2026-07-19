@@ -20,10 +20,10 @@
 #include <vector>
 
 #include "compute/task_graph_planning.hpp"
-#include "core/ops.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "plugin/plugin_manager.hpp"
+#include "providers/configured_operation_providers.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "core/op_registry_test_access.hpp"
 #include "plugin/plugin_loader_test_access.hpp"
@@ -1472,7 +1472,6 @@ TEST_F(PluginManagerLifecycleTest,
   node.name = "plugin_task_shape_generation";
   node.type = kLifecycleType;
   node.subtype = kLifecycleTaskShapeSubtype;
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = 64;
   node.parameters["height"] = 16;
   graph.add_node(node);
@@ -2061,7 +2060,7 @@ TEST_F(PluginManagerLifecycleTest,
   node.type = kDirectCpuOwnerType;
   node.subtype = kDirectCpuTiledSubtype;
   OutputTile output;
-  output.roi = cv::Rect(2, 3, 5, 7);
+  output.roi = PixelRect{2, 3, 5, 7};
   const std::vector<InputTile> inputs(4);
   tracker.last_tiled_result.store(-1, std::memory_order_release);
   std::get<TileOpFunc>(device_snapshot_copy->func)(node, output, inputs);
@@ -2830,8 +2829,8 @@ TEST_F(PluginManagerLifecycleTest,
  * @brief Proves repeated public seed calls never replay built-ins over a later
  * registry replacement.
  * @throws Nothing when the replacement remains active until explicit cleanup.
- * @note `ops::register_builtin()` is called directly only after the assertion
- * to restore the test's core-operation callback for subsequent tests.
+ * @note Configured provider registration is called directly only after the
+ * assertion to restore the provider callback for subsequent tests.
  */
 TEST_F(PluginManagerLifecycleTest,
        RepeatedSeedDoesNotOverwritePostSeedRegistryReplacement) {
@@ -2857,7 +2856,7 @@ TEST_F(PluginManagerLifecycleTest,
   const NodeOutput output = std::get<MonolithicOpFunc>(*resolved)(node, {});
   EXPECT_EQ(output.debug.compute_device, "POST_SEED_REPLACEMENT");
 
-  ops::register_builtin();
+  providers::register_configured_operation_providers();
 }
 
 /**
@@ -3207,13 +3206,13 @@ TEST_F(PluginManagerLifecycleTest,
 /**
  * @brief Proves loaded callbacks fence only the actual DSO invocation frame.
  *
- * @throws Nothing when host pre-entry YAML conversion and post-return output
- * validation preserve their original host-owned exception types.
- * @note The release file already exists, so any accidental callback entry is
- * visible in the lifecycle trace without blocking the test.
+ * @throws Nothing when host post-return output validation preserves its
+ * original host-owned exception type.
+ * @note Graph parameters are already format-neutral, so callback entry has no
+ * late document conversion stage.
  */
 TEST_F(PluginManagerLifecycleTest,
-       LoadedCallbackPreservesHostAdapterExceptionTypesOutsideDsoFence) {
+       LoadedCallbackPreservesHostPostReturnValidationOutsideDsoFence) {
   const auto plugin_path = lifecycle_plugin_path();
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
   const auto trace_path = lifecycle_trace_path("host-adapter-exceptions");
@@ -3241,12 +3240,7 @@ TEST_F(PluginManagerLifecycleTest,
   node.id = 1;
   node.type = kLifecycleType;
   node.subtype = kLifecycleSubtype;
-  node.parameters = YAML::Load("{bad: !unsupported value}");
-  EXPECT_THROW((void)callback(node, {}), YAML::Exception);
-  EXPECT_EQ(read_lifecycle_trace(trace_path),
-            (std::vector<std::string>{"registrar_return"}));
-
-  node.parameters = YAML::Node(YAML::NodeType::Map);
+  node.parameters["bad"] = "opaque";
   {
     ScopedEnvironmentVariable invalid_result_environment(
         kLifecycleInvalidResultEnvironment, "1");
@@ -3301,14 +3295,12 @@ TEST_F(PluginManagerLifecycleTest,
   source.name = "roi_source";
   source.type = "test";
   source.subtype = "source";
-  source.parameters = YAML::Node(YAML::NodeType::Map);
   graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "roi_child";
   child.type = kLifecycleType;
   child.subtype = kLifecycleSubtype;
-  child.parameters = YAML::Node(YAML::NodeType::Map);
   child.image_inputs = {ImageInput{1, "image"}};
   graph.add_node(child);
   graph.validate_topology();
@@ -3326,16 +3318,16 @@ TEST_F(PluginManagerLifecycleTest,
     ScopedEnvironmentVariable invalid_roi_environment(
         kLifecycleInvalidRoiEnvironment, "negative");
     EXPECT_THROW(
-        (void)dirty(graph.node(2), cv::Rect(1, 2, 3, 4), graph, cv::Size(8, 8),
-                    {cv::Size(8, 8)}, parameters, nullptr),
+        (void)dirty(graph.node(2), PixelRect{1, 2, 3, 4}, graph,
+                    PixelSize{8, 8}, {PixelSize{8, 8}}, parameters, nullptr),
         std::invalid_argument);
   }
   {
     ScopedEnvironmentVariable invalid_roi_environment(
         kLifecycleInvalidRoiEnvironment, "overflow");
-    EXPECT_THROW((void)forward(graph.node(2), cv::Rect(1, 2, 3, 4), graph,
-                               cv::Size(8, 8), cv::Size(8, 8), 0,
-                               {cv::Size(8, 8)}, parameters),
+    EXPECT_THROW((void)forward(graph.node(2), PixelRect{1, 2, 3, 4}, graph,
+                               PixelSize{8, 8}, PixelSize{8, 8}, 0,
+                               {PixelSize{8, 8}}, parameters),
                  std::invalid_argument);
   }
 
@@ -3877,14 +3869,17 @@ TEST_F(PluginManagerLifecycleTest,
   source.name = "dependency_source";
   source.type = "image_generator";
   source.subtype = "constant";
-  source.parameters = YAML::Load("{width: 8, height: 8, value: 0}");
+  source.parameters["width"] = 8;
+  source.parameters["height"] = 8;
+  source.parameters["value"] = 0;
   graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "plugin_dependency";
   child.type = "plugin_lifecycle";
   child.subtype = "op";
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
@@ -3897,7 +3892,7 @@ TEST_F(PluginManagerLifecycleTest,
 
   RoiPropagationService propagation;
   const auto build_and_read_marker = [&]() {
-    (void)propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+    (void)propagation.project_roi_backward(graph, 2, PixelRect{0, 0, 1, 1}, 1);
     const Node& cached_node = graph.node(2);
     EXPECT_TRUE(cached_node.dependency_lut_cache.has_value());
     return cached_node.dependency_lut_cache->lut.cell_to_upstream_roi.front().x;
@@ -3940,14 +3935,17 @@ TEST_F(PluginManagerLifecycleTest,
   source.name = "dependency_source";
   source.type = "image_generator";
   source.subtype = "constant";
-  source.parameters = YAML::Load("{width: 8, height: 8, value: 0}");
+  source.parameters["width"] = 8;
+  source.parameters["height"] = 8;
+  source.parameters["value"] = 0;
   graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "plugin_dependency";
   child.type = kLifecycleType;
   child.subtype = kLifecycleSubtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
@@ -3960,7 +3958,7 @@ TEST_F(PluginManagerLifecycleTest,
 
   RoiPropagationService propagation;
   const auto project = [&]() {
-    return propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+    return propagation.project_roi_backward(graph, 2, PixelRect{0, 0, 1, 1}, 1);
   };
 
   ASSERT_EQ(manager.load_from_dirs_report({plugin_path.parent_path().string()})

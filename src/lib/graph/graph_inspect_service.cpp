@@ -61,8 +61,8 @@ const NodeOutput* pick_cached_output(const Node& node,
  * @param path Request-local recursion path used for cycle detection.
  * @param include_metadata Whether copied nodes include cache metadata.
  * @return Nothing.
- * @throws std::bad_alloc if path, edge, node, or tree storage exhausts memory.
- * @throws YAML::Exception if node parameter cloning fails.
+ * @throws std::bad_alloc if path, edge, recursive parameter, or tree storage
+ * exhausts memory.
  * @note path membership is removed during unwind so sibling branches do not
  * inherit one another's cycle state. All borrowed references remain call-local.
  */
@@ -141,8 +141,8 @@ NodeMetadataSummary metadata_summary_for(const Node& node) {
  * @param node Node to inspect during serialized graph access.
  * @param include_metadata Whether formal HP cache metadata is copied.
  * @return Owned node inspection value.
- * @throws std::bad_alloc if string, YAML, or metadata storage exhausts memory.
- * @throws YAML::Exception if parameter cloning fails for another reason.
+ * @throws std::bad_alloc if string, parameter, or metadata storage exhausts
+ * memory.
  * @note The result owns all values and retains no Node or NodeOutput reference.
  */
 GraphNodeInspectInfo GraphInspectService::inspect_node(
@@ -152,7 +152,7 @@ GraphNodeInspectInfo GraphInspectService::inspect_node(
   info.name = node.name;
   info.type = node.type;
   info.subtype = node.subtype;
-  info.parameters = YAML::Clone(node.parameters);
+  info.parameters = node.parameters;
   if (include_metadata) {
     info.metadata = metadata_summary_for(node);
   }
@@ -168,7 +168,6 @@ GraphNodeInspectInfo GraphInspectService::inspect_node(
  * @throws std::bad_alloc if id collection, node copying, or result storage
  * exhausts memory.
  * @throws GraphError if a node id disappears during caller-unsafe mutation.
- * @throws YAML::Exception if parameter cloning fails for another reason.
  * @note BUILD_TESTING may inject resource exhaustion inside the real
  * collection loop based on immutable test input; production builds compile
  * that branch out.
@@ -194,8 +193,8 @@ GraphInspectionSnapshot GraphInspectService::inspect_graph(
  * @param graph Graph whose upstream topology is traversed.
  * @param include_metadata Whether copied nodes include cache metadata.
  * @return Owned flattened dependency tree.
- * @throws std::bad_alloc if root, path, edge, or entry storage exhausts memory.
- * @throws YAML::Exception if parameter cloning fails for another reason.
+ * @throws std::bad_alloc if root, path, edge, recursive parameter, or entry
+ * storage exhausts memory.
  * @note The caller owns graph-state serialization; recursion state is local to
  * each root branch.
  */
@@ -231,8 +230,8 @@ DependencyTree GraphInspectService::dependency_tree(
  * @param start_node_id Requested traversal root.
  * @param include_metadata Whether copied nodes include cache metadata.
  * @return Owned flattened tree, or a value with start_node_found=false.
- * @throws std::bad_alloc if root, path, edge, or entry storage exhausts memory.
- * @throws YAML::Exception if parameter cloning fails for another reason.
+ * @throws std::bad_alloc if root, path, edge, recursive parameter, or entry
+ * storage exhausts memory.
  * @note The caller owns graph-state serialization; no graph reference escapes.
  */
 DependencyTree GraphInspectService::dependency_tree(

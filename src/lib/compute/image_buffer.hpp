@@ -2,9 +2,9 @@
 
 #include <cstddef>
 #include <memory>
-#include <opencv2/core.hpp>
 #include <vector>
 
+#include "photospider/core/geometry.hpp"
 #include "photospider/core/image_buffer.hpp"
 
 namespace ps {
@@ -17,13 +17,14 @@ struct SpatialContext;
  *
  * InputTile is the private compute representation passed between tile planning,
  * input normalization, backend adapters, and operation-host callbacks. Its
- * OpenCV rectangle is confined to the backend implementation boundary.
+ * ROI uses the same dependency-neutral geometry as the public operation
+ * contract.
  *
  * @throws Nothing for value operations.
  * @note The buffer pointer is const so tiled operator APIs cannot mutate
- *       ImageBuffer metadata or replace the upstream payload. OpenCV cv::Mat
- *       views do not provide hard pixel immutability, so tiled operators must
- *       still treat matrices obtained from InputTile as read-only.
+ *       ImageBuffer metadata or replace the upstream payload. Backend views
+ *       may not provide hard pixel immutability, so tiled operators must still
+ *       treat views obtained from InputTile as read-only.
  */
 struct InputTile {
   /**
@@ -35,7 +36,7 @@ struct InputTile {
 
   /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
    */
-  cv::Rect roi;
+  PixelRect roi;
 
   /**
    * @brief Borrowed immutable spatial metadata for the upstream output.
@@ -51,8 +52,8 @@ struct InputTile {
  * @brief Writable non-owning view over an output image region.
  *
  * OutputTile is the private compute write representation passed to backend
- * adapters and operation-host callbacks. Its OpenCV rectangle never crosses
- * the public plugin contract, which uses backend-neutral geometry values.
+ * adapters and operation-host callbacks. Its ROI is a backend-neutral value;
+ * an OpenCV provider may translate it only when creating a local matrix view.
  *
  * @throws Nothing for value operations.
  * @note The buffer pointer is mutable because output tiles are the only tile
@@ -64,7 +65,7 @@ struct OutputTile {
 
   /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
    */
-  cv::Rect roi;
+  PixelRect roi;
 };
 
 /**

@@ -11,8 +11,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/ops.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "providers/configured_operation_providers.hpp"
 
 namespace ps {
 namespace {
@@ -237,7 +237,7 @@ PluginLoadResult PluginManager::load_from_dirs_report(
 void PluginManager::synchronize_builtins_locked() {
   auto& registry = OpRegistry::instance();
   if (!builtins_seeded_) {
-    ops::register_builtin();
+    providers::register_configured_operation_providers();
     builtins_seeded_ = true;
   }
 

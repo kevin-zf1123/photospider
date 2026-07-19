@@ -10,19 +10,25 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "adapters/yaml/parameter_value_yaml.hpp"
 #include "compute/dirty_region_planner.hpp"
-#include "core/ops.hpp"
-#include "core/parameter_value_adapter.hpp"
+#include "compute/image_buffer.hpp"
+#include "compute/task_graph_planning.hpp"
+#include "core/parameter_value_text.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
+#include "photospider/core/inspection_types.hpp"
+#include "photospider/host/compute_request.hpp"
 #include "photospider/plugin/opencv_adapter.hpp"
 #include "photospider/plugin/plugin_api.hpp"
 #include "plugin/operation_host_adapter.hpp"
+#include "providers/configured_operation_providers.hpp"
 
 namespace ps {
 namespace {
@@ -35,6 +41,82 @@ static_assert(static_cast<std::uint32_t>(DataType::UINT8) == 0U);
 static_assert(static_cast<std::uint32_t>(DataType::FLOAT64) == 5U);
 static_assert(static_cast<std::uint32_t>(plugin::ParameterKind::Null) == 0U);
 static_assert(static_cast<std::uint32_t>(plugin::ParameterKind::Object) == 6U);
+
+static_assert(std::is_same_v<decltype(InputTileView::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(OutputTileView::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(InputTile::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(OutputTile::roi), PixelRect>);
+static_assert(std::is_same_v<decltype(Node::hp_roi), std::optional<PixelRect>>);
+static_assert(std::is_same_v<decltype(Node::last_input_size_hp),
+                             std::optional<PixelSize>>);
+static_assert(std::is_same_v<typename decltype(DependencyLutCacheIdentity::
+                                                   input_extents)::value_type,
+                             PixelSize>);
+static_assert(
+    std::is_same_v<decltype(UpstreamRoiProjection::shared_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(UpstreamRoiProjection::dependency_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::HpPlanEntry::roi_hp), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::HpPlanEntry::hp_size), PixelSize>);
+static_assert(
+    std::is_same_v<decltype(compute::RtPlanEntry::roi_rt), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::RtPlanEntry::rt_size), PixelSize>);
+static_assert(std::is_same_v<
+              decltype(compute::DirtySourceRoiRecord::source_roi), PixelRect>);
+static_assert(std::is_same_v<typename decltype(compute::DirtySourceNodeState::
+                                                   source_rois)::value_type,
+                             PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyTileKey::pixel_roi), PixelRect>);
+static_assert(std::is_same_v<
+              decltype(compute::DirtyMonolithicRegion::pixel_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyEdgeMapping::from_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyEdgeMapping::to_roi), PixelRect>);
+static_assert(
+    std::is_same_v<
+        typename decltype(compute::DirtyRegionSnapshot::per_node_dirty_rois)::
+            mapped_type::value_type,
+        PixelRect>);
+static_assert(std::is_same_v<
+              typename decltype(compute::DirtyRegionSnapshot::
+                                    actual_dirty_rois)::mapped_type::value_type,
+              PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::PlannedDependency::to_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::PlannedTask::output_roi), PixelRect>);
+static_assert(
+    std::is_same_v<
+        typename decltype(compute::PlannedNodeWork::dirty_rois)::value_type,
+        PixelRect>);
+static_assert(std::is_same_v<
+              decltype(compute::DirtyNodeSelection::execution_roi), PixelRect>);
+static_assert(std::is_same_v<decltype(compute::ComputeRequest::dirty_roi),
+                             std::optional<PixelRect>>);
+static_assert(std::is_same_v<decltype(HostComputeRequest::dirty_roi),
+                             std::optional<PixelRect>>);
+static_assert(std::is_same_v<decltype(SpatialSnapshot::extent), PixelSize>);
+static_assert(
+    std::is_same_v<decltype(DirtyTileSnapshot::pixel_roi), PixelRect>);
+static_assert(std::is_same_v<
+              typename decltype(DirtyRegionInspectionSnapshot::
+                                    actual_dirty_rois)::mapped_type::value_type,
+              PixelRect>);
+static_assert(
+    std::is_same_v<decltype(plugin::RoiContext::requested_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(plugin::RoiContext::output_extent), PixelSize>);
+static_assert(
+    std::is_same_v<decltype(plugin::SpatialSnapshot::absolute_roi), PixelRect>);
+static_assert(
+    std::is_same_v<typename decltype(plugin::DependencyLutSnapshot::
+                                         cell_to_upstream_roi)::value_type,
+                   PixelRect>);
 
 TEST(OperationPluginRegistrar,
      RejectsInvalidNamesAndEmptyCallbacksBeforeRawHostCallbacks) {
@@ -121,7 +203,6 @@ Node make_source_node(int id, const std::string& name, int width, int height) {
   node.name = name;
   node.type = "image_generator";
   node.subtype = "constant";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   if (width > 0)
     node.parameters["width"] = width;
   if (height > 0)
@@ -136,7 +217,6 @@ Node make_unparameterized_source_node(int id, const std::string& name) {
   node.name = name;
   node.type = "image_generator";
   node.subtype = "constant";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   return node;
 }
 
@@ -146,7 +226,6 @@ Node make_blur_node(int id, int parent_id, int ksize) {
   node.name = "blur";
   node.type = "image_process";
   node.subtype = "gaussian_blur";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["ksize"] = ksize;
   node.image_inputs.push_back(ImageInput{parent_id, "image"});
   return node;
@@ -159,7 +238,6 @@ Node make_resize_node(int id, int parent_id, int width, int height,
   node.name = "resize";
   node.type = "image_process";
   node.subtype = "resize";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = width;
   node.parameters["height"] = height;
   node.parameters["interpolation"] = interpolation;
@@ -173,7 +251,6 @@ Node make_curve_node(int id, int parent_id) {
   node.name = "curve";
   node.type = "image_process";
   node.subtype = "curve_transform";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.image_inputs.push_back(ImageInput{parent_id, "image"});
   return node;
 }
@@ -198,7 +275,7 @@ void seed_hp_extent(GraphModel& graph, int node_id, int width, int height) {
  * @param image_parent_id Image source node id.
  * @param parameter_parent_id Named-value source node id.
  * @return Node configured with an 8x8 output and `radius` parameter input.
- * @throws std::bad_alloc or YAML exceptions during value construction.
+ * @throws std::bad_alloc during value construction.
  * @note The operation key is test-local and registered explicitly by its test.
  */
 Node make_public_dependency_node(int id, int image_parent_id,
@@ -208,7 +285,6 @@ Node make_public_dependency_node(int id, int image_parent_id,
   node.name = "public_dependency";
   node.type = "operation_sdk_test";
   node.subtype = "dependency";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = 8;
   node.parameters["height"] = 8;
   node.parameters["radius"] = 1;
@@ -225,7 +301,7 @@ Node make_public_dependency_node(int id, int image_parent_id,
  * @param value Integer named output value.
  * @param revision Positive HP revision paired with the value.
  * @return Nothing.
- * @throws std::bad_alloc or YAML exceptions during output construction.
+ * @throws std::bad_alloc during output construction.
  * @note Mutation uses the graph runtime-state boundary so topology is
  * unchanged.
  */
@@ -241,7 +317,7 @@ void seed_parameter_output(GraphModel& graph, int node_id, int value,
 }  // namespace
 
 TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
-  ops::register_builtin();
+  providers::register_configured_operation_providers();
   GraphModel graph = make_graph();
   graph.add_node(make_source_node(1, "source", 1024, 1024));
   graph.add_node(make_blur_node(2, 1, 21));
@@ -253,8 +329,8 @@ TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
   seed_hp_extent(graph, 200, 512, 512);
 
   RoiPropagationService propagation;
-  std::optional<cv::Rect> propagated =
-      propagation.project_roi_backward(graph, 200, cv::Rect(10, 20, 30, 40), 1);
+  std::optional<PixelRect> propagated = propagation.project_roi_backward(
+      graph, 200, (PixelRect{10, 20, 30, 40}), 1);
 
   ASSERT_TRUE(propagated.has_value());
   // curve_transform: identity.
@@ -263,11 +339,11 @@ TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
   // propagation; with the default identity matrix, the resize step therefore
   // carries the union of [19,39,62x82] and [10,20,30x40] = [10,20,71x101].
   // gaussian_blur ksize=21 expands by radius 10, producing [0,10,91x121].
-  EXPECT_EQ(*propagated, cv::Rect(0, 10, 91, 121));
+  EXPECT_EQ(*propagated, (PixelRect{0, 10, 91, 121}));
 }
 
 TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
-  ops::register_builtin();
+  providers::register_configured_operation_providers();
   GraphModel graph = make_graph();
   graph.add_node(make_unparameterized_source_node(1, "source_without_hp"));
   graph.add_node(make_resize_node(2, 1, 4, 4, "nearest"));
@@ -275,7 +351,7 @@ TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
 
   RoiPropagationService propagation;
   EXPECT_FALSE(
-      propagation.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1)
+      propagation.project_roi_backward(graph, 2, (PixelRect{1, 1, 1, 1}), 1)
           .has_value())
       << "Missing HP state must not provide propagation extent.";
 
@@ -285,10 +361,10 @@ TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
         make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
   });
 
-  std::optional<cv::Rect> propagated =
-      propagation.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1);
+  std::optional<PixelRect> propagated =
+      propagation.project_roi_backward(graph, 2, (PixelRect{1, 1, 1, 1}), 1);
   ASSERT_TRUE(propagated.has_value());
-  EXPECT_EQ(*propagated, cv::Rect(2, 2, 2, 2));
+  EXPECT_EQ(*propagated, (PixelRect{2, 2, 2, 2}));
 }
 
 TEST(OperationParameterAdapter,
@@ -298,7 +374,8 @@ TEST(OperationParameterAdapter,
       "quoted: \"12\"\n"
       "enabled: true\n"
       "items: [null, 2.5, {name: original}]\n");
-  plugin::ParameterMap parameters = core::parameter_map_from_yaml(source);
+  plugin::ParameterMap parameters =
+      adapters::yaml::internal::parameter_map_from_yaml(source);
 
   ASSERT_TRUE(parameters.at("plain").is_int64());
   EXPECT_EQ(parameters.at("plain").as_int64(), 12);
@@ -317,7 +394,8 @@ TEST(OperationParameterAdapter,
   EXPECT_THROW(parameters.at("quoted").as_double(), plugin::ParameterTypeError);
 
   const YAML::Node collision = YAML::Load("{1: first, 1.0: second}");
-  EXPECT_THROW(core::parameter_map_from_yaml(collision), std::invalid_argument);
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(collision),
+               std::invalid_argument);
 
   GraphModel graph = make_graph();
   Node disconnected = make_public_dependency_node(7, -1, -1);
@@ -377,6 +455,34 @@ TEST(OperationParameterValue,
   }
 }
 
+/**
+ * @brief Verifies provider-independent scalar and recursive inspection text.
+ */
+TEST(OperationParameterValue,
+     InspectionTextPreservesScalarsAndEscapesRecursiveValues) {
+  EXPECT_EQ(core::format_parameter_value_for_inspection(
+                plugin::ParameterValue("007")),
+            "007");
+  EXPECT_EQ(
+      core::format_parameter_value_for_inspection(plugin::ParameterValue(1.25)),
+      "1.25");
+
+  plugin::ParameterValue::Object object;
+  object.emplace("z", plugin::ParameterValue(true));
+  object.emplace("a\n",
+                 plugin::ParameterValue(std::string("quote\" slash\\\x01")));
+  plugin::ParameterValue::Array array;
+  array.emplace_back("plain");
+  array.emplace_back(std::move(object));
+  array.emplace_back(nullptr);
+  array.emplace_back(1.25);
+
+  EXPECT_EQ(
+      core::format_parameter_value_for_inspection(
+          plugin::ParameterValue(std::move(array))),
+      R"(["plain", {"a\n": "quote\" slash\\\u0001", "z": true}, null, 1.25])");
+}
+
 TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
   plugin::ParameterValue::Object object;
   object.emplace("numeric_text", plugin::ParameterValue("123"));
@@ -390,10 +496,10 @@ TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
   object.emplace("infinity", plugin::ParameterValue(
                                  std::numeric_limits<double>::infinity()));
 
-  const YAML::Node yaml =
-      core::parameter_value_to_yaml(plugin::ParameterValue(std::move(object)));
+  const YAML::Node yaml = adapters::yaml::internal::parameter_value_to_yaml(
+      plugin::ParameterValue(std::move(object)));
   const plugin::ParameterValue round_trip =
-      core::parameter_value_from_yaml(yaml);
+      adapters::yaml::internal::parameter_value_from_yaml(yaml);
   const auto& values = round_trip.as_object();
   EXPECT_EQ(values.at("numeric_text").as_string(), "123");
   EXPECT_EQ(values.at("boolean_text").as_string(), "true");
@@ -406,8 +512,9 @@ TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
   EXPECT_TRUE(values.at("infinity").is_double());
   EXPECT_TRUE(std::isinf(values.at("infinity").as_double()));
 
-  const plugin::ParameterMap plain = core::parameter_map_from_yaml(
-      YAML::Load("{nan: .nan, infinity: .inf, hex: 0x10, octal: 012}"));
+  const plugin::ParameterMap plain =
+      adapters::yaml::internal::parameter_map_from_yaml(
+          YAML::Load("{nan: .nan, infinity: .inf, hex: 0x10, octal: 012}"));
   EXPECT_TRUE(plain.at("nan").is_double());
   EXPECT_TRUE(std::isnan(plain.at("nan").as_double()));
   EXPECT_TRUE(plain.at("infinity").is_double());
@@ -418,34 +525,37 @@ TEST(OperationParameterAdapter, PreservesTaggedRoundTripAndYamlNumericKinds) {
 
 TEST(OperationParameterAdapter,
      RejectsOutOfRangePlainIntegersBeforeDoubleInference) {
-  const plugin::ParameterMap boundaries = core::parameter_map_from_yaml(
-      YAML::Load("{maximum: 9223372036854775807, "
-                 "minimum: -9223372036854775808, scientific: 9.25e2}"));
+  const plugin::ParameterMap boundaries =
+      adapters::yaml::internal::parameter_map_from_yaml(
+          YAML::Load("{maximum: 9223372036854775807, "
+                     "minimum: -9223372036854775808, scientific: 9.25e2}"));
   EXPECT_EQ(boundaries.at("maximum").as_int64(),
             std::numeric_limits<std::int64_t>::max());
   EXPECT_EQ(boundaries.at("minimum").as_int64(),
             std::numeric_limits<std::int64_t>::min());
   EXPECT_DOUBLE_EQ(boundaries.at("scientific").as_double(), 925.0);
 
-  EXPECT_THROW(
-      core::parameter_map_from_yaml(YAML::Load("{value: 9223372036854775808}")),
-      YAML::Exception);
-  EXPECT_THROW(
-      core::parameter_map_from_yaml(YAML::Load("{value: 9223372036854775809}")),
-      YAML::Exception);
-  EXPECT_THROW(core::parameter_map_from_yaml(
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
+                   YAML::Load("{value: 9223372036854775808}")),
+               YAML::Exception);
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
+                   YAML::Load("{value: 9223372036854775809}")),
+               YAML::Exception);
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
                    YAML::Load("{value: -9223372036854775809}")),
                YAML::Exception);
-  EXPECT_THROW(core::parameter_map_from_yaml(YAML::Load("{value: 1e9999}")),
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
+                   YAML::Load("{value: 1e9999}")),
                YAML::Exception);
 }
 
 TEST(OperationParameterAdapter,
      HonorsEveryExplicitScalarTagAndRejectsUnknownTags) {
-  const plugin::ParameterMap tagged = core::parameter_map_from_yaml(
-      YAML::Load("{null_value: !!null null, bool_value: !!bool true, "
-                 "int_value: !!int 1, float_value: !!float 1, "
-                 "string_value: !!str 1}"));
+  const plugin::ParameterMap tagged =
+      adapters::yaml::internal::parameter_map_from_yaml(
+          YAML::Load("{null_value: !!null null, bool_value: !!bool true, "
+                     "int_value: !!int 1, float_value: !!float 1, "
+                     "string_value: !!str 1}"));
   EXPECT_TRUE(tagged.at("null_value").is_null());
   EXPECT_TRUE(tagged.at("bool_value").is_bool());
   EXPECT_TRUE(tagged.at("bool_value").as_bool());
@@ -456,10 +566,10 @@ TEST(OperationParameterAdapter,
   EXPECT_TRUE(tagged.at("string_value").is_string());
   EXPECT_EQ(tagged.at("string_value").as_string(), "1");
 
-  EXPECT_THROW(core::parameter_map_from_yaml(
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
                    YAML::Load("{value: !photospider/custom opaque}")),
                YAML::Exception);
-  EXPECT_THROW(core::parameter_map_from_yaml(
+  EXPECT_THROW(adapters::yaml::internal::parameter_map_from_yaml(
                    YAML::Load("{value: !!timestamp 2026-07-13}")),
                YAML::Exception);
 }
@@ -471,26 +581,26 @@ TEST(SpatialDependencyMapContract,
   lut.grid_size_y = 10;
   lut.cols = 2;
   lut.rows = 2;
-  lut.output_extent = cv::Size(20, 20);
-  lut.cell_to_upstream_roi = {cv::Rect(1, 1, 1, 1), cv::Rect(2, 2, 1, 1),
-                              cv::Rect(3, 3, 1, 1), cv::Rect(4, 4, 1, 1)};
+  lut.output_extent = (PixelSize{20, 20});
+  lut.cell_to_upstream_roi = {(PixelRect{1, 1, 1, 1}), (PixelRect{2, 2, 1, 1}),
+                              (PixelRect{3, 3, 1, 1}), (PixelRect{4, 4, 1, 1})};
   ASSERT_TRUE(lut.is_valid());
 
-  EXPECT_EQ(lut.lookup(cv::Rect(-20, 5, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(20, 5, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(5, -20, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(5, 20, 5, 5)), cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(std::numeric_limits<int>::min(), 0,
-                                std::numeric_limits<int>::max(), 1)),
-            cv::Rect());
-  EXPECT_EQ(lut.lookup(cv::Rect(std::numeric_limits<int>::max(), 0,
-                                std::numeric_limits<int>::max(), 1)),
-            cv::Rect());
+  EXPECT_EQ(lut.lookup((PixelRect{-20, 5, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup((PixelRect{20, 5, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup((PixelRect{5, -20, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup((PixelRect{5, 20, 5, 5})), (PixelRect{}));
+  EXPECT_EQ(lut.lookup(PixelRect{std::numeric_limits<int>::min(), 0,
+                                 std::numeric_limits<int>::max(), 1}),
+            (PixelRect{}));
+  EXPECT_EQ(lut.lookup(PixelRect{std::numeric_limits<int>::max(), 0,
+                                 std::numeric_limits<int>::max(), 1}),
+            (PixelRect{}));
 
-  EXPECT_EQ(lut.lookup(cv::Rect(-5, 0, 10, 10)), cv::Rect(1, 1, 1, 1));
-  EXPECT_EQ(lut.lookup(cv::Rect(15, 0, 10, 10)), cv::Rect(2, 2, 1, 1));
-  EXPECT_EQ(lut.lookup(cv::Rect(0, -5, 10, 10)), cv::Rect(1, 1, 1, 1));
-  EXPECT_EQ(lut.lookup(cv::Rect(0, 15, 10, 10)), cv::Rect(3, 3, 1, 1));
+  EXPECT_EQ(lut.lookup((PixelRect{-5, 0, 10, 10})), (PixelRect{1, 1, 1, 1}));
+  EXPECT_EQ(lut.lookup((PixelRect{15, 0, 10, 10})), (PixelRect{2, 2, 1, 1}));
+  EXPECT_EQ(lut.lookup((PixelRect{0, -5, 10, 10})), (PixelRect{1, 1, 1, 1}));
+  EXPECT_EQ(lut.lookup((PixelRect{0, 15, 10, 10})), (PixelRect{3, 3, 1, 1}));
 }
 
 TEST(OperationHostAdapter,
@@ -502,7 +612,8 @@ TEST(OperationHostAdapter,
   child.name = "lut_validation";
   child.type = "operation_sdk_test";
   child.subtype = "lut_validation";
-  child.parameters = YAML::Load("{width: 4, height: 4}");
+  child.parameters["width"] = 4;
+  child.parameters["height"] = 4;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
@@ -521,30 +632,30 @@ TEST(OperationHostAdapter,
       });
   const plugin::ParameterMap parameters;
   SpatialDependencyMap normalized = builder(
-      graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4), parameters);
-  ASSERT_TRUE(normalized.is_valid_for(cv::Size(4, 4)));
+      graph.node(2), graph, {(PixelSize{8, 8})}, (PixelSize{4, 4}), parameters);
+  ASSERT_TRUE(normalized.is_valid_for((PixelSize{4, 4})));
   ASSERT_EQ(normalized.cell_to_upstream_roi.size(), 1u);
-  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), cv::Rect(0, 0, 3, 3));
+  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), (PixelRect{0, 0, 3, 3}));
 
   cell = PixelRect{std::numeric_limits<int>::max(), 0,
                    std::numeric_limits<int>::max(), 1};
-  normalized = builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters);
-  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), cv::Rect());
+  normalized = builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters);
+  EXPECT_EQ(normalized.cell_to_upstream_roi.front(), (PixelRect{}));
 
-  cell = PixelRect{0, 0, -1, 1};
-  EXPECT_THROW(builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters),
+  cell = (PixelRect{0, 0, -1, 1});
+  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters),
                std::invalid_argument);
-  cell = PixelRect{0, 0, 1, 1};
-  cell_size = PixelSize{-1, 4};
-  EXPECT_THROW(builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters),
+  cell = (PixelRect{0, 0, 1, 1});
+  cell_size = (PixelSize{-1, 4});
+  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters),
                std::invalid_argument);
-  cell_size = PixelSize{4, 4};
-  output_extent = PixelSize{8, 4};
-  EXPECT_THROW(builder(graph.node(2), graph, {cv::Size(8, 8)}, cv::Size(4, 4),
-                       parameters),
+  cell_size = (PixelSize{4, 4});
+  output_extent = (PixelSize{8, 4});
+  EXPECT_THROW(builder(graph.node(2), graph, {(PixelSize{8, 8})},
+                       (PixelSize{4, 4}), parameters),
                std::invalid_argument);
 }
 
@@ -555,8 +666,6 @@ TEST(OperationHostAdapter,
   node.name = "null_views";
   node.type = "operation_sdk_test";
   node.subtype = "null_views";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
-
   bool monolithic_saw_nulls = false;
   MonolithicOpFunc monolithic = plugin_host::adapt_monolithic_operation(
       [&](const plugin::NodeView& public_node,
@@ -572,8 +681,8 @@ TEST(OperationHostAdapter,
   EXPECT_TRUE(monolithic_saw_nulls);
 
   NodeOutput data_only;
-  data_only.data.emplace("answer", YAML::Node(42));
-  data_only.space.absolute_roi = cv::Rect(3, 4, 5, 6);
+  data_only.data.emplace("answer", plugin::ParameterValue(42));
+  data_only.space.absolute_roi = (PixelRect{3, 4, 5, 6});
   data_only.space.global_scale_x = 2.0;
   bool monolithic_saw_data_only = false;
   MonolithicOpFunc inspect_data_only = plugin_host::adapt_monolithic_operation(
@@ -603,9 +712,9 @@ TEST(OperationHostAdapter,
             inputs.size() == 1 && inputs[0].spatial == nullptr;
       });
   ImageBuffer image = make_aligned_cpu_image_buffer(2, 2, 1, DataType::FLOAT32);
-  OutputTile output{&image, cv::Rect(0, 0, 1, 1)};
+  OutputTile output{&image, (PixelRect{0, 0, 1, 1})};
   const std::vector<InputTile> inputs{
-      InputTile{&image, cv::Rect(0, 0, 1, 1), nullptr}};
+      InputTile{&image, (PixelRect{0, 0, 1, 1}), nullptr}};
   tiled(node, output, inputs);
   EXPECT_TRUE(tiled_saw_null_spatial);
 
@@ -638,48 +747,35 @@ TEST(OperationHostAdapter,
                     .available_input.spatial->absolute_roi.height == 6;
         return context.requested_roi;
       });
-  const plugin::ParameterMap effective =
-      core::parameter_map_from_yaml(roi_child.parameters);
-  EXPECT_EQ(dirty(graph.node(52), cv::Rect(0, 0, 1, 1), graph, cv::Size(1, 1),
-                  {cv::Size()}, effective, nullptr),
-            cv::Rect(0, 0, 1, 1));
+  const plugin::ParameterMap effective = roi_child.parameters;
+  EXPECT_EQ(dirty(graph.node(52), (PixelRect{0, 0, 1, 1}), graph,
+                  (PixelSize{1, 1}), {(PixelSize{})}, effective, nullptr),
+            (PixelRect{0, 0, 1, 1}));
   EXPECT_TRUE(roi_saw_data_only_spatial);
 }
 
-TEST(OperationHostAdapter, RejectsMalformedTaggedParametersBeforePluginEntry) {
+TEST(OperationParameterAdapter,
+     RejectsMalformedTaggedParametersBeforeGraphStorage) {
   Node node;
   node.id = 42;
   node.name = "malformed_parameter";
   node.type = "operation_sdk_test";
   node.subtype = "malformed_parameter";
-  node.parameters = YAML::Load("{radius: !!int not-an-integer}");
-  bool callback_entered = false;
-  MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
-      [&](const plugin::NodeView&,
-          plugin::ArrayView<plugin::OperationInputView>) {
-        callback_entered = true;
-        return plugin::OperationOutput{};
-      });
-
-  EXPECT_THROW((void)operation(node, {}), YAML::Exception);
-  EXPECT_FALSE(callback_entered);
-
   const std::vector<std::string> malformed_documents{
       "{value: !!null nope}", "{value: !!bool nope}", "{value: !!int nope}",
       "{value: !!float nope}", "{value: 9223372036854775808}"};
   for (const std::string& document : malformed_documents) {
     SCOPED_TRACE(document);
-    node.parameters = YAML::Load(document);
-    callback_entered = false;
-    EXPECT_THROW((void)operation(node, {}), YAML::Exception);
-    EXPECT_FALSE(callback_entered);
+    EXPECT_THROW(
+        adapters::yaml::internal::parameter_map_from_yaml(YAML::Load(document)),
+        YAML::Exception);
+    EXPECT_TRUE(node.parameters.empty());
   }
 
-  node.parameters = YAML::Load("{value: !!float 1}");
-  const plugin::ParameterMap parameters =
-      plugin_host::parameter_map_from_yaml(node.parameters);
-  EXPECT_TRUE(parameters.at("value").is_double());
-  EXPECT_DOUBLE_EQ(parameters.at("value").as_double(), 1.0);
+  node.parameters = adapters::yaml::internal::parameter_map_from_yaml(
+      YAML::Load("{value: !!float 1}"));
+  EXPECT_TRUE(node.parameters.at("value").is_double());
+  EXPECT_DOUBLE_EQ(node.parameters.at("value").as_double(), 1.0);
 }
 
 TEST(OperationHostAdapter, RejectsInvalidPublicSpatialMetadata) {
@@ -688,14 +784,12 @@ TEST(OperationHostAdapter, RejectsInvalidPublicSpatialMetadata) {
   node.name = "invalid_spatial";
   node.type = "operation_sdk_test";
   node.subtype = "invalid_spatial";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
-
   std::vector<plugin::SpatialSnapshot> invalid_snapshots(3);
   invalid_snapshots[0].transform_matrix[0] =
       std::numeric_limits<double>::quiet_NaN();
   invalid_snapshots[1].global_scale_y = std::numeric_limits<double>::infinity();
   invalid_snapshots[2].absolute_roi =
-      PixelRect{std::numeric_limits<int>::max(), 0, 2, 1};
+      (PixelRect{std::numeric_limits<int>::max(), 0, 2, 1});
   std::size_t selected = 0;
   MonolithicOpFunc operation = plugin_host::adapt_monolithic_operation(
       [&](const plugin::NodeView&,
@@ -717,8 +811,6 @@ TEST(OperationHostAdapter,
   node.name = "image_descriptor";
   node.type = "operation_sdk_test";
   node.subtype = "image_descriptor";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
-
   cv::Mat source(3, 5, CV_32FC1, cv::Scalar(4.0f));
   cv::UMat unified;
   source.copyTo(unified);
@@ -815,7 +907,7 @@ TEST(OperationHostAdapter,
   child.name = "merge";
   child.type = "operation_sdk_test";
   child.subtype = "forward";
-  child.parameters = YAML::Load("{mode: exact}");
+  child.parameters["mode"] = "exact";
   child.image_inputs = {ImageInput{1, "image"}, ImageInput{2, "image"}};
   graph.add_node(child);
   graph.validate_topology();
@@ -835,15 +927,15 @@ TEST(OperationHostAdapter,
             mode->is_string() && mode->as_string() == "exact";
         return context.requested_roi;
       });
-  const std::vector<cv::Size> extents{cv::Size(10, 11), cv::Size(20, 21)};
-  const plugin::ParameterMap effective =
-      core::parameter_map_from_yaml(child.parameters);
-  const cv::Rect result =
-      forward(graph.node(3), cv::Rect(1, 2, 3, 4), graph, cv::Size(20, 21),
-              cv::Size(20, 21), 1, extents, effective);
+  const std::vector<PixelSize> extents{(PixelSize{10, 11}),
+                                       (PixelSize{20, 21})};
+  const plugin::ParameterMap effective = child.parameters;
+  const PixelRect result =
+      forward(graph.node(3), (PixelRect{1, 2, 3, 4}), graph,
+              (PixelSize{20, 21}), (PixelSize{20, 21}), 1, extents, effective);
 
   EXPECT_TRUE(snapshot_is_exact);
-  EXPECT_EQ(result, cv::Rect(1, 2, 3, 4));
+  EXPECT_EQ(result, (PixelRect{1, 2, 3, 4}));
 }
 
 TEST(OperationHostAdapter, ValidatesReturnedRoiGeometryAfterCallbackReturn) {
@@ -852,30 +944,29 @@ TEST(OperationHostAdapter, ValidatesReturnedRoiGeometryAfterCallbackReturn) {
   Node child = make_blur_node(2, 1, 3);
   graph.add_node(child);
   graph.validate_topology();
-  const plugin::ParameterMap effective =
-      core::parameter_map_from_yaml(child.parameters);
+  const plugin::ParameterMap effective = child.parameters;
 
   DirtyRoiPropFunc negative_origin = plugin_host::adapt_dirty_propagator(
-      [](const plugin::RoiContext&) { return PixelRect{-7, -5, 3, 4}; });
-  EXPECT_EQ(
-      negative_origin(graph.node(2), cv::Rect(0, 0, 1, 1), graph,
-                      cv::Size(10, 11), {cv::Size(10, 11)}, effective, nullptr),
-      cv::Rect(-7, -5, 3, 4));
+      [](const plugin::RoiContext&) { return (PixelRect{-7, -5, 3, 4}); });
+  EXPECT_EQ(negative_origin(graph.node(2), (PixelRect{0, 0, 1, 1}), graph,
+                            (PixelSize{10, 11}), {(PixelSize{10, 11})},
+                            effective, nullptr),
+            (PixelRect{-7, -5, 3, 4}));
 
   DirtyRoiPropFunc negative_size = plugin_host::adapt_dirty_propagator(
-      [](const plugin::RoiContext&) { return PixelRect{0, 0, -1, 2}; });
-  EXPECT_THROW((void)negative_size(graph.node(2), cv::Rect(0, 0, 1, 1), graph,
-                                   cv::Size(10, 11), {cv::Size(10, 11)},
-                                   effective, nullptr),
+      [](const plugin::RoiContext&) { return (PixelRect{0, 0, -1, 2}); });
+  EXPECT_THROW((void)negative_size(graph.node(2), (PixelRect{0, 0, 1, 1}),
+                                   graph, (PixelSize{10, 11}),
+                                   {(PixelSize{10, 11})}, effective, nullptr),
                std::invalid_argument);
 
   ForwardRoiPropFunc overflowing =
       plugin_host::adapt_forward_propagator([](const plugin::RoiContext&) {
-        return PixelRect{std::numeric_limits<int>::max(), 0, 1, 1};
+        return (PixelRect{std::numeric_limits<int>::max(), 0, 1, 1});
       });
-  EXPECT_THROW((void)overflowing(graph.node(2), cv::Rect(0, 0, 1, 1), graph,
-                                 cv::Size(10, 11), cv::Size(10, 11), 0,
-                                 {cv::Size(10, 11)}, effective),
+  EXPECT_THROW((void)overflowing(graph.node(2), (PixelRect{0, 0, 1, 1}), graph,
+                                 (PixelSize{10, 11}), (PixelSize{10, 11}), 0,
+                                 {(PixelSize{10, 11})}, effective),
                std::invalid_argument);
 }
 
@@ -886,7 +977,7 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
   registry.register_dirty_propagator(
       type, subtype,
       plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return PixelRect{0, 0, 1, 1}; }));
+          [](const plugin::RoiContext&) { return (PixelRect{0, 0, 1, 1}); }));
   registry.register_dependency_builder(
       type, subtype,
       plugin_host::adapt_dependency_builder(
@@ -895,7 +986,7 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
             result.upstream_input_index = 1;
             result.cell_size = context.output_extent;
             result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back(PixelRect{5, 0, 1, 1});
+            result.cell_to_upstream_roi.push_back((PixelRect{5, 0, 1, 1}));
             return result;
           }),
       false);
@@ -908,7 +999,8 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
   child.name = "dependency_route";
   child.type = type;
   child.subtype = subtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs = {ImageInput{1, "image"}, ImageInput{4, "image"}};
   graph.add_node(child);
   graph.validate_topology();
@@ -917,14 +1009,14 @@ TEST(PropagationContracts, DependencyLutRoutesOnlyToItsSelectedImageInputEdge) {
 
   RoiPropagationService propagation;
   const auto left =
-      propagation.project_roi_backward(graph, 3, cv::Rect(0, 0, 1, 1), 1);
+      propagation.project_roi_backward(graph, 3, (PixelRect{0, 0, 1, 1}), 1);
   const auto right =
-      propagation.project_roi_backward(graph, 3, cv::Rect(0, 0, 1, 1), 4);
+      propagation.project_roi_backward(graph, 3, (PixelRect{0, 0, 1, 1}), 4);
 
   ASSERT_TRUE(left.has_value());
-  EXPECT_EQ(*left, cv::Rect(0, 0, 1, 1));
+  EXPECT_EQ(*left, (PixelRect{0, 0, 1, 1}));
   ASSERT_TRUE(right.has_value());
-  EXPECT_EQ(*right, cv::Rect(0, 0, 6, 1));
+  EXPECT_EQ(*right, (PixelRect{0, 0, 6, 1}));
   ASSERT_TRUE(graph.node(3).dependency_lut_cache.has_value());
   EXPECT_EQ(graph.node(3).dependency_lut_cache->lut.upstream_input_index, 1u);
 }
@@ -947,19 +1039,22 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
             result.upstream_input_index = 0;
             result.cell_size = context.output_extent;
             result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back(PixelRect{70, 0, 1, 1});
+            result.cell_to_upstream_roi.push_back((PixelRect{70, 0, 1, 1}));
             return result;
           }),
       false);
 
   GraphModel graph = make_graph();
-  graph.add_node(make_source_node(1, "bounded_source", 128, 128));
+  Node source = make_source_node(1, "bounded_source", 128, 128);
+  source.subtype = "bounded_source";
+  graph.add_node(source);
   Node child;
   child.id = 2;
   child.name = "bounded_dependency_union";
   child.type = type;
   child.subtype = subtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
@@ -967,20 +1062,33 @@ TEST(PropagationContracts, BoundsSharedAndLutContributionsBeforeBackwardUnion) {
 
   RoiPropagationService propagation;
   const auto projected =
-      propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+      propagation.project_roi_backward(graph, 2, (PixelRect{0, 0, 1, 1}), 1);
   ASSERT_TRUE(projected.has_value());
-  EXPECT_EQ(*projected, cv::Rect(70, 0, 1, 1));
+  EXPECT_EQ(*projected, (PixelRect{70, 0, 1, 1}));
 
   GraphTraversalService traversal;
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const compute::HighPrecisionDirtyPlan plan =
-      planner.plan_high_precision(graph, 2, cv::Rect(0, 0, 1, 1));
-  ASSERT_TRUE(plan.entries.count(1));
-  const cv::Rect planned_parent_roi = plan.entries.at(1).roi_hp;
-  EXPECT_LE(planned_parent_roi.x, 70);
-  EXPECT_GT(static_cast<std::int64_t>(planned_parent_roi.x) +
-                planned_parent_roi.width,
-            70);
+      planner.plan_high_precision(graph, 2, (PixelRect{0, 0, 1, 1}));
+  ASSERT_EQ(plan.entries.size(), 2u);
+  EXPECT_EQ(plan.entries.at(1).roi_hp, (PixelRect{64, 0, 64, 64}));
+  EXPECT_EQ(plan.entries.at(2).roi_hp, (PixelRect{0, 0, 8, 8}));
+
+  ASSERT_EQ(plan.snapshot.actual_dirty_rois.size(), 2u);
+  EXPECT_EQ(plan.snapshot.actual_dirty_rois.at(1),
+            (std::vector<PixelRect>{{64, 0, 64, 64}}));
+  EXPECT_EQ(plan.snapshot.actual_dirty_rois.at(2),
+            (std::vector<PixelRect>{{0, 0, 8, 8}}));
+
+  ASSERT_EQ(plan.snapshot.edge_mappings.size(), 1u);
+  const compute::DirtyEdgeMapping& mapping =
+      plan.snapshot.edge_mappings.front();
+  EXPECT_EQ(mapping.from_node_id, 1);
+  EXPECT_EQ(mapping.to_node_id, 2);
+  EXPECT_EQ(mapping.domain, compute::DirtyDomain::HighPrecision);
+  EXPECT_EQ(mapping.from_roi, (PixelRect{64, 0, 64, 64}));
+  EXPECT_EQ(mapping.to_roi, (PixelRect{0, 0, 8, 8}));
+  EXPECT_EQ(mapping.direction, compute::DirtyEdgeDirection::BackwardDemand);
 }
 
 TEST(PropagationContracts,
@@ -993,7 +1101,7 @@ TEST(PropagationContracts,
   registry.register_dirty_propagator(
       type, subtype,
       plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return PixelRect{}; }));
+          [](const plugin::RoiContext&) { return (PixelRect{}); }));
   registry.register_dependency_builder(
       type, subtype,
       plugin_host::adapt_dependency_builder(
@@ -1006,7 +1114,7 @@ TEST(PropagationContracts,
             result.upstream_input_index = value == 99 ? 9 : 0;
             result.cell_size = context.output_extent;
             result.output_extent = context.output_extent;
-            result.cell_to_upstream_roi.push_back(PixelRect{value, 0, 1, 1});
+            result.cell_to_upstream_roi.push_back((PixelRect{value, 0, 1, 1}));
             return result;
           }),
       false);
@@ -1024,23 +1132,23 @@ TEST(PropagationContracts,
   RoiPropagationService propagation;
   auto project = [&] {
     const int current_image_source = graph.node(3).image_inputs[0].from_node_id;
-    return propagation.project_roi_backward(graph, 3, cv::Rect(0, 0, 1, 1),
+    return propagation.project_roi_backward(graph, 3, (PixelRect{0, 0, 1, 1}),
                                             current_image_source);
   };
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 1);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 1u);
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 1);
 
   graph.mutate_node_runtime_state(
       3, [](auto& state) { state.parameters_version = 1; });
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 2);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 2u);
 
   seed_parameter_output(graph, 2, 2, 2);
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(2, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{2, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 3);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 3u);
   ASSERT_TRUE(graph.node(3).dependency_lut_cache.has_value());
@@ -1050,7 +1158,7 @@ TEST(PropagationContracts,
           .dependency_lut_cache->identity.upstream_content_revisions.empty());
 
   seed_parameter_output(graph, 2, 4, 3);
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(4, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{4, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 4);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 4u);
   ASSERT_TRUE(graph.node(3).dependency_lut_cache.has_value());
@@ -1061,7 +1169,7 @@ TEST(PropagationContracts,
       4);
 
   graph.rewire_image_input(3, 0, 4, "image");
-  ASSERT_EQ(project(), std::optional<cv::Rect>(cv::Rect(4, 0, 1, 1)));
+  ASSERT_EQ(project(), std::optional<PixelRect>((PixelRect{4, 0, 1, 1})));
   EXPECT_EQ(*builder_calls, 5);
   EXPECT_EQ(*last_source_id, 4);
   EXPECT_EQ(graph.node(3).dependency_lut_version, 5u);
@@ -1109,7 +1217,7 @@ TEST(PropagationContracts,
   registry.register_dirty_propagator(
       type, subtype,
       plugin_host::adapt_dirty_propagator(
-          [](const plugin::RoiContext&) { return PixelRect{}; }));
+          [](const plugin::RoiContext&) { return (PixelRect{}); }));
   auto register_builder = [&](int marker, const std::shared_ptr<int>& calls) {
     registry.register_dependency_builder(
         type, subtype,
@@ -1120,7 +1228,8 @@ TEST(PropagationContracts,
               result.upstream_input_index = 0;
               result.cell_size = context.output_extent;
               result.output_extent = context.output_extent;
-              result.cell_to_upstream_roi.push_back(PixelRect{marker, 0, 1, 1});
+              result.cell_to_upstream_roi.push_back(
+                  (PixelRect{marker, 0, 1, 1}));
               return result;
             }),
         false);
@@ -1136,14 +1245,15 @@ TEST(PropagationContracts,
   child.name = "builder_revision";
   child.type = type;
   child.subtype = subtype;
-  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.parameters["width"] = 8;
+  child.parameters["height"] = 8;
   child.image_inputs.push_back(ImageInput{1, "image"});
   graph.add_node(child);
   graph.validate_topology();
   seed_hp_extent(graph, 1, 8, 8);
   RoiPropagationService propagation;
 
-  (void)propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+  (void)propagation.project_roi_backward(graph, 2, (PixelRect{0, 0, 1, 1}), 1);
   EXPECT_EQ(*first_calls, 1);
   EXPECT_EQ(*second_calls, 0);
   ASSERT_TRUE(graph.node(2).dependency_lut_cache.has_value());
@@ -1153,7 +1263,7 @@ TEST(PropagationContracts,
             1);
 
   register_builder(2, second_calls);
-  (void)propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+  (void)propagation.project_roi_backward(graph, 2, (PixelRect{0, 0, 1, 1}), 1);
   EXPECT_EQ(*first_calls, 1);
   EXPECT_EQ(*second_calls, 1);
   EXPECT_NE(
@@ -1171,8 +1281,8 @@ TEST(OperationRegistryContract,
   registry.unregister_key(make_key(type, subtype));
   const auto builder = [](std::size_t marker) {
     return DependencyLutBuilder(
-        [marker](const Node&, const GraphModel&, const std::vector<cv::Size>&,
-                 const cv::Size&, const plugin::ParameterMap&) {
+        [marker](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+                 const PixelSize&, const plugin::ParameterMap&) {
           SpatialDependencyMap result;
           result.upstream_input_index = marker;
           return result;
@@ -1187,46 +1297,53 @@ TEST(OperationRegistryContract,
   ASSERT_TRUE(initial_snapshot.has_value());
   EXPECT_FALSE(initial_snapshot->data_dependent);
   EXPECT_EQ(initial_snapshot->data_dependent_revision, 0u);
-  EXPECT_EQ(initial_snapshot->callback(node, graph, {}, cv::Size(), {})
+  EXPECT_EQ(initial_snapshot->callback(node, graph, {}, (PixelSize{}), {})
                 .upstream_input_index,
             0u);
-  std::atomic<bool> reader_started{false};
+  std::atomic<bool> reader_ready{false};
   std::atomic<bool> writer_finished{false};
   std::atomic<bool> saw_replacement{false};
   std::atomic<int> inconsistent_snapshots{0};
   std::thread reader([&] {
-    reader_started.store(true, std::memory_order_release);
-    for (int iteration = 0; iteration < 100000 &&
-                            (!writer_finished.load(std::memory_order_acquire) ||
-                             !saw_replacement.load(std::memory_order_acquire));
-         ++iteration) {
+    bool first_snapshot = true;
+    for (;;) {
+      const bool writer_was_finished =
+          writer_finished.load(std::memory_order_acquire);
       const auto snapshot =
           registry.get_dependency_builder_snapshot(type, subtype);
       if (!snapshot) {
         inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      const std::size_t marker =
-          snapshot->callback(node, graph, {}, cv::Size(), {})
-              .upstream_input_index;
-      if (marker == 0) {
-        if (snapshot->data_dependent ||
-            snapshot->data_dependent_revision != 0) {
-          inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
-        }
-      } else if (marker == 1) {
-        saw_replacement.store(true, std::memory_order_release);
-        if (!snapshot->data_dependent ||
-            snapshot->data_dependent_revision !=
-                snapshot->dependency_builder_revision) {
-          inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
-        }
       } else {
-        inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+        const std::size_t marker =
+            snapshot->callback(node, graph, {}, (PixelSize{}), {})
+                .upstream_input_index;
+        if (marker == 0) {
+          if (snapshot->data_dependent ||
+              snapshot->data_dependent_revision != 0) {
+            inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+          }
+        } else if (marker == 1) {
+          saw_replacement.store(true, std::memory_order_release);
+          if (!snapshot->data_dependent ||
+              snapshot->data_dependent_revision !=
+                  snapshot->dependency_builder_revision) {
+            inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+          }
+        } else {
+          inconsistent_snapshots.fetch_add(1, std::memory_order_relaxed);
+        }
       }
+      if (first_snapshot) {
+        reader_ready.store(true, std::memory_order_release);
+        first_snapshot = false;
+      }
+      if (writer_was_finished) {
+        break;
+      }
+      std::this_thread::yield();
     }
   });
-  while (!reader_started.load(std::memory_order_acquire)) {
+  while (!reader_ready.load(std::memory_order_acquire)) {
     std::this_thread::yield();
   }
   registry.register_dependency_builder(type, subtype, builder(1), true);
@@ -1245,8 +1362,8 @@ TEST(OperationRegistryContract,
   auto& registry = OpRegistry::instance();
   registry.unregister_key(make_key(type, subtype));
   const DependencyLutBuilder builder =
-      [](const Node&, const GraphModel&, const std::vector<cv::Size>&,
-         const cv::Size&,
+      [](const Node&, const GraphModel&, const std::vector<PixelSize>&,
+         const PixelSize&,
          const plugin::ParameterMap&) { return SpatialDependencyMap{}; };
   const MonolithicOpFunc operation = [](const Node&,
                                         const std::vector<const NodeOutput*>&) {

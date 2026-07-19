@@ -28,6 +28,7 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_traversal_service.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
@@ -36,6 +37,7 @@
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -562,7 +564,8 @@ TEST_F(GpuPipelineSchedulerTest, ProductionComputeUsesDeviceImplementation) {
   runtime.model().add_node(node);
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
   ComputeService::Request request;
   request.node_id = node.id;
@@ -625,7 +628,8 @@ TEST_F(GpuPipelineSchedulerTest,
   runtime.model().add_node(node);
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
   ComputeService::Request request;
   request.node_id = node.id;
@@ -850,7 +854,7 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -905,7 +909,7 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -939,7 +943,8 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   int node_id = (*endings)[0];
 
   GraphTraversalService traversal;
-  GraphCacheService cache;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
   ComputeService compute(traversal, cache, runtime.event_service());
 
   ComputeService::Request rt_request;
@@ -947,7 +952,7 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   rt_request.cache.precision = "int8";
   rt_request.cache.force_recache = true;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
-  rt_request.dirty_roi = cv::Rect(0, 0, 64, 64);
+  rt_request.dirty_roi = PixelRect{0, 0, 64, 64};
   NodeOutput& rt_result =
       compute.compute_parallel(runtime.model(), runtime, rt_request);
 

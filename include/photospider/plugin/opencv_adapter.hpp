@@ -18,8 +18,8 @@ namespace ps::plugin::opencv {
  * @brief Converts a CPU image descriptor to an OpenCV matrix view.
  * @param buffer Read-only image descriptor.
  * @return Matrix sharing the descriptor's CPU data storage.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when no readable CPU data exists; every non-CPU
  * descriptor and opaque backend-only context requires a device-specific
  * adapter and is rejected.
@@ -34,8 +34,8 @@ cv::Mat to_mat(const ImageBuffer& buffer);
  * @brief Converts a read-only tile to an ROI-scoped OpenCV matrix view.
  * @param tile Borrowed input tile.
  * @return Matrix view covering tile.roi.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error for a missing buffer or payload.
  * @throws std::out_of_range for a negative or out-of-bounds ROI.
  * @throws cv::Exception for an invalid ROI or backend conversion.
@@ -50,8 +50,8 @@ cv::Mat to_mat(const InputTileView& tile);
  * @brief Converts a writable tile to an ROI-scoped OpenCV matrix view.
  * @param tile Borrowed output tile.
  * @return Writable matrix view covering tile.roi.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error for a missing buffer or payload.
  * @throws std::out_of_range for a negative or out-of-bounds ROI.
  * @throws cv::Exception for an invalid ROI or backend conversion.
@@ -66,8 +66,8 @@ cv::Mat to_mat(const OutputTileView& tile);
  * @brief Converts an image descriptor to an OpenCV unified matrix.
  * @param buffer Read-only image descriptor.
  * @return Unified matrix uploaded from CPU image data.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error when no readable CPU data exists; every non-CPU
  * descriptor and opaque backend-only context requires a device-specific
  * adapter and is rejected.
@@ -81,8 +81,8 @@ cv::UMat to_umat(const ImageBuffer& buffer);
  * @brief Converts a read-only tile to an ROI-scoped unified matrix.
  * @param tile Borrowed input tile.
  * @return Read-only-by-contract unified matrix view.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error for a missing buffer or payload.
  * @throws std::out_of_range for a negative or out-of-bounds ROI.
  * @throws cv::Exception for an invalid ROI or backend conversion.
@@ -97,8 +97,8 @@ cv::UMat to_umat(const InputTileView& tile);
  * @brief Converts a writable tile to an ROI-scoped unified matrix.
  * @param tile Borrowed output tile.
  * @return Writable unified matrix view.
- * @throws std::invalid_argument when channels is outside OpenCV's supported
- * positive range.
+ * @throws std::invalid_argument when the descriptor is malformed or channels
+ * are outside OpenCV's supported positive range.
  * @throws std::runtime_error for a missing buffer or payload.
  * @throws std::out_of_range for a negative or out-of-bounds ROI.
  * @throws cv::Exception for an invalid ROI or backend conversion.

@@ -76,7 +76,7 @@ void append_unique(std::vector<int>& values, int value) {
 }
 
 /**
- * @brief Merges two optional cv::Rect values using empty-as-missing semantics.
+ * @brief Merges two optional PixelRect values using empty-as-missing semantics.
  *
  * @param current Current accumulated rectangle, possibly empty.
  * @param next Next rectangle to merge, possibly empty.
@@ -84,16 +84,9 @@ void append_unique(std::vector<int>& values, int value) {
  * @throws Nothing.
  * @note Empty rectangles are used as "unknown/no ROI" rather than geometry.
  */
-cv::Rect merge_optional_rect(const cv::Rect& current, const cv::Rect& next) {
-  if (next.width <= 0 || next.height <= 0)
-    return current;
-  if (current.width <= 0 || current.height <= 0)
-    return next;
-  const int x0 = std::min(current.x, next.x);
-  const int y0 = std::min(current.y, next.y);
-  const int x1 = std::max(current.x + current.width, next.x + next.width);
-  const int y1 = std::max(current.y + current.height, next.y + next.height);
-  return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+PixelRect merge_optional_rect(const PixelRect& current,
+                              const PixelRect& next) noexcept {
+  return merge_rect(current, next);
 }
 
 /**
@@ -234,7 +227,7 @@ void populate_dependencies_from_graph(ComputePlan& result, DirtyDomain domain,
                              : "parameter";
       add_dependency(result.task_graph.dependencies,
                      PlannedDependency{edge.from_node_id, node_id, domain, kind,
-                                       cv::Rect(), cv::Rect(),
+                                       PixelRect{}, PixelRect{},
                                        DirtyEdgeDirection::BackwardDemand});
     }
   }
@@ -312,7 +305,7 @@ void populate_node_dependency_lists(ComputePlan& result) {
  * @note Empty dependency ROIs mean "unknown/full dependency" rather than an
  * empty spatial relationship.
  */
-bool has_roi(const cv::Rect& roi) {
+bool has_roi(const PixelRect& roi) noexcept {
   return roi.width > 0 && roi.height > 0;
 }
 
@@ -325,9 +318,9 @@ bool has_roi(const cv::Rect& roi) {
  * @throws Nothing.
  * @note Empty rectangles are treated by callers before this helper is used.
  */
-bool rois_overlap(const cv::Rect& upstream_roi,
-                  const cv::Rect& downstream_roi) {
-  return (upstream_roi & downstream_roi).area() > 0;
+bool rois_overlap(const PixelRect& upstream_roi,
+                  const PixelRect& downstream_roi) noexcept {
+  return !is_rect_empty(intersect_rect(upstream_roi, downstream_roi));
 }
 
 /**
@@ -426,11 +419,11 @@ std::unordered_map<int, NodeTaskDependencyIndex> build_task_dependency_index(
  * @note The cache is local to dependency construction and does not persist in
  * GraphModel.
  */
-cv::Size resolve_planned_extent(
+PixelSize resolve_planned_extent(
     const GraphModel& graph, int node_id, GraphExtentResolver& resolver,
-    std::unordered_map<int, cv::Size>& extent_cache) {
+    std::unordered_map<int, PixelSize>& extent_cache) {
   if (!graph.has_node(node_id)) {
-    return cv::Size();
+    return PixelSize{};
   }
   return resolver.resolve_output_extent(graph, node_id, extent_cache);
 }
@@ -448,10 +441,10 @@ cv::Size resolve_planned_extent(
  * @note This captures all graph-known inputs, not only the edge currently being
  *       mapped, so public random-access RoiContext snapshots remain complete.
  */
-std::vector<cv::Size> resolve_planned_input_extents(
+std::vector<PixelSize> resolve_planned_input_extents(
     const GraphModel& graph, const Node& node, GraphExtentResolver& resolver,
-    std::unordered_map<int, cv::Size>& extent_cache) {
-  std::vector<cv::Size> extents(node.image_inputs.size());
+    std::unordered_map<int, PixelSize>& extent_cache) {
+  std::vector<PixelSize> extents(node.image_inputs.size());
   for (std::size_t index = 0; index < node.image_inputs.size(); ++index) {
     const int source_id = node.image_inputs[index].from_node_id;
     if (source_id >= 0 && graph.has_node(source_id)) {
@@ -482,13 +475,13 @@ std::vector<cv::Size> resolve_planned_input_extents(
  *       request plan its still-uncached parameter producer. Without graph, the
  *       function falls back to dependency ROI metadata or aligned output ROI.
  */
-cv::Rect required_upstream_roi_for_task(
+PixelRect required_upstream_roi_for_task(
     const PlannedDependency& dependency, const PlannedTask& to_task,
     const GraphModel* graph, GraphExtentResolver& resolver,
-    std::unordered_map<int, cv::Size>& extent_cache) {
+    std::unordered_map<int, PixelSize>& extent_cache) {
   if (graph && graph->has_node(dependency.from_node_id) &&
       graph->has_node(dependency.to_node_id) && has_roi(to_task.output_roi)) {
-    const cv::Size upstream_extent = resolve_planned_extent(
+    const PixelSize upstream_extent = resolve_planned_extent(
         *graph, dependency.from_node_id, resolver, extent_cache);
     if (upstream_extent.width > 0 && upstream_extent.height > 0) {
       ImageBuffer input_buffer;
@@ -500,14 +493,15 @@ cv::Rect required_upstream_roi_for_task(
       TiledExecutionConfig config;
       config.tile_size = to_task.tile_size > 0 ? to_task.tile_size : 256;
       config.output_roi = to_task.output_roi;
-      const cv::Size downstream_extent = resolve_planned_extent(
+      const PixelSize downstream_extent = resolve_planned_extent(
           *graph, dependency.to_node_id, resolver, extent_cache);
       if (downstream_extent.width > 0 && downstream_extent.height > 0) {
         config.output_size = downstream_extent;
       }
       const Node& downstream_node = graph->node(dependency.to_node_id);
-      const std::vector<cv::Size> input_extents = resolve_planned_input_extents(
-          *graph, downstream_node, resolver, extent_cache);
+      const std::vector<PixelSize> input_extents =
+          resolve_planned_input_extents(*graph, downstream_node, resolver,
+                                        extent_cache);
       std::optional<OpMetadata> metadata = metadata_for_domain(
           downstream_node.type, downstream_node.subtype, to_task.domain);
       if (metadata) {
@@ -519,11 +513,11 @@ cv::Rect required_upstream_roi_for_task(
         effective_parameters =
             resolve_effective_parameter_snapshot(downstream_node, *graph);
       }
-      const cv::Rect execution_mapped_roi = NodeExecutor::input_roi_for_tile(
+      const PixelRect execution_mapped_roi = NodeExecutor::input_roi_for_tile(
           const_cast<GraphModel&>(*graph), downstream_node, to_task.output_roi,
           input_buffer, config, input_extents,
           effective_parameters ? &*effective_parameters : nullptr);
-      const cv::Rect snapshot_lower_bound =
+      const PixelRect snapshot_lower_bound =
           clip_rect(dependency.from_roi, upstream_extent);
       return clip_rect(
           merge_optional_rect(execution_mapped_roi, snapshot_lower_bound),
@@ -550,8 +544,8 @@ cv::Rect required_upstream_roi_for_task(
  */
 void append_covering_upstream_tiles(
     std::vector<int>& dependency_ids,
-    const NodeTaskDependencyIndex& upstream_index, const cv::Rect& required_roi,
-    const std::vector<PlannedTask>& tasks) {
+    const NodeTaskDependencyIndex& upstream_index,
+    const PixelRect& required_roi, const std::vector<PlannedTask>& tasks) {
   if (!upstream_index.grid_addressable || upstream_index.tile_size <= 0) {
     return;
   }
@@ -675,7 +669,7 @@ std::vector<std::vector<int>> build_task_dependency_ids(
   std::vector<std::vector<int>> dependency_ids(tasks.size());
   const auto task_index_by_node = build_task_dependency_index(tasks);
   GraphExtentResolver extent_resolver;
-  std::unordered_map<int, cv::Size> extent_cache;
+  std::unordered_map<int, PixelSize> extent_cache;
 
   for (const auto& dependency : dependencies) {
     const auto from_it = task_index_by_node.find(dependency.from_node_id);
@@ -701,7 +695,7 @@ std::vector<std::vector<int>> build_task_dependency_ids(
                                           to_task) &&
           !requires_conservative_parameterized_image_dependency(
               dependency, to_task, graph)) {
-        const cv::Rect required_roi = required_upstream_roi_for_task(
+        const PixelRect required_roi = required_upstream_roi_for_task(
             dependency, to_task, graph, extent_resolver, extent_cache);
         append_covering_upstream_tiles(ids, upstream_index, required_roi,
                                        tasks);
@@ -780,8 +774,8 @@ void rebuild_work_task_ids(ComputePlan& result) {
  */
 void clear_dirty_work_metadata(ComputePlan& result) {
   for (auto& work : result.planned_work) {
-    work.represented_hp_roi = cv::Rect();
-    work.execution_roi = cv::Rect();
+    work.represented_hp_roi = PixelRect{};
+    work.execution_roi = PixelRect{};
     work.whole_output = false;
     work.dirty_rois.clear();
   }

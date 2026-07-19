@@ -2,8 +2,9 @@
 
 This document describes the current ownership, publication, mutation, and
 failure behavior of graph sessions. It records implemented behavior, including
-known boundary limitations; proposed persistence abstractions belong in the
-kernel evolution roadmap.
+known boundary limitations. The in-memory GraphDefinition seam, injected YAML
+document/cache adapters, and the dependency-disabled unavailable persistence
+adapters are current behavior.
 
 ## Ownership
 
@@ -48,15 +49,24 @@ constructed and no session is published.
 
 Graph document loading is a prepare-then-publish transaction:
 
-1. `GraphIOService` parses all YAML sequence entries into a temporary node map.
-2. Parser, root-shape, duplicate-id, and node-schema failures are classified
-   before replacement.
-3. Dependencies and cycles are validated and replacement adjacency is built.
-4. `GraphModel::replace_nodes()` installs nodes and topology together, resets
-   graph runtime metadata, and advances topology generation.
+1. `GraphIOService` asks its injected `GraphDocumentReader` for an ordered,
+   detached `GraphDefinition`. The configured `YamlGraphDocumentAdapter` owns
+   filesystem access, YAML parsing, and translation; static parameters and
+   optional output parameters are deep-owned `ParameterValue` trees with no
+   YAML aliases.
+2. The YAML adapter classifies parser, root-shape, parameter representation,
+   and node-field failures while producing the definition. Non-map parameter
+   values, unsupported tags, normalized key collisions, and Int64/Double
+   overflow are document failures.
+3. `InMemoryGraphDocumentAdapter` rejects duplicate ids and empty required
+   parameter-edge names while staging the complete temporary node map.
+4. The adapter calls `GraphModel::replace_nodes()` exactly once. That call
+   validates dependencies and cycles, builds replacement adjacency, installs
+   nodes and topology together, resets graph runtime metadata, and advances
+   topology generation.
 5. `Kernel` inserts the runtime into its map only after the load completes.
 
-A path, parser, node-construction, topology, unexpected, or resource failure
+A path, parser, definition conversion, topology, unexpected, or resource failure
 therefore publishes neither a partial graph nor a new session.
 `std::bad_alloc` propagates unchanged; other failures use the stable matrix
 below. Directory creation and file-copy side effects that happened before
@@ -79,8 +89,9 @@ diagnostic state after accepting the reload. Every nonempty source uses the
 same IO, syntax/schema, topology, unexpected-failure, and resource-exhaustion
 classification as initial load.
 
-`GraphIOService` builds and validates a temporary replacement exactly as it
-does for initial loading. Until `replace_nodes()` succeeds, the visible node
+`GraphIOService` builds a detached definition and the in-memory adapter stages
+and validates a temporary replacement exactly as they do for initial loading.
+Until the adapter's single `replace_nodes()` call succeeds, the visible node
 map, topology, topology generation, cache, timing, dirty/planning state,
 runtime state, and session identity remain unchanged. This guarantee covers
 handled failures and propagated `std::bad_alloc`.
@@ -115,10 +126,14 @@ still returns the displaced reservation exactly once.
 
 `Host::save_graph()` admits the session against concurrent close, requires the
 session map entry, and serializes the visible node snapshot through the same
-`GraphStateExecutor` used by graph mutation and compute. A missing or closing
-session is `GraphErrc::NotFound`, and resolution stops before destination
-access. For an existing session, recoverable node-serialization, YAML-emission,
-and destination preparation/open/write/flush/close failures are normalized to
+`GraphStateExecutor` used by graph mutation and compute. `GraphIOService` first
+captures a detached definition in ascending node-id order through the
+in-memory adapter and excludes all runtime state, then passes it to the
+injected writer. The configured YAML adapter emits the complete representation
+before destination open. A missing or closing session is
+`GraphErrc::NotFound`, and resolution stops before destination access. For an
+existing session, recoverable definition capture, YAML emission, and
+destination preparation/open/write/flush/close failures are normalized to
 `GraphErrc::Io`. Resource exhaustion remains the exact `std::bad_alloc`
 exception channel rather than becoming an `Io` status.
 
@@ -138,12 +153,16 @@ rollback is therefore not part of the graph-owner transaction.
 ## Node Replacement and Structural Edits
 
 `Host::set_node_yaml()` admits the session against concurrent close. Required
-node lookup, candidate parsing, forced replacement-id assignment, and
+node lookup, candidate `NodeDefinition` parsing through the injected reader,
+forced replacement-id assignment, in-memory materialization, and
 `GraphModel::replace_node()` execute in one graph-state work item, so clear or
-reload cannot enter between lookup and mutation. A missing or closing session,
-or a missing requested node, is `GraphErrc::NotFound`. Parsing and complete
-candidate-topology validation for an existing target are
-`GraphErrc::InvalidYaml`.
+reload cannot enter between lookup and mutation. `get_node_yaml()` uses the
+inverse single-node capture through the injected writer. These public method
+names remain for ABI stability; private Kernel/Interaction methods and
+GraphIO are format-neutral. `Node` exposes no YAML conversion methods. A
+missing or closing session, or a missing requested node, is
+`GraphErrc::NotFound`. Parsing and complete candidate-topology validation for
+an existing target are `GraphErrc::InvalidYaml`.
 
 Replacement copies the current node map, validates the complete candidate
 topology, and only then swaps it into visible state. Parse,
@@ -166,10 +185,36 @@ nodes are `GraphErrc::NotFound`. When both endpoints exist but the ROI is empty,
 the path is unreachable, or propagation produces no valid rectangle, the Host
 returns `GraphErrc::InvalidParameter`.
 
+Host requests and results plus private graph, propagation, dirty, and planning
+state carry `PixelRect` and `PixelSize`. An OpenCV adapter or provider may
+construct library geometry only locally at an actual matrix operation; that
+representation does not enter the graph-state work item or its retained state.
+
 Existing-session propagation exceptions continue to update Kernel's
 best-effort `LastError` mirror, but the current Host result comes directly from
 the same required operation. It is never reconstructed by reading shared
 diagnostic state after the operation.
+
+## Injected Persistence Lifetime
+
+Persistence dependencies are composed once per `Kernel`. The embedded product
+root supplies a shared `ImageArtifactCodec`, a shared
+`YamlCacheMetadataCodec`, and one shared `YamlGraphDocumentAdapter` viewed
+through the reader and writer contracts. `GraphCacheService` retains both
+codec owners; `GraphIOService` retains the reader and writer. Kernel,
+GraphCache, and GraphIO reject absent owners at construction and provide no
+configured fallback.
+
+These dependencies are not graph state: reload, clear, and close do not replace
+them. `Kernel::~Kernel()` explicitly clears the owned runtime map before
+ordinary member teardown reaches cache, traversal, diagnostic, IO, or ROI
+collaborators. Each `GraphRuntime` therefore stops graph-state admission,
+drains admitted work, and joins its worker while those borrowed Kernel
+services and all injected owners are still alive; only later service
+destruction releases them. The owning Host must stop external Kernel-call
+admission before Kernel destruction, because the private graph map is not a
+concurrent-destruction API. Codec/document `GraphError` values retain their
+documented categories, and `std::bad_alloc` propagates unchanged.
 
 ## Clear
 
@@ -216,10 +261,13 @@ generation wake, but those waiters still return and no second worker is created.
 A later close drains and joins the replacement lane before retrying scheduler
 stop. On successful close, concrete schedulers shut down and are destroyed
 before their slots return. Destroying an embedded Host without explicit close
-follows the same synchronous ownership chain: `GraphRuntime` drains and joins
-its lane before scheduler teardown and returns all graph reservations before
-Host destruction completes. `NotFound` is reserved for a session that is
-actually absent.
+follows the same synchronous ownership chain. The adapter first waits its joined
+async status workers and stops external admission; `Kernel::~Kernel()` then
+clears the runtime map while Kernel services remain alive. Every `GraphRuntime`
+drains and joins its lane before scheduler teardown, and all graph reservations
+return before Host destruction completes. Direct internal Kernel owners have the
+same duty to stop concurrent callers before destruction. `NotFound` is reserved
+for a session that is actually absent.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
@@ -235,14 +283,14 @@ lease, socket, and shutdown rules are defined in
 | initial load, combined HP+RT process capacity unavailable | no session or scheduler publication; exact `GraphErrc::ComputeError` |
 | initial load, empty path | loads session-local `content.yaml` when present; otherwise intentionally publishes an empty session |
 | initial load, explicit missing/unreadable/uncopyable source or session-path failure | `GraphErrc::Io`; no session publication or fallback; already-created filesystem scratch side effects are not rolled back |
-| initial load, YAML syntax/representation, non-sequence root, duplicate id, or node-schema failure | `GraphErrc::InvalidYaml`; no session publication |
+| initial load, YAML syntax/representation, non-sequence root, duplicate id, parameter representation/overflow, or node-schema failure | `GraphErrc::InvalidYaml`; no session publication |
 | initial load, missing dependency or cycle | exact `GraphErrc::MissingDependency` or `GraphErrc::Cycle`; no session publication |
 | initial load, unexpected non-resource failure | `GraphErrc::Unknown`; no session publication |
 | initial load, resource exhaustion | `std::bad_alloc` propagates; no session publication |
 | reload, missing or closing session | `GraphErrc::NotFound` |
 | reload, existing session with empty path | `GraphErrc::InvalidParameter`; prior graph and runtime state remain visible |
 | reload, missing/unreadable source | `GraphErrc::Io`; prior graph and runtime state remain visible |
-| reload, YAML syntax/representation, non-sequence root, duplicate id, or node-schema failure | `GraphErrc::InvalidYaml`; prior graph and runtime state remain visible |
+| reload, YAML syntax/representation, non-sequence root, duplicate id, parameter representation/overflow, or node-schema failure | `GraphErrc::InvalidYaml`; prior graph and runtime state remain visible |
 | reload, missing dependency or cycle | exact `GraphErrc::MissingDependency` or `GraphErrc::Cycle`; prior graph and runtime state remain visible |
 | reload, unexpected non-resource failure | `GraphErrc::Unknown`; prior graph and runtime state remain visible |
 | reload, resource exhaustion | `std::bad_alloc` propagates; prior graph and runtime state remain visible |
@@ -263,18 +311,66 @@ IPC serializes that exact status and rolls its reserved session name back when
 Host load fails; it does not introduce a transport-only graph-document
 taxonomy.
 
+## Boundaries and Rationale
+
+- Session identity is a copied label; graph and runtime ownership never cross
+  the Host boundary.
+- Prepare-before-publish load and prepare-before-swap reload keep incomplete
+  topology out of the graph map and preserve the prior graph on classified
+  failure.
+- Detached definitions and the in-memory adapter keep format conversion,
+  persistent values, model materialization, and topology publication as
+  separate testable stages without changing the public path contract.
+- The graph-owner transaction and destination-file side effects are separate:
+  save preserves graph state but does not promise atomic destination replace.
+- `GraphStateExecutor` serializes visible graph ownership, while scheduler
+  reservations remain attached to concrete scheduler lifetime and rollback.
+
+These boundaries make publication, mutation, and resource ownership testable
+without using shared diagnostic state as a transaction log.
+[ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
+governs the current ingestion contract. `GraphDefinition`,
+`InMemoryGraphDocumentAdapter`, the injected graph-document contracts, and the
+configured YAML filesystem adapter are now the current persistence boundary.
+Issue #61 implements filesystem-adapter injection and format-neutral private
+Host composition while preserving the public YAML-named ABI. Issue #62 moves
+shared YAML value conversion and cache metadata behind adapter-owned
+contracts, so runtime, graph, compute, inspection, and cache declarations are
+YAML-neutral. Issue #63 completes the dependency-disabled product profile:
+empty and in-memory sessions remain available without yaml-cpp discovery,
+while an explicit graph-document or cache-metadata representation operation
+uses an unavailable adapter and returns `GraphErrc::Io`.
+
 ## Implementation and Validation Entry Points
 
+- `src/lib/core/image_artifact_codec.hpp`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/providers/configured_image_artifact_codec.*`
+- `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/runtime/kernel.cpp`
 - `src/lib/runtime/kernel_io_cache_facade.cpp`
 - `src/lib/runtime/kernel_inspection_facade.cpp`
 - `src/lib/runtime/kernel_dirty_roi_facade.cpp`
+- `src/lib/graph/graph_definition.hpp`
+- `src/lib/graph/graph_document_reader.hpp`
+- `src/lib/graph/graph_document_writer.hpp`
+- `src/lib/graph/in_memory_graph_document_adapter.*`
+- `src/lib/adapters/yaml/graph_definition_yaml.*`
+- `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
+- `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_io_service.cpp`
 - `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
+- `tests/integration/test_graph_document_injection.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`
+- `tests/unit/test_graph_document_adapter.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/integration/test_kernel_contracts.cpp`

@@ -2,13 +2,13 @@
 
 ## 状态
 
-作为目标约束已接受；当前实现尚未完成该迁移。
+已接受，并已在当前内核与 embedded-product 边界实现。
 
 ## 背景
 
-公共 operation 和 Host 契约已经使用 Photospider 值类型，但私有 Graph、ROI、dirty propagation、
-planning、cache 和 runtime 代码仍使用 OpenCV geometry 与 image object。YAML 也同时承担图文件
-格式和内部 runtime value model。这使图像处理库与序列化库成为内核语义的一部分。
+历史上，私有 Graph、ROI、dirty propagation、planning、cache 和 runtime 代码使用 OpenCV
+geometry 与 image object。YAML 也同时承担图文件格式和内部 runtime value model。这些依赖使
+图像处理库与序列化库成为内核语义的一部分。
 
 该耦合阻塞了独立 geometry 优化、可替换 operation provider、in-memory graph definition、
 通用数据类型，以及不依赖 OpenCV/yaml-cpp 的内核构建。
@@ -38,4 +38,6 @@ graph-state value model。
 - 算法质量与 codec policy 在编排之外保持可替换。
 - Graph load/reload/save 需要显式 transaction 和 error matrix。
 - Operation provider 必须声明并发与资源行为，不能用隐藏的进程级库锁表达。
-- 现有行为需要分阶段纵向迁移和回归测试；本 ADR 不表示迁移已经完成。
+- 默认 profile 保留 OpenCV/YAML 行为；`PHOTOSPIDER_ENABLE_OPENCV=OFF` 与
+  `PHOTOSPIDER_ENABLE_YAML=OFF` 则选择标准库或显式 unavailable adapter。
+- Clean dependency-disabled producer、install 与外部 Host consumer 是本决策的长期验收证据。

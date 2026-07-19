@@ -242,10 +242,6 @@ named for RT work; normal-priority work may enter the GPU queue when
 `SchedulerHostContext` reports `GPU_METAL` available. Both HP and RT dirty
 source batches currently use high priority, and both downstream groups use
 normal priority, so queue naming must not be interpreted as an intent contract.
-Older fields such as
-`force_cpu_for_rt`, `rt_preempt_threshold_ms`, and scheduler-local
-implementation priority tables are not active configuration in the current
-code path.
 
 ### Per-graph physical resource ownership
 
@@ -488,7 +484,7 @@ operation callbacks reached through the public Host compute path. They do not
 infer the process worker total from `get_stats()`, per-instance worker ids, or a
 whole-process operating-system thread snapshot.
 
-## Current Boundary Invariants
+## Boundaries and Rationale
 
 - `IScheduler` is the current formal public scheduler interface.
 - Concrete ready parallel work is routed through scheduler-owned task runtimes;
@@ -506,6 +502,36 @@ whole-process operating-system thread snapshot.
 - Per-instance worker grants and the shared 32-slot admission ledger contain
   current per-graph ownership; they do not create a shared executor or claim a
   whole-process OS-thread limit.
-- The current interface combines policy and physical worker ownership. ADR 0003
-  records a different accepted ownership decision for later implementation;
-  this document describes the currently executable contract.
+- The current interface combines policy and physical worker ownership. This
+  document describes that executable contract; it does not present a shared
+  executor as current behavior.
+
+The ready-task-only boundary lets scheduler ordering, worker lifecycle, and
+failure publication be tested without graph topology or cache ownership. The
+process ledger contains the current per-graph physical ownership without
+reinterpreting a reservation as a running thread or shared pool.
+[ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
+governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-execution-resources.md)
+and the exact
+[process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
+record the accepted replacement ownership without changing this contract.
+
+## Implementation and Validation Entry Points
+
+- `include/photospider/scheduler/scheduler.hpp`
+- `include/photospider/scheduler/scheduler_task_runtime.hpp`
+- `include/photospider/scheduler/scheduler_plugin_api.hpp`
+- `src/lib/runtime/graph_runtime.*`
+- `src/lib/scheduler/cpu_work_stealing_scheduler.*`
+- `src/lib/scheduler/gpu_pipeline_scheduler.*`
+- `src/lib/scheduler/scheduler_factory.*`
+- `src/lib/scheduler/scheduler_worker_budget.*`
+- `src/lib/scheduler/scheduler_reservation_owner.*`
+- `src/lib/scheduler/scheduler_plugin_loader.*`
+- `tests/integration/test_scheduler.cpp`
+- `tests/integration/test_gpu_pipeline_scheduler.cpp`
+- `tests/integration/test_scheduler_worker_budget.cpp`
+- `tests/integration/test_scheduler_plugin_loader.cpp`
+- `tests/unit/test_scheduler_factory_plan.cpp`
+- `tests/unit/test_scheduler_reservation_owner.cpp`
+- `tests/unit/test_scheduler_exception_publication.cpp`

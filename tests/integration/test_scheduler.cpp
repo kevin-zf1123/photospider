@@ -21,18 +21,20 @@
 #include "graph/graph_cache_service.hpp"      // <--- 修正点: 添加缺失的头文件
 #include "graph/graph_model.hpp"              // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
+#include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
 #include "scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
 #include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 namespace {
 
 void register_micro_blur_for_dirty_scheduler_tests() {
   auto& registry = ps::OpRegistry::instance();
   const auto base_impl =
-      registry.get_implementations("image_process", "gaussian_blur_tiled");
+      registry.get_implementations("image_process", "gaussian_blur");
   ASSERT_TRUE(base_impl && base_impl->tiled_hp);
 
   ps::OpMetadata micro_meta;
@@ -207,7 +209,7 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -253,7 +255,7 @@ TEST(SchedulerTest, ParallelLogToJson) {
   using ps::InteractionService;
   using ps::Kernel;
 
-  Kernel kernel;
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -297,7 +299,7 @@ TEST(SchedulerTest, ParallelLogToJson) {
 }
 
 TEST(Scheduler, DirtyRegionTiledComputation) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
   register_micro_blur_for_dirty_scheduler_tests();
@@ -352,7 +354,7 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   std::cout << "--- SCHEDULER TEST: Simulating a dirty region... ---"
             << std::endl;
 
-  cv::Rect dirty_rect(200, 200, 128, 128);
+  ps::PixelRect dirty_rect{200, 200, 128, 128};
 
   // 修正点: 明确 Lambda 返回类型为 void
   runtime.graph_state()
@@ -365,7 +367,9 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
           cv::Mat mat = ps::toCvMat(
               source_state.cached_output_high_precision->image_buffer);
 
-          mat(dirty_rect).setTo(cv::Scalar(1.0f));
+          mat(cv::Rect{dirty_rect.x, dirty_rect.y, dirty_rect.width,
+                       dirty_rect.height})
+              .setTo(cv::Scalar(1.0f));
         });
 
         // Keep downstream HP outputs as dirty update seeds. The dirty ROI
@@ -386,7 +390,9 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
       runtime.graph_state().submit([&](ps::GraphModel& g) -> ps::NodeOutput {
         // 修正点: 直接构造服务类，不访问 kernel 的私有成员
         ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service;
+        ps::GraphCacheService cache_service{
+            ps::providers::make_configured_image_artifact_codec(),
+            ps::testing::make_yaml_cache_metadata_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        runtime.event_service());
 
@@ -489,7 +495,7 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
 
 TEST(Scheduler,
      DirtyRegionProductionTraceCoversStaleGenerationAndExceptionRethrow) {
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
   register_micro_blur_for_dirty_scheduler_tests();
@@ -507,7 +513,7 @@ TEST(Scheduler,
   stale_hp_request.execution.parallel = true;
   ASSERT_TRUE(svc.cmd_compute(stale_hp_request));
 
-  const cv::Rect dirty_rect(200, 200, 128, 128);
+  const ps::PixelRect dirty_rect{200, 200, 128, 128};
   stale_runtime.graph_state()
       .submit([&](ps::GraphModel& g) -> void {
         g.dirty_source_hp_commit_generation[1] =
@@ -527,7 +533,9 @@ TEST(Scheduler,
   auto stale_future = stale_runtime.graph_state().submit(
       [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service;
+        ps::GraphCacheService cache_service{
+            ps::providers::make_configured_image_artifact_codec(),
+            ps::testing::make_yaml_cache_metadata_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        stale_runtime.event_service());
         ps::ComputeService::Request request;
@@ -575,7 +583,9 @@ TEST(Scheduler,
   auto exception_future = exception_runtime.graph_state().submit(
       [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service;
+        ps::GraphCacheService cache_service{
+            ps::providers::make_configured_image_artifact_codec(),
+            ps::testing::make_yaml_cache_metadata_codec()};
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        exception_runtime.event_service());
         ps::ComputeService::Request request;
@@ -599,23 +609,24 @@ TEST(Scheduler,
 }
 
 /**
- * @brief Verifies concurrent HP/RT dirty siblings preserve YAML node state.
+ * @brief Verifies concurrent HP/RT dirty siblings preserve ParameterMap state.
  *
  * The test seeds one scheduler-backed graph, performs an authoritative HP
  * compute, then issues repeated RealTimeUpdate transactions whose HP and RT
  * siblings resolve the same live node parameters concurrently. It finally
- * checks both the graph-owned YAML state and the RT proxy output.
+ * checks graph-owned static state, request-local runtime cleanup, and the RT
+ * proxy output.
  *
- * @return Nothing; GoogleTest assertions report compute, YAML, or proxy-state
- *         failures.
- * @throws std::bad_alloc, YAML::Exception, GraphError, or std::system_error if
- *         graph setup, concurrent dirty execution, or result inspection fails.
+ * @return Nothing; GoogleTest assertions report compute, parameter, or
+ * proxy-state failures.
+ * @throws std::bad_alloc, GraphError, or std::system_error if graph setup,
+ * concurrent dirty execution, or result inspection fails.
  * @note The test exercises production scheduler callbacks. Transaction-local
  *       synchronization must protect same-node snapshot and parameter staging
  *       without serializing operation bodies or persisting into GraphRuntime.
  */
-TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
-  ps::Kernel kernel;
+TEST(Scheduler, ConcurrentDirtySiblingsPreserveParameterValueState) {
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::Kernel::SchedulerConfig scheduler_config;
   scheduler_config.worker_count = 8;
   kernel.set_scheduler_config(scheduler_config);
@@ -642,7 +653,9 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
     auto update_future = runtime.graph_state().submit(
         [&](ps::GraphModel& graph) -> ps::NodeOutput {
           ps::GraphTraversalService traversal_service;
-          ps::GraphCacheService cache_service;
+          ps::GraphCacheService cache_service{
+              ps::providers::make_configured_image_artifact_codec(),
+              ps::testing::make_yaml_cache_metadata_codec()};
           ps::ComputeService compute_service(traversal_service, cache_service,
                                              runtime.event_service());
           ps::ComputeService::Request request;
@@ -650,7 +663,7 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
           request.cache.precision = "int8";
           request.cache.disable_disk_cache = true;
           request.intent = ps::ComputeIntent::RealTimeUpdate;
-          request.dirty_roi = cv::Rect(200, 200, 128, 128);
+          request.dirty_roi = ps::PixelRect{200, 200, 128, 128};
           return compute_service.compute_parallel(graph, runtime, request);
         });
     ps::NodeOutput output;
@@ -662,10 +675,10 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
   runtime.graph_state()
       .submit([](ps::GraphModel& graph) {
         const ps::Node& blur = graph.node(2);
-        ASSERT_TRUE(blur.parameters);
-        EXPECT_EQ(blur.parameters["ksize"].as<int>(), 25);
-        ASSERT_TRUE(blur.runtime_parameters);
-        EXPECT_EQ(blur.runtime_parameters["ksize"].as<int>(), 25);
+        ASSERT_FALSE(blur.parameters.empty());
+        EXPECT_EQ(blur.parameters.at("ksize").as_int64(), 25);
+        EXPECT_TRUE(blur.runtime_parameters.empty())
+            << "request-local effective parameters must not persist in Graph";
       })
       .get();
   const auto* proxy_output = runtime.realtime_proxy_graph().find_output(3);

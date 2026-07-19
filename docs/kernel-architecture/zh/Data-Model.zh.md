@@ -1,8 +1,9 @@
 # 内核数据模型
 
-本文档描述当前内核使用的图和节点数据结构。`GraphModel` 与 `Node` 是私有 backend state，
-不是共享 public contract。Frontend 使用 `ps::Host` value，operation plugin 使用 operation SDK，
-scheduler 只接收 ready-task metadata。本文说明这些边界最终操作的内部行为。
+本文档描述当前内核使用的图和节点数据结构。`GraphDefinition` 是脱离运行态的持久文档 value；
+`GraphModel` 与 `Node` 是私有 backend runtime state，不是共享 public contract。Frontend 使用
+`ps::Host` value，operation plugin 使用 operation SDK，scheduler 只接收 ready-task metadata。
+本文说明这些边界最终操作的内部行为。
 
 ## GraphModel
 
@@ -31,6 +32,45 @@ frontend caller。
 `Kernel::load_graph` 调用继续使用 session-local fallback：`<root_dir>/<graph_name>/cache`。
 
 `GraphModel::clear()` 会重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
+
+## GraphDefinition 与内存适配器
+
+`GraphDefinition` 是完整图文档的一份深度拥有、格式中立 value。它拥有按顺序排列的
+`NodeDefinition` vector。每个 `NodeDefinition` 只包含持久 identity、operation
+type/subtype、图像边与参数边、静态 `ParameterMap`、output/cache descriptor，以及
+`preserved` 标志。它不包含 runtime parameter、computed output、revision、ROI/LUT state、
+timing、dirty state 或 cache result。
+
+`InMemoryGraphDocumentAdapter` 是这份脱离运行态的 value 与私有 `Node`/`GraphModel` state
+之间唯一的翻译者：
+
+- apply 会在 stage 完整 `GraphModel::NodeMap` 时校验重复 id 和参数边的必需名称，随后精确调用
+  一次 `GraphModel::replace_nodes()`；
+- capture 会按 node id 升序访问图节点，只把持久字段复制到独立 definition；
+- 单节点 materialization/capture 为 ABI 稳定的 `Host::get_node_yaml()` /
+  `Host::set_node_yaml()` 操作提供支持，而不会在 `Node` 上恢复 YAML method。
+
+该 adapter 不拥有 graph、file、parser tree、cache 或 thread。Caller 仍负责使用现有
+`GraphStateExecutor` 完成串行化。在 replacement 前发生 definition 或 topology failure，会保留
+先前的 node map、topology、generation 与 runtime state。
+
+`GraphDocumentReader` 与 `GraphDocumentWriter` 是两个独立的格式中立 contract。完整图 method
+只交换 filesystem path 与脱离运行态的 `GraphDefinition` value；节点 method 只交换拥有所有权的
+文本与脱离运行态的 `NodeDefinition` value。两个 contract 都不暴露 yaml-cpp、`GraphModel`、
+`Node`、cache state 或 provider-library type。
+
+`GraphIOService` 要求非空的共享 reader/writer owner。它只保留 model orchestration：load 让 reader
+返回脱离运行态的 definition，再通过 `InMemoryGraphDocumentAdapter` 应用；save 会先 capture
+definition，再调用 writer；node-document operation 也经过同一个注入边界。它不会构造 parser、
+emitter 或 graph-document stream。
+
+已配置的 `YamlGraphDocumentAdapter` 拥有私有 YAML translator、filesystem read、node-text
+conversion、完整 emission，以及直接 open/write/flush/close 行为。`create_embedded_host()` 在 YAML
+启用时选择该 adapter，禁用时选择显式 unavailable document adapter，再把同一个共享 owner 作为
+两个 contract 通过 `Kernel` 注入；Kernel 与 GraphIO 都没有默认 persistence construction。一个私有
+的显式依赖 Host root 支持确定性的 fake 替换，不增加可安装 API。Issue #61 与 #62 建立中立的
+document/value 边界。Issue #63 完成 dependency-disabled product profile；empty/in-memory
+session 保持可用，显式 document IO 返回 `GraphErrc::Io`。
 
 ## 拓扑邻接
 
@@ -66,9 +106,21 @@ frontend caller。
 
 ## 参数
 
-`Node::parameters` 包含从图 YAML 加载的静态 YAML 参数。
+`NodeDefinition::parameters` 与 `Node::parameters` 都是包含深度拥有静态数据的
+`plugin::ParameterMap` value。已配置 YAML adapter 内部的私有 translator 会把 graph
+document 一次转换为脱离运行态的 definition；in-memory adapter 随后把该 definition 复制进
+Graph state。Definition 与 Graph storage 都不会保留源 YAML tree。Value 使用精确的
+`ParameterValue` alternative：`Null`、`Bool`、`Int64`、`Double`、`String`、`Array`
+和以 string 为键的 `Object`。
 
-`Node::runtime_parameters` 在执行时通过克隆静态参数并应用 `parameter_inputs` 重建。算子在计算期间应从 `runtime_parameters` 读取有效值。
+Inspection 通过格式中立的 `format_parameter_value_for_inspection()` helper 渲染这些 value。
+Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 ordered-map 顺序；string 会被
+加引号并转义，整个过程不会构造 YAML node 或 emitter。
+
+`Node::runtime_parameters` 是另一个 `ParameterMap`，在执行时通过复制静态 value 并应用
+`parameter_inputs` 重建。连接的命名 output 会替换同名静态 value，期间不发生格式转换。
+算子在计算期间应从 `runtime_parameters` 读取有效值。Executor 会在 request-local node snapshot
+上填充它；它不会作为可复用 Graph state 提交。
 
 ## 输出
 
@@ -77,11 +129,21 @@ frontend caller。
 | 字段 | 含义 |
 | --- | --- |
 | `image_buffer` | 以公共 `ImageBuffer` 契约表示的图像负载。 |
-| `data` | 作为 YAML 节点保存的命名标量或结构化输出。 |
+| `data` | 作为 `plugin::ParameterMap` 保存的命名标量或结构化输出。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
-| `debug` | worker/设备/计时/范围诊断信息。 |
+| `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过 `ImageBuffer::step` 遍历 active scalar byte；padding 被排除，opaque device value 保留 provider diagnostic。 |
 
 算子可以返回图像数据、命名数据，或两者都返回。
+
+持久 `OutputPort::output_parameters` 是可选、深度拥有的 `ParameterValue`。空 optional 表示
+文档字段缺失；已包含值的 null 会保留显式出现的 YAML null。因此，嵌套 output configuration
+可以在 parser 销毁后继续存在，而不保留 `YAML::Node`。
+
+对于 tiled `image_mixing`，需要 crop/pad 的 secondary input 会被物化为 request-local
+`NodeOutput`：named data、spatial/debug provenance 与 plugin-library lifetime 会被复制，而其
+image descriptor 会替换为通过内核 fill/copy 原语生成的 aligned storage。Resize 与 channel
+conversion 继续保留为局部 OpenCV algorithm call。Normalization context 会持有这些临时 output，
+直到所有同步 tile callback 完成；shape 完全匹配的 input 继续借用 upstream output。
 
 ## 缓存字段
 
@@ -120,12 +182,17 @@ RT proxy commit 之后。
   outputs:
     - output_id: 0
       output_type: image
+      output_parameters:
+        color_space: linear
+        channels: [red, green, blue]
   caches:
     - cache_type: image
       location: output.png
 ```
 
-`id` 是必需字段。其他字段根据 `Node::from_yaml` 默认。`parameter_inputs` 要求 `from_output_name` 和 `to_parameter_name` 非空。
+`id` 是必需字段。其他字段使用已配置 YAML adapter translator 的既有默认值。
+`parameter_inputs` 要求 `from_output_name` 和 `to_parameter_name` 非空。
+`output_parameters` 可以缺失、显式为 null，或者是任意可表示的递归 `ParameterValue`。
 
 ## 空间元数据
 
@@ -140,3 +207,52 @@ RT proxy commit 之后。
 | `global_scale_x`, `global_scale_y` | 尺度元数据。 |
 
 `SpatialDependencyMap` 是用于数据依赖空间传播的可选节点本地 LUT。
+
+## 边界与原理
+
+- `GraphDefinition` 是脱离运行态的私有 document value；`GraphModel` 与 `Node` 是私有
+  backend runtime state。Public Host caller 与 operation plugin 接收复制的公共 value，而不是
+  model reference。
+- 结构变更必须经过 model helper，使节点存储、两个方向的邻接、topology generation 与缓存的
+  planning state 作为一份一致图状态变为可见。
+- Scheduler 只接收 ready-task metadata，绝不拥有节点存储、参数、输出值、拓扑或缓存权威。
+- `YAML::Node` 只保留在用于 graph document、共享 value translation 与已配置 cache metadata 的
+  私有 YAML adapter 内。Runtime、graph、compute、inspection 或 cache contract 不再声明它，
+  `GraphDefinition`、持久 `Node` 字段与 `OutputPort` 也不拥有它。静态/有效参数、output-port
+  configuration 与 operation 命名 output 都是 `ParameterValue` tree。Graph extent、spatial
+  metadata、dirty snapshot 与 compute-task geometry 使用内核自有的 `PixelSize` 和
+  `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
+  确实需要时，才会创建 OpenCV geometry。
+
+把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
+mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
+前提下完成 runtime/cache YAML value 边界。剩余 configured-product 与 provider-library
+dependency 工作由
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)和精确的
+[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)约束；这两份文档都不会
+改变上文描述的当前字段。
+
+## 实现与验证入口
+
+- `src/lib/graph/graph_model.*`
+- `src/lib/graph/node.hpp`
+- `src/lib/graph/graph_definition.hpp`
+- `src/lib/graph/graph_document_reader.hpp`
+- `src/lib/graph/graph_document_writer.hpp`
+- `src/lib/graph/in_memory_graph_document_adapter.*`
+- `src/lib/adapters/yaml/graph_definition_yaml.*`
+- `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/parameter_value_text.*`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/core/ps_types.*`
+- `src/lib/compute/tiled_input_normalizer.*`
+- `src/lib/compute/compute_metrics_recorder.*`
+- `tests/unit/test_graph_topology_boundaries.cpp`
+- `tests/unit/test_graph_document_adapter.cpp`
+- `tests/integration/test_graph_document_injection.cpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/integration/test_graph_document_errors.cpp`

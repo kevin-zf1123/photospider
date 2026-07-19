@@ -59,7 +59,7 @@ struct DependencyLutCacheIdentity {
   /** @brief Image source node/output identities by destination input index. */
   std::vector<DependencyImageInputIdentity> image_input_sources;
   /** @brief Image-input extents indexed by destination input index. */
-  std::vector<cv::Size> input_extents;
+  std::vector<PixelSize> input_extents;
   /** @brief Data-dependent image-parent HP revisions by input index. */
   std::vector<uint64_t> upstream_content_revisions;
   /** @brief Whether upstream content revisions participate in equality. */
@@ -117,13 +117,13 @@ struct DependencyLutCache {
 /**
  * @brief Owns one private graph node's topology, configuration, and HP state.
  *
- * A Node stores declared image/parameter edges, static and request-local YAML
- * parameters, output/cache descriptors, the authoritative reusable HP output,
- * and dependency-LUT identity. Real-time proxy outputs remain outside Node in
- * compute-service runtime state.
+ * A Node stores declared image/parameter edges, static and request-local
+ * `ParameterValue` maps, output/cache descriptors, the authoritative reusable
+ * HP output, and dependency-LUT identity. Real-time proxy outputs remain
+ * outside Node in compute-service runtime state.
  *
- * @throws std::bad_alloc when copied strings, YAML trees, vectors, optional
- * output payloads, or cache identities cannot allocate.
+ * @throws std::bad_alloc when copied strings, parameter trees, vectors,
+ * optional output payloads, or cache identities cannot allocate.
  * @note GraphModel owns Node objects and serializes structural mutation. Cache
  * fields are private backend state, not operation SDK values; callers must use
  * GraphModel/runtime synchronization rather than mutate a shared Node from
@@ -145,15 +145,19 @@ class Node {
   /** @brief Declared parameter edges in effective-parameter merge order. */
   std::vector<ParameterInput> parameter_inputs;
 
-  /** @brief Static YAML parameter map owned by the graph definition. */
-  YAML::Node parameters;
+  /**
+   * @brief Static format-neutral parameter map owned by the graph definition.
+   * @note Graph document adapters populate this value exactly once during
+   * ingestion; Graph and compute code never retain the source YAML tree.
+   */
+  plugin::ParameterMap parameters;
 
   /**
-   * @brief Execution-local effective YAML parameters for the current request.
+   * @brief Execution-local effective parameters for the current request.
    * @note Executors populate this snapshot from parameters and connected
    * parameter inputs; it must not be treated as committed reusable graph state.
    */
-  YAML::Node runtime_parameters;
+  plugin::ParameterMap runtime_parameters;
 
   /** @brief Declared output ports serialized with the graph definition. */
   std::vector<OutputPort> outputs;
@@ -171,10 +175,10 @@ class Node {
   /** @brief Monotonic content revision of the reusable HP output. */
   int hp_version = 0;
   /** @brief Most recent dirty or updated ROI committed to the HP output. */
-  std::optional<cv::Rect> hp_roi;
+  std::optional<PixelRect> hp_roi;
 
   /** @brief Last committed full-resolution input extent for ROI propagation. */
-  std::optional<cv::Size> last_input_size_hp;
+  std::optional<PixelSize> last_input_size_hp;
 
   /**
    * @brief Validated dependency LUT and exact private reuse identity.
@@ -185,36 +189,6 @@ class Node {
   mutable uint64_t dependency_lut_version = 0;
   /** @brief Monotonic revision of the node's static parameter document. */
   uint64_t parameters_version = 0;
-
-  /**
-   * @brief Parses one private graph node from its YAML representation.
-   *
-   * @param n YAML mapping containing identity, edges, parameters, outputs, and
-   * cache descriptors.
-   * @return Fully owned Node value; runtime and computed cache fields retain
-   * their defaults.
-   * @throws YAML::Exception when a present field has an incompatible YAML
-   * shape or scalar conversion.
-   * @throws GraphError with `GraphErrc::InvalidParameter` when a parameter edge
-   * omits either endpoint name.
-   * @throws std::bad_alloc when strings, YAML nodes, or vectors cannot
-   * allocate.
-   * @note Parsing does not validate graph-wide topology or resolve operation
-   * callbacks; GraphModel performs those later stages.
-   */
-  static Node from_yaml(const YAML::Node& n);
-
-  /**
-   * @brief Serializes persistent node configuration to a YAML mapping.
-   *
-   * @return YAML mapping containing identity, declared edges, static
-   * parameters, outputs, cache descriptors, and the preserved flag.
-   * @throws YAML::Exception when yaml-cpp cannot construct or assign a value.
-   * @throws std::bad_alloc when YAML/container storage cannot allocate.
-   * @note Runtime parameters, computed outputs, revisions, ROIs, and dependency
-   * LUT state are deliberately excluded from graph serialization.
-   */
-  YAML::Node to_yaml() const;
 };
 
 }  // namespace ps

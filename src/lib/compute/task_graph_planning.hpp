@@ -58,9 +58,9 @@ struct PlannedDependency {
   /** @brief Input category, currently "image" or "parameter". */
   std::string input_kind = "image";
   /** @brief Upstream ROI represented by this edge, when known. */
-  cv::Rect from_roi;
+  PixelRect from_roi;
   /** @brief Downstream ROI demanded or affected by this edge, when known. */
-  cv::Rect to_roi;
+  PixelRect to_roi;
   /** @brief Direction used to explain how dirty ROI mapping was derived. */
   DirtyEdgeDirection direction = DirtyEdgeDirection::BackwardDemand;
 };
@@ -86,7 +86,7 @@ struct PlannedTask {
   /** @brief HP or RT domain for this single-domain task. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
   /** @brief Output pixel ROI covered by this task; empty means unknown. */
-  cv::Rect output_roi;
+  PixelRect output_roi;
   /** @brief Tile x index for tile tasks, or -1 for non-tile work. */
   int tile_x = -1;
   /** @brief Tile y index for tile tasks, or -1 for non-tile work. */
@@ -121,15 +121,15 @@ struct PlannedNodeWork {
   /** @brief HP or RT domain represented by this work item. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
   /** @brief HP-space ROI represented for inspection or downsample sync. */
-  cv::Rect represented_hp_roi;
+  PixelRect represented_hp_roi;
   /** @brief Domain-local ROI the planner expects to execute. */
-  cv::Rect execution_roi;
+  PixelRect execution_roi;
   /** @brief Whether the work item must recompute the whole output. */
   bool whole_output = false;
   /** @brief Whether a formal reusable HP cache was available during pruning. */
   bool reusable_cache_available = false;
   /** @brief Dirty ROIs associated with this node after snapshot pruning. */
-  std::vector<cv::Rect> dirty_rois;
+  std::vector<PixelRect> dirty_rois;
   /** @brief Upstream planned node ids required by this node. */
   std::vector<int> dependency_node_ids;
   /** @brief Downstream planned node ids depending on this node. */
@@ -191,13 +191,13 @@ struct DirtyNodeSelection {
   /** @brief Graph node id represented by this selected dirty metadata. */
   int node_id = -1;
   /** @brief HP-space ROI represented by the selected dirty task view. */
-  cv::Rect represented_hp_roi;
+  PixelRect represented_hp_roi;
   /** @brief Domain-local ROI selected for execution. */
-  cv::Rect execution_roi;
+  PixelRect execution_roi;
   /** @brief Whether selected dirty work covers the whole output. */
   bool whole_output = false;
   /** @brief Dirty ROIs associated with this node in the snapshot. */
-  std::vector<cv::Rect> dirty_rois;
+  std::vector<PixelRect> dirty_rois;
 };
 
 /**
@@ -256,7 +256,7 @@ struct ComputeRequest {
   /** @brief Whether the caller intends scheduler-backed execution. */
   bool parallel = false;
   /** @brief Optional dirty ROI used by dirty update callers. */
-  std::optional<cv::Rect> dirty_roi;
+  std::optional<PixelRect> dirty_roi;
 };
 
 /**

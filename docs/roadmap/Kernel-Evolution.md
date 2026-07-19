@@ -9,6 +9,14 @@ implementation checklist. Current facts remain authoritative in
 `docs/adr/`; implementation state is tracked only in the linked GitHub
 Projects and Issues.
 
+[ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
+defines this separation and the promotion workflow. Each delivery slice cites
+its current-state baseline, governing ADR, exact target section, live
+Project/Issue state, and actual verification. Completing a delivery item does
+not by itself make the target current behavior; the corresponding maintained
+architecture document changes only when implementation and durable tests
+support it.
+
 The current branch is treated as a local, single-user, embedded or Unix-socket
 sidecar baseline. The target described here is required before Photospider is
 presented as a general dataflow kernel, a low-latency interactive engine, or a
@@ -185,6 +193,15 @@ is a breaking replacement, not a permanent forwarding layer.
 
 ## Dependency-Neutral Kernel
 
+[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
+governs this target. The maintained current baseline is documented in
+[Kernel Terminology](../kernel-architecture/Terminology.md),
+[Kernel Data Model](../kernel-architecture/Data-Model.md),
+[Dirty Region Propagation and Work Selection](../kernel-architecture/Dirty-Region-Propagation.md),
+and [Graph Lifecycle and Mutation Semantics](../kernel-architecture/Graph-Lifecycle.md).
+Those current-state documents remain authoritative while the migration
+proceeds.
+
 The kernel owns only the small primitives needed to express and execute its
 semantics:
 
@@ -193,23 +210,40 @@ semantics:
 - stride-aware buffer view, copy, fill, crop-to-view, pad, minimal conversion,
   and validation primitives;
 - format-neutral parameter values and typed graph definitions;
-- injected graph document readers/writers and image/artifact codecs.
+- injected graph document readers/writers, image/artifact codecs, and cache
+  metadata codecs.
 
 OpenCV remains valuable as an optional operation provider, image codec, and
 public image adapter. It must not define Graph, ROI, dirty propagation,
 planning, cache, or runtime interfaces. The current repository-owned CPU
-provider already follows the provider concurrency direction from ADR 0004: it
-uses reentrant `cv::Mat` callbacks, fixes OpenCV internal CPU threading at one
-before publication, leaves outer parallelism to admitted scheduler workers,
-and keeps genuine shared backend synchronization provider-local. The target
-architecture preserves those ownership rules while moving all OpenCV
-initialization, exceptions, algorithms, codecs, and process-wide state fully
-inside the optional OpenCV provider.
+provider already follows the provider concurrency direction from
+[ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md):
+it uses reentrant `cv::Mat` callbacks, fixes OpenCV internal CPU threading at
+one before publication, leaves outer parallelism to admitted scheduler
+workers, and keeps genuine shared backend synchronization provider-local. The
+repository-owned operation algorithms, their OpenCV initialization, and their
+exception translation now live in a separately switchable provider module;
+the provider-disabled profile proves a stdlib-only v2 provider can supply and
+execute an absent operation. Issue #63 makes image processing, codecs, public
+adapters, provider/plugin defaults, and the embedded product capability
+selected. The dependency-disabled profile discovers no OpenCV and builds the
+real kernel aggregate and Host product with standard-library or explicit
+unavailable adapters.
 
 YAML remains a supported document adapter. `YAML::Node` must not remain the
 runtime parameter, output, cache metadata, or graph-state value model. Graph
 loading and saving are injected behaviors with explicit transaction and error
-contracts.
+contracts. [ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
+fixes the classified ingestion transaction that the loading boundary must
+preserve.
+
+Issue #62 makes the runtime/cache value slice current: shared YAML conversion
+is adapter-owned, cache metadata crosses an injected format-neutral codec, and
+inspection uses a neutral recursive formatter. Issue #63 completes the
+dependency-disabled product/static/install consumer slice. Its clean smoke
+build disables both capability discoveries, verifies the real
+`photospider_kernel` and `photospider` targets, installs without dependency
+leakage, and runs an external Host consumer.
 
 ## General Data and Regions
 

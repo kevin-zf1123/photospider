@@ -15,8 +15,8 @@
 #include <vector>
 
 #include "benchmark/benchmark_service.hpp"
-#include "core/opencv_operation_test_access.hpp"
 #include "photospider/host/host.hpp"
+#include "providers/opencv/opencv_operation_provider_test_access.hpp"
 
 namespace ps {
 namespace {
@@ -137,9 +137,10 @@ class ScopedBenchmarkRoot final {
  *       worker configuration. Only `image_process:curve_transform` contributes
  *       to the reported concurrency.
  */
-class NonBlockingCurveObserver final : public ops::OpenCvOperationObserver {
+class NonBlockingCurveObserver final
+    : public providers::opencv::OpenCvOperationObserver {
  public:
-  /** @copydoc ops::OpenCvOperationObserver::on_enter */
+  /** @copydoc providers::opencv::OpenCvOperationObserver::on_enter */
   void on_enter(const char* operation_key) noexcept override {
     if (std::strcmp(operation_key, "image_process:curve_transform") != 0) {
       return;
@@ -153,7 +154,7 @@ class NonBlockingCurveObserver final : public ops::OpenCvOperationObserver {
     }
   }
 
-  /** @copydoc ops::OpenCvOperationObserver::on_exit */
+  /** @copydoc providers::opencv::OpenCvOperationObserver::on_exit */
   void on_exit(const char* operation_key) noexcept override {
     if (std::strcmp(operation_key, "image_process:curve_transform") != 0) {
       return;
@@ -206,13 +207,13 @@ class ScopedObserverPublication final {
    * @throws Nothing.
    */
   explicit ScopedObserverPublication(
-      ops::OpenCvOperationObserver& observer) noexcept {
-    ops::set_opencv_operation_observer_for_testing(&observer);
+      providers::opencv::OpenCvOperationObserver& observer) noexcept {
+    providers::opencv::set_opencv_operation_observer_for_testing(&observer);
   }
 
   /** @brief Clears observer publication. @throws Nothing. */
   ~ScopedObserverPublication() noexcept {
-    ops::set_opencv_operation_observer_for_testing(nullptr);
+    providers::opencv::set_opencv_operation_observer_for_testing(nullptr);
   }
 
   /**

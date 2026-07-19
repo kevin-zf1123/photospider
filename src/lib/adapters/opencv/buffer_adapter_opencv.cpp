@@ -6,6 +6,23 @@
 
 #include "photospider/plugin/opencv_adapter.hpp"
 
+namespace {
+
+/**
+ * @brief Converts kernel-native geometry at an OpenCV matrix boundary.
+ *
+ * @param rectangle Kernel-native pixel rectangle.
+ * @return Equivalent OpenCV rectangle used only for matrix slicing.
+ * @throws Nothing.
+ * @note This single file-local conversion serves both private and public
+ *       OpenCV adapter views; callers and kernel planning retain PixelRect.
+ */
+cv::Rect to_opencv_rect(const ps::PixelRect& rectangle) noexcept {
+  return cv::Rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+}
+
+}  // namespace
+
 namespace ps {
 namespace {
 
@@ -141,6 +158,7 @@ ImageBuffer* tile_buffer(const OutputTile& tile) noexcept {
  * @param tile Tile view carrying a buffer pointer and ROI.
  * @param missing_message Error text used when the tile has no buffer.
  * @return cv::Mat view covering tile.roi.
+ * @throws std::invalid_argument when the ImageBuffer descriptor is malformed.
  * @throws std::runtime_error when tile has no buffer or the ImageBuffer adapter
  * cannot expose a matrix.
  * @throws cv::Exception when backend mapping or ROI slicing fails.
@@ -153,6 +171,7 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
   if (!buffer) {
     throw std::runtime_error(missing_message);
   }
+  validate_image_buffer(*buffer);
   require_cpu_device(*buffer, "toCvMat");
   cv::Mat full_mat;
   if (buffer->data) {
@@ -163,7 +182,7 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
     throw std::runtime_error(
         "OpenCV adapter cannot interpret an opaque backend-only context");
   }
-  return full_mat(tile.roi);
+  return full_mat(to_opencv_rect(tile.roi));
 }
 
 /**
@@ -174,6 +193,7 @@ cv::Mat to_cv_mat_for_tile(const TileView& tile, const char* missing_message) {
  * @param missing_message Error text used when the tile has no buffer.
  * @param access OpenCV access intent for upload/backend synchronization.
  * @return cv::UMat view covering tile.roi.
+ * @throws std::invalid_argument when the ImageBuffer descriptor is malformed.
  * @throws std::runtime_error when tile has no buffer or the ImageBuffer adapter
  * cannot expose a UMat.
  * @throws cv::Exception when upload, backend mapping, or ROI slicing fails.
@@ -187,6 +207,7 @@ cv::UMat to_cv_umat_for_tile(const TileView& tile, const char* missing_message,
   if (!buffer) {
     throw std::runtime_error(missing_message);
   }
+  validate_image_buffer(*buffer);
   require_cpu_device(*buffer, "toCvUMat");
   cv::UMat full_umat;
   if (buffer->data) {
@@ -198,13 +219,14 @@ cv::UMat to_cv_umat_for_tile(const TileView& tile, const char* missing_message,
     throw std::runtime_error(
         "OpenCV adapter cannot interpret an opaque backend-only context");
   }
-  return full_umat(tile.roi);
+  return full_umat(to_opencv_rect(tile.roi));
 }
 
 }  // namespace
 
 /** @copydoc toCvMat(const ImageBuffer&) */
 cv::Mat toCvMat(const ImageBuffer& buffer) {
+  validate_image_buffer(buffer);
   require_cpu_device(buffer, "toCvMat");
   // CPU storage is exposed as a zero-copy, source-lifetime-bound view.
   if (buffer.data) {
@@ -235,6 +257,7 @@ cv::Mat toCvMat(const OutputTile& tile) {
 
 /** @copydoc toCvUMat(const ImageBuffer&) */
 cv::UMat toCvUMat(const ImageBuffer& buffer) {
+  validate_image_buffer(buffer);
   require_cpu_device(buffer, "toCvUMat");
   // CPU storage is uploaded through a source-lifetime-bound Mat view.
   if (buffer.data) {
@@ -327,16 +350,6 @@ namespace ps::plugin::opencv {
 namespace {
 
 /**
- * @brief Converts public geometry to the OpenCV adapter rectangle.
- * @param rectangle Public pixel rectangle.
- * @return Equivalent OpenCV rectangle.
- * @throws Nothing.
- */
-cv::Rect to_opencv_rect(const PixelRect& rectangle) noexcept {
-  return cv::Rect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-}
-
-/**
  * @brief Validates one public tile ROI without overflow-prone edge arithmetic.
  * @param buffer Image extent containing the tile.
  * @param rectangle Public ROI to validate.
@@ -370,7 +383,7 @@ cv::Mat to_mat(const InputTileView& tile) {
     throw std::runtime_error("to_mat: input tile has no image buffer");
   }
   validate_public_tile_roi(*tile.buffer, tile.roi);
-  return ps::toCvMat(InputTile{tile.buffer, to_opencv_rect(tile.roi), nullptr});
+  return ps::toCvMat(InputTile{tile.buffer, tile.roi, nullptr});
 }
 
 /** @copydoc to_mat(const OutputTileView&) */
@@ -393,8 +406,7 @@ cv::UMat to_umat(const InputTileView& tile) {
     throw std::runtime_error("to_umat: input tile has no image buffer");
   }
   validate_public_tile_roi(*tile.buffer, tile.roi);
-  return ps::toCvUMat(
-      InputTile{tile.buffer, to_opencv_rect(tile.roi), nullptr});
+  return ps::toCvUMat(InputTile{tile.buffer, tile.roi, nullptr});
 }
 
 /** @copydoc to_umat(const OutputTileView&) */

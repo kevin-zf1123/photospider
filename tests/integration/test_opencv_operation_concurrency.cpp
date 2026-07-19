@@ -17,10 +17,10 @@
 #include <vector>
 
 #include "benchmark/benchmark_service.hpp"
-#include "core/opencv_operation_test_access.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
+#include "providers/opencv/opencv_operation_provider_test_access.hpp"
 #include "support/ipc_host_spy.hpp"
 
 namespace ps {
@@ -361,7 +361,8 @@ class ScopedCallbackRelease final {
  *         the test process rather than perturbing product callback semantics.
  * @note Other built-in keys pass through without changing gate state.
  */
-class CurveOperationObserver final : public ops::OpenCvOperationObserver {
+class CurveOperationObserver final
+    : public providers::opencv::OpenCvOperationObserver {
  public:
   /**
    * @brief Binds the observer to test-owned blocking state.
@@ -371,14 +372,14 @@ class CurveOperationObserver final : public ops::OpenCvOperationObserver {
   explicit CurveOperationObserver(CallbackConcurrencyGate& gate) noexcept
       : gate_(&gate) {}
 
-  /** @copydoc ops::OpenCvOperationObserver::on_enter */
+  /** @copydoc providers::opencv::OpenCvOperationObserver::on_enter */
   void on_enter(const char* operation_key) noexcept override {
     if (std::strcmp(operation_key, "image_process:curve_transform") == 0) {
       gate_->enter_and_block();
     }
   }
 
-  /** @copydoc ops::OpenCvOperationObserver::on_exit */
+  /** @copydoc providers::opencv::OpenCvOperationObserver::on_exit */
   void on_exit(const char* operation_key) noexcept override {
     if (std::strcmp(operation_key, "image_process:curve_transform") == 0) {
       gate_->leave();
@@ -404,13 +405,13 @@ class ScopedOpenCvObserverPublication final {
    * @throws Nothing.
    */
   explicit ScopedOpenCvObserverPublication(
-      ops::OpenCvOperationObserver& observer) noexcept {
-    ops::set_opencv_operation_observer_for_testing(&observer);
+      providers::opencv::OpenCvOperationObserver& observer) noexcept {
+    providers::opencv::set_opencv_operation_observer_for_testing(&observer);
   }
 
   /** @brief Clears observer publication. @throws Nothing. */
   ~ScopedOpenCvObserverPublication() noexcept {
-    ops::set_opencv_operation_observer_for_testing(nullptr);
+    providers::opencv::set_opencv_operation_observer_for_testing(nullptr);
   }
 
   /**

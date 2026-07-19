@@ -6,6 +6,11 @@
 当前事实仍由 `docs/kernel-architecture/` 说明；架构决策记录在 `docs/adr/`；实施状态只由链接的
 GitHub Project 和 Issue 跟踪。
 
+[ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
+定义上述分离与提升流程。每个交付切片都要引用其当前状态基线、governing ADR、精确目标章节、
+实时 Project/Issue 状态和实际验证结果。完成交付项本身不会让目标变成当前行为；只有实现与长期
+测试支持该行为时，才会修改对应维护中架构文档。
+
 当前分支定位为本地、单用户、embedded 或 Unix-socket sidecar 基线。在 Photospider 被描述为
 通用数据流内核、低延迟交互引擎或多 session server runtime 之前，应完成本文目标。
 
@@ -154,24 +159,43 @@ forwarding layer。
 
 ## 依赖中立内核
 
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
+约束本目标。维护中的当前基线由[内核术语](../../kernel-architecture/zh/Terminology.zh.md)、
+[内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
+[脏区传播与工作选择](../../kernel-architecture/zh/Dirty-Region-Propagation.zh.md)和
+[图生命周期与变更语义](../../kernel-architecture/zh/Graph-Lifecycle.zh.md)记录。迁移期间，这些
+当前状态文档仍是权威来源。
+
 内核只拥有表达和执行自身语义所需的小型原语：
 
 - checked rectangle、extent、clip、union/intersection、scale、halo、grid、tile alignment 和
   transform bound；
 - stride-aware buffer view、copy、fill、crop-to-view、pad、最小 conversion 和 validation；
 - format-neutral parameter value 和 typed graph definition；
-- 注入式 graph document reader/writer 和 image/artifact codec。
+- 注入式 graph document reader/writer、image/artifact codec 与 cache metadata codec。
 
 OpenCV 继续作为可选 operation provider、image codec 和公共 image adapter。它不得定义 Graph、
 ROI、dirty propagation、planning、cache 或 runtime interface。当前仓库自有 CPU provider 已遵循
-ADR 0004 的 provider 并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU
-threading 固定为一，把外层并行交给已准入 scheduler worker，并让真实共享 backend 同步保持
-provider-local。目标架构会保留这些所有权规则，同时把全部 OpenCV 初始化、异常、algorithm、codec
-与进程级状态完整移入可选 OpenCV provider。
+[ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md) 的 provider
+并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU threading 固定为一，把
+外层并行交给已准入 scheduler worker，并让真实共享 backend 同步保持 provider-local。仓库自有
+operation algorithm、对应 OpenCV 初始化与异常翻译现已位于可独立开关的 provider module 中；
+provider-disabled profile 会证明 stdlib-only v2 provider 能提供并执行缺失 operation。Issue #63
+让 image processing、codec、public adapter、provider/plugin 默认值与 embedded product 都由
+capability 选择。Dependency-disabled profile 不发现 OpenCV，并使用标准库或显式 unavailable
+adapter 构建真实 kernel aggregate 与 Host product。
 
 YAML 继续作为受支持的 document adapter；`YAML::Node` 不再作为 runtime parameter、output、
-cache metadata 或 graph-state value model。Graph load/save 是具有显式 transaction 和 error
-contract 的注入行为。
+cache metadata 或 graph-state value model。Graph load/save 是具有显式 transaction 与 error
+contract 的注入行为；
+[ADR 0005](../../adr/zh/0005-graph-document-ingestion-is-a-classified-transaction.zh.md) 固定了
+load 边界必须保留的分类摄取事务。
+
+Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML conversion 归 adapter
+所有，cache metadata 经过注入的格式中立 codec，inspection 使用中立的递归 formatter。Issue #63
+完成 dependency-disabled product/static/install consumer 纵向切片。其 clean smoke build 会禁用
+两个 capability discovery，验证真实 `photospider_kernel` 与 `photospider` target，确认安装不泄漏
+依赖，并运行外部 Host consumer。
 
 ## 通用数据与 Region
 

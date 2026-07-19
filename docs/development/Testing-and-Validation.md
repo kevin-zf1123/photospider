@@ -99,6 +99,19 @@ components fail as well; optional disabled `ipc_client` and unknown components
 remain not-found without failing discovery; omitting components or requesting
 `embedded` retains the existing backend dependency resolution.
 
+The durable `DependencyDisabledInstallSmoke` configures a clean producer with
+OpenCV and YAML capabilities disabled, disables both package discoveries,
+turns off IPC/testing, and builds the real `photospider_kernel` aggregate and
+`photospider` product. It verifies the derived provider/plugin/CLI defaults and
+the precise diagnostics for three invalid explicit combinations. After a clean
+install it rejects OpenCV headers, targets, export references, and yaml-cpp
+link leakage; optional `operation_opencv` remains unavailable while the
+required component fails. An external consumer configures with both discoveries
+disabled, links/runs `Photospider::photospider`, allocates a neutral image,
+loads and closes an empty Host session, and observes `GraphErrc::Io` from an
+explicit YAML operation. CI may reuse a producer only after its cache identity,
+configuration, and complete capability profile are validated.
+
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
 `CMAKE_GENERATOR` and `CMAKE_CONFIGURATION_TYPES` cache value, and resolves the
@@ -124,8 +137,9 @@ the maintained product. The daemon help test uses a CMake script driver to run
 the real configuration-specific `photospiderd --help`, captures stdout and
 stderr, requires a numeric zero process result before matching the stable
 capability sentence, and diagnoses launch failure separately from nonzero exit.
-`IpcDisabledInstallSmoke`, focused `test_ipc_protocol`/`test_ipc_host` cases,
-and real-process `test_ipc_daemon` cases follow the same rule: they exercise
+`IpcDisabledInstallSmoke`, `DependencyDisabledInstallSmoke`, focused
+`test_ipc_protocol`/`test_ipc_host` cases, and real-process `test_ipc_daemon`
+cases follow the same rule: they exercise
 package, framing, typed client, complete IPC Host dispatch/polling/stop/artifact
 ownership, daemon lifecycle, concurrency, and cleanup behavior. Daemon tests
 use CTest timeouts plus bounded
@@ -287,6 +301,103 @@ maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
 
+## Injected Image Artifact Codec Validation
+
+`test_kernel_contracts` owns the long-lived fake-codec cache boundary. Its
+`CacheSemantics.InjectedCodec*` cases create `GraphCacheService` or a real
+`Kernel` with a shared `FakeImageArtifactCodec` and verify exact decode/encode
+paths, service-retained codec lifetime, `int16` precision selection, recoverable
+`GraphErrc::Io` diagnostics without HP-cache mutation, and exact
+`std::bad_alloc` propagation. The Kernel-lifetime case blocks the real
+`GraphStateExecutor`, admits a second cache-save work item that borrows
+`Kernel::cache_service_`, releases the caller's only codec owner, and destroys
+Kernel on another thread. Executor checkpoints and futures require destruction
+to wait, the admitted encode to observe a live codec, and codec release to occur
+only after Kernel destruction completes. The fake performs no real image-format
+IO, so these tests remain independent of OpenCV codec behavior while exercising
+the production runtime and cache service.
+
+`ImageArtifactCodecDependencyDisabledBuild` configures a fresh nested build with
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`,
+builds the provider-independent focused `test_kernel_contracts` target, and
+runs only the injected-codec cases. The target remains available without
+registering the complete kernel-contract binary in that profile's CTest
+inventory. This proves the Graph/cache injection contract and fake do not
+depend on the optional operation provider. The separate
+`DependencyDisabledInstallSmoke` covers the complete product profile that omits
+OpenCV discovery and selects the unavailable production codec.
+
+Run the focused validation with:
+
+```bash
+cmake --build build --target test_kernel_contracts -j 2
+./build/tests/test_kernel_contracts \
+  --gtest_filter='CacheSemantics.InjectedCodec*'
+ctest --test-dir build --output-on-failure \
+  -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
+```
+
+## Optional OpenCV Operation Provider Validation
+
+`test_optional_opencv_operation_provider` is a CTest-registered integration
+binary built against both provider configurations. In the normal configuration
+it seeds the repository OpenCV provider, executes its real resize callback,
+proves an invalid OpenCV matrix shape is translated to host-owned
+`GraphErrc::ComputeError`, loads a stdlib-only v2 provider that takes complete
+ownership of the resize execution/dirty/forward slots, executes the replacement
+sentinel output, unloads it, and executes the restored OpenCV predecessor.
+
+`test_opencv_operation_provider_exceptions` runs in its own process so the
+first provider initialization attempt is deterministic. A private
+`BUILD_TESTING` hook injects one `cv::Exception` inside the real
+`std::call_once` body before `cv::setNumThreads(1)`: the first registration must
+return host-owned `GraphErrc::ComputeError` without publishing callbacks, and
+the next registration must retry, set the OpenCV thread count to one, and
+publish the provider. The same private, uninstalled test-access boundary drives
+the actual monolithic and tiled exception wrappers directly. Two independent
+`cv::Error::StsNoMem` injections must each emerge as an exact, fresh
+`std::bad_alloc`, while a tiled non-exhaustion failure must emerge as
+`GraphErrc::ComputeError`; no test attempts real memory exhaustion or changes
+the public ABI.
+
+`OpenCvOperationProviderDisabledBuild` configures a transient nested build with
+`BUILD_TESTING=ON` and
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph
+CLI, and operation-plugin defaults remain enabled. The provider-aware broad
+suite gate is therefore off. The driver validates the exact CMake cache
+profile, builds only the provider-independent focused binary and its
+stdlib-only fixture, then queries the machine-readable CTest inventory. That
+inventory must contain exactly `DependencyDisabledInstallSmoke` and
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`; no broad
+provider-dependent test may remain registered. The driver runs the focused
+case through CTest. The disabled profile requires dependency-neutral
+analyzer/math operations to remain seeded, OpenCV-backed operation keys to be
+absent, and the replacement provider to publish, execute, and fully retire its
+resize key. The transient build is a long-lived product configuration check;
+it emits commands/results to CTest and retains no per-run report. This stage
+disables the operation provider, not the separate OpenCV codec, normalization,
+adapter, or embedded-product dependencies.
+
+Before removing its transient tree, the nested-build driver derives an
+absolute work spelling without resolving it for deletion. It rejects parent
+traversal, the repository, every repository ancestor, filesystem roots, and
+every symlink in the final work path or an existing parent component. Canonical
+resolution is used only for protected-location comparison; the same checks are
+repeated immediately before recursive removal, which always receives the
+validated absolute spelling rather than a symlink target. Recursive-removal
+failures propagate, and an lstat-style postcondition verifies that no directory
+or dangling link remains.
+`OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
+failure propagation, and postcondition only against a synthetic repository,
+ancestors, and unrelated symlink targets under a disposable temporary root.
+Its final-symlink and symlinked-parent cases require each unrelated target and
+marker to survive; the test never passes the real checkout or its parents to
+the remover. The driver also reads the nested
+`CMakeCache.txt`: a nonempty `CMAKE_CONFIGURATION_TYPES` selects
+`tests/<config>/`, while a single-config cache must contain the exact requested
+`CMAKE_BUILD_TYPE`. Missing or contradictory cache state fails explicitly, and
+the safety regression covers both layouts independently of the host platform.
+
 ## OpenCV Operation Concurrency Validation
 
 `test_opencv_operation_concurrency` is a CTest-registered integration binary
@@ -374,6 +485,21 @@ assertions.
 GoogleTest binary. CMake keeps it buildable for manual scripts and ad hoc
 validation, but CTest does not discover or run it. Do not claim that CTest
 covers `test_propagation`; run the exact manual command separately when needed.
+
+The provider-dependent default full test suite is registered only when
+`BUILD_TESTING`, OpenCV, YAML, graph CLI, the repository OpenCV operation
+provider, and repository OpenCV operation plugins are all enabled. It registers
+`test_stdlib_image_buffer_processing` and compiles the standard-library
+implementation directly even though that producer uses OpenCV. The test
+verifies clone independence, stride-safe deterministic bilinear border
+behavior, channel conversions, and ROI copying. The default CTest inventory
+also includes `DependencyDisabledInstallSmoke`.
+
+When only `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is disabled from that
+otherwise default test profile, CMake does not create or discover the broad
+suite. It keeps the provider-independent `test_kernel_contracts` target
+buildable for the injected-codec smoke and registers exactly the focused
+optional-provider GoogleTest plus `DependencyDisabledInstallSmoke`.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific
@@ -501,11 +627,15 @@ The maintained entry points are:
   only the later docs increment. The local source/shell lock does not emulate
   GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
   container runner.
-- `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
-  plus CTest discovery.
-- `ci/scripts/ctest_full.sh` for the main CTest suite.
+- `ci/scripts/integration_plan.sh` for capability discovery of the
+  static-product and IPC-disabled build smokes.
+- `ci/scripts/build_integrity.sh` for the default and IPC-disabled producer
+  profiles, including required-target/full builds and default CTest discovery.
+- `ci/scripts/ctest_full.sh` for the main CTest suite, including the regular
+  durable `DependencyDisabledInstallSmoke`.
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
-  including CLI, propagation, plugin, and scheduler coverage.
+  using full CTest for dependency-disabled coverage alongside the planned build
+  smokes, CLI, propagation, plugin, and scheduler coverage.
 
 CI source inventories and exclusion lists must describe maintained tests and
 current source paths. Migration-only harness names must not be retained as

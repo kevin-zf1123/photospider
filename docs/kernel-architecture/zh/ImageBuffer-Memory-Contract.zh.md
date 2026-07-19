@@ -17,11 +17,16 @@ image payload。
 | `data` | CPU 可访问的数据 owner 或 view。 |
 | `context` | 后端特定资源 owner 或 handle。 |
 
-`InputTile` 是指向上游 `ImageBuffer` 加 `cv::Rect` ROI 的只读非拥有 view。它携带
-`const ImageBuffer*`，因此 tiled 算子不能通过 tile API 替换或修改上游 buffer
-元数据。`OutputTile` 是面向目标区域的可写对应类型，携带可变 `ImageBuffer*`。
-`TileTask` 将一个 `OutputTile` 与零个或多个 `InputTile` view 组合起来，交给 tiled
-算子回调执行。
+公共 tile 契约使用 `InputTileView` 与 `OutputTileView`。二者都携带借用的
+`const ImageBuffer*` 和 backend-neutral `PixelRect`。Input view 是只读的；output view 允许
+adapter 从保留的 payload 暴露可写像素，但 callback 不能替换 descriptor dimension、device
+identity、payload ownership 或 backend context。公共 `TiledOperation` callback 以
+`const OutputTileView&` 接收 output，并以 `OperationTileInputView` value 接收 input。
+
+私有 compute 层另行使用 `InputTile`、`OutputTile` 与 `TileTask`。这些只属于 backend 的 value
+也携带 `PixelRect`；私有 `OutputTile` 在把 task-owned output storage 接到 adapter 时使用可变
+`ImageBuffer*`。OpenCV adapter 只能在创建 matrix view 时局部转换该 rectangle，不会通过这些
+value 保留或返回 `cv::Rect`。它们不会跨越公共 operation 或 Host contract。
 
 ## CPU 缓冲区契约
 
@@ -75,6 +80,36 @@ auto* row = base + y * width * channels * bytes_per_channel;
 
 OpenCV 适配器必须通过使用提供的 `step` 构造 `cv::Mat` 来保持步长。
 
+## 内核 CPU Buffer 原语
+
+当前仅依赖标准库的 operation runtime 拥有以下最小 CPU buffer 原语：
+
+- `validate_image_buffer()` 校验已声明 enum、规范空状态、非空 descriptor 的正尺寸、
+  shared owner 一致性、CPU payload 要求、packed-row stride，以及 descriptor byte
+  算术是否可表示。Opaque backend 的 allocation capacity 仍由 provider 负责。
+- `image_buffer_row_bytes()` 计算不含 padding 的 active packed-row byte；
+  `image_buffer_row_data()` 则通过 `step` 返回只读 CPU row。
+- `fill_image_buffer_region()` 只填充 `OutputTileView` 的 active byte。ROI 之外的 pixel
+  与 row padding 保持不变。
+- `copy_image_buffer_region()` 逐行复制 shape 和 format 相同的
+  `InputTileView`/`OutputTileView` region。当 payload 可能 alias 时，它会在第一次写 destination
+  前完整快照 source 的 active byte，因此重叠 view 具有 value-copy 语义。经证明互相独立的
+  payload 会在 validation 后直接复制；validation/allocation 失败不会改变 destination。
+
+每次调用只借用 tile view；这些原语不会保留 descriptor、添加同步、推断 backend mapping，
+也不会把 producer 提供的只读 snapshot 变成可写内存。Row/pixel access 要求非空且拥有 CPU
+payload。由于 `shared_ptr` 不公开 allocation capacity，producer 必须保证 storage 覆盖每一条
+已声明 active row。合法的 context-only 或 non-CPU descriptor 会在不解引用的情况下被拒绝。
+Copy 与 fill 会在修改前完整校验 descriptor 和 ROI，并且绝不把 padding 当成 pixel。
+
+当前 tiled `image_mixing` 的 crop/pad normalization 会组合 aligned allocation、zero fill 与
+region copy。Shape 完全匹配的 input 继续作为 descriptor 透传。Resize 与 channel conversion
+仍仅在真实 algorithm call 处使用 OpenCV，并返回保留结果的 `ImageBuffer`。Compute metrics
+recorder 不再创建或 reshape `cv::Mat`：启用 timing statistics 时，它会通过 `step` 遍历 active
+CPU scalar value、排除 padding，并记录 range/non-finite diagnostic。Active payload 全为 NaN
+时，继续保留此前正/负无穷的 empty-range sentinel。Opaque non-CPU resource 继续保留 provider
+提供的 diagnostic，因为只有对应 device adapter 可以映射它们。
+
 ## GPU 缓冲区契约
 
 对于 GPU 缓冲区：
@@ -106,7 +141,7 @@ compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.m
 Metal operation 路径独立拥有 backend-specific object。直接解释 `context` 属于后端特定行为，
 不是可移植内存契约。
 
-## 能力边界
+## 边界与原理
 
 `ImageBuffer` 是当前二维图像 payload 和 operation DSO 契约。其 channel count 在结构上不限制为
 四，`FLOAT64` 也是已声明 scalar type，但这些事实不承诺每个 loader、operation、cache 或
@@ -128,7 +163,25 @@ carrier。新增通用 value kind、rank/shape model、descriptor、handle 或 r
 
 因此，8/16 通道图像和 FP64 不能被宣传为完整 framework contract；FP4、latent Tensor、
 Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`、descriptor、handle 和
-region 目标记录在 `../../roadmap/zh/Kernel-Evolution.zh.md`。
+region 方向记录在精确的
+[通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
+
+把不可变 descriptor 与可写 payload view 分开，可以防止并行 tile callback 竞态替换 ownership
+或 device metadata。公共 view 使用 `PixelRect`，也能避免私有 OpenCV geometry 成为 operation ABI
+的一部分。
+
+## 实现与验证入口
+
+- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/image_buffer.cpp`
+- `src/lib/compute/image_buffer.hpp`
+- `src/lib/adapters/opencv/buffer_adapter_opencv.*`
+- `src/lib/ipc/output_store.*`
+- `tests/unit/test_image_buffer_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/integration/test_ipc_daemon.cpp`

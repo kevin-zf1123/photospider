@@ -2,13 +2,15 @@
 
 This document summarizes the architecture present in the current source tree.
 The documentation roles and recommended reading order are defined in
-`README.md`; domain terms are defined in `Terminology.md`.
+`README.md` under the information architecture fixed by
+[ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md);
+domain terms are defined in `Terminology.md`.
 
 ## Architecture Summary
 
 Photospider is built around a graph runtime with a service split, operation
 registry, cache layer, scheduler abstraction, and a frontend-facing Host seam.
-Parallel planned work now dispatches through scheduler-owned task runtimes.
+Parallel planned work dispatches through scheduler-owned task runtimes.
 Graph-state commands and compute requests that mutate visible graph state enter
 an explicit per-graph `GraphStateExecutor` boundary instead of the scheduler
 dispatch path. That boundary is a bounded FIFO lane with one graph-owned worker
@@ -36,21 +38,25 @@ The root `CMakeLists.txt` builds these internal modules:
 
 | Target | Role |
 | --- | --- |
-| `photospider_core_internal` | Build-only private core values and public/private parameter-value conversion. |
-| `photospider_graph_internal` | Build-only builtin operation registry source, `GraphModel`, graph IO, traversal, cache, propagation, and inspection services. |
-| `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, v2 loader, value adapter, and DSO lifetime ownership. |
+| `photospider_core_internal` | Build-only dependency-neutral core values and neutral parameter formatting plus the build-selected image-processing and image-artifact implementations. `PHOTOSPIDER_ENABLE_OPENCV=ON` selects OpenCV processing/codec adapters; `OFF` selects the standard-library processing implementation and an unavailable codec without discovering OpenCV. |
+| `photospider_graph_internal` | Build-only dependency-neutral core operation source, `GraphModel`, registry behavior, graph IO, traversal, cache, propagation, and inspection services. |
+| `photospider_yaml_adapter_internal` | Build-only YAML adapter present only with `PHOTOSPIDER_ENABLE_YAML=ON`. It owns shared parameter-value translation, graph-document parsing/emission, cache-metadata parsing/emission, and their direct filesystem behavior; format-neutral GraphIO, Kernel, runtime, and cache contracts do not declare parser values. |
+| `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
+| `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
 | `photospider_scheduler_internal` | Build-only scheduler factory, handshake loader, and built-in scheduler implementations. |
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, and event implementation; it depends one-way on scheduler ownership. |
+| `photospider_host_internal` | Build-only Kernel/Interaction facades and embedded Host composition root. It selects real YAML persistence adapters or explicit unavailable adapters according to the producer capability. |
+| `photospider_kernel` | Buildable aggregate target that compiles the real selected core, graph, plugin, scheduler, compute, Host, and optional provider/adapter modules; it is not an install artifact or a placeholder library. |
 | `photospider_operation_runtime` | Installable static implementation of public image-buffer factories with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
 | `photospider_operation_sdk` | Installable interface target for operation v2 headers; it transitively links `operation_runtime`. |
-| `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component. |
+| `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_scheduler_sdk` | Installable interface target carrying only scheduler headers and the C++17 requirement. |
-| `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It exports `Photospider::photospider`; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
+| `photospider` | Static installable backend product, archived as `libphotospider`, linked by enabled CLI and embedded Host frontends. It exports `Photospider::photospider` and remains buildable with OpenCV and YAML disabled; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
 | `photospider_ipc_client` | Installed static typed Unix IPC client plus the complete IPC Host adapter. It exports `Photospider::photospider_ipc_client`, implements all 55 direct Client methods and all 53 current Host virtuals, and does not link the backend or expose JSON/POSIX implementation types. |
 | `photospider_ipc_server_internal` | Non-installed bounded Unix listener, typed router, and private session/job/snapshot/output registries. It serializes all backend access through one daemon-owned Host. |
 | `photospiderd` | Installed foreground macOS/Linux daemon that owns one embedded Host, a protected per-user socket and output store, and deterministic joined shutdown. |
-| `photospider_cli_common` | Non-installable application helper built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. |
-| `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`. |
+| `photospider_cli_common` | Non-installable application helper, present only with `PHOTOSPIDER_BUILD_GRAPH_CLI=ON`, built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. |
+| `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`; its derived default is `ON` only when both OpenCV and YAML capabilities are enabled. |
 
 The CLI-owned application surface is private to `apps/graph_cli/`, including
 its `include/graph_cli/` headers and `resources/help/` text. The complete CLI
@@ -75,17 +81,19 @@ Output directories:
 
 Package boundary:
 
-- `cmake --install` installs the static `photospider`, operation-runtime, and
-  operation-OpenCV archives; the operation/scheduler interface SDKs; an exact
-  public-header inventory under `include/photospider/**`;
-  the base `PhotospiderTargets.cmake`, OpenCV-dependent
-  `PhotospiderOpenCVTargets.cmake`, embedded-product
-  `PhotospiderEmbeddedTargets.cmake`, and `PhotospiderConfig.cmake`. The main
+- `cmake --install` installs the static `photospider`, operation-runtime,
+  operation/scheduler interface SDKs, the enabled public-header inventory under
+  `include/photospider/**`, the base `PhotospiderTargets.cmake`,
+  `PhotospiderEmbeddedTargets.cmake`, and `PhotospiderConfig.cmake`. When
+  OpenCV is enabled it additionally installs the operation-OpenCV archive,
+  header, and `PhotospiderOpenCVTargets.cmake`; otherwise none of that surface
+  is installed or advertised. The main
   archive is `libphotospider.a` on Unix-like toolchains and `photospider.lib`
   with MSVC. The config completes dependency and required-component checks
-  before importing the base export set. It then imports the OpenCV and embedded
-  sets only when the selected explicit components or the component-less
-  embedded default have usable dependencies.
+  before importing the base export set. It imports only export sets created by
+  the producer and discovers only producer-enabled dependencies. The selected
+  explicit components or component-less embedded default still control which
+  available sets are imported.
 - On macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON`, installation also exports
   `Photospider::photospider_ipc_client`, installs exactly the three
   `include/photospider/ipc/` headers and `photospiderd`, and keeps the server
@@ -107,7 +115,12 @@ Package boundary:
   false, its target is not imported, and dependency-free requested targets
   remain available. Requiring that component instead makes package discovery
   fail.
-- OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
+- Producer capability values are recorded in the package config. An
+  OpenCV-disabled install reports `operation_opencv` unavailable without
+  discovering OpenCV. An embedded consumer of the OpenCV/YAML-disabled product
+  discovers neither package and links/runs the real Host product.
+- When enabled, OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`) and
+  `yaml-cpp`, plus always-required `Threads`,
   platform dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
   flags are implementation link dependencies of the static archive. Library
   dependencies appear as `$<LINK_ONLY:...>` entries on the installed target;
@@ -115,6 +128,11 @@ Package boundary:
   block. Public Host/core headers avoid OpenCV and `yaml-cpp` types; Windows
   consumers receive `PHOTOSPIDER_STATIC` so declarations do not use DLL
   import/export attributes.
+  `PHOTOSPIDER_ENABLE_OPENCV` selects image processing, image codec, public
+  adapter, and the derived provider/plugin defaults.
+  `PHOTOSPIDER_ENABLE_YAML` selects graph-document and cache-metadata
+  persistence. Invalid explicit target/capability combinations fail at
+  configure time.
 - FTXUI, `photospider_cli_common`, operation plugins, scheduler plugins, and
   their implementation-specific dependencies are not exported as dependencies
   of the embedded static package.
@@ -143,13 +161,23 @@ graph TD
     Daemon --> DaemonHost["daemon-owned embedded Host"]
     EmbeddedHost --> InteractionService
     DaemonHost --> InteractionService
+    EmbeddedHost --> YamlGraphDocumentAdapter["one shared YAML document adapter"]
+    DaemonHost --> YamlGraphDocumentAdapter
+    EmbeddedHost --> YamlCacheMetadataCodec["one shared YAML cache-metadata adapter"]
+    DaemonHost --> YamlCacheMetadataCodec
     EmbeddedHost --> PluginManager["process PluginManager"]
     InteractionService --> Kernel
 
     Kernel --> GraphRuntime
     Kernel --> GraphIOService
+    GraphIOService --> GraphDocumentReader
+    GraphIOService --> GraphDocumentWriter
+    YamlGraphDocumentAdapter -. implements .-> GraphDocumentReader
+    YamlGraphDocumentAdapter -. implements .-> GraphDocumentWriter
     Kernel --> GraphTraversalService
     Kernel --> GraphCacheService
+    GraphCacheService --> CacheMetadataCodec
+    YamlCacheMetadataCodec -. implements .-> CacheMetadataCodec
     Kernel --> GraphInspectService
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
@@ -171,6 +199,21 @@ graph TD
 
     PluginManager --> OpRegistry
 ```
+
+`create_embedded_host()` is the configured persistence composition root. With
+YAML enabled, it constructs one `YamlGraphDocumentAdapter` and one
+`YamlCacheMetadataCodec`; with YAML disabled, it constructs explicit
+unavailable graph-document and cache-metadata adapters. It converts the
+document owner to the format-neutral reader and writer contracts and injects
+all three contracts together with the configured real or unavailable image
+codec into `Kernel`. Empty and in-memory session lifecycles remain usable in
+the disabled profile; explicit representation IO returns `GraphErrc::Io`.
+`GraphIOService` retains the document owners, while `GraphCacheService` retains
+the image and metadata owners. Kernel and those services have no default
+persistence constructors or implicit fallback adapters. The private
+explicit-dependency Host root is used by substitution
+tests. The IPC Host remains a client-side transport adapter; only the
+daemon-owned embedded Host composes backend persistence.
 
 Each embedded Host owns its Kernel, graph runtimes, and async coordination, but
 operation plugins are different: every Host and Kernel reaches the same
@@ -214,34 +257,15 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
-| `GraphCacheService` | Memory/disk cache operations and cache synchronization. |
+| `GraphCacheService` | Memory/disk cache operations and cache synchronization; disk images and neutral metadata cross required injected codec contracts. |
 | `GraphInspectService` | Structured cache/spatial metadata inspection and dependency-tree snapshots built from graph topology. |
 | `GraphEventService` | Thread-safe, fixed-capacity per-node compute-event ring with sequenced destructive batches and saturating drop accounting. |
 | `PluginManager` | Unique process-lifetime operation plugin owner; serializes load/seed/unload/inspection and owns source/restoration/handle state. Load registers and records dynamic plugins, seed initializes or reconciles built-ins, and only explicit global unload removes dynamic plugins. |
 | `OpRegistry` | Process-global operation implementation registry with coherent copied callback snapshots, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
 
-## Maintained Documents
+## Observable Behavior
 
-| Document | Scope |
-| --- | --- |
-| `README.md` | Documentation roles, reading order, and content rules. |
-| `Overview.md` | Top-level module ownership and current architecture state. |
-| `Terminology.md` | Canonical current kernel language and distinctions. |
-| `Data-Model.md` | `GraphModel`, `Node`, YAML schema, inputs, outputs, parameters, and cache fields. |
-| `Graph-Lifecycle.md` | Graph runtime ownership and load/reload/edit/clear semantics. |
-| `Compute-Boundaries.md` | Current compute module responsibilities, ownership, and invariants. |
-| `Compute-Flow.md` | Sequential, parallel, RT, HP, ROI update, and event/timing flow. |
-| `Cache-Model.md` | HP/RT memory cache semantics and disk cache behavior. |
-| `ImageBuffer-Memory-Contract.md` | Public `ImageBuffer` memory/device contract, alignment, stride, and adapter rules. |
-| `Dirty-Region-Propagation.md` | ROI propagation, tile mapping, and current tunable tile defaults. |
-| `Scheduler-Architecture.md` | Current `IScheduler` lifecycle, built-in schedulers, and task-runtime dispatch boundary. |
-| `Plugin-ABI.md` | Operation plugin and scheduler plugin ABI contracts. |
-
-Testing guidance is maintained in `../development/Testing-and-Validation.md`.
-Accepted future ownership and data-model goals are maintained in
-`../roadmap/Kernel-Evolution.md` rather than mixed into current behavior.
-
-## Compute Flow
+### Compute Flow
 
 Typical REPL compute flow:
 
@@ -330,7 +354,7 @@ Production bounds include 64 active and 256 retained terminal compute jobs;
 compute events; and 65,536 scheduler-trace entries. The full method mapping and
 all string/page/snapshot/frame limits live in the maintained protocol document.
 
-## Bounded Event and Trace Observation
+### Bounded Event and Trace Observation
 
 The public Host observation boundary never returns an unbounded compute-event
 or scheduler-trace vector. `ComputeEventSnapshot` and
@@ -353,7 +377,7 @@ Host limits and trace cursors return `GraphErrc::InvalidParameter` without
 mutating retained observations; a missing session remains
 `GraphErrc::NotFound` for a valid request.
 
-## Scheduler Model
+### Scheduler Model
 
 The runtime recognizes two compute intents:
 
@@ -402,7 +426,7 @@ against the fixed 32-slot process ceiling. Capacity exhaustion is a graph
 `InvalidParameter`. This is admission containment, not a shared executor or a
 limit on every process thread.
 
-## Operation Registry
+### Operation Registry
 
 Operations are keyed by `type:subtype`. The registry supports:
 
@@ -415,13 +439,18 @@ Operations are keyed by `type:subtype`. The registry supports:
 - forward ROI propagators
 - dependency builders
 
-Built-in operations are registered in `src/lib/core/ops.cpp`. Runtime plugin
-examples live in `plugins/ops/`; the Metal operation implementation is private
-to `plugins/ops/metal/`. Dynamic operation plugins register through the exact
-v2 registrar using `ps::plugin` snapshots; public callbacks receive no mutable
-`Node`, `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
+Dependency-neutral core analyzer/math operations and their propagation
+contracts are registered in `src/lib/core/ops.cpp`. The build-configured
+composition entry point is
+`src/lib/providers/configured_operation_providers.cpp`; when enabled, the
+optional provider under `src/lib/providers/opencv/` registers the OpenCV image
+algorithms and owns their process policy and exception translation. Runtime
+plugin examples live in `plugins/ops/`; the Metal operation implementation is
+private to `plugins/ops/metal/`. Dynamic operation plugins register through the
+exact v2 registrar using `ps::plugin` snapshots; public callbacks receive no
+mutable `Node`, `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
 
-## Cache Model
+### Cache Model
 
 The cache layer uses one node-local formal cache plus one runtime-owned RT
 proxy graph:
@@ -438,9 +467,13 @@ interactive state. Dirty RT worker writes are staged through
 `RealtimeProxyWriteBuffer` before proxy commit; dirty HP worker writes are
 staged through `HighPrecisionDirtyWriteBuffer` before graph commit. Formal
 cache save, load, synchronization behavior, subsequent HP compute, and
-long-term storage use HP output.
+long-term storage use HP output. The service requires non-null
+`ImageArtifactCodec` and `CacheMetadataCodec` owners and never constructs or
+declares a YAML value. The configured `YamlCacheMetadataCodec` is responsible
+for YAML syntax, filesystem metadata IO, and translating parser/emitter
+failures into the existing graph error taxonomy.
 
-## ImageBuffer Contract
+### ImageBuffer Contract
 
 `ImageBuffer` is a public kernel contract, not an internal implementation
 detail. Operators, schedulers, plugins, adapters, and cache code may depend on
@@ -452,22 +485,24 @@ preserve alignment. ARM Mac high-performance paths may need or benefit from
 128-byte alignment, but 128-byte alignment is an optimization target rather than
 the portable minimum.
 
-## Dirty Region Propagation
+### Dirty Region Propagation
 
 ROI propagation is handled through `RoiPropagationService` using
 registry-provided propagators, `GraphModel` topology adjacency, and
-`GraphExtentResolver`. The active propagation notes are in
-`docs/kernel-architecture/Dirty-Region-Propagation.md`.
+`GraphExtentResolver`. The active behavior is documented in
+[Dirty Region Propagation and Work Selection](Dirty-Region-Propagation.md).
 
 Important current behavior:
 
+- Host, graph, dirty-region, planning, and task geometry is represented by
+  `PixelRect` and `PixelSize`, not OpenCV value types
 - identity propagation for source/generator/analyzer/math-style nodes
 - specific propagation for `resize`, `crop`, `convolve`, and `gaussian_blur`
 - forward propagation for downstream dirty-region projection
 - tiled compute metadata for operators that can execute in tile space
 - current tile defaults are tunable implementation parameters, not permanent ABI
 
-## Current Boundary Summary
+## Boundaries and Rationale
 
 - `Kernel` composes graph-scoped services and exposes no installable API.
 - `ComputeService` coordinates private collaborators; its module boundaries are
@@ -479,16 +514,64 @@ Important current behavior:
   embedded Host adapter, and rendered by frontend code without exposing backend
   objects.
 - Repository-owned CPU OpenCV providers use reentrant `cv::Mat` callbacks with
-  OpenCV internal CPU threading fixed at one before publication; admitted
-  scheduler grants own outer callback parallelism, while genuine shared backend
-  state remains synchronized inside its provider.
+  OpenCV internal CPU threading fixed at one before publication. Every
+  `cv::Exception` raised by a registered algorithm is translated inside the
+  provider to a host-owned `GraphError`, or to a fresh `std::bad_alloc` for
+  OpenCV resource exhaustion. Admitted scheduler grants own outer callback
+  parallelism, while genuine shared backend state remains synchronized inside
+  its provider.
+- `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits those built-in image
+  operation callbacks while retaining dependency-neutral core operations.
+  A v2 operation plugin may then supply the absent key. With the provider
+  enabled, the same registration transaction can replace an active key and
+  unload restores the built-in predecessor.
 - Current schedulers own physical workers per graph and intent, subject to
   bounded per-instance grants and the shared 32-slot admission ledger. The
   accepted replacement for that ownership is recorded in ADR 0003, but the
   shared `ExecutionService` is not current behavior.
 
-ADR 0001 defines graph-state versus scheduler dispatch, ADR 0002 defines the
-external-library adapter target, ADR 0003 defines the accepted process
-execution domain, and ADR 0004 defines current OpenCV CPU provider concurrency.
-`../roadmap/Kernel-Evolution.md` combines those decisions into the long-term
-target without changing the meaning of this current-state document.
+- [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
+  separates graph-state access from scheduler dispatch.
+- [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
+  defines the external-library adapter target.
+- [ADR 0003](../adr/0003-process-owned-execution-resources.md) defines the
+  accepted process execution domain.
+- [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
+  defines current OpenCV CPU provider concurrency.
+- [ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
+  defines the implemented graph-document ingestion transaction.
+- [ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
+  defines how current facts, decisions, targets, and implementation status
+  remain distinct.
+
+The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
+target decisions into a long-term direction without changing the meaning of
+this current-state document.
+
+## Implementation and Validation Entry Points
+
+- `CMakeLists.txt`
+- `include/photospider/host/host.hpp`
+- `src/lib/graph/graph_document_reader.hpp`
+- `src/lib/graph/graph_document_writer.hpp`
+- `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/image_buffer_processing.*`
+- `src/lib/core/parameter_value_text.*`
+- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
+- `src/lib/providers/configured_image_artifact_codec.*`
+- `src/lib/providers/configured_persistence_adapters.*`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/runtime/kernel.*`
+- `src/lib/runtime/graph_runtime.*`
+- `src/lib/host/embedded_host.cpp`
+- `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_graph_document_injection.cpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_ipc_daemon.cpp`
+- `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/ipc_disabled_install_smoke.py`
+- `tests/integration/dependency_disabled_install_smoke.py`
+- `tests/unit/test_stdlib_image_buffer_processing.cpp`

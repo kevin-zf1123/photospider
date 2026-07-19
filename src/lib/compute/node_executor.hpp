@@ -28,11 +28,11 @@ struct TiledExecutionConfig {
   int halo_size = 16;
 
   /** @brief Optional output ROI limiting which output pixels are recomputed. */
-  std::optional<cv::Rect> output_roi;
+  std::optional<PixelRect> output_roi;
 
   /** @brief Optional full output size when output_buffer is not the size
    * source. */
-  std::optional<cv::Size> output_size;
+  std::optional<PixelSize> output_size;
 
   /** @brief Optional halo override; zero disables implicit halo expansion. */
   std::optional<int> forced_halo;
@@ -43,7 +43,7 @@ struct TiledExecutionConfig {
 
   /** @brief Synchronous hook called with each output tile ROI before execution.
    */
-  std::function<void(const cv::Rect&)> on_tile;
+  std::function<void(const PixelRect&)> on_tile;
 };
 
 /**
@@ -122,10 +122,10 @@ class NodeExecutor {
    * @note Empty propagated ROIs fall back to clipped output_roi, matching
    * legacy tiled execution behavior.
    */
-  static cv::Rect input_roi_for_tile(
-      GraphModel& graph, const Node& node, const cv::Rect& output_roi,
+  static PixelRect input_roi_for_tile(
+      GraphModel& graph, const Node& node, const PixelRect& output_roi,
       const ImageBuffer& input_buffer, const TiledExecutionConfig& config,
-      const std::vector<cv::Size>& known_input_extents = {},
+      const std::vector<PixelSize>& known_input_extents = {},
       const plugin::ParameterMap* known_effective_parameters = nullptr,
       const std::vector<const NodeOutput*>* available_inputs = nullptr);
 

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -120,6 +121,130 @@ TEST(ImageBufferContracts, AllocatorCreatesAlignedCpuPayload) {
             0U);
 }
 
+TEST(ImageBufferPrimitives,
+     ValidatesCanonicalPaddedBackendAndMalformedDescriptors) {
+  EXPECT_NO_THROW(validate_image_buffer(ImageBuffer{}));
+
+  const ImageBuffer padded =
+      make_aligned_cpu_image_buffer(5, 3, 1, DataType::FLOAT32);
+  EXPECT_EQ(image_buffer_row_bytes(padded), 5U * sizeof(float));
+  EXPECT_GT(padded.step, image_buffer_row_bytes(padded));
+  EXPECT_NO_THROW(validate_image_buffer(padded));
+
+  ImageBuffer invalid_empty;
+  invalid_empty.type = DataType::UINT8;
+  EXPECT_THROW(validate_image_buffer(invalid_empty), std::invalid_argument);
+
+  ImageBuffer short_stride = padded;
+  short_stride.step = image_buffer_row_bytes(short_stride) - 1;
+  EXPECT_THROW(validate_image_buffer(short_stride), std::invalid_argument);
+
+  std::shared_ptr<void> empty_owner;
+  ImageBuffer ownerless_alias = padded;
+  ownerless_alias.data = std::shared_ptr<void>(empty_owner, padded.data.get());
+  ASSERT_NE(ownerless_alias.data.get(), nullptr);
+  ASSERT_EQ(ownerless_alias.data.use_count(), 0);
+  EXPECT_THROW(validate_image_buffer(ownerless_alias), std::invalid_argument);
+
+  ImageBuffer backend;
+  backend.width = 5;
+  backend.height = 3;
+  backend.channels = 1;
+  backend.type = DataType::FLOAT32;
+  backend.device = Device::GPU_METAL;
+  backend.context = std::make_shared<int>(7);
+  EXPECT_NO_THROW(validate_image_buffer(backend));
+  EXPECT_THROW((void)image_buffer_row_data(backend, 0), std::invalid_argument);
+
+  ImageBuffer overflow = padded;
+  overflow.width = std::numeric_limits<int>::max();
+  overflow.channels = std::numeric_limits<int>::max();
+  overflow.type = DataType::FLOAT64;
+  overflow.step = std::numeric_limits<std::size_t>::max();
+  EXPECT_THROW((void)image_buffer_row_bytes(overflow), std::overflow_error);
+  EXPECT_THROW(validate_image_buffer(overflow), std::invalid_argument);
+}
+
+TEST(ImageBufferPrimitives, RowAccessAndFillPreservePaddingAndOutsidePixels) {
+  ImageBuffer buffer = make_aligned_cpu_image_buffer(5, 3, 1, DataType::UINT8);
+  const std::size_t row_bytes = image_buffer_row_bytes(buffer);
+  ASSERT_GT(buffer.step, row_bytes);
+  std::memset(buffer.data.get(), 0x7F, buffer.step * buffer.height);
+
+  fill_image_buffer_region(OutputTileView{&buffer, PixelRect{1, 1, 3, 2}},
+                           std::byte{0});
+
+  const std::byte* first_row = image_buffer_row_data(buffer, 0);
+  const std::byte* second_row = image_buffer_row_data(buffer, 1);
+  EXPECT_EQ(second_row - first_row, static_cast<std::ptrdiff_t>(buffer.step));
+  EXPECT_THROW((void)image_buffer_row_data(buffer, -1), std::out_of_range);
+  EXPECT_THROW((void)image_buffer_row_data(buffer, buffer.height),
+               std::out_of_range);
+
+  for (int y = 0; y < buffer.height; ++y) {
+    const std::byte* row = image_buffer_row_data(buffer, y);
+    for (int x = 0; x < buffer.width; ++x) {
+      const bool filled = y >= 1 && x >= 1 && x < 4;
+      EXPECT_EQ(row[x], filled ? std::byte{0} : std::byte{0x7F});
+    }
+    for (std::size_t offset = row_bytes; offset < buffer.step; ++offset) {
+      EXPECT_EQ(row[offset], std::byte{0x7F});
+    }
+  }
+}
+
+TEST(ImageBufferPrimitives, RegionCopySnapshotsOverlappingPaddedRows) {
+  ImageBuffer buffer = make_aligned_cpu_image_buffer(2, 3, 1, DataType::UINT8);
+  const std::size_t row_bytes = image_buffer_row_bytes(buffer);
+  ASSERT_GT(buffer.step, row_bytes);
+  std::memset(buffer.data.get(), 0xEE, buffer.step * buffer.height);
+  auto* base = static_cast<std::uint8_t*>(buffer.data.get());
+  base[0] = 1;
+  base[1] = 2;
+  base[buffer.step] = 3;
+  base[buffer.step + 1] = 4;
+  base[2 * buffer.step] = 5;
+  base[2 * buffer.step + 1] = 6;
+
+  copy_image_buffer_region(InputTileView{&buffer, PixelRect{0, 0, 2, 2}},
+                           OutputTileView{&buffer, PixelRect{0, 1, 2, 2}});
+
+  const std::uint8_t expected[3][2] = {{1, 2}, {1, 2}, {3, 4}};
+  for (int y = 0; y < buffer.height; ++y) {
+    const auto* row =
+        reinterpret_cast<const std::uint8_t*>(image_buffer_row_data(buffer, y));
+    EXPECT_EQ(row[0], expected[y][0]);
+    EXPECT_EQ(row[1], expected[y][1]);
+    for (std::size_t offset = row_bytes; offset < buffer.step; ++offset) {
+      EXPECT_EQ(row[offset], 0xEE);
+    }
+  }
+}
+
+TEST(ImageBufferPrimitives,
+     RegionCopyRejectsMismatchBeforeDestinationMutation) {
+  ImageBuffer source = make_aligned_cpu_image_buffer(2, 2, 1, DataType::UINT8);
+  ImageBuffer destination =
+      make_aligned_cpu_image_buffer(2, 2, 1, DataType::UINT16);
+  std::memset(source.data.get(), 0x11, source.step * source.height);
+  std::memset(destination.data.get(), 0xA5,
+              destination.step * destination.height);
+  std::vector<std::uint8_t> before(destination.step * destination.height);
+  std::memcpy(before.data(), destination.data.get(), before.size());
+
+  EXPECT_THROW(copy_image_buffer_region(
+                   InputTileView{&source, PixelRect{0, 0, 2, 2}},
+                   OutputTileView{&destination, PixelRect{0, 0, 2, 2}}),
+               std::invalid_argument);
+  EXPECT_EQ(std::memcmp(before.data(), destination.data.get(), before.size()),
+            0);
+
+  EXPECT_THROW(
+      copy_image_buffer_region(InputTileView{&source, PixelRect{0, 0, 3, 1}},
+                               OutputTileView{&source, PixelRect{0, 0, 3, 1}}),
+      std::out_of_range);
+}
+
 TEST(OpenCvOperationAdapter, AcceptsEmptyEdgeAlignedTileRoi) {
   const cv::Mat image(4, 5, CV_8UC1, cv::Scalar(0));
   const ImageBuffer buffer = plugin::opencv::from_mat(image);
@@ -218,6 +343,19 @@ TEST(OpenCvOperationAdapter, RejectsInvalidChannelsBeforeOpenCvTypeMacros) {
     EXPECT_THROW((void)plugin::opencv::to_mat(input), std::invalid_argument);
     EXPECT_THROW((void)plugin::opencv::to_umat(output), std::invalid_argument);
   }
+}
+
+TEST(OpenCvOperationAdapter, RejectsMalformedStrideBeforeMatrixConstruction) {
+  ImageBuffer invalid =
+      make_aligned_cpu_image_buffer(4, 3, 1, DataType::FLOAT32);
+  invalid.step = image_buffer_row_bytes(invalid) - 1;
+  const InputTileView input{&invalid, PixelRect{0, 0, 1, 1}};
+  const OutputTileView output{&invalid, PixelRect{0, 0, 1, 1}};
+
+  EXPECT_THROW((void)plugin::opencv::to_mat(invalid), std::invalid_argument);
+  EXPECT_THROW((void)plugin::opencv::to_umat(invalid), std::invalid_argument);
+  EXPECT_THROW((void)plugin::opencv::to_mat(input), std::invalid_argument);
+  EXPECT_THROW((void)plugin::opencv::to_umat(output), std::invalid_argument);
 }
 
 TEST(OpenCvOperationAdapter, CopiesExternalMatStorageBeforeOwnerRetires) {

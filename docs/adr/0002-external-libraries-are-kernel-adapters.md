@@ -2,16 +2,15 @@
 
 ## Status
 
-Accepted as a target constraint. The current implementation has not completed
-this migration.
+Accepted and implemented for the current kernel and embedded-product boundary.
 
 ## Context
 
-The public operation and Host contracts already use Photospider values, but
-private Graph, ROI, dirty propagation, planning, cache, and runtime code still
-uses OpenCV geometry and image objects. YAML also serves both as the graph file
-format and as an internal runtime value model. These dependencies make an
-image-processing library and a serialization library part of kernel semantics.
+Historically, private Graph, ROI, dirty propagation, planning, cache, and
+runtime code used OpenCV geometry and image objects. YAML also served both as
+the graph file format and as an internal runtime value model. Those
+dependencies made an image-processing library and a serialization library part
+of kernel semantics.
 
 That coupling blocks independent geometry optimization, alternate operation
 providers, in-memory graph definitions, general data types, and a build of the
@@ -47,5 +46,8 @@ not coexist behind permanent forwarding wrappers.
 - Graph load/reload/save requires an explicit transaction and error matrix.
 - Operation providers must declare concurrency and resource behavior instead
   of hiding it behind process-wide library locks.
-- Existing behavior requires staged vertical migration and regression tests;
-  this ADR does not claim that the migration is already complete.
+- The default profile preserves OpenCV/YAML behavior, while
+  `PHOTOSPIDER_ENABLE_OPENCV=OFF` and `PHOTOSPIDER_ENABLE_YAML=OFF` select
+  standard-library or explicit unavailable adapters.
+- A clean dependency-disabled producer, install, and external Host consumer are
+  long-lived acceptance evidence for this decision.

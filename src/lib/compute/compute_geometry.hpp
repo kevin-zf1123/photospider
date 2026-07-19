@@ -1,6 +1,8 @@
 #pragma once
 
-#include <opencv2/core.hpp>
+#include <cstdint>
+
+#include "photospider/core/geometry.hpp"
 
 namespace ps::compute {
 
@@ -16,13 +18,28 @@ constexpr int kHpMacroTileSize = 256;
 constexpr int kHpMicroTileSize = 64;
 
 /**
+ * @brief Constructs a rectangle from checked half-open pixel edges.
+ * @param x0 Inclusive left coordinate.
+ * @param y0 Inclusive top coordinate.
+ * @param x1 Exclusive right coordinate.
+ * @param y1 Exclusive bottom coordinate.
+ * @return Positive-area PixelRect when every coordinate and dimension is
+ *         representable by int; otherwise an empty rectangle.
+ * @throws Nothing.
+ * @note This is the common narrowing boundary for geometry derived with wide
+ *       arithmetic.
+ */
+PixelRect rect_from_edges(std::int64_t x0, std::int64_t y0, std::int64_t x1,
+                          std::int64_t y1) noexcept;
+
+/**
  * @brief Checks whether a rectangle has no positive area.
  * @param rect Rectangle to inspect without endpoint arithmetic.
  * @return True when width or height is non-positive.
  * @throws Nothing.
  * @note Safe for arbitrary signed-int field values.
  */
-bool is_rect_empty(const cv::Rect& rect) noexcept;
+bool is_rect_empty(const PixelRect& rect) noexcept;
 
 /**
  * @brief Clips one rectangle to positive image bounds using wide arithmetic.
@@ -33,7 +50,30 @@ bool is_rect_empty(const cv::Rect& rect) noexcept;
  * @note Signed-int endpoint overflow is impossible because addition precedes
  * narrowing in signed 64-bit space.
  */
-cv::Rect clip_rect(const cv::Rect& rect, const cv::Size& bounds) noexcept;
+PixelRect clip_rect(const PixelRect& rect, const PixelSize& bounds) noexcept;
+
+/**
+ * @brief Intersects two arbitrary pixel rectangles with wide endpoints.
+ * @param lhs First half-open rectangle.
+ * @param rhs Second half-open rectangle.
+ * @return Their positive-area intersection or an empty rectangle.
+ * @throws Nothing.
+ * @note Endpoint addition and final narrowing are checked through
+ *       rect_from_edges.
+ */
+PixelRect intersect_rect(const PixelRect& lhs, const PixelRect& rhs) noexcept;
+
+/**
+ * @brief Translates one rectangle without signed-int overflow.
+ * @param rect Source rectangle.
+ * @param dx Horizontal offset in wide pixel coordinates.
+ * @param dy Vertical offset in wide pixel coordinates.
+ * @return Translated rectangle or empty when the result is not representable.
+ * @throws Nothing.
+ * @note Empty input remains empty; dimensions are preserved on success.
+ */
+PixelRect translate_rect(const PixelRect& rect, std::int64_t dx,
+                         std::int64_t dy) noexcept;
 
 /**
  * @brief Expands all rectangle sides by non-negative padding safely.
@@ -43,7 +83,7 @@ cv::Rect clip_rect(const cv::Rect& rect, const cv::Size& bounds) noexcept;
  * @throws Nothing.
  * @note Callers normally clip the result to an image extent afterward.
  */
-cv::Rect expand_rect(const cv::Rect& rect, int padding) noexcept;
+PixelRect expand_rect(const PixelRect& rect, int padding) noexcept;
 
 /**
  * @brief Aligns rectangle edges outward to one positive pixel grid.
@@ -53,7 +93,7 @@ cv::Rect expand_rect(const cv::Rect& rect, int padding) noexcept;
  * @throws Nothing.
  * @note Arithmetic uses signed 64-bit intermediates.
  */
-cv::Rect align_rect(const cv::Rect& rect, int alignment) noexcept;
+PixelRect align_rect(const PixelRect& rect, int alignment) noexcept;
 
 /**
  * @brief Computes a safe bounding union of two rectangles.
@@ -63,7 +103,7 @@ cv::Rect align_rect(const cv::Rect& rect, int alignment) noexcept;
  * @throws Nothing.
  * @note Endpoint sums are evaluated in signed 64-bit space.
  */
-cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) noexcept;
+PixelRect merge_rect(const PixelRect& a, const PixelRect& b) noexcept;
 
 /**
  * @brief Ceil-divides a positive extent by a positive factor.
@@ -73,7 +113,7 @@ cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) noexcept;
  * @throws Nothing.
  * @note Pre-division addition uses signed 64-bit arithmetic.
  */
-cv::Size scale_down_size(const cv::Size& size, int factor) noexcept;
+PixelSize scale_down_size(const PixelSize& size, int factor) noexcept;
 
 /**
  * @brief Ceil-divides rectangle endpoints by a positive factor.
@@ -83,7 +123,7 @@ cv::Size scale_down_size(const cv::Size& size, int factor) noexcept;
  * @throws Nothing.
  * @note Endpoint arithmetic uses signed 64-bit intermediates.
  */
-cv::Rect scale_down_rect(const cv::Rect& rect, int factor) noexcept;
+PixelRect scale_down_rect(const PixelRect& rect, int factor) noexcept;
 
 /**
  * @brief Multiplies rectangle endpoints by a positive factor safely.
@@ -93,7 +133,7 @@ cv::Rect scale_down_rect(const cv::Rect& rect, int factor) noexcept;
  * @throws Nothing.
  * @note No narrowing occurs until every endpoint and dimension is checked.
  */
-cv::Rect scale_up_rect(const cv::Rect& rect, int factor) noexcept;
+PixelRect scale_up_rect(const PixelRect& rect, int factor) noexcept;
 
 /**
  * @brief Expands an ROI by a halo and clips it to image bounds.
@@ -104,7 +144,7 @@ cv::Rect scale_up_rect(const cv::Rect& rect, int factor) noexcept;
  * @throws Nothing.
  * @note Non-positive halo still clips roi to bounds.
  */
-cv::Rect calculate_halo(const cv::Rect& roi, int halo_size,
-                        const cv::Size& bounds) noexcept;
+PixelRect calculate_halo(const PixelRect& roi, int halo_size,
+                         const PixelSize& bounds) noexcept;
 
 }  // namespace ps::compute

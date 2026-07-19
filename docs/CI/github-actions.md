@@ -59,16 +59,45 @@ lock; the existing Ubuntu base and apt-provided CMake setup remain unchanged.
 
 ## Integration Test Sharding
 
-For a non-documentation change on the normal published-image path, `integration-plan` configures the checked-out commit with testing enabled and uses `ctest -N` to discover the exact `StaticProductConsumerSmoke` and `IpcDisabledInstallSmoke` test names. It enables each smoke and its required build only when that test exists. The current `main` tree therefore schedules only `build-integrity-default`, while a refactor commit that introduces the IPC-disabled install smoke also schedules `build-integrity-ipc-disabled`. This is capability discovery from the tested commit, not a hard-coded branch-name check, so the workflow definition based on `main` can also test the refactor pull request head. If a smoke runner exists without its exact CTest registration, planning fails instead of silently dropping coverage.
+For a non-documentation change on the normal published-image path,
+`integration-plan` configures the checked-out commit with testing enabled and
+uses `ctest -N` to discover the exact `StaticProductConsumerSmoke` and
+`IpcDisabledInstallSmoke` test names. It enables each smoke and its required
+build only when that test exists. The current `main` tree therefore schedules
+only `build-integrity-default`, while a refactor commit that introduces the
+IPC-disabled install smoke also schedules `build-integrity-ipc-disabled`. This
+is capability discovery from the tested commit, not a hard-coded branch-name
+check, so the workflow definition based on `main` can also test the refactor
+pull request head. If a smoke runner exists without its exact CTest
+registration, planning fails instead of silently dropping coverage.
 
-Each profile has an independent build job that configures and compiles only that profile, then uploads a separate reusable build artifact: `ci-build-default` or `ci-build-ipc-disabled`. The IPC-disabled profile configures the producer with `PHOTOSPIDER_BUILD_IPC=OFF`. Default consumers depend only on `build-integrity-default`, while the IPC-disabled smoke depends only on `build-integrity-ipc-disabled`; a failure in one profile therefore does not suppress tests for the other profile.
+Each profile has an independent build job that configures and compiles only
+that profile, then uploads a separate reusable build artifact:
+`ci-build-default` or `ci-build-ipc-disabled`. The IPC-disabled profile
+configures the producer with `PHOTOSPIDER_BUILD_IPC=OFF`. Default consumers
+depend only on `build-integrity-default`, while the IPC-disabled smoke depends
+only on `build-integrity-ipc-disabled`; a failure in one profile therefore does
+not suppress tests for the other profile.
 
 The test jobs reuse those prebuilt producers rather than recompiling every configuration on one runner:
 
 - `full-ctest`, `scripted-cli`, `propagation-script`, `plugin-load`, and `scheduler-repeat` download only `ci-build-default`.
-- `full-ctest` excludes `SplitComputeServiceRuntimeTrace`, `StaticProductConsumerSmoke`, and `IpcDisabledInstallSmoke`. The split trace remains outside primary CI, and the two long build smoke tests run in their own jobs.
+- `full-ctest` excludes `SplitComputeServiceRuntimeTrace`,
+  `StaticProductConsumerSmoke`, and `IpcDisabledInstallSmoke`. The split trace
+  remains outside primary CI, and the two long build smoke tests run in their
+  own jobs.
 - `static-product-consumer-smoke` downloads `ci-build-default` and runs only `StaticProductConsumerSmoke`.
 - `ipc-disabled-install-smoke` downloads the precompiled `ci-build-ipc-disabled` producer and runs only `IpcDisabledInstallSmoke`.
+
+`DependencyDisabledInstallSmoke` is instead a regular, durable CTest and is not
+an independently planned workflow shard. Because `ctest_full.sh` does not
+exclude it, the existing `full-ctest` integration gate runs it from the default
+producer. The test creates its own clean nested producer with OpenCV and YAML
+capabilities disabled, builds and installs the real kernel and Host products,
+checks package-component discovery and invalid option combinations, and builds
+and executes an external consumer. This keeps the capability-off profile under
+the existing integration gate without changing protected workflow or script
+paths.
 
 If CI image inputs change, the workflow cannot use the previously published image and instead runs `local-image-integration` on one Docker-capable runner. After building `photospider-ci:local`, `integration_suite.sh` performs the same dynamic plan, builds each discovered profile, and runs the same full-CTest, build-smoke, CLI, propagation, plugin, and scheduler shards sequentially with their corresponding build. This fallback preserves test selection and producer configuration while accepting that a single local-image runner cannot fan out into artifact-consuming jobs.
 
@@ -136,7 +165,7 @@ personal development content.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled planning tree, discovers the two exact build-smoke test names with `ctest -N`, validates registration against the runner files, and emits smoke/build capability flags.
 - `ci/scripts/integration_suite.sh`: applies the dynamic plan and runs the resulting integration shards sequentially for the local-image fallback path.
 - `ci/scripts/build_integrity.sh`: builds the profile selected by `CI_BUILD_PROFILE`. `default` builds the required targets and the complete tree before CTest discovery; `ipc-disabled` sets `BUILD_TESTING=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`, validates the cache, and builds only the `photospider` producer target.
-- `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest, excluding the two separately sharded build smoke tests by default. Its protected script also retains a no-op exclusion for the removed `SplitComputeServiceRuntimeTrace`; a follow-up `CI/**` branch from main must remove that token after the source-layout change lands.
+- `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest, excluding the two separately sharded build smoke tests by default. It does not exclude `DependencyDisabledInstallSmoke`, whose nested producer supplies capability-off coverage. The protected script also retains a no-op exclusion for the removed `SplitComputeServiceRuntimeTrace`; a follow-up `CI/**` branch from main must remove that token after the source-layout change lands.
 - `ci/scripts/build_smoke_test.sh`: runs one separately selected build smoke test from a reusable producer; set `SMOKE_TEST` to `static-product-consumer` or `ipc-disabled-install`.
 - `ci/scripts/graph_cli_script_test.sh`: runs isolated positive, explicit-missing-source, and invalid-target REPL checks using the pre-execution Graph document capability marker described above.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
@@ -167,6 +196,8 @@ BUILD_DIR="$PWD/build/ci-ipc-disabled" CI_BUILD_PROFILE=ipc-disabled \
   bash ci/scripts/build_integrity.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/ctest-full bash ci/scripts/ctest_full.sh
+ctest --test-dir "$PWD/build/ci-default" --output-on-failure \
+  -R '^DependencyDisabledInstallSmoke$'
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   SMOKE_TEST=static-product-consumer \
   CI_ARTIFACT_DIR=CI-results/static-product-consumer-smoke \
@@ -190,7 +221,11 @@ BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
 SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitizer_test.sh
 ```
 
-The `ipc-disabled` profile and either smoke command are valid only when the checked-out commit's integration plan reports them. To reproduce the entire dynamically selected sequence, use:
+The `ipc-disabled` profile and either separately sharded smoke command are valid
+only when the checked-out commit's integration plan reports them. The direct
+`DependencyDisabledInstallSmoke` command above is a regular CTest and does not
+depend on an integration-plan profile. To reproduce the entire dynamically
+selected sequence, use:
 
 ```bash
 CI_ARTIFACT_ROOT=CI-results bash ci/scripts/integration_suite.sh

@@ -76,7 +76,7 @@ struct DirtySourceRoiRecord {
   /** @brief Dirty domain associated with the source event. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
   /** @brief Node-local source ROI recorded for the event. */
-  cv::Rect source_roi;
+  PixelRect source_roi;
   /** @brief Dirty generation in which the source ROI was recorded. */
   uint64_t generation = 0;
 };
@@ -97,7 +97,7 @@ struct DirtySourceNodeState {
   /** @brief Dirty generation represented by this source state. */
   uint64_t generation = 0;
   /** @brief Source ROIs accumulated for the generation. */
-  std::vector<cv::Rect> source_rois;
+  std::vector<PixelRect> source_rois;
 };
 
 /**
@@ -120,7 +120,7 @@ struct DirtyTileKey {
   /** @brief Tile edge length in domain-local pixels. */
   int tile_size = 0;
   /** @brief Pixel ROI covered by this tile key. */
-  cv::Rect pixel_roi;
+  PixelRect pixel_roi;
 };
 
 /**
@@ -135,7 +135,7 @@ struct DirtyMonolithicRegion {
   /** @brief Compute domain of the monolithic dirty record. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
   /** @brief Domain-local pixel ROI represented by this record. */
-  cv::Rect pixel_roi;
+  PixelRect pixel_roi;
   /** @brief True when the node output is dirty as a whole unit. */
   bool whole_output = true;
 };
@@ -154,9 +154,9 @@ struct DirtyEdgeMapping {
   /** @brief Dirty domain represented by the mapping. */
   DirtyDomain domain = DirtyDomain::HighPrecision;
   /** @brief ROI on from_node_id side of the edge. */
-  cv::Rect from_roi;
+  PixelRect from_roi;
   /** @brief ROI on to_node_id side of the edge. */
-  cv::Rect to_roi;
+  PixelRect to_roi;
   /** @brief Direction of the recorded propagation. */
   DirtyEdgeDirection direction = DirtyEdgeDirection::BackwardDemand;
 };
@@ -188,9 +188,9 @@ struct DirtyRegionSnapshot {
   /** @brief Monolithic dirty records derived for nodes that cannot tile. */
   std::vector<DirtyMonolithicRegion> dirty_monolithic_nodes;
   /** @brief Dirty ROIs keyed by node id after domain-specific normalization. */
-  std::unordered_map<int, std::vector<cv::Rect>> per_node_dirty_rois;
+  std::unordered_map<int, std::vector<PixelRect>> per_node_dirty_rois;
   /** @brief Actual dirty ROIs exposed to inspection and materialization. */
-  std::unordered_map<int, std::vector<cv::Rect>> actual_dirty_rois;
+  std::unordered_map<int, std::vector<PixelRect>> actual_dirty_rois;
   /** @brief Edge-level ROI mappings produced by dirty propagation. */
   std::vector<DirtyEdgeMapping> edge_mappings;
 

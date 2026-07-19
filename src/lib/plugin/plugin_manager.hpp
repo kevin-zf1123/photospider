@@ -284,14 +284,15 @@ class PluginManager {
   void unlock_state() const noexcept;
 
   /**
-   * @brief Initializes built-ins once and reconciles their source labels.
+   * @brief Initializes core/configured providers and reconciles source labels.
    *
    * @return Nothing.
-   * @throws std::bad_alloc if built-in registration, registry snapshotting, or
+   * @throws std::bad_alloc if operation registration, registry snapshotting, or
    *         source-map reconciliation exhausts memory.
+   * @throws GraphError if a configured provider cannot initialize.
    * @note Caller holds both the manager and process-registry state locks. Once
-   *       initialized, later Host seed calls never replay built-in registration
-   *       over an active plugin override.
+   *       initialized, later Host seed calls never replay configured provider
+   *       registration over an active plugin override.
    */
   void synchronize_builtins_locked();
 

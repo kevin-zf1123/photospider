@@ -18,12 +18,20 @@ not inspect image payloads.
 | `data` | CPU-accessible data owner or view. |
 | `context` | Backend-specific resource owner or handle. |
 
-`InputTile` is a read-only non-owning view into an upstream `ImageBuffer` plus a
-`cv::Rect` ROI. It carries a `const ImageBuffer*` so tiled operators cannot
-replace or mutate upstream buffer metadata through the tile API. `OutputTile` is
-the writable counterpart for destination regions and carries a mutable
-`ImageBuffer*`. `TileTask` combines one `OutputTile` with zero or more
-`InputTile` views for a tiled operator callback.
+The public tile contract uses `InputTileView` and `OutputTileView`. Both carry a
+borrowed `const ImageBuffer*` plus a backend-neutral `PixelRect`. The input view
+is read-only. The output view permits adapters to expose writable pixels from
+the retained payload, but the callback cannot replace descriptor dimensions,
+device identity, payload ownership, or backend context. Public
+`TiledOperation` callbacks receive the output as `const OutputTileView&` and
+receive inputs as `OperationTileInputView` values.
+
+The private compute layer separately uses `InputTile`, `OutputTile`, and
+`TileTask`. Those backend-only values also carry `PixelRect`; private
+`OutputTile` uses a mutable `ImageBuffer*` while bridging task-owned output
+storage to an adapter. An OpenCV adapter may translate the rectangle only
+locally when creating a matrix view; it does not retain or return `cv::Rect`
+through these values. They do not cross the public operation or Host contract.
 
 ## CPU Buffer Contract
 
@@ -87,6 +95,46 @@ auto* row = base + y * width * channels * bytes_per_channel;
 OpenCV adapters must preserve stride by constructing `cv::Mat` with the
 provided `step`.
 
+## Kernel CPU Buffer Primitives
+
+The standard-library-only operation runtime owns the current minimum CPU buffer
+primitives:
+
+- `validate_image_buffer()` validates declared enums, canonical empty state,
+  positive nonempty dimensions, shared-owner consistency, CPU payload
+  requirements, packed-row stride, and representable descriptor byte
+  arithmetic. Opaque backend allocation capacity remains provider-owned.
+- `image_buffer_row_bytes()` computes active packed-row bytes without padding,
+  while `image_buffer_row_data()` returns a read-only CPU row through `step`.
+- `fill_image_buffer_region()` fills only the active bytes of an
+  `OutputTileView`. Pixels outside the ROI and row padding are unchanged.
+- `copy_image_buffer_region()` copies equal-shaped, equal-format
+  `InputTileView`/`OutputTileView` regions row by row. It snapshots all source
+  active bytes before the first destination write when the payloads may alias,
+  so overlapping views have value-copy semantics. Proven-independent payloads
+  copy directly after validation; validation/allocation failures leave the
+  destination unchanged.
+
+The tile views are borrowed for each call. The primitives do not retain
+descriptors, add synchronization, infer backend mappings, or turn a read-only
+producer snapshot into writable memory. Row/pixel access requires a nonempty
+owned CPU payload. Because `shared_ptr` does not expose allocation capacity, the
+producer must ensure that storage covers every declared active row. Valid
+context-only or non-CPU descriptors are rejected without dereferencing them.
+Copy and fill validate the complete descriptor and ROI before mutation, and
+never treat padding as pixels.
+
+Current tiled `image_mixing` crop/pad normalization composes aligned allocation,
+zero fill, and region copy. Exact-shape inputs remain pass-through descriptors.
+Resize and channel conversion still use OpenCV only at the actual algorithm
+call and return an `ImageBuffer` retaining the result. The compute metrics
+recorder no longer creates or reshapes `cv::Mat`: when timing statistics are
+enabled, it walks active CPU scalar values through `step`, excludes padding,
+and records range/non-finite diagnostics. An all-NaN active payload retains the
+previous positive/negative infinity empty-range sentinels. Opaque non-CPU
+resources retain provider-supplied diagnostics because only their device
+adapter may map them.
+
 ## GPU Buffer Contract
 
 For GPU buffers:
@@ -122,7 +170,7 @@ as a production runtime boundary. The current production Metal operation path
 owns its backend-specific objects independently. Direct interpretation of
 `context` is backend-specific and is not a portable memory contract.
 
-## Capability Boundary
+## Boundaries and Rationale
 
 `ImageBuffer` is the current two-dimensional image payload and operation DSO
 contract. Its channel count is not structurally limited to four, and
@@ -150,7 +198,26 @@ Current limitations are explicit:
 Therefore 8/16-channel images and FP64 are not advertised as complete framework
 contracts, and FP4, latent Tensor, Deep Image, and vector-scene values are not
 supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
-target is documented in `../roadmap/Kernel-Evolution.md`.
+target is documented in the exact
+[general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
+
+Separating immutable descriptors from writable payload views prevents parallel
+tile callbacks from racing to replace ownership or device metadata. Keeping
+`PixelRect` in the public view also prevents private OpenCV geometry from
+becoming part of the operation ABI.
+
+## Implementation and Validation Entry Points
+
+- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/image_buffer.cpp`
+- `src/lib/compute/image_buffer.hpp`
+- `src/lib/adapters/opencv/buffer_adapter_opencv.*`
+- `src/lib/ipc/output_store.*`
+- `tests/unit/test_image_buffer_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/integration/test_ipc_daemon.cpp`

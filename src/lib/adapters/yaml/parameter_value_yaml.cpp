@@ -1,4 +1,4 @@
-#include "core/parameter_value_adapter.hpp"
+#include "adapters/yaml/parameter_value_yaml.hpp"
 
 #include <cctype>
 #include <cmath>
@@ -11,7 +11,7 @@
 #include <string>
 #include <utility>
 
-namespace ps::core {
+namespace ps::adapters::yaml::internal {
 namespace {
 
 /**
@@ -338,7 +338,7 @@ std::string normalized_mapping_key(const YAML::Node& key) {
 
 }  // namespace
 
-/** @copydoc ps::core::parameter_value_from_yaml */
+/** @copydoc ps::adapters::yaml::internal::parameter_value_from_yaml */
 plugin::ParameterValue parameter_value_from_yaml(const YAML::Node& value) {
   if (!value || value.IsNull()) {
     return plugin::ParameterValue(nullptr);
@@ -360,7 +360,7 @@ plugin::ParameterValue parameter_value_from_yaml(const YAML::Node& value) {
   throw std::invalid_argument("Unsupported YAML parameter node kind");
 }
 
-/** @copydoc ps::core::parameter_map_from_yaml */
+/** @copydoc ps::adapters::yaml::internal::parameter_map_from_yaml */
 plugin::ParameterMap parameter_map_from_yaml(const YAML::Node& value) {
   plugin::ParameterMap result;
   if (!value || value.IsNull()) {
@@ -381,7 +381,7 @@ plugin::ParameterMap parameter_map_from_yaml(const YAML::Node& value) {
   return result;
 }
 
-/** @copydoc ps::core::parameter_value_to_yaml */
+/** @copydoc ps::adapters::yaml::internal::parameter_value_to_yaml */
 YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value) {
   switch (value.kind()) {
     case plugin::ParameterKind::Null: {
@@ -429,4 +429,15 @@ YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value) {
   throw std::invalid_argument("Unknown public parameter kind");
 }
 
-}  // namespace ps::core
+/** @copydoc ps::adapters::yaml::internal::parameter_map_to_yaml */
+YAML::Node parameter_map_to_yaml(const plugin::ParameterMap& values) {
+  YAML::Node result(YAML::NodeType::Map);
+  for (const auto& [key, value] : values) {
+    YAML::Node yaml_key(key);
+    yaml_key.SetTag("!!str");
+    result[yaml_key] = parameter_value_to_yaml(value);
+  }
+  return result;
+}
+
+}  // namespace ps::adapters::yaml::internal

@@ -1,6 +1,7 @@
 #include "compute/dirty_region_snapshot_builder.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
@@ -9,8 +10,7 @@
 
 namespace ps::compute {
 
-// Validate and store only source facts; derived actual dirty records are
-// rebuilt by refresh_actual_dirty_regions after the source state is coherent.
+/** @copydoc DirtyRegionSnapshotBuilder::apply_source_lifecycle_event */
 void DirtyRegionSnapshotBuilder::apply_source_lifecycle_event(
     const GraphModel& graph, DirtyRegionSnapshot& snapshot,
     const DirtySourceLifecycleUpdate& update) const {
@@ -51,8 +51,7 @@ void DirtyRegionSnapshotBuilder::apply_source_lifecycle_event(
   }
 }
 
-// Rebuild derived records from source facts so lifecycle events never write
-// downstream actual dirty regions directly.
+/** @copydoc DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions */
 void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
     const GraphModel& graph, DirtyRegionSnapshot& snapshot,
     DirtyDomain domain) const {
@@ -62,7 +61,7 @@ void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
   snapshot.actual_dirty_rois.clear();
   snapshot.edge_mappings.clear();
 
-  std::unordered_map<int, cv::Size> hp_size_cache;
+  std::unordered_map<int, PixelSize> hp_size_cache;
   for (const auto& [node_id, records] : snapshot.source_roi_records) {
     if (!graph.has_node(node_id)) {
       continue;
@@ -72,7 +71,7 @@ void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
       if (record.domain != domain || is_rect_empty(record.source_roi)) {
         continue;
       }
-      const cv::Rect domain_roi = normalize_source_roi(
+      const PixelRect domain_roi = normalize_source_roi(
           graph, node_id, domain, record.source_roi, hp_size_cache);
       if (is_rect_empty(domain_roi)) {
         continue;
@@ -86,8 +85,7 @@ void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
   }
 }
 
-// Monolithic detection remains registry-based so snapshot materialization stays
-// aligned with the operator implementation selected elsewhere in compute.
+/** @copydoc DirtyRegionSnapshotBuilder::is_monolithic_boundary */
 bool DirtyRegionSnapshotBuilder::is_monolithic_boundary(
     const Node& node) const {
   const auto impls =
@@ -95,9 +93,7 @@ bool DirtyRegionSnapshotBuilder::is_monolithic_boundary(
   return impls && impls->monolithic_hp && !impls->tiled_hp;
 }
 
-// Append only snapshot records here; callers separately maintain per-node ROI
-// maps because HP planning stores HP ROIs even when RT tile records use proxy
-// coordinates.
+/** @copydoc DirtyRegionSnapshotBuilder::append_node_work */
 void DirtyRegionSnapshotBuilder::append_node_work(
     DirtyRegionSnapshot& snapshot, const DirtyNodeWorkRecord& record) const {
   if (!record.node || is_rect_empty(record.work_roi)) {
@@ -114,58 +110,65 @@ void DirtyRegionSnapshotBuilder::append_node_work(
                            record.work_roi, record.tile_size});
 }
 
-// Tile enumeration intentionally emits value-type keys rather than pointers so
-// inspection stays stable across graph reloads or node replacement.
+/**
+ * @copydoc DirtyRegionSnapshotBuilder::enumerate_tiles
+ *
+ * @note Tile enumeration emits value-type keys rather than pointers so
+ *       inspection stays stable across graph reloads or node replacement.
+ */
 void DirtyRegionSnapshotBuilder::enumerate_tiles(
     DirtyRegionSnapshot& snapshot, const DirtyTileEnumeration& request) const {
   if (is_rect_empty(request.roi) || request.tile_size <= 0) {
     return;
   }
-  const cv::Rect aligned = align_rect(request.roi, request.tile_size);
-  for (int y = aligned.y; y < aligned.y + aligned.height;
-       y += request.tile_size) {
-    for (int x = aligned.x; x < aligned.x + aligned.width;
-         x += request.tile_size) {
-      cv::Rect tile_roi(
-          x, y, std::min(request.tile_size, aligned.x + aligned.width - x),
-          std::min(request.tile_size, aligned.y + aligned.height - y));
+  const PixelRect aligned = align_rect(request.roi, request.tile_size);
+  const std::int64_t right =
+      static_cast<std::int64_t>(aligned.x) + aligned.width;
+  const std::int64_t bottom =
+      static_cast<std::int64_t>(aligned.y) + aligned.height;
+  for (std::int64_t y = aligned.y; y < bottom; y += request.tile_size) {
+    for (std::int64_t x = aligned.x; x < right; x += request.tile_size) {
+      PixelRect tile_roi{static_cast<int>(x), static_cast<int>(y),
+                         static_cast<int>(std::min<std::int64_t>(
+                             request.tile_size, right - x)),
+                         static_cast<int>(std::min<std::int64_t>(
+                             request.tile_size, bottom - y))};
       snapshot.dirty_tiles.push_back({request.node_id, request.domain,
-                                      request.level, x / request.tile_size,
-                                      y / request.tile_size, request.tile_size,
-                                      tile_roi});
+                                      request.level,
+                                      static_cast<int>(x / request.tile_size),
+                                      static_cast<int>(y / request.tile_size),
+                                      request.tile_size, tile_roi});
     }
   }
 }
 
-// Normalize from the stored source fact into the domain-local coordinate space
-// consumed by dirty snapshot readers.
-cv::Rect DirtyRegionSnapshotBuilder::normalize_source_roi(
+/** @copydoc DirtyRegionSnapshotBuilder::normalize_source_roi */
+PixelRect DirtyRegionSnapshotBuilder::normalize_source_roi(
     const GraphModel& graph, int node_id, DirtyDomain domain,
-    const cv::Rect& source_roi,
-    std::unordered_map<int, cv::Size>& hp_size_cache) const {
-  const cv::Size hp_size = infer_hp_size(graph, node_id, hp_size_cache);
-  cv::Rect clipped = clip_rect(source_roi, hp_size);
+    const PixelRect& source_roi,
+    std::unordered_map<int, PixelSize>& hp_size_cache) const {
+  const PixelSize hp_size = infer_hp_size(graph, node_id, hp_size_cache);
+  PixelRect clipped = clip_rect(source_roi, hp_size);
   if (is_rect_empty(clipped)) {
-    return cv::Rect();
+    return PixelRect{};
   }
   if (domain == DirtyDomain::HighPrecision) {
     return clip_rect(align_rect(clipped, kHpMicroTileSize), hp_size);
   }
-  const cv::Size rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
+  const PixelSize rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
   return clip_rect(
       align_rect(scale_down_rect(clipped, kRtDownscaleFactor), kRtTileSize),
       rt_size);
 }
 
-// Keep HP extent resolution behind one cache-aware helper so RT source
-// projection cannot accidentally use transient RT output as formal bounds.
-cv::Size DirtyRegionSnapshotBuilder::infer_hp_size(
+/** @copydoc DirtyRegionSnapshotBuilder::infer_hp_size */
+PixelSize DirtyRegionSnapshotBuilder::infer_hp_size(
     const GraphModel& graph, int node_id,
-    std::unordered_map<int, cv::Size>& cache) const {
+    std::unordered_map<int, PixelSize>& cache) const {
   return extent_resolver_.resolve_output_extent(graph, node_id, cache);
 }
 
-// The snapshot currently records micro dirty tiles for both domains.
+/** @copydoc DirtyRegionSnapshotBuilder::tile_size_for_domain */
 int DirtyRegionSnapshotBuilder::tile_size_for_domain(DirtyDomain domain) const {
   return domain == DirtyDomain::HighPrecision ? kHpMicroTileSize : kRtTileSize;
 }

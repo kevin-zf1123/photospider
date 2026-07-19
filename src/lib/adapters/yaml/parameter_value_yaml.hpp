@@ -4,7 +4,7 @@
 
 #include "photospider/plugin/node_view.hpp"
 
-namespace ps::core {
+namespace ps::adapters::yaml::internal {
 
 /**
  * @brief Recursively copies one YAML value into the public owned value tree.
@@ -46,4 +46,16 @@ plugin::ParameterMap parameter_map_from_yaml(const YAML::Node& value);
  */
 YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value);
 
-}  // namespace ps::core
+/**
+ * @brief Converts a kernel-owned parameter map to independent YAML storage.
+ * @param values Deep-owned parameter map to serialize at a document boundary.
+ * @return Newly constructed YAML mapping with string keys and typed values.
+ * @throws std::invalid_argument if a nested value reports an unknown parameter
+ *         kind.
+ * @throws std::bad_alloc unchanged from YAML/container allocation.
+ * @note This is an outbound adapter operation. The returned YAML tree never
+ *       aliases Graph, request, output, or plugin-owned parameter storage.
+ */
+YAML::Node parameter_map_to_yaml(const plugin::ParameterMap& values);
+
+}  // namespace ps::adapters::yaml::internal

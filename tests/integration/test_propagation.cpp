@@ -15,6 +15,7 @@
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
 #include "support/kernel_test_access.hpp"
+#include "support/kernel_test_dependencies.hpp"
 
 /** @brief Micro-tile fallback edge length used by the scriptable test tool. */
 const int TILE_SIZE_MICRO = 64;
@@ -219,8 +220,8 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
 
   const auto& start_node = model.node(start_node_id);
   int tile_size = get_tile_size(start_node);
-  cv::Rect initial_roi(tile_x * tile_size, tile_y * tile_size, tile_size,
-                       tile_size);
+  ps::PixelRect initial_roi{tile_x * tile_size, tile_y * tile_size, tile_size,
+                            tile_size};
   std::cout << "Triggering dirty region at Node " << start_node_id << " tile ("
             << tile_x << "," << tile_y << ") -> pixel ROI " << initial_roi.x
             << "," << initial_roi.y << "," << initial_roi.width << ","
@@ -241,7 +242,7 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
               << ")" << std::endl;
     return;
   }
-  cv::Rect target_roi = *projected_roi_opt;
+  ps::PixelRect target_roi = *projected_roi_opt;
   std::cout << "Projected Forward to End Node " << target_end_node
             << " -> pixel ROI " << target_roi.x << "," << target_roi.y << ","
             << target_roi.width << "," << target_roi.height << std::endl;
@@ -254,10 +255,11 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
             << " to Source Node " << start_node_id << ")\n"
             << std::endl;
 
-  std::function<void(int, const cv::Rect&, int)> trace_backward;
+  std::function<void(int, const ps::PixelRect&, int)> trace_backward;
   std::set<int> visited_in_trace;
 
-  trace_backward = [&](int current_id, const cv::Rect& current_roi, int depth) {
+  trace_backward = [&](int current_id, const ps::PixelRect& current_roi,
+                       int depth) {
     std::string indent(depth * 2, ' ');
     const auto& node = model.node(current_id);
 
@@ -363,7 +365,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  ps::Kernel kernel;
+  ps::Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
   svc.cmd_plugins_load({"build/plugins"});

@@ -137,7 +137,7 @@ struct HostRegistrarContext {
  *       exception is inspected while the library lease is alive and converted
  *       to a host-owned `GraphError`;
  *       exact plugin exception types intentionally do not cross the unloadable
- *       DSO boundary. Host adapter conversion before callback entry and
+ *       DSO boundary. Host snapshot preparation before callback entry and
  *       validation after callback return execute outside this wrapper and
  *       preserve their host-owned exception types.
  */

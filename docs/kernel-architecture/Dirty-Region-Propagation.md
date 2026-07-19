@@ -3,8 +3,11 @@
 This document describes the dirty-region behavior implemented by the current
 kernel. It separates graph-scoped dirty facts, request planning, task selection,
 scheduler filtering, and output commit. Proposed Macro retile, adaptive
-coarsening, Run cancellation, and dependency-neutral geometry belong in the
-kernel evolution roadmap, not in this current-state contract.
+coarsening, and Run cancellation belong in the kernel evolution roadmap, not
+in this current-state contract. The dirty-geometry path and the private
+clone/resize/channel/ROI processing contract are kernel-owned. The configured
+build selects either an OpenCV adapter or the standard-library implementation,
+so compute/runtime code does not directly declare OpenCV.
 
 ## Terms and Ownership
 
@@ -12,8 +15,11 @@ kernel evolution roadmap, not in this current-state contract.
 snapshot. A lifecycle event may name it explicitly; a request planner may infer
 it as an upstream root of the selected dependency cone.
 
-**Dirty ROI** is a rectangular affected or demanded region. The current private
-kernel representation is `cv::Rect`; output extents use `cv::Size`.
+**Dirty ROI** is a rectangular affected or demanded region. Across the Host,
+graph, propagation, planning, snapshot, task/work-set, write-buffer, and
+`NodeExecutor` boundaries, the kernel-owned representation is `PixelRect`;
+output extents use `PixelSize`. OpenCV rectangles and sizes are created only
+locally inside providers or algorithms at actual matrix or algorithm calls.
 
 **Dirty generation** is the value stored in a `DirtyRegionSnapshot` and copied
 into selected task metadata. It identifies dirty inspection and source-commit
@@ -172,6 +178,14 @@ on already-expanded tasks, clips execution ROIs, preserves task ids, derives
 task-level dependencies, and separates source-boundary and downstream task ids.
 It does not expand nodes, create a new tile shape, or insert a retile task.
 
+Before a selected tiled `image_mixing` node dispatches its borrowed
+`InputTile`/`OutputTile` views, `NodeExecutor` normalizes required secondary
+inputs once for that node invocation. Crop/pad uses stride-aware kernel
+fill/copy primitives, so active pixels are copied through each descriptor's
+`step` and padded bytes are excluded. Temporary normalized `NodeOutput` owners
+remain request-local and live until synchronous tile callbacks finish. This
+normalization changes neither the selected task ids nor dirty ROI geometry.
+
 The dispatcher submits the selected source group and waits for it to settle,
 validates that required source outputs exist in the relevant staged or committed
 store, then submits the initially ready downstream group. Dependency completion
@@ -206,13 +220,13 @@ commit does not roll the proxy commit back.
 
 Before scheduler-backed siblings start, `ComputeService` creates one
 request-owned per-node synchronization object and shares it with both domains.
-Only live `Node` snapshot/YAML parameter resolution and short staging sections
+Only live `Node` snapshot/`ParameterMap` resolution and short staging sections
 for the same node are serialized; different nodes and operation execution
 remain concurrent. The owner survives sibling failure cleanup and scheduler
 drain, then is destroyed with that request. It is not retained by `GraphModel`,
 `GraphRuntime`, or process-wide state.
 
-## Explicit Current Limitations
+## Boundaries and Rationale
 
 The current implementation does not provide:
 
@@ -223,17 +237,28 @@ The current implementation does not provide:
 - a general `ComputeRun`, graph revision, deadline, supersession, or
   cooperative cancellation contract.
 
-Current dirty geometry also depends directly on OpenCV types in graph,
-propagation, planning, snapshot, and execution interfaces. This is an accepted
-current limitation. [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
-and the [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) define the
-post-merge replacement with kernel-owned checked geometry and adapter-only
-OpenCV use.
+Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
+across the Host request, graph state, ROI propagation, planning, snapshot,
+task/work-set, write-buffer, and `NodeExecutor` boundaries. Checked geometry
+helpers perform endpoint arithmetic in a wider integer representation before
+narrowing. OpenCV rectangles and sizes are created only inside provider or
+adapter implementations at actual matrix or algorithm calls. Private compute
+helpers use `image_processing::*`; the standard-library profile provides
+stride-safe deterministic bilinear resize, channel conversion, cloning, and ROI
+copy without OpenCV discovery.
+
+Keeping dirty facts, static task shape, ready dispatch, and staged commit as
+separate values prevents ROI updates from rewriting topology or transferring
+graph ownership into a scheduler queue. The explicit limitations above bound
+what generation and epoch checks can currently guarantee.
 
 ## Implementation and Validation Entry Points
 
 - `src/lib/compute/compute_geometry.hpp`
+- `src/lib/core/image_buffer_processing.*`
+- `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
+- `tests/unit/test_stdlib_image_buffer_processing.cpp`
 - `src/lib/compute/dirty_region_snapshot_builder.cpp`
 - `src/lib/compute/dirty_region_planner.cpp`
 - `src/lib/compute/dirty_region_planning_policy.hpp`
@@ -241,8 +266,11 @@ OpenCV use.
 - `src/lib/compute/task_graph_planning.cpp`
 - `src/lib/compute/dirty_execution_common.cpp`
 - `src/lib/compute/dirty_update_executor.cpp`
+- `src/lib/compute/tiled_input_normalizer.cpp`
+- `src/lib/compute/node_executor.cpp`
 - `src/lib/graph/roi_propagation_service.cpp`
 - `tests/integration/test_scheduler.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

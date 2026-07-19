@@ -72,19 +72,22 @@ The callback boundary is host-independent:
 - `OperationInputView` and `OperationTileInputView` borrow immutable image,
   named-data, and spatial snapshots only for the callback duration.
 - `OperationOutput` owns its image descriptor, named parameter values, spatial
-  metadata, and debug metadata. The host converts the complete value to its
-  private representation before attaching the private DSO lease.
+  metadata, and debug metadata. Named values are copied or moved directly
+  between `ParameterMap` storage and the private `NodeOutput`; the host
+  validates the complete output before attaching the private DSO lease.
 - `RoiContext` exposes ordered `InputEdgeView` topology snapshots; forward ROI
   callbacks receive the active edge, and dependency builders return an owned
   `DependencyLutSnapshot` that the host validates before caching.
 - `ParameterTypeError` reports an explicit `ParameterValue` alternative
-  mismatch. Parameter conversion and allocation failures propagate unchanged
-  before callback entry.
+  mismatch inside plugin code. Document conversion has already completed before
+  Graph publication; callback preparation can fail only while copying owned
+  snapshots or allocating storage.
 
-Host conversion before callback entry and after a successful return remains
-outside the plugin exception fence and preserves its host-owned type. The
-actual plugin invocation retains an explicit DSO lease and normalizes every
-plugin-origin exception before that lease can be released: plugin
+Host snapshot preparation before callback entry and output validation after a
+successful return remain outside the plugin exception fence and preserve their
+host-owned types. The actual plugin invocation retains an explicit DSO lease
+and normalizes every plugin-origin exception before that lease can be released:
+plugin
 `std::bad_alloc` becomes a fresh host `std::bad_alloc`; plugin `GraphError`
 becomes a host copy with the same fixed-width code and message;
 `std::invalid_argument` maps to `GraphErrc::InvalidParameter`; and other
@@ -223,8 +226,13 @@ single-threaded execution from a shared operation key, device, or intent.
 
 Repository-owned CPU OpenCV providers implement that contract with immutable
 inputs, callback-local or task-owned `cv::Mat` state, and no process-wide outer
-operation mutex. Built-in registration fixes OpenCV internal CPU threading at
-one before callback publication, so scheduler grants own the outer parallelism.
+operation mutex. The optional built-in provider fixes OpenCV internal CPU
+threading at one before callback publication, so scheduler grants own the outer
+parallelism. Its provider-local fence converts OpenCV resource exhaustion to a
+fresh `std::bad_alloc` and all other `cv::Exception` values to host-owned
+`GraphError`. Building with
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits those slots while the
+registry and public v2 registrar remain usable by another provider.
 Provider-local synchronization is still required for actual shared backend
 state: the Metal Perlin DSO mutex protects only its shared Metal lifecycle.
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
@@ -238,6 +246,10 @@ legacy, metadata, implementation, and ownership map nodes together, then
 destroys the extracted values outside the guard. Device implementation values
 and their revision vector therefore remain parallel, and a direct device
 registration after whole-key unregister cannot inherit a stale plugin token.
+Manager-driven v2 registration applies those same slot semantics to the
+optional OpenCV provider: a DSO may own every active resize slot, execute
+without OpenCV through public `ImageBuffer` values, and restore the captured
+OpenCV predecessor on unload.
 
 The transaction has three outcomes:
 
@@ -292,7 +304,7 @@ lease is the first-declared and last-destroyed
 member. Copy construction retains it before copying payload state; move
 construction transfers the complete state through a no-throw swap. Copy and move
 assignment first stage a complete replacement, swap it into place, and let the
-temporary retire the old image/YAML/data/spatial/debug state before releasing
+temporary retire the old image/ParameterValue/spatial/debug state before releasing
 the old lease. A failed copy leaves the destination unchanged. Consequently,
 plugin-defined image/context deleters remain mapped even when a cached output is
 copied, moved, or overwritten after explicit global unload. These leases contain
@@ -541,7 +553,7 @@ capacity during replacement; graph-load rollback returns both unpublished
 intent reservations. A live or failed-close graph cannot release its grant
 early.
 
-## Current ABI Status
+## Boundaries and Rationale
 
 Both current plugin ABIs are explicitly provisional. The operation entrypoint
 name rejects unsupported registration generations, but accepted registrar
@@ -554,9 +566,19 @@ diagnostic metadata only and never substitutes for the numeric handshake.
 For both interfaces, binary compatibility depends on the matching Photospider
 SDK and a compatible compiler, standard library, C++ ABI, allocator/runtime,
 exception model, and RTTI configuration. C linkage is an identity/generation
-gate, not a pure C data boundary or cross-toolchain stability guarantee. ADR
-0003 and the kernel evolution roadmap record accepted replacement directions;
-they do not change the current loader contracts described here.
+gate, not a pure C data boundary or cross-toolchain stability guarantee.
+
+Shadow transactions prevent partial registry or type-map publication. DSO
+leases and matching destroy functions keep callback state and plugin-created
+instances inside the lifetime of their defining library. Those mechanisms make
+the provisional C++ boundary explicit rather than mistaking a C symbol for a
+stable C value ABI.
+[ADR 0003](../adr/0003-process-owned-execution-resources.md) and the exact
+[process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
+record the accepted scheduler replacement direction. The exact
+[server and plugin isolation target](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation)
+records the operation-isolation direction. Neither changes the current loader
+contracts described here.
 
 ## Compatibility Guidelines
 
@@ -577,3 +599,20 @@ they do not change the current loader contracts described here.
   invalid direct calls defensively.
 - The host should use plugin destroy for plugin-created scheduler instances.
 - No pure C operation or scheduler ABI compatibility is currently provided.
+
+## Implementation and Validation Entry Points
+
+- `include/photospider/plugin/plugin_api.hpp`
+- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/scheduler/scheduler.hpp`
+- `include/photospider/scheduler/scheduler_plugin_api.hpp`
+- `src/lib/plugin/operation_host_adapter.*`
+- `src/lib/plugin/plugin_loader.*`
+- `src/lib/plugin/plugin_manager.*`
+- `src/lib/scheduler/scheduler_plugin_loader.*`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_plugin_manager.cpp`
+- `tests/integration/test_scheduler_plugin_loader.cpp`
+- `tests/unit/test_op_registry_m31.cpp`
+- `tests/unit/test_scheduler_sdk_example.cpp`
+- `tests/integration/graph_cli_plugin_compute_smoke.py`

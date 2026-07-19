@@ -7,7 +7,6 @@
 #include <string>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "runtime/kernel.hpp"
 
@@ -69,8 +68,9 @@ class KernelTestAccess {
    * @return The helper result if resource exhaustion is incorrectly recorded
    *         as LastError; the correct contract propagates std::bad_alloc.
    * @throws std::bad_alloc through the submitted graph-state future.
-   * @note `reload_graph_yaml()` uses this exact private wrapper; the injection
-   *       isolates its catch ordering without adding a production debug hook.
+   * @note `reload_graph_document()` uses this exact private wrapper; the
+   * injection isolates its catch ordering without adding a production debug
+   * hook.
    */
   static std::optional<int> inject_bad_alloc_through_last_error_graph_state(
       Kernel& kernel, const std::string& name) {
@@ -150,6 +150,34 @@ class KernelTestAccess {
                                  Fn&& fn)
       -> std::future<std::invoke_result_t<Fn, GraphModel&>> {
     return runtime(kernel, name).graph_state().submit(std::forward<Fn>(fn));
+  }
+
+  /**
+   * @brief Admits one cache-save work item that borrows Kernel collaborators.
+   *
+   * @param kernel Kernel whose cache service and runtime lane are exercised.
+   * @param name Loaded graph name used to resolve the runtime.
+   * @param node_id Node whose formal HP output should be persisted.
+   * @param precision Cache precision label forwarded to GraphCacheService.
+   * @return Future completing after the admitted cache-save work item returns.
+   * @throws std::runtime_error when the graph is not loaded.
+   * @throws std::bad_alloc if task, precision, or future-state allocation
+   * fails.
+   * @note The submitted closure intentionally borrows `kernel.cache_service_`
+   * through the real graph-state lane. It is a private lifetime-regression
+   * seam, not a production cache API or an alternate ownership wrapper.
+   */
+  static std::future<void> submit_cache_save(Kernel& kernel,
+                                             const std::string& name,
+                                             int node_id,
+                                             std::string precision) {
+    return runtime(kernel, name)
+        .graph_state()
+        .submit([&kernel, node_id,
+                 precision = std::move(precision)](GraphModel& graph) {
+          kernel.cache_service_.save_cache_if_configured(
+              graph, graph.node(node_id), precision);
+        });
   }
 
   /**

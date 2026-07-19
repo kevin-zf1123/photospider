@@ -1,9 +1,9 @@
 # Kernel Terminology
 
 This glossary defines the language used by the current kernel implementation.
-Terms that exist only in the accepted future direction are defined in
-`docs/roadmap/Kernel-Evolution.md` and must not be described as current runtime
-objects.
+Terms that exist only in the accepted
+[kernel evolution target](../roadmap/Kernel-Evolution.md) must not be described
+as current runtime objects.
 
 ## Product and Runtime Ownership
 
@@ -181,10 +181,21 @@ The current image payload contract: two-dimensional extent, channel count,
 one scalar type, device, row stride, shared data ownership, and optional
 backend context. It is not a general Tensor, Deep Image, or vector-scene model.
 
+**`PixelRect` / `PixelSize`**
+External-library-neutral integer geometry values used by public Host and
+operation contracts and by private Graph, ROI propagation, dirty-region,
+cache-identity, planning, and task state. OpenCV geometry may be constructed
+only locally in an OpenCV adapter or provider at the actual matrix/library
+call; it is not stored or passed through those kernel contracts.
+
 **Operation provider**
-An implementation source for operation callbacks and metadata. The current
-built-in implementation uses OpenCV in private backend code; public operation
-contracts use Photospider values.
+An implementation source for operation callbacks, propagation contracts, and
+metadata. Dependency-neutral core operations are always composed at process
+seed. The repository OpenCV CPU provider is a separate optional build module
+that owns its algorithms, process initialization, and exception translation.
+Both it and v2 DSO providers publish into the same provider-neutral registry
+slots, so a DSO can replace an active operation and unload restores its
+predecessor. Public operation contracts use Photospider values.
 
 **Adapter**
 A narrow translation at an external library, transport, or product edge. An
@@ -199,12 +210,29 @@ planning, cache, or scheduling semantics.
 - `DirtyRegionSnapshot` is not `ComputeTaskGraph`.
 - A ready task is not a task graph.
 - HP cache is not RT proxy state.
-- `ImageBuffer` is not the future general data model.
+- `ImageBuffer` is not the
+  [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 - A worker request is not a resolved grant, and a grant is not necessarily the
   final scheduler slot charge.
 - A reserved scheduler worker slot is not proof of one currently running
   thread.
 - `SchedulerWorkerBudget` is not a worker pool, fairness authority, or a limit
   on every thread in the process.
-- The current per-graph `IScheduler` is not the target process execution
-  domain.
+- The current per-graph `IScheduler` is not the
+  [target process execution domain](../roadmap/Kernel-Evolution.md#process-execution-domain).
+
+## Implementation and Validation Entry Points
+
+- `include/photospider/host/host.hpp`
+- `include/photospider/core/compute_intent.hpp`
+- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/scheduler/scheduler.hpp`
+- `src/lib/runtime/graph_runtime.hpp`
+- `src/lib/graph/graph_model.hpp`
+- `src/lib/graph/graph_state_executor.hpp`
+- `src/lib/compute/task_graph_planning.hpp`
+- `src/lib/compute/dirty_region_snapshot.hpp`
+- `src/lib/scheduler/scheduler_worker_budget.hpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_scheduler_worker_budget.cpp`

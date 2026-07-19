@@ -60,7 +60,8 @@ Associated fields:
 `GraphCacheService` handles disk cache files under `GraphModel::cache_root`.
 Node cache entries describe cache type and location. Image cache files are saved
 as image files, and named `NodeOutput::data` entries are saved as YAML metadata
-next to the image file.
+next to the image file. In-memory named data remains a detached
+`plugin::ParameterMap`; `GraphCacheService` never constructs YAML values.
 
 For CLI-loaded graphs, `GraphModel::cache_root` is configured from
 `cache_root_dir` before graph load and resolves to
@@ -70,6 +71,31 @@ not provide a cache root continue to use `<root_dir>/<graph_name>/cache`.
 
 Disk cache precision currently supports `int8` and `int16` save paths. Loaded
 image cache data is converted into float image buffers.
+
+Image bytes cross the private, dependency-neutral `ImageArtifactCodec` contract.
+`Kernel` obtains one configured shared codec from the product composition root
+and injects it into `GraphCacheService`; Graph/cache code supplies only paths,
+`ImageBuffer`, and normalized integer precision. With OpenCV enabled, the
+configured adapter uses OpenCV imgcodecs and translates provider failures to
+`GraphErrc::Io`, while OpenCV `StsNoMem` remains `std::bad_alloc`. With OpenCV
+disabled, the configured unavailable codec returns `GraphErrc::Io` without
+discovering or exporting OpenCV. Tests inject a deterministic fake to
+verify call order, lifetime retention, precision selection, recoverable errors,
+and resource exhaustion without reading or writing a real image format.
+
+Named values independently cross the private, dependency-neutral
+`CacheMetadataCodec` contract as paths and detached `ParameterMap` values.
+`Kernel` injects and `GraphCacheService` retains this second immutable shared
+owner for the same service lifetime. Cache policy still derives the sibling
+`.yml` path, creates directories, selects entries, records timing and
+diagnostics, preserves HP authority, and removes stale files. The configured
+`YamlCacheMetadataCodec` alone owns YAML nodes, recursive value conversion,
+stream IO, and provider exception translation. Null documents decode to an
+empty map; invalid representations become `GraphErrc::InvalidYaml`, recoverable
+write/emission failures become `GraphErrc::Io`, and `std::bad_alloc` propagates
+unchanged. A deterministic fake verifies exact paths, values, retained
+lifetime, error categories, and resource exhaustion without declaring YAML
+types in cache code.
 
 Disk cache load attempts preserve the existing try-load bool contract while also
 recording the latest diagnostic through GraphModel's dedicated disk-cache
@@ -95,16 +121,52 @@ Disk cache save, load, and synchronization use `cached_output_high_precision`
 only. RT proxy output does not protect stale disk files and is not promoted to
 disk cache state.
 
-## Cache Rules
+## Boundaries and Rationale
 
-- New HP code writes `cached_output_high_precision`.
-- New RT code writes `RealtimeProxyGraph` as transient interactive state, using
+- HP paths write `cached_output_high_precision`.
+- RT paths write `RealtimeProxyGraph` as transient interactive state, using
   `RealtimeProxyWriteBuffer` for dirty worker writes before proxy commit.
 - Formal cache save/load/sync behavior, subsequent HP compute, and long-term
   storage must use HP output and must not promote RT output to authoritative
   cache.
-- Tests should verify HP graph cache and RT proxy graph state independently.
+- Long-lived tests verify HP graph cache and RT proxy graph state
+  independently.
 
 `GraphInspectService` selects node-local display metadata from HP cache only.
 The current Host inspection surface does not promote RT proxy state into
 `GraphModel` or expose it as authoritative cache metadata.
+
+One formal cache authority prevents a low-resolution preview from silently
+becoming an HP dependency or persistence source. Request-local staging keeps
+partially assembled dirty output invisible until its domain-specific work has
+settled.
+
+The current private disk-cache implementation calls neither OpenCV image codecs
+nor YAML APIs. It depends on injected `ImageArtifactCodec` and
+`CacheMetadataCodec` contracts; configured private adapters own provider
+decode/encode, recursive conversion, stream IO, and exception translation.
+Issue #62 completes this runtime/cache value boundary. Issue #63 adds
+capability-selected real or unavailable adapters: the default product discovers
+and links yaml-cpp/OpenCV, while the dependency-disabled product discovers
+neither and returns `GraphErrc::Io` for explicit representation IO.
+[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
+describe the final adapter and document boundary.
+
+## Implementation and Validation Entry Points
+
+- `src/lib/core/image_artifact_codec.hpp`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/providers/configured_image_artifact_codec.*`
+- `src/lib/providers/configured_persistence_adapters.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/graph/graph_model.*`
+- `src/lib/compute/realtime_proxy_graph.*`
+- `src/lib/compute/dirty_write_buffers.*`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_host_adapter.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`

@@ -11,7 +11,9 @@ transport 或进程级 operation plugin
 
 公共调用方只能通过 `ps::Host` 进入计算。Embedded adapter 把公共 `HostComputeRequest` 值
 转换为内部 Kernel 和 `ComputeService` 请求。公共 API 不暴露 `ComputeService`、plan、任务图
-或 scheduler pointer。
+或 scheduler pointer。Request、propagation、planning 与 execution geometry 直到
+`NodeExecutor` 都保持为 `PixelRect`/`PixelSize`；OpenCV geometry 只存在于 provider 或
+算法实现内部，并且位于真正消费它的 library call 处。
 
 ## 所有权图
 
@@ -100,6 +102,8 @@ Compute collaborator 位于 `src/lib/compute/`；三个 admission/ownership coll
 - 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。
 - 只要仍有由 `ComputeTaskGraph` 派生的 scheduler-visible callback 可能执行，该图就不可变。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
+- Host、graph、planning、dirty work-set、staged-write 与 `NodeExecutor` 边界携带内核自有的
+  `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。
 - 在可行时，tiled input normalization 每次 node invocation 只执行一次，而不是每个 tile callback
   执行一次。
 
@@ -149,10 +153,17 @@ capture 与卸载，但会在 callback invocation 前释放。因此，每个 pr
 可重入，或自行同步其共享可变状态。共享 operation key、device、intent 或 callback owner 绝不
 意味着单线程执行。
 
-`register_builtin()` 会在发布 builtin callback 前恰好一次调用 `cv::setNumThreads(1)`。仓库自有
-CPU provider 使用 `cv::Mat`；仓库代码不调用 `cv::ocl::setUseOpenCL(false)`，也不会在 callback
-可能活跃时重新配置 OpenCV threading。因此，已准入的 scheduler worker grant 是仓库自有的外层
-CPU parallelism，而 OpenCV 内部 CPU parallelism 保持禁用。
+可选 OpenCV provider 会在发布自身 callback 前恰好一次调用 `cv::setNumThreads(1)`。它使用
+`cv::Mat`，不调用 `cv::ocl::setUseOpenCL(false)`，也不会在 callback 可能活跃时重新配置
+OpenCV threading。其 callback fence 会在仍处于 provider 代码内部时捕获注册算法抛出的每个
+`cv::Exception`。OpenCV 资源耗尽会变成新建的 `std::bad_alloc`；其他 OpenCV failure 会变成
+携带 `GraphErrc::ComputeError` 的 host-owned `GraphError`。因此，已准入的 scheduler worker
+grant 是仓库自有的外层 CPU parallelism，而 OpenCV 内部 CPU parallelism 保持禁用。
+
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 会省略该 provider 的 callback，但依赖中立
+core operation 仍保持注册。Registry 与 v2 registrar 不依赖 OpenCV：其他 provider 可以发布
+缺失 operation，也可以通过相同 slot 替换已启用的 OpenCV operation。由 manager 驱动的卸载会
+退役 replacement，并恢复已捕获的 predecessor。
 
 围绕真实 backend state 的同步仍由 provider 局部负责。Metal Perlin provider 保留一个
 DSO-private mutex，保护其共享 Metal device、queue、pipeline 与 buffer；该 mutex 既不是 OpenCV
@@ -162,8 +173,11 @@ operation lock，也不是 scheduler exclusivity contract。仓库自有 provide
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录本项决策。
 长期 integration coverage 会证明 `1/2/4/8` grant 对应精确 callback overlap，以及单 worker 与
 八 worker 输出按位相同；手工原生扩展性证据记录在
-`../../development/zh/Testing-and-Validation.zh.md`。ADR 0002 仍把未来 OpenCV algorithm、codec、
-exception translation 与 process state 放入可选 provider/adapter，而不是 kernel 语义。
+`../../development/zh/Testing-and-Validation.zh.md`。
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)与精确的
+[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)会把 OpenCV algorithm、
+codec、exception translation 与 process state 放入可选 provider/adapter，而不再让它们定义目标
+kernel 语义。
 
 ## Intent 与提交边界
 
@@ -208,9 +222,10 @@ metadata 推导该关系。
 3. 临时输出可以在可见前验证。
 4. 物理执行所有权与 dependency correctness 保持可分离。
 
-ADR 0003 记录了供后续实现的另一项已接受 ownership decision。本文是当前 per-graph scheduler
-ownership 及其有界进程 admission containment 的权威说明；该 ledger 不是目标 shared
-`ExecutionService`。
+[ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)与精确的
+[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了供后续实现的另一项
+已接受 ownership decision。本文是当前 per-graph scheduler ownership 及其有界进程 admission
+containment 的权威说明；该 ledger 不是目标 shared `ExecutionService`。
 
 ## 实现与验证入口
 
@@ -223,6 +238,8 @@ ownership 及其有界进程 admission containment 的权威说明；该 ledger 
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/providers/configured_operation_providers.*`
+- `src/lib/providers/opencv/*`
 - `src/lib/scheduler/scheduler_factory.*`
 - `src/lib/scheduler/scheduler_worker_budget.*`
 - `src/lib/scheduler/scheduler_reservation_owner.*`

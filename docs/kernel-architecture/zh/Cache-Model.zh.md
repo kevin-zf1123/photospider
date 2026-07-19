@@ -39,13 +39,33 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 
 ## 磁盘缓存
 
-`GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。
+`GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。
+图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。
+内存中的命名 data 始终是脱离 adapter 的 `plugin::ParameterMap`；
+`GraphCacheService` 绝不构造 YAML value。
 
 对于 CLI 加载的 graph，`GraphModel::cache_root` 会在 graph load 前由 `cache_root_dir`
 配置决定，并解析为 `<cache_root_dir>/<graph_name>`。相对 `cache_root_dir` 按进程当前工作目录解析。
 未提供 cache root 的直接 `Kernel::load_graph` 调用继续使用 `<root_dir>/<graph_name>/cache`。
 
 磁盘缓存精度当前支持 `int8` 和 `int16` 保存路径。加载的图像缓存数据会转换为浮点图像缓冲区。
+
+图像字节通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
+共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、`ImageBuffer` 与
+规范化整数精度。OpenCV 启用时，已配置 adapter 使用 OpenCV imgcodecs，并把 provider failure
+翻译为 `GraphErrc::Io`，同时让 OpenCV `StsNoMem` 保持为 `std::bad_alloc`。OpenCV 禁用时，
+已配置 unavailable codec 会在不发现或导出 OpenCV 的情况下返回 `GraphErrc::Io`。测试会注入确定性 fake，
+在不读取或写入真实图像格式的情况下验证调用顺序、生命周期保持、精度选择、可恢复错误与资源耗尽。
+
+Named value 独立通过私有、依赖中立的 `CacheMetadataCodec` contract，只交换 path 和脱离
+adapter 的 `ParameterMap` value。`Kernel` 注入、`GraphCacheService` 保留第二个不可变 shared
+owner，且其 service lifetime 与 image codec 相同。Cache policy 仍负责推导同级 `.yml` path、
+创建目录、选择 entry、记录计时和诊断、保持 HP 权威性，以及移除陈旧文件。只有已配置的
+`YamlCacheMetadataCodec` 拥有 YAML node、递归 value conversion、stream IO 与 provider
+exception translation。Null document 解码为空 map；无效 representation 变成
+`GraphErrc::InvalidYaml`，可恢复 write/emission failure 变成 `GraphErrc::Io`，
+`std::bad_alloc` 原样传播。确定性 fake 会验证精确 path、value、保留生命周期、error category
+与资源耗尽，而 cache code 不声明 YAML type。
 
 磁盘缓存加载尝试会保留既有 try-load 布尔返回契约，同时通过 GraphModel 专用的
 disk-cache diagnostic mutex 记录最新诊断。调用方通过 snapshot API 检查该状态，
@@ -66,13 +86,44 @@ miss 混在一起。
 
 磁盘缓存保存、加载和同步只使用 `cached_output_high_precision`。RT proxy 输出不会保护陈旧磁盘文件，也不会被提升为磁盘缓存状态。
 
-## 缓存规则
+## 边界与原理
 
-- 新 HP 代码写入 `cached_output_high_precision`。
-- 新 RT 代码将 `RealtimeProxyGraph` 写为临时交互式状态；dirty worker 写入必须先经过
+- HP 路径写入 `cached_output_high_precision`。
+- RT 路径将 `RealtimeProxyGraph` 写为临时交互式状态；dirty worker 写入必须先经过
   `RealtimeProxyWriteBuffer`，再提交到 proxy。
 - 正式缓存的保存、加载、同步行为、后续 HP 计算和长期存储必须使用 HP 输出，不能将 RT 输出提升为权威缓存。
-- 测试应分别验证 HP graph cache 和 RT proxy graph state。
+- 长期测试分别验证 HP graph cache 和 RT proxy graph state。
 
 `GraphInspectService` 只从 HP cache 选择 node-local 显示 metadata。当前 Host inspection surface
 不会把 RT proxy state 提升到 `GraphModel`，也不会将其作为权威 cache metadata 暴露。
+
+只有一个正式缓存权威，可以防止低分辨率 preview 静默变成 HP dependency 或 persistence source。
+Request-local staging 会让尚未组装完成的 dirty output 保持不可见，直到相应 domain 的工作 settle。
+
+当前私有 disk-cache 实现既不调用 OpenCV image codec，也不调用 YAML API。它依赖注入的
+`ImageArtifactCodec` 与 `CacheMetadataCodec` contract；已配置的私有 adapter 拥有 provider
+decode/encode、递归 conversion、stream IO 与 exception translation。Issue #62 完成了这条
+runtime/cache value 边界。Issue #63 增加由 capability 选择的真实或 unavailable adapter：默认
+product 发现并链接 yaml-cpp/OpenCV；dependency-disabled product 两者都不发现，并在显式
+representation IO 时返回 `GraphErrc::Io`。
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
+和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述最终 adapter 与
+document boundary。
+
+## 实现与验证入口
+
+- `src/lib/core/image_artifact_codec.hpp`
+- `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/adapters/opencv/image_artifact_codec_opencv.*`
+- `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
+- `src/lib/adapters/yaml/parameter_value_yaml.*`
+- `src/lib/providers/configured_image_artifact_codec.*`
+- `src/lib/providers/configured_persistence_adapters.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/graph/graph_model.*`
+- `src/lib/compute/realtime_proxy_graph.*`
+- `src/lib/compute/dirty_write_buffers.*`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_host_adapter.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`

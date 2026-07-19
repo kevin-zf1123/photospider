@@ -141,14 +141,14 @@ class GraphModel {
   };
 
   struct NodeRuntimeState {
-    YAML::Node& runtime_parameters;
+    plugin::ParameterMap& runtime_parameters;
     std::vector<OutputPort>& outputs;
     std::vector<CacheEntry>& caches;
     bool& preserved;
     std::optional<NodeOutput>& cached_output_high_precision;
     int& hp_version;
-    std::optional<cv::Rect>& hp_roi;
-    std::optional<cv::Size>& last_input_size_hp;
+    std::optional<PixelRect>& hp_roi;
+    std::optional<PixelSize>& last_input_size_hp;
     std::optional<DependencyLutCache>& dependency_lut_cache;
     uint64_t& dependency_lut_version;
     uint64_t& parameters_version;
@@ -330,8 +330,7 @@ class GraphModel {
  *         dependency-cache identity.
  * @throws GraphError with MissingDependency when a required parameter input or
  *         named output is unavailable.
- * @throws std::invalid_argument for malformed/colliding YAML mapping keys.
- * @throws std::bad_alloc unchanged from cloning or recursive conversion.
+ * @throws std::bad_alloc unchanged from copying recursive parameter values.
  * @note The function never trusts graph-node runtime_parameters because compute
  *       may resolve those values only on an execution-local node copy.
  */
@@ -347,7 +346,7 @@ plugin::ParameterMap resolve_effective_parameter_snapshot(
  * @note Graph extent resolution may overwrite unknown entries when it has
  *       stronger request-local knowledge.
  */
-std::vector<cv::Size> cached_image_input_extents(const Node& node,
-                                                 const GraphModel& graph);
+std::vector<PixelSize> cached_image_input_extents(const Node& node,
+                                                  const GraphModel& graph);
 
 }  // namespace ps

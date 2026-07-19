@@ -14,7 +14,10 @@ transport, or process-wide operation plugin lifetime.
 The public caller reaches compute only through `ps::Host`. The embedded adapter
 translates public `HostComputeRequest` values into internal Kernel and
 `ComputeService` requests. No public API exposes a `ComputeService`, plan, task
-graph, or scheduler pointer.
+graph, or scheduler pointer. Request, propagation, planning, and execution
+geometry remains `PixelRect`/`PixelSize` through `NodeExecutor`; OpenCV geometry
+exists only inside a provider or algorithm implementation at the library call
+that consumes it.
 
 ## Ownership Map
 
@@ -121,6 +124,8 @@ private implementation modules and do not form an installable API.
   from it may still execute.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
+- Host, graph, planning, dirty work-set, staged-write, and `NodeExecutor`
+  boundaries carry kernel-owned `PixelRect`/`PixelSize`, never OpenCV geometry.
 - Tiled input normalization occurs once per node invocation where possible,
   rather than once per tile callback.
 
@@ -178,12 +183,22 @@ make its callback reentrant or synchronize its own shared mutable state. A
 shared operation key, device, intent, or callback owner never implies
 single-threaded execution.
 
-`register_builtin()` calls `cv::setNumThreads(1)` exactly once before publishing
-built-in callbacks. Repository-owned CPU providers use `cv::Mat`; repository
-code does not call `cv::ocl::setUseOpenCL(false)` and does not reconfigure
-OpenCV threading while callbacks may be active. The admitted scheduler worker
-grant is therefore the repository-owned outer CPU parallelism layer, while
-OpenCV internal CPU parallelism remains disabled.
+The optional OpenCV provider calls `cv::setNumThreads(1)` exactly once before
+publishing its callbacks. It uses `cv::Mat`, does not call
+`cv::ocl::setUseOpenCL(false)`, and does not reconfigure OpenCV threading while
+callbacks may be active. Its callback fence catches every `cv::Exception`
+raised by a registered algorithm while still inside provider code. OpenCV
+resource exhaustion becomes a fresh `std::bad_alloc`; every other OpenCV
+failure becomes a host-owned `GraphError` with `GraphErrc::ComputeError`. The
+admitted scheduler worker grant is therefore the repository-owned outer CPU
+parallelism layer, while OpenCV internal CPU parallelism remains disabled.
+
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits this provider's
+callbacks but leaves dependency-neutral core operations registered. The
+registry and v2 registrar do not depend on OpenCV: another provider can publish
+the absent operation, or replace an enabled OpenCV operation through the same
+slots. Manager-driven unload retires the replacement and restores the captured
+predecessor.
 
 Synchronization around genuine backend state remains provider-local. The
 Metal Perlin provider retains a DSO-private mutex around its shared Metal
@@ -196,9 +211,12 @@ outside scheduler worker accounting.
 records this decision. Durable integration coverage proves exact callback
 overlap for `1/2/4/8` grants and bitwise-equal one-versus-eight-worker output;
 the manual native scaling evidence is documented in
-`../development/Testing-and-Validation.md`. ADR 0002 still places the future
-OpenCV algorithms, codecs, exception translation, and process state inside an
-optional provider/adapter rather than kernel semantics.
+`../development/Testing-and-Validation.md`.
+[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
+place OpenCV algorithms, codecs, exception translation, and process state
+inside an optional provider/adapter instead of letting them define target
+kernel semantics.
 
 ## Intent and Commit Boundaries
 
@@ -255,10 +273,12 @@ four independent correctness points:
 3. Temporary output can be validated before becoming visible.
 4. Physical execution ownership remains separable from dependency correctness.
 
-ADR 0003 records a different accepted ownership decision for later
-implementation. This document is authoritative for current per-graph scheduler
-ownership plus its bounded process admission containment; the ledger is not the
-target shared `ExecutionService`.
+[ADR 0003](../adr/0003-process-owned-execution-resources.md) and the exact
+[process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
+record a different accepted ownership decision for later implementation. This
+document is authoritative for current per-graph scheduler ownership plus its
+bounded process admission containment; the ledger is not the target shared
+`ExecutionService`.
 
 ## Implementation and Validation Entry Points
 
@@ -271,6 +291,8 @@ target shared `ExecutionService`.
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/providers/configured_operation_providers.*`
+- `src/lib/providers/opencv/*`
 - `src/lib/scheduler/scheduler_factory.*`
 - `src/lib/scheduler/scheduler_worker_budget.*`
 - `src/lib/scheduler/scheduler_reservation_owner.*`

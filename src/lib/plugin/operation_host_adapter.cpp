@@ -8,11 +8,9 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "core/parameter_value_adapter.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
@@ -20,34 +18,14 @@ namespace ps::plugin_host {
 namespace {
 
 /**
- * @brief Converts one OpenCV rectangle to public geometry.
- * @param rect Private rectangle.
- * @return Equivalent public rectangle.
- * @throws Nothing.
- */
-PixelRect to_public_rect(const cv::Rect& rect) noexcept {
-  return PixelRect{rect.x, rect.y, rect.width, rect.height};
-}
-
-/**
- * @brief Converts one public rectangle to OpenCV geometry.
- * @param rect Public rectangle.
- * @return Equivalent private rectangle.
- * @throws Nothing.
- */
-cv::Rect to_private_rect(const PixelRect& rect) noexcept {
-  return cv::Rect(rect.x, rect.y, rect.width, rect.height);
-}
-
-/**
- * @brief Validates and converts one plugin-produced ROI rectangle.
+ * @brief Validates one plugin-produced ROI rectangle.
  * @param rect Public rectangle returned by an operation callback.
- * @return Equivalent private rectangle, including a permitted negative origin.
+ * @return Validated kernel rectangle, including a permitted negative origin.
  * @throws std::invalid_argument when a dimension is negative or either
- * endpoint cannot be represented by the private signed-int geometry type.
+ * endpoint cannot be represented by the kernel signed-int geometry type.
  * @note Zero-area rectangles are valid and retain their supplied origin.
  */
-cv::Rect validated_private_rect(const PixelRect& rect) {
+PixelRect validated_kernel_rect(const PixelRect& rect) {
   const std::int64_t right = static_cast<std::int64_t>(rect.x) + rect.width;
   const std::int64_t bottom = static_cast<std::int64_t>(rect.y) + rect.height;
   if (rect.width < 0 || rect.height < 0 ||
@@ -58,27 +36,7 @@ cv::Rect validated_private_rect(const PixelRect& rect) {
     throw std::invalid_argument(
         "Operation ROI callback returned invalid geometry");
   }
-  return to_private_rect(rect);
-}
-
-/**
- * @brief Converts one OpenCV extent to public geometry.
- * @param size Private extent.
- * @return Equivalent public extent.
- * @throws Nothing.
- */
-PixelSize to_public_size(const cv::Size& size) noexcept {
-  return PixelSize{size.width, size.height};
-}
-
-/**
- * @brief Converts one public extent to OpenCV geometry.
- * @param size Public extent.
- * @return Equivalent private extent.
- * @throws Nothing.
- */
-cv::Size to_private_size(const PixelSize& size) noexcept {
-  return cv::Size(size.width, size.height);
+  return rect;
 }
 
 /**
@@ -93,7 +51,7 @@ plugin::SpatialSnapshot to_public_spatial(
   result.transform_matrix = spatial.transform_matrix;
   result.inverse_matrix = spatial.inverse_matrix;
   result.local_inverse_matrix = spatial.local_inverse_matrix;
-  result.absolute_roi = to_public_rect(spatial.absolute_roi);
+  result.absolute_roi = spatial.absolute_roi;
   result.global_scale_x = spatial.global_scale_x;
   result.global_scale_y = spatial.global_scale_y;
   return result;
@@ -132,30 +90,9 @@ SpatialContext to_private_spatial(const plugin::SpatialSnapshot& spatial) {
   result.transform_matrix = spatial.transform_matrix;
   result.inverse_matrix = spatial.inverse_matrix;
   result.local_inverse_matrix = spatial.local_inverse_matrix;
-  result.absolute_roi = to_private_rect(spatial.absolute_roi);
+  result.absolute_roi = spatial.absolute_roi;
   result.global_scale_x = spatial.global_scale_x;
   result.global_scale_y = spatial.global_scale_y;
-  return result;
-}
-
-/**
- * @brief Converts one private named-output map to public values.
- * @param data Host-owned named YAML outputs.
- * @return Deep-owned public parameter map.
- * @throws std::invalid_argument for unsupported mapping keys or normalized-key
- * collisions in a nested output value.
- * @throws YAML::Exception when a nested scalar cannot be represented by its
- * inferred or explicit type, or uses an unsupported explicit tag.
- * @throws std::bad_alloc unchanged from recursive conversion.
- * @note Keys are already strings and therefore require no numeric
- * normalization.
- */
-plugin::ParameterMap output_data_to_public(
-    const std::unordered_map<std::string, OutputValue>& data) {
-  plugin::ParameterMap result;
-  for (const auto& [key, value] : data) {
-    result.emplace(key, parameter_value_from_yaml(value));
-  }
   return result;
 }
 
@@ -258,97 +195,10 @@ void attach_result_library_lifetime(
 }
 
 /**
- * @brief Validates one plugin-origin image descriptor before publication.
- * @param buffer Public descriptor to inspect without moving its owners.
- * @return Nothing.
- * @throws std::invalid_argument for invalid enums, dimensions, channels,
- * payload shape, or CPU row stride.
- * @throws std::invalid_argument when packed-row or total byte arithmetic
- * exceeds `std::size_t`.
- * @note A completely empty descriptor is the only image-less representation.
- * Backend contexts are opaque, so the host validates their public geometry
- * and enum fields but cannot validate backend allocation capacity.
- */
-void validate_image_descriptor(const ImageBuffer& buffer) {
-  switch (buffer.type) {
-    case DataType::UINT8:
-    case DataType::INT8:
-    case DataType::UINT16:
-    case DataType::INT16:
-    case DataType::FLOAT32:
-    case DataType::FLOAT64:
-      break;
-    default:
-      throw std::invalid_argument("Operation output has invalid image type");
-  }
-  switch (buffer.device) {
-    case Device::CPU:
-    case Device::GPU_METAL:
-    case Device::GPU_CUDA:
-    case Device::ASIC_NPU:
-      break;
-    default:
-      throw std::invalid_argument("Operation output has invalid image device");
-  }
-  const bool invalid_data_owner =
-      (buffer.data.get() == nullptr) != (buffer.data.use_count() == 0);
-  const bool invalid_context_owner =
-      (buffer.context.get() == nullptr) != (buffer.context.use_count() == 0);
-  if (invalid_data_owner || invalid_context_owner) {
-    throw std::invalid_argument(
-        "Operation output image payload has no lifetime owner");
-  }
-  const bool has_data = buffer.data.use_count() != 0;
-  const bool has_context = buffer.context.use_count() != 0;
-  const bool has_payload = has_data || has_context;
-  const bool completely_empty = !has_payload && buffer.width == 0 &&
-                                buffer.height == 0 && buffer.channels == 0 &&
-                                buffer.step == 0;
-  if (completely_empty) {
-    if (buffer.type != DataType::FLOAT32 || buffer.device != Device::CPU) {
-      throw std::invalid_argument(
-          "Operation output empty image descriptor is not canonical");
-    }
-    return;
-  }
-  if (!has_payload || buffer.width <= 0 || buffer.height <= 0 ||
-      buffer.channels <= 0) {
-    throw std::invalid_argument(
-        "Operation output has incomplete image dimensions or payload");
-  }
-  if (buffer.device == Device::CPU && !has_data) {
-    throw std::invalid_argument(
-        "Operation output CPU image requires owned pixel data");
-  }
-  const std::size_t width = static_cast<std::size_t>(buffer.width);
-  const std::size_t channels = static_cast<std::size_t>(buffer.channels);
-  const std::size_t bytes_per_channel =
-      image_buffer_bytes_per_channel(buffer.type);
-  if (channels > std::numeric_limits<std::size_t>::max() / width ||
-      width * channels >
-          std::numeric_limits<std::size_t>::max() / bytes_per_channel) {
-    throw std::invalid_argument("Operation output packed row size overflow");
-  }
-  const std::size_t packed_row = width * channels * bytes_per_channel;
-  if (has_data && buffer.step < packed_row) {
-    throw std::invalid_argument("Operation output CPU row stride is too small");
-  }
-  if (buffer.step != 0 &&
-      static_cast<std::size_t>(buffer.height) >
-          std::numeric_limits<std::size_t>::max() / buffer.step) {
-    throw std::invalid_argument("Operation output image byte size overflow");
-  }
-}
-
-/**
  * @brief Builds callback-scoped public views for private upstream outputs.
  * @param inputs Borrowed private output pointers in image-input order.
- * @return Storage owning every converted non-image value and view.
- * @throws std::invalid_argument for unsupported mapping keys or normalized-key
- * collisions in upstream named data.
- * @throws YAML::Exception when an upstream named-data scalar cannot be
- * represented by its inferred or explicit type, or uses an unsupported tag.
- * @throws std::bad_alloc unchanged from conversion or vector allocation.
+ * @return Storage owning every copied non-image value and view.
+ * @throws std::bad_alloc unchanged from recursive copying or vector allocation.
  * @note Null inputs become empty views without dereferencing host storage.
  *       Every non-null NodeOutput exposes its spatial snapshot even when it is
  *       data-only and therefore has no image payload.
@@ -364,7 +214,7 @@ OperationInputStorage make_operation_inputs(
       storage.spatial.emplace_back();
       continue;
     }
-    storage.data.push_back(output_data_to_public(input->data));
+    storage.data.push_back(input->data);
     storage.spatial.push_back(to_public_spatial(input->space));
   }
   storage.views.reserve(inputs.size());
@@ -387,21 +237,18 @@ OperationInputStorage make_operation_inputs(
  * @brief Converts a complete public operation output to private storage.
  * @param output Public value moved out of plugin code.
  * @return Complete private output without a library lease.
- * @throws std::invalid_argument for an invalid image descriptor, public
- * parameter kind, or spatial snapshot.
- * @throws std::bad_alloc unchanged from YAML conversion or map growth.
+ * @throws std::invalid_argument for an invalid image descriptor or spatial
+ * snapshot.
+ * @throws std::bad_alloc unchanged from recursive map moves/copies.
  * @note The caller attaches its private DSO lease only after this conversion
  *       succeeds; during conversion the callback wrapper still retains it.
- *       This public-to-YAML direction performs no tagged-scalar parsing, so it
- *       does not propagate the pre-entry `YAML::Exception` category.
+ *       Named values remain ParameterValue objects without format conversion.
  */
 NodeOutput operation_output_to_private(plugin::OperationOutput output) {
-  validate_image_descriptor(output.image_buffer);
+  validate_image_buffer(output.image_buffer);
   NodeOutput result;
   result.image_buffer = std::move(output.image_buffer);
-  for (const auto& [key, value] : output.data) {
-    result.data.emplace(key, parameter_value_to_yaml(value));
-  }
+  result.data = std::move(output.data);
   result.space = to_private_spatial(output.spatial);
   result.debug.computed_by_worker_id = output.debug.computed_by_worker_id;
   result.debug.timestamp_us = output.debug.timestamp_us;
@@ -484,18 +331,14 @@ struct RoiInvocationStorage {
  * @param available_inputs Optional destination-indexed execution inputs. Null
  * selects immutable snapshots from the supplied planning graph.
  * @return Owned invocation storage with stable internal pointers.
- * @throws std::invalid_argument for unsupported mapping keys or normalized-key
- * collisions in available upstream named data.
- * @throws YAML::Exception when an available named-data scalar cannot be
- * represented by its inferred or explicit type, or uses an unsupported tag.
  * @throws std::bad_alloc unchanged from snapshot construction.
  * @note The returned context contains no graph owner or mutable cache handle.
  *       Active-edge validation belongs to `RoiInvocationStorage::view()` after
  *       this storage has reached its final address.
  */
 RoiInvocationStorage make_roi_invocation(
-    const Node& node, const GraphModel& graph, const cv::Rect& requested_roi,
-    const cv::Size& output_extent, const std::vector<cv::Size>& input_extents,
+    const Node& node, const GraphModel& graph, const PixelRect& requested_roi,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
     plugin::ParameterMap effective_parameters,
     std::optional<std::size_t> active_input_index,
     const std::vector<const NodeOutput*>* available_inputs = nullptr) {
@@ -523,7 +366,7 @@ RoiInvocationStorage make_roi_invocation(
     public_edge.source_output = edge.from_output_name;
     public_edge.input_index = edge.input_index;
     if (edge.input_index < input_extents.size()) {
-      public_edge.extent = to_public_size(input_extents[edge.input_index]);
+      public_edge.extent = input_extents[edge.input_index];
     }
     const NodeOutput* available = nullptr;
     if (available_inputs) {
@@ -534,7 +377,7 @@ RoiInvocationStorage make_roi_invocation(
       available = cached_output(graph.node(edge.from_node_id));
     }
     if (available) {
-      storage.available_data.back() = output_data_to_public(available->data);
+      storage.available_data.back() = available->data;
       storage.available_spatial.back() = to_public_spatial(available->space);
       public_edge.has_available_input = true;
       const bool has_image = has_image_payload(available->image_buffer);
@@ -551,8 +394,8 @@ RoiInvocationStorage make_roi_invocation(
     }
     storage.edges.push_back(std::move(public_edge));
   }
-  storage.requested_roi = to_public_rect(requested_roi);
-  storage.output_extent = to_public_size(output_extent);
+  storage.requested_roi = requested_roi;
+  storage.output_extent = output_extent;
   storage.active_input_index = active_input_index;
   return storage;
 }
@@ -611,13 +454,13 @@ SpatialDependencyMap dependency_lut_to_private(
         "Operation dependency LUT input extent is unavailable");
   }
 
-  const auto normalize_upstream_roi = [&](const PixelRect& roi) -> cv::Rect {
+  const auto normalize_upstream_roi = [&](const PixelRect& roi) -> PixelRect {
     if (roi.width < 0 || roi.height < 0) {
       throw std::invalid_argument(
           "Operation dependency LUT cell has a negative size");
     }
     if (roi.width == 0 || roi.height == 0) {
-      return cv::Rect();
+      return PixelRect{};
     }
     const std::int64_t left = std::max<std::int64_t>(roi.x, 0);
     const std::int64_t top = std::max<std::int64_t>(roi.y, 0);
@@ -627,18 +470,18 @@ SpatialDependencyMap dependency_lut_to_private(
         std::min<std::int64_t>(static_cast<std::int64_t>(roi.y) + roi.height,
                                input_edge->extent.height);
     if (right <= left || bottom <= top) {
-      return cv::Rect();
+      return PixelRect{};
     }
-    return cv::Rect(static_cast<int>(left), static_cast<int>(top),
-                    static_cast<int>(right - left),
-                    static_cast<int>(bottom - top));
+    return PixelRect{static_cast<int>(left), static_cast<int>(top),
+                     static_cast<int>(right - left),
+                     static_cast<int>(bottom - top)};
   };
   SpatialDependencyMap result;
   result.grid_size_x = snapshot.cell_size.width;
   result.grid_size_y = snapshot.cell_size.height;
   result.cols = static_cast<int>(columns);
   result.rows = static_cast<int>(rows);
-  result.output_extent = to_private_size(snapshot.output_extent);
+  result.output_extent = snapshot.output_extent;
   result.upstream_input_index = snapshot.upstream_input_index;
   result.cell_to_upstream_roi.reserve(snapshot.cell_to_upstream_roi.size());
   for (const PixelRect& roi : snapshot.cell_to_upstream_roi) {
@@ -649,29 +492,13 @@ SpatialDependencyMap dependency_lut_to_private(
 
 }  // namespace
 
-/** @copydoc ps::plugin_host::parameter_value_from_yaml */
-plugin::ParameterValue parameter_value_from_yaml(const YAML::Node& value) {
-  return core::parameter_value_from_yaml(value);
-}
-
-/** @copydoc ps::plugin_host::parameter_map_from_yaml */
-plugin::ParameterMap parameter_map_from_yaml(const YAML::Node& value) {
-  return core::parameter_map_from_yaml(value);
-}
-
-/** @copydoc ps::plugin_host::parameter_value_to_yaml */
-YAML::Node parameter_value_to_yaml(const plugin::ParameterValue& value) {
-  return core::parameter_value_to_yaml(value);
-}
-
 /** @copydoc ps::plugin_host::make_node_view */
 plugin::NodeView make_node_view(const Node& node) {
-  const YAML::Node& effective =
-      node.runtime_parameters && !node.runtime_parameters.IsNull()
-          ? node.runtime_parameters
-          : node.parameters;
+  const plugin::ParameterMap& effective = node.runtime_parameters.empty()
+                                              ? node.parameters
+                                              : node.runtime_parameters;
   return plugin::NodeView(node.id, node.name, node.type, node.subtype,
-                          parameter_map_from_yaml(effective));
+                          effective);
 }
 
 /** @copydoc ps::plugin_host::operation_device_to_private */
@@ -753,7 +580,7 @@ TileOpFunc adapt_tiled_operation(plugin::TiledOperation callback) {
              const Node& node, const OutputTile& output,
              const std::vector<InputTile>& inputs) mutable {
     plugin::NodeView node_view = make_node_view(node);
-    OutputTileView public_output{output.buffer, to_public_rect(output.roi)};
+    OutputTileView public_output{output.buffer, output.roi};
     std::vector<plugin::SpatialSnapshot> spatial;
     std::vector<plugin::OperationTileInputView> public_inputs;
     spatial.reserve(inputs.size());
@@ -765,8 +592,7 @@ TileOpFunc adapt_tiled_operation(plugin::TiledOperation callback) {
         public_spatial = &spatial.back();
       }
       public_inputs.push_back(plugin::OperationTileInputView{
-          InputTileView{input.buffer, to_public_rect(input.roi)},
-          public_spatial});
+          InputTileView{input.buffer, input.roi}, public_spatial});
     }
     callback(node_view, public_output,
              plugin::ArrayView<plugin::OperationTileInputView>(public_inputs));
@@ -776,16 +602,16 @@ TileOpFunc adapt_tiled_operation(plugin::TiledOperation callback) {
 /** @copydoc ps::plugin_host::adapt_dirty_propagator */
 DirtyRoiPropFunc adapt_dirty_propagator(plugin::DirtyRoiPropagator callback) {
   return [callback = std::move(callback)](
-             const Node& node, const cv::Rect& requested,
-             const GraphModel& graph, const cv::Size& output_extent,
-             const std::vector<cv::Size>& input_extents,
+             const Node& node, const PixelRect& requested,
+             const GraphModel& graph, const PixelSize& output_extent,
+             const std::vector<PixelSize>& input_extents,
              const plugin::ParameterMap& effective_parameters,
              const std::vector<const NodeOutput*>* available_inputs) mutable {
     RoiInvocationStorage invocation = make_roi_invocation(
         node, graph, requested, output_extent, input_extents,
         effective_parameters, std::nullopt, available_inputs);
     const plugin::RoiContext context = invocation.view();
-    return validated_private_rect(callback(context));
+    return validated_kernel_rect(callback(context));
   };
 }
 
@@ -793,12 +619,12 @@ DirtyRoiPropFunc adapt_dirty_propagator(plugin::DirtyRoiPropagator callback) {
 ForwardRoiPropFunc adapt_forward_propagator(
     plugin::ForwardRoiPropagator callback) {
   return [callback = std::move(callback)](
-             const Node& node, const cv::Rect& requested,
-             const GraphModel& graph, const cv::Size& parent_extent,
-             const cv::Size& child_extent, std::size_t active_input_index,
-             const std::vector<cv::Size>& input_extents,
+             const Node& node, const PixelRect& requested,
+             const GraphModel& graph, const PixelSize& parent_extent,
+             const PixelSize& child_extent, std::size_t active_input_index,
+             const std::vector<PixelSize>& input_extents,
              const plugin::ParameterMap& effective_parameters) mutable {
-    std::vector<cv::Size> resolved_extents = input_extents;
+    std::vector<PixelSize> resolved_extents = input_extents;
     if (resolved_extents.size() <= active_input_index) {
       resolved_extents.resize(active_input_index + 1);
     }
@@ -807,7 +633,7 @@ ForwardRoiPropFunc adapt_forward_propagator(
         node, graph, requested, child_extent, resolved_extents,
         effective_parameters, active_input_index);
     const plugin::RoiContext context = invocation.view();
-    return validated_private_rect(callback(context));
+    return validated_kernel_rect(callback(context));
   };
 }
 
@@ -816,12 +642,12 @@ DependencyLutBuilder adapt_dependency_builder(
     plugin::DependencyLutBuilder callback) {
   return [callback = std::move(callback)](
              const Node& node, const GraphModel& graph,
-             const std::vector<cv::Size>& upstream_extents,
-             const cv::Size& downstream_extent,
+             const std::vector<PixelSize>& upstream_extents,
+             const PixelSize& downstream_extent,
              const plugin::ParameterMap& effective_parameters) mutable {
     RoiInvocationStorage invocation = make_roi_invocation(
         node, graph,
-        cv::Rect(0, 0, downstream_extent.width, downstream_extent.height),
+        PixelRect{0, 0, downstream_extent.width, downstream_extent.height},
         downstream_extent, upstream_extents, effective_parameters,
         std::nullopt);
     const plugin::RoiContext context = invocation.view();

@@ -11,18 +11,19 @@
 #include <mutex>
 #include <new>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/dirty_region_snapshot.hpp"
+#include "core/parameter_value_text.hpp"
+#include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
+#include "providers/configured_persistence_adapters.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
-#include "yaml-cpp/yaml.h"
 
 namespace ps {
 
@@ -368,8 +369,24 @@ struct EmbeddedHostState {
   /** @brief Internal interaction facade used only by this Host adapter. */
   InteractionService interaction;
 
-  /** @brief Creates the interaction facade after constructing the Kernel. */
-  EmbeddedHostState() : interaction(kernel) {}
+  /**
+   * @brief Creates backend state from explicit retained dependencies.
+   *
+   * @param image_codec Shared artifact codec owner.
+   * @param metadata_codec Shared metadata codec owner.
+   * @param document_reader Shared graph/node document reader owner.
+   * @param document_writer Shared graph/node document writer owner.
+   * @throws std::invalid_argument when any required owner is empty.
+   * @throws std::bad_alloc if backend ownership allocation fails.
+   * @note Kernel is fully composed before InteractionService borrows it.
+   */
+  EmbeddedHostState(std::shared_ptr<const ImageArtifactCodec> image_codec,
+                    std::shared_ptr<const CacheMetadataCodec> metadata_codec,
+                    std::shared_ptr<const GraphDocumentReader> document_reader,
+                    std::shared_ptr<const GraphDocumentWriter> document_writer)
+      : kernel(std::move(image_codec), std::move(metadata_codec),
+               std::move(document_reader), std::move(document_writer)),
+        interaction(kernel) {}
 
   /**
    * @brief Waits for all tracked async computes before destroying the backend.
@@ -1038,23 +1055,6 @@ OperationStatus status_from_exception(const char* operation,
 }
 
 /**
- * @brief Maps a caught YAML exception into a Host operation status.
- *
- * @param operation Frontend operation name used in the diagnostic prefix.
- * @param error YAML parser or emitter exception.
- * @return InvalidYaml failure status with diagnostic text.
- * @throws std::bad_alloc if diagnostic string allocation fails.
- * @note YAML remains an implementation dependency; Host callers only receive a
- *       stable status value.
- */
-OperationStatus status_from_exception(const char* operation,
-                                      const YAML::Exception& error) {
-  return failure_status(
-      GraphErrc::InvalidYaml,
-      std::string(operation) + " YAML failed: " + error.what());
-}
-
-/**
  * @brief Maps a filesystem exception into a Host operation status.
  *
  * @param operation Frontend operation name used in the diagnostic prefix.
@@ -1145,8 +1145,8 @@ OperationStatus await_async_compute_status(
  *         caught.
  * @throws std::bad_alloc when allocation failure prevents reliable status
  *         construction.
- * @note This is the public seam guard for backend and serialization
- *       exceptions.
+ * @note Concrete adapters translate provider exceptions before this public
+ * seam; the guard handles only dependency-neutral failures.
  */
 template <typename Value, typename Fn>
 Result<Value> guarded_result(const char* operation, GraphErrc fallback_code,
@@ -1156,10 +1156,6 @@ Result<Value> guarded_result(const char* operation, GraphErrc fallback_code,
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& error) {
-    Result<Value> result;
-    result.status = status_from_exception(operation, error);
-    return result;
-  } catch (const YAML::Exception& error) {
     Result<Value> result;
     result.status = status_from_exception(operation, error);
     return result;
@@ -1200,8 +1196,6 @@ VoidResult guarded_void(const char* operation, GraphErrc fallback_code,
     throw;
   } catch (const GraphError& error) {
     return VoidResult{status_from_exception(operation, error)};
-  } catch (const YAML::Exception& error) {
-    return VoidResult{status_from_exception(operation, error)};
   } catch (const std::filesystem::filesystem_error& error) {
     return VoidResult{status_from_exception(operation, error)};
   } catch (const std::exception& error) {
@@ -1217,8 +1211,8 @@ VoidResult guarded_void(const char* operation, GraphErrc fallback_code,
  * @tparam Fn Callable returning VoidResult and explicitly producing NotFound
  *         only when Kernel reports that no graph map entry exists.
  * @param fn Close body to execute after Host admission coordination.
- * @return Callable result, the exact recoverable Graph/YAML/filesystem
- *         category, or Graph Unknown for scheduler NotFound and otherwise
+ * @return Callable result, the exact recoverable Graph/filesystem category, or
+ *         Graph Unknown for scheduler NotFound and otherwise
  *         unclassified exceptions raised while stopping an existing runtime.
  * @throws std::bad_alloc when backend execution or status construction exhausts
  *         memory.
@@ -1236,8 +1230,6 @@ VoidResult guarded_graph_close(Fn&& fn) {
       return VoidResult{
           status_from_exception("close_graph", GraphErrc::Unknown, error)};
     }
-    return VoidResult{status_from_exception("close_graph", error)};
-  } catch (const YAML::Exception& error) {
     return VoidResult{status_from_exception("close_graph", error)};
   } catch (const std::filesystem::filesystem_error& error) {
     return VoidResult{status_from_exception("close_graph", error)};
@@ -1269,8 +1261,6 @@ OperationStatus guarded_status(const char* operation, GraphErrc fallback_code,
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& error) {
-    return status_from_exception(operation, error);
-  } catch (const YAML::Exception& error) {
     return status_from_exception(operation, error);
   } catch (const std::filesystem::filesystem_error& error) {
     return status_from_exception(operation, error);
@@ -1317,28 +1307,6 @@ OperationStatus failure_from_last_error(const EmbeddedHostState& state,
     return failure_status(error->code, error->message);
   }
   return failure_status(fallback_code, fallback_message);
-}
-
-/**
- * @brief Converts a public PixelRect into an OpenCV rectangle.
- *
- * @param rect Public rectangle.
- * @return cv::Rect with identical coordinates and size.
- * @throws Nothing.
- */
-cv::Rect to_cv_rect(const PixelRect& rect) {
-  return cv::Rect(rect.x, rect.y, rect.width, rect.height);
-}
-
-/**
- * @brief Converts an OpenCV rectangle into a public PixelRect.
- *
- * @param rect Internal rectangle.
- * @return Public rectangle with identical coordinates and size.
- * @throws Nothing.
- */
-PixelRect to_pixel_rect(const cv::Rect& rect) {
-  return PixelRect{rect.x, rect.y, rect.width, rect.height};
 }
 
 /**
@@ -1396,43 +1364,20 @@ DirtySourceLifecycleState to_public_dirty_lifecycle(
 }
 
 /**
- * @brief Removes trailing newline characters from formatted YAML text.
+ * @brief Converts a format-neutral parameter map into public display strings.
  *
- * @param text Text to normalize.
- * @return Text without trailing newline or carriage-return characters.
- * @throws std::bad_alloc if string move/copy allocation fails.
- * @note YAML::Dump often appends a newline; frontend parameter maps are easier
- *       to compare when scalar values are normalized.
- */
-std::string trim_trailing_newlines(std::string text) {
-  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
-    text.pop_back();
-  }
-  return text;
-}
-
-/**
- * @brief Converts a YAML parameter map into public string values.
- *
- * @param parameters Backend YAML parameters.
+ * @param parameters Backend ParameterValue parameters.
  * @return Map from parameter name to display/serialization text.
- * @throws YAML::Exception/std::bad_alloc if YAML conversion fails.
- * @note Host clients receive YAML as text so they do not depend on yaml-cpp.
+ * @throws std::bad_alloc if recursive display conversion allocates and fails.
+ * @throws std::logic_error if a value reports an unknown parameter kind.
+ * @note Scalar strings retain their exact text. Arrays and objects use the
+ * dependency-neutral deterministic inspection grammar.
  */
-std::map<std::string, std::string> parameter_strings_from_yaml(
-    const YAML::Node& parameters) {
+std::map<std::string, std::string> parameter_strings_from_values(
+    const plugin::ParameterMap& parameters) {
   std::map<std::string, std::string> out;
-  if (!parameters || !parameters.IsMap()) {
-    return out;
-  }
-  for (auto it = parameters.begin(); it != parameters.end(); ++it) {
-    std::string key;
-    if (it->first.IsScalar()) {
-      key = it->first.as<std::string>();
-    } else {
-      key = trim_trailing_newlines(YAML::Dump(it->first));
-    }
-    out[key] = trim_trailing_newlines(YAML::Dump(it->second));
+  for (const auto& [key, value] : parameters) {
+    out[key] = core::format_parameter_value_for_inspection(value);
   }
   return out;
 }
@@ -1470,7 +1415,7 @@ DebugMetadataSnapshot to_public_debug(const DebugMeta& debug) {
 SpatialSnapshot to_public_space(const SpatialContext& space, int output_width,
                                 int output_height) {
   SpatialSnapshot snapshot;
-  snapshot.absolute_roi = to_pixel_rect(space.absolute_roi);
+  snapshot.absolute_roi = space.absolute_roi;
   snapshot.extent = PixelSize{output_width, output_height};
   snapshot.global_scale_x = space.global_scale_x;
   snapshot.global_scale_y = space.global_scale_y;
@@ -1488,9 +1433,10 @@ SpatialSnapshot to_public_space(const SpatialContext& space, int output_width,
  *
  * @param info Backend node inspection result.
  * @return Public node inspection view.
- * @throws YAML::Exception/std::bad_alloc if parameter conversion allocates or
- *         fails.
- * @note Backend Node and YAML objects are copied into public value fields.
+ * @throws std::bad_alloc if recursive parameter display conversion allocates
+ * and fails.
+ * @throws std::logic_error if a parameter reports an unknown kind.
+ * @note Backend Node values are copied into public value fields.
  */
 NodeInspectionView to_public_node(const GraphNodeInspectInfo& info) {
   NodeInspectionView view;
@@ -1498,7 +1444,7 @@ NodeInspectionView to_public_node(const GraphNodeInspectInfo& info) {
   view.name = info.name;
   view.type = info.type;
   view.subtype = info.subtype;
-  view.parameters = parameter_strings_from_yaml(info.parameters);
+  view.parameters = parameter_strings_from_values(info.parameters);
   if (info.metadata) {
     view.has_cached_output = info.metadata->has_cached_output;
     if (!info.metadata->source_label.empty()) {
@@ -1541,7 +1487,7 @@ void throw_if_graph_adapter_bad_alloc_probe(const GraphNodeInspectInfo& info) {
  * @return Public graph inspection view.
  * @throws std::bad_alloc when public node, parameter, or result storage
  * exhausts memory.
- * @throws YAML::Exception when backend YAML parameters cannot be converted.
+ * @throws std::logic_error if a recursive parameter reports an unknown kind.
  * @note BUILD_TESTING may compile an immutable-name failpoint inside the real
  * adapter loop. Production builds compile out the probe and expose no callable
  * test seam.
@@ -1617,7 +1563,7 @@ HostDependencyTreeScope to_public_tree_scope(DependencyTree::Scope scope) {
  *
  * @param tree Backend dependency tree.
  * @return Public dependency tree snapshot.
- * @throws YAML::Exception/std::bad_alloc from node conversion.
+ * @throws std::logic_error or std::bad_alloc from node conversion.
  */
 HostDependencyTreeSnapshot to_public_dependency_tree(
     const DependencyTree& tree) {
@@ -1824,7 +1770,7 @@ ComputePlanningTaskSnapshot to_public_planning_task(
   snapshot.node = NodeId{task.node_id};
   snapshot.kind = to_public_planning_task_kind(task.kind);
   snapshot.domain = to_public_dirty_domain(task.domain);
-  snapshot.output_roi = to_pixel_rect(task.output_roi);
+  snapshot.output_roi = task.output_roi;
   snapshot.tile_x = task.tile_x;
   snapshot.tile_y = task.tile_y;
   snapshot.tile_size = task.tile_size;
@@ -1908,7 +1854,7 @@ DirtySourceSnapshot to_public_dirty_source(
   snapshot.generation = state.generation;
   snapshot.source_rois.reserve(state.source_rois.size());
   for (const auto& roi : state.source_rois) {
-    snapshot.source_rois.push_back(to_pixel_rect(roi));
+    snapshot.source_rois.push_back(roi);
   }
   return snapshot;
 }
@@ -1927,7 +1873,7 @@ DirtyTileSnapshot to_public_dirty_tile(const compute::DirtyTileKey& tile) {
   snapshot.tile_x = tile.tile_x;
   snapshot.tile_y = tile.tile_y;
   snapshot.tile_size = tile.tile_size;
-  snapshot.pixel_roi = to_pixel_rect(tile.pixel_roi);
+  snapshot.pixel_roi = tile.pixel_roi;
   return snapshot;
 }
 
@@ -1961,7 +1907,7 @@ DirtyMonolithicRegionSnapshot to_public_dirty_monolithic_region(
   DirtyMonolithicRegionSnapshot snapshot;
   snapshot.node = NodeId{region.node_id};
   snapshot.domain = to_public_dirty_domain(region.domain);
-  snapshot.pixel_roi = to_pixel_rect(region.pixel_roi);
+  snapshot.pixel_roi = region.pixel_roi;
   snapshot.whole_output = region.whole_output;
   return snapshot;
 }
@@ -1979,8 +1925,8 @@ DirtyEdgeMappingSnapshot to_public_dirty_edge_mapping(
   snapshot.from_node = NodeId{mapping.from_node_id};
   snapshot.to_node = NodeId{mapping.to_node_id};
   snapshot.domain = to_public_dirty_domain(mapping.domain);
-  snapshot.from_roi = to_pixel_rect(mapping.from_roi);
-  snapshot.to_roi = to_pixel_rect(mapping.to_roi);
+  snapshot.from_roi = mapping.from_roi;
+  snapshot.to_roi = mapping.to_roi;
   snapshot.direction = to_public_dirty_edge_direction(mapping.direction);
   return snapshot;
 }
@@ -2026,7 +1972,7 @@ DirtyRegionInspectionSnapshot to_public_dirty_snapshot(
     auto& converted = out.actual_dirty_rois[node_id];
     converted.reserve(rois.size());
     for (const auto& roi : rois) {
-      converted.push_back(to_pixel_rect(roi));
+      converted.push_back(roi);
     }
   }
 
@@ -2041,7 +1987,7 @@ DirtyRegionInspectionSnapshot to_public_dirty_snapshot(
  * @brief Converts public compute request values into the Kernel request.
  *
  * @param request Public Host compute request.
- * @return Kernel request with internal OpenCV dirty ROI.
+ * @return Kernel request with kernel-native dirty ROI.
  * @throws std::bad_alloc if copying strings allocates and fails.
  */
 Kernel::ComputeRequest to_kernel_compute_request(
@@ -2058,7 +2004,7 @@ Kernel::ComputeRequest to_kernel_compute_request(
   kernel_request.telemetry.enable_timing = request.telemetry.enable_timing;
   kernel_request.intent = request.intent;
   if (request.dirty_roi) {
-    kernel_request.dirty_roi = to_cv_rect(*request.dirty_roi);
+    kernel_request.dirty_roi = *request.dirty_roi;
   }
   return kernel_request;
 }
@@ -2098,14 +2044,25 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
 class EmbeddedHost final : public Host {
  public:
   /**
-   * @brief Creates a Host with a fresh embedded backend state.
+   * @brief Creates a Host with a fresh explicitly composed backend state.
    *
+   * @param image_codec Shared artifact codec owner.
+   * @param metadata_codec Shared metadata codec owner.
+   * @param document_reader Shared graph/node document reader owner.
+   * @param document_writer Shared graph/node document writer owner.
+   * @throws std::invalid_argument when any required owner is empty.
    * @throws std::bad_alloc if backend state allocation fails.
    * @note The state owns per-Host implementation objects and outlives adapter
    *       futures captured by compute_async(). It does not own or unload the
    *       process operation plugin manager.
    */
-  EmbeddedHost() : state_(std::make_shared<EmbeddedHostState>()) {}
+  EmbeddedHost(std::shared_ptr<const ImageArtifactCodec> image_codec,
+               std::shared_ptr<const CacheMetadataCodec> metadata_codec,
+               std::shared_ptr<const GraphDocumentReader> document_reader,
+               std::shared_ptr<const GraphDocumentWriter> document_writer)
+      : state_(std::make_shared<EmbeddedHostState>(
+            std::move(image_codec), std::move(metadata_codec),
+            std::move(document_reader), std::move(document_writer))) {}
 
   /**
    * @brief Loads one graph through the embedded backend.
@@ -2244,7 +2201,8 @@ class EmbeddedHost final : public Host {
         return failure_void(GraphErrc::NotFound,
                             "graph session not found: " + session.value);
       }
-      if (!state_->interaction.cmd_reload_yaml(session.value, yaml_path)) {
+      if (!state_->interaction.cmd_reload_graph_document(session.value,
+                                                         yaml_path)) {
         return VoidResult{failure_from_last_error(
             *state_, session, GraphErrc::InvalidYaml,
             "failed to reload graph session: " + session.value)};
@@ -2298,7 +2256,7 @@ class EmbeddedHost final : public Host {
           session, EmbeddedOperationTestEvent::SaveGraph,
           EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
-      state_->interaction.cmd_save_yaml(session.value, yaml_path);
+      state_->interaction.cmd_save_graph_document(session.value, yaml_path);
       return success_void();
     });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
@@ -2481,7 +2439,7 @@ class EmbeddedHost final : public Host {
             result.status = failure_status(error->code, error->message);
             return result;
           }
-          return success_result(fromCvMat(*image));
+          return success_result(std::move(*image));
         });
   }
 
@@ -2639,8 +2597,8 @@ class EmbeddedHost final : public Host {
                                     NodeId node) override {
     return guarded_result<std::string>(
         "get_node_yaml", GraphErrc::NotFound, [&] {
-          auto yaml =
-              state_->interaction.cmd_get_node_yaml(session.value, node.value);
+          auto yaml = state_->interaction.cmd_get_node_document(session.value,
+                                                                node.value);
           if (!yaml) {
             return failure_result<std::string>(
                 GraphErrc::NotFound, "node YAML not available for node " +
@@ -2682,8 +2640,8 @@ class EmbeddedHost final : public Host {
               session, EmbeddedOperationTestEvent::SetNodeYaml,
               EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
-          state_->interaction.cmd_set_node_yaml(session.value, node.value,
-                                                yaml_text);
+          state_->interaction.cmd_set_node_document(session.value, node.value,
+                                                    yaml_text);
           return success_void();
         });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
@@ -2703,7 +2661,8 @@ class EmbeddedHost final : public Host {
    * @param node Node to inspect.
    * @return Public node snapshot, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note YAML parameter formatting exceptions are converted to status.
+   * @note Recursive parameter display-format exceptions are converted to
+   * status.
    */
   Result<NodeInspectionView> inspect_node(const GraphSessionId& session,
                                           NodeId node) override {
@@ -2885,14 +2844,13 @@ class EmbeddedHost final : public Host {
               EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
           auto roi = state_->interaction.cmd_project_roi(
-              session.value, start_node.value, to_cv_rect(start_roi),
-              target_node.value);
+              session.value, start_node.value, start_roi, target_node.value);
           if (!roi) {
             return failure_result<PixelRect>(
                 GraphErrc::InvalidParameter,
                 "failed to project ROI for session: " + session.value);
           }
-          return success_result(to_pixel_rect(*roi));
+          return success_result(*roi);
         });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
     if (admission) {
@@ -2941,14 +2899,13 @@ class EmbeddedHost final : public Host {
               EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
 #endif
           auto roi = state_->interaction.cmd_project_roi_backward(
-              session.value, target_node.value, to_cv_rect(target_roi),
-              source_node.value);
+              session.value, target_node.value, target_roi, source_node.value);
           if (!roi) {
             return failure_result<PixelRect>(
                 GraphErrc::InvalidParameter,
                 "failed to project ROI backward for session: " + session.value);
           }
-          return success_result(to_pixel_rect(*roi));
+          return success_result(*roi);
         });
 #if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
     if (admission) {
@@ -3071,7 +3028,7 @@ class EmbeddedHost final : public Host {
           }
           auto snapshot = state_->interaction.cmd_begin_dirty_source(
               session.value, node.value, to_compute_dirty_domain(domain),
-              to_cv_rect(source_roi));
+              source_roi);
           if (!snapshot) {
             Result<DirtyRegionInspectionSnapshot> result;
             result.status = failure_from_last_error(
@@ -3109,7 +3066,7 @@ class EmbeddedHost final : public Host {
           }
           auto snapshot = state_->interaction.cmd_update_dirty_source(
               session.value, node.value, to_compute_dirty_domain(domain),
-              to_cv_rect(source_roi));
+              source_roi);
           if (!snapshot) {
             Result<DirtyRegionInspectionSnapshot> result;
             result.status = failure_from_last_error(
@@ -3710,8 +3667,26 @@ void set_embedded_host_operation_test_hook(
 }
 #endif
 
+/** @copydoc ps::internal::create_embedded_host_with_dependencies */
+std::unique_ptr<Host> internal::create_embedded_host_with_dependencies(
+    std::shared_ptr<const ImageArtifactCodec> image_codec,
+    std::shared_ptr<const CacheMetadataCodec> metadata_codec,
+    std::shared_ptr<const GraphDocumentReader> document_reader,
+    std::shared_ptr<const GraphDocumentWriter> document_writer) {
+  return std::make_unique<EmbeddedHost>(
+      std::move(image_codec), std::move(metadata_codec),
+      std::move(document_reader), std::move(document_writer));
+}
+
+/** @copydoc ps::create_embedded_host */
 std::unique_ptr<Host> create_embedded_host() {
-  return std::make_unique<EmbeddedHost>();
+  providers::ConfiguredPersistenceAdapters persistence =
+      providers::make_configured_persistence_adapters();
+  return internal::create_embedded_host_with_dependencies(
+      providers::make_configured_image_artifact_codec(),
+      std::move(persistence.metadata_codec),
+      std::move(persistence.document_reader),
+      std::move(persistence.document_writer));
 }
 
 }  // namespace ps

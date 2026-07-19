@@ -39,12 +39,20 @@ and all repository-owned standard CPU operation plugins use `cv::Mat`, not
 `cv::UMat`. Inputs remain immutable; mutable matrices and output regions are
 callback-local or task-owned.
 
-Built-in registration calls `cv::setNumThreads(1)` exactly once, before any
-built-in callback is published. This disables nested OpenCV CPU parallelism and
-leaves the admitted scheduler worker grant as the repository-owned outer
-parallelism layer. Repository code does not call
-`cv::ocl::setUseOpenCL(false)` and does not reconfigure OpenCV threading while
-callbacks can be active.
+The optional repository OpenCV operation provider calls
+`cv::setNumThreads(1)` exactly once, before any of its callbacks are published.
+This disables nested OpenCV CPU parallelism and leaves the admitted scheduler
+worker grant as the repository-owned outer parallelism layer. Repository code
+does not call `cv::ocl::setUseOpenCL(false)` and does not reconfigure OpenCV
+threading while callbacks can be active.
+
+The same provider owns its OpenCV algorithm implementations and exception
+fence. OpenCV resource exhaustion is rethrown as a fresh `std::bad_alloc`;
+every other `cv::Exception` is translated to a host-owned `GraphError` with
+`GraphErrc::ComputeError`. The provider is included only when
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is enabled. Dependency-neutral
+core operations and the v2 registrar remain available when it is disabled, and
+a v2 provider can replace the same registry slots when it is enabled.
 
 Synchronization remains provider-local when a provider owns real shared
 mutable state. The Metal Perlin provider therefore retains its DSO-private
@@ -75,6 +83,12 @@ correctness gates.
   formerly locked entry points.
 - Nested CPU work remains bounded because OpenCV internal threading is fixed at
   one before callback publication.
+- Disabling the OpenCV operation provider removes its operation callbacks
+  without removing dependency-neutral registry/plugin contracts. This option
+  does not yet remove separate OpenCV codec, normalization, adapter, or static
+  product link dependencies.
+- OpenCV dynamic exception types from registered built-in algorithms no longer
+  escape the provider boundary.
 - `cv::setNumThreads(1)` still affects other OpenCV users in the same process.
   An embedding override would require a separate process-ownership and ABI
   decision.

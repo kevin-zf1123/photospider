@@ -40,9 +40,9 @@
 所有非空路径都是显式路径，绝不回退到本地内容。Kernel 把来源/会话文件系统检查和复制
 失败映射为 `Io`。
 
-`GraphIOService` 拥有文档分类，因为它能区分文件访问、YAML 表示、节点转换和拓扑校验。
-它会把 `Node::from_yaml()` 的参数细节失败转换为文档模式 `InvalidYaml`，同时保留拓扑
-`GraphError` 值。`InteractionService` 是防御性的最终嵌入式边界：它保留
+`GraphIOService` 拥有文档分类，因为它能区分文件访问、YAML 表示、definition 转换和拓扑
+校验。它会把 GraphDefinition translator/adapter 的 schema 细节失败转换为文档模式
+`InvalidYaml`，同时保留拓扑 `GraphError` 值。`InteractionService` 是防御性的最终嵌入式边界：它保留
 `GraphError`，映射残余文件/YAML 异常，把其他标准和非标准失败转换为 `Unknown`，并始终
 重新抛出 `std::bad_alloc`。
 
@@ -50,9 +50,10 @@
 完整文档。失败会销毁未发布所有权并归还调度器预留。目录和已复制文件的暂存副作用可能保留，
 因为它们不是已发布会话所有权。
 
-重载会把节点解析到临时所有权中。`GraphModel::replace_nodes()` 会先校验依赖/环并构造
-替换邻接，再交换节点和拓扑。因此失败会保留节点、邻接、拓扑代次、运行时图状态和会话
-标识。只有成功替换这一提交会重置运行时图状态并推进拓扑代次。
+重载会把脱离运行态的 `GraphDefinition` 解析到临时所有权中。In-memory adapter 会在单次调用
+`GraphModel::replace_nodes()` 之前 stage 每个私有节点；该调用会先校验依赖/环并构造替换邻接，
+再交换节点和拓扑。因此失败会保留节点、邻接、拓扑代次、运行时图状态和会话标识。只有成功
+替换这一提交会重置运行时图状态并推进拓扑代次。
 
 IPC 不添加第二套分类。它会序列化精确的 Host 状态，并在 Host 装载失败时回滚已预留的
 会话名称。

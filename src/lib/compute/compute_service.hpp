@@ -115,7 +115,7 @@ class ComputeService {
     std::optional<ComputeIntent> intent;
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
-    std::optional<cv::Rect> dirty_roi;
+    std::optional<PixelRect> dirty_roi;
   };
 
   /**
@@ -246,7 +246,10 @@ class ComputeService {
    * @throws GraphError for cycles, missing dependencies or operations, cache
    * failures, and operation failures represented by the backend.
    * @note The context and its references must outlive the recursive call tree.
-   * The method mutates graph HP cache and telemetry only on the calling thread.
+   * Effective parameters and execution-facing node state remain on a
+   * request-local Node snapshot. The method commits only the resolved
+   * graph-owned input-size hint, HP cache/version, disk-cache effects, and
+   * telemetry on the calling thread.
    */
   NodeOutput& compute_internal(GraphModel& graph, int node_id,
                                const RecursiveComputeContext& context);

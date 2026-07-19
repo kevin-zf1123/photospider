@@ -10,6 +10,7 @@
 #include "graph/graph_io_service.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/graph_traversal_service.hpp"
+#include "support/graph_document_test_dependencies.hpp"
 
 namespace ps {
 namespace {
@@ -20,7 +21,6 @@ Node make_source(int id) {
   node.name = "source" + std::to_string(id);
   node.type = "image_generator";
   node.subtype = "constant";
-  node.parameters = YAML::Node(YAML::NodeType::Map);
   node.parameters["width"] = 16;
   node.parameters["height"] = 16;
   return node;
@@ -198,7 +198,7 @@ TEST(GraphTopologyBoundaries, FailedLoadDoesNotExposePartialTopology) {
              "      from_output_name: image\n");
 
   GraphModel graph(temp_file("photospider-topology-load-cache"));
-  GraphIOService io;
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
   io.load(graph, valid_path);
 
   GraphTraversalService traversal;
