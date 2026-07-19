@@ -638,13 +638,16 @@ class ComputeRunLease {
    * @return Nothing.
    * @throws std::invalid_argument when identity does not match this lease or a
    * registered local task.
-   * @throws GraphError or operation exceptions from Run-owned task execution.
-   * @throws std::bad_alloc unchanged from execution or callback submission.
+   * @throws std::system_error if the control mutex cannot be locked.
+   * @throws Exceptions propagated by Run-owned plan execution, scheduler
+   * completion accounting, dependent-callback submission, or matching failure
+   * publication.
    * @note A matching accepted callback whose Run is already terminal releases
    * its previously counted completion unit without entering plan execution. An
    * active valid task releases that unit only through successful plan
-   * execution; its exception is published to this Run before unchanged
-   * rethrow to scheduler transport.
+   * execution; an execution exception is passed to this Run's failure publisher
+   * before unchanged rethrow to scheduler transport. If that publication
+   * throws, its exception propagates instead.
    */
   void execute_task(const ComputeRunTaskIdentity& identity,
                     SchedulerTaskRuntime& task_runtime);

@@ -630,10 +630,14 @@ std::optional<ComputeRunTerminalOutcome> ComputeRunLease::terminal_outcome()
  * @param task_runtime Active scheduler runtime.
  * @return Nothing.
  * @throws std::invalid_argument for mismatched or unregistered identity.
- * @throws GraphError, std::bad_alloc, or operation exceptions from execution.
+ * @throws std::system_error if the control mutex cannot be locked.
+ * @throws Exceptions propagated by Run-owned plan execution, scheduler
+ * completion accounting, dependent-callback submission, or matching failure
+ * publication.
  * @note A matching accepted callback observed after terminal publication
  * releases its own completion unit without entering the plan. Active valid
- * failures are published before unchanged rethrow.
+ * failures are passed to this Run's failure publisher before unchanged
+ * rethrow; an exception from that publication propagates instead.
  */
 void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
                                    SchedulerTaskRuntime& task_runtime) {
