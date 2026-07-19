@@ -15,27 +15,16 @@ cd "$REPO_ROOT"
 
 run_logged cmake_configure configure_ci_build
 run_logged validate_profile_cache require_ci_profile_cache
-run_logged ctest_discovery ctest -N --test-dir "$BUILD_DIR"
-
-inventory_file="$CI_ARTIFACT_DIR/ctest_discovery.log"
-has_static_product_consumer_smoke=false
-has_ipc_disabled_install_smoke=false
-
-if ctest_inventory_has_exact_test \
-  "$inventory_file" StaticProductConsumerSmoke; then
-  has_static_product_consumer_smoke=true
-fi
-if ctest_inventory_has_exact_test \
-  "$inventory_file" IpcDisabledInstallSmoke; then
-  has_ipc_disabled_install_smoke=true
-fi
-
-static_runner="$REPO_ROOT/tests/integration/static_product_consumer_smoke.py"
-ipc_disabled_runner="$REPO_ROOT/tests/integration/ipc_disabled_install_smoke.py"
-require_ctest_runner_pair \
-  "$inventory_file" StaticProductConsumerSmoke "$static_runner"
-require_ctest_runner_pair \
-  "$inventory_file" IpcDisabledInstallSmoke "$ipc_disabled_runner"
+matrix_file="$CI_ARTIFACT_DIR/build_smoke_matrix.json"
+run_logged build_smoke_plan \
+  python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan \
+    --build-dir "$BUILD_DIR" \
+    --ctest-executable "${CTEST_COMMAND:-ctest}" \
+    --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+    --label "$BUILD_SMOKE_LABEL" \
+    --inventory-output "$CI_ARTIFACT_DIR/ctest_inventory.json" \
+    --matrix-output "$matrix_file" \
+    --names-output "$CI_ARTIFACT_DIR/build_smoke_names.z"
 
 # @brief Persist one planner value to logs and the GitHub output channel.
 # @param $1 Stable output key consumed by the workflow.
@@ -54,7 +43,5 @@ emit_output() {
 }
 
 : > "$CI_ARTIFACT_DIR/outputs.log"
-emit_output has_static_product_consumer_smoke \
-  "$has_static_product_consumer_smoke"
-emit_output has_ipc_disabled_install_smoke \
-  "$has_ipc_disabled_install_smoke"
+build_smoke_matrix=$(<"$matrix_file")
+emit_output build_smoke_matrix "$build_smoke_matrix"

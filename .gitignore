@@ -49,6 +49,7 @@ feedback/
 !ci/
 !ci/**/
 !ci/scripts/*.sh
+!ci/scripts/*.py
 
 # ============================
 # 3. 头文件 (Headers)

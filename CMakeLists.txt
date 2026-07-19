@@ -1210,6 +1210,7 @@ endif()
 # ==============================================================================
 # 8. Tests
 # ==============================================================================
+set(PHOTOSPIDER_BUILD_SMOKE_LABEL "build-smoke")
 if(BUILD_TESTING)
     enable_testing()
     find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
@@ -1223,7 +1224,9 @@ if(BUILD_TESTING)
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(DependencyDisabledInstallSmoke PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 900)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 900)
 endif()
 
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
@@ -1720,7 +1723,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(StaticProductConsumerSmoke PROPERTIES
-            RUN_SERIAL TRUE TIMEOUT 900)
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE}
@@ -1731,7 +1736,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(IpcDisabledInstallSmoke PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 600)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 600)
     add_test(NAME ImageArtifactCodecDependencyDisabledBuild
         COMMAND ${Python3_EXECUTABLE}
             "${PROJECT_SOURCE_DIR}/tests/integration/image_artifact_codec_dependency_disabled_smoke.py"
@@ -1742,7 +1749,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(ImageArtifactCodecDependencyDisabledBuild PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 900)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 900)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         add_test(NAME OpenCvOperationProviderBuildSmokeSafety
             COMMAND ${Python3_EXECUTABLE} -B
@@ -1750,7 +1759,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             WORKING_DIRECTORY
                 "${PROJECT_SOURCE_DIR}/tests/integration")
         set_tests_properties(
-            OpenCvOperationProviderBuildSmokeSafety PROPERTIES TIMEOUT 30)
+            OpenCvOperationProviderBuildSmokeSafety PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            TIMEOUT 30)
         add_test(NAME OpenCvOperationProviderDisabledBuild
             COMMAND ${Python3_EXECUTABLE}
                 "${PROJECT_SOURCE_DIR}/tests/integration/optional_opencv_operation_provider_build_smoke.py"
@@ -1762,7 +1773,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(OpenCvOperationProviderDisabledBuild PROPERTIES
-            RUN_SERIAL TRUE TIMEOUT 900)
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
     endif()
     add_test(NAME GraphCliOptionBadAlloc
         COMMAND ${Python3_EXECUTABLE}
@@ -1787,7 +1800,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --target public_header_self_containment --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(PublicHeaderSelfContainment PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 300)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 300)
 
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_sdk_example

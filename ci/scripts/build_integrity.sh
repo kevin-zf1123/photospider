@@ -24,28 +24,17 @@ case "$CI_BUILD_PROFILE" in
       gpu_pipeline_example_plugin \
       serial_debug_example_plugin
     ensure_ci_all build_all
-    run_logged ctest_discovery ctest -N --test-dir "$BUILD_DIR"
-
-    total_tests=$(
-      awk '/Total Tests:/ {print $3}' \
-        "$CI_ARTIFACT_DIR/ctest_discovery.log" | tail -n 1
-    )
-    if [[ -z "$total_tests" || "$total_tests" -le 0 ]]; then
-      echo "CTest discovery did not find any tests." >&2
-      exit 1
-    fi
+    run_logged build_smoke_inventory \
+      python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan \
+        --build-dir "$BUILD_DIR" \
+        --ctest-executable "${CTEST_COMMAND:-ctest}" \
+        --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+        --label "$BUILD_SMOKE_LABEL" \
+        --inventory-output "$CI_ARTIFACT_DIR/ctest_inventory.json" \
+        --matrix-output "$CI_ARTIFACT_DIR/build_smoke_matrix.json" \
+        --names-output "$CI_ARTIFACT_DIR/build_smoke_names.z"
     mark_ci_build_reusable
-    echo "Default profile discovered $total_tests tests." |
-      tee "$CI_ARTIFACT_DIR/summary.log"
-    ;;
-  ipc-disabled)
-    BUILD_TESTING=OFF
-    PHOTOSPIDER_BUILD_IPC=OFF
-    ensure_ci_configured cmake_configure
-    run_logged validate_profile_cache require_ci_profile_cache
-    ensure_ci_targets build_photospider photospider
-    mark_ci_build_reusable
-    echo "IPC-disabled profile built photospider with BUILD_TESTING=OFF and IPC=OFF." |
+    echo "Default profile build and build-smoke inventory completed." |
       tee "$CI_ARTIFACT_DIR/summary.log"
     ;;
   *)

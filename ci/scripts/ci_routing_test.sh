@@ -730,11 +730,9 @@ assert_gate_checks_all_results() {
         ci-image-change
         integration-plan
         build-integrity-default
-        build-integrity-ipc-disabled
         local-image-integration
         full-ctest
-        static-product-consumer-smoke
-        ipc-disabled-install-smoke
+        build-smoke
         scripted-cli
         propagation-script
         plugin-load
@@ -748,6 +746,78 @@ assert_gate_checks_all_results() {
   for assertion_label in "${assertion_labels[@]}"; do
     assert_file_contains "$gate_script" "require_value $assertion_label"
   done
+}
+
+# @brief Require build-smoke routing to remain label-driven and matrix-based.
+# @param $1 Integration workflow YAML path.
+# @return Zero after planner, matrix, full-CTest, and fallback checks pass.
+# @throws Nothing; missing or stale source contracts exit through fail.
+# @note This is a durable CI-routing assertion. The JSON parser's malformed,
+#   empty, duplicate, escaping, and exact-selection behavior is tested by its
+#   focused Python regression.
+validate_build_smoke_matrix_contract() {
+  local workflow=$1
+  local plan_job="$TEST_ROOT/integration-plan-build-smoke-job.yml"
+  local smoke_job="$TEST_ROOT/integration-build-smoke-job.yml"
+  local full_ctest_job="$TEST_ROOT/integration-full-ctest-job.yml"
+  local plan_script="$REPO_ROOT/ci/scripts/integration_plan.sh"
+  local full_ctest_script="$REPO_ROOT/ci/scripts/ctest_full.sh"
+  local smoke_script="$REPO_ROOT/ci/scripts/build_smoke_test.sh"
+  local local_suite="$REPO_ROOT/ci/scripts/integration_suite.sh"
+
+  extract_job_block "$workflow" integration-plan "$plan_job" ||
+    fail "integration-plan job could not be extracted for build-smoke routing"
+  extract_job_block "$workflow" build-smoke "$smoke_job" ||
+    fail "build-smoke matrix job could not be extracted"
+  extract_job_block "$workflow" full-ctest "$full_ctest_job" ||
+    fail "full-ctest job could not be extracted for build-smoke routing"
+
+  assert_file_contains "$plan_job" \
+    'build_smoke_matrix: ${{ steps.plan.outputs.build_smoke_matrix }}'
+  assert_file_contains "$smoke_job" \
+    'name: Build smoke (${{ matrix.test }})'
+  assert_file_contains "$smoke_job" \
+    'needs: [integration-plan, build-integrity-default]'
+  assert_file_contains "$smoke_job" \
+    "needs.integration-plan.result == 'success' &&"
+  assert_file_contains "$smoke_job" \
+    "needs.build-integrity-default.result == 'success'"
+  assert_file_contains "$smoke_job" 'fail-fast: false'
+  assert_file_contains "$smoke_job" \
+    'matrix: ${{ fromJSON(needs.integration-plan.outputs.build_smoke_matrix) }}'
+  assert_file_contains "$smoke_job" 'name: ci-build-default'
+  assert_file_contains "$smoke_job" \
+    'SMOKE_TEST_NAME: ${{ matrix.test }}'
+  assert_file_contains "$smoke_job" \
+    'CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-smoke/${{ matrix.artifact }}'
+  assert_file_contains "$smoke_job" \
+    'name: build-smoke-${{ matrix.artifact }}-results'
+  assert_file_contains "$full_ctest_job" \
+    'run: bash ci/scripts/ctest_full.sh'
+
+  assert_file_contains "$plan_script" \
+    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan'
+  assert_file_contains "$plan_script" \
+    'emit_output build_smoke_matrix "$build_smoke_matrix"'
+  assert_file_not_contains "$plan_script" StaticProductConsumerSmoke
+  assert_file_not_contains "$plan_script" IpcDisabledInstallSmoke
+  assert_file_contains "$full_ctest_script" \
+    '--label-exclude "^${BUILD_SMOKE_LABEL}$"'
+  assert_file_not_contains "$full_ctest_script" CTEST_EXCLUDE_REGEX
+  assert_file_contains "$smoke_script" \
+    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" run'
+  assert_file_contains "$smoke_script" \
+    '--test-name "$SMOKE_TEST_NAME"'
+  assert_file_contains "$local_suite" \
+    "mapfile -d '' -t build_smoke_tests"
+  assert_file_contains "$local_suite" \
+    'SMOKE_TEST_NAME="$build_smoke_test"'
+
+  assert_file_not_contains "$workflow" '  build-integrity-ipc-disabled:'
+  assert_file_not_contains "$workflow" '  static-product-consumer-smoke:'
+  assert_file_not_contains "$workflow" '  ipc-disabled-install-smoke:'
+
+  pass integration-label-driven-build-smoke-matrix
 }
 
 # @brief Validate the canonical protected condition and executable gate contracts.
@@ -1376,6 +1446,7 @@ main() {
 
   validate_workflow_contract "$health_workflow" "Report healthcheck gate"
   validate_workflow_contract "$integration_workflow" "Report integration gate"
+  validate_build_smoke_matrix_contract "$integration_workflow"
   validate_published_image_base_fetch "$health_workflow"
   validate_published_image_fetch_shells "$health_workflow"
   validate_published_image_workspace_trust "$health_workflow"

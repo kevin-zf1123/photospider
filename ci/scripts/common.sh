@@ -10,6 +10,8 @@ CI_JOBS=${CI_JOBS:-4}
 CI_REUSE_BUILD=${CI_REUSE_BUILD:-OFF}
 CI_BUILD_PROFILE=${CI_BUILD_PROFILE:-default}
 BUILD_TESTING=${BUILD_TESTING:-ON}
+BUILD_SMOKE_LABEL=build-smoke
+readonly BUILD_SMOKE_LABEL
 CI_BUILD_STAMP="$BUILD_DIR/.photospider-ci-build-complete"
 
 mkdir -p "$CI_ARTIFACT_DIR"
@@ -110,11 +112,6 @@ ci_profile_cache_is_valid() {
         [[ "$ipc_value" == ON ]]
       fi
       ;;
-    ipc-disabled)
-      [[ "$build_testing_value" == OFF ]] || return 1
-      ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC) || return 1
-      [[ "$ipc_value" == OFF ]]
-      ;;
     *)
       return 1
       ;;
@@ -173,54 +170,6 @@ build_testing=$build_testing_value
 photospider_build_ipc=$ipc_value
 created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
-}
-
-# @brief Find one exact CTest name in a captured discovery inventory.
-# @param $1 Path to the ctest -N log.
-# @param $2 Exact test name, without regular-expression interpretation.
-# @return Zero when the exact name is present, otherwise nonzero.
-# @throws Nothing; unreadable inventory files return nonzero through awk.
-# @note Prefix and substring matches are intentionally rejected.
-ctest_inventory_has_exact_test() {
-  local inventory_file=$1
-  local expected_test=$2
-  awk -v expected="$expected_test" '
-    {
-      discovered = $0
-      sub(/^[[:space:]]*Test[[:space:]]+#[0-9]+:[[:space:]]+/, "", discovered)
-      if (discovered == expected) {
-        found = 1
-      }
-    }
-    END { exit(found ? 0 : 1) }
-  ' "$inventory_file"
-}
-
-# @brief Require a durable runner file and exact CTest registration to agree.
-# @param $1 Path to the captured ctest -N inventory.
-# @param $2 Exact CTest name.
-# @param $3 Repository runner file implementing that test.
-# @return Zero when both are present or both are absent, otherwise nonzero.
-# @throws Nothing; mismatches return nonzero with a diagnostic.
-# @note This prevents both normal and local-image workflows from silently
-#   dropping a smoke test whose source still exists.
-require_ctest_runner_pair() {
-  local inventory_file=$1
-  local test_name=$2
-  local runner_file=$3
-  local has_test=false
-  local has_runner=false
-  if ctest_inventory_has_exact_test "$inventory_file" "$test_name"; then
-    has_test=true
-  fi
-  if [[ -f "$runner_file" ]]; then
-    has_runner=true
-  fi
-  if [[ "$has_test" == "$has_runner" ]]; then
-    return 0
-  fi
-  echo "CTest/runner mismatch for $test_name: $runner_file" >&2
-  return 1
 }
 
 # @brief Require the downloaded CMake tree to match the requested CI profile.
