@@ -283,8 +283,9 @@ def parse_inventory(raw_json: bytes | str) -> Inventory:
 
     @param raw_json UTF-8 bytes or text emitted by CTest JSON discovery.
     @return Immutable Inventory retaining the decoded payload and test records.
-    @throws InventoryError If encoding, JSON, schema, names, properties, labels,
-      disabled state, or command representation is unsafe or malformed.
+    @throws InventoryError If input encoding, JSON, schema, names (including
+      names that cannot be encoded as UTF-8), properties, labels, disabled
+      state, or command representation is unsafe or malformed.
     @note Parsing is deterministic and in-memory. It performs no external I/O
       and does not retain the caller's byte buffer.
     """
@@ -336,7 +337,13 @@ def parse_inventory(raw_json: bytes | str) -> Inventory:
             raise InventoryError(f"CTest test {index} has no valid name.")
         if "\0" in test_name:
             raise InventoryError(f"CTest test {index} contains a NUL in its name.")
-        if len(test_name.encode("utf-8")) > MAX_TEST_NAME_BYTES:
+        try:
+            encoded_test_name = test_name.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise InventoryError(
+                f"CTest test {index} name is not valid UTF-8."
+            ) from error
+        if len(encoded_test_name) > MAX_TEST_NAME_BYTES:
             raise InventoryError(
                 f"CTest test {test_name!r} exceeds {MAX_TEST_NAME_BYTES} UTF-8 bytes."
             )

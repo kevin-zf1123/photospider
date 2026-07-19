@@ -11,7 +11,9 @@ boundaries, and one disposable real CMake/CTest POST_BUILD discovery fixture.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
@@ -163,6 +165,58 @@ class InventoryParsingTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(inventory_module.InventoryError, "duplicated"):
             inventory_module.parse_inventory(raw)
+
+    def test_lone_surrogate_name_reports_controlled_main_error(self) -> None:
+        """@brief Report an invalid Unicode test name without a traceback.
+
+        @return None after the stable diagnostic and status are verified.
+        @throws AssertionError If a lone surrogate escapes InventoryError
+          handling, changes the diagnostic, or produces a traceback.
+        @note JSON serialization escapes the surrogate before UTF-8 encoding.
+          Discovery is mocked and all output paths are temporary.
+        """
+
+        payload = inventory_payload(
+            [
+                test_entry(
+                    "\ud800",
+                    labels=["build-smoke"],
+                    command=["invalid-name"],
+                )
+            ]
+        )
+        query_result = subprocess.CompletedProcess(
+            args=["ctest"], returncode=0, stdout=payload, stderr=b""
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            stderr = io.StringIO()
+            with mock.patch.object(
+                inventory_module.subprocess,
+                "run",
+                return_value=query_result,
+            ):
+                with contextlib.redirect_stderr(stderr):
+                    status = inventory_module.main(
+                        [
+                            "plan",
+                            "--build-dir",
+                            str(temporary_root / "build"),
+                            "--inventory-output",
+                            str(temporary_root / "inventory.json"),
+                            "--matrix-output",
+                            str(temporary_root / "matrix.json"),
+                        ]
+                    )
+
+        diagnostic = stderr.getvalue()
+        self.assertEqual(status, 2)
+        self.assertEqual(
+            diagnostic,
+            "Build-smoke inventory error: "
+            "CTest test 1 name is not valid UTF-8.\n",
+        )
+        self.assertNotIn("Traceback", diagnostic)
 
     def test_duplicate_labels_property_fails_closed(self) -> None:
         """@brief Reject two LABELS property objects on one test.
