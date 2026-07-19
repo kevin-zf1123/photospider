@@ -125,6 +125,49 @@ enter the primary repository nor remain as long-lived personal-overlay
 content. Long-lived runtime, public-header, and package-consumer tests own the
 durable product boundaries.
 
+## Build-Smoke CI Classification
+
+A build smoke is a durable CTest whose primary boundary delegates to a CMake
+configure/build/install, an exported-package or external-consumer build, or a
+dedicated compile target. A safety regression that validates the destructive
+cleanup and configuration-layout behavior of such a nested-build driver shares
+the same scheduling class. Every such test carries the exact stable CTest label
+`build-smoke`.
+
+The maintained labelled inventory is
+`DependencyDisabledInstallSmoke`,
+`ImageArtifactCodecDependencyDisabledBuild`,
+`IpcDisabledInstallSmoke`,
+`OpenCvOperationProviderBuildSmokeSafety`,
+`OpenCvOperationProviderDisabledBuild`,
+`PublicHeaderSelfContainment`, and
+`StaticProductConsumerSmoke`. `PublicHeaderSelfContainment` belongs because its
+CTest command builds the dedicated self-containment target; ordinary
+GoogleTest binaries, daemon/CLI process tests, and
+`PhotospiderdCapabilityHelp` do not create a child build and remain in the main
+CTest shard.
+
+CTest keeps every labelled test registered for direct local use. CI's
+`full-ctest` shard excludes the exact label, while integration planning parses
+`ctest --show-only=json-v1` and creates one independent matrix job per labelled
+test. Adding another maintained build smoke therefore requires its CTest
+registration and the same label, but no workflow test-name edit. Planning fails
+closed on malformed inventory, duplicates, invalid label shape, disabled or
+commandless labelled tests, or an empty labelled set. Before execution, the
+runner re-queries the inventory and rejects a selected name that is absent,
+duplicate, disabled, commandless, or no longer labelled. After that exact label
+check, it selects only the validated numeric CTest index, so arbitrary test-name
+characters are not interpreted by a shell or regular expression.
+
+The published-image workflow fans these entries out after restoring the same
+reusable default producer. Each CTest registration retains its own timeout and
+`RUN_SERIAL` behavior; each matrix item also has an independent workflow
+timeout and result artifact. The local-image fallback reads the same
+NUL-delimited planned names and executes them sequentially because it has only
+one Docker-capable runner. Nested drivers must continue to use disjoint work
+directories, validate any reusable producer identity they accept, and clean up
+without following or deleting unrelated symlink targets.
+
 ## Validation Ownership
 
 Primary-repository CTest and CI entries are reserved for long-lived software
@@ -606,7 +649,8 @@ detection without emitting a false negative route.
 The maintained entry points are:
 
 - `ci/scripts/healthcheck.sh` for fail-closed changed-path inventory, diff,
-  format, cpplint, and both durable shell regressions.
+  format, cpplint, the build-smoke inventory regression, and both durable shell
+  regressions.
 - `ci/scripts/change_classification.sh` and
   `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
   routing and its durable event/path regression matrix.
@@ -619,7 +663,8 @@ The maintained entry points are:
   and checkout-before-trust-before-fetch/healthcheck order;
   published/local job-scoped pull-request exact-base and `CI/**`
   cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
-  newline-path artifacts; and detector/reader/producer failure propagation. It
+  label-driven build-smoke matrix/full-CTest/fallback routing; newline-path
+  artifacts; and detector/reader/producer failure propagation. It
   executes the production trust block with an isolated HOME/repository and
   requires exactly that repository in the resulting global trust list. It also
   executes both production main-fetch blocks, while an isolated Git history
@@ -627,15 +672,18 @@ The maintained entry points are:
   only the later docs increment. The local source/shell lock does not emulate
   GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
   container runner.
-- `ci/scripts/integration_plan.sh` for capability discovery of the
-  static-product and IPC-disabled build smokes.
-- `ci/scripts/build_integrity.sh` for the default and IPC-disabled producer
-  profiles, including required-target/full builds and default CTest discovery.
-- `ci/scripts/ctest_full.sh` for the main CTest suite, including the regular
-  durable `DependencyDisabledInstallSmoke`.
+- `ci/scripts/build_smoke_inventory.py` and its focused regression for strict
+  CTest JSON parsing, deterministic nonempty matrix generation, safe artifact
+  keys, NUL-delimited names, and exact index-based execution.
+- `ci/scripts/integration_plan.sh` for exact-label build-smoke discovery and
+  dynamic matrix output.
+- `ci/scripts/build_integrity.sh` for the default producer profile, including
+  required-target/full builds and labelled CTest inventory validation.
+- `ci/scripts/ctest_full.sh` for the main CTest suite with the exact
+  `build-smoke` label excluded.
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
-  using full CTest for dependency-disabled coverage alongside the planned build
-  smokes, CLI, propagation, plugin, and scheduler coverage.
+  running every planned build smoke alongside full CTest, CLI, propagation,
+  plugin, and scheduler coverage.
 
 CI source inventories and exclusion lists must describe maintained tests and
 current source paths. Migration-only harness names must not be retained as

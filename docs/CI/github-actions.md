@@ -3,7 +3,7 @@
 ## Workflows
 
 - `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests targeting `main` through `pull_request_target`, pushes to `main` and `CI/**`, and manual dispatch, followed by one stable `healthcheck` result gate.
-- `.github/workflows/ci-integration.yml`: documentation-only routing, dynamic integration planning, parallel build-integrity profiles, separately sharded full CTest and build smoke tests, scripted `graph_cli`, scripted propagation, plugin loading, scheduler repeat checks, and one stable `integration` result gate.
+- `.github/workflows/ci-integration.yml`: documentation-only routing, dynamic label-driven integration planning, one reusable default build, separately sharded full CTest and per-test build-smoke matrix jobs, scripted `graph_cli`, scripted propagation, plugin loading, scheduler repeat checks, and one stable `integration` result gate.
 - `.github/workflows/ci-sanitizer.yml`: manual ASan or TSan focused checks.
 - `.github/workflows/build-ci-image.yml`: GHCR image publish for `ghcr.io/<owner>/<repo>/photospider-ci` on image-input pushes and manual dispatch.
 
@@ -61,45 +61,62 @@ lock; the existing Ubuntu base and apt-provided CMake setup remain unchanged.
 
 For a non-documentation change on the normal published-image path,
 `integration-plan` configures the checked-out commit with testing enabled and
-uses `ctest -N` to discover the exact `StaticProductConsumerSmoke` and
-`IpcDisabledInstallSmoke` test names. It enables each smoke and its required
-build only when that test exists. The current `main` tree therefore schedules
-only `build-integrity-default`, while a refactor commit that introduces the
-IPC-disabled install smoke also schedules `build-integrity-ipc-disabled`. This
-is capability discovery from the tested commit, not a hard-coded branch-name
-check, so the workflow definition based on `main` can also test the refactor
-pull request head. If a smoke runner exists without its exact CTest
-registration, planning fails instead of silently dropping coverage.
+uses `ctest --show-only=json-v1` to discover every test carrying the exact
+`build-smoke` label. The planner validates the `ctestInfo` version, complete
+test-name uniqueness, property and label shapes, enabled state, executable
+command, nonempty selection, and matrix size before emitting a stable
+case-insensitive name ordering. Malformed JSON, duplicate tests or properties,
+invalid labels, disabled or commandless labelled tests, and an empty
+build-smoke set all fail planning. Artifact keys are derived from a bounded
+ASCII slug plus a SHA-256 name digest, while the exact test name remains a JSON
+matrix value. No workflow test-name list is maintained.
 
-Each profile has an independent build job that configures and compiles only
-that profile, then uploads a separate reusable build artifact:
-`ci-build-default` or `ci-build-ipc-disabled`. The IPC-disabled profile
-configures the producer with `PHOTOSPIDER_BUILD_IPC=OFF`. Default consumers
-depend only on `build-integrity-default`, while the IPC-disabled smoke depends
-only on `build-integrity-ipc-disabled`; a failure in one profile therefore does
-not suppress tests for the other profile.
+The current labelled inventory is:
 
-The test jobs reuse those prebuilt producers rather than recompiling every configuration on one runner:
+- `DependencyDisabledInstallSmoke`
+- `ImageArtifactCodecDependencyDisabledBuild`
+- `IpcDisabledInstallSmoke`
+- `OpenCvOperationProviderBuildSmokeSafety`
+- `OpenCvOperationProviderDisabledBuild`
+- `PublicHeaderSelfContainment`
+- `StaticProductConsumerSmoke`
+
+The first five product drivers create or validate isolated nested build
+profiles; the OpenCV safety companion validates the destructive cleanup and
+configuration-layout boundaries of its nested-build driver; public-header
+self-containment invokes its dedicated compile target. These are durable
+product, package, configuration, safety, and compile boundaries, not migration
+or source-layout checks.
+
+`build-integrity-default` builds the complete default profile once and uploads
+`ci-build-default`. The regular test jobs reuse that artifact:
 
 - `full-ctest`, `scripted-cli`, `propagation-script`, `plugin-load`, and `scheduler-repeat` download only `ci-build-default`.
-- `full-ctest` excludes `SplitComputeServiceRuntimeTrace`,
-  `StaticProductConsumerSmoke`, and `IpcDisabledInstallSmoke`. The split trace
-  remains outside primary CI, and the two long build smoke tests run in their
-  own jobs.
-- `static-product-consumer-smoke` downloads `ci-build-default` and runs only `StaticProductConsumerSmoke`.
-- `ipc-disabled-install-smoke` downloads the precompiled `ci-build-ipc-disabled` producer and runs only `IpcDisabledInstallSmoke`.
+- `full-ctest` excludes every exact `build-smoke` label with CTest's label
+  filter. It has no name-based build-smoke exclusion list.
+- `build-smoke` consumes the planner's JSON include matrix with
+  `fail-fast: false`. Each matrix entry appears as its own
+  `Build smoke (<exact CTest name>)` job, downloads `ci-build-default`, receives
+  a separate 20-minute job timeout and artifact path, and runs only that
+  selected CTest entry. The CTest registrations retain their individual
+  30-to-900-second timeouts and existing `RUN_SERIAL` semantics.
 
-`DependencyDisabledInstallSmoke` is instead a regular, durable CTest and is not
-an independently planned workflow shard. Because `ctest_full.sh` does not
-exclude it, the existing `full-ctest` integration gate runs it from the default
-producer. The test creates its own clean nested producer with OpenCV and YAML
-capabilities disabled, builds and installs the real kernel and Host products,
-checks package-component discovery and invalid option combinations, and builds
-and executes an external consumer. This keeps the capability-off profile under
-the existing integration gate without changing protected workflow or script
-paths.
+The runner re-queries CTest JSON immediately before execution and requires the
+selected exact name to remain unique, enabled, executable, and labelled.
+After that label check, execution uses only the validated numeric CTest index;
+no test name is interpolated into a shell command or regular expression.
+`IpcDisabledInstallSmoke` therefore executes through its maintained
+CTest registration and creates its own clean `PHOTOSPIDER_BUILD_IPC=OFF`
+producer instead of depending on a separately hard-coded workflow profile.
 
-If CI image inputs change, the workflow cannot use the previously published image and instead runs `local-image-integration` on one Docker-capable runner. After building `photospider-ci:local`, `integration_suite.sh` performs the same dynamic plan, builds each discovered profile, and runs the same full-CTest, build-smoke, CLI, propagation, plugin, and scheduler shards sequentially with their corresponding build. This fallback preserves test selection and producer configuration while accepting that a single local-image runner cannot fan out into artifact-consuming jobs.
+If CI image inputs change, the workflow cannot use the previously published
+image and instead runs `local-image-integration` on one Docker-capable runner.
+After building `photospider-ci:local`, `integration_suite.sh` builds the default
+profile, reads the same planner-produced NUL-delimited exact-name inventory,
+excludes the label from full CTest, and runs every labelled smoke sequentially
+before the CLI, propagation, plugin, and scheduler shards. This fallback
+preserves the same discovery and selection contract while accepting that one
+local-image runner cannot fan out into matrix jobs.
 
 CMake 3.16 is the project's compatibility floor, not a workflow-pinned version
 for every pull request. Build logic guards policies introduced after that floor,
@@ -157,16 +174,17 @@ long-lived personal-overlay content. Explicitly documented general-purpose
 manual developer tools are separate; a clean primary checkout never imports
 personal development content.
 
-- `ci/scripts/healthcheck.sh`: builds a NUL-delimited changed-path artifact, runs `git diff --check`, the durable change-classification and CI-routing regressions, and `clang-format --dry-run --Werror` plus `cpplint` on every nondeleted changed C++ path; inventory failure terminates the script before a no-C++ summary.
+- `ci/scripts/healthcheck.sh`: builds a NUL-delimited changed-path artifact, runs `git diff --check`, the durable change-classification, build-smoke inventory, and CI-routing regressions, and `clang-format --dry-run --Werror` plus `cpplint` on every nondeleted changed C++ path; inventory failure terminates the script before a no-C++ summary.
 - `ci/scripts/change_classification.sh`: classifies exact event revisions as documentation-only or full-integration, records all changed and non-documentation paths, and fails closed on Git uncertainty.
 - `ci/scripts/change_classification_test.sh`: exercises the long-lived routing contract across documentation, source, mixed, type-change, workflow, rename, deletion, repeated `CI/**` push, pull-request merge-base, missing branch or revision, zero/unavailable revision, manual, empty-diff, and shallow-clone cases.
-- `ci/scripts/ci_routing_test.sh`: whitespace-normalizes and exact-locks both production `protected-ci-paths.if` expressions, then extracts and executes the real stable-gate, pre-checkout fork-rejection, and protected-path shell blocks. Isolated Git fixtures prove that both production guards reject a newline-containing `ci/**` path, safely record it, and fail closed on producer or reader failure. A job/step-scoped production assertion extracts each exact published-image history-fetch step and requires its own top-level `shell: bash`, so metadata on another job or neighboring step cannot satisfy the contract. Another job/step-scoped assertion requires exactly one `Trust checked-out workspace` step with `shell: bash`; its only executable lines must enable strict mode, add the exact `$GITHUB_WORKSPACE` global `safe.directory`, and verify `HEAD^{commit}`. It rejects an entry in another job or adjacent step, any additional or wildcard `safe.directory`, and placement after either fetch or `healthcheck.sh`. The extracted production trust block runs with an isolated HOME and Git repository, where the resulting global configuration must contain exactly that repository path. Job-scoped assertions separately lock the published-image and local-image pull-request exact-base fetch, `CI/**` main fetch/verification, three-way `CI_BASE_REF` route, and execution order. The test executes both extracted production main-fetch blocks; an isolated history proves that cumulative `origin/main` scope retains an early unformatted C++ path while event-before scope contains only the later documentation path. Detector fixtures retain exact/cumulative bases, empty comparisons, newline paths, and changed-path failure propagation. These local source and shell checks deliberately do not claim to execute GitHub's expression evaluator, reproduce cross-UID dubious ownership, or emulate the hosted container runner.
+- `ci/scripts/ci_routing_test.sh`: whitespace-normalizes and exact-locks both production `protected-ci-paths.if` expressions, then extracts and executes the real stable-gate, pre-checkout fork-rejection, and protected-path shell blocks. It also locks the label-driven planner output, `fromJSON` matrix, per-item artifact/name binding, full-CTest label exclusion, exact runner input, local fallback inventory, and aggregate build-smoke gate. Isolated Git fixtures prove that both production guards reject a newline-containing `ci/**` path, safely record it, and fail closed on producer or reader failure. A job/step-scoped production assertion extracts each exact published-image history-fetch step and requires its own top-level `shell: bash`, so metadata on another job or neighboring step cannot satisfy the contract. Another job/step-scoped assertion requires exactly one `Trust checked-out workspace` step with `shell: bash`; its only executable lines must enable strict mode, add the exact `$GITHUB_WORKSPACE` global `safe.directory`, and verify `HEAD^{commit}`. It rejects an entry in another job or adjacent step, any additional or wildcard `safe.directory`, and placement after either fetch or `healthcheck.sh`. The extracted production trust block runs with an isolated HOME and Git repository, where the resulting global configuration must contain exactly that repository path. Job-scoped assertions separately lock the published-image and local-image pull-request exact-base fetch, `CI/**` main fetch/verification, three-way `CI_BASE_REF` route, and execution order. The test executes both extracted production main-fetch blocks; an isolated history proves that cumulative `origin/main` scope retains an early unformatted C++ path while event-before scope contains only the later documentation path. Detector fixtures retain exact/cumulative bases, empty comparisons, newline paths, and changed-path failure propagation. These local source and shell checks deliberately do not claim to execute GitHub's expression evaluator, reproduce cross-UID dubious ownership, or emulate the hosted container runner.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current NUL-delimited, unfiltered diff changes CI image inputs; workflows provide an exact fetched pull-request base SHA, and diff failure exits without a route output.
-- `ci/scripts/integration_plan.sh`: configures a small testing-enabled planning tree, discovers the two exact build-smoke test names with `ctest -N`, validates registration against the runner files, and emits smoke/build capability flags.
-- `ci/scripts/integration_suite.sh`: applies the dynamic plan and runs the resulting integration shards sequentially for the local-image fallback path.
-- `ci/scripts/build_integrity.sh`: builds the profile selected by `CI_BUILD_PROFILE`. `default` builds the required targets and the complete tree before CTest discovery; `ipc-disabled` sets `BUILD_TESTING=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`, validates the cache, and builds only the `photospider` producer target.
-- `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest, excluding the two separately sharded build smoke tests by default. It does not exclude `DependencyDisabledInstallSmoke`, whose nested producer supplies capability-off coverage. The protected script also retains a no-op exclusion for the removed `SplitComputeServiceRuntimeTrace`; a follow-up `CI/**` branch from main must remove that token after the source-layout change lands.
-- `ci/scripts/build_smoke_test.sh`: runs one separately selected build smoke test from a reusable producer; set `SMOKE_TEST` to `static-product-consumer` or `ipc-disabled-install`.
+- `ci/scripts/build_smoke_inventory.py`: strictly parses CTest JSON v1, emits the deterministic nonempty matrix and NUL-delimited exact names, and revalidates one matrix selection before index-based execution. Its focused regression covers malformed JSON/schema, duplicate names/properties/labels, invalid or missing labels, disabled/commandless entries, empty selection, deterministic ordering, JSON round trips, safe artifact keys, and hostile test-name characters.
+- `ci/scripts/integration_plan.sh`: configures a small testing-enabled planning tree and emits the JSON matrix discovered solely from the exact CTest label.
+- `ci/scripts/integration_suite.sh`: consumes the planner-produced exact names and runs the resulting integration shards sequentially for the local-image fallback path.
+- `ci/scripts/build_integrity.sh`: builds the default profile's required targets and complete tree, validates the labelled CTest inventory, and stamps the reusable build.
+- `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest with the exact `build-smoke` label excluded.
+- `ci/scripts/build_smoke_test.sh`: revalidates and runs the exact CTest name in `SMOKE_TEST_NAME` from a reusable default producer.
 - `ci/scripts/graph_cli_script_test.sh`: runs isolated positive, explicit-missing-source, and invalid-target REPL checks using the pre-execution Graph document capability marker described above.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
 - `ci/scripts/plugin_load_test.sh`: checks plugin artifacts, plugin manager tests, scheduler plugin loader tests, and CLI scheduler plugin listing.
@@ -184,6 +202,7 @@ CI_CHANGE_EVENT=push \
   CI_ARTIFACT_DIR=CI-results/change-classification \
   bash ci/scripts/change_classification.sh
 bash ci/scripts/change_classification_test.sh
+python3 -B ci/scripts/build_smoke_inventory_test.py
 bash ci/scripts/ci_routing_test.sh
 GITHUB_OUTPUT=/tmp/photospider-integration-plan.out \
   CI_ARTIFACT_DIR=CI-results/integration-plan \
@@ -191,20 +210,11 @@ GITHUB_OUTPUT=/tmp/photospider-integration-plan.out \
 BUILD_DIR="$PWD/build/ci-default" CI_BUILD_PROFILE=default \
   CI_ARTIFACT_DIR=CI-results/build-integrity-default \
   bash ci/scripts/build_integrity.sh
-BUILD_DIR="$PWD/build/ci-ipc-disabled" CI_BUILD_PROFILE=ipc-disabled \
-  CI_ARTIFACT_DIR=CI-results/build-integrity-ipc-disabled \
-  bash ci/scripts/build_integrity.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/ctest-full bash ci/scripts/ctest_full.sh
-ctest --test-dir "$PWD/build/ci-default" --output-on-failure \
-  -R '^DependencyDisabledInstallSmoke$'
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
-  SMOKE_TEST=static-product-consumer \
-  CI_ARTIFACT_DIR=CI-results/static-product-consumer-smoke \
-  bash ci/scripts/build_smoke_test.sh
-BUILD_DIR="$PWD/build/ci-ipc-disabled" CI_REUSE_BUILD=ON \
-  SMOKE_TEST=ipc-disabled-install \
-  CI_ARTIFACT_DIR=CI-results/ipc-disabled-install-smoke \
+  SMOKE_TEST_NAME=DependencyDisabledInstallSmoke \
+  CI_ARTIFACT_DIR=CI-results/build-smoke/dependency-disabled \
   bash ci/scripts/build_smoke_test.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/graph-cli \
@@ -221,11 +231,12 @@ BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
 SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitizer_test.sh
 ```
 
-The `ipc-disabled` profile and either separately sharded smoke command are valid
-only when the checked-out commit's integration plan reports them. The direct
-`DependencyDisabledInstallSmoke` command above is a regular CTest and does not
-depend on an integration-plan profile. To reproduce the entire dynamically
-selected sequence, use:
+Replace `SMOKE_TEST_NAME` with any exact name emitted by
+`CI-results/integration-plan/build_smoke_matrix.json`; the runner refuses an
+absent, duplicate, disabled, commandless, or unlabelled selection. To run all
+labelled smokes directly from a configured tree, use
+`ctest --test-dir build/ci-default -L '^build-smoke$' --output-on-failure`.
+To reproduce the entire dynamically selected sequence, use:
 
 ```bash
 CI_ARTIFACT_ROOT=CI-results bash ci/scripts/integration_suite.sh
