@@ -640,8 +640,11 @@ class ComputeRunLease {
    * registered local task.
    * @throws GraphError or operation exceptions from Run-owned task execution.
    * @throws std::bad_alloc unchanged from execution or callback submission.
-   * @note A valid task exception is published to this Run before being
-   * rethrown to scheduler transport.
+   * @note A matching accepted callback whose Run is already terminal releases
+   * its previously counted completion unit without entering plan execution. An
+   * active valid task releases that unit only through successful plan
+   * execution; its exception is published to this Run before unchanged
+   * rethrow to scheduler transport.
    */
   void execute_task(const ComputeRunTaskIdentity& identity,
                     SchedulerTaskRuntime& task_runtime);
@@ -654,8 +657,10 @@ class ComputeRunLease {
    * @return Nothing.
    * @throws GraphError or standard exceptions from ready discovery,
    * completion accounting, trace publication, or callback submission.
-   * @note The bootstrap completion unit is released only after every initial
-   * callback is accepted; an exception is published to this Run and rethrown.
+   * @note A matching accepted bootstrap whose Run is already terminal releases
+   * its previously counted completion unit without publishing planned work.
+   * Otherwise the bootstrap unit is released only after every initial callback
+   * is accepted; an exception is published to this Run and rethrown.
    */
   void execute_bootstrap(SchedulerTaskRuntime& task_runtime);
 

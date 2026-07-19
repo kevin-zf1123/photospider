@@ -119,6 +119,15 @@ as an owned callback retaining a non-forgeable `ComputeRunLease` and
 `(RunId, RunLocalTaskId)`. No raw `TaskExecutor` is borrowed by full HP work,
 and matching task identity gates failure publication.
 
+Every accepted full-HP bootstrap or planned-task callback retires exactly the
+completion unit already counted for it. If its matching Run is terminal when
+the callback begins, an installed-plan bootstrap or a lease-validated
+registered task releases that unit and skips planned submission/execution. A
+mismatched or unregistered task route is rejected before decrementing, while a
+callback that enters the active plan retains the normal success or
+first-exception path. This is settlement of already accepted work, not
+cooperative cancellation or a new scheduler/plugin ABI behavior.
+
 ### Batch exception publication and reuse
 
 The CPU work-stealing and GPU-pipeline runtimes publish one exact worker

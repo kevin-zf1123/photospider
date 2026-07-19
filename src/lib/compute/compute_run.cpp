@@ -631,11 +631,14 @@ std::optional<ComputeRunTerminalOutcome> ComputeRunLease::terminal_outcome()
  * @return Nothing.
  * @throws std::invalid_argument for mismatched or unregistered identity.
  * @throws GraphError, std::bad_alloc, or operation exceptions from execution.
- * @note Valid failures are published before unchanged rethrow.
+ * @note A matching accepted callback observed after terminal publication
+ * releases its own completion unit without entering the plan. Active valid
+ * failures are published before unchanged rethrow.
  */
 void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
                                    SchedulerTaskRuntime& task_runtime) {
   TaskSubmissionPlan* plan = nullptr;
+  bool skip_terminal_run = false;
   {
     std::lock_guard<std::mutex> lock(control_->mutex);
     if (control_->submission_plan == nullptr ||
@@ -644,9 +647,14 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
           "ComputeRun task identity does not match its retaining lease.");
     }
     if (control_->terminal_outcome.has_value()) {
-      return;
+      skip_terminal_run = true;
+    } else {
+      plan = control_->submission_plan.get();
     }
-    plan = control_->submission_plan.get();
+  }
+  if (skip_terminal_run) {
+    task_runtime.dec_tasks_to_complete();
+    return;
   }
 
   try {
@@ -664,11 +672,14 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
  * @param task_runtime Active scheduler batch initialized by the dispatcher.
  * @return Nothing.
  * @throws GraphError or standard exceptions from plan bootstrap and runtime.
- * @note Bootstrap failures publish directly to this Run because bootstrap has
- * no planned local task identity.
+ * @note An accepted bootstrap observed after terminal publication releases its
+ * own completion unit without submitting planned work. Active bootstrap
+ * failures publish directly to this Run because bootstrap has no planned local
+ * task identity.
  */
 void ComputeRunLease::execute_bootstrap(SchedulerTaskRuntime& task_runtime) {
   TaskSubmissionPlan* plan = nullptr;
+  bool skip_terminal_run = false;
   {
     std::lock_guard<std::mutex> lock(control_->mutex);
     if (control_->submission_plan == nullptr) {
@@ -676,9 +687,14 @@ void ComputeRunLease::execute_bootstrap(SchedulerTaskRuntime& task_runtime) {
           "ComputeRun bootstrap requires an installed submission plan.");
     }
     if (control_->terminal_outcome.has_value()) {
-      return;
+      skip_terminal_run = true;
+    } else {
+      plan = control_->submission_plan.get();
     }
-    plan = control_->submission_plan.get();
+  }
+  if (skip_terminal_run) {
+    task_runtime.dec_tasks_to_complete();
+    return;
   }
 
   try {

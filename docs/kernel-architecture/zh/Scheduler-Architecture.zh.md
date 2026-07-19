@@ -89,6 +89,14 @@ storage。
 不可伪造 `ComputeRunLease` 与 `(RunId, RunLocalTaskId)` 的 owned callback 提交。Full HP work
 不借用 raw `TaskExecutor`，并由匹配 task identity 守卫 failure publication。
 
+每个已接收的 full-HP bootstrap 或 planned-task callback 都只 retire 已经为它
+计入的那一个 completion unit。如果匹配 Run 在 callback 开始时已经 terminal，
+那么已找到所安装 plan 的 bootstrap，或已由 lease 验证且完成注册的 task，会
+释放该 unit 并跳过 planned submission/execution。身份不匹配或未注册的 task
+route 会在 decrement 前被拒绝；已经进入 active plan 的 callback 则保留正常
+success 或 first-exception path。这只是对已接收工作的结算，并非 cooperative
+cancellation，也不是新的 scheduler/plugin ABI 行为。
+
 ### 批次异常发布与复用
 
 CPU work-stealing 和 GPU-pipeline runtime 每个批次只发布一个原始 worker exception。独立的
