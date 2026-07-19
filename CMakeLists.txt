@@ -25,8 +25,50 @@ endif()
 option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
 option(BUILD_TESTING "Build tests" ON)
+option(PHOTOSPIDER_ENABLE_OPENCV
+    "Enable OpenCV-backed image processing, codecs, and public adapters" ON)
+option(PHOTOSPIDER_ENABLE_YAML
+    "Enable YAML graph-document and cache-metadata persistence" ON)
+set(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER_DEFAULT
+    ${PHOTOSPIDER_ENABLE_OPENCV})
 option(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER
-    "Build the repository-owned OpenCV CPU operation provider" ON)
+    "Build the repository-owned OpenCV CPU operation provider"
+    ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER_DEFAULT})
+set(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS_DEFAULT
+    ${PHOTOSPIDER_ENABLE_OPENCV})
+option(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS
+    "Build repository-owned OpenCV operation plugin shared libraries"
+    ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS_DEFAULT})
+if(PHOTOSPIDER_ENABLE_OPENCV AND PHOTOSPIDER_ENABLE_YAML)
+    set(PHOTOSPIDER_BUILD_GRAPH_CLI_DEFAULT ON)
+else()
+    set(PHOTOSPIDER_BUILD_GRAPH_CLI_DEFAULT OFF)
+endif()
+option(PHOTOSPIDER_BUILD_GRAPH_CLI
+    "Build the graph_cli frontend and its FTXUI support library"
+    ${PHOTOSPIDER_BUILD_GRAPH_CLI_DEFAULT})
+if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER AND
+   NOT PHOTOSPIDER_ENABLE_OPENCV)
+    message(FATAL_ERROR
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON requires PHOTOSPIDER_ENABLE_OPENCV=ON")
+endif()
+if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS AND
+   NOT PHOTOSPIDER_ENABLE_OPENCV)
+    message(FATAL_ERROR
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=ON requires PHOTOSPIDER_ENABLE_OPENCV=ON")
+endif()
+if(PHOTOSPIDER_BUILD_GRAPH_CLI AND
+   (NOT PHOTOSPIDER_ENABLE_OPENCV OR NOT PHOTOSPIDER_ENABLE_YAML))
+    message(FATAL_ERROR
+        "PHOTOSPIDER_BUILD_GRAPH_CLI=ON requires PHOTOSPIDER_ENABLE_OPENCV=ON and PHOTOSPIDER_ENABLE_YAML=ON")
+endif()
+if(BUILD_TESTING AND PHOTOSPIDER_ENABLE_OPENCV AND
+   PHOTOSPIDER_ENABLE_YAML AND PHOTOSPIDER_BUILD_GRAPH_CLI AND
+   PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+    set(PHOTOSPIDER_BUILD_FULL_TEST_SUITE ON)
+else()
+    set(PHOTOSPIDER_BUILD_FULL_TEST_SUITE OFF)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
    CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PHOTOSPIDER_IPC_PLATFORM_SUPPORTED ON)
@@ -105,7 +147,6 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     host/host.hpp
     plugin/node_view.hpp
     plugin/op_contract.hpp
-    plugin/opencv_adapter.hpp
     plugin/plugin_api.hpp
     public_boundary.hpp
     scheduler/scheduler.hpp
@@ -119,12 +160,20 @@ set(PHOTOSPIDER_IPC_PUBLIC_HEADER_RELATIVE_PATHS
 )
 set(PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
     ${PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS})
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
+        plugin/opencv_adapter.hpp)
+endif()
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 19)
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
+        "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
+endif()
 if(PHOTOSPIDER_BUILD_IPC)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         ${PHOTOSPIDER_IPC_PUBLIC_HEADER_RELATIVE_PATHS})
-    set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 23)
-else()
-    set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 20)
+    math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
+        "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 3")
 endif()
 list(LENGTH PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
     PHOTOSPIDER_ACTUAL_PUBLIC_HEADER_COUNT)
@@ -224,125 +273,155 @@ if(APPLE)
 endif()
 
 find_package(Threads REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
-find_package(yaml-cpp REQUIRED)
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
+endif()
+if(PHOTOSPIDER_ENABLE_YAML)
+    find_package(yaml-cpp REQUIRED)
+endif()
 find_package(CURL) 
 find_package(OpenSSL)
 if(PHOTOSPIDER_BUILD_IPC OR BUILD_TESTING)
     find_package(nlohmann_json 3.9 REQUIRED)
 endif()
 
-# OpenCV packages normally publish `opencv_core`; accept common namespaced
-# variants while refusing a raw `${OpenCV_LIBS}` fallback that would leak
-# unrelated backend modules into the exported operation adapter component.
-if(TARGET opencv_core)
-    set(PHOTOSPIDER_OPENCV_CORE_TARGET opencv_core)
-elseif(TARGET OpenCV::opencv_core)
-    set(PHOTOSPIDER_OPENCV_CORE_TARGET OpenCV::opencv_core)
-elseif(TARGET OpenCV::Core)
-    set(PHOTOSPIDER_OPENCV_CORE_TARGET OpenCV::Core)
-else()
-    message(FATAL_ERROR
-        "OpenCV core component did not provide an exportable CMake target")
-endif()
-if(TARGET opencv_imgproc)
-    set(PHOTOSPIDER_OPENCV_IMGPROC_TARGET opencv_imgproc)
-elseif(TARGET OpenCV::opencv_imgproc)
-    set(PHOTOSPIDER_OPENCV_IMGPROC_TARGET OpenCV::opencv_imgproc)
-elseif(TARGET OpenCV::Imgproc)
-    set(PHOTOSPIDER_OPENCV_IMGPROC_TARGET OpenCV::Imgproc)
-else()
-    message(FATAL_ERROR
-        "OpenCV imgproc component did not provide an exportable CMake target")
-endif()
-if(TARGET opencv_imgcodecs)
-    set(PHOTOSPIDER_OPENCV_IMGCODECS_TARGET opencv_imgcodecs)
-elseif(TARGET OpenCV::opencv_imgcodecs)
-    set(PHOTOSPIDER_OPENCV_IMGCODECS_TARGET OpenCV::opencv_imgcodecs)
-elseif(TARGET OpenCV::Imgcodecs)
-    set(PHOTOSPIDER_OPENCV_IMGCODECS_TARGET OpenCV::Imgcodecs)
-else()
-    message(FATAL_ERROR
-        "OpenCV imgcodecs component did not provide an exportable CMake target")
-endif()
+# OpenCV packages normally publish component targets. Accept common namespaced
+# variants while refusing a raw `${OpenCV_LIBS}` fallback from the public
+# adapter export.
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    if(TARGET opencv_core)
+        set(PHOTOSPIDER_OPENCV_CORE_TARGET opencv_core)
+    elseif(TARGET OpenCV::opencv_core)
+        set(PHOTOSPIDER_OPENCV_CORE_TARGET OpenCV::opencv_core)
+    elseif(TARGET OpenCV::Core)
+        set(PHOTOSPIDER_OPENCV_CORE_TARGET OpenCV::Core)
+    else()
+        message(FATAL_ERROR
+            "OpenCV core component did not provide an exportable CMake target")
+    endif()
+    if(TARGET opencv_imgproc)
+        set(PHOTOSPIDER_OPENCV_IMGPROC_TARGET opencv_imgproc)
+    elseif(TARGET OpenCV::opencv_imgproc)
+        set(PHOTOSPIDER_OPENCV_IMGPROC_TARGET OpenCV::opencv_imgproc)
+    elseif(TARGET OpenCV::Imgproc)
+        set(PHOTOSPIDER_OPENCV_IMGPROC_TARGET OpenCV::Imgproc)
+    else()
+        message(FATAL_ERROR
+            "OpenCV imgproc component did not provide an exportable CMake target")
+    endif()
+    if(TARGET opencv_imgcodecs)
+        set(PHOTOSPIDER_OPENCV_IMGCODECS_TARGET opencv_imgcodecs)
+    elseif(TARGET OpenCV::opencv_imgcodecs)
+        set(PHOTOSPIDER_OPENCV_IMGCODECS_TARGET OpenCV::opencv_imgcodecs)
+    elseif(TARGET OpenCV::Imgcodecs)
+        set(PHOTOSPIDER_OPENCV_IMGCODECS_TARGET OpenCV::Imgcodecs)
+    else()
+        message(FATAL_ERROR
+            "OpenCV imgcodecs component did not provide an exportable CMake target")
+    endif()
 
-# Optional public OpenCV adapter. Consumers that request only operation_sdk or
-# operation_runtime do not inherit or discover OpenCV.
-add_library(photospider_operation_opencv STATIC
-    src/lib/adapters/opencv/buffer_adapter_opencv.cpp)
-add_library(Photospider::operation_opencv ALIAS
-    photospider_operation_opencv)
-set_target_properties(photospider_operation_opencv PROPERTIES
-    EXPORT_NAME operation_opencv)
-target_compile_features(photospider_operation_opencv PUBLIC cxx_std_17)
-target_include_directories(photospider_operation_opencv PRIVATE
-    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
-target_link_libraries(photospider_operation_opencv PUBLIC
-    Photospider::operation_sdk
-    Photospider::operation_runtime
-    ${PHOTOSPIDER_OPENCV_CORE_TARGET})
+    # Optional public OpenCV adapter. Consumers requesting only neutral
+    # components do not inherit or discover OpenCV.
+    add_library(photospider_operation_opencv STATIC
+        src/lib/adapters/opencv/buffer_adapter_opencv.cpp)
+    add_library(Photospider::operation_opencv ALIAS
+        photospider_operation_opencv)
+    set_target_properties(photospider_operation_opencv PROPERTIES
+        EXPORT_NAME operation_opencv)
+    target_compile_features(photospider_operation_opencv PUBLIC cxx_std_17)
+    target_include_directories(photospider_operation_opencv PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(photospider_operation_opencv PUBLIC
+        Photospider::operation_sdk
+        Photospider::operation_runtime
+        ${PHOTOSPIDER_OPENCV_CORE_TARGET})
+endif()
 
 # --- FTXUI (Frontend UI Lib) ---
-set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
-set(FTXUI_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/src")
 set(FTXUI_TARGETS "")
+if(PHOTOSPIDER_BUILD_GRAPH_CLI)
+    set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
+    set(FTXUI_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/src")
 
-if(EXISTS "${FTXUI_SRC_DIR}")
-    file(GLOB_RECURSE FTXUI_SCREEN_SOURCES "${FTXUI_SRC_DIR}/ftxui/screen/*.cpp")
-    file(GLOB_RECURSE FTXUI_DOM_SOURCES "${FTXUI_SRC_DIR}/ftxui/dom/*.cpp")
-    file(GLOB_RECURSE FTXUI_COMPONENT_SOURCES "${FTXUI_SRC_DIR}/ftxui/component/*.cpp")
+    if(EXISTS "${FTXUI_SRC_DIR}")
+        file(GLOB_RECURSE FTXUI_SCREEN_SOURCES
+            "${FTXUI_SRC_DIR}/ftxui/screen/*.cpp")
+        file(GLOB_RECURSE FTXUI_DOM_SOURCES
+            "${FTXUI_SRC_DIR}/ftxui/dom/*.cpp")
+        file(GLOB_RECURSE FTXUI_COMPONENT_SOURCES
+            "${FTXUI_SRC_DIR}/ftxui/component/*.cpp")
 
-    foreach(src_list FTXUI_SCREEN_SOURCES FTXUI_DOM_SOURCES FTXUI_COMPONENT_SOURCES)
-        list(FILTER ${src_list} EXCLUDE REGEX ".*_test\\.cpp$")
-        list(FILTER ${src_list} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
-        list(FILTER ${src_list} EXCLUDE REGEX ".*_benchmark\\.cpp$")
-    endforeach()
+        foreach(src_list FTXUI_SCREEN_SOURCES FTXUI_DOM_SOURCES
+                FTXUI_COMPONENT_SOURCES)
+            list(FILTER ${src_list} EXCLUDE REGEX ".*_test\\.cpp$")
+            list(FILTER ${src_list} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
+            list(FILTER ${src_list} EXCLUDE REGEX ".*_benchmark\\.cpp$")
+        endforeach()
 
-    add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
-    target_include_directories(ftxui-screen PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
+        add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
+        target_include_directories(ftxui-screen PUBLIC ${FTXUI_INCLUDE_DIR}
+            PRIVATE ${FTXUI_SRC_DIR})
 
-    add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
-    target_include_directories(ftxui-dom PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
-    target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
+        add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
+        target_include_directories(ftxui-dom PUBLIC ${FTXUI_INCLUDE_DIR}
+            PRIVATE ${FTXUI_SRC_DIR})
+        target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
 
-    add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
-    target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
-    target_link_libraries(ftxui-component PUBLIC ftxui-dom)
-    
-    set(FTXUI_TARGETS ftxui-component)
-else()
-    find_package(ftxui REQUIRED)
-    set(FTXUI_TARGETS ftxui::component)
+        add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
+        target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR}
+            PRIVATE ${FTXUI_SRC_DIR})
+        target_link_libraries(ftxui-component PUBLIC ftxui-dom)
+
+        set(FTXUI_TARGETS ftxui-component)
+    else()
+        find_package(ftxui REQUIRED)
+        set(FTXUI_TARGETS ftxui::component)
+    endif()
 endif()
 
 # ==============================================================================
 # 1. Internal Static Modules (The Building Blocks)
 # ==============================================================================
 
-# Module: dependency-neutral private core values and display formatting,
-# combined at the current product-composition boundary with the configured
-# image-artifact codec provider and its OpenCV adapter. This target still links
-# Photospider::operation_opencv and OpenCV imgcodecs; the complete OpenCV-free
-# product profile remains issue #63.
+# Module: dependency-neutral private core values, display formatting, and the
+# build-selected image-processing/image-artifact implementations.
 set(PHOTOSPIDER_CORE_INTERNAL_SOURCES
     src/lib/core/ps_types.cpp
     src/lib/core/parameter_value_text.cpp
 )
 
 set(PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES
-    src/lib/adapters/opencv/image_artifact_codec_opencv.cpp
     src/lib/providers/configured_image_artifact_codec.cpp
 )
+set(PHOTOSPIDER_IMAGE_PROCESSING_SOURCES "")
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    list(APPEND PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES
+        src/lib/adapters/opencv/image_artifact_codec_opencv.cpp)
+    list(APPEND PHOTOSPIDER_IMAGE_PROCESSING_SOURCES
+        src/lib/adapters/opencv/image_buffer_processing_opencv.cpp)
+else()
+    list(APPEND PHOTOSPIDER_IMAGE_PROCESSING_SOURCES
+        src/lib/core/image_buffer_processing.cpp)
+endif()
 
 add_library(photospider_core_internal STATIC
     ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
-    ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES})
+    ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES}
+    ${PHOTOSPIDER_IMAGE_PROCESSING_SOURCES})
 target_include_directories(photospider_core_internal PRIVATE
-    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS})
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_core_internal PRIVATE
-    Photospider::operation_opencv
-    ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
+    Photospider::operation_runtime)
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    target_compile_definitions(photospider_core_internal PRIVATE
+        PHOTOSPIDER_HAS_OPENCV)
+    target_include_directories(photospider_core_internal PRIVATE
+        ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(photospider_core_internal PRIVATE
+        Photospider::operation_opencv
+        ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET}
+        ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
+endif()
 
 # Module: private graph model, registry behavior, dependency-neutral cache
 # coordination, and format-neutral graph services.
@@ -362,11 +441,10 @@ set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
 add_library(photospider_graph_internal STATIC
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES})
 target_include_directories(photospider_graph_internal PRIVATE
-    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS})
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_graph_internal PRIVATE
     photospider_core_internal
-    Photospider::operation_opencv)
+    Photospider::operation_sdk)
 
 # Module: configured YAML value translation, graph-document IO, and cache
 # metadata persistence. GraphIO, cache, and Kernel see only neutral contracts;
@@ -378,15 +456,20 @@ set(PHOTOSPIDER_YAML_ADAPTER_SOURCES
     src/lib/adapters/yaml/yaml_cache_metadata_codec.cpp
 )
 
-add_library(photospider_yaml_adapter_internal STATIC
-    ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
-target_include_directories(
-    photospider_yaml_adapter_internal PRIVATE
-    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
-target_link_libraries(
-    photospider_yaml_adapter_internal PRIVATE
-    photospider_core_internal
-    yaml-cpp::yaml-cpp)
+if(PHOTOSPIDER_ENABLE_YAML)
+    add_library(photospider_yaml_adapter_internal STATIC
+        ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
+    target_include_directories(
+        photospider_yaml_adapter_internal PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(
+        photospider_yaml_adapter_internal PRIVATE
+        photospider_core_internal
+        yaml-cpp::yaml-cpp)
+endif()
+
+set(PHOTOSPIDER_CONFIGURED_PERSISTENCE_SOURCES
+    src/lib/providers/configured_persistence_adapters.cpp)
 
 # Module: optional repository-owned OpenCV CPU operation provider. The graph
 # registry remains provider-neutral; only this target owns algorithm callbacks,
@@ -407,7 +490,7 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         Photospider::operation_opencv
         ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET}
         ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
-    if(BUILD_TESTING)
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(
             photospider_opencv_operation_provider_internal PRIVATE
             PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING)
@@ -425,8 +508,7 @@ set(PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES
 add_library(photospider_plugin_host_internal STATIC
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES})
 target_include_directories(photospider_plugin_host_internal PRIVATE
-    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS})
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_plugin_host_internal PRIVATE
     photospider_core_internal
     photospider_graph_internal
@@ -511,13 +593,54 @@ endif()
 add_library(photospider_compute_internal STATIC
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES})
 target_include_directories(photospider_compute_internal PRIVATE
-    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS})
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_compute_internal PRIVATE
+    photospider_core_internal
     photospider_graph_internal
     photospider_plugin_host_internal
     photospider_scheduler_internal
-    Photospider::operation_opencv)
+    Photospider::operation_sdk)
+
+# Module: private Kernel/Interaction facades and the embedded Host composition
+# root. The installed product compiles the same source set into its standalone
+# archive; this module keeps the kernel aggregate independently buildable.
+add_library(photospider_host_internal STATIC
+    ${KERNEL_FACADE_SOURCES}
+    ${PHOTOSPIDER_CONFIGURED_PERSISTENCE_SOURCES})
+target_include_directories(photospider_host_internal PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+target_link_libraries(photospider_host_internal PRIVATE
+    photospider_core_internal
+    photospider_graph_internal
+    photospider_plugin_host_internal
+    photospider_scheduler_internal
+    photospider_compute_internal
+    Photospider::operation_sdk)
+if(PHOTOSPIDER_ENABLE_YAML)
+    target_compile_definitions(photospider_host_internal PRIVATE
+        PHOTOSPIDER_HAS_YAML)
+    target_link_libraries(photospider_host_internal PRIVATE
+        photospider_yaml_adapter_internal)
+endif()
+
+# Buildable aggregate for the private kernel modules. This target has no
+# placeholder source: invoking it compiles the actual dependency-selected
+# module graph while keeping the installed Host product a separate artifact.
+add_custom_target(photospider_kernel)
+add_dependencies(photospider_kernel
+    photospider_core_internal
+    photospider_graph_internal
+    photospider_plugin_host_internal
+    photospider_scheduler_internal
+    photospider_compute_internal
+    photospider_host_internal)
+if(PHOTOSPIDER_ENABLE_YAML)
+    add_dependencies(photospider_kernel photospider_yaml_adapter_internal)
+endif()
+if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+    add_dependencies(photospider_kernel
+        photospider_opencv_operation_provider_internal)
+endif()
 
 # ==============================================================================
 # 2. Installable Static Library (The Embedded Frontend Product)
@@ -526,14 +649,19 @@ target_link_libraries(photospider_compute_internal PRIVATE
 set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_CORE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_IMAGE_ARTIFACT_CODEC_SOURCES}
+    ${PHOTOSPIDER_IMAGE_PROCESSING_SOURCES}
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
-    ${PHOTOSPIDER_YAML_ADAPTER_SOURCES}
+    ${PHOTOSPIDER_CONFIGURED_PERSISTENCE_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES}
     ${PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES}
     ${KERNEL_FACADE_SOURCES}
 )
+if(PHOTOSPIDER_ENABLE_YAML)
+    list(APPEND PHOTOSPIDER_PRODUCT_SOURCES
+        ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
+endif()
 
 add_library(photospider STATIC ${PHOTOSPIDER_PRODUCT_SOURCES})
 
@@ -542,7 +670,13 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
     target_compile_definitions(photospider PRIVATE
         PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
 endif()
-if(BUILD_TESTING)
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    target_compile_definitions(photospider PRIVATE PHOTOSPIDER_HAS_OPENCV)
+endif()
+if(PHOTOSPIDER_ENABLE_YAML)
+    target_compile_definitions(photospider PRIVATE PHOTOSPIDER_HAS_YAML)
+endif()
+if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(photospider PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING
@@ -559,17 +693,24 @@ target_include_directories(photospider
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE
         ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
-        ${OpenCV_INCLUDE_DIRS}
 )
 
 target_link_libraries(photospider PRIVATE
-    Photospider::operation_opencv
+    Photospider::operation_sdk
+    Photospider::operation_runtime
     Photospider::scheduler_sdk
     Threads::Threads
-    yaml-cpp::yaml-cpp
-    ${OpenCV_LIBS}
     ${CMAKE_DL_LIBS}
 )
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    target_include_directories(photospider PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(photospider PRIVATE
+        Photospider::operation_opencv
+        ${OpenCV_LIBS})
+endif()
+if(PHOTOSPIDER_ENABLE_YAML)
+    target_link_libraries(photospider PRIVATE yaml-cpp::yaml-cpp)
+endif()
 
 # ==============================================================================
 # 2a. Versioned Local IPC Products (Unix only)
@@ -664,13 +805,15 @@ install(TARGETS
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-install(TARGETS photospider_operation_opencv
-    EXPORT PhotospiderOpenCVTargets
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    install(TARGETS photospider_operation_opencv
+        EXPORT PhotospiderOpenCVTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+endif()
 
 if(PHOTOSPIDER_BUILD_IPC)
     install(TARGETS photospider_ipc_client
@@ -699,10 +842,12 @@ install(EXPORT PhotospiderTargets
     DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
 )
 
-install(EXPORT PhotospiderOpenCVTargets
-    NAMESPACE Photospider::
-    DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
-)
+if(PHOTOSPIDER_ENABLE_OPENCV)
+    install(EXPORT PhotospiderOpenCVTargets
+        NAMESPACE Photospider::
+        DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+    )
+endif()
 
 install(EXPORT PhotospiderEmbeddedTargets
     NAMESPACE Photospider::
@@ -731,55 +876,59 @@ install(FILES
 # 3. CLI Static Library (The Frontend Logic)
 # ==============================================================================
 
-file(GLOB_RECURSE CLI_LOGIC_SOURCES CONFIGURE_DEPENDS
-    "apps/graph_cli/src/*.cpp")
-set(PHOTOSPIDER_CLI_BENCHMARK_SOURCES
-    src/lib/benchmark/benchmark_service.cpp
-    src/lib/benchmark/benchmark_yaml_generator.cpp)
+if(PHOTOSPIDER_BUILD_GRAPH_CLI)
+    file(GLOB_RECURSE CLI_LOGIC_SOURCES CONFIGURE_DEPENDS
+        "apps/graph_cli/src/*.cpp")
+    set(PHOTOSPIDER_CLI_BENCHMARK_SOURCES
+        src/lib/benchmark/benchmark_service.cpp
+        src/lib/benchmark/benchmark_yaml_generator.cpp)
 
-add_library(photospider_cli_common STATIC
-    ${CLI_LOGIC_SOURCES}
-    ${PHOTOSPIDER_CLI_BENCHMARK_SOURCES})
+    add_library(photospider_cli_common STATIC
+        ${CLI_LOGIC_SOURCES}
+        ${PHOTOSPIDER_CLI_BENCHMARK_SOURCES})
 
-target_include_directories(photospider_cli_common PRIVATE
-    "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src/lib"
-    ${OpenCV_INCLUDE_DIRS}
-)
-target_compile_definitions(photospider_cli_common PRIVATE
-    PHOTOSPIDER_GRAPH_CLI_HELP_DIR=\"${PROJECT_SOURCE_DIR}/apps/graph_cli/resources/help\")
+    target_include_directories(photospider_cli_common PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        ${OpenCV_INCLUDE_DIRS}
+    )
+    target_compile_definitions(photospider_cli_common PRIVATE
+        PHOTOSPIDER_GRAPH_CLI_HELP_DIR=\"${PROJECT_SOURCE_DIR}/apps/graph_cli/resources/help\")
 
-target_link_libraries(photospider_cli_common PUBLIC
-    photospider
-    ${FTXUI_TARGETS}
-)
-target_link_libraries(photospider_cli_common PRIVATE
-    yaml-cpp::yaml-cpp
-    ${OpenCV_LIBS}
-)
+    target_link_libraries(photospider_cli_common PUBLIC
+        photospider
+        ${FTXUI_TARGETS}
+    )
+    target_link_libraries(photospider_cli_common PRIVATE
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS}
+    )
+endif()
 
 # ==============================================================================
 # 4. Main Executable
 # ==============================================================================
 
-add_executable(graph_cli apps/graph_cli/main.cpp)
-target_include_directories(graph_cli PRIVATE
-    "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src/lib"
-    ${OpenCV_INCLUDE_DIRS}
-)
-target_link_libraries(graph_cli PRIVATE photospider_cli_common)
+if(PHOTOSPIDER_BUILD_GRAPH_CLI)
+    add_executable(graph_cli apps/graph_cli/main.cpp)
+    target_include_directories(graph_cli PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        ${OpenCV_INCLUDE_DIRS}
+    )
+    target_link_libraries(graph_cli PRIVATE photospider_cli_common)
 
-if (UNIX AND NOT APPLE)
-    target_link_libraries(graph_cli PRIVATE dl pthread)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(graph_cli PRIVATE dl pthread)
+    endif()
+
+    set_target_properties(graph_cli PROPERTIES
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
 endif()
-
-set_target_properties(graph_cli PROPERTIES
-    BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
-    INSTALL_RPATH "$ORIGIN/../lib"
-)
 
 # ==============================================================================
 # 5. Standard Operation Plugins
@@ -787,31 +936,32 @@ set_target_properties(graph_cli PROPERTIES
 # Build everything in plugins/ops/ except the special Metal loader.
 
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
-file(GLOB PLUGIN_SOURCES "plugins/ops/*.cpp")
-
 set(OP_PLUGIN_TARGETS "")
-foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
-    get_filename_component(PLUGIN_NAME ${PLUGIN_SOURCE} NAME_WE)
-    add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SOURCE})
-    list(APPEND OP_PLUGIN_TARGETS ${PLUGIN_NAME})
-    target_compile_definitions(${PLUGIN_NAME} PRIVATE
-        PHOTOSPIDER_PLUGIN_BUILD)
-    
-    set_target_properties(${PLUGIN_NAME} PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
-        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
-    )
-    
-    target_link_libraries(${PLUGIN_NAME} PRIVATE
-        Photospider::operation_opencv)
-    if(PLUGIN_NAME STREQUAL "threshold_op")
+if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+    file(GLOB PLUGIN_SOURCES "plugins/ops/*.cpp")
+    foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
+        get_filename_component(PLUGIN_NAME ${PLUGIN_SOURCE} NAME_WE)
+        add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SOURCE})
+        list(APPEND OP_PLUGIN_TARGETS ${PLUGIN_NAME})
+        target_compile_definitions(${PLUGIN_NAME} PRIVATE
+            PHOTOSPIDER_PLUGIN_BUILD)
+
+        set_target_properties(${PLUGIN_NAME} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        )
+
         target_link_libraries(${PLUGIN_NAME} PRIVATE
-            ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET})
-    elseif(PLUGIN_NAME STREQUAL "save_op")
-        target_link_libraries(${PLUGIN_NAME} PRIVATE
-            ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
-    endif()
-endforeach()
+            Photospider::operation_opencv)
+        if(PLUGIN_NAME STREQUAL "threshold_op")
+            target_link_libraries(${PLUGIN_NAME} PRIVATE
+                ${PHOTOSPIDER_OPENCV_IMGPROC_TARGET})
+        elseif(PLUGIN_NAME STREQUAL "save_op")
+            target_link_libraries(${PLUGIN_NAME} PRIVATE
+                ${PHOTOSPIDER_OPENCV_IMGCODECS_TARGET})
+        endif()
+    endforeach()
+endif()
 
 # ==============================================================================
 # 6. Scheduler Plugins (Dynamic Loadable Schedulers)
@@ -983,12 +1133,9 @@ if(APPLE)
 
     find_library(METAL_FRAMEWORK NAMES Metal)
     find_library(FOUNDATION_FRAMEWORK NAMES Foundation)
-    find_library(COREIMAGE_FRAMEWORK NAMES CoreImage)
-    find_library(COREVIDEO_FRAMEWORK NAMES CoreVideo)
-    if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK OR
-       NOT COREIMAGE_FRAMEWORK OR NOT COREVIDEO_FRAMEWORK)
+    if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK)
         message(FATAL_ERROR
-            "Photospider requires Metal, Foundation, CoreImage, and CoreVideo on Apple platforms")
+            "Photospider requires Metal and Foundation on Apple platforms")
     endif()
 
     # Core product needs Metal framework for Objective-C++ runtime sources.
@@ -997,43 +1144,56 @@ if(APPLE)
         "-framework Foundation"
     )
 
-    # 1. The Implementation Library (the actual op logic)
-    add_library(perlin_noise_metal SHARED
-        plugins/ops/metal/perlin_noise_metal.mm)
-    set_target_properties(perlin_noise_metal PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
-        MACOSX_RPATH ON
-    )
-    target_link_libraries(perlin_noise_metal PRIVATE
-        Photospider::operation_opencv
-        ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${COREIMAGE_FRAMEWORK} ${COREVIDEO_FRAMEWORK}
-    )
-    target_include_directories(perlin_noise_metal PRIVATE
-        "${PROJECT_SOURCE_DIR}/plugins/ops"
-    )
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+        find_library(COREIMAGE_FRAMEWORK NAMES CoreImage)
+        find_library(COREVIDEO_FRAMEWORK NAMES CoreVideo)
+        if(NOT COREIMAGE_FRAMEWORK OR NOT COREVIDEO_FRAMEWORK)
+            message(FATAL_ERROR
+                "Photospider Metal operation plugins require CoreImage and CoreVideo")
+        endif()
 
-    # 2. The Loader Plugin (registers the op with the Kernel)
-    add_library(metal_ops_loader SHARED
-        plugins/ops/metal/metal_ops_loader.cpp)
-    target_compile_definitions(metal_ops_loader PRIVATE
-        PHOTOSPIDER_PLUGIN_BUILD)
-    set_target_properties(metal_ops_loader PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
-        # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
-        BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
-        INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
-        MACOSX_RPATH ON
-    )
+        # 1. The Implementation Library (the actual op logic)
+        add_library(perlin_noise_metal SHARED
+            plugins/ops/metal/perlin_noise_metal.mm)
+        set_target_properties(perlin_noise_metal PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
+            MACOSX_RPATH ON
+        )
+        target_link_libraries(perlin_noise_metal PRIVATE
+            Photospider::operation_opencv
+            ${METAL_FRAMEWORK}
+            ${FOUNDATION_FRAMEWORK}
+            ${COREIMAGE_FRAMEWORK}
+            ${COREVIDEO_FRAMEWORK}
+        )
+        target_include_directories(perlin_noise_metal PRIVATE
+            "${PROJECT_SOURCE_DIR}/plugins/ops"
+        )
 
-    target_include_directories(metal_ops_loader PRIVATE
-        "${PROJECT_SOURCE_DIR}/plugins/ops"
-    )
+        # 2. The Loader Plugin (registers the op with the Kernel)
+        add_library(metal_ops_loader SHARED
+            plugins/ops/metal/metal_ops_loader.cpp)
+        target_compile_definitions(metal_ops_loader PRIVATE
+            PHOTOSPIDER_PLUGIN_BUILD)
+        set_target_properties(metal_ops_loader PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
+            # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
+            BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
+            INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
+            MACOSX_RPATH ON
+        )
 
-    # [修复关键点] 必须链接 perlin_noise_metal，否则 loader 运行时找不到符号
-    target_link_libraries(metal_ops_loader PRIVATE 
-        perlin_noise_metal
-        Photospider::operation_sdk
-    )
+        target_include_directories(metal_ops_loader PRIVATE
+            "${PROJECT_SOURCE_DIR}/plugins/ops"
+        )
+
+        # The loader directly calls implementation symbols and therefore owns
+        # the implementation DSO dependency.
+        target_link_libraries(metal_ops_loader PRIVATE
+            perlin_noise_metal
+            Photospider::operation_sdk
+        )
+    endif()
 
 endif()
 
@@ -1042,11 +1202,25 @@ endif()
 # ==============================================================================
 if(BUILD_TESTING)
     enable_testing()
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME DependencyDisabledInstallSmoke
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/integration/dependency_disabled_install_smoke.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --work
+                "${CMAKE_BINARY_DIR}/tests/dependency_disabled_install_smoke"
+            --cmake-executable "${CMAKE_COMMAND}"
+            --config $<CONFIG>
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    set_tests_properties(DependencyDisabledInstallSmoke PROPERTIES
+        RUN_SERIAL TRUE TIMEOUT 900)
+endif()
+
+if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
     file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
     
     include(GoogleTest)
-    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     find_package(GTest REQUIRED)
     macro(add_ps_test TEST_NAME SOURCE_FILE)
         add_executable(${TEST_NAME} ${SOURCE_FILE})
@@ -1258,6 +1432,18 @@ if(BUILD_TESTING)
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
+    add_executable(test_stdlib_image_buffer_processing
+        tests/unit/test_stdlib_image_buffer_processing.cpp
+        src/lib/core/image_buffer_processing.cpp)
+    set_target_properties(test_stdlib_image_buffer_processing PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+    target_include_directories(test_stdlib_image_buffer_processing PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib")
+    target_link_libraries(test_stdlib_image_buffer_processing PRIVATE
+        Photospider::operation_runtime
+        GTest::gtest
+        GTest::gtest_main)
     add_ps_test(test_event_stream_boundaries
         tests/unit/test_event_stream_boundaries.cpp)
     add_ps_test(test_cli_compute_event_paging
@@ -1472,20 +1658,25 @@ if(BUILD_TESTING)
 
     # The opt-in adapter is compiled separately with exactly its declared
     # operation_opencv usage requirements.
-    add_library(public_opencv_header_self_containment_objects OBJECT
-        "${PHOTOSPIDER_OPENCV_HEADER_SELF_CONTAINMENT_SOURCE}"
-    )
-    target_link_libraries(public_opencv_header_self_containment_objects
-        PRIVATE Photospider::operation_opencv
-    )
-    target_compile_features(public_opencv_header_self_containment_objects
-        PRIVATE cxx_std_17
-    )
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        add_library(public_opencv_header_self_containment_objects OBJECT
+            "${PHOTOSPIDER_OPENCV_HEADER_SELF_CONTAINMENT_SOURCE}"
+        )
+        target_link_libraries(public_opencv_header_self_containment_objects
+            PRIVATE Photospider::operation_opencv
+        )
+        target_compile_features(public_opencv_header_self_containment_objects
+            PRIVATE cxx_std_17
+        )
+    endif()
 
     add_custom_target(public_header_self_containment)
     add_dependencies(public_header_self_containment
-        public_header_self_containment_objects
-        public_opencv_header_self_containment_objects)
+        public_header_self_containment_objects)
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        add_dependencies(public_header_self_containment
+            public_opencv_header_self_containment_objects)
+    endif()
     # CTest is reserved for long-lived runtime, package-consumer, compile, and
     # error-boundary behavior. Migration/residue scanners and source-quality
     # audits are intentionally absent from the test inventory.
@@ -1617,6 +1808,8 @@ if(BUILD_TESTING)
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_stdlib_image_buffer_processing
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_event_stream_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_cli_compute_event_paging
@@ -1673,14 +1866,17 @@ endif()
 message(STATUS "-----------------------------------------------------------")
 message(STATUS "Build Configuration Summary:")
 message(STATUS "  Product Lib (Static): libphotospider (Embedded frontend)")
-message(STATUS "  CLI Lib (Static)  : libphotospider_cli_common (Frontend)")
-message(STATUS "  Executable        : graph_cli")
+message(STATUS "  OpenCV Capability : ${PHOTOSPIDER_ENABLE_OPENCV}")
+message(STATUS "  YAML Capability   : ${PHOTOSPIDER_ENABLE_YAML}")
+message(STATUS "  Graph CLI         : ${PHOTOSPIDER_BUILD_GRAPH_CLI}")
+message(STATUS "  OpenCV Op Plugins : ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS}")
 message(STATUS "  Output Bin        : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
 message(STATUS "  Scheduler Plugins : ${SCHEDULER_PLUGIN_DIR}")
 message(STATUS "  OpenCV Op Provider: ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER}")
-if(APPLE)
+message(STATUS "  Full Test Suite   : ${PHOTOSPIDER_BUILD_FULL_TEST_SUITE}")
+if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     message(STATUS "  Metal Plugins     : ${METAL_ROOT_DIR}")
 endif()
 message(STATUS "-----------------------------------------------------------")

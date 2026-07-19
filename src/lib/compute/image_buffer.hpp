@@ -22,9 +22,9 @@ struct SpatialContext;
  *
  * @throws Nothing for value operations.
  * @note The buffer pointer is const so tiled operator APIs cannot mutate
- *       ImageBuffer metadata or replace the upstream payload. OpenCV cv::Mat
- *       views do not provide hard pixel immutability, so tiled operators must
- *       still treat matrices obtained from InputTile as read-only.
+ *       ImageBuffer metadata or replace the upstream payload. Backend views
+ *       may not provide hard pixel immutability, so tiled operators must still
+ *       treat views obtained from InputTile as read-only.
  */
 struct InputTile {
   /**

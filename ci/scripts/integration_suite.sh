@@ -13,6 +13,7 @@ DEFAULT_BUILD_DIR=$BUILD_DIR
 DEFAULT_DISCOVERY_LOG="$CI_ARTIFACT_ROOT/build-integrity/ctest_discovery.log"
 STATIC_SMOKE_RUNNER="$REPO_ROOT/tests/integration/static_product_consumer_smoke.py"
 IPC_DISABLED_SMOKE_RUNNER="$REPO_ROOT/tests/integration/ipc_disabled_install_smoke.py"
+DEPENDENCY_DISABLED_SMOKE_RUNNER="$REPO_ROOT/tests/integration/dependency_disabled_install_smoke.py"
 suite_status=0
 
 # @brief Run one independent integration shard and retain aggregate failure.
@@ -34,6 +35,9 @@ require_ctest_runner_pair \
 require_ctest_runner_pair \
   "$DEFAULT_DISCOVERY_LOG" IpcDisabledInstallSmoke \
   "$IPC_DISABLED_SMOKE_RUNNER"
+require_ctest_runner_pair \
+  "$DEFAULT_DISCOVERY_LOG" DependencyDisabledInstallSmoke \
+  "$DEPENDENCY_DISABLED_SMOKE_RUNNER"
 run_integration_check env \
   CI_BUILD_PROFILE=default BUILD_DIR="$DEFAULT_BUILD_DIR" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/ctest-full" \
@@ -58,6 +62,26 @@ if ctest_inventory_has_exact_test \
       CI_BUILD_PROFILE=ipc-disabled BUILD_DIR="$IPC_DISABLED_BUILD_DIR" \
       CI_REUSE_BUILD=ON SMOKE_TEST=ipc-disabled-install \
       CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/ipc-disabled-install-smoke" \
+      bash "$SCRIPT_DIR/build_smoke_test.sh"
+  else
+    suite_status=1
+  fi
+fi
+if ctest_inventory_has_exact_test \
+  "$DEFAULT_DISCOVERY_LOG" DependencyDisabledInstallSmoke; then
+  DEPENDENCY_DISABLED_BUILD_DIR=${DEPENDENCY_DISABLED_BUILD_DIR:-"$REPO_ROOT/build/ci-dependency-disabled"}
+  if env \
+    CI_BUILD_PROFILE=dependency-disabled BUILD_TESTING=OFF \
+      PHOTOSPIDER_BUILD_IPC=OFF PHOTOSPIDER_ENABLE_OPENCV=OFF \
+      PHOTOSPIDER_ENABLE_YAML=OFF CI_DISABLE_OPENCV_YAML_FIND=ON \
+      BUILD_DIR="$DEPENDENCY_DISABLED_BUILD_DIR" \
+      CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/build-integrity-dependency-disabled" \
+      bash "$SCRIPT_DIR/build_integrity.sh"; then
+    run_integration_check env \
+      CI_BUILD_PROFILE=dependency-disabled \
+      BUILD_DIR="$DEPENDENCY_DISABLED_BUILD_DIR" CI_REUSE_BUILD=ON \
+      SMOKE_TEST=dependency-disabled-install \
+      CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/dependency-disabled-install-smoke" \
       bash "$SCRIPT_DIR/build_smoke_test.sh"
   else
     suite_status=1

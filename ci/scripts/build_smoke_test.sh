@@ -14,8 +14,16 @@ case "${SMOKE_TEST:-}" in
     BUILD_TESTING=OFF
     PHOTOSPIDER_BUILD_IPC=OFF
     ;;
+  dependency-disabled-install)
+    expected_profile=dependency-disabled
+    BUILD_TESTING=OFF
+    PHOTOSPIDER_BUILD_IPC=OFF
+    PHOTOSPIDER_ENABLE_OPENCV=OFF
+    PHOTOSPIDER_ENABLE_YAML=OFF
+    CI_DISABLE_OPENCV_YAML_FIND=ON
+    ;;
   *)
-    echo "SMOKE_TEST must be static-product-consumer or ipc-disabled-install." >&2
+    echo "SMOKE_TEST must select a maintained install consumer smoke." >&2
     exit 2
     ;;
 esac
@@ -81,6 +89,37 @@ case "$SMOKE_TEST" in
     fi
     run_logged ipc_disabled_install_smoke \
       "${ipc_smoke_command[@]}"
+    ;;
+  dependency-disabled-install)
+    smoke_script="$REPO_ROOT/tests/integration/dependency_disabled_install_smoke.py"
+    if [[ ! -f "$smoke_script" ]]; then
+      {
+        echo "DependencyDisabledInstallSmoke runner is absent:"
+        echo "  $smoke_script"
+      } | tee "$CI_ARTIFACT_DIR/missing-smoke-runner.log" >&2
+      exit 1
+    fi
+    ensure_ci_configured cmake_configure
+    ensure_ci_targets build_dependency_disabled_products \
+      photospider_kernel \
+      photospider
+    dependency_smoke_command=(
+      python3 "$smoke_script"
+        --repo "$REPO_ROOT"
+        --work "$CI_ARTIFACT_DIR/work"
+        --cmake-executable "${CMAKE_COMMAND:-cmake}"
+        --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
+        --producer-build "$BUILD_DIR"
+    )
+    if command -v timeout >/dev/null 2>&1; then
+      dependency_smoke_command=(
+        timeout --signal=INT --kill-after=30s \
+          "${CI_DEPENDENCY_SMOKE_TIMEOUT_SECONDS:-900}" \
+          "${dependency_smoke_command[@]}"
+      )
+    fi
+    run_logged dependency_disabled_install_smoke \
+      "${dependency_smoke_command[@]}"
     ;;
 esac
 

@@ -5,8 +5,8 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_geometry.hpp"
+#include "core/image_buffer_processing.hpp"
 
 namespace ps::compute {
 namespace {
@@ -18,8 +18,8 @@ namespace {
  * @param label Human-readable buffer domain used in error messages.
  * @return Independent CPU ImageBuffer when CPU pixels are present; otherwise a
  * shared backend descriptor whose immutable owner is safe to replace later.
- * @throws GraphError when adapter conversion fails; may throw std::bad_alloc
- * while allocating cloned OpenCV storage.
+ * @throws GraphError when neutral CPU-buffer cloning fails; may throw
+ * std::bad_alloc while allocating independent storage.
  * @note Empty buffers keep shape metadata but drop ownership. Non-CPU buffers
  * are shallow-copied because the generic host cannot clone opaque resources;
  * tiled execution replaces that descriptor with a CPU staging allocation
@@ -39,7 +39,7 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
   }
 
   try {
-    cloned = fromCvMat(toCvMat(source).clone());
+    cloned = image_processing::clone_cpu_image_buffer(source);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& e) {

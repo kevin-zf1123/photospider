@@ -17,7 +17,6 @@
 #include <memory>
 #include <mutex>
 #include <new>
-#include <opencv2/opencv.hpp>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -668,15 +667,16 @@ class Kernel {
    *
    * @param request Graph name, target node, cache, execution, telemetry, and
    * optional intent/dirty ROI controls.
-   * @return Cloned output image, or nullopt when graph lookup, compute, or
-   * image conversion fails.
+   * @return Cloned output descriptor, or nullopt when graph lookup, compute, or
+   * image cloning fails.
    * @throws std::bad_alloc if compute/image execution or handled-failure
    *         LastError construction exhausts memory.
    * @note The image is cloned out of graph-owned storage before returning.
-   *       Other compute and image-conversion exceptions preserve the historical
+   *       Other compute and image-cloning exceptions preserve the historical
    *       nullopt preview/save contract.
    */
-  std::optional<cv::Mat> compute_and_get_image(const ComputeRequest& request);
+  std::optional<ImageBuffer> compute_and_get_image(
+      const ComputeRequest& request);
 
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
   /**
@@ -1175,18 +1175,18 @@ class Kernel {
       ComputeRequest request);
 
   /**
-   * @brief Runs compute and returns the target output as an OpenCV image.
+   * @brief Runs compute and returns an owned target image descriptor.
    *
    * @param request Internal compute request with image-returning arguments.
-   * @return Cloned cv::Mat target image, or nullopt on missing graph, compute
-   * failure, or empty output.
+   * @return Cloned CPU ImageBuffer target image, or nullopt on missing graph,
+   * compute failure, or empty output.
    * @throws std::bad_alloc if compute/image execution or handled-failure
    *         LastError construction exhausts memory.
    * @note Missing graphs return nullopt before LastError state is touched.
    * Successful compute paths clear stale LastError state, including the
    * no-image-output case. Other compute/image exceptions become nullopt.
    */
-  std::optional<cv::Mat> compute_and_get_image_request(
+  std::optional<ImageBuffer> compute_and_get_image_request(
       const ComputeRequest& request);
 
   /**

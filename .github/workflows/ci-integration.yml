@@ -266,6 +266,7 @@ jobs:
     outputs:
       has_static_product_consumer_smoke: ${{ steps.plan.outputs.has_static_product_consumer_smoke }}
       has_ipc_disabled_install_smoke: ${{ steps.plan.outputs.has_ipc_disabled_install_smoke }}
+      has_dependency_disabled_install_smoke: ${{ steps.plan.outputs.has_dependency_disabled_install_smoke }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -365,6 +366,48 @@ jobs:
         with:
           name: ci-build-ipc-disabled
           path: CI-results/reusable-build-ipc-disabled/ci-build.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  build-integrity-dependency-disabled:
+    needs: integration-plan
+    if: needs.integration-plan.outputs.has_dependency_disabled_install_smoke == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Run dependency-disabled build integrity
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity-dependency-disabled
+          CI_BUILD_PROFILE: dependency-disabled
+        run: bash ci/scripts/build_integrity.sh
+      - name: Pack reusable dependency-disabled build
+        run: |
+          mkdir -p CI-results/reusable-build-dependency-disabled
+          tar -C build -czf \
+            CI-results/reusable-build-dependency-disabled/ci-build.tar.gz ci
+      - name: Upload dependency-disabled build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-integrity-dependency-disabled-results
+          path: CI-results/build-integrity-dependency-disabled
+          if-no-files-found: warn
+      - name: Upload reusable dependency-disabled build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-build-dependency-disabled
+          path: CI-results/reusable-build-dependency-disabled/ci-build.tar.gz
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
@@ -530,6 +573,48 @@ jobs:
           path: CI-results/ipc-disabled-install-smoke
           if-no-files-found: warn
 
+  dependency-disabled-install-smoke:
+    needs: [integration-plan, build-integrity-dependency-disabled]
+    if: needs.integration-plan.outputs.has_dependency_disabled_install_smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Download reusable dependency-disabled build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-dependency-disabled
+          path: CI-results/reusable-build
+      - name: Restore reusable dependency-disabled build
+        run: |
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run dependency-disabled install smoke test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/dependency-disabled-install-smoke
+          CI_BUILD_PROFILE: dependency-disabled
+          CI_REUSE_BUILD: ON
+          SMOKE_TEST: dependency-disabled-install
+        run: bash ci/scripts/build_smoke_test.sh
+      - name: Upload dependency-disabled install smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-disabled-install-smoke-results
+          path: CI-results/dependency-disabled-install-smoke
+          if-no-files-found: warn
+
   scripted-cli:
     needs: [integration-plan, build-integrity-default]
     runs-on: ubuntu-latest
@@ -692,10 +777,12 @@ jobs:
       - integration-plan
       - build-integrity-default
       - build-integrity-ipc-disabled
+      - build-integrity-dependency-disabled
       - local-image-integration
       - full-ctest
       - static-product-consumer-smoke
       - ipc-disabled-install-smoke
+      - dependency-disabled-install-smoke
       - scripted-cli
       - propagation-script
       - plugin-load
@@ -720,12 +807,15 @@ jobs:
           PLAN_RESULT: ${{ needs.integration-plan.result }}
           HAS_STATIC_SMOKE: ${{ needs.integration-plan.outputs.has_static_product_consumer_smoke }}
           HAS_IPC_SMOKE: ${{ needs.integration-plan.outputs.has_ipc_disabled_install_smoke }}
+          HAS_DEPENDENCY_SMOKE: ${{ needs.integration-plan.outputs.has_dependency_disabled_install_smoke }}
           BUILD_DEFAULT_RESULT: ${{ needs.build-integrity-default.result }}
           BUILD_IPC_RESULT: ${{ needs.build-integrity-ipc-disabled.result }}
+          BUILD_DEPENDENCY_RESULT: ${{ needs.build-integrity-dependency-disabled.result }}
           LOCAL_IMAGE_RESULT: ${{ needs.local-image-integration.result }}
           FULL_CTEST_RESULT: ${{ needs.full-ctest.result }}
           STATIC_SMOKE_RESULT: ${{ needs.static-product-consumer-smoke.result }}
           IPC_SMOKE_RESULT: ${{ needs.ipc-disabled-install-smoke.result }}
+          DEPENDENCY_SMOKE_RESULT: ${{ needs.dependency-disabled-install-smoke.result }}
           SCRIPTED_CLI_RESULT: ${{ needs.scripted-cli.result }}
           PROPAGATION_RESULT: ${{ needs.propagation-script.result }}
           PLUGIN_LOAD_RESULT: ${{ needs.plugin-load.result }}
@@ -758,10 +848,14 @@ jobs:
             require_value integration-plan "$PLAN_RESULT" skipped
             require_value build-integrity-default "$BUILD_DEFAULT_RESULT" skipped
             require_value build-integrity-ipc-disabled "$BUILD_IPC_RESULT" skipped
+            require_value build-integrity-dependency-disabled \
+              "$BUILD_DEPENDENCY_RESULT" skipped
             require_value full-ctest "$FULL_CTEST_RESULT" skipped
             require_value static-product-consumer-smoke \
               "$STATIC_SMOKE_RESULT" skipped
             require_value ipc-disabled-install-smoke "$IPC_SMOKE_RESULT" skipped
+            require_value dependency-disabled-install-smoke \
+              "$DEPENDENCY_SMOKE_RESULT" skipped
             require_value scripted-cli "$SCRIPTED_CLI_RESULT" skipped
             require_value propagation-script "$PROPAGATION_RESULT" skipped
             require_value plugin-load "$PLUGIN_LOAD_RESULT" skipped
@@ -842,6 +936,24 @@ jobs:
                   ;;
                 *)
                   echo "IPC smoke capability produced '$HAS_IPC_SMOKE'." >&2
+                  exit 1
+                  ;;
+              esac
+              case "$HAS_DEPENDENCY_SMOKE" in
+                true)
+                  require_value build-integrity-dependency-disabled \
+                    "$BUILD_DEPENDENCY_RESULT" success
+                  require_value dependency-disabled-install-smoke \
+                    "$DEPENDENCY_SMOKE_RESULT" success
+                  ;;
+                false)
+                  require_value build-integrity-dependency-disabled \
+                    "$BUILD_DEPENDENCY_RESULT" skipped
+                  require_value dependency-disabled-install-smoke \
+                    "$DEPENDENCY_SMOKE_RESULT" skipped
+                  ;;
+                *)
+                  echo "Dependency smoke capability produced '$HAS_DEPENDENCY_SMOKE'." >&2
                   exit 1
                   ;;
               esac

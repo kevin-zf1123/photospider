@@ -463,14 +463,15 @@ class InteractionService {
    * @param request Internal graph, target, cache, execution, telemetry, and
    * optional dirty/intent controls produced by the embedded Host adapter from
    * a public HostComputeRequest.
-   * @return Cloned image, or nullopt when compute or image extraction fails.
+   * @return Cloned CPU image descriptor, or nullopt when compute or image
+   * extraction fails.
    * @throws std::bad_alloc if Kernel compute/image execution or handled-
    *         failure LastError construction exhausts memory.
    * @note Frontends submit HostComputeRequest to ps::Host and never construct
    * this Kernel::ComputeRequest directly. The request is not retained after
    * image extraction completes.
    */
-  std::optional<cv::Mat> cmd_compute_and_get_image(
+  std::optional<ImageBuffer> cmd_compute_and_get_image(
       const Kernel::ComputeRequest& request) {
     return kernel_.compute_and_get_image(request);
   }

@@ -20,6 +20,7 @@ run_logged ctest_discovery ctest -N --test-dir "$BUILD_DIR"
 inventory_file="$CI_ARTIFACT_DIR/ctest_discovery.log"
 has_static_product_consumer_smoke=false
 has_ipc_disabled_install_smoke=false
+has_dependency_disabled_install_smoke=false
 
 if ctest_inventory_has_exact_test \
   "$inventory_file" StaticProductConsumerSmoke; then
@@ -29,13 +30,21 @@ if ctest_inventory_has_exact_test \
   "$inventory_file" IpcDisabledInstallSmoke; then
   has_ipc_disabled_install_smoke=true
 fi
+if ctest_inventory_has_exact_test \
+  "$inventory_file" DependencyDisabledInstallSmoke; then
+  has_dependency_disabled_install_smoke=true
+fi
 
 static_runner="$REPO_ROOT/tests/integration/static_product_consumer_smoke.py"
 ipc_disabled_runner="$REPO_ROOT/tests/integration/ipc_disabled_install_smoke.py"
+dependency_disabled_runner="$REPO_ROOT/tests/integration/dependency_disabled_install_smoke.py"
 require_ctest_runner_pair \
   "$inventory_file" StaticProductConsumerSmoke "$static_runner"
 require_ctest_runner_pair \
   "$inventory_file" IpcDisabledInstallSmoke "$ipc_disabled_runner"
+require_ctest_runner_pair \
+  "$inventory_file" DependencyDisabledInstallSmoke \
+  "$dependency_disabled_runner"
 
 # @brief Persist one planner value to logs and the GitHub output channel.
 # @param $1 Stable output key consumed by the workflow.
@@ -58,3 +67,5 @@ emit_output has_static_product_consumer_smoke \
   "$has_static_product_consumer_smoke"
 emit_output has_ipc_disabled_install_smoke \
   "$has_ipc_disabled_install_smoke"
+emit_output has_dependency_disabled_install_smoke \
+  "$has_dependency_disabled_install_smoke"

@@ -34,9 +34,9 @@ struct TiledInputContext {
  * defines the base extent/channel count, secondary inputs are resized or
  * cropped according to merge_strategy, and supported channel conversions are
  * materialized into temporary NodeOutput storage. Crop/pad uses kernel-owned
- * stride-aware fill/copy primitives; OpenCV remains only at actual
- * resize/channel-algorithm calls. Non-mixing nodes and mixing nodes with fewer
- * than two inputs pass through unchanged.
+ * stride-aware fill/copy primitives; resize/channel work uses the one
+ * image-processing implementation selected by the build. Non-mixing nodes and
+ * mixing nodes with fewer than two inputs pass through unchanged.
  *
  * @note This class owns no graph state. Returned temporary storage belongs to
  * the returned TiledInputContext and must outlive any tile dispatch that uses
@@ -57,8 +57,8 @@ class TiledInputNormalizer {
    * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
    *         std::bad_alloc when kernel validation, allocation, fill, or copy
    *         fails.
-   * @throws cv::Exception or std::runtime_error when an OpenCV resize/channel
-   *         conversion fails.
+   * @throws std::exception when the selected resize/channel implementation
+   *         fails.
    * @note The method performs whole-input normalization only when needed; tile
    * ROI clipping remains NodeExecutor's responsibility.
    */

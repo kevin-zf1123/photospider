@@ -16,14 +16,12 @@
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
-#include "adapters/yaml/yaml_cache_metadata_codec.hpp"
-#include "adapters/yaml/yaml_graph_document_adapter.hpp"
 #include "compute/dirty_region_snapshot.hpp"
 #include "core/parameter_value_text.hpp"
 #include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
+#include "providers/configured_persistence_adapters.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
 
@@ -2441,7 +2439,7 @@ class EmbeddedHost final : public Host {
             result.status = failure_status(error->code, error->message);
             return result;
           }
-          return success_result(fromCvMat(*image));
+          return success_result(std::move(*image));
         });
   }
 
@@ -3682,13 +3680,13 @@ std::unique_ptr<Host> internal::create_embedded_host_with_dependencies(
 
 /** @copydoc ps::create_embedded_host */
 std::unique_ptr<Host> create_embedded_host() {
-  auto metadata_adapter =
-      std::make_shared<adapters::yaml::YamlCacheMetadataCodec>();
-  auto document_adapter =
-      std::make_shared<adapters::yaml::YamlGraphDocumentAdapter>();
+  providers::ConfiguredPersistenceAdapters persistence =
+      providers::make_configured_persistence_adapters();
   return internal::create_embedded_host_with_dependencies(
-      providers::make_configured_image_artifact_codec(), metadata_adapter,
-      document_adapter, document_adapter);
+      providers::make_configured_image_artifact_codec(),
+      std::move(persistence.metadata_codec),
+      std::move(persistence.document_reader),
+      std::move(persistence.document_writer));
 }
 
 }  // namespace ps

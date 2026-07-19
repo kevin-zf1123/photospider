@@ -12,10 +12,10 @@ namespace ps::providers {
  * and configured source operations.
  * @throws std::bad_alloc if first-use codec ownership allocation fails.
  * @throws std::system_error if one-time initialization synchronization fails.
- * @note With the current product configuration this returns one immutable
- * private OpenCV adapter. Tests and future dependency-disabled composition
- * roots may inject a fake or another implementation without changing
- * Graph/cache code.
+ * @note OpenCV-enabled products return one immutable private OpenCV adapter.
+ * OpenCV-disabled products return a dependency-neutral unavailable codec whose
+ * operations report `GraphErrc::Io`. Tests may inject fakes through the
+ * explicit private Host/Kernel seams without changing Graph/cache code.
  */
 std::shared_ptr<const ImageArtifactCodec>
 make_configured_image_artifact_codec();

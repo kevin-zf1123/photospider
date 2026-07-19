@@ -1,13 +1,12 @@
 #include "compute/tiled_input_normalizer.hpp"
 
 #include <algorithm>
-#include <opencv2/imgproc.hpp>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/image_buffer_processing.hpp"
 #include "core/param_utils.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/image_buffer.hpp"
@@ -20,8 +19,7 @@ namespace {
  *
  * The base image's width, height, and channel count are the only properties the
  * tiled image_mixing path normalizes today. Data type is intentionally
- * preserved from each source unless OpenCV channel conversion changes the Mat
- * type.
+ * preserved from each source during channel conversion.
  *
  * @note This is a local value object; it does not borrow image memory.
  */
@@ -114,20 +112,17 @@ const ImageBuffer& require_non_empty_image(const NodeOutput* output,
  * @param base_shape Required output shape.
  * @return CPU descriptor retaining the resized OpenCV result.
  * @throws std::invalid_argument for a malformed CPU descriptor.
- * @throws std::runtime_error when the OpenCV adapter cannot expose CPU data.
- * @throws cv::Exception when OpenCV resize fails.
- * @throws std::bad_alloc when OpenCV or lifetime retention cannot allocate.
- * @note Interpolation matches the previous tiled image_mixing path. OpenCV is
- * used only for the actual resize algorithm; descriptor validation and
- * stride semantics remain kernel-owned.
+ * @throws std::exception when the selected image-processing implementation
+ * cannot resize the image.
+ * @throws std::bad_alloc when processing or lifetime retention cannot
+ * allocate.
+ * @note The configured implementation owns its resize algorithm; descriptor
+ * validation and stride semantics remain kernel-owned.
  */
 ImageBuffer resize_to_base(const ImageBuffer& current_buffer,
                            const ImageShape& base_shape) {
-  cv::Mat resized;
-  cv::resize(toCvMat(current_buffer), resized,
-             cv::Size(base_shape.width, base_shape.height), 0, 0,
-             cv::INTER_LINEAR);
-  return fromCvMat(resized);
+  return image_processing::resize_cpu_image_buffer(
+      current_buffer, PixelSize{base_shape.width, base_shape.height});
 }
 
 /**
@@ -145,7 +140,7 @@ ImageBuffer resize_to_base(const ImageBuffer& current_buffer,
  * allocate.
  * @note The kernel fill/copy primitives preserve source stride, ignore row
  * padding, and retain the previous zero-padding behavior without relying on
- * cv::Mat ROI or copy semantics.
+ * backend-specific ROI or copy semantics.
  */
 ImageBuffer crop_to_base(const ImageBuffer& current_buffer,
                          const ImageShape& base_shape) {
@@ -173,7 +168,7 @@ ImageBuffer crop_to_base(const ImageBuffer& current_buffer,
  * @throws GraphError when strategy is unsupported.
  * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
  * std::bad_alloc from kernel descriptor/copy/allocation primitives.
- * @throws cv::Exception or std::runtime_error when OpenCV resize fails.
+ * @throws std::exception when the selected resize implementation fails.
  * @note Channel conversion is handled separately after size normalization.
  */
 ImageBuffer normalize_size(const ImageBuffer& current_buffer,
@@ -196,23 +191,6 @@ ImageBuffer normalize_size(const ImageBuffer& current_buffer,
 }
 
 /**
- * @brief Expands a single-channel matrix to the requested channel count.
- *
- * @param current_mat Single-channel input matrix.
- * @param target_channels Base image channel count.
- * @return Multi-channel matrix with duplicated source planes.
- * @throws cv::Exception when OpenCV merge fails.
- * @note Only 3- and 4-channel targets are supported to preserve legacy
- * behavior.
- */
-cv::Mat expand_gray_to_color(const cv::Mat& current_mat, int target_channels) {
-  std::vector<cv::Mat> planes(target_channels, current_mat);
-  cv::Mat converted;
-  cv::merge(planes, converted);
-  return converted;
-}
-
-/**
  * @brief Converts an already sized secondary image to the base channel count.
  *
  * @param current_buffer Secondary input after size normalization.
@@ -220,13 +198,12 @@ cv::Mat expand_gray_to_color(const cv::Mat& current_mat, int target_channels) {
  * @param node_id Node id used in GraphError messages.
  * @return Descriptor with base channel count.
  * @throws GraphError when the channel conversion is unsupported.
- * @throws std::invalid_argument or std::runtime_error when the OpenCV adapter
- * cannot expose a valid CPU descriptor.
- * @throws cv::Exception when OpenCV color conversion fails.
+ * @throws std::invalid_argument when the descriptor or conversion is invalid.
+ * @throws std::exception when the selected channel implementation fails.
  * @throws std::bad_alloc when conversion or lifetime retention cannot
  * allocate.
- * @note Conversion cases exactly mirror the previous tiled image_mixing logic.
- * OpenCV remains confined to the actual channel algorithm boundary.
+ * @note Conversion cases exactly mirror the previous tiled image_mixing
+ * logic. The selected build-time implementation owns the pixel algorithm.
  */
 ImageBuffer normalize_channels(const ImageBuffer& current_buffer,
                                const ImageShape& base_shape, int node_id) {
@@ -234,23 +211,16 @@ ImageBuffer normalize_channels(const ImageBuffer& current_buffer,
   if (current_channels == base_shape.channels) {
     return current_buffer;
   }
-  cv::Mat current_mat = toCvMat(current_buffer);
-  if (current_channels == 1 &&
-      (base_shape.channels == 3 || base_shape.channels == 4)) {
-    return fromCvMat(expand_gray_to_color(current_mat, base_shape.channels));
-  }
-  if ((current_channels == 3 || current_channels == 4) &&
-      base_shape.channels == 1) {
-    cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2GRAY);
-    return fromCvMat(current_mat);
-  }
-  if (current_channels == 4 && base_shape.channels == 3) {
-    cv::cvtColor(current_mat, current_mat, cv::COLOR_BGRA2BGR);
-    return fromCvMat(current_mat);
-  }
-  if (current_channels == 3 && base_shape.channels == 4) {
-    cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2BGRA);
-    return fromCvMat(current_mat);
+  const bool supported =
+      (current_channels == 1 &&
+       (base_shape.channels == 3 || base_shape.channels == 4)) ||
+      ((current_channels == 3 || current_channels == 4) &&
+       base_shape.channels == 1) ||
+      (current_channels == 4 && base_shape.channels == 3) ||
+      (current_channels == 3 && base_shape.channels == 4);
+  if (supported) {
+    return image_processing::convert_cpu_image_buffer_channels(
+        current_buffer, base_shape.channels);
   }
   throw GraphError(GraphErrc::InvalidParameter,
                    "Unsupported channel conversion for image_mixing node " +
@@ -270,8 +240,7 @@ ImageBuffer normalize_channels(const ImageBuffer& current_buffer,
  * @throws GraphError when the input is invalid or unsupported.
  * @throws std::invalid_argument, std::out_of_range, std::overflow_error, or
  * std::bad_alloc from descriptor, allocation, and copy primitives.
- * @throws cv::Exception or std::runtime_error when resize/channel conversion
- * fails.
+ * @throws std::exception when the selected resize/channel implementation fails.
  * @note Returned NodeOutput preserves named data, spatial/debug metadata, and
  * plugin-library leases from the original input; only its normalized image
  * descriptor changes. Spatial metadata continues to describe upstream

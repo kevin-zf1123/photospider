@@ -731,10 +731,12 @@ assert_gate_checks_all_results() {
         integration-plan
         build-integrity-default
         build-integrity-ipc-disabled
+        build-integrity-dependency-disabled
         local-image-integration
         full-ctest
         static-product-consumer-smoke
         ipc-disabled-install-smoke
+        dependency-disabled-install-smoke
         scripted-cli
         propagation-script
         plugin-load

@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <opencv2/imgproc.hpp>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -3580,10 +3581,13 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
                                    GraphRuntime::SchedulerEvent::EXECUTE_TILE;
                           }));
   EXPECT_GT(graph.node(2).hp_version, sequential_hp_version);
-  ASSERT_EQ(sequential->size(), parallel->size());
-  ASSERT_EQ(sequential->type(), parallel->type());
-  EXPECT_DOUBLE_EQ(cv::sum(*sequential)[0], cv::sum(*parallel)[0]);
-  EXPECT_DOUBLE_EQ(cv::norm(*sequential, *parallel, cv::NORM_INF), 0.0);
+  const cv::Mat sequential_matrix = toCvMat(*sequential);
+  const cv::Mat parallel_matrix = toCvMat(*parallel);
+  ASSERT_EQ(sequential_matrix.size(), parallel_matrix.size());
+  ASSERT_EQ(sequential_matrix.type(), parallel_matrix.type());
+  EXPECT_DOUBLE_EQ(cv::sum(sequential_matrix)[0], cv::sum(parallel_matrix)[0]);
+  EXPECT_DOUBLE_EQ(cv::norm(sequential_matrix, parallel_matrix, cv::NORM_INF),
+                   0.0);
 }
 
 TEST(KernelComputeRuntimeSplit,
@@ -3639,8 +3643,8 @@ TEST(KernelComputeRuntimeSplit,
   rt_request.dirty_roi = (PixelRect{8, 8, 16, 16});
   auto rt_image = interaction.cmd_compute_and_get_image(rt_request);
   ASSERT_TRUE(rt_image.has_value());
-  EXPECT_GT(rt_image->cols, 0);
-  EXPECT_GT(rt_image->rows, 0);
+  EXPECT_GT(rt_image->width, 0);
+  EXPECT_GT(rt_image->height, 0);
 
   auto rt_events = interaction.cmd_drain_compute_events(
       kGraphName, kComputeEventDrainMaxLimit);

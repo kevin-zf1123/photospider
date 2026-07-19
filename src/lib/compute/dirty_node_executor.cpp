@@ -1,20 +1,19 @@
 #include "compute/dirty_node_executor.hpp"
 
 #include <new>
-#include <opencv2/imgproc.hpp>
 #include <optional>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/dirty_execution_common.hpp"
 #include "compute/dirty_update_executor.hpp"
 #include "compute/domain_op_metadata.hpp"
 #include "compute/node_executor.hpp"
+#include "core/image_buffer_processing.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -420,8 +419,8 @@ ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
  * @param op_variant Selected monolithic or tiled operation.
  * @return Nothing.
  * @throws std::bad_alloc when operation execution or staging exhausts memory.
- * @throws GraphError preserving operation errors and wrapping other OpenCV or
- * standard failures with node context.
+ * @throws GraphError preserving operation errors and wrapping other standard
+ * or selected image-processing failures with node context.
  * @note Resource exhaustion retains its type through dirty execution and the
  * public Host boundary; ordinary failures retain RT diagnostic wrapping.
  */
@@ -439,10 +438,6 @@ void RealTimeDirtyNodeExecutor::execute_operation(
                   image_inputs_ready, rt_buffer);
   } catch (const std::bad_alloc&) {
     throw;
-  } catch (const cv::Exception& e) {
-    throw GraphError(GraphErrc::ComputeError, "RT compute failed at node " +
-                                                  std::to_string(node.id) +
-                                                  ": " + std::string(e.what()));
   } catch (const GraphError&) {
     throw;
   } catch (const std::exception& e) {
@@ -493,20 +488,17 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
         result.image_buffer.type);
   }
 
-  cv::Mat result_mat = toCvMat(result.image_buffer);
-  cv::Mat resized_result;
-  const bool needs_resize = result_mat.cols != entry.rt_size.width ||
-                            result_mat.rows != entry.rt_size.height;
+  const ImageBuffer* normalized_result = &result.image_buffer;
+  std::optional<ImageBuffer> resized_result;
+  const bool needs_resize = result.image_buffer.width != entry.rt_size.width ||
+                            result.image_buffer.height != entry.rt_size.height;
   if (needs_resize) {
-    cv::resize(result_mat, resized_result,
-               cv::Size(entry.rt_size.width, entry.rt_size.height), 0, 0,
-               cv::INTER_LINEAR);
-    result_mat = resized_result;
+    resized_result = image_processing::resize_cpu_image_buffer(
+        result.image_buffer, entry.rt_size);
+    normalized_result = &*resized_result;
   }
-  cv::Mat dest = toCvMat(rt_buffer);
-  const cv::Rect copy_roi{entry.roi_rt.x, entry.roi_rt.y, entry.roi_rt.width,
-                          entry.roi_rt.height};
-  result_mat(copy_roi).copyTo(dest(copy_roi));
+  copy_image_buffer_region(InputTileView{normalized_result, entry.roi_rt},
+                           OutputTileView{&rt_buffer, entry.roi_rt});
 }
 
 void RealTimeDirtyNodeExecutor::execute_tiled(

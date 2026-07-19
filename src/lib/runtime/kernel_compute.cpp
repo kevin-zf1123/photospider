@@ -16,7 +16,7 @@
 #include <string>
 #include <utility>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/image_buffer_processing.hpp"
 #include "runtime/kernel.hpp"
 
 namespace ps {
@@ -217,9 +217,9 @@ bool Kernel::compute_request(const ComputeRequest& request) {
  * @return Cloned image or nullopt under the internal preview/save contract.
  * @throws std::bad_alloc if compute/image execution or handled-failure
  *         LastError construction exhausts memory.
- * @note Other compute and image-conversion failures become nullopt.
+ * @note Other compute and image-cloning failures become nullopt.
  */
-std::optional<cv::Mat> Kernel::compute_and_get_image(
+std::optional<ImageBuffer> Kernel::compute_and_get_image(
     const ComputeRequest& request) {
   return compute_and_get_image_request(request);
 }
@@ -233,10 +233,10 @@ std::optional<cv::Mat> Kernel::compute_and_get_image(
  * @throws std::bad_alloc if compute/image execution or catch-path LastError
  *         construction exhausts memory.
  * @note Runtime start and compute share one graph-state work item. Other
- *       compute, adapter, and clone exceptions become nullopt; successful empty
- *       output clears stale LastError state.
+ *       compute, selected image-processing, and clone exceptions become
+ *       nullopt; successful empty output clears stale LastError state.
  */
-std::optional<cv::Mat> Kernel::compute_and_get_image_request(
+std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     const ComputeRequest& request) {
   auto it = graphs_.find(request.name);
   if (it == graphs_.end()) {
@@ -263,7 +263,7 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
       return std::nullopt;
     }
     clear_last_error(request.name);
-    return toCvMat(output.image_buffer).clone();
+    return image_processing::clone_cpu_image_buffer(output.image_buffer);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& ge) {

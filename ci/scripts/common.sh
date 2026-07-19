@@ -62,6 +62,22 @@ configure_ci_build() {
       -DPHOTOSPIDER_BUILD_IPC="$PHOTOSPIDER_BUILD_IPC"
     )
   fi
+  if [[ -n "${PHOTOSPIDER_ENABLE_OPENCV:-}" ]]; then
+    configure_args+=(
+      -DPHOTOSPIDER_ENABLE_OPENCV="$PHOTOSPIDER_ENABLE_OPENCV"
+    )
+  fi
+  if [[ -n "${PHOTOSPIDER_ENABLE_YAML:-}" ]]; then
+    configure_args+=(
+      -DPHOTOSPIDER_ENABLE_YAML="$PHOTOSPIDER_ENABLE_YAML"
+    )
+  fi
+  if [[ "${CI_DISABLE_OPENCV_YAML_FIND:-OFF}" == ON ]]; then
+    configure_args+=(
+      -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON
+      -DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON
+    )
+  fi
   cmake "${configure_args[@]}"
 }
 
@@ -115,6 +131,21 @@ ci_profile_cache_is_valid() {
       ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC) || return 1
       [[ "$ipc_value" == OFF ]]
       ;;
+    dependency-disabled)
+      [[ "$build_testing_value" == OFF ]] || return 1
+      [[ "$(ci_cache_value PHOTOSPIDER_BUILD_IPC)" == OFF ]] || return 1
+      [[ "$(ci_cache_value PHOTOSPIDER_ENABLE_OPENCV)" == OFF ]] || return 1
+      [[ "$(ci_cache_value PHOTOSPIDER_ENABLE_YAML)" == OFF ]] || return 1
+      [[ "$(ci_cache_value PHOTOSPIDER_BUILD_GRAPH_CLI)" == OFF ]] || return 1
+      [[ "$(ci_cache_value \
+        PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)" == OFF ]] || return 1
+      [[ "$(ci_cache_value \
+        PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)" == OFF ]] || return 1
+      [[ "$(ci_cache_value CMAKE_DISABLE_FIND_PACKAGE_OpenCV)" == ON ]] ||
+        return 1
+      [[ "$(ci_cache_value CMAKE_DISABLE_FIND_PACKAGE_yaml-cpp)" == ON ]] ||
+        return 1
+      ;;
     *)
       return 1
       ;;
@@ -141,16 +172,24 @@ require_ci_profile_cache() {
 ci_build_is_reusable() {
   local build_testing_value
   local ipc_value
+  local opencv_value
+  local yaml_value
   [[ -f "$CI_BUILD_STAMP" && -f "$BUILD_DIR/CMakeCache.txt" ]] || return 1
   ci_profile_cache_is_valid || return 1
   build_testing_value=$(ci_cache_value BUILD_TESTING) || return 1
   ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC 2>/dev/null ||
     printf 'not-defined\n')
+  opencv_value=$(ci_cache_value PHOTOSPIDER_ENABLE_OPENCV 2>/dev/null ||
+    printf 'not-defined\n')
+  yaml_value=$(ci_cache_value PHOTOSPIDER_ENABLE_YAML 2>/dev/null ||
+    printf 'not-defined\n')
   grep -Fqx "build_dir=$BUILD_DIR" "$CI_BUILD_STAMP" &&
     grep -Fqx "source_dir=$REPO_ROOT" "$CI_BUILD_STAMP" &&
     grep -Fqx "profile=$CI_BUILD_PROFILE" "$CI_BUILD_STAMP" &&
     grep -Fqx "build_testing=$build_testing_value" "$CI_BUILD_STAMP" &&
-    grep -Fqx "photospider_build_ipc=$ipc_value" "$CI_BUILD_STAMP"
+    grep -Fqx "photospider_build_ipc=$ipc_value" "$CI_BUILD_STAMP" &&
+    grep -Fqx "photospider_enable_opencv=$opencv_value" "$CI_BUILD_STAMP" &&
+    grep -Fqx "photospider_enable_yaml=$yaml_value" "$CI_BUILD_STAMP"
 }
 
 # @brief Stamp a completed profile build for downstream artifact consumers.
@@ -160,9 +199,15 @@ ci_build_is_reusable() {
 mark_ci_build_reusable() {
   local build_testing_value
   local ipc_value
+  local opencv_value
+  local yaml_value
   require_ci_profile_cache || return
   build_testing_value=$(ci_cache_value BUILD_TESTING) || return
   ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC 2>/dev/null ||
+    printf 'not-defined\n')
+  opencv_value=$(ci_cache_value PHOTOSPIDER_ENABLE_OPENCV 2>/dev/null ||
+    printf 'not-defined\n')
+  yaml_value=$(ci_cache_value PHOTOSPIDER_ENABLE_YAML 2>/dev/null ||
     printf 'not-defined\n')
   mkdir -p "$BUILD_DIR"
   cat > "$CI_BUILD_STAMP" <<EOF
@@ -171,6 +216,8 @@ source_dir=$REPO_ROOT
 profile=$CI_BUILD_PROFILE
 build_testing=$build_testing_value
 photospider_build_ipc=$ipc_value
+photospider_enable_opencv=$opencv_value
+photospider_enable_yaml=$yaml_value
 created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
 }

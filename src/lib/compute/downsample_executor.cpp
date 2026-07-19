@@ -2,13 +2,12 @@
 
 #include <algorithm>
 #include <new>
-#include <opencv2/imgproc.hpp>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_geometry.hpp"
+#include "core/image_buffer_processing.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -38,7 +37,7 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source) {
     return source;
   }
   try {
-    return fromCvMat(toCvMat(source).clone());
+    return image_processing::clone_cpu_image_buffer(source);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& e) {
@@ -205,15 +204,8 @@ PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
     roi_rt = PixelRect{0, 0, rt_size.width, rt_size.height};
   }
 
-  cv::Mat hp_mat = toCvMat(hp_buffer);
-  cv::Mat rt_mat = toCvMat(rt_buffer);
-  const cv::Rect hp_patch_roi{roi_hp.x, roi_hp.y, roi_hp.width, roi_hp.height};
-  const cv::Rect rt_patch_roi{roi_rt.x, roi_rt.y, roi_rt.width, roi_rt.height};
-  cv::Mat hp_patch = hp_mat(hp_patch_roi);
-  cv::Mat downsampled;
-  cv::resize(hp_patch, downsampled, cv::Size(roi_rt.width, roi_rt.height), 0, 0,
-             cv::INTER_LINEAR);
-  downsampled.copyTo(rt_mat(rt_patch_roi));
+  image_processing::resize_cpu_image_buffer_region(hp_buffer, roi_hp, rt_buffer,
+                                                   roi_rt);
   return roi_rt;
 }
 
