@@ -30,6 +30,16 @@ The root CMake configuration exports `compile_commands.json` and defaults
 mainline macOS builds to `arm64` when no `CMAKE_OSX_ARCHITECTURES` value is
 provided.
 
+On macOS, each install-consumer smoke reads the selected producer's resolved
+`CMAKE_OSX_ARCHITECTURES` cache value and passes the exact meaningful value to
+every external CMake configure as one argument. Semicolon-separated universal
+architecture lists therefore remain intact, and the producer, installed static
+archives, and all consumers stay on one architecture profile even when a
+Rosetta-launched outer runner would choose another compiler default. This
+propagation is Darwin-only; Linux and Windows children never receive the
+macOS-specific option. It does not create or preserve a supported mainline
+`x86_64` path.
+
 The declared CMake 3.16 minimum is a compatibility floor for the installable
 static product's producer path and downstream package consumption; it is not a
 fixed toolchain that every pull request must run. Any policy introduced after
@@ -147,6 +157,11 @@ GoogleTest binaries, daemon/CLI process tests, and
 CTest shard. `OpenCvOperationProviderBuildSmokeSafety` also remains there: it
 is the ordinary safety regression for the OpenCV build-smoke driver and does
 not itself start CMake, CTest, an install, or a compile target.
+`InstallConsumerArchitecturePropagationSafety` likewise remains in the main
+shard: it runs the three install-consumer drivers' real command-construction
+paths against disposable producer cache fixtures while replacing subprocess
+execution, so it verifies cache-to-child-argv propagation without launching a
+configure, build, or install.
 
 CTest keeps every labelled test registered for direct local use. CI's
 `full-ctest` shard excludes the exact label. Configuration planning parses

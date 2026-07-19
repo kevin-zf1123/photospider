@@ -1706,6 +1706,14 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # CTest is reserved for long-lived runtime, package-consumer, compile, and
     # error-boundary behavior. Migration/residue scanners and source-quality
     # audits are intentionally absent from the test inventory.
+    add_test(NAME InstallConsumerArchitecturePropagationSafety
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${PROJECT_SOURCE_DIR}/tests/integration/install_consumer_architecture_propagation_test.py"
+        WORKING_DIRECTORY
+            "${PROJECT_SOURCE_DIR}/tests/integration")
+    set_tests_properties(
+        InstallConsumerArchitecturePropagationSafety PROPERTIES
+        TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_IPC)
         add_test(NAME PhotospiderdCapabilityHelp
             COMMAND ${CMAKE_COMMAND}

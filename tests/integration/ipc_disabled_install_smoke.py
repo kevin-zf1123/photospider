@@ -9,6 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from cmake_build_smoke_support import (
+    producer_osx_architecture_arguments,
+)
+
 
 def run(command: list[str], cwd: Path) -> None:
     """@brief Run one required smoke command with inherited output.
@@ -174,7 +178,10 @@ def main() -> int:
       original fresh configure/build under ``work``. With that option, it
       strictly validates and reuses an external producer without configuring,
       compiling, or deleting it. Installation and all consumer checks remain
-      transient under ``work``; no result/provenance report is written.
+      transient under ``work``; no result/provenance report is written. On
+      Darwin, every child configure inherits the selected producer's meaningful
+      ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
+      receive no macOS-specific option.
     """
 
     parser = argparse.ArgumentParser()
@@ -239,6 +246,9 @@ def main() -> int:
                 ],
                 repo,
             )
+        child_architecture_arguments = (
+            producer_osx_architecture_arguments(build)
+        )
         run(
             [
                 args.cmake_executable,
@@ -310,6 +320,7 @@ def main() -> int:
                 "-B",
                 str(optional_ipc_build),
                 f"-DCMAKE_PREFIX_PATH={prefix}",
+                *child_architecture_arguments,
             ],
             repo,
         )
@@ -335,6 +346,7 @@ def main() -> int:
                 "-B",
                 str(missing_ipc_build),
                 f"-DCMAKE_PREFIX_PATH={prefix}",
+                *child_architecture_arguments,
             ],
             repo,
         )
@@ -375,6 +387,7 @@ def main() -> int:
                 "-B",
                 str(consumer_build),
                 f"-DCMAKE_PREFIX_PATH={prefix}",
+                *child_architecture_arguments,
             ],
             repo,
         )

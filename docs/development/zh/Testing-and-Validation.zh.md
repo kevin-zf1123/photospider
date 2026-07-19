@@ -22,6 +22,13 @@
 
 根 CMake 配置会导出 `compile_commands.json`，并在没有提供 `CMAKE_OSX_ARCHITECTURES` 值时默认主线 macOS 构建为 `arm64`。
 
+在 macOS 上，每个 install-consumer smoke 都会读取所选 producer 已解析的
+`CMAKE_OSX_ARCHITECTURES` cache 值，并把精确且有意义的值作为一个参数传给每个外部 CMake
+configure。因此，以分号分隔的 universal architecture 列表会保持完整；即使由 Rosetta 启动的
+外层 runner 会选择另一种 compiler 默认值，producer、已安装 static archive 与全部 consumer
+仍保持同一 architecture profile。该传播只在 Darwin 上生效；Linux 和 Windows child 绝不会
+收到这个 macOS 专属选项。这不会创建或保留受支持的主线 `x86_64` 路径。
+
 声明的 CMake 3.16 最低版本是可安装静态产品 producer 路径与下游 package consumption 的
 兼容性下限，不是每个 pull request 都必须运行的固定 toolchain。任何晚于该下限引入的 policy
 （例如 `CMP0135`）都必须用 `if(POLICY <policy>)` 保护。兼容性由这项 policy 保护、当前 GitHub
@@ -110,6 +117,9 @@ helper，它会作为普通 safety regression 留在完整 CTest 分片。
 `PhotospiderdCapabilityHelp` 不会创建 child build，因此继续留在主 CTest 分片。
 `OpenCvOperationProviderBuildSmokeSafety` 也留在该分片：它是 OpenCV build-smoke driver 的普通
 safety regression，本身不会启动 CMake、CTest、install 或 compile target。
+`InstallConsumerArchitecturePropagationSafety` 同样留在主分片：它使用可丢弃的 producer cache
+fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
+在不启动 configure、build 或 install 的情况下验证 cache 到 child argv 的传播。
 
 CTest 会保留每个带标签测试的注册，供本机直接运行。CI 的 `full-ctest` 分片会排除该精确标签；
 配置规划只会把 `ctest --show-only=json-v1` 解析为允许空集合的预检，因为默认
