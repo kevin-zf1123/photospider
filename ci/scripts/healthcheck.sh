@@ -79,6 +79,8 @@ fi
 
 run_logged change_classification_test \
   bash "$SCRIPT_DIR/change_classification_test.sh"
+run_logged build_smoke_inventory_test \
+  python3 -B "$SCRIPT_DIR/build_smoke_inventory_test.py"
 run_logged ci_routing_test bash "$SCRIPT_DIR/ci_routing_test.sh"
 
 if ((${#cpp_files[@]} == 0)); then

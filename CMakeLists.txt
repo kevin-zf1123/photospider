@@ -1210,11 +1210,12 @@ endif()
 # ==============================================================================
 # 8. Tests
 # ==============================================================================
+set(PHOTOSPIDER_BUILD_SMOKE_LABEL "build-smoke")
 if(BUILD_TESTING)
     enable_testing()
     find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     add_test(NAME DependencyDisabledInstallSmoke
-        COMMAND ${Python3_EXECUTABLE}
+        COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/dependency_disabled_install_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --work
@@ -1223,7 +1224,9 @@ if(BUILD_TESTING)
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(DependencyDisabledInstallSmoke PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 900)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 900)
 endif()
 
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
@@ -1703,6 +1706,27 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # CTest is reserved for long-lived runtime, package-consumer, compile, and
     # error-boundary behavior. Migration/residue scanners and source-quality
     # audits are intentionally absent from the test inventory.
+    set(PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS
+        --expected-smoke DependencyDisabledInstallSmoke
+        --expected-smoke IpcDisabledInstallSmoke)
+    if(PHOTOSPIDER_BUILD_IPC)
+        list(APPEND
+            PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS
+            --expected-smoke StaticProductConsumerSmoke)
+    endif()
+    add_test(NAME InstallConsumerArchitecturePropagationSafety
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${PROJECT_SOURCE_DIR}/tests/integration/install_consumer_architecture_propagation_test.py"
+            --build-dir "${CMAKE_BINARY_DIR}"
+            --ctest-executable "${CMAKE_CTEST_COMMAND}"
+            --config "$<CONFIG>"
+            --python-executable "${Python3_EXECUTABLE}"
+            ${PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS}
+        WORKING_DIRECTORY
+            "${PROJECT_SOURCE_DIR}/tests/integration")
+    set_tests_properties(
+        InstallConsumerArchitecturePropagationSafety PROPERTIES
+        TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_IPC)
         add_test(NAME PhotospiderdCapabilityHelp
             COMMAND ${CMAKE_COMMAND}
@@ -1711,7 +1735,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         set_tests_properties(PhotospiderdCapabilityHelp PROPERTIES
             TIMEOUT 10)
         add_test(NAME StaticProductConsumerSmoke
-            COMMAND ${Python3_EXECUTABLE}
+            COMMAND ${Python3_EXECUTABLE} -B
                 "${PROJECT_SOURCE_DIR}/tests/integration/static_product_consumer_smoke.py"
                 --repo "${PROJECT_SOURCE_DIR}"
                 --build "${CMAKE_BINARY_DIR}"
@@ -1720,10 +1744,12 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(StaticProductConsumerSmoke PROPERTIES
-            RUN_SERIAL TRUE TIMEOUT 900)
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
-        COMMAND ${Python3_EXECUTABLE}
+        COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/ipc_disabled_install_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --work "${CMAKE_BINARY_DIR}/tests/ipc_disabled_install_smoke"
@@ -1731,7 +1757,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(IpcDisabledInstallSmoke PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 600)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 600)
     add_test(NAME ImageArtifactCodecDependencyDisabledBuild
         COMMAND ${Python3_EXECUTABLE}
             "${PROJECT_SOURCE_DIR}/tests/integration/image_artifact_codec_dependency_disabled_smoke.py"
@@ -1742,7 +1770,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(ImageArtifactCodecDependencyDisabledBuild PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 900)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 900)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         add_test(NAME OpenCvOperationProviderBuildSmokeSafety
             COMMAND ${Python3_EXECUTABLE} -B
@@ -1750,7 +1780,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             WORKING_DIRECTORY
                 "${PROJECT_SOURCE_DIR}/tests/integration")
         set_tests_properties(
-            OpenCvOperationProviderBuildSmokeSafety PROPERTIES TIMEOUT 30)
+            OpenCvOperationProviderBuildSmokeSafety PROPERTIES
+            TIMEOUT 30)
         add_test(NAME OpenCvOperationProviderDisabledBuild
             COMMAND ${Python3_EXECUTABLE}
                 "${PROJECT_SOURCE_DIR}/tests/integration/optional_opencv_operation_provider_build_smoke.py"
@@ -1762,7 +1793,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(OpenCvOperationProviderDisabledBuild PROPERTIES
-            RUN_SERIAL TRUE TIMEOUT 900)
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
     endif()
     add_test(NAME GraphCliOptionBadAlloc
         COMMAND ${Python3_EXECUTABLE}
@@ -1787,7 +1820,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --target public_header_self_containment --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(PublicHeaderSelfContainment PROPERTIES
-        RUN_SERIAL TRUE TIMEOUT 300)
+        LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+        RUN_SERIAL TRUE
+        TIMEOUT 300)
 
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_sdk_example

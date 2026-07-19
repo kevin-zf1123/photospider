@@ -16,6 +16,10 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
+from cmake_build_smoke_support import (
+    producer_osx_architecture_arguments,
+)
+
 
 STATIC_PRODUCT_ARCHIVE_NAMES = {
     "libphotospider.a",
@@ -2184,6 +2188,9 @@ def main() -> int:
     @note The CTest-facing result covers package behavior only. Commands and
       assertions write directly to the streams captured by CTest; the work
       directory contains only normal producer/consumer build inputs and outputs.
+      On Darwin, every child configure inherits the producer's meaningful
+      ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
+      receive no macOS-specific option.
     """
 
     parser = argparse.ArgumentParser()
@@ -2397,21 +2404,28 @@ def main() -> int:
             unknown_component_configure_command,
         ):
             command.extend(["-G", args.generator])
-    osx_architectures = cmake_cache_value(build, "CMAKE_OSX_ARCHITECTURES")
+    osx_architecture_arguments = producer_osx_architecture_arguments(build)
+    osx_architectures = (
+        osx_architecture_arguments[0].split("=", 1)[1]
+        if osx_architecture_arguments
+        else ""
+    )
     install_libdir = cmake_cache_value(build, "CMAKE_INSTALL_LIBDIR") or "lib"
     package_cmake_dir = (
         cmake_cache_value(build, "PHOTOSPIDER_INSTALL_CMAKEDIR")
         or f"{install_libdir}/cmake/Photospider"
     )
-    if osx_architectures:
-        for command in (
-            embedded_configure_command,
-            ipc_configure_command,
-            scheduler_sdk_configure_command,
-            operation_sdk_configure_command,
-            operation_opencv_configure_command,
-        ):
-            command.append(f"-DCMAKE_OSX_ARCHITECTURES={osx_architectures}")
+    for command in (
+        embedded_configure_command,
+        ipc_configure_command,
+        scheduler_sdk_configure_command,
+        operation_sdk_configure_command,
+        operation_opencv_configure_command,
+        optional_opencv_missing_configure_command,
+        required_opencv_missing_configure_command,
+        unknown_component_configure_command,
+    ):
+        command.extend(osx_architecture_arguments)
     embedded_configure_code = run_command(embedded_configure_command, repo)
     ipc_configure_code = run_command(ipc_configure_command, repo)
     scheduler_sdk_configure_code = run_command(scheduler_sdk_configure_command, repo)

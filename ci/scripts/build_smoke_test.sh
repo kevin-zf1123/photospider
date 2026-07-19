@@ -2,29 +2,27 @@
 
 set -Eeuo pipefail
 
+# @file build_smoke_test.sh
+# @brief Revalidate and run one exact labelled test from a reusable full build.
+# @note SMOKE_TEST_NAME is workflow data, not shell or regex source; the Python
+#   runner resolves it to a fresh validated numeric CTest index.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-case "${SMOKE_TEST:-}" in
-  static-product-consumer)
-    expected_profile=default
-    BUILD_TESTING=ON
-    ;;
-  ipc-disabled-install)
-    expected_profile=ipc-disabled
-    BUILD_TESTING=OFF
-    PHOTOSPIDER_BUILD_IPC=OFF
-    ;;
-  *)
-    echo "SMOKE_TEST must be static-product-consumer or ipc-disabled-install." >&2
-    exit 2
-    ;;
-esac
-
-if [[ -n "${CI_BUILD_PROFILE:-}" && "$CI_BUILD_PROFILE" != "$expected_profile" ]]; then
-  echo "SMOKE_TEST=$SMOKE_TEST requires CI_BUILD_PROFILE=$expected_profile." >&2
+# @var SMOKE_TEST_NAME
+# @brief Required exact CTest identity selected by one dynamic matrix entry.
+# @note The value remains process-local and is forwarded as one argv element.
+if [[ -z "${SMOKE_TEST_NAME:-}" ]]; then
+  echo "SMOKE_TEST_NAME must select one exact labelled CTest name." >&2
   exit 2
 fi
-CI_BUILD_PROFILE=$expected_profile
+if [[ -n "${CI_BUILD_PROFILE:-}" && "$CI_BUILD_PROFILE" != default ]]; then
+  echo "Labelled build smokes require CI_BUILD_PROFILE=default." >&2
+  exit 2
+fi
+CI_BUILD_PROFILE=default
+BUILD_TESTING=ON
+unset PHOTOSPIDER_BUILD_IPC || true
 
 # shellcheck source=ci/scripts/common.sh
 source "$SCRIPT_DIR/common.sh"
@@ -32,57 +30,21 @@ source "$SCRIPT_DIR/common.sh"
 cd "$REPO_ROOT"
 
 if ! ci_reuse_build_enabled || ! ci_build_is_reusable; then
-  echo "Smoke test requires reusable '$expected_profile' build at $BUILD_DIR." >&2
+  echo "Build smoke requires a reusable default build at $BUILD_DIR." >&2
   exit 1
 fi
 
-case "$SMOKE_TEST" in
-  static-product-consumer)
-    ensure_ci_configured cmake_configure
-    ensure_ci_all build_all
-    run_logged smoke_discovery \
-      ctest -N --test-dir "$BUILD_DIR" -R '^StaticProductConsumerSmoke$'
-    if ! ctest_inventory_has_exact_test \
-      "$CI_ARTIFACT_DIR/smoke_discovery.log" \
-      StaticProductConsumerSmoke; then
-      echo "StaticProductConsumerSmoke is not registered." >&2
-      exit 1
-    fi
-    run_logged static_product_consumer_smoke \
-      ctest --output-on-failure --test-dir "$BUILD_DIR" \
-        -R '^StaticProductConsumerSmoke$'
-    ;;
-  ipc-disabled-install)
-    smoke_script="$REPO_ROOT/tests/integration/ipc_disabled_install_smoke.py"
-    if [[ ! -f "$smoke_script" ]]; then
-      {
-        echo "IpcDisabledInstallSmoke was selected, but its runner is absent:"
-        echo "  $smoke_script"
-        echo "This revision cannot run the IPC-disabled install smoke."
-      } | tee "$CI_ARTIFACT_DIR/missing-smoke-runner.log" >&2
-      exit 1
-    fi
-    ensure_ci_configured cmake_configure
-    ensure_ci_targets build_photospider photospider
-    ipc_smoke_command=(
-      python3 "$smoke_script"
-        --repo "$REPO_ROOT"
-        --work "$CI_ARTIFACT_DIR/work"
-        --cmake-executable "${CMAKE_COMMAND:-cmake}"
-        --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
-        --producer-build "$BUILD_DIR"
-    )
-    if command -v timeout >/dev/null 2>&1; then
-      ipc_smoke_command=(
-        timeout --signal=INT --kill-after=30s \
-          "${CI_IPC_SMOKE_TIMEOUT_SECONDS:-600}" \
-          "${ipc_smoke_command[@]}"
-      )
-    fi
-    run_logged ipc_disabled_install_smoke \
-      "${ipc_smoke_command[@]}"
-    ;;
-esac
+ensure_ci_configured cmake_configure
+ensure_ci_all build_all
+run_logged selected_build_smoke \
+  python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" run \
+    --build-dir "$BUILD_DIR" \
+    --ctest-executable "${CTEST_COMMAND:-ctest}" \
+    --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+    --label "$BUILD_SMOKE_LABEL" \
+    --inventory-output "$CI_ARTIFACT_DIR/ctest_inventory.json" \
+    --selection-output "$CI_ARTIFACT_DIR/selection.json" \
+    --test-name "$SMOKE_TEST_NAME"
 
-echo "Build smoke '$SMOKE_TEST' completed." |
+printf 'Build smoke %q completed.\n' "$SMOKE_TEST_NAME" |
   tee "$CI_ARTIFACT_DIR/summary.log"

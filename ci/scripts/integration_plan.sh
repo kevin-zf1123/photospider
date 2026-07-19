@@ -2,6 +2,11 @@
 
 set -Eeuo pipefail
 
+# @file integration_plan.sh
+# @brief Configure and validate the non-authoritative pre-build CI inventory.
+# @note GoogleTest POST_BUILD discovery has not run in this job. An empty
+#   build-smoke preview is therefore valid and is never routed to a matrix.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$REPO_ROOT/build/ci-plan"}
@@ -15,46 +20,22 @@ cd "$REPO_ROOT"
 
 run_logged cmake_configure configure_ci_build
 run_logged validate_profile_cache require_ci_profile_cache
-run_logged ctest_discovery ctest -N --test-dir "$BUILD_DIR"
 
-inventory_file="$CI_ARTIFACT_DIR/ctest_discovery.log"
-has_static_product_consumer_smoke=false
-has_ipc_disabled_install_smoke=false
+# @var prebuild_matrix_file
+# @brief Disposable configuration-time matrix preview retained for diagnostics.
+# @note The workflow never exposes this file as a job output; only the complete
+#   build-integrity inventory is authoritative for matrix routing.
+prebuild_matrix_file="$CI_ARTIFACT_DIR/prebuild_smoke_matrix.json"
+run_logged prebuild_smoke_inventory \
+  python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan \
+    --build-dir "$BUILD_DIR" \
+    --ctest-executable "${CTEST_COMMAND:-ctest}" \
+    --config "${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+    --label "$BUILD_SMOKE_LABEL" \
+    --inventory-output "$CI_ARTIFACT_DIR/prebuild_ctest_inventory.json" \
+    --matrix-output "$prebuild_matrix_file" \
+    --names-output "$CI_ARTIFACT_DIR/prebuild_smoke_names.z" \
+    --allow-empty
 
-if ctest_inventory_has_exact_test \
-  "$inventory_file" StaticProductConsumerSmoke; then
-  has_static_product_consumer_smoke=true
-fi
-if ctest_inventory_has_exact_test \
-  "$inventory_file" IpcDisabledInstallSmoke; then
-  has_ipc_disabled_install_smoke=true
-fi
-
-static_runner="$REPO_ROOT/tests/integration/static_product_consumer_smoke.py"
-ipc_disabled_runner="$REPO_ROOT/tests/integration/ipc_disabled_install_smoke.py"
-require_ctest_runner_pair \
-  "$inventory_file" StaticProductConsumerSmoke "$static_runner"
-require_ctest_runner_pair \
-  "$inventory_file" IpcDisabledInstallSmoke "$ipc_disabled_runner"
-
-# @brief Persist one planner value to logs and the GitHub output channel.
-# @param $1 Stable output key consumed by the workflow.
-# @param $2 Single-line output value.
-# @return The first failed write status, or zero.
-# @throws Nothing; write failures terminate through set -e.
-# @note Local callers without GITHUB_OUTPUT still receive outputs.log.
-emit_output() {
-  local key=$1
-  local value=$2
-  printf '%s=%s\n' "$key" "$value" |
-    tee -a "$CI_ARTIFACT_DIR/outputs.log"
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
-  fi
-}
-
-: > "$CI_ARTIFACT_DIR/outputs.log"
-emit_output has_static_product_consumer_smoke \
-  "$has_static_product_consumer_smoke"
-emit_output has_ipc_disabled_install_smoke \
-  "$has_ipc_disabled_install_smoke"
+echo "Configuration-time CTest inventory preflight completed; build-smoke routing waits for the complete build." |
+  tee "$CI_ARTIFACT_DIR/summary.log"

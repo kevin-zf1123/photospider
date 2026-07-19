@@ -730,11 +730,9 @@ assert_gate_checks_all_results() {
         ci-image-change
         integration-plan
         build-integrity-default
-        build-integrity-ipc-disabled
         local-image-integration
         full-ctest
-        static-product-consumer-smoke
-        ipc-disabled-install-smoke
+        build-smoke
         scripted-cli
         propagation-script
         plugin-load
@@ -748,6 +746,118 @@ assert_gate_checks_all_results() {
   for assertion_label in "${assertion_labels[@]}"; do
     assert_file_contains "$gate_script" "require_value $assertion_label"
   done
+}
+
+# @brief Require build-smoke routing to use the complete post-build inventory.
+# @param $1 Integration workflow YAML path.
+# @return Zero after preflight, build output, matrix, CTest, and fallback checks.
+# @throws Nothing; missing or stale source contracts exit through fail.
+# @note Configuration preflight must allow an empty POST_BUILD placeholder set
+#   but expose no workflow matrix output. The focused Python regression compiles
+#   a real disposable gtest_discover_tests fixture and proves the strict
+#   post-build inventory contains the subsequently discovered labelled test.
+validate_build_smoke_matrix_contract() {
+  local workflow=$1
+  local plan_job="$TEST_ROOT/integration-plan-build-smoke-job.yml"
+  local build_job="$TEST_ROOT/integration-build-integrity-job.yml"
+  local smoke_job="$TEST_ROOT/integration-build-smoke-job.yml"
+  local full_ctest_job="$TEST_ROOT/integration-full-ctest-job.yml"
+  local plan_script="$REPO_ROOT/ci/scripts/integration_plan.sh"
+  local build_script="$REPO_ROOT/ci/scripts/build_integrity.sh"
+  local full_ctest_script="$REPO_ROOT/ci/scripts/ctest_full.sh"
+  local smoke_script="$REPO_ROOT/ci/scripts/build_smoke_test.sh"
+  local local_suite="$REPO_ROOT/ci/scripts/integration_suite.sh"
+  local inventory_test="$REPO_ROOT/ci/scripts/build_smoke_inventory_test.py"
+  local healthcheck_script="$REPO_ROOT/ci/scripts/healthcheck.sh"
+  local build_all_line
+  local inventory_line
+  local output_line
+
+  extract_job_block "$workflow" integration-plan "$plan_job" ||
+    fail "integration-plan job could not be extracted for build-smoke routing"
+  extract_job_block "$workflow" build-integrity-default "$build_job" ||
+    fail "build-integrity-default job could not be extracted for matrix output"
+  extract_job_block "$workflow" build-smoke "$smoke_job" ||
+    fail "build-smoke matrix job could not be extracted"
+  extract_job_block "$workflow" full-ctest "$full_ctest_job" ||
+    fail "full-ctest job could not be extracted for build-smoke routing"
+
+  assert_file_contains "$plan_job" \
+    'name: Preflight integration inventory'
+  assert_file_not_contains "$plan_job" '    outputs:'
+  assert_file_contains "$build_job" \
+    'build_smoke_matrix: ${{ steps.build.outputs.build_smoke_matrix }}'
+  assert_file_contains "$build_job" 'id: build'
+  assert_file_contains "$build_job" \
+    'run: bash ci/scripts/build_integrity.sh'
+  assert_file_contains "$smoke_job" \
+    'name: Build smoke (${{ matrix.test }})'
+  assert_file_contains "$smoke_job" \
+    'needs: [integration-plan, build-integrity-default]'
+  assert_file_contains "$smoke_job" \
+    "needs.integration-plan.result == 'success' &&"
+  assert_file_contains "$smoke_job" \
+    "needs.build-integrity-default.result == 'success'"
+  assert_file_contains "$smoke_job" 'fail-fast: false'
+  assert_file_contains "$smoke_job" \
+    "matrix: \${{ fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix || '{\"include\":[]}') }}"
+  assert_file_contains "$smoke_job" 'name: ci-build-default'
+  assert_file_contains "$smoke_job" \
+    'SMOKE_TEST_NAME: ${{ matrix.test }}'
+  assert_file_contains "$smoke_job" \
+    'CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-smoke/${{ matrix.artifact }}'
+  assert_file_contains "$smoke_job" \
+    'name: build-smoke-${{ matrix.artifact }}-results'
+  assert_file_contains "$full_ctest_job" \
+    'run: bash ci/scripts/ctest_full.sh'
+
+  assert_file_contains "$plan_script" \
+    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan'
+  assert_file_contains "$plan_script" '--allow-empty'
+  assert_file_contains "$plan_script" 'prebuild_smoke_matrix.json'
+  assert_file_not_contains "$plan_script" 'emit_output build_smoke_matrix'
+  assert_file_not_contains "$plan_script" StaticProductConsumerSmoke
+  assert_file_not_contains "$plan_script" IpcDisabledInstallSmoke
+  assert_file_contains "$build_script" \
+    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan'
+  assert_file_contains "$build_script" \
+    'emit_output build_smoke_matrix "$build_smoke_matrix"'
+  assert_file_not_contains "$build_script" '--allow-empty'
+  build_all_line=$(grep -nF -- 'ensure_ci_all build_all' "$build_script" |
+    head -n 1 | cut -d: -f1)
+  inventory_line=$(grep -nF -- \
+    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" plan' "$build_script" |
+    head -n 1 | cut -d: -f1)
+  output_line=$(grep -nF -- \
+    'emit_output build_smoke_matrix "$build_smoke_matrix"' "$build_script" |
+    head -n 1 | cut -d: -f1)
+  [[ -n "$build_all_line" && -n "$inventory_line" && -n "$output_line" ]] ||
+    fail "build-integrity lacks complete build-to-matrix output order"
+  ((build_all_line < inventory_line && inventory_line < output_line)) ||
+    fail "build-integrity exposes build-smoke matrix before complete discovery"
+  assert_file_contains "$full_ctest_script" \
+    '--label-exclude "^${BUILD_SMOKE_LABEL}$"'
+  assert_file_not_contains "$full_ctest_script" CTEST_EXCLUDE_REGEX
+  assert_file_contains "$smoke_script" \
+    'python3 -B "$SCRIPT_DIR/build_smoke_inventory.py" run'
+  assert_file_contains "$smoke_script" \
+    '--test-name "$SMOKE_TEST_NAME"'
+  assert_file_contains "$local_suite" \
+    "mapfile -d '' -t build_smoke_tests"
+  assert_file_contains "$local_suite" \
+    'SMOKE_TEST_NAME="$build_smoke_test"'
+  assert_file_contains "$inventory_test" \
+    'class PostBuildDiscoveryTest(unittest.TestCase):'
+  assert_file_contains "$inventory_test" \
+    'gtest_discover_tests(post_build_fixture'
+  assert_file_contains "$healthcheck_script" \
+    'python3 -B "$SCRIPT_DIR/build_smoke_inventory_test.py"'
+
+  assert_file_not_contains "$workflow" '  build-integrity-ipc-disabled:'
+  assert_file_not_contains "$workflow" '  static-product-consumer-smoke:'
+  assert_file_not_contains "$workflow" '  ipc-disabled-install-smoke:'
+
+  pass integration-label-driven-build-smoke-matrix
 }
 
 # @brief Validate the canonical protected condition and executable gate contracts.
@@ -1376,6 +1486,7 @@ main() {
 
   validate_workflow_contract "$health_workflow" "Report healthcheck gate"
   validate_workflow_contract "$integration_workflow" "Report integration gate"
+  validate_build_smoke_matrix_contract "$integration_workflow"
   validate_published_image_base_fetch "$health_workflow"
   validate_published_image_fetch_shells "$health_workflow"
   validate_published_image_workspace_trust "$health_workflow"
