@@ -30,6 +30,16 @@ The root CMake configuration exports `compile_commands.json` and defaults
 mainline macOS builds to `arm64` when no `CMAKE_OSX_ARCHITECTURES` value is
 provided.
 
+On macOS, each install-consumer smoke reads the selected producer's resolved
+`CMAKE_OSX_ARCHITECTURES` cache value and passes the exact meaningful value to
+every external CMake configure as one argument. Semicolon-separated universal
+architecture lists therefore remain intact, and the producer, installed static
+archives, and all consumers stay on one architecture profile even when a
+Rosetta-launched outer runner would choose another compiler default. This
+propagation is Darwin-only; Linux and Windows children never receive the
+macOS-specific option. It does not create or preserve a supported mainline
+`x86_64` path.
+
 The declared CMake 3.16 minimum is a compatibility floor for the installable
 static product's producer path and downstream package consumption; it is not a
 fixed toolchain that every pull request must run. Any policy introduced after
@@ -124,6 +134,74 @@ Issue-specific replay, provenance, helper, and output artifacts must neither
 enter the primary repository nor remain as long-lived personal-overlay
 content. Long-lived runtime, public-header, and package-consumer tests own the
 durable product boundaries.
+
+## Build-Smoke CI Classification
+
+A build smoke is a durable CTest whose primary boundary delegates to a CMake
+configure/build/install, an exported-package or external-consumer build, or a
+dedicated compile target. Every such test carries the exact stable CTest label
+`build-smoke`. A companion that only calls the driver's Python cleanup or
+layout helpers in-process remains an ordinary safety regression in the full
+CTest shard.
+
+The maintained labelled inventory is
+`DependencyDisabledInstallSmoke`,
+`ImageArtifactCodecDependencyDisabledBuild`,
+`IpcDisabledInstallSmoke`,
+`OpenCvOperationProviderDisabledBuild`,
+`PublicHeaderSelfContainment`, and
+`StaticProductConsumerSmoke`. `PublicHeaderSelfContainment` belongs because its
+CTest command builds the dedicated self-containment target; ordinary
+GoogleTest binaries, daemon/CLI process tests, and
+`PhotospiderdCapabilityHelp` do not create a child build and remain in the main
+CTest shard. `OpenCvOperationProviderBuildSmokeSafety` also remains there: it
+is the ordinary safety regression for the OpenCV build-smoke driver and does
+not itself start CMake, CTest, an install, or a compile target.
+`InstallConsumerArchitecturePropagationSafety` likewise remains in the main
+shard: it runs the three install-consumer drivers' real command-construction
+paths against disposable producer cache fixtures while replacing subprocess
+execution, so it verifies cache-to-child-argv propagation without launching a
+configure, build, or install. When CMake registers the safety test, it also
+supplies the current build tree, CTest executable, configuration, and Python
+launcher. The test queries that tree through
+`ctest --show-only=json-v1` and the production inventory parser. It requires
+`DependencyDisabledInstallSmoke` and `IpcDisabledInstallSmoke` exactly once in
+every profile, requires `StaticProductConsumerSmoke` exactly once only when
+IPC is enabled and absent otherwise, then requires every expected entry to
+remain enabled and labelled and to start with the exact `python -B` driver
+path. Commented or inactive CMake source cannot satisfy this
+generated-inventory check because it produces no CTest entry. The inventory
+query executes none of the real smokes and does not change the six-test
+build-smoke classification.
+
+CTest keeps every labelled test registered for direct local use. CI's
+`full-ctest` shard excludes the exact label. Configuration planning parses
+`ctest --show-only=json-v1` only as an allow-empty preflight because default
+`gtest_discover_tests` entries may still be unlabelled `_NOT_BUILT`
+placeholders. After the complete default build, build integrity repeats the
+query in strict mode and publishes one independent matrix job per labelled
+test. Adding another maintained build smoke therefore requires its CTest
+registration and the same label, but no workflow test-name edit. Preflight
+fails closed on malformed inventory, duplicates, invalid label shape, or
+disabled/commandless labelled entries, but not on an empty selection. The
+post-build authority rejects those states and an empty labelled set. Before
+execution, the runner re-queries the inventory and rejects a selected name that
+is absent, duplicate, disabled, commandless, or no longer labelled. After that
+exact label check, it selects only the validated numeric CTest index, so
+arbitrary test-name characters are not interpreted by a shell or regular
+expression.
+
+The published-image workflow fans out the strict build-integrity output after
+restoring the same reusable default producer. An empty include fallback keeps
+`fromJSON` well-formed when that producer job is intentionally skipped; a
+successful producer cannot publish an empty strict matrix. Each CTest
+registration retains its own timeout and `RUN_SERIAL` behavior; each matrix
+item also has an independent workflow timeout and result artifact. The
+local-image fallback reads the same post-build NUL-delimited names and executes
+them sequentially because it has only one Docker-capable runner. Nested drivers
+must continue to use disjoint work directories, validate any reusable producer
+identity they accept, and clean up without following or deleting unrelated
+symlink targets.
 
 ## Validation Ownership
 
@@ -397,6 +475,9 @@ the remover. The driver also reads the nested
 `tests/<config>/`, while a single-config cache must contain the exact requested
 `CMAKE_BUILD_TYPE`. Missing or contradictory cache state fails explicitly, and
 the safety regression covers both layouts independently of the host platform.
+It is a fast ordinary full-CTest regression that imports and invokes the
+driver's helpers in-process; only `OpenCvOperationProviderDisabledBuild`
+launches the child configure/build/CTest profile and carries `build-smoke`.
 
 ## OpenCV Operation Concurrency Validation
 
@@ -606,7 +687,8 @@ detection without emitting a false negative route.
 The maintained entry points are:
 
 - `ci/scripts/healthcheck.sh` for fail-closed changed-path inventory, diff,
-  format, cpplint, and both durable shell regressions.
+  format, cpplint, the build-smoke inventory regression, and both durable shell
+  regressions.
 - `ci/scripts/change_classification.sh` and
   `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
   routing and its durable event/path regression matrix.
@@ -619,7 +701,9 @@ The maintained entry points are:
   and checkout-before-trust-before-fetch/healthcheck order;
   published/local job-scoped pull-request exact-base and `CI/**`
   cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
-  newline-path artifacts; and detector/reader/producer failure propagation. It
+  allow-empty configuration preflight, strict post-build matrix job output,
+  empty-output-safe `fromJSON`, full-CTest/fallback routing; newline-path
+  artifacts; and detector/reader/producer failure propagation. It
   executes the production trust block with an isolated HOME/repository and
   requires exactly that repository in the resulting global trust list. It also
   executes both production main-fetch blocks, while an isolated Git history
@@ -627,15 +711,22 @@ The maintained entry points are:
   only the later docs increment. The local source/shell lock does not emulate
   GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
   container runner.
-- `ci/scripts/integration_plan.sh` for capability discovery of the
-  static-product and IPC-disabled build smokes.
-- `ci/scripts/build_integrity.sh` for the default and IPC-disabled producer
-  profiles, including required-target/full builds and default CTest discovery.
-- `ci/scripts/ctest_full.sh` for the main CTest suite, including the regular
-  durable `DependencyDisabledInstallSmoke`.
+- `ci/scripts/build_smoke_inventory.py` and its focused regression for strict
+  CTest JSON parsing, deterministic strict or explicit allow-empty matrix
+  generation, duplicate label values, safe artifact keys, NUL-delimited names,
+  exact index-based execution, absent/disabled/commandless selections stopping
+  before a second subprocess, and a real configure-placeholder-to-post-build
+  discovery fixture.
+- `ci/scripts/integration_plan.sh` for allow-empty exact-label configuration
+  preflight without authoritative matrix output.
+- `ci/scripts/build_integrity.sh` for the default producer profile, including
+  required-target/full builds, strict post-build labelled CTest validation, and
+  the authoritative matrix job output.
+- `ci/scripts/ctest_full.sh` for the main CTest suite with the exact
+  `build-smoke` label excluded.
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
-  using full CTest for dependency-disabled coverage alongside the planned build
-  smokes, CLI, propagation, plugin, and scheduler coverage.
+  running every post-build-discovered build smoke alongside full CTest, CLI,
+  propagation, plugin, and scheduler coverage.
 
 CI source inventories and exclusion lists must describe maintained tests and
 current source paths. Migration-only harness names must not be retained as

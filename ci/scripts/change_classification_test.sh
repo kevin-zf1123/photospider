@@ -179,6 +179,15 @@ main() {
   run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification workflow-change false true non-documentation-files
 
+  new_case_repo build_smoke_metadata_change
+  mkdir -p "$CASE_REPO/ci/scripts"
+  printf 'print("planner")\n' \
+    > "$CASE_REPO/ci/scripts/build_smoke_inventory.py"
+  commit_case "build-smoke metadata change"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
+  assert_classification build-smoke-metadata-change false true \
+    non-documentation-files
+
   new_case_repo ci_branch_second_push
   mkdir -p "$CASE_REPO/src"
   printf 'first push\n' > "$CASE_REPO/src/first-push.cpp"

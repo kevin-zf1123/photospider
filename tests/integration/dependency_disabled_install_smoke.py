@@ -9,6 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from cmake_build_smoke_support import (
+    producer_osx_architecture_arguments,
+)
+
 
 def run(command: list[str], cwd: Path) -> None:
     """@brief Run one required smoke command with inherited output.
@@ -302,7 +306,10 @@ def main() -> int:
       contradicts the dependency-disabled profile.
     @note A validated ``--producer-build`` may be reused without configuration
       or compilation. Installation and consumer artifacts always remain under
-      ``work`` and are removed before return.
+      ``work`` and are removed before return. On Darwin, every child configure
+      inherits the selected producer's meaningful
+      ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
+      receive no macOS-specific option.
     """
 
     parser = argparse.ArgumentParser()
@@ -378,6 +385,9 @@ def main() -> int:
                 repo,
             )
 
+        child_architecture_arguments = (
+            producer_osx_architecture_arguments(build)
+        )
         run(
             [
                 args.cmake_executable,
@@ -432,6 +442,7 @@ def main() -> int:
                 f"-DCMAKE_PREFIX_PATH={prefix}",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+                *child_architecture_arguments,
             ],
             repo,
         )
@@ -447,6 +458,7 @@ def main() -> int:
                 f"-DCMAKE_PREFIX_PATH={prefix}",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+                *child_architecture_arguments,
             ],
             repo,
             "Photospider was built without the operation_opencv component",
@@ -462,6 +474,7 @@ def main() -> int:
             "-DPHOTOSPIDER_ENABLE_YAML=OFF",
             "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
             "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+            *child_architecture_arguments,
         ]
         run_expect_failure(
             [
@@ -508,6 +521,7 @@ def main() -> int:
                 f"-DCMAKE_PREFIX_PATH={prefix}",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",
+                *child_architecture_arguments,
             ],
             repo,
         )
