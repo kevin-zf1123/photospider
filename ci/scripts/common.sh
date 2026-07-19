@@ -2,6 +2,11 @@
 
 set -Eeuo pipefail
 
+# @file common.sh
+# @brief Provide synchronous build, reuse, logging, and assertion primitives.
+# @note Callers source this file once per CI script process; it owns no
+#   background jobs and retains state only in shell variables and artifacts.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$REPO_ROOT/build/ci"}
@@ -10,6 +15,11 @@ CI_JOBS=${CI_JOBS:-4}
 CI_REUSE_BUILD=${CI_REUSE_BUILD:-OFF}
 CI_BUILD_PROFILE=${CI_BUILD_PROFILE:-default}
 BUILD_TESTING=${BUILD_TESTING:-ON}
+
+# @var BUILD_SMOKE_LABEL
+# @brief Exact immutable CTest label used for discovery and full-suite exclusion.
+# @note This process-lifetime value must match build_smoke_inventory.py and is
+#   never interpreted as caller-controlled regular-expression content.
 BUILD_SMOKE_LABEL=build-smoke
 readonly BUILD_SMOKE_LABEL
 CI_BUILD_STAMP="$BUILD_DIR/.photospider-ci-build-complete"

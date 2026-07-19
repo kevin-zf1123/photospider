@@ -263,8 +263,6 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    outputs:
-      build_smoke_matrix: ${{ steps.plan.outputs.build_smoke_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -272,8 +270,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
-      - name: Plan integration jobs
-        id: plan
+      - name: Preflight integration inventory
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/integration-plan
         run: bash ci/scripts/integration_plan.sh
@@ -294,6 +291,8 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      build_smoke_matrix: ${{ steps.build.outputs.build_smoke_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -302,6 +301,7 @@ jobs:
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
       - name: Run build integrity
+        id: build
         env:
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity-default
           CI_BUILD_PROFILE: default
@@ -411,7 +411,7 @@ jobs:
       needs.build-integrity-default.result == 'success'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.integration-plan.outputs.build_smoke_matrix) }}
+      matrix: ${{ fromJSON(needs.build-integrity-default.outputs.build_smoke_matrix || '{"include":[]}') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container:

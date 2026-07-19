@@ -1760,7 +1760,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 "${PROJECT_SOURCE_DIR}/tests/integration")
         set_tests_properties(
             OpenCvOperationProviderBuildSmokeSafety PROPERTIES
-            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             TIMEOUT 30)
         add_test(NAME OpenCvOperationProviderDisabledBuild
             COMMAND ${Python3_EXECUTABLE}

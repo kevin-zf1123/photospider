@@ -2,8 +2,16 @@
 
 set -Eeuo pipefail
 
+# @file build_smoke_test.sh
+# @brief Revalidate and run one exact labelled test from a reusable full build.
+# @note SMOKE_TEST_NAME is workflow data, not shell or regex source; the Python
+#   runner resolves it to a fresh validated numeric CTest index.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
+# @var SMOKE_TEST_NAME
+# @brief Required exact CTest identity selected by one dynamic matrix entry.
+# @note The value remains process-local and is forwarded as one argv element.
 if [[ -z "${SMOKE_TEST_NAME:-}" ]]; then
   echo "SMOKE_TEST_NAME must select one exact labelled CTest name." >&2
   exit 2

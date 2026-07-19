@@ -2,6 +2,10 @@
 
 set -Eeuo pipefail
 
+# @file ctest_full.sh
+# @brief Run the ordinary CTest shard while excluding the exact build-smoke label.
+# @note The exclusion is label-based and contains no maintained test-name list.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=ci/scripts/common.sh
 source "$SCRIPT_DIR/common.sh"
