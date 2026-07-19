@@ -10,7 +10,7 @@ cd "$REPO_ROOT"
 
 ensure_ci_configured cmake_configure
 ensure_ci_all build_all
-CTEST_EXCLUDE_REGEX=${CTEST_EXCLUDE_REGEX-"^(SplitComputeServiceRuntimeTrace|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|DependencyDisabledInstallSmoke)$"}
+CTEST_EXCLUDE_REGEX=${CTEST_EXCLUDE_REGEX-"^(SplitComputeServiceRuntimeTrace|StaticProductConsumerSmoke|IpcDisabledInstallSmoke)$"}
 if [[ -n "$CTEST_EXCLUDE_REGEX" ]]; then
   run_logged ctest_full ctest --output-on-failure --test-dir "$BUILD_DIR" -E "$CTEST_EXCLUDE_REGEX"
 else

@@ -48,21 +48,6 @@ case "$CI_BUILD_PROFILE" in
     echo "IPC-disabled profile built photospider with BUILD_TESTING=OFF and IPC=OFF." |
       tee "$CI_ARTIFACT_DIR/summary.log"
     ;;
-  dependency-disabled)
-    BUILD_TESTING=OFF
-    PHOTOSPIDER_BUILD_IPC=OFF
-    PHOTOSPIDER_ENABLE_OPENCV=OFF
-    PHOTOSPIDER_ENABLE_YAML=OFF
-    CI_DISABLE_OPENCV_YAML_FIND=ON
-    ensure_ci_configured cmake_configure
-    run_logged validate_profile_cache require_ci_profile_cache
-    ensure_ci_targets build_dependency_disabled_products \
-      photospider_kernel \
-      photospider
-    mark_ci_build_reusable
-    echo "Dependency-disabled profile built kernel and Host without OpenCV or YAML." |
-      tee "$CI_ARTIFACT_DIR/summary.log"
-    ;;
   *)
     echo "Unsupported CI_BUILD_PROFILE: $CI_BUILD_PROFILE" >&2
     exit 2

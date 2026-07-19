@@ -57,29 +57,34 @@ Ubuntu/CMake 版本锁定；既有 Ubuntu base 与 apt 提供的 CMake 设置保
 ## Integration 测试分片
 
 对常规 published-image 路径中的非文档变更，`integration-plan` 会启用测试来配置被 checkout 的
-commit，并使用 `ctest -N` 精确发现 `StaticProductConsumerSmoke`、
-`IpcDisabledInstallSmoke` 与 `DependencyDisabledInstallSmoke` 测试名。它仅在对应测试存在时
-启用各 smoke 及其所需 build。这是针对被测 commit 的能力发现，而不是硬编码的分支名判断，因此
-以 `main` 为基础的 workflow 定义也能测试引入新 profile 的 pull request head。如果 smoke runner
-与精确 CTest 注册没有成对存在，规划会失败，不会静默丢失覆盖。
+commit，并使用 `ctest -N` 精确发现 `StaticProductConsumerSmoke` 和
+`IpcDisabledInstallSmoke` 测试名。它仅在对应测试存在时启用各 smoke 及其所需 build。因此，
+当前 `main` 树只调度 `build-integrity-default`；引入 IPC-disabled install smoke 的 refactor
+commit 还会调度 `build-integrity-ipc-disabled`。这是针对被测 commit 的能力发现，而不是硬编码
+的分支名判断，因此以 `main` 为基础的 workflow 定义也能测试 refactor pull request 的 head。
+如果 smoke runner 已存在却没有对应的精确 CTest 注册，规划会失败，不会静默丢失覆盖。
 
-每个 profile 都有独立 build job，只配置和编译该 profile，再上传
-`ci-build-default`、`ci-build-ipc-disabled` 或 `ci-build-dependency-disabled`。IPC-disabled
-profile 设置 `PHOTOSPIDER_BUILD_IPC=OFF`。Dependency-disabled profile 还会把两个 capability
-option 设为 `OFF`，禁用 OpenCV/yaml-cpp discovery，并构建真实 `photospider_kernel` 与
-`photospider` target。每个 smoke 只依赖匹配的 build job，因此一个 profile 失败不会抑制另一个
-profile 的测试。
+每个 profile 都有独立 build job，只配置和编译该 profile，再上传独立的可复用构建 artifact：
+`ci-build-default` 或 `ci-build-ipc-disabled`。IPC-disabled profile 使用
+`PHOTOSPIDER_BUILD_IPC=OFF` 配置 producer。Default consumers 只依赖
+`build-integrity-default`，IPC-disabled smoke 只依赖 `build-integrity-ipc-disabled`；因此，
+一个 profile 失败不会抑制另一个 profile 的测试。
 
 测试 job 会复用这些预构建 producer，不再由一个 runner 重新编译全部配置：
 
 - `full-ctest`、`scripted-cli`、`propagation-script`、`plugin-load` 和 `scheduler-repeat` 只下载 `ci-build-default`。
 - `full-ctest` 排除 `SplitComputeServiceRuntimeTrace`、`StaticProductConsumerSmoke`、
-  `IpcDisabledInstallSmoke` 与 `DependencyDisabledInstallSmoke`。Split trace 继续置于主 CI
-  之外，三个耗时较长的 build smoke 测试则在各自 job 中运行。
+  `IpcDisabledInstallSmoke`。Split trace 继续置于主 CI 之外，两个耗时较长的 build smoke
+  测试则在各自 job 中运行。
 - `static-product-consumer-smoke` 下载 `ci-build-default`，并且只运行 `StaticProductConsumerSmoke`。
 - `ipc-disabled-install-smoke` 下载预编译的 `ci-build-ipc-disabled` producer，并且只运行 `IpcDisabledInstallSmoke`。
-- `dependency-disabled-install-smoke` 下载预编译的 `ci-build-dependency-disabled` producer，并且
-  只运行 `DependencyDisabledInstallSmoke`。
+
+`DependencyDisabledInstallSmoke` 则是普通、长期维护的 CTest，并非独立规划的 workflow 分片。
+由于 `ctest_full.sh` 不排除它，既有 `full-ctest` integration 门禁会从 default producer 执行
+该测试。测试自行创建关闭 OpenCV 与 YAML capability 的全新嵌套 producer，构建并安装真实 kernel
+与 Host product，校验 package component discovery 和无效 option 组合，再构建并执行外部
+consumer。这样无需修改受保护的 workflow 或脚本路径，也能由既有 integration 门禁覆盖
+capability-off profile。
 
 如果 CI 镜像输入发生变化，workflow 不能使用此前发布的镜像，而会在一个具备 Docker 能力的 runner 上运行 `local-image-integration`。构建 `photospider-ci:local` 后，`integration_suite.sh` 会执行同样的动态规划，构建发现到的每个 profile，再使用各自对应的 build，依次运行相同的完整 CTest、build smoke、CLI、propagation、plugin 和 scheduler 分片。该 fallback 保持相同的测试选择与 producer 配置，但接受单个本地镜像 runner 无法将工作扇出到多个 artifact-consuming job 的限制。
 
@@ -128,19 +133,11 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/change_classification_test.sh`：覆盖文档、源码、混合、type change、workflow、重命名、删除、重复 `CI/**` push、pull-request merge-base、branch 或 revision 缺失、全零/不可达 revision、手动触发、空 diff 与浅克隆场景，验证长期路由契约。
 - `ci/scripts/ci_routing_test.sh`：对两份生产 `protected-ci-paths.if` 表达式做空白归一化并锁定精确源码，再抽取并执行真实 stable-gate、checkout 前 fork-rejection 与 protected-path shell block。隔离 Git fixture 会证明两份生产门禁都拒绝含换行的 `ci/**` 路径、安全记录该路径，并在 producer 或 reader 失败时 fail closed。一个 job/step-scoped production 断言会抽取 published-image 中两个精确的 history-fetch step，并要求各自拥有顶层 `shell: bash`，因此其他 job 或相邻 step 的元数据无法满足该契约。另一个 job/step-scoped 断言要求恰好一个使用 `shell: bash` 的 `Trust checked-out workspace` step；它唯一可执行的内容必须是启用严格模式、把精确 `$GITHUB_WORKSPACE` 加入 global `safe.directory`，以及校验 `HEAD^{commit}`。其他 job 或相邻 step 中的条目、任何额外或通配的 `safe.directory`，以及晚于任一 fetch 或 `healthcheck.sh` 的位置都无法满足断言。抽取出的 production trust block 会在隔离 HOME 与 Git 仓库中运行，并要求所得 global 配置只包含该仓库的精确路径。Job-scoped 断言还分别锁定 published-image 与 local-image 的 pull-request 精确 base fetch、`CI/**` main fetch/校验、三路 `CI_BASE_REF` 路由及执行顺序。测试会执行两份抽取出的 production main-fetch block；隔离历史会证明累计 `origin/main` 范围保留较早的未格式化 C++ 路径，而 event-before 范围只包含较晚的文档路径。Detector fixture 继续覆盖精确/累计 base、空比较、含换行路径及 changed-path 失败传播。这些本机源码与 shell 检查明确不声称执行 GitHub expression evaluator、复现跨 UID dubious ownership 或模拟托管 container runner。
 - `ci/scripts/ci_image_changed.sh`：检测当前 NUL 分隔且不带 status 过滤的 diff 是否修改 CI 镜像输入；workflow 会向它提供已拉取并验证的 pull-request 精确 base SHA，diff 失败时不会输出路由。
-- `ci/scripts/integration_plan.sh`：配置一个启用测试的小型规划 build tree，使用 `ctest -N` 发现三个
-  精确 build-smoke 测试名，对照 runner 文件校验注册，并输出 smoke/build capability 标记。
+- `ci/scripts/integration_plan.sh`：配置一个启用测试的小型规划 build tree，使用 `ctest -N` 发现两个精确 build-smoke 测试名，对照 runner 文件校验注册，并输出 smoke/build 能力标记。
 - `ci/scripts/integration_suite.sh`：应用动态规划，并为本地镜像 fallback 路径顺序运行所得 integration 分片。
-- `ci/scripts/build_integrity.sh`：构建 `CI_BUILD_PROFILE` 选定的 profile。`default` 会构建 required
-  target 与完整 build tree，再执行 CTest discovery；`ipc-disabled` 只构建 IPC-off product；
-  `dependency-disabled` 校验完整 capability-off cache，并在不发现依赖时构建 kernel aggregate 与
-  Host product。
-- `ci/scripts/ctest_full.sh`：复用或构建 default producer 并运行 CTest，默认排除三个已独立分片的
-  build smoke 测试。受保护脚本还保留了已移除 `SplitComputeServiceRuntimeTrace` 的 no-op
-  exclusion；source-layout 变更落地主线后，必须从 main 创建后续 `CI/**` branch 删除该 token。
-- `ci/scripts/build_smoke_test.sh`：从经过校验的可复用 producer 运行单独选择的 build smoke；
-  `SMOKE_TEST` 可选择 `static-product-consumer`、`ipc-disabled-install` 或
-  `dependency-disabled-install`。
+- `ci/scripts/build_integrity.sh`：构建 `CI_BUILD_PROFILE` 选定的 profile。`default` 会构建 required targets 与完整 build tree，再执行 CTest discovery；`ipc-disabled` 设置 `BUILD_TESTING=OFF` 与 `PHOTOSPIDER_BUILD_IPC=OFF`，校验 cache，并且只构建 `photospider` producer target。
+- `ci/scripts/ctest_full.sh`：复用或构建 default producer 并运行 CTest，默认排除两个已独立分片的 build smoke 测试。它不会排除 `DependencyDisabledInstallSmoke`，该测试的嵌套 producer 会提供 capability-off 覆盖。受保护脚本还保留了已移除 `SplitComputeServiceRuntimeTrace` 的 no-op exclusion；source-layout 变更落地主线后，必须从 main 创建后续 `CI/**` branch 删除该 token。
+- `ci/scripts/build_smoke_test.sh`：从可复用 producer 运行一个单独选择的 build smoke 测试；将 `SMOKE_TEST` 设置为 `static-product-consumer` 或 `ipc-disabled-install`。
 - `ci/scripts/graph_cli_script_test.sh`：使用上述执行前 Graph 文档能力标记，运行相互隔离的正路径、显式来源缺失和无效 target REPL 检查。
 - `ci/scripts/propagation_script_test.sh`：构建 `test_propagation`，并对线性和复杂 propagation 图运行 `tiles all`。
 - `ci/scripts/plugin_load_test.sh`：检查插件产物、plugin manager 测试、scheduler plugin loader 测试和 CLI scheduler 插件列表。
@@ -168,12 +165,10 @@ BUILD_DIR="$PWD/build/ci-default" CI_BUILD_PROFILE=default \
 BUILD_DIR="$PWD/build/ci-ipc-disabled" CI_BUILD_PROFILE=ipc-disabled \
   CI_ARTIFACT_DIR=CI-results/build-integrity-ipc-disabled \
   bash ci/scripts/build_integrity.sh
-BUILD_DIR="$PWD/build/ci-dependency-disabled" \
-  CI_BUILD_PROFILE=dependency-disabled \
-  CI_ARTIFACT_DIR=CI-results/build-integrity-dependency-disabled \
-  bash ci/scripts/build_integrity.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/ctest-full bash ci/scripts/ctest_full.sh
+ctest --test-dir "$PWD/build/ci-default" --output-on-failure \
+  -R '^DependencyDisabledInstallSmoke$'
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   SMOKE_TEST=static-product-consumer \
   CI_ARTIFACT_DIR=CI-results/static-product-consumer-smoke \
@@ -181,11 +176,6 @@ BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
 BUILD_DIR="$PWD/build/ci-ipc-disabled" CI_REUSE_BUILD=ON \
   SMOKE_TEST=ipc-disabled-install \
   CI_ARTIFACT_DIR=CI-results/ipc-disabled-install-smoke \
-  bash ci/scripts/build_smoke_test.sh
-BUILD_DIR="$PWD/build/ci-dependency-disabled" CI_REUSE_BUILD=ON \
-  CI_BUILD_PROFILE=dependency-disabled \
-  SMOKE_TEST=dependency-disabled-install \
-  CI_ARTIFACT_DIR=CI-results/dependency-disabled-install-smoke \
   bash ci/scripts/build_smoke_test.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/graph-cli \
@@ -202,8 +192,9 @@ BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
 SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitizer_test.sh
 ```
 
-只有被 checkout commit 的 integration plan 报告了相应能力时，可选 profile 及其 smoke 命令才
-有效。要复现动态选出的完整执行顺序，可使用：
+只有被 checkout commit 的 integration plan 报告了相应能力时，`ipc-disabled` profile 和两个
+独立分片的 smoke 命令才有效。上面的 `DependencyDisabledInstallSmoke` 直接命令运行的是普通
+CTest，不依赖 integration-plan profile。要复现动态选出的完整执行顺序，可使用：
 
 ```bash
 CI_ARTIFACT_ROOT=CI-results bash ci/scripts/integration_suite.sh
