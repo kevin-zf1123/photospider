@@ -105,9 +105,11 @@ class InventoryParsingTest(unittest.TestCase):
     def test_matrix_is_sorted_safe_and_round_trippable(self) -> None:
         """@brief Preserve exact hostile names in deterministic safe output.
 
-        @return None after ordering, JSON round trip, and artifact-key checks.
+        @return None after command retention, ordering, JSON round trip, and
+          artifact-key checks.
         @throws AssertionError If names are reordered unsafely, raw newlines
-          enter JSON, or artifact keys collide or contain unsafe characters.
+          enter JSON, command argv is changed, or artifact keys collide or
+          contain unsafe characters.
         @note No subprocess or filesystem I/O occurs.
         """
 
@@ -132,6 +134,13 @@ class InventoryParsingTest(unittest.TestCase):
             ]
         )
         inventory = inventory_module.parse_inventory(raw)
+        records_by_name = {
+            test.name: test for test in inventory.tests
+        }
+        self.assertEqual(
+            records_by_name["zeta [consumer]"].command,
+            ("python3", "zeta.py"),
+        )
         matrix_text, selected = inventory_module.build_matrix(inventory.build_smokes())
         matrix = json.loads(matrix_text)
 
@@ -314,6 +323,7 @@ class InventoryParsingTest(unittest.TestCase):
             inventory_module.InventoryError, "no executable CTest command"
         ):
             commandless.build_smokes()
+        self.assertIsNone(commandless.tests[0].command)
 
     def test_unsupported_schema_and_invalid_json_fail_closed(self) -> None:
         """@brief Reject malformed JSON, kind, and boolean schema versions.

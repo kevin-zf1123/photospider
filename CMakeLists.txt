@@ -1706,9 +1706,22 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # CTest is reserved for long-lived runtime, package-consumer, compile, and
     # error-boundary behavior. Migration/residue scanners and source-quality
     # audits are intentionally absent from the test inventory.
+    set(PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS
+        --expected-smoke DependencyDisabledInstallSmoke
+        --expected-smoke IpcDisabledInstallSmoke)
+    if(PHOTOSPIDER_BUILD_IPC)
+        list(APPEND
+            PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS
+            --expected-smoke StaticProductConsumerSmoke)
+    endif()
     add_test(NAME InstallConsumerArchitecturePropagationSafety
         COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/install_consumer_architecture_propagation_test.py"
+            --build-dir "${CMAKE_BINARY_DIR}"
+            --ctest-executable "${CMAKE_CTEST_COMMAND}"
+            --config "$<CONFIG>"
+            --python-executable "${Python3_EXECUTABLE}"
+            ${PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS}
         WORKING_DIRECTORY
             "${PROJECT_SOURCE_DIR}/tests/integration")
     set_tests_properties(

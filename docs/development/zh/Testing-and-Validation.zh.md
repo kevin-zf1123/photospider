@@ -119,7 +119,15 @@ helper，它会作为普通 safety regression 留在完整 CTest 分片。
 safety regression，本身不会启动 CMake、CTest、install 或 compile target。
 `InstallConsumerArchitecturePropagationSafety` 同样留在主分片：它使用可丢弃的 producer cache
 fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
-在不启动 configure、build 或 install 的情况下验证 cache 到 child argv 的传播。
+在不启动 configure、build 或 install 的情况下验证 cache 到 child argv 的传播。CMake 注册该
+safety test 时，还会传入当前 build tree、CTest executable、configuration 与 Python launcher。
+测试随后通过 `ctest --show-only=json-v1` 和生产 inventory parser 查询该 build tree，并要求三个
+真实 smoke 遵循配置相关的精确集合：所有 profile 都必须各自只注册一次
+`DependencyDisabledInstallSmoke` 与 `IpcDisabledInstallSmoke`；
+`StaticProductConsumerSmoke` 只在 IPC enabled 时必须精确注册一次，在 IPC disabled 时必须缺席。
+每个预期 entry 还必须保持 enabled、带正确 label，并以精确的 `python -B` driver path 开头。被
+注释或处于 inactive CMake 分支中的源码不会生成 CTest entry，因此无法通过这项生成后 inventory
+检查。该查询不会执行任何真实 smoke，也不会改变现有六项 build-smoke 分类。
 
 CTest 会保留每个带标签测试的注册，供本机直接运行。CI 的 `full-ctest` 分片会排除该精确标签；
 配置规划只会把 `ctest --show-only=json-v1` 解析为允许空集合的预检，因为默认

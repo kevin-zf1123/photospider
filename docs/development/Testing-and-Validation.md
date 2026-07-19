@@ -161,7 +161,18 @@ not itself start CMake, CTest, an install, or a compile target.
 shard: it runs the three install-consumer drivers' real command-construction
 paths against disposable producer cache fixtures while replacing subprocess
 execution, so it verifies cache-to-child-argv propagation without launching a
-configure, build, or install.
+configure, build, or install. When CMake registers the safety test, it also
+supplies the current build tree, CTest executable, configuration, and Python
+launcher. The test queries that tree through
+`ctest --show-only=json-v1` and the production inventory parser. It requires
+`DependencyDisabledInstallSmoke` and `IpcDisabledInstallSmoke` exactly once in
+every profile, requires `StaticProductConsumerSmoke` exactly once only when
+IPC is enabled and absent otherwise, then requires every expected entry to
+remain enabled and labelled and to start with the exact `python -B` driver
+path. Commented or inactive CMake source cannot satisfy this
+generated-inventory check because it produces no CTest entry. The inventory
+query executes none of the real smokes and does not change the six-test
+build-smoke classification.
 
 CTest keeps every labelled test registered for direct local use. CI's
 `full-ctest` shard excludes the exact label. Configuration planning parses

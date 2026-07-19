@@ -3,17 +3,59 @@
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
+import json
 import pathlib
-import re
 import sys
 import tempfile
 import unittest
+from typing import Any
 from unittest import mock
 
 import cmake_build_smoke_support as architecture_support
 import dependency_disabled_install_smoke as dependency_disabled
 import ipc_disabled_install_smoke as ipc_disabled
 import static_product_consumer_smoke as static_product
+
+
+#: @brief Resolved repository root shared by inventory and driver assertions.
+#: @note The path is immutable for the test-process lifetime and is never used
+#:   as a cleanup target.
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
+#: @brief Exact CI inventory implementation loaded as the system under test.
+#: @note Loading by path keeps direct script execution independent of cwd and
+#:   does not install or copy the production module.
+BUILD_SMOKE_INVENTORY_MODULE_PATH = (
+    REPOSITORY_ROOT / "ci" / "scripts" / "build_smoke_inventory.py"
+)
+#: @brief Unique process-local module identity for dataclass initialization.
+#: @note The name avoids colliding with other unittest modules that may load the
+#:   same production script under their own isolated identity.
+BUILD_SMOKE_INVENTORY_MODULE_NAME = (
+    "_photospider_install_consumer_build_smoke_inventory"
+)
+#: @brief Import specification for the production CTest inventory parser.
+#: @note The loader releases its source file after synchronous module execution.
+BUILD_SMOKE_INVENTORY_SPEC = importlib.util.spec_from_file_location(
+    BUILD_SMOKE_INVENTORY_MODULE_NAME,
+    BUILD_SMOKE_INVENTORY_MODULE_PATH,
+)
+if (
+    BUILD_SMOKE_INVENTORY_SPEC is None
+    or BUILD_SMOKE_INVENTORY_SPEC.loader is None
+):
+    raise RuntimeError(
+        f"Cannot load {BUILD_SMOKE_INVENTORY_MODULE_PATH}"
+    )
+#: @brief Process-local production inventory module used by all registrations.
+#: @note sys.modules registration is required by dataclass initialization and
+#:   lasts only until this test process exits.
+ctest_inventory = importlib.util.module_from_spec(
+    BUILD_SMOKE_INVENTORY_SPEC
+)
+sys.modules[BUILD_SMOKE_INVENTORY_MODULE_NAME] = ctest_inventory
+BUILD_SMOKE_INVENTORY_SPEC.loader.exec_module(ctest_inventory)
 
 
 #: @brief Module-owned multi-architecture CMake cache fixture for all cases.
@@ -24,6 +66,238 @@ ARCHITECTURES = "arm64;x86_64"
 #: @note This process-lifetime assertion value must stay aligned with
 #:   ``ARCHITECTURES`` and remain one unsplit argv element.
 ARCHITECTURE_ARGUMENT = f"-DCMAKE_OSX_ARCHITECTURES={ARCHITECTURES}"
+#: @brief Exact maintained install-consumer CTest names and driver basenames.
+#: @note Every expected entry carries the build-smoke label in real CTest
+#:   inventory; ordering is stable only for deterministic diagnostics.
+INSTALL_CONSUMER_CTEST_REGISTRATIONS = (
+    (
+        "DependencyDisabledInstallSmoke",
+        "dependency_disabled_install_smoke.py",
+    ),
+    (
+        "IpcDisabledInstallSmoke",
+        "ipc_disabled_install_smoke.py",
+    ),
+    (
+        "StaticProductConsumerSmoke",
+        "static_product_consumer_smoke.py",
+    ),
+)
+#: @brief Exact maintained names derived from the command contract table.
+#: @note CMake passes a configuration-specific subset because the static
+#:   product smoke exists only when IPC product support is enabled.
+INSTALL_CONSUMER_CTEST_NAMES = tuple(
+    test_name
+    for test_name, _driver_name in INSTALL_CONSUMER_CTEST_REGISTRATIONS
+)
+
+
+def ctest_test_entry(
+    name: str,
+    command: list[str] | None,
+    *,
+    disabled: bool = False,
+    labels: tuple[str, ...] = ("build-smoke",),
+) -> dict[str, Any]:
+    """@brief Create one detached synthetic CTest json-v1 test entry.
+
+    @param name Exact CTest test name.
+    @param command Optional command argv; None omits executable state.
+    @param disabled Whether to add the boolean CTest DISABLED property.
+    @param labels Exact ordered label values serialized for the entry.
+    @return Newly owned JSON-compatible test-entry mapping.
+    @throws None This helper performs no filesystem or subprocess I/O.
+    @note Synthetic command and property containers are copied so mutations in
+      one fail-closed subtest cannot affect another.
+    """
+
+    properties: list[dict[str, Any]] = [
+        {"name": "LABELS", "value": list(labels)}
+    ]
+    if disabled:
+        properties.append({"name": "DISABLED", "value": True})
+    entry: dict[str, Any] = {
+        "name": name,
+        "properties": properties,
+    }
+    if command is not None:
+        entry["command"] = list(command)
+    return entry
+
+
+def ctest_inventory_payload(
+    entries: list[dict[str, Any]],
+) -> bytes:
+    """@brief Serialize one complete synthetic CTest json-v1 inventory.
+
+    @param entries Test entries in their intended numeric CTest index order.
+    @return UTF-8 ctestInfo payload accepted by the production parser.
+    @throws TypeError If an entry is not JSON serializable.
+    @throws UnicodeError If serialized text cannot be encoded as UTF-8.
+    @note Serialization is in-memory and retains no caller-owned containers.
+    """
+
+    return json.dumps(
+        {
+            "kind": "ctestInfo",
+            "tests": entries,
+            "version": {"major": 1, "minor": 0},
+        }
+    ).encode("utf-8")
+
+
+def expected_install_consumer_ctest_entries(
+    python_executable: str,
+    expected_test_names: tuple[str, ...] = INSTALL_CONSUMER_CTEST_NAMES,
+) -> list[dict[str, Any]]:
+    """@brief Build valid entries for one maintained configuration subset.
+
+    @param python_executable Exact launcher expected at command argv index zero.
+    @param expected_test_names Configuration-specific exact maintained subset.
+    @return Newly owned entries with the exact ``python -B driver`` prefixes.
+    @throws ctest_inventory.InventoryError If a requested name is unknown,
+      duplicated, or the expected subset is empty.
+    @note Remaining driver arguments are intentionally absent because this
+      fixture validates the registration prefix rather than driver behavior.
+    """
+
+    if not expected_test_names:
+        raise ctest_inventory.InventoryError(
+            "At least one install-consumer smoke must be expected."
+        )
+    if len(set(expected_test_names)) != len(expected_test_names):
+        raise ctest_inventory.InventoryError(
+            "Expected install-consumer smoke names must be unique."
+        )
+    driver_by_name = dict(INSTALL_CONSUMER_CTEST_REGISTRATIONS)
+    unknown_names = tuple(
+        name for name in expected_test_names if name not in driver_by_name
+    )
+    if unknown_names:
+        raise ctest_inventory.InventoryError(
+            "Unknown expected install-consumer smoke names: "
+            f"{list(unknown_names)!r}."
+        )
+    integration_directory = REPOSITORY_ROOT / "tests" / "integration"
+    return [
+        ctest_test_entry(
+            test_name,
+            [
+                python_executable,
+                "-B",
+                str(integration_directory / driver_by_name[test_name]),
+            ],
+        )
+        for test_name in expected_test_names
+    ]
+
+
+def require_install_consumer_ctest_commands(
+    inventory: Any,
+    *,
+    python_executable: str,
+    expected_test_names: tuple[str, ...] = INSTALL_CONSUMER_CTEST_NAMES,
+) -> None:
+    """@brief Validate the configuration-specific install-smoke command set.
+
+    The check requires each expected exact name once and every other maintained
+    name zero times. It then reuses the production build-smoke selector to
+    reject missing labels, disabled state, and unusable commands. Each
+    surviving argv must start with the configured Python launcher, immediately
+    followed by ``-B`` and the exact maintained driver.
+
+    @param inventory Parsed production ``Inventory`` instance to validate.
+    @param python_executable Exact CMake-selected Python launcher.
+    @param expected_test_names Exact maintained subset enabled by this CMake
+      configuration.
+    @return None after the exact set and every live command prefix pass.
+    @throws ctest_inventory.InventoryError If expected names are unknown,
+      duplicated, or empty; an expected name is absent/duplicated; a
+      configuration-inactive maintained name is present; or an expected entry
+      lacks the label, is disabled/commandless, or has a different command
+      prefix.
+    @note The function inspects only immutable in-memory inventory. It neither
+      launches CTest nor executes any smoke command.
+    """
+
+    expected_install_consumer_ctest_entries(
+        python_executable,
+        expected_test_names,
+    )
+    expected_name_set = set(expected_test_names)
+    integration_directory = REPOSITORY_ROOT / "tests" / "integration"
+    for test_name, driver_name in INSTALL_CONSUMER_CTEST_REGISTRATIONS:
+        matches = tuple(
+            test for test in inventory.tests if test.name == test_name
+        )
+        expected_count = 1 if test_name in expected_name_set else 0
+        if len(matches) != expected_count:
+            expected_state = (
+                "appear exactly once"
+                if expected_count == 1
+                else "be absent"
+            )
+            raise ctest_inventory.InventoryError(
+                f"Maintained install-consumer smoke {test_name!r} must "
+                f"{expected_state} in CTest inventory for this configuration; "
+                f"observed {len(matches)} entries."
+            )
+        if expected_count == 0:
+            continue
+        record = inventory.require_selected(test_name)
+        expected_prefix = (
+            python_executable,
+            "-B",
+            str(integration_directory / driver_name),
+        )
+        if record.command is None or record.command[:3] != expected_prefix:
+            observed_prefix = (
+                None
+                if record.command is None
+                else list(record.command[:3])
+            )
+            raise ctest_inventory.InventoryError(
+                f"Install-consumer smoke {test_name!r} must start with "
+                f"{list(expected_prefix)!r}; observed {observed_prefix!r}."
+            )
+
+
+def parse_live_inventory_arguments(
+    argv: list[str],
+) -> tuple[argparse.Namespace, list[str]]:
+    """@brief Separate optional live-CTest inputs from unittest arguments.
+
+    @param argv Complete process argv including the script path.
+    @return Parsed live options plus argv preserved for ``unittest.main``.
+    @throws SystemExit If argparse rejects a live option or build-dir use omits
+      the configured Python launcher or expected smoke set.
+    @note Direct no-option execution leaves live validation disabled. CTest
+      supplies all live inputs, while standard unittest flags pass through.
+    """
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--build-dir", type=pathlib.Path)
+    parser.add_argument("--ctest-executable", default="ctest")
+    parser.add_argument("--config")
+    parser.add_argument("--python-executable")
+    parser.add_argument(
+        "--expected-smoke",
+        action="append",
+        choices=INSTALL_CONSUMER_CTEST_NAMES,
+        default=[],
+    )
+    options, unittest_arguments = parser.parse_known_args(argv[1:])
+    if options.build_dir is not None and not options.python_executable:
+        parser.error(
+            "--python-executable is required when --build-dir enables "
+            "live CTest validation"
+        )
+    if options.build_dir is not None and not options.expected_smoke:
+        parser.error(
+            "at least one --expected-smoke is required when --build-dir "
+            "enables live CTest validation"
+        )
+    return options, [argv[0], *unittest_arguments]
 
 
 def write_cmake_cache(
@@ -173,57 +447,256 @@ class CommandRecorder:
 
 
 class InstallConsumerCTestRegistrationTest(unittest.TestCase):
-    """@brief Lock Python bytecode policy for the three real install smokes.
+    """@brief Lock active CTest commands for the three real install smokes.
 
-    @throws OSError If the repository CMake source cannot be read.
-    @throws AssertionError If a named smoke is absent, duplicated, points at a
-      different driver, or does not place ``-B`` immediately after Python.
-    @note This source-level regression starts no process and does not classify
-      itself as a build smoke. It keeps the durable six-test labelled inventory
-      unchanged while failing closed on registration drift.
+    @throws OSError If an explicitly configured live CTest query cannot start.
+    @throws ctest_inventory.InventoryError If live or synthetic inventory is
+      malformed or violates the exact registration contract.
+    @throws AssertionError If a fail-closed counterexample is accepted.
+    @note Synthetic cases perform no process I/O. The live case runs only when
+      CMake passes a configured build tree; it queries inventory without
+      executing a configure, build, install, or smoke command.
     """
 
-    def test_real_install_smokes_disable_python_bytecode(self) -> None:
-        """@brief Require ``python -B`` for every helper-importing real smoke.
+    #: @brief Optional configured build tree used only by the live test.
+    #: @note None keeps direct Python execution independent of a producer tree.
+    live_build_dir: pathlib.Path | None = None
+    #: @brief CTest launcher paired with ``live_build_dir``.
+    #: @note CMake overrides the process-local default with
+    #:   ``CMAKE_CTEST_COMMAND``.
+    live_ctest_executable: str = "ctest"
+    #: @brief Optional multi-configuration selector for live discovery.
+    #: @note None or an empty string omits ``-C`` in the production query.
+    live_config: str | None = None
+    #: @brief Exact configured Python launcher required by live commands.
+    #: @note None is valid only while live validation is disabled.
+    live_python_executable: str | None = None
+    #: @brief Exact maintained smoke subset enabled by the live configuration.
+    #: @note CMake supplies two names when IPC is disabled and three when
+    #:   enabled; direct no-option execution leaves the tuple empty.
+    live_expected_test_names: tuple[str, ...] = ()
 
-        @return None after all three exact CMake registrations match once.
-        @throws OSError If the root CMake source cannot be read.
-        @throws AssertionError If any registration or launcher token differs.
-        @note The expression permits whitespace-only formatting changes but
-          binds each test name directly to its maintained driver path. It does
-          not inspect or modify CTest labels.
+    def test_valid_synthetic_inventory_matches_all_commands(self) -> None:
+        """@brief Accept both legal configuration-specific active sets.
+
+        @return None after IPC-enabled and IPC-disabled command sets pass.
+        @throws AssertionError If the valid synthetic inventory is rejected.
+        @note The case exercises the production parser and semantic checker
+          entirely in memory.
         """
 
-        cmake_source = (
-            pathlib.Path(__file__).resolve().parents[2] / "CMakeLists.txt"
-        ).read_text(encoding="utf-8")
-        registrations = (
+        python_executable = "/fixture/python3"
+        profiles = (
+            ("ipc-enabled", INSTALL_CONSUMER_CTEST_NAMES),
+            ("ipc-disabled", INSTALL_CONSUMER_CTEST_NAMES[:2]),
+        )
+        for profile, expected_test_names in profiles:
+            with self.subTest(profile=profile):
+                inventory = ctest_inventory.parse_inventory(
+                    ctest_inventory_payload(
+                        expected_install_consumer_ctest_entries(
+                            python_executable,
+                            expected_test_names,
+                        )
+                    )
+                )
+                require_install_consumer_ctest_commands(
+                    inventory,
+                    python_executable=python_executable,
+                    expected_test_names=expected_test_names,
+                )
+
+        unexpected_static_inventory = ctest_inventory.parse_inventory(
+            ctest_inventory_payload(
+                expected_install_consumer_ctest_entries(
+                    python_executable,
+                    INSTALL_CONSUMER_CTEST_NAMES,
+                )
+            )
+        )
+        with self.assertRaisesRegex(
+            ctest_inventory.InventoryError,
+            "must be absent",
+        ):
+            require_install_consumer_ctest_commands(
+                unexpected_static_inventory,
+                python_executable=python_executable,
+                expected_test_names=INSTALL_CONSUMER_CTEST_NAMES[:2],
+            )
+
+    def test_missing_inactive_and_commented_entries_fail_closed(
+        self,
+    ) -> None:
+        """@brief Reject every source state that yields no active CTest entry.
+
+        @return None after missing, ``if(FALSE)``, and bracket-comment models
+          each fail because one exact required name is absent.
+        @throws AssertionError If any omitted registration is accepted.
+        @note CTest JSON contains neither inactive branches nor comments, so
+          each counterexample is correctly represented by omitting that entry
+          rather than parsing CMake source text.
+        """
+
+        python_executable = "/fixture/python3"
+        source_states = (
+            ("missing", 0),
+            ("inactive-if-false", 1),
+            ("bracket-commented", 2),
+        )
+        for source_state, missing_index in source_states:
+            with self.subTest(source_state=source_state):
+                entries = expected_install_consumer_ctest_entries(
+                    python_executable
+                )
+                entries.pop(missing_index)
+                inventory = ctest_inventory.parse_inventory(
+                    ctest_inventory_payload(entries)
+                )
+                with self.assertRaisesRegex(
+                    ctest_inventory.InventoryError,
+                    "must appear exactly once",
+                ):
+                    require_install_consumer_ctest_commands(
+                        inventory,
+                        python_executable=python_executable,
+                    )
+
+    def test_duplicate_disabled_and_commandless_entries_fail_closed(
+        self,
+    ) -> None:
+        """@brief Reject non-unique or non-executable maintained registrations.
+
+        @return None after duplicate, disabled, and commandless counterexamples
+          are rejected by production inventory validation.
+        @throws AssertionError If identity or executable-state drift is
+          accepted.
+        @note Every case starts from newly allocated valid entries and performs
+          no filesystem or process I/O.
+        """
+
+        python_executable = "/fixture/python3"
+        duplicate_entries = expected_install_consumer_ctest_entries(
+            python_executable
+        )
+        duplicate_entries.append(
+            ctest_test_entry(
+                duplicate_entries[0]["name"],
+                list(duplicate_entries[0]["command"]),
+            )
+        )
+        with self.assertRaisesRegex(
+            ctest_inventory.InventoryError,
+            "duplicated",
+        ):
+            ctest_inventory.parse_inventory(
+                ctest_inventory_payload(duplicate_entries)
+            )
+
+        for state in ("disabled", "commandless"):
+            with self.subTest(state=state):
+                entries = expected_install_consumer_ctest_entries(
+                    python_executable
+                )
+                command = list(entries[0]["command"])
+                entries[0] = ctest_test_entry(
+                    str(entries[0]["name"]),
+                    None if state == "commandless" else command,
+                    disabled=state == "disabled",
+                )
+                inventory = ctest_inventory.parse_inventory(
+                    ctest_inventory_payload(entries)
+                )
+                diagnostic = (
+                    "disabled"
+                    if state == "disabled"
+                    else "no CTest command"
+                )
+                with self.assertRaisesRegex(
+                    ctest_inventory.InventoryError,
+                    diagnostic,
+                ):
+                    require_install_consumer_ctest_commands(
+                        inventory,
+                        python_executable=python_executable,
+                    )
+
+    def test_launcher_flag_and_driver_drift_fail_closed(self) -> None:
+        """@brief Reject every semantic command-prefix drift independently.
+
+        @return None after wrong launcher, displaced ``-B``, and wrong driver
+          each fail the exact argv-prefix contract.
+        @throws AssertionError If a syntactically valid but incorrect command
+          prefix is accepted.
+        @note The production JSON parser intentionally accepts generic command
+          argv; this integration-specific checker owns their semantics.
+        """
+
+        python_executable = "/fixture/python3"
+        command_mutations = (
+            ("wrong-launcher", 0, "/fixture/not-python3"),
+            ("missing-bytecode-flag", 1, "--version"),
             (
-                "DependencyDisabledInstallSmoke",
-                "dependency_disabled_install_smoke.py",
-            ),
-            (
-                "IpcDisabledInstallSmoke",
-                "ipc_disabled_install_smoke.py",
-            ),
-            (
-                "StaticProductConsumerSmoke",
-                "static_product_consumer_smoke.py",
+                "wrong-driver",
+                2,
+                str(
+                    REPOSITORY_ROOT
+                    / "tests"
+                    / "integration"
+                    / "not_the_install_driver.py"
+                ),
             ),
         )
-        for test_name, driver_name in registrations:
-            with self.subTest(test_name=test_name):
-                name_pattern = re.compile(
-                    rf"add_test\(\s*NAME\s+{re.escape(test_name)}(?=\s)"
+        for state, argument_index, replacement in command_mutations:
+            with self.subTest(state=state):
+                entries = expected_install_consumer_ctest_entries(
+                    python_executable
                 )
-                self.assertEqual(len(name_pattern.findall(cmake_source)), 1)
-                pattern = re.compile(
-                    rf"add_test\(\s*NAME\s+{re.escape(test_name)}"
-                    rf"\s+COMMAND\s+\$\{{Python3_EXECUTABLE\}}\s+-B"
-                    rf"\s+\"\$\{{PROJECT_SOURCE_DIR\}}/tests/integration/"
-                    rf"{re.escape(driver_name)}\""
+                command = list(entries[0]["command"])
+                command[argument_index] = replacement
+                entries[0]["command"] = command
+                inventory = ctest_inventory.parse_inventory(
+                    ctest_inventory_payload(entries)
                 )
-                self.assertEqual(len(pattern.findall(cmake_source)), 1)
+                with self.assertRaisesRegex(
+                    ctest_inventory.InventoryError,
+                    "must start with",
+                ):
+                    require_install_consumer_ctest_commands(
+                        inventory,
+                        python_executable=python_executable,
+                    )
+
+    def test_configured_ctest_inventory_matches_all_commands(self) -> None:
+        """@brief Validate commands emitted by the current configured tree.
+
+        @return None after a live ``ctest --show-only=json-v1`` query and all
+          exact registration checks pass, or after an explicit direct-run skip.
+        @throws OSError If the configured CTest process cannot be started.
+        @throws ctest_inventory.InventoryError If discovery or registration
+          validation fails.
+        @note Direct Python execution deliberately skips only this live case;
+          CMake supplies the authoritative tree, executable, config, and
+          launcher when the safety regression runs through CTest.
+        """
+
+        if self.live_build_dir is None:
+            self.skipTest(
+                "live CTest validation requires CMake --build-dir metadata"
+            )
+        if self.live_python_executable is None:
+            self.fail(
+                "live CTest validation has no configured Python launcher"
+            )
+        inventory = ctest_inventory.query_ctest(
+            self.live_ctest_executable,
+            self.live_build_dir,
+            self.live_config,
+        )
+        require_install_consumer_ctest_commands(
+            inventory,
+            python_executable=self.live_python_executable,
+            expected_test_names=self.live_expected_test_names,
+        )
 
 
 class ProducerArchitectureArgumentPolicyTest(unittest.TestCase):
@@ -596,4 +1069,20 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    live_options, forwarded_unittest_argv = (
+        parse_live_inventory_arguments(sys.argv)
+    )
+    InstallConsumerCTestRegistrationTest.live_build_dir = (
+        live_options.build_dir
+    )
+    InstallConsumerCTestRegistrationTest.live_ctest_executable = (
+        live_options.ctest_executable
+    )
+    InstallConsumerCTestRegistrationTest.live_config = live_options.config
+    InstallConsumerCTestRegistrationTest.live_python_executable = (
+        live_options.python_executable
+    )
+    InstallConsumerCTestRegistrationTest.live_expected_test_names = tuple(
+        live_options.expected_smoke
+    )
+    unittest.main(argv=forwarded_unittest_argv)

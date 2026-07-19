@@ -70,6 +70,7 @@ class TestRecord:
     @param labels Ordered, unique labels parsed from the LABELS property.
     @param disabled Whether CTest marks the test as disabled.
     @param has_command Whether the JSON entry contains a valid command vector.
+    @param command Immutable validated command argv, or None when unusable.
     @note Records are immutable value objects. They borrow no JSON containers
       and own no I/O, cache, subprocess, or thread lifetime.
     """
@@ -84,6 +85,10 @@ class TestRecord:
     disabled: bool
     #: @brief True only when the JSON command is a usable string argv.
     has_command: bool
+    #: @brief Detached validated CTest command argv, or None when unusable.
+    #: @note Empty non-launcher arguments remain intact for multi-configuration
+    #:   generator expressions; callers must interpret command semantics.
+    command: tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -279,7 +284,8 @@ def parse_inventory(raw_json: bytes | str) -> Inventory:
 
     The parser decodes UTF-8/JSON, validates the ctestInfo schema version, then
     validates every test name, property set, label set, disabled flag, and
-    command shape while assigning stable one-based indices.
+    command shape while assigning stable one-based indices and retaining each
+    usable command as detached immutable argv.
 
     @param raw_json UTF-8 bytes or text emitted by CTest JSON discovery.
     @return Immutable Inventory retaining the decoded payload and test records.
@@ -366,6 +372,7 @@ def parse_inventory(raw_json: bytes | str) -> Inventory:
                 for argument in command
             )
         )
+        command_argv = tuple(command) if has_command else None
         records.append(
             TestRecord(
                 index=index,
@@ -373,6 +380,7 @@ def parse_inventory(raw_json: bytes | str) -> Inventory:
                 labels=labels,
                 disabled=disabled_value,
                 has_command=has_command,
+                command=command_argv,
             )
         )
     return Inventory(payload=payload, tests=tuple(records))
