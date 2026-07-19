@@ -98,7 +98,7 @@ safety regression：其 Python unittest 会在进程内验证 cleanup guard 与 
   `fromJSON` 仍有效；job-level 路由仍要求预检与 build-integrity 成功，而后者的严格 matrix
   不可能为空。每个 matrix entry 都会显示为独立的 `Build smoke (<精确 CTest 名>)` job，下载 `ci-build-default`，获得独立
   20 分钟 job timeout 与 artifact 路径，并且只运行所选 CTest entry。CTest 注册继续保留各自
-  30 到 900 秒 timeout 与既有 `RUN_SERIAL` 语义。
+  300 到 900 秒 timeout 与既有 `RUN_SERIAL` 语义。
 
 Runner 会在执行前立即重新查询 CTest JSON，并要求选定的精确名称仍然唯一、enabled、可执行且
 带标签。完成该标签校验后，执行只使用校验过的 CTest 数字索引；测试名不会插入 shell command

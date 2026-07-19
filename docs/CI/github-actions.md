@@ -115,7 +115,7 @@ but does not start a child configure, build, install, or compile target.
   `Build smoke (<exact CTest name>)` job, downloads `ci-build-default`, receives
   a separate 20-minute job timeout and artifact path, and runs only that
   selected CTest entry. The CTest registrations retain their individual
-  30-to-900-second timeouts and existing `RUN_SERIAL` semantics.
+  300-to-900-second timeouts and existing `RUN_SERIAL` semantics.
 
 The runner re-queries CTest JSON immediately before execution and requires the
 selected exact name to remain unique, enabled, executable, and labelled.
