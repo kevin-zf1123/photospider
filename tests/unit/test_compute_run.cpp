@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -60,7 +62,7 @@ Node make_plan_node(int id) {
 }
 
 /**
- * @brief Verifies immutable issue #66 request identity and explicit QoS.
+ * @brief Verifies immutable Run request identity and explicit QoS.
  *
  * @note Two live Runs must never receive the same process-lifetime identity.
  */
@@ -211,7 +213,7 @@ TEST(ComputeRunLifecycle, ConcurrentTerminalContendersSelectExactlyOne) {
 }
 
 /**
- * @brief Verifies full HP plan, dependency, handle, and temp storage ownership.
+ * @brief Verifies full HP plan, dependency, identity, and temp ownership.
  *
  * @note The plan is constructed after admission and remains address-stable
  * until passive Run destruction.
@@ -256,6 +258,139 @@ TEST(ComputeRunStorage, OwnsOneStandaloneDirtyHpWriteBuffer) {
   ASSERT_TRUE(terminal_run.publish_succeeded());
   EXPECT_THROW((void)terminal_run.emplace_dirty_hp_write_buffer(true),
                std::logic_error);
+}
+
+/**
+ * @brief Verifies a lease retains Run state after its request observer leaves.
+ *
+ * @note Observer destruction is intentionally not a cancellation signal. The
+ * surviving lease proves the descriptor and terminal arbiter remain alive
+ * after the original stack frame returns.
+ */
+TEST(ComputeRunLease,
+     RetainsControlAfterObserverDestructionWithoutImplicitCancellation) {
+  std::optional<ComputeRunLease> retained_lease;
+  std::uint64_t retained_run_id = 0;
+  {
+    ComputeRun run(make_test_submission("lease-retained", 12, 9));
+    retained_run_id = run.descriptor().id().value();
+    retained_lease.emplace(run.acquire_lease());
+    EXPECT_FALSE(run.is_quiescent());
+  }
+
+  ASSERT_TRUE(retained_lease.has_value());
+  EXPECT_EQ(retained_lease->descriptor().id().value(), retained_run_id);
+  EXPECT_EQ(retained_lease->descriptor().graph_identity(), "lease-retained");
+  EXPECT_FALSE(retained_lease->terminal_outcome().has_value());
+  retained_lease.reset();
+}
+
+/**
+ * @brief Verifies terminal publication does not imply physical quiescence.
+ *
+ * @note The failure is visible through both observer and active lease before
+ * the lease releases; quiescence changes only when active lease count reaches
+ * zero.
+ */
+TEST(ComputeRunLease, TerminalStateRemainsNonquiescentUntilLeaseRelease) {
+  ComputeRun run(make_test_submission("terminal-nonquiescent", 13, 10));
+  {
+    ComputeRunLease lease = run.acquire_lease();
+    const std::exception_ptr failure =
+        std::make_exception_ptr(std::runtime_error("leased failure"));
+    ASSERT_TRUE(run.publish_failed(failure));
+    EXPECT_TRUE(run.is_terminal());
+    EXPECT_FALSE(run.is_quiescent());
+    EXPECT_THROW((void)run.acquire_lease(), std::logic_error);
+    const auto leased_outcome = lease.terminal_outcome();
+    ASSERT_TRUE(leased_outcome.has_value());
+    EXPECT_EQ(leased_outcome->kind, ComputeRunTerminalKind::Failed);
+    EXPECT_TRUE(leased_outcome->failure == failure);
+  }
+  EXPECT_TRUE(run.is_quiescent());
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Failed);
+}
+
+/**
+ * @brief Verifies lease copy and move operations preserve exact accounting.
+ *
+ * @note Copies add active ownership, moves transfer it, and replacing a lease
+ * releases the previous Run without making the retained Run quiescent.
+ */
+TEST(ComputeRunLease, CopyMoveAndAssignmentPreserveQuiescenceAccounting) {
+  ComputeRun first(make_test_submission("lease-copy-first", 14, 11));
+  ComputeRun second(make_test_submission("lease-copy-second", 15, 12));
+  {
+    ComputeRunLease first_lease = first.acquire_lease();
+    ComputeRunLease first_copy = first_lease;
+    ComputeRunLease moved_copy = std::move(first_copy);
+    ComputeRunLease second_lease = second.acquire_lease();
+
+    EXPECT_FALSE(first.is_quiescent());
+    EXPECT_FALSE(second.is_quiescent());
+    second_lease = moved_copy;
+    EXPECT_TRUE(second.is_quiescent());
+    EXPECT_EQ(second_lease.descriptor().id(), first.descriptor().id());
+
+    first_copy = std::move(second_lease);
+    EXPECT_EQ(first_copy.descriptor().id(), first.descriptor().id());
+    EXPECT_FALSE(first.is_quiescent());
+  }
+  EXPECT_TRUE(first.is_quiescent());
+  EXPECT_TRUE(second.is_quiescent());
+}
+
+/**
+ * @brief Verifies identical local ids are isolated by Run id and lease route.
+ *
+ * @note A mismatched or unregistered identity cannot publish failure. The
+ * matching Run retains the exact original exception pointer.
+ */
+TEST(ComputeRunTaskIdentity,
+     RepeatedLocalIdsAndFailurePublicationRemainRunScoped) {
+  GraphModel first_graph("cache/compute-run-identity-first");
+  first_graph.add_node(make_plan_node(21));
+  first_graph.validate_topology();
+  GraphModel second_graph("cache/compute-run-identity-second");
+  second_graph.add_node(make_plan_node(22));
+  second_graph.validate_topology();
+  GraphTraversalService traversal;
+  ComputeRun first(make_test_submission("identity-first",
+                                        first_graph.topology_generation(), 21));
+  ComputeRun second(make_test_submission(
+      "identity-second", second_graph.topology_generation(), 22));
+  first.advance_to(ComputeRunPhase::Admitted);
+  second.advance_to(ComputeRunPhase::Admitted);
+  first.emplace_submission_plan(first_graph, traversal, 21,
+                                std::vector<Device>{Device::CPU});
+  second.emplace_submission_plan(second_graph, traversal, 22,
+                                 std::vector<Device>{Device::CPU});
+  ComputeRunLease first_lease = first.acquire_lease();
+  ComputeRunLease second_lease = second.acquire_lease();
+  const ComputeRunTaskIdentity first_zero = first_lease.task_identity(0);
+  const ComputeRunTaskIdentity second_zero = second_lease.task_identity(0);
+
+  EXPECT_NE(first_zero, second_zero);
+  EXPECT_TRUE(first_lease.accepts_task_identity(first_zero));
+  EXPECT_FALSE(first_lease.accepts_task_identity(second_zero));
+  EXPECT_FALSE(
+      first_lease.accepts_task_identity(first_lease.task_identity(999)));
+
+  const std::exception_ptr failure =
+      std::make_exception_ptr(std::runtime_error("second run failure"));
+  EXPECT_FALSE(first_lease.publish_task_failure(second_zero, failure));
+  EXPECT_FALSE(first_lease.publish_task_failure(first_lease.task_identity(999),
+                                                failure));
+  EXPECT_FALSE(first.terminal_outcome().has_value());
+  EXPECT_FALSE(second.terminal_outcome().has_value());
+
+  EXPECT_TRUE(second_lease.publish_task_failure(second_zero, failure));
+  EXPECT_FALSE(first.terminal_outcome().has_value());
+  const auto second_outcome = second.terminal_outcome();
+  ASSERT_TRUE(second_outcome.has_value());
+  EXPECT_EQ(second_outcome->kind, ComputeRunTerminalKind::Failed);
+  EXPECT_TRUE(second_outcome->failure == failure);
 }
 
 }  // namespace

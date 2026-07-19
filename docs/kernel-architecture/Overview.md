@@ -259,7 +259,7 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
-| `ComputeRun` | Private request owner for one non-realtime HP descriptor, monotonic phase, exact terminal outcome, and full-plan/temporary or standalone dirty-HP staging storage. It does not yet provide stable leases, realtime Run grouping, or process execution ownership. |
+| `ComputeRun` | Private request owner for one non-realtime HP descriptor, monotonic phase, exact terminal outcome, and shared-control full-plan/temporary or standalone dirty-HP staging storage. Scheduler-backed full HP work retains stable leases and composite task identity; realtime Run grouping and process execution ownership remain future. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -520,8 +520,10 @@ Important current behavior:
   implementation details behind `ps::Host`.
 - The current `ComputeRun` is a bounded non-realtime HP request owner. Its
   topology generation is submission provenance, not authoritative
-  `GraphRevision`, and its scheduler handles still drain synchronously without
-  stable Run leases.
+  `GraphRevision`. Scheduler-backed full HP work executes owned callbacks under
+  stable Run leases and routes failure by `(RunId, RunLocalTaskId)`;
+  request-local dirty executors retain their separate synchronous
+  borrowed-handle path.
 - `GraphTraversalService` owns topology queries only.
 - `RoiPropagationService` and `GraphExtentResolver` own spatial propagation and
   HP-authoritative extent resolution.
@@ -561,7 +563,8 @@ Important current behavior:
   remain distinct.
 - [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
   fixes the complete target Run, completion, execution-service, ledger, and
-  lifecycle ownership. Only its issue #66 non-realtime HP Run slice is current.
+  lifecycle ownership. Its issue #67 non-realtime HP Run lease and
+  completion-isolation slice is current.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

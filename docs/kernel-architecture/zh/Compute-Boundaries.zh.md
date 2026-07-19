@@ -65,7 +65,7 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 | 模块 | 当前职责 | 不拥有 |
 | --- | --- | --- |
 | `ComputeService` | 请求验证、intent 协调、创建/settle 一个非 realtime HP Run、协作者构造和最终结果选择 | 前端值、worker thread、图文档 |
-| `ComputeRun` | 不可变的非 realtime HP descriptor、单调 phase、唯一 terminal outcome，以及 full-plan/temporary storage 或 standalone dirty-HP staging storage 的所有权 | 稳定 lease、completion routing、配对 realtime grouping、Graph state、worker、权威 revision commit |
+| `ComputeRun` | 不可变的非 realtime HP descriptor、单调 phase、唯一 terminal outcome、通过共享 control 对 full-plan/temporary storage 或 standalone dirty-HP staging storage 的所有权、稳定 lease，以及 full-HP 复合 task identity | 配对 realtime grouping、Graph state、worker、权威 revision commit、cancellation 或 resource admission |
 | `ComputeCachePolicy` | HP cache eligibility 与缓存路径决定 | 磁盘 I/O 所有权或 operation 执行 |
 | `NodeInputResolver` | runtime parameter 和 ready image input | 图遍历或输出提交 |
 | `FullTaskGraphExpander` | 一个 graph generation/domain 的完整 node/tile task 形态 | 请求目标、cache pruning、dirty pruning |
@@ -75,7 +75,7 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 | `DirtySnapshotTaskGraphPruner` | 从既有 plan 选择活动 dirty work | task expansion |
 | `IntentUpdateCoordinator` | HP-only 或 HP/RT sibling 语义 | 物理优先级或 worker 所有权 |
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit 或 scheduler policy |
-| `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned task handle、dense index、依赖状态、variant 和结果槽 | 超出当前同步 dispatch/drain contract 的生命周期 |
+| `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、variant、结果槽与 callback owner | Scheduler worker、Run terminal state 或 dirty-path execution |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | scheduler trace 所有权 |
 | `SchedulerFactory` | 在构造前解析 `0..8` worker 请求，并规划每个 scheduler 的保守 slot 计费 | 进程容量所有权或 graph-state access |
@@ -95,10 +95,11 @@ Compute collaborator 位于 `src/lib/compute/`；三个 admission/ownership coll
    request-local HP snapshot。
 5. Planner 展开一个 domain 的完整 task 形态，再裁剪到请求目标和依赖锥。
 6. Dirty request 从该 plan 选择活动 work set；dirty 状态不会创建新的 task 形态。
-7. 顺序执行 inline 遍历同一请求语义；并行执行 materialize 具体 handle，只把 ready handle 或
-   callback 提交给选定 scheduler runtime。
-8. Worker 写入 Run-owned full-plan 临时结果或 standalone dirty HP staging。Issue #66 中配对
-   realtime staging 仍由 sibling callback 局部持有；只有相应 commit path 能修改可见图状态。
+7. 顺序执行 inline 遍历同一请求语义；并行 full HP 执行会 materialize 保留 Run lease 与
+   `(RunId, RunLocalTaskId)` identity 的 owned callback，并且只把 ready callback 提交给选定
+   scheduler runtime。Dirty execution 保留独立的 request-local handle 路径。
+8. Worker 写入 Run-owned full-plan 临时结果或 standalone dirty HP staging。配对 realtime
+   staging 仍由 sibling callback 局部持有；只有相应 commit path 能修改可见图状态。
 9. Run 在输出验证或精确异常捕获后发布唯一 success/failure，随后结果、事件、计时和错误通过
    Host value 边界复制返回。
 
@@ -218,10 +219,11 @@ metadata 推导该关系。
   保留容量供重试；replacement 在失败时保留旧 scheduler，因此需要 transient headroom。
 - 已 admission 的 scheduler batch 会在异常离开当前请求前 settle。
 - Operation callback 可能已经产生外部副作用；staged graph output 不会回滚这些副作用。
-- 当前 task handle 借用请求级 executor 状态，其生命周期在当前 completion wait 结束；因此不能
-  原样移入进程级异步队列。Full HP plan 与临时结果槽现在由 Run 拥有，但栈上的 runner 与
-  completion identity 还没有 lease 支撑。ADR 0007 要求目标队列使用稳定 Run lease；issue #67
-  仍是未来行为。
+- Scheduler-backed full HP work 不再借用 raw `TaskExecutor`。`TaskSubmissionPlan` 拥有其
+  runner，每个真实 ready task 都是保留 `ComputeRunLease` 的 owned callback，failure publication
+  必须匹配 `(RunId, RunLocalTaskId)`。空 borrowed-handle batch 只用于建立当前 scheduler epoch。
+  Request-local dirty executor 仍使用独立的同步 borrowed-handle 路径，因此仍不能原样移入
+  process-wide asynchronous queue。
 
 ## 边界原理
 
@@ -235,9 +237,9 @@ metadata 推导该关系。
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受替代方向和详细
-所有权契约。本文是当前 issue #66 HP Run 切片、per-graph scheduler ownership 及其有界进程
-admission containment 的权威说明；稳定 lease、权威 revision 与 shared `ExecutionService`
-部分仍是未来行为。
+所有权契约。本文是当前 issue #67 HP Run lease/completion-isolation 切片、per-graph scheduler
+ownership 及其有界进程 admission containment 的权威说明；权威 revision、配对 realtime Run、
+通用 dirty-path lease 与 shared `ExecutionService` 仍是未来行为。
 
 ## 实现与验证入口
 

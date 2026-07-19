@@ -38,7 +38,7 @@ Ownership is divided as follows:
 | `DirtyRegionSnapshotBuilder` | Normalize source ROIs and materialize snapshot-only Micro tile or monolithic records | Graph traversal or compute requests |
 | `RoiPropagationService` | Compute operator-specific forward inspection and backward demand projections | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | Select and clip active tasks from an existing request plan | New task shapes |
-| dirty executors and write buffers | Execute source-first work and stage HP/RT output; standalone non-realtime HP staging is owned by its `ComputeRun`, while paired realtime sibling buffers remain callback-local | General cancellation, stable Run leases/grouping, or graph revision policy |
+| dirty executors and write buffers | Execute source-first work and stage HP/RT output; standalone non-realtime HP staging is owned by its `ComputeRun`, while paired realtime sibling buffers remain callback-local | General cancellation, dirty-path Run leases/grouping, or graph revision policy |
 
 ## Current Flow
 
@@ -211,9 +211,10 @@ stage output in `RealtimeProxyWriteBuffer`. A successful request commits staged
 HP state to `GraphModel` or RT state to `RealtimeProxyGraph` through the
 intent-specific commit path. For a standalone non-realtime HP request, the
 `HighPrecisionDirtyWriteBuffer` is owned by the request `ComputeRun` until
-commit or failure cleanup. The HP child of `RealTimeUpdate` has no issue #66
-Run and retains its callback-local buffer until later child-Run/`RunGroup`
-support.
+commit or failure cleanup. This dirty path does not use the issue #67 full-HP
+callback lease/composite-identity route. The HP child of `RealTimeUpdate` has
+no child Run and retains its callback-local buffer until later
+child-Run/`RunGroup` support.
 
 For a `RealTimeUpdate`, RT and HP are sibling computations. The RT sibling may
 commit proxy state first, while the HP sibling observes the sibling commit gate
@@ -238,8 +239,8 @@ The current implementation does not provide:
 - Macro dirty-key materialization or dynamic Micro/Macro coarsening;
 - sparse ROI sets, dirty-area caps, time-window merging, or adaptive batching;
 - a node-to-backend dirty subscription that automatically launches compute;
-- stable Run leases, paired realtime child Runs/`RunGroup`, authoritative graph
-  revision, enforced deadline, supersession, or cooperative cancellation.
+- dirty-path Run leases, paired realtime child Runs/`RunGroup`, authoritative
+  graph revision, enforced deadline, supersession, or cooperative cancellation.
 
 Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
 across the Host request, graph state, ROI propagation, planning, snapshot,

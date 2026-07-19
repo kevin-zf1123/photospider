@@ -293,6 +293,383 @@ class StartFailingScheduler final : public IScheduler {
   SchedulerHostContext* host_ = nullptr;
 };
 
+/**
+ * @brief Scheduler fixture that accepts only owned callbacks for full HP work.
+ *
+ * The fixture establishes batch accounting through an empty borrowed-handle
+ * batch, queues every owned callback without executing it in the submission
+ * method, and drains callbacks only from wait_for_completion(). It therefore
+ * proves the real ComputeService path transfers callback ownership beyond the
+ * original submission frame.
+ *
+ * @throws std::logic_error for non-empty borrowed handles, invalid lifecycle,
+ * or unbalanced completion accounting.
+ * @note The fixture is single-batch and test-local. A mutex protects callbacks
+ * added recursively while wait_for_completion() is draining.
+ */
+class LeaseCallbackScheduler final : public IScheduler {
+ public:
+  /** @brief Releases queued callbacks and their Run leases without throwing. */
+  ~LeaseCallbackScheduler() noexcept override = default;
+
+  /**
+   * @brief Attaches the borrowed runtime host context.
+   *
+   * @param host Context retained until detach().
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void attach(SchedulerHostContext& host) noexcept override { host_ = &host; }
+
+  /**
+   * @brief Clears the borrowed runtime host context.
+   *
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void detach() noexcept override { host_ = nullptr; }
+
+  /**
+   * @brief Starts callback admission.
+   *
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void start() noexcept override { running_ = true; }
+
+  /**
+   * @brief Stops callback admission and releases queued callbacks.
+   *
+   * @return Nothing.
+   * @throws Nothing.
+   * @note GraphRuntime invokes shutdown only after the synchronous product test
+   * has completed its batch.
+   */
+  void shutdown() noexcept override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    running_ = false;
+    callbacks_.clear();
+    next_callback_ = 0;
+  }
+
+  /**
+   * @brief Returns the stable fixture scheduler name.
+   *
+   * @return Owned diagnostic name.
+   * @throws std::bad_alloc if string allocation fails.
+   */
+  std::string name() const override { return "lease_callback"; }
+
+  /**
+   * @brief Returns completion accounting for diagnostics.
+   *
+   * @return Owned stable fixture text.
+   * @throws std::bad_alloc if string allocation fails.
+   */
+  std::string get_stats() const override { return "owned-callback-only"; }
+
+  /**
+   * @brief Reports whether callback admission is running.
+   *
+   * @return true between start() and shutdown().
+   * @throws Nothing.
+   */
+  bool is_running() const noexcept override { return running_; }
+
+  /**
+   * @brief Reports the CPU capability used by the split operation fixtures.
+   *
+   * @return Single CPU device label.
+   * @throws std::bad_alloc if vector allocation fails.
+   */
+  std::vector<Device> available_devices() const override {
+    return {Device::CPU};
+  }
+
+  /**
+   * @brief Establishes a fresh batch only from an empty handle vector.
+   *
+   * @param handles Borrowed handles, required to be empty.
+   * @param total_task_count Required zero initial count.
+   * @param priority Ignored priority for the empty epoch marker.
+   * @return Nothing.
+   * @throws std::logic_error when lifecycle, handles, or count are invalid.
+   * @note A non-empty vector increments the observed violation counter before
+   * rejection.
+   */
+  void submit_initial_task_handles(std::vector<TaskHandle>&& handles,
+                                   int total_task_count,
+                                   SchedulerTaskPriority priority) override {
+    (void)priority;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_) {
+      throw std::logic_error("lease callback scheduler is not running");
+    }
+    if (!handles.empty()) {
+      ++nonempty_borrowed_batches_;
+      throw std::logic_error(
+          "full HP product path submitted borrowed task handles");
+    }
+    if (total_task_count != 0) {
+      throw std::logic_error(
+          "empty lease callback batch requires zero task count");
+    }
+    callbacks_.clear();
+    next_callback_ = 0;
+    tasks_to_complete_ = 0;
+    first_exception_ = nullptr;
+    batch_initialized_ = true;
+    ++empty_epoch_batches_;
+  }
+
+  /**
+   * @brief Rejects non-empty worker-ready borrowed handle batches.
+   *
+   * @param handles Borrowed handles that must be empty.
+   * @param priority Ignored for an empty vector.
+   * @return Nothing.
+   * @throws std::logic_error when any borrowed handle is supplied.
+   */
+  void submit_ready_task_handles_from_worker(
+      std::vector<TaskHandle>&& handles,
+      SchedulerTaskPriority priority) override {
+    (void)priority;
+    if (!handles.empty()) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++nonempty_borrowed_batches_;
+      throw std::logic_error(
+          "full HP dependent path submitted borrowed task handles");
+    }
+  }
+
+  /**
+   * @brief Queues an owned callback without executing it in this frame.
+   *
+   * @param task Callback whose ownership transfers to the fixture queue.
+   * @param priority Ignored deterministic fixture priority.
+   * @param epoch Ignored because the fixture has one active batch.
+   * @return Nothing.
+   * @throws std::logic_error when no active batch exists.
+   * @throws std::bad_alloc if callback queue growth fails.
+   * @note Every accepted callback executes later from wait_for_completion().
+   */
+  void submit_ready_task_any_thread(
+      Task&& task, SchedulerTaskPriority priority,
+      std::optional<std::uint64_t> epoch) override {
+    (void)priority;
+    (void)epoch;
+    if (!task) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_ || !batch_initialized_) {
+      throw std::logic_error("lease callback scheduler has no active batch");
+    }
+    callbacks_.push_back(std::move(task));
+    ++owned_callbacks_submitted_;
+  }
+
+  /**
+   * @brief Drains every owned callback after its submission call returned.
+   *
+   * @return Nothing when completion accounting reaches zero.
+   * @throws The exact first callback exception.
+   * @throws std::logic_error when completion accounting is unbalanced.
+   * @note Callbacks may append dependent callbacks while the drain is active.
+   */
+  void wait_for_completion() override {
+    ++wait_calls_;
+    for (;;) {
+      Task callback;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (first_exception_ || next_callback_ >= callbacks_.size()) {
+          break;
+        }
+        callback = std::move(callbacks_.at(next_callback_));
+        ++next_callback_;
+      }
+      try {
+        callback();
+        ++callbacks_executed_after_submission_;
+      } catch (...) {
+        set_exception(std::current_exception());
+      }
+    }
+
+    std::exception_ptr failure;
+    int remaining = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      failure = first_exception_;
+      remaining = tasks_to_complete_;
+      callbacks_.clear();
+      next_callback_ = 0;
+    }
+    if (failure) {
+      std::rethrow_exception(failure);
+    }
+    if (remaining != 0) {
+      throw std::logic_error(
+          "lease callback scheduler completion count did not reach zero");
+    }
+  }
+
+  /**
+   * @brief Stores the first non-null callback exception.
+   *
+   * @param error Exact exception identity to retain.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void set_exception(std::exception_ptr error) noexcept override {
+    if (!error) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!first_exception_) {
+      first_exception_ = std::move(error);
+    }
+  }
+
+  /**
+   * @brief Adds positive completion units to the active batch.
+   *
+   * @param delta Positive task-count increment.
+   * @return Nothing.
+   * @throws std::logic_error when no batch exists or count would overflow.
+   */
+  void inc_tasks_to_complete(int delta) override {
+    if (delta <= 0) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!batch_initialized_) {
+      throw std::logic_error(
+          "lease callback scheduler has no completion batch");
+    }
+    if (tasks_to_complete_ > std::numeric_limits<int>::max() - delta) {
+      throw std::logic_error(
+          "lease callback scheduler completion count overflow");
+    }
+    tasks_to_complete_ += delta;
+  }
+
+  /**
+   * @brief Releases one completion unit.
+   *
+   * @return Nothing.
+   * @throws std::logic_error when the completion count is already zero.
+   */
+  void dec_tasks_to_complete() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (tasks_to_complete_ <= 0) {
+      throw std::logic_error(
+          "lease callback scheduler completion count underflow");
+    }
+    --tasks_to_complete_;
+  }
+
+  /**
+   * @brief Accepts scheduler trace events without adding test synchronization.
+   *
+   * @param action Stable trace action.
+   * @param node_id Backend node id.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void log_event(SchedulerTraceAction action, int node_id) noexcept override {
+    (void)action;
+    (void)node_id;
+  }
+
+  /**
+   * @brief Returns observed non-empty borrowed batch violations.
+   *
+   * @return Number of rejected non-empty borrowed submissions.
+   * @throws Nothing.
+   */
+  int nonempty_borrowed_batches() const noexcept {
+    return nonempty_borrowed_batches_;
+  }
+
+  /**
+   * @brief Returns accepted empty epoch batch count.
+   *
+   * @return Number of empty batch initializations.
+   * @throws Nothing.
+   */
+  int empty_epoch_batches() const noexcept { return empty_epoch_batches_; }
+
+  /**
+   * @brief Returns owned callback submission count.
+   *
+   * @return Bootstrap plus planned ready callbacks accepted by the queue.
+   * @throws Nothing.
+   */
+  int owned_callbacks_submitted() const noexcept {
+    return owned_callbacks_submitted_;
+  }
+
+  /**
+   * @brief Returns callbacks executed only after submission returned.
+   *
+   * @return Number of callbacks drained by wait_for_completion().
+   * @throws Nothing.
+   */
+  int callbacks_executed_after_submission() const noexcept {
+    return callbacks_executed_after_submission_;
+  }
+
+  /**
+   * @brief Returns batch wait count.
+   *
+   * @return Number of wait_for_completion() calls.
+   * @throws Nothing.
+   */
+  int wait_calls() const noexcept { return wait_calls_; }
+
+ private:
+  /** @brief Borrowed host context retained only for lifecycle fidelity. */
+  SchedulerHostContext* host_ = nullptr;
+
+  /** @brief Protects callback queue, count, and exception state. */
+  mutable std::mutex mutex_;
+
+  /** @brief Owned callbacks that retain Run leases until drain/retirement. */
+  std::vector<Task> callbacks_;
+
+  /** @brief Next callback index selected by wait_for_completion(). */
+  std::size_t next_callback_ = 0;
+
+  /** @brief First exact callback exception, if any. */
+  std::exception_ptr first_exception_;
+
+  /** @brief Current bootstrap plus planned task completion units. */
+  int tasks_to_complete_ = 0;
+
+  /** @brief Whether one empty initial batch established completion state. */
+  bool batch_initialized_ = false;
+
+  /** @brief Whether lifecycle currently accepts callback submission. */
+  bool running_ = false;
+
+  /** @brief Number of rejected non-empty borrowed handle submissions. */
+  int nonempty_borrowed_batches_ = 0;
+
+  /** @brief Number of accepted empty epoch batches. */
+  int empty_epoch_batches_ = 0;
+
+  /** @brief Number of owned callback submissions. */
+  int owned_callbacks_submitted_ = 0;
+
+  /** @brief Number of callbacks executed from wait, after submit returned. */
+  int callbacks_executed_after_submission_ = 0;
+
+  /** @brief Number of completion waits used by the product path. */
+  int wait_calls_ = 0;
+};
+
 Node make_node(int id, std::string type, std::string subtype) {
   Node node;
   node.id = id;
@@ -2014,7 +2391,7 @@ TEST(TaskGraphPlanningSplit,
  *
  * @note A zero QoS weight is a Run descriptor error. The missing HP target
  * would instead produce NotFound if planning ran first. RealTimeUpdate keeps
- * the same invalid QoS but reaches intent validation because issue #66 creates
+ * the same invalid QoS but reaches intent validation because realtime creates
  * no mixed-domain Run for that path.
  */
 TEST(ComputeRunProductPath,
@@ -2040,6 +2417,61 @@ TEST(ComputeRunProductPath,
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
   }
+}
+
+/**
+ * @brief Proves the real full-HP service path transfers leased owned callbacks.
+ *
+ * @note The fixture rejects every non-empty borrowed handle and executes each
+ * callback only from wait_for_completion(), after its submission method has
+ * returned. Successful target output therefore requires
+ * ComputeService -> ComputeTaskDispatcher -> SchedulerTaskRuntime to preserve
+ * Run state through owned callback leases.
+ */
+TEST(ComputeRunProductPath,
+     FullHpUsesLeaseBackedCallbacksAfterSubmissionFrameReturns) {
+  register_split_ops();
+  ScopedTestDirectory runtime_directory("cache/compute-run-lease-product-path");
+  GraphRuntime::Info info;
+  info.name = "compute-run-lease-product-path";
+  info.root = runtime_directory.path();
+  info.cache_root = runtime_directory.path() / "cache";
+  GraphRuntime runtime(info);
+  auto scheduler = std::make_unique<LeaseCallbackScheduler>();
+  LeaseCallbackScheduler* scheduler_observer = scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(scheduler));
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  graph.add_node(source);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.graph_identity = info.name;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+
+  NodeOutput& output = service.compute_parallel(graph, runtime, request);
+
+  EXPECT_EQ(output.image_buffer.width, 32);
+  EXPECT_EQ(output.image_buffer.height, 16);
+  EXPECT_EQ(scheduler_observer->nonempty_borrowed_batches(), 0);
+  EXPECT_EQ(scheduler_observer->empty_epoch_batches(), 1);
+  EXPECT_GE(scheduler_observer->owned_callbacks_submitted(), 2)
+      << "one bootstrap plus at least one planned task callback";
+  EXPECT_EQ(scheduler_observer->callbacks_executed_after_submission(),
+            scheduler_observer->owned_callbacks_submitted());
+  EXPECT_EQ(scheduler_observer->wait_calls(), 1);
 }
 
 TEST(ComputeServiceSplit,

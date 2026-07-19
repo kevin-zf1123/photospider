@@ -1,11 +1,16 @@
 #pragma once
 
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "compute/compute_node_task_runner.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/compute_task_dependency_state.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -19,19 +24,22 @@ namespace ps::compute {
  * @brief Owns the scheduler-facing shape of one high-precision ComputePlan.
  *
  * TaskSubmissionPlan converts a cache-pruned ComputePlan into dense indexes,
- * dependency counters, dependent adjacency lists, scheduler closures, resolved
- * operation variants, and temporary result slots. It is the authority for
- * which nodes run during one ComputeTaskDispatcher::execute() call.
+ * dependency counters, dependent adjacency lists, composite Run-local task
+ * identity, an owned NodeTaskRunner, resolved operation variants, and
+ * temporary result slots. It is the authority for which nodes run during one
+ * ComputeTaskDispatcher::execute() call.
  *
- * @note The plan owns task closures that capture this object by reference.
- * Therefore the plan must remain alive until SchedulerTaskRuntime has drained
- * all submitted tasks.
+ * @throws GraphError or standard exceptions through individual construction,
+ * execution, and submission operations.
+ * @note Scheduler callbacks never capture this object directly. They capture a
+ * ComputeRunLease and reach the plan only through lease-validated identity.
  */
-class TaskSubmissionPlan : public TaskExecutor {
+class TaskSubmissionPlan {
  public:
   /**
    * @brief Builds scheduler submission state for one target node.
    *
+   * @param run_id Opaque namespace assigned by the owning ComputeRun.
    * @param graph GraphModel used for planning and operation resolution.
    * @param traversal Traversal service used by ComputeDispatchPlanBuilder.
    * @param node_id Target node id for the GlobalHighPrecision request.
@@ -41,8 +49,9 @@ class TaskSubmissionPlan : public TaskExecutor {
    * @note The underlying ComputePlan is recorded on GraphModel by the planning
    * unit before dependency state is constructed.
    */
-  TaskSubmissionPlan(GraphModel& graph, GraphTraversalService& traversal,
-                     int node_id, std::vector<Device> available_devices);
+  TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
+                     GraphTraversalService& traversal, int node_id,
+                     std::vector<Device> available_devices);
 
   /**
    * @brief Reports whether the pruned plan contains no executable tasks.
@@ -50,8 +59,7 @@ class TaskSubmissionPlan : public TaskExecutor {
    * @return true when the task graph has no PlannedTask entries.
    * @throws Nothing.
    * @note An empty plan is legal only when the target already has reusable
-   * high-precision output; dispatch treats an uncached empty target as a
-   * planning contract error.
+   * high-precision output.
    */
   bool empty() const { return compute_plan_.task_graph.tasks.empty(); }
 
@@ -61,15 +69,14 @@ class TaskSubmissionPlan : public TaskExecutor {
    * @return Dense task count aligned with compute_plan_.task_graph.tasks.
    * @throws Nothing.
    */
-  size_t size() const { return compute_plan_.task_graph.tasks.size(); }
+  std::size_t size() const { return compute_plan_.task_graph.tasks.size(); }
 
   /**
    * @brief Returns the planned node id order.
    *
    * @return Const reference to dense planned node ids.
    * @throws Nothing.
-   * @note The returned reference remains valid only while this plan object is
-   * alive.
+   * @note The reference remains valid only while this plan is lease-retained.
    */
   const std::vector<int>& execution_order() const { return execution_order_; }
 
@@ -78,17 +85,15 @@ class TaskSubmissionPlan : public TaskExecutor {
    *
    * @return Const reference to the cache-pruned plan.
    * @throws Nothing.
-   * @note The reference remains valid only while this TaskSubmissionPlan lives.
+   * @note The reference remains valid only while this plan is lease-retained.
    */
   const ComputePlan& compute_plan() const { return compute_plan_; }
 
   /**
-   * @brief Returns the node id to dense index lookup.
+   * @brief Returns the node id to dense execution-index lookup.
    *
-   * @return Const reference to the lookup map used by worker input resolution.
+   * @return Const reference used by worker input resolution.
    * @throws Nothing.
-   * @note The returned reference remains valid only while this plan object is
-   * alive.
    */
   const std::unordered_map<int, int>& id_to_idx() const {
     return dependency_state_.id_to_idx();
@@ -97,10 +102,9 @@ class TaskSubmissionPlan : public TaskExecutor {
   /**
    * @brief Returns mutable temporary result slots for planned nodes.
    *
-   * @return Reference to optional outputs aligned with execution_order_.
+   * @return Slots aligned with execution_order_.
    * @throws Nothing.
-   * @note Worker tasks publish into these slots; the result committer later
-   * moves populated values into GraphModel under the graph mutex.
+   * @note Workers publish here before the dispatcher serializes Graph commit.
    */
   std::vector<std::optional<NodeOutput>>& temp_results() {
     return temp_results_;
@@ -109,11 +113,9 @@ class TaskSubmissionPlan : public TaskExecutor {
   /**
    * @brief Returns resolved operations for planned high-precision nodes.
    *
-   * @return Const reference to optional operation variants aligned with
-   * execution_order_.
+   * @return Optional variants aligned with execution_order_.
    * @throws Nothing.
-   * @note Missing operations are preserved as empty optionals so NodeTaskRunner
-   * can throw a node-specific GraphError at execution time.
+   * @note Missing operations remain empty for worker-time node diagnostics.
    */
   const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops()
       const {
@@ -121,138 +123,212 @@ class TaskSubmissionPlan : public TaskExecutor {
   }
 
   /**
-   * @brief Materializes scheduler closures for all planned nodes.
+   * @brief Constructs and owns the worker runner for this Run plan.
    *
-   * @param runner Worker runner used by each closure.
-   * @param task_runtime Scheduler runtime used for trace events, dependent task
-   * submission, and completion accounting.
-   * @throws std::bad_alloc if task closure storage allocation fails.
-   * @note Each task captures this plan and runner by reference. Callers must
-   * wait for scheduler completion before either object is destroyed.
+   * @param context Graph services, plan vectors, telemetry, and options
+   * borrowed by the runner while leased callbacks execute.
+   * @return Nothing.
+   * @throws std::logic_error when a runner is already installed.
+   * @throws std::bad_alloc when runner-owned synchronization storage cannot
+   * allocate.
+   * @note The runner lives in this Run-owned plan rather than on the dispatcher
+   * stack.
    */
-  void build_scheduler_tasks(NodeTaskRunner& runner,
-                             SchedulerTaskRuntime& task_runtime);
+  void emplace_task_runner(NodeTaskRunnerContext context);
 
   /**
-   * @brief Moves ready initial scheduler task handles out of the plan.
+   * @brief Builds one composite identity in this plan's Run namespace.
    *
-   * @return Initial task handles that may be submitted to
-   * SchedulerTaskRuntime.
-   * @throws std::bad_alloc if temporary ready-task storage grows.
-   * @note TaskGraphReadyChecker is preferred. If the pruned graph carries no
-   * initial ids, zero-dependency nodes are used as a compatibility fallback.
+   * @param task_id Dense registered PlannedTask id.
+   * @return Composite Run/local task identity.
+   * @throws std::out_of_range when task_id is not registered.
    */
-  std::vector<TaskHandle> take_initial_task_handles();
+  ComputeRunTaskIdentity task_identity(int task_id) const;
 
   /**
-   * @brief Executes one task handle selected by the scheduler.
+   * @brief Checks whether a composite identity belongs to this plan.
    *
-   * @param task_id Dense PlannedTask id from compute_plan_.task_graph.
-   * @throws GraphError or operation exceptions from NodeTaskRunner.
-   * @note This method is called by SchedulerTaskRuntime after epoch checks and
-   * owns dependency release plus completion accounting for the task.
+   * @param identity Candidate Run/local identity.
+   * @return true only when Run id and dense local registration match.
+   * @throws Nothing.
    */
-  void run_task(int task_id) override;
+  bool contains_task_identity(
+      const ComputeRunTaskIdentity& identity) const noexcept;
 
   /**
-   * @brief Emits trace events for tasks selected as initial scheduler work.
+   * @brief Publishes the full initial ready set as lease-backed callbacks.
    *
-   * @param task_runtime Scheduler runtime that receives AssignInitial events.
-   * @throws Exceptions from task_runtime.log_event().
-   * @note This is called after `submit_initial_task_handles()` so traces
-   * reflect the actual set of committed initial borrowed handles.
+   * @param lease Matching lease copied into every accepted initial callback.
+   * @param task_runtime Active scheduler batch receiving completion count,
+   * trace, and owned callbacks.
+   * @return Nothing.
+   * @throws GraphError when a nonempty plan has no initial ready work.
+   * @throws std::bad_alloc from ready identity or callback storage.
+   * @throws Scheduler runtime exceptions from count, trace, or submission.
+   * @note The caller owns one bootstrap completion unit. This method adds the
+   * planned task count but does not release the bootstrap unit.
    */
-  void log_initial_assignments(SchedulerTaskRuntime& task_runtime) const;
+  void submit_initial_ready_tasks(const ComputeRunLease& lease,
+                                  SchedulerTaskRuntime& task_runtime);
+
+  /**
+   * @brief Executes one lease-validated planned task exactly once.
+   *
+   * @param identity Matching composite identity already checked by the lease.
+   * @param lease Lease copied into newly released dependent callbacks.
+   * @param task_runtime Active scheduler runtime for trace, submission, and
+   * completion accounting.
+   * @return Nothing.
+   * @throws std::invalid_argument for mismatched identity.
+   * @throws std::logic_error when the registered task already entered.
+   * @throws GraphError or operation exceptions from NodeTaskRunner and
+   * dependency release.
+   * @note Success releases dependents and one scheduler completion unit.
+   * Failure publication is owned by the calling lease route.
+   */
+  void execute_task(const ComputeRunTaskIdentity& identity,
+                    const ComputeRunLease& lease,
+                    SchedulerTaskRuntime& task_runtime);
 
  private:
-  /** @brief Resolves GlobalHighPrecision operation variants for planned nodes.
+  /**
+   * @brief Exact-once entry state for one registered local task.
+   *
+   * @throws Nothing for atomic representation operations.
+   */
+  enum class TaskExecutionState : std::uint8_t {
+    /** @brief Callback has not entered Run-local execution. */
+    Pending = 0U,
+    /** @brief One matching callback owns execution. */
+    Executing = 1U,
+    /** @brief Execution, dependent release, and completion succeeded. */
+    Completed = 2U,
+    /** @brief Execution or completion routing threw. */
+    Failed = 3U,
+  };
+
+  /**
+   * @brief Resolves GlobalHighPrecision operation variants for planned nodes.
+   *
+   * @return Nothing.
+   * @throws std::bad_alloc from registry candidate or result storage.
+   * @note Missing variants remain empty for worker-time GraphError context.
    */
   void resolve_operations();
 
   /**
    * @brief Releases dependent tasks whose upstream counters reached zero.
    *
-   * @param current_task_id Completed task whose dependent counters advance.
+   * @param current_task_id Completed task whose dependency edges advance.
    * @param current_node_id Completed node used in scheduling diagnostics.
-   * @param task_runtime Scheduler runtime receiving newly ready handles.
+   * @param lease Matching lease copied into dependent callbacks.
+   * @param task_runtime Runtime receiving newly ready owned callbacks.
    * @return Nothing.
-   * @throws std::bad_alloc if ready-handle collection or scheduler submission
-   *         exhausts memory.
-   * @throws GraphError with scheduling-stage context for other dependency-map,
-   *         range, or scheduler submission failures.
+   * @throws std::bad_alloc if ready identity/callback submission exhausts
+   * memory.
+   * @throws GraphError with scheduling-stage context for other dependency,
+   * range, or scheduler submission failures.
    * @note Resource exhaustion keeps its exception identity; recoverable
-   * scheduling failures receive node context before worker-thread transport.
+   * scheduling failures receive node context.
    */
   void release_dependents(int current_task_id, int current_node_id,
+                          const ComputeRunLease& lease,
                           SchedulerTaskRuntime& task_runtime);
 
-  /** @brief Appends a task handle when all dependencies are satisfied. */
-  void append_initial_task_handle(int task_id);
+  /**
+   * @brief Appends one initially ready composite identity.
+   *
+   * @param task_id Dense candidate task id.
+   * @param identities Output ready identity list.
+   * @return Nothing.
+   * @throws std::out_of_range for inconsistent dense task metadata.
+   * @throws std::bad_alloc if output or deduplication storage grows.
+   */
+  void append_initial_task_identity(
+      int task_id, std::vector<ComputeRunTaskIdentity>& identities);
 
-  /** @brief Appends initial tasks identified by the planned task graph. */
-  void append_graph_ready_tasks();
+  /**
+   * @brief Appends graph-declared initial ready identities.
+   *
+   * @param identities Output ready identity list.
+   * @return Nothing.
+   * @throws std::bad_alloc or std::out_of_range from ready discovery.
+   */
+  void append_graph_ready_tasks(
+      std::vector<ComputeRunTaskIdentity>& identities);
 
-  /** @brief Appends zero-dependency nodes as compatibility initial work. */
-  void append_zero_dependency_tasks();
+  /**
+   * @brief Appends zero-dependency identities as compatibility fallback.
+   *
+   * @param identities Output ready identity list.
+   * @return Nothing.
+   * @throws std::bad_alloc or std::out_of_range from ready discovery.
+   */
+  void append_zero_dependency_tasks(
+      std::vector<ComputeRunTaskIdentity>& identities);
 
-  /** @brief Builds one lightweight handle for a planned task id. */
-  TaskHandle make_handle(int task_id) const;
+  /**
+   * @brief Emits traces for task ids selected as initial work.
+   *
+   * @param task_runtime Runtime receiving AssignInitial events.
+   * @return Nothing.
+   * @throws Exceptions from task_runtime.log_event().
+   */
+  void log_initial_assignments(SchedulerTaskRuntime& task_runtime) const;
 
-  /** @brief Borrowed graph used for operation resolution and errors. */
+  /** @brief Opaque namespace retained from the owning Run descriptor. */
+  ComputeRunId run_id_;
+
+  /** @brief Borrowed graph used for operation resolution and diagnostics. */
   GraphModel& graph_;
 
-  /** @brief Cache-pruned compute plan recorded for inspection and scheduling.
-   */
+  /** @brief Cache-pruned compute plan recorded for scheduling/inspection. */
   ComputePlan compute_plan_;
 
   /** @brief Dense planned node ids after cache pruning. */
   std::vector<int> execution_order_;
 
-  /** @brief Devices that may execute operation implementations this dispatch.
-   */
+  /** @brief Devices available for operation implementation selection. */
   std::vector<Device> available_devices_;
 
   /** @brief Runtime dependency counters and dense node-id mapping. */
   TaskDependencyState dependency_state_;
 
-  /** @brief Scheduler handles aligned with task_graph.tasks. */
-  std::vector<TaskHandle> task_handles_;
-
-  /** @brief Initial task handles moved out for submit_initial_task_handles().
-   */
-  std::vector<TaskHandle> initial_task_handles_;
-
-  /** @brief Task ids already selected as initial tasks. */
+  /** @brief Task ids already selected as initial work. */
   std::unordered_set<int> submitted_initial_task_ids_;
 
-  /** @brief Runner borrowed after build_scheduler_tasks() binds execution. */
-  NodeTaskRunner* runner_ = nullptr;
+  /** @brief Exact-once state aligned with composite local task ids. */
+  std::vector<std::atomic<std::uint8_t>> task_execution_states_;
 
-  /** @brief Scheduler runtime borrowed for logging and dependency release. */
-  SchedulerTaskRuntime* task_runtime_ = nullptr;
+  /** @brief Run-owned worker runner retained by callback leases. */
+  std::unique_ptr<NodeTaskRunner> task_runner_;
 
   /** @brief Temporary worker outputs aligned with execution_order_. */
   std::vector<std::optional<NodeOutput>> temp_results_;
 
-  /** @brief Resolved operation variants aligned with execution_order_. */
+  /** @brief Resolved operations aligned with execution_order_. */
   std::vector<std::optional<OpRegistry::OpVariant>> resolved_ops_;
 };
 
 /**
- * @brief Submits the planned scheduler work for one dispatch request.
+ * @brief Submits one planned full-HP graph through lease-backed callbacks.
  *
- * @param graph GraphModel being computed.
- * @param task_runtime Scheduler runtime receiving initial planned tasks.
- * @param node_id Target node id used when validating empty plans.
- * @param plan Built scheduler submission plan.
- * @throws GraphError when planning yields no scheduler tasks and the target
- * does not already have a reusable high-precision output. It may also rethrow
- * task submission or scheduler completion exceptions.
- * @note Empty plans are legal only when the target output is already present.
- * The dispatcher no longer falls back to the legacy recursive HP path.
+ * @param graph GraphModel used to validate target cache state for empty plans.
+ * @param task_runtime Runtime receiving one empty epoch batch and owned
+ * callbacks.
+ * @param node_id Target node id used in empty-plan diagnostics.
+ * @param plan Run-owned scheduler submission plan.
+ * @param dispatcher_lease Lease retained by dispatcher/commit and copied into
+ * the bootstrap callback.
+ * @return Nothing.
+ * @throws GraphError when an empty plan lacks reusable target output.
+ * @throws Scheduler or task exceptions unchanged through completion wait.
+ * @note The full HP path submits no non-empty TaskHandle and exposes no
+ * borrowed TaskExecutor pointer. Empty plans bypass batch setup.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             SchedulerTaskRuntime& task_runtime, int node_id,
-                            TaskSubmissionPlan& plan);
+                            TaskSubmissionPlan& plan,
+                            const ComputeRunLease& dispatcher_lease);
 
 }  // namespace ps::compute

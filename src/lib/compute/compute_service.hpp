@@ -132,7 +132,7 @@ class ComputeService {
      * @brief Explicit QoS value captured independently from compute intent.
      *
      * @note Current Kernel callers use Throughput, weight one, no deadline, and
-     * an optional sequential parallelism cap. Issue #66 records but does not
+     * an optional sequential parallelism cap. Current Runs record but do not
      * enforce scheduling policy from this value.
      */
     compute::ComputeRunQos qos;
@@ -381,14 +381,16 @@ class ComputeService {
    * @param graph Graph whose target HP output is computed.
    * @param runtime Runtime owning the borrowed GlobalHighPrecision scheduler.
    * @param request Full HP target, cache, and telemetry options.
-   * @param run Request-owned plan, temporary output, and lifecycle owner.
+   * @param run Request observer for leased plan, runner, callback, temporary
+   * output, exception, and lifecycle state.
    * @return Mutable target HP output owned by graph cache.
    * @throws GraphError for scheduler, planning, execution, cache, or output
    * failures.
    * @throws std::bad_alloc unchanged when scheduler, plan, operation, cache,
    * telemetry, or Run storage exhausts memory.
-   * @note The dispatcher synchronously drains every borrowed task handle before
-   * returning; stable Run leases remain issue #67 work.
+   * @note Full-HP scheduler callbacks retain stable Run leases and composite
+   * task identity. The dispatcher still waits synchronously because graph
+   * lifetime and visible commit decoupling remain later work.
    */
   NodeOutput& compute_parallel_hp_impl(GraphModel& graph, GraphRuntime& runtime,
                                        const Request& request,
@@ -407,8 +409,8 @@ class ComputeService {
    * @throws GraphError for intent validation, operation, planning, or output
    * failures.
    * @note Inline RT proxy storage remains owned by ComputeService until service
-   * destruction and is protected by inline_rt_proxy_graphs_mutex_. Issue #66
-   * deliberately creates no mixed-domain Run for realtime coordination.
+   * destruction and is protected by inline_rt_proxy_graphs_mutex_. Current
+   * realtime coordination deliberately creates no mixed-domain Run.
    */
   NodeOutput& compute_with_intent_impl(GraphModel& graph,
                                        const Request& request,

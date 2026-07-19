@@ -65,9 +65,11 @@ mode 或 commit policy。
 当前用于一次非 realtime HP service call 的私有、request-owned 执行记录。其不可变 descriptor
 包含不透明且不复用的 id、session identity、只表示提交时拓扑的 revision、target、
 `GlobalHighPrecision` intent、full quality 与显式 QoS。它拥有单调 phase、exact-once terminal
-state，以及 full scheduler submission plan/temporary result 或 standalone dirty HP staging
-buffer。当前 task handle 仍借用 executor state，直到同步 completion wait 结束；稳定 Run lease、
-配对 realtime child Run/`RunGroup`、权威 `GraphRevision` 与进程执行所有权仍是后续工作。
+state，并通过共享 control state 拥有 full scheduler submission plan/temporary result 或
+standalone dirty HP staging buffer。Scheduler-backed full HP task 会保留不可伪造的
+`ComputeRunLease`，执行 owned callback，并且只通过匹配的
+`(RunId, RunLocalTaskId)` 发布失败。Request-local dirty executor 仍使用独立的同步借用 handle
+路径。配对 realtime child Run/`RunGroup`、权威 `GraphRevision` 与进程执行所有权仍是后续工作。
 
 **`FullTaskGraph`**
 一个 graph generation、compute intent 和 task-shape 配置下完整的 node/tile task 形态。
@@ -93,7 +95,8 @@ scheduler-visible task 可能执行，它就保持不可变。
 的执行协调器。对于当前 full HP 工作，request `ComputeRun` 拥有 `TaskSubmissionPlan` storage 和
 temporary result slot，而 dispatcher 拥有其中的 dependency transition 与 final result commit。
 Dirty executor 复用它的 source-first submission helper，并通过 dirty write buffer 拥有自己的
-staged commit。它只向 scheduler 推送具体 ready task handle 或 callback。
+staged commit。Full HP 路径会推送由 lease 支撑的 owned callback；dirty 路径仍可推送借用
+task handle。
 
 **`ReadyTaskSubmission`**
 一个概念性的 ready submission，表现为计算依赖已满足的借用 `TaskHandle` 或 owned callback。它可以

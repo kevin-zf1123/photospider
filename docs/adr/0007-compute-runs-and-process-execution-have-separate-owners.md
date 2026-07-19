@@ -2,14 +2,16 @@
 
 ## Status
 
-Accepted as the target architecture. The issue #66 non-realtime HP slice of
+Accepted as the target architecture. The issue #67 non-realtime HP slice of
 `ComputeRun` is current software behavior: it provides request identity,
 topology-only submission revision, intent/quality/QoS, monotonic phase, one
-terminal outcome, and Run-owned full-plan/temporary or standalone dirty-HP
-staging storage. `RunGroup`, stable Run leases and completion identity, the
-injected process-owned `ExecutionService` and its `RunLifecycleRegistry`,
-authoritative `GraphRevision` commit validation, the target `ResourceLedger`,
-and the policy-only scheduler generation remain target behavior.
+terminal outcome, shared-control full-plan/temporary or standalone dirty-HP
+staging storage, stable leases, and `(RunId, RunLocalTaskId)` isolation for
+scheduler-backed full HP completion. `RunGroup`, dirty/realtime lease coverage,
+the injected process-owned `ExecutionService` and its
+`RunLifecycleRegistry`, authoritative `GraphRevision` commit validation, the
+target `ResourceLedger`, and the policy-only scheduler generation remain
+target behavior.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -25,13 +27,14 @@ counters, exception publication, and ordering policy. The function-static
 to 32 across embedded Hosts, but it owns no worker, ready-store capacity, Run,
 memory, scratch, device, I/O, or plugin-process budget.
 
-Current `TaskHandle` values borrow a `TaskExecutor*`. For non-realtime full HP
-work, `ComputeRun` now owns `TaskSubmissionPlan`, temporary results, and
-dependency state. The dispatcher, stack `NodeTaskRunner`, and scheduler
-completion identity are still borrowed and bounded by the matching synchronous
-completion wait. Moving those handles into a process queue before issue #67
-introduces stable leases would create use-after-free and cross-request
-completion risks.
+Current `TaskHandle` values borrow a `TaskExecutor*` on request-local dirty
+paths. For non-realtime scheduler-backed full HP work, `ComputeRun` shared
+control owns `TaskSubmissionPlan`, temporary results, dependency state, and the
+runner. Every real ready task is an owned callback retaining a non-forgeable
+Run lease and `(RunId, RunLocalTaskId)`; a matching identity gates failure
+publication. The empty borrowed-handle batch only establishes a scheduler
+epoch. Moving the remaining dirty handles into a process queue without their
+own stable lease would still create use-after-free risk.
 
 ADR 0003 chose the direction—request-owned `ComputeRun`, process-owned
 `ExecutionService`, host-owned `ResourceLedger`, and policy-only
@@ -429,14 +432,14 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract. Issue #66 is now implemented as
-the current non-realtime HP slice; the following slices remain ordered target
-work:
+This decision fixes the dependency contract. Issues #66 and #67 are now
+implemented as the current non-realtime HP slices; the following slices remain
+ordered target work:
 
 | Issue | Consumes this decision | Explicit non-goal of the slice |
 | --- | --- | --- |
 | #66 (current) | HP `ComputeRun` descriptor, state, storage, and one terminal outcome | Process worker migration |
-| #67 | Stable Run leases and `(RunId, RunLocalTaskId)` completion isolation | Shared CPU service |
+| #67 (current) | Stable Run leases and `(RunId, RunLocalTaskId)` full-HP completion isolation | Shared CPU service |
 | #68 | Injected CPU-only `ExecutionService` for one Run, ready-only input | Multi-Graph migration and final ledger |
 | #69 | Shared multi-Graph and HP/RT CPU domain; removal of per-Graph workers | Full admission/policy model |
 | #70 | Production admission, bounded ready store, and `ResourceLedger` | Fairness algorithms |
@@ -548,7 +551,8 @@ static composition object.
   Issue/Project status to remain distinct.
 - [Kernel Evolution](../roadmap/Kernel-Evolution.md#run-and-process-execution-domain-contract)
   records the durable target and delivery dependency order.
-- Current behavior, including the bounded issue #66 HP Run slice, remains
+- Current behavior, including the bounded issue #67 HP Run lease and
+  full-HP completion-isolation slice, remains
   authoritative in
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md),
   [Compute Flow](../kernel-architecture/Compute-Flow.md), and

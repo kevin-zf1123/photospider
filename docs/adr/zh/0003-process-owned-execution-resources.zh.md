@@ -4,9 +4,10 @@
 
 作为目标架构已接受；在迁移完成前，当前每图 scheduler 所有权仍是现行软件行为。当前进程级
 scheduler-worker admission ledger 是 containment 步骤，并不是进程执行所有权的实现。Issue #66
-现在已经实现有界的非 realtime HP `ComputeRun` identity/state/storage 子集；稳定 lease、进程
-worker、resource accounting 与 revision-safe commit 仍是目标行为。ADR 0007 只在详细所有权与
-生命周期契约上取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
+现在已经实现有界的非 realtime HP `ComputeRun` identity/state/storage 子集，issue #67 则增加
+稳定 lease 与 full-HP 复合 completion 隔离。进程 worker、通用 dirty/realtime lease 覆盖、
+resource accounting 与 revision-safe commit 仍是目标行为。ADR 0007 只在详细所有权与生命周期
+契约上取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 
 ## 背景
 

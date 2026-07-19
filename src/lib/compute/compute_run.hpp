@@ -15,9 +15,11 @@
 namespace ps {
 class GraphModel;
 class GraphTraversalService;
+class SchedulerTaskRuntime;
 }  // namespace ps
 
 namespace ps::compute {
+class ComputeRunControl;
 class HighPrecisionDirtyWriteBuffer;
 class TaskSubmissionPlan;
 
@@ -70,6 +72,7 @@ class ComputeRunId {
 
  private:
   friend class ComputeRun;
+  friend class ComputeRunControl;
 
   /**
    * @brief Constructs an id from the private monotonic generator.
@@ -85,7 +88,140 @@ class ComputeRunId {
 };
 
 /**
- * @brief Topology-only revision captured when issue #66 creates a Run.
+ * @brief Dense task identity whose numeric value is local to one ComputeRun.
+ *
+ * A local id has meaning only together with the Run id carried by
+ * ComputeRunTaskIdentity. Different Runs intentionally reuse the same dense
+ * values without sharing execution or completion state.
+ *
+ * @throws Nothing for construction, comparison, and value access.
+ * @note This private backend value is not a scheduler epoch, worker id, graph
+ * node id, or process-global task identity.
+ */
+class ComputeRunLocalTaskId {
+ public:
+  /**
+   * @brief Constructs one Run-local task id from a dense nonnegative value.
+   *
+   * @param value Dense task value supplied by a Run-owned submission plan.
+   * @throws Nothing.
+   * @note Registration against a concrete Run plan is validated when the
+   * identity is routed; constructing a value alone grants no execution right.
+   */
+  explicit ComputeRunLocalTaskId(uint64_t value) noexcept : value_(value) {}
+
+  /**
+   * @brief Returns the dense Run-local numeric value.
+   *
+   * @return Value interpreted only inside the matching Run.
+   * @throws Nothing.
+   */
+  uint64_t value() const noexcept { return value_; }
+
+  /**
+   * @brief Compares two local task values.
+   *
+   * @param other Candidate local value.
+   * @return true when the dense values match.
+   * @throws Nothing.
+   * @note Equal local values from different Runs remain different composite
+   * task identities.
+   */
+  bool operator==(const ComputeRunLocalTaskId& other) const noexcept {
+    return value_ == other.value_;
+  }
+
+  /**
+   * @brief Compares two local task values for inequality.
+   *
+   * @param other Candidate local value.
+   * @return true when the dense values differ.
+   * @throws Nothing.
+   */
+  bool operator!=(const ComputeRunLocalTaskId& other) const noexcept {
+    return !(*this == other);
+  }
+
+ private:
+  /** @brief Dense value interpreted only by the matching Run plan. */
+  uint64_t value_ = 0;
+};
+
+/**
+ * @brief Composite completion identity for one task in one ComputeRun.
+ *
+ * Task execution, dependency release, completion, and worker-failure routing
+ * compare both components. The value carries no lifetime; an accepted callback
+ * must separately retain the matching ComputeRunLease.
+ *
+ * @throws Nothing for construction and comparison.
+ * @note Scheduler batch epochs cannot substitute for this identity.
+ */
+class ComputeRunTaskIdentity {
+ public:
+  /**
+   * @brief Constructs one composite task identity.
+   *
+   * @param run_id Opaque Run namespace.
+   * @param local_task_id Dense task value within that Run.
+   * @throws Nothing.
+   * @note Route validation still requires a matching lease and a registered
+   * local id.
+   */
+  ComputeRunTaskIdentity(ComputeRunId run_id,
+                         ComputeRunLocalTaskId local_task_id) noexcept
+      : run_id_(run_id), local_task_id_(local_task_id) {}
+
+  /**
+   * @brief Returns the Run namespace component.
+   *
+   * @return Opaque identity of the owning Run.
+   * @throws Nothing.
+   */
+  ComputeRunId run_id() const noexcept { return run_id_; }
+
+  /**
+   * @brief Returns the Run-local task component.
+   *
+   * @return Dense task id interpreted by the owning Run plan.
+   * @throws Nothing.
+   */
+  ComputeRunLocalTaskId local_task_id() const noexcept {
+    return local_task_id_;
+  }
+
+  /**
+   * @brief Compares complete task identities.
+   *
+   * @param other Candidate composite identity.
+   * @return true only when both Run and local components match.
+   * @throws Nothing.
+   */
+  bool operator==(const ComputeRunTaskIdentity& other) const noexcept {
+    return run_id_ == other.run_id_ && local_task_id_ == other.local_task_id_;
+  }
+
+  /**
+   * @brief Compares complete task identities for inequality.
+   *
+   * @param other Candidate composite identity.
+   * @return true when either component differs.
+   * @throws Nothing.
+   */
+  bool operator!=(const ComputeRunTaskIdentity& other) const noexcept {
+    return !(*this == other);
+  }
+
+ private:
+  /** @brief Opaque namespace of the owning Run. */
+  ComputeRunId run_id_;
+
+  /** @brief Dense task value registered by that Run's plan. */
+  ComputeRunLocalTaskId local_task_id_;
+};
+
+/**
+ * @brief Topology-only revision captured when the service creates a Run.
  *
  * @throws Nothing for value operations.
  * @note This is not the authoritative graph-wide GraphRevision or a commit
@@ -105,7 +241,7 @@ struct ComputeRunSubmissionRevision {
  * @brief Quality carried independently from compute intent and QoS.
  *
  * @throws Nothing for value operations.
- * @note Issue #66 implements only the full-quality HP Run slice.
+ * @note Current non-realtime HP Runs use only full quality.
  */
 enum class ComputeRunQuality {
   /** @brief Full high-precision product output. */
@@ -169,7 +305,7 @@ struct ComputeRunSubmission {
   /** @brief Target graph node id requested by the caller. */
   int target_node_id = -1;
 
-  /** @brief Single-domain intent; issue #66 accepts only HP. */
+  /** @brief Single-domain intent; current Runs accept only HP. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
 
   /** @brief Quality independent from intent and QoS. */
@@ -229,7 +365,7 @@ class ComputeRunDescriptor {
   /**
    * @brief Returns the single-domain compute intent.
    *
-   * @return GlobalHighPrecision for issue #66 Runs.
+   * @return GlobalHighPrecision for current Runs.
    * @throws Nothing.
    */
   ComputeIntent intent() const noexcept { return intent_; }
@@ -237,7 +373,7 @@ class ComputeRunDescriptor {
   /**
    * @brief Returns the captured quality marker.
    *
-   * @return Full for issue #66 Runs.
+   * @return Full for current Runs.
    * @throws Nothing.
    */
   ComputeRunQuality quality() const noexcept { return quality_; }
@@ -253,6 +389,7 @@ class ComputeRunDescriptor {
 
  private:
   friend class ComputeRun;
+  friend class ComputeRunControl;
 
   /**
    * @brief Constructs one immutable descriptor from validated submission data.
@@ -336,8 +473,8 @@ enum class ComputeRunTerminalKind {
  * @brief Stable cancellation reason retained by a cancelled Run.
  *
  * @throws Nothing for value operations.
- * @note Issue #66 models terminal arbitration but exposes no Host cancellation
- * control surface.
+ * @note Current Run terminal arbitration exposes no Host cancellation control
+ * surface.
  */
 enum class ComputeRunCancellationReason {
   /** @brief Caller explicitly requested cancellation. */
@@ -378,20 +515,200 @@ struct ComputeRunTerminalOutcome {
 };
 
 /**
- * @brief Request-owned HP execution descriptor, state, storage, and arbiter.
+ * @brief Non-forgeable strong ownership of one ComputeRun control block.
  *
- * ComputeRun is the issue #66 ownership boundary. It keeps immutable request
- * identity, monotonic phase, exactly-one terminal state, full HP dispatcher
- * state, temporary results, and standalone dirty HP staging alive for one
- * synchronous service execution.
+ * A lease is minted only by ComputeRun::acquire_lease() and remains bound to
+ * that Run for its complete lifetime. Copying retains another active lease;
+ * moving transfers one active lease without changing the count. Scheduler
+ * callbacks use the lease to route composite task identity into the matching
+ * Run-owned plan.
+ *
+ * @throws std::system_error from state observation or routed execution when a
+ * valid mutex cannot be locked.
+ * @note Destruction is non-throwing, publishes no terminal outcome, and never
+ * requests cancellation. This type is private backend API, not an installed
+ * Host or scheduler-plugin contract.
+ */
+class ComputeRunLease {
+ public:
+  /**
+   * @brief Retains another active lease to the same control block.
+   *
+   * @param other Existing non-forgeable lease.
+   * @throws Nothing.
+   * @note Copying is required by scheduler-owned std::function callbacks.
+   */
+  ComputeRunLease(const ComputeRunLease& other) noexcept;
+
+  /**
+   * @brief Replaces this lease with another retained control block.
+   *
+   * @param other Existing lease whose control block is retained.
+   * @return Reference to this lease.
+   * @throws Nothing.
+   * @note The previous lease is released before the new lease is retained.
+   */
+  ComputeRunLease& operator=(const ComputeRunLease& other) noexcept;
+
+  /**
+   * @brief Transfers one active lease without incrementing its count.
+   *
+   * @param other Lease left empty after transfer.
+   * @throws Nothing.
+   */
+  ComputeRunLease(ComputeRunLease&& other) noexcept;
+
+  /**
+   * @brief Replaces this lease by transferring another active lease.
+   *
+   * @param other Lease left empty after transfer.
+   * @return Reference to this lease.
+   * @throws Nothing.
+   */
+  ComputeRunLease& operator=(ComputeRunLease&& other) noexcept;
+
+  /**
+   * @brief Releases this active lease passively.
+   *
+   * @throws Nothing.
+   * @note Releasing the last lease may make an observer-visible Run quiescent,
+   * but never changes terminal state.
+   */
+  ~ComputeRunLease() noexcept;
+
+  /**
+   * @brief Returns the immutable descriptor retained by this lease.
+   *
+   * @return Borrowed descriptor valid while this lease remains alive.
+   * @throws Nothing.
+   */
+  const ComputeRunDescriptor& descriptor() const noexcept;
+
+  /**
+   * @brief Builds a composite identity in this lease's Run namespace.
+   *
+   * @param local_task_id Dense local value to pair with the retained Run id.
+   * @return Composite Run/local identity.
+   * @throws Nothing.
+   * @note Registration is checked separately before task or failure routing.
+   */
+  ComputeRunTaskIdentity task_identity(uint64_t local_task_id) const noexcept;
+
+  /**
+   * @brief Tests whether an identity names a task registered by this Run.
+   *
+   * @param identity Candidate composite identity.
+   * @return true only when both Run id and local plan registration match.
+   * @throws std::system_error if the control mutex cannot be locked.
+   * @note The check grants no execution by itself.
+   */
+  bool accepts_task_identity(const ComputeRunTaskIdentity& identity) const;
+
+  /**
+   * @brief Publishes a matching task failure through this Run's arbiter.
+   *
+   * @param identity Composite identity of the failing registered task.
+   * @param failure Exact non-null exception captured at the worker boundary.
+   * @return true only when identity matched and this failure won the terminal
+   * arbiter; false for mismatch or an already terminal Run.
+   * @throws std::invalid_argument when failure is null.
+   * @throws std::system_error if the control mutex cannot be locked.
+   * @note A mismatched identity mutates neither this Run nor the identity's
+   * named Run.
+   */
+  bool publish_task_failure(const ComputeRunTaskIdentity& identity,
+                            std::exception_ptr failure);
+
+  /**
+   * @brief Returns the current terminal outcome retained by the lease.
+   *
+   * @return Outcome snapshot, or nullopt before terminal publication.
+   * @throws std::system_error if the control mutex cannot be locked.
+   * @note This remains observable after the original ComputeRun observer is
+   * destroyed.
+   */
+  std::optional<ComputeRunTerminalOutcome> terminal_outcome() const;
+
+  /**
+   * @brief Executes one registered task through the matching Run-owned plan.
+   *
+   * @param identity Composite task identity carried by an accepted callback.
+   * @param task_runtime Scheduler runtime used for trace, ready submission, and
+   * completion accounting.
+   * @return Nothing.
+   * @throws std::invalid_argument when identity does not match this lease or a
+   * registered local task.
+   * @throws GraphError or operation exceptions from Run-owned task execution.
+   * @throws std::bad_alloc unchanged from execution or callback submission.
+   * @note A valid task exception is published to this Run before being
+   * rethrown to scheduler transport.
+   */
+  void execute_task(const ComputeRunTaskIdentity& identity,
+                    SchedulerTaskRuntime& task_runtime);
+
+  /**
+   * @brief Runs the full-HP scheduler bootstrap through this lease.
+   *
+   * @param task_runtime Active scheduler batch receiving initial owned
+   * callbacks and completion accounting.
+   * @return Nothing.
+   * @throws GraphError or standard exceptions from ready discovery,
+   * completion accounting, trace publication, or callback submission.
+   * @note The bootstrap completion unit is released only after every initial
+   * callback is accepted; an exception is published to this Run and rethrown.
+   */
+  void execute_bootstrap(SchedulerTaskRuntime& task_runtime);
+
+ private:
+  friend class ComputeRun;
+
+  /**
+   * @brief Mints the first active lease for one Run control block.
+   *
+   * @param control Shared Run state retained by this lease.
+   * @throws Nothing.
+   * @note Only ComputeRun may call this constructor.
+   */
+  explicit ComputeRunLease(std::shared_ptr<ComputeRunControl> control) noexcept;
+
+  /**
+   * @brief Increments the active lease count for a copied control block.
+   *
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void retain() noexcept;
+
+  /**
+   * @brief Decrements the active lease count and clears this reference.
+   *
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void release() noexcept;
+
+  /** @brief Shared Run control retained independently from observers. */
+  std::shared_ptr<ComputeRunControl> control_;
+};
+
+/**
+ * @brief Request observer for HP execution descriptor, state, storage, and
+ * arbiter.
+ *
+ * ComputeRun creates the shared control block established by issues #66 and
+ * #67. The observer settles service-level lifecycle, while non-forgeable
+ * leases keep full-HP dispatcher state, owned callbacks, temporary results,
+ * exception state, and standalone dirty HP staging alive independently from
+ * the original observer.
  *
  * @throws std::invalid_argument when constructed with non-HP intent,
  * nonpositive QoS weight, or zero maximum parallelism.
  * @throws std::overflow_error when process-lifetime Run identities are
  * exhausted.
  * @throws std::bad_alloc when descriptor or storage ownership cannot allocate.
- * @note Scheduler/task handles remain borrowed and must synchronously drain
- * before Run destruction. Stable RunLease lifetime begins in issue #67.
+ * @note Full scheduler-backed HP work uses stable leases and composite task
+ * identity. The separate dirty source-first executor family remains
+ * synchronously drained until RT child Runs land.
  */
 class ComputeRun {
  public:
@@ -408,11 +725,12 @@ class ComputeRun {
   explicit ComputeRun(ComputeRunSubmission submission);
 
   /**
-   * @brief Passively destroys Run-owned storage.
+   * @brief Passively releases the request observer.
    *
    * @throws Nothing.
    * @note Destruction never publishes cancellation or another terminal
-   * outcome. Callers must synchronously drain borrowed scheduler handles first.
+   * outcome. Active leases retain the shared control block after this observer
+   * disappears.
    */
   ~ComputeRun() noexcept;
 
@@ -421,7 +739,8 @@ class ComputeRun {
    *
    * @param other Source Run that cannot be copied.
    * @throws Nothing because the operation is deleted.
-   * @note ComputeRun ownership is unique to one service request.
+   * @note One request has one settlement observer; callback ownership is
+   * represented only by ComputeRunLease.
    */
   ComputeRun(const ComputeRun& other) = delete;
 
@@ -440,7 +759,8 @@ class ComputeRun {
    *
    * @param other Source Run that cannot be moved.
    * @throws Nothing because the operation is deleted.
-   * @note Current borrowed task handles require address-stable Run storage.
+   * @note Moving an observer would obscure the single service settlement
+   * boundary even though leased control storage is address-stable.
    */
   ComputeRun(ComputeRun&& other) = delete;
 
@@ -450,7 +770,7 @@ class ComputeRun {
    * @param other Source Run that cannot be assigned.
    * @return No value because the operation is deleted.
    * @throws Nothing because the operation is deleted.
-   * @note Stable lease-based mobility is not introduced by issue #66.
+   * @note Stable callback ownership uses ComputeRunLease instead.
    */
   ComputeRun& operator=(ComputeRun&& other) = delete;
 
@@ -461,8 +781,29 @@ class ComputeRun {
    * @throws Nothing.
    */
   const ComputeRunDescriptor& descriptor() const noexcept {
-    return descriptor_;
+    return descriptor_ref();
   }
+
+  /**
+   * @brief Acquires one non-forgeable active lease before accepting work.
+   *
+   * @return Strong lease retaining the shared Run control block.
+   * @throws std::logic_error when the Run is already terminal.
+   * @throws std::system_error if the control mutex cannot be locked.
+   * @note Dispatcher and commit continuations keep their own lease while every
+   * accepted callback receives a copied or moved lease.
+   */
+  ComputeRunLease acquire_lease();
+
+  /**
+   * @brief Reports current Run-local physical quiescence.
+   *
+   * @return true only when no active ComputeRunLease exists.
+   * @throws Nothing.
+   * @note Terminal publication does not imply quiescence. This count does not
+   * represent future graph/resource/registry settlement.
+   */
+  bool is_quiescent() const noexcept;
 
   /**
    * @brief Returns the current phase snapshot.
@@ -515,8 +856,8 @@ class ComputeRun {
    * @param reason Cancellation cause accepted by the Run arbiter.
    * @return true only for the winning terminal publication.
    * @throws std::system_error if mutex locking fails.
-   * @note Current issue #66 product paths do not call this method; it exists so
-   * exact terminal arbitration is complete before a control surface arrives.
+   * @note Current product paths do not call this method; it exists so exact
+   * terminal arbitration is complete before a control surface arrives.
    */
   bool publish_cancelled(ComputeRunCancellationReason reason);
 
@@ -544,12 +885,10 @@ class ComputeRun {
    * @param traversal Traversal service used to build the cache-pruned plan.
    * @param node_id Target node id.
    * @param available_devices Devices exposed by the borrowed scheduler.
-   * @return Mutable Run-owned plan used until synchronous scheduler drainage
-   * and commit finish.
+   * @return Mutable Run-owned plan retained by the shared control block.
    * @throws std::logic_error when a plan already exists or the Run is terminal.
    * @throws GraphError or standard exceptions from plan construction.
-   * @note Task closures may borrow this plan only until the current dispatcher
-   * wait completes; issue #67 introduces stable leases.
+   * @note Full-HP task callbacks reach this plan only through a matching lease.
    */
   TaskSubmissionPlan& emplace_submission_plan(
       GraphModel& graph, GraphTraversalService& traversal, int node_id,
@@ -571,7 +910,7 @@ class ComputeRun {
    * @return Mutable Run-owned write buffer.
    * @throws std::logic_error when a buffer already exists or Run is terminal.
    * @throws std::bad_alloc when buffer allocation fails.
-   * @note Paired realtime sibling staging remains outside issue #66.
+   * @note Paired realtime sibling staging remains outside the current Run.
    */
   HighPrecisionDirtyWriteBuffer& emplace_dirty_hp_write_buffer(
       bool seed_existing_outputs);
@@ -587,6 +926,16 @@ class ComputeRun {
 
  private:
   /**
+   * @brief Returns the descriptor from the shared control block.
+   *
+   * @return Borrowed immutable descriptor.
+   * @throws Nothing.
+   * @note The request observer itself retains the control block for the
+   * returned reference.
+   */
+  const ComputeRunDescriptor& descriptor_ref() const noexcept;
+
+  /**
    * @brief Attempts one exact terminal publication under the Run mutex.
    *
    * @param outcome Fully formed terminal value.
@@ -596,25 +945,8 @@ class ComputeRun {
    */
   bool publish_terminal(ComputeRunTerminalOutcome outcome);
 
-  /** @brief Immutable identity and request inputs captured before planning. */
-  const ComputeRunDescriptor descriptor_;
-
-  /** @brief Guards phase, terminal arbiter, and optional storage installation.
-   */
-  mutable std::mutex mutex_;
-
-  /** @brief Latest monotonic nonterminal phase before settlement. */
-  ComputeRunPhase phase_ = ComputeRunPhase::Created;
-
-  /** @brief Exactly-one terminal outcome, absent before settlement. */
-  std::optional<ComputeRunTerminalOutcome> terminal_outcome_;
-
-  /** @brief Optional Run-owned full HP plan, dependency state, and temp output.
-   */
-  std::unique_ptr<TaskSubmissionPlan> submission_plan_;
-
-  /** @brief Optional Run-owned standalone dirty HP staging output. */
-  std::unique_ptr<HighPrecisionDirtyWriteBuffer> dirty_hp_write_buffer_;
+  /** @brief Shared state retained by this observer and every active lease. */
+  std::shared_ptr<ComputeRunControl> control_;
 };
 
 }  // namespace ps::compute

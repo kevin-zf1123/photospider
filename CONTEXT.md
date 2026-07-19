@@ -24,15 +24,17 @@ are authoritative; reader-oriented Chinese copies live under
 
 ## Current and Target Concepts
 
-The current issue #66 slice gives each non-realtime HP request one private,
+The current issue #67 slice gives each non-realtime HP request one private,
 request-owned `ComputeRun`. It captures an opaque id, the session label, a
 topology-only submission revision, target, HP intent, full quality, explicit
-QoS, monotonic phase, and one terminal outcome. It owns the full scheduler
-submission plan and temporary results, or the standalone dirty HP staging
-buffer. It still drains borrowed task handles synchronously before returning.
+QoS, monotonic phase, and one terminal outcome. Its shared control state owns
+the full scheduler submission plan and temporary results, or the standalone
+dirty HP staging buffer. The scheduler-backed full HP path retains that state
+through non-forgeable `ComputeRunLease` values, executes owned callbacks, and
+routes task failure by `(RunId, RunLocalTaskId)`.
 
 Do not describe the remaining accepted future objects as if they already
-exist. Request-owned `RunGroup`, stable `RunLease`,
+exist. Request-owned `RunGroup`,
 `ExecutionService::RunLifecycleRegistry`, process-owned `ExecutionService`,
 authoritative `GraphRevision` commit validation, `ResourceLedger`, the general
 `Value` model, heterogeneous executors, server control plane, and isolated
@@ -56,9 +58,10 @@ context document.
 - `ImageBuffer` is not a general Tensor, Deep Image, or vector-scene model.
 - The current worker-owning `IScheduler` is not the target process execution
   domain.
-- A scheduler epoch or task id is not the current `RunId`. Current completion
-  still uses borrowed scheduler state; target `(RunId, RunLocalTaskId)`
-  completion identity is scoped by one stable Run lease.
+- A scheduler epoch is neither a `RunId` nor a completion identity. Current
+  scheduler-backed full HP completion is scoped by one stable Run lease and
+  `(RunId, RunLocalTaskId)`; request-local dirty executors still use their
+  separate synchronous borrowed-handle path.
 - A target `RunGroup` coordinates results and lifecycle for independent HP/RT
   Runs; it is not a mixed-domain Run or a cross-domain task graph.
 - A graph-lifetime lease protects a target Graph lifetime; it does not make

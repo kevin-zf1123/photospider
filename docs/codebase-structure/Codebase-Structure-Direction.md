@@ -43,7 +43,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_graph_internal` | Build-only `GraphModel` and graph-service helper. | `GraphModel` remains private under `src/lib/graph`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation v2 loader, adapter, and lifetime helper. | It is not exported. |
 | `photospider_scheduler_internal` | Build-only scheduler planning/factory, ABI-v2 loader, built-in implementation, reservation owner, and process-budget helper. | Its fixed 32-slot process ledger is transitional private containment, not the target injected execution service. |
-| `photospider_compute_internal` | Build-only compute, request-owned HP `ComputeRun`, runtime, dirty-region, and interaction helper. | The Run remains private and its borrowed scheduler completion still depends one-way on the scheduler helper. |
+| `photospider_compute_internal` | Build-only compute, request-owned HP `ComputeRun`, runtime, dirty-region, and interaction helper. | The Run remains private; its scheduler-backed full HP callbacks retain stable Run leases while physical workers still belong to per-Graph schedulers. |
 | `photospider_operation_runtime` | Installable static image-buffer factory implementation. | It has no external package or back-link to the operation SDK. |
 | `photospider_operation_sdk` | Installable operation v2 interface SDK. | It transitively carries `operation_runtime`, so it is the sole ordinary plugin link target. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
@@ -97,11 +97,13 @@ Resolved seam tightening in the current branch:
   `src/lib/**` directories. Internal targets compile with the private
   `src/lib/` root, while the installable public header inventory remains
   limited to `include/photospider/**`.
-- The current issue #66 Run implementation lives only in
+- The current issue #67 Run implementation lives only in
   `src/lib/compute/compute_run.*`. `Kernel` supplies session identity and
   explicit default QoS to the private service request; `ComputeService` creates
-  one Run for each non-realtime HP call, and the Run owns full-plan/temporary or
-  standalone dirty-HP staging storage through exact terminal publication. No
+  one Run for each non-realtime HP call. Shared Run control owns
+  full-plan/temporary or standalone dirty-HP staging storage through exact
+  terminal publication. Scheduler-backed full HP work retains non-forgeable
+  leases and routes owned-callback failure by `(RunId, RunLocalTaskId)`. No
   installed header, Host value, operation ABI, or scheduler ABI names this
   private object.
 - Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
@@ -428,10 +430,11 @@ CMake rules:
 ## Target Process-Execution Composition Boundary
 
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-fixes the complete process-execution ownership. Its issue #66 private HP Run
-source is now current under `src/lib/compute/`; stable leases, paired Runs,
-process service composition, resource ownership, and revision-safe commit
-remain target layout. The product composition root will later construct one
+fixes the complete process-execution ownership. Its issue #67 private HP Run
+source, stable lease, and full-HP completion-isolation slice is now current
+under `src/lib/compute/`; paired Runs, process service composition, resource
+ownership, and revision-safe commit remain target layout. The product
+composition root will later construct one
 explicit `ExecutionService` from process configuration and inject it into
 participating backend owners. It will not use a static singleton.
 
@@ -440,10 +443,12 @@ In that target:
 - `GraphRuntime` remains graph-scoped and owns Graph state, the graph-state lane,
   revision capture/commit validation, stable graph-instance identity and
   lifetime anchor, events, and platform/session metadata;
-- the current `ComputeRun` owns non-realtime HP descriptor/phase/terminal state
-  plus full-plan/temporary or standalone dirty-HP staging storage; the target
-  extends that owner with stable dispatcher/completion state, cancellation,
-  reservations, and non-forgeable Run leases across asynchronous work;
+- the current `ComputeRun` shared control owns non-realtime HP
+  descriptor/phase/terminal state plus full-plan/temporary or standalone
+  dirty-HP staging storage; scheduler-backed full HP work retains
+  non-forgeable leases and composite task identity, while the target extends
+  that owner with general dirty/realtime coverage, cancellation, and
+  reservations;
 - request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;

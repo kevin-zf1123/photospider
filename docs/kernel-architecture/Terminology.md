@@ -80,10 +80,13 @@ service call. Its immutable descriptor contains an opaque non-reused id,
 session identity, topology-only submission revision, target,
 `GlobalHighPrecision` intent, full quality, and explicit QoS. It owns monotonic
 phase and exact-once terminal state plus the full scheduler submission
-plan/temporary results or standalone dirty HP staging buffer. Current task
-handles still borrow executor state until the synchronous completion wait;
-stable Run leases, paired realtime child Runs/`RunGroup`, authoritative
-`GraphRevision`, and process execution ownership remain future work.
+plan/temporary results or standalone dirty HP staging buffer through shared
+control state. Scheduler-backed full HP tasks retain non-forgeable
+`ComputeRunLease` values, execute owned callbacks, and publish failure only
+through a matching `(RunId, RunLocalTaskId)`. Request-local dirty executors
+still use a separate synchronous borrowed-handle path. Paired realtime child
+Runs/`RunGroup`, authoritative `GraphRevision`, and process execution
+ownership remain future work.
 
 **`FullTaskGraph`**
 The complete node/tile task shape for one graph generation, compute intent, and
@@ -115,8 +118,9 @@ temporary-result indexing semantics, and completion aggregation. For current
 full HP work, the request `ComputeRun` owns the `TaskSubmissionPlan` storage and
 temporary result slots while the dispatcher owns their dependency transitions
 and final result commit. Dirty executors reuse its source-first submission
-helper and own their staged commit through dirty write buffers. It pushes only
-concrete ready task handles or callbacks to the scheduler.
+helper and own their staged commit through dirty write buffers. The full HP
+path pushes lease-backed owned callbacks; dirty paths may still push borrowed
+task handles.
 
 **`ReadyTaskSubmission`**
 A conceptual ready submission represented by a borrowed `TaskHandle` or an

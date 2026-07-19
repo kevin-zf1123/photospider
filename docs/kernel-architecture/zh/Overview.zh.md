@@ -218,7 +218,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
-| `ComputeRun` | 私有 request owner，拥有一次非 realtime HP descriptor、单调 phase、唯一 terminal outcome，以及 full-plan/temporary storage 或 standalone dirty-HP staging storage；尚不提供稳定 lease、realtime Run grouping 或进程执行所有权。 |
+| `ComputeRun` | 私有 request owner，拥有一次非 realtime HP descriptor、单调 phase、唯一 terminal outcome，以及由共享 control 持有的 full-plan/temporary storage 或 standalone dirty-HP staging storage；scheduler-backed full HP work 会保留稳定 lease 与复合 task identity，realtime Run grouping 和进程执行所有权仍是后续工作。 |
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
 | `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
@@ -416,8 +416,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `Kernel` 组合图级 service，不暴露可安装 API。
 - `ComputeService` 协调私有协作者，其模块边界是 `ps::Host` 后方的实现细节。
 - 当前 `ComputeRun` 是有界的非 realtime HP request owner。其 topology generation 只是
-  submission provenance，不是权威 `GraphRevision`；scheduler handle 仍在没有稳定 Run lease
-  的情况下同步 drain。
+  submission provenance，不是权威 `GraphRevision`。Scheduler-backed full HP work 会在稳定
+  Run lease 下执行 owned callback，并按 `(RunId, RunLocalTaskId)` 路由 failure；request-local
+  dirty executor 保留独立的同步 borrowed-handle 路径。
 - `GraphTraversalService` 只拥有 topology query。
 - `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
@@ -446,8 +447,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - [ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
   定义当前事实、决策、目标与实施状态如何保持分离。
 - [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-  固定完整的目标 Run、completion、execution-service、ledger 与 lifecycle 所有权；当前只实现其
-  issue #66 非 realtime HP Run 切片。
+  固定完整的目标 Run、completion、execution-service、ledger 与 lifecycle 所有权；其 issue #67
+  非 realtime HP Run lease 与 completion-isolation 切片已经是当前行为。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

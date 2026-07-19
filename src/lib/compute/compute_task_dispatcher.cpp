@@ -100,17 +100,19 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @param graph GraphModel whose target output is computed.
  * @param task_runtime Scheduler runtime used for this dispatch.
  * @param request Per-call dispatch options.
- * @param run Request-owned HP Run retaining dispatcher-local plan and output
- * storage until synchronous drainage and commit complete.
+ * @param run Request observer that mints a dispatcher lease retaining plan,
+ * runner, callback, exception, and output state through commit.
  * @return Mutable high-precision output stored on the target graph node.
  * @throws GraphError for missing targets, missing final output, compute
  * failures, or scheduling failures; may also propagate operation/cache
  * exceptions with added context.
  * @throws std::bad_alloc unchanged when plan, task, operation, cache,
  * telemetry, or result storage exhausts memory.
- * @note The function builds all worker closures before submission, waits for
- * completion, then commits Run-owned temp outputs under graph_mutex_. The
- * runner and scheduler runtime remain borrowed until that wait completes.
+ * @note The function binds the Run-owned worker runner before submission,
+ * waits for owned callbacks and their dependent releases, then commits
+ * Run-owned temp outputs under graph_mutex_. Every full-HP callback reaches the
+ * runner through a composite identity and a matching lease; the scheduler
+ * runtime remains borrowed through the current synchronous wait.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
@@ -134,6 +136,7 @@ NodeOutput& ComputeTaskDispatcher::execute(
     graph.clear_full_task_graph_cache();
   }
 
+  ComputeRunLease dispatcher_lease = run.acquire_lease();
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal_, node_id, task_runtime.available_devices());
   if (request.force_recache) {
@@ -141,7 +144,7 @@ NodeOutput& ComputeTaskDispatcher::execute(
                                         plan.execution_order());
   }
 
-  NodeTaskRunner runner(NodeTaskRunnerContext{
+  plan.emplace_task_runner(NodeTaskRunnerContext{
       graph,
       cache_,
       events_,
@@ -158,10 +161,9 @@ NodeOutput& ComputeTaskDispatcher::execute(
       request.disable_disk_cache,
       request.benchmark_events,
   });
-  plan.build_scheduler_tasks(runner, task_runtime);
   run.advance_to(ComputeRunPhase::Queued);
   run.advance_to(ComputeRunPhase::Running);
-  dispatch_planned_tasks(graph, task_runtime, node_id, plan);
+  dispatch_planned_tasks(graph, task_runtime, node_id, plan, dispatcher_lease);
   run.advance_to(ComputeRunPhase::CommitPending);
 
   ComputeResultCommitter committer(cache_, graph_mutex,

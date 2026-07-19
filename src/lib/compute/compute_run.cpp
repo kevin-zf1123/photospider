@@ -6,6 +6,7 @@
 #include "compute/compute_run.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -43,7 +44,7 @@ uint64_t mint_compute_run_id_value() {
 }
 
 /**
- * @brief Validates issue #66 submission values before descriptor creation.
+ * @brief Validates current HP Run submission values before descriptor creation.
  *
  * @param submission Candidate HP Run inputs.
  * @return Nothing.
@@ -55,7 +56,7 @@ uint64_t mint_compute_run_id_value() {
 void validate_submission(const ComputeRunSubmission& submission) {
   if (submission.intent != ComputeIntent::GlobalHighPrecision) {
     throw std::invalid_argument(
-        "Issue #66 ComputeRun requires GlobalHighPrecision intent.");
+        "ComputeRun requires GlobalHighPrecision intent.");
   }
   if (submission.qos.weight == 0) {
     throw std::invalid_argument("ComputeRun QoS weight must be positive.");
@@ -97,6 +98,63 @@ int nonterminal_phase_rank(ComputeRunPhase phase) {
 }  // namespace
 
 /**
+ * @brief Shared private lifetime and mutable state for one ComputeRun.
+ *
+ * The request observer and every active ComputeRunLease retain this control
+ * block. It owns all Run-local execution storage and tracks lease-count
+ * quiescence independently from terminal publication.
+ *
+ * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
+ * validated descriptor construction.
+ * @note The class is defined only in this translation unit and is not an ABI
+ * surface.
+ */
+class ComputeRunControl {
+ public:
+  /**
+   * @brief Constructs a new control block with a fresh Run identity.
+   *
+   * @param submission Immutable request inputs transferred into the descriptor.
+   * @throws std::invalid_argument for unsupported intent or invalid QoS.
+   * @throws std::overflow_error when Run identity values are exhausted.
+   * @throws std::bad_alloc when descriptor ownership cannot allocate.
+   * @note No lease exists until ComputeRun::acquire_lease() is called.
+   */
+  explicit ComputeRunControl(ComputeRunSubmission submission);
+
+  /**
+   * @brief Passively destroys Run-owned plan and staging storage.
+   *
+   * @throws Nothing.
+   * @note Destruction publishes no outcome, requests no cancellation, and
+   * creates no new lease.
+   */
+  ~ComputeRunControl() noexcept;
+
+  /** @brief Immutable identity and request inputs captured before planning. */
+  const ComputeRunDescriptor descriptor;
+
+  /** @brief Guards phase, terminal arbiter, and storage installation. */
+  mutable std::mutex mutex;
+
+  /** @brief Latest monotonic nonterminal phase before settlement. */
+  ComputeRunPhase phase = ComputeRunPhase::Created;
+
+  /** @brief Exactly-one terminal outcome, absent before settlement. */
+  std::optional<ComputeRunTerminalOutcome> terminal_outcome;
+
+  /** @brief Optional full HP plan, dependency state, runner, and temp output.
+   */
+  std::unique_ptr<TaskSubmissionPlan> submission_plan;
+
+  /** @brief Optional standalone dirty HP staging output. */
+  std::unique_ptr<HighPrecisionDirtyWriteBuffer> dirty_hp_write_buffer;
+
+  /** @brief Number of live non-forgeable leases retaining this control. */
+  std::atomic<std::size_t> active_leases{0};
+};
+
+/**
  * @brief Constructs an immutable descriptor from a fresh id and submission.
  *
  * @param id Fresh opaque Run identity.
@@ -115,29 +173,83 @@ ComputeRunDescriptor::ComputeRunDescriptor(ComputeRunId id,
       qos_(submission.qos) {}  // NOLINT(whitespace/indent_namespace)
 
 /**
- * @brief Constructs one request-owned HP Run in Created phase.
+ * @brief Constructs shared Run state after validating immutable submission.
  *
- * @param submission Descriptor inputs captured before HP planning.
+ * @param submission Candidate request values transferred into the descriptor.
  * @throws std::invalid_argument for unsupported intent or invalid QoS.
- * @throws std::overflow_error if Run identity allocation is exhausted.
- * @throws std::bad_alloc if descriptor ownership cannot allocate.
- * @note The fresh id is minted only after semantic validation succeeds.
+ * @throws std::overflow_error when Run id allocation is exhausted.
+ * @throws std::bad_alloc when descriptor ownership cannot allocate.
  */
-ComputeRun::ComputeRun(ComputeRunSubmission submission)
-    : descriptor_([&submission]() {
+ComputeRunControl::ComputeRunControl(ComputeRunSubmission submission)
+    : descriptor([&submission]() {
         validate_submission(submission);
         return ComputeRunDescriptor(ComputeRunId(mint_compute_run_id_value()),
                                     std::move(submission));
       }()) {}
 
 /**
- * @brief Passively destroys Run-owned plan and staging storage.
+ * @brief Passively releases Run-local storage after all owners disappear.
  *
  * @throws Nothing.
- * @note Destruction does not publish a terminal outcome or interact with the
- * borrowed scheduler runtime.
+ */
+ComputeRunControl::~ComputeRunControl() noexcept = default;
+
+/**
+ * @brief Constructs one request observer and shared HP Run control block.
+ *
+ * @param submission Descriptor inputs captured before HP planning.
+ * @throws std::invalid_argument for unsupported intent or invalid QoS.
+ * @throws std::overflow_error if Run identity allocation is exhausted.
+ * @throws std::bad_alloc if descriptor ownership cannot allocate.
+ * @note The fresh id is minted only after semantic validation succeeds; no
+ * active lease exists yet.
+ */
+ComputeRun::ComputeRun(ComputeRunSubmission submission)
+    : control_(std::make_shared<ComputeRunControl>(std::move(submission))) {}
+
+/**
+ * @brief Passively releases the request observer.
+ *
+ * @throws Nothing.
+ * @note Active leases retain the control block; observer destruction publishes
+ * no terminal outcome and requests no cancellation.
  */
 ComputeRun::~ComputeRun() noexcept = default;
+
+/**
+ * @brief Returns the immutable descriptor from shared control.
+ *
+ * @return Borrowed descriptor retained by this observer.
+ * @throws Nothing.
+ */
+const ComputeRunDescriptor& ComputeRun::descriptor_ref() const noexcept {
+  return control_->descriptor;
+}
+
+/**
+ * @brief Acquires one active non-forgeable lease before accepting work.
+ *
+ * @return Strong lease bound to this Run control block.
+ * @throws std::logic_error when terminal state is already published.
+ * @throws std::system_error if mutex locking fails.
+ */
+ComputeRunLease ComputeRun::acquire_lease() {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  if (control_->terminal_outcome.has_value()) {
+    throw std::logic_error("Cannot acquire a lease for a terminal ComputeRun.");
+  }
+  return ComputeRunLease(control_);
+}
+
+/**
+ * @brief Reports whether no active Run lease remains.
+ *
+ * @return true only when the active lease count is zero.
+ * @throws Nothing.
+ */
+bool ComputeRun::is_quiescent() const noexcept {
+  return control_->active_leases.load(std::memory_order_acquire) == 0U;
+}
 
 /**
  * @brief Returns the current phase under the Run mutex.
@@ -146,8 +258,9 @@ ComputeRun::~ComputeRun() noexcept = default;
  * @throws std::system_error if mutex locking fails.
  */
 ComputeRunPhase ComputeRun::phase() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return terminal_outcome_.has_value() ? ComputeRunPhase::Terminal : phase_;
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->terminal_outcome.has_value() ? ComputeRunPhase::Terminal
+                                                : control_->phase;
 }
 
 /**
@@ -161,18 +274,18 @@ ComputeRunPhase ComputeRun::phase() const {
  */
 bool ComputeRun::advance_to(ComputeRunPhase next) {
   const int next_rank = nonterminal_phase_rank(next);
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (terminal_outcome_.has_value()) {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  if (control_->terminal_outcome.has_value()) {
     return false;
   }
-  const int current_rank = nonterminal_phase_rank(phase_);
+  const int current_rank = nonterminal_phase_rank(control_->phase);
   if (next_rank < current_rank) {
     throw std::logic_error("ComputeRun phase cannot move backward.");
   }
   if (next_rank == current_rank) {
     return false;
   }
-  phase_ = next;
+  control_->phase = next;
   return true;
 }
 
@@ -223,8 +336,8 @@ bool ComputeRun::publish_cancelled(ComputeRunCancellationReason reason) {
  * @throws std::system_error if mutex locking fails.
  */
 std::optional<ComputeRunTerminalOutcome> ComputeRun::terminal_outcome() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return terminal_outcome_;
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->terminal_outcome;
 }
 
 /**
@@ -234,8 +347,8 @@ std::optional<ComputeRunTerminalOutcome> ComputeRun::terminal_outcome() const {
  * @throws std::system_error if mutex locking fails.
  */
 bool ComputeRun::is_terminal() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return terminal_outcome_.has_value();
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->terminal_outcome.has_value();
 }
 
 /**
@@ -248,22 +361,23 @@ bool ComputeRun::is_terminal() const {
  * @return Mutable Run-owned submission plan.
  * @throws std::logic_error for duplicate storage or terminal Run.
  * @throws GraphError or standard exceptions from TaskSubmissionPlan.
- * @note The Run must outlive the synchronous scheduler drain.
+ * @note Shared control retains the plan through every accepted full-HP lease.
  */
 TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
     GraphModel& graph, GraphTraversalService& traversal, int node_id,
     std::vector<Device> available_devices) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (terminal_outcome_.has_value()) {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  if (control_->terminal_outcome.has_value()) {
     throw std::logic_error(
         "Cannot install submission plan on a terminal ComputeRun.");
   }
-  if (submission_plan_) {
+  if (control_->submission_plan) {
     throw std::logic_error("ComputeRun already owns a task submission plan.");
   }
-  submission_plan_ = std::make_unique<TaskSubmissionPlan>(
-      graph, traversal, node_id, std::move(available_devices));
-  return *submission_plan_;
+  control_->submission_plan = std::make_unique<TaskSubmissionPlan>(
+      control_->descriptor.id(), graph, traversal, node_id,
+      std::move(available_devices));
+  return *control_->submission_plan;
 }
 
 /**
@@ -273,8 +387,8 @@ TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
  * @throws std::system_error if mutex locking fails.
  */
 TaskSubmissionPlan* ComputeRun::submission_plan() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return submission_plan_.get();
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->submission_plan.get();
 }
 
 /**
@@ -287,17 +401,17 @@ TaskSubmissionPlan* ComputeRun::submission_plan() {
  */
 HighPrecisionDirtyWriteBuffer& ComputeRun::emplace_dirty_hp_write_buffer(
     bool seed_existing_outputs) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (terminal_outcome_.has_value()) {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  if (control_->terminal_outcome.has_value()) {
     throw std::logic_error(
         "Cannot install dirty HP storage on a terminal ComputeRun.");
   }
-  if (dirty_hp_write_buffer_) {
+  if (control_->dirty_hp_write_buffer) {
     throw std::logic_error("ComputeRun already owns a dirty HP write buffer.");
   }
-  dirty_hp_write_buffer_ =
+  control_->dirty_hp_write_buffer =
       std::make_unique<HighPrecisionDirtyWriteBuffer>(seed_existing_outputs);
-  return *dirty_hp_write_buffer_;
+  return *control_->dirty_hp_write_buffer;
 }
 
 /**
@@ -307,8 +421,8 @@ HighPrecisionDirtyWriteBuffer& ComputeRun::emplace_dirty_hp_write_buffer(
  * @throws std::system_error if mutex locking fails.
  */
 HighPrecisionDirtyWriteBuffer* ComputeRun::dirty_hp_write_buffer() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return dirty_hp_write_buffer_.get();
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->dirty_hp_write_buffer.get();
 }
 
 /**
@@ -319,12 +433,268 @@ HighPrecisionDirtyWriteBuffer* ComputeRun::dirty_hp_write_buffer() {
  * @throws std::system_error if mutex locking fails.
  */
 bool ComputeRun::publish_terminal(ComputeRunTerminalOutcome outcome) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (terminal_outcome_.has_value()) {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  if (control_->terminal_outcome.has_value()) {
     return false;
   }
-  terminal_outcome_ = std::move(outcome);
+  control_->terminal_outcome = std::move(outcome);
   return true;
+}
+
+/**
+ * @brief Mints the first active lease for one shared Run control block.
+ *
+ * @param control Control block retained by the new lease.
+ * @throws Nothing.
+ */
+ComputeRunLease::ComputeRunLease(
+    std::shared_ptr<ComputeRunControl> control) noexcept
+    : control_(std::move(control)) {
+  retain();
+}
+
+/**
+ * @brief Copies one active lease and increments quiescence accounting.
+ *
+ * @param other Existing lease to the same or another Run.
+ * @throws Nothing.
+ */
+ComputeRunLease::ComputeRunLease(const ComputeRunLease& other) noexcept
+    : control_(other.control_) {
+  retain();
+}
+
+/**
+ * @brief Replaces this lease with a retained copy.
+ *
+ * @param other Existing lease to retain.
+ * @return Reference to this lease.
+ * @throws Nothing.
+ */
+ComputeRunLease& ComputeRunLease::operator=(
+    const ComputeRunLease& other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  release();
+  control_ = other.control_;
+  retain();
+  return *this;
+}
+
+/**
+ * @brief Transfers one active lease without changing its count.
+ *
+ * @param other Lease left empty.
+ * @throws Nothing.
+ */
+ComputeRunLease::ComputeRunLease(ComputeRunLease&& other) noexcept
+    : control_(std::move(other.control_)) {}
+
+/**
+ * @brief Replaces this lease by transferring another lease.
+ *
+ * @param other Lease left empty.
+ * @return Reference to this lease.
+ * @throws Nothing.
+ */
+ComputeRunLease& ComputeRunLease::operator=(ComputeRunLease&& other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  release();
+  control_ = std::move(other.control_);
+  return *this;
+}
+
+/**
+ * @brief Passively releases one active lease.
+ *
+ * @throws Nothing.
+ */
+ComputeRunLease::~ComputeRunLease() noexcept {
+  release();
+}
+
+/**
+ * @brief Increments active lease accounting for the retained control.
+ *
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void ComputeRunLease::retain() noexcept {
+  if (control_) {
+    control_->active_leases.fetch_add(1U, std::memory_order_acq_rel);
+  }
+}
+
+/**
+ * @brief Decrements active lease accounting and releases shared ownership.
+ *
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Counter underflow indicates an internal ownership defect and
+ * terminates instead of silently corrupting quiescence.
+ */
+void ComputeRunLease::release() noexcept {
+  if (!control_) {
+    return;
+  }
+  const std::size_t previous =
+      control_->active_leases.fetch_sub(1U, std::memory_order_acq_rel);
+  if (previous == 0U) {
+    std::terminate();
+  }
+  control_.reset();
+}
+
+/**
+ * @brief Returns the immutable descriptor retained by this lease.
+ *
+ * @return Borrowed descriptor valid for the lease lifetime.
+ * @throws Nothing.
+ */
+const ComputeRunDescriptor& ComputeRunLease::descriptor() const noexcept {
+  return control_->descriptor;
+}
+
+/**
+ * @brief Creates a composite identity in the retained Run namespace.
+ *
+ * @param local_task_id Dense Run-local task value.
+ * @return Composite Run/local identity.
+ * @throws Nothing.
+ */
+ComputeRunTaskIdentity ComputeRunLease::task_identity(
+    uint64_t local_task_id) const noexcept {
+  return ComputeRunTaskIdentity(control_->descriptor.id(),
+                                ComputeRunLocalTaskId(local_task_id));
+}
+
+/**
+ * @brief Tests whether a composite identity is registered by this Run plan.
+ *
+ * @param identity Candidate Run/local identity.
+ * @return true only for a matching Run and registered local task.
+ * @throws std::system_error if mutex locking fails.
+ */
+bool ComputeRunLease::accepts_task_identity(
+    const ComputeRunTaskIdentity& identity) const {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->submission_plan != nullptr &&
+         control_->submission_plan->contains_task_identity(identity);
+}
+
+/**
+ * @brief Publishes one matching task failure through the Run terminal arbiter.
+ *
+ * @param identity Identity of the registered failing task.
+ * @param failure Exact non-null worker exception.
+ * @return true only when the identity matched and failure won.
+ * @throws std::invalid_argument when failure is null.
+ * @throws std::system_error if mutex locking fails.
+ */
+bool ComputeRunLease::publish_task_failure(
+    const ComputeRunTaskIdentity& identity, std::exception_ptr failure) {
+  if (!failure) {
+    throw std::invalid_argument(
+        "ComputeRun task failure requires an exception.");
+  }
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  if (control_->submission_plan == nullptr ||
+      !control_->submission_plan->contains_task_identity(identity) ||
+      control_->terminal_outcome.has_value()) {
+    return false;
+  }
+  control_->terminal_outcome = ComputeRunTerminalOutcome{
+      ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt};
+  return true;
+}
+
+/**
+ * @brief Copies terminal outcome while this lease retains the Run.
+ *
+ * @return Outcome snapshot or nullopt.
+ * @throws std::system_error if mutex locking fails.
+ */
+std::optional<ComputeRunTerminalOutcome> ComputeRunLease::terminal_outcome()
+    const {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->terminal_outcome;
+}
+
+/**
+ * @brief Routes one accepted callback into its matching Run-owned plan.
+ *
+ * @param identity Composite task identity carried by the callback.
+ * @param task_runtime Active scheduler runtime.
+ * @return Nothing.
+ * @throws std::invalid_argument for mismatched or unregistered identity.
+ * @throws GraphError, std::bad_alloc, or operation exceptions from execution.
+ * @note Valid failures are published before unchanged rethrow.
+ */
+void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
+                                   SchedulerTaskRuntime& task_runtime) {
+  TaskSubmissionPlan* plan = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (control_->submission_plan == nullptr ||
+        !control_->submission_plan->contains_task_identity(identity)) {
+      throw std::invalid_argument(
+          "ComputeRun task identity does not match its retaining lease.");
+    }
+    if (control_->terminal_outcome.has_value()) {
+      return;
+    }
+    plan = control_->submission_plan.get();
+  }
+
+  try {
+    plan->execute_task(identity, *this, task_runtime);
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    (void)publish_task_failure(identity, failure);
+    std::rethrow_exception(failure);
+  }
+}
+
+/**
+ * @brief Executes initial-ready discovery and submission under this lease.
+ *
+ * @param task_runtime Active scheduler batch initialized by the dispatcher.
+ * @return Nothing.
+ * @throws GraphError or standard exceptions from plan bootstrap and runtime.
+ * @note Bootstrap failures publish directly to this Run because bootstrap has
+ * no planned local task identity.
+ */
+void ComputeRunLease::execute_bootstrap(SchedulerTaskRuntime& task_runtime) {
+  TaskSubmissionPlan* plan = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (control_->submission_plan == nullptr) {
+      throw std::logic_error(
+          "ComputeRun bootstrap requires an installed submission plan.");
+    }
+    if (control_->terminal_outcome.has_value()) {
+      return;
+    }
+    plan = control_->submission_plan.get();
+  }
+
+  try {
+    plan->submit_initial_ready_tasks(*this, task_runtime);
+    task_runtime.dec_tasks_to_complete();
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    {
+      std::lock_guard<std::mutex> lock(control_->mutex);
+      if (!control_->terminal_outcome.has_value()) {
+        control_->terminal_outcome = ComputeRunTerminalOutcome{
+            ComputeRunTerminalKind::Failed, failure, std::nullopt};
+      }
+    }
+    std::rethrow_exception(failure);
+  }
 }
 
 }  // namespace ps::compute

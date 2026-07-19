@@ -101,17 +101,23 @@ worker can observe a prefix and the original exception identity propagates.
 
 `TaskHandle` is a borrowed pair of executor pointer and task id. Its
 `TaskExecutor` must outlive every successfully committed callback through
-`wait_for_completion()`. For non-realtime full HP work, the current
-`ComputeRun` owns the `TaskSubmissionPlan`, dependency state, handles, and
-temporary slots, but the stack runner and completion identity remain borrowed.
-A failed batch commits no handle and executes zero callbacks, so request-local
-dirty executors may unwind immediately without leaving a queue entry that
+`wait_for_completion()`. Request-local dirty executors still use this
+synchronous path. A failed batch commits no handle and executes zero callbacks,
+so those executors may unwind immediately without leaving a queue entry that
 points into destroyed stack storage. The scheduler can accept the next batch
 on the same object after rollback. Exception publication uses the same queue
 transaction gate before choosing its epoch, so a concurrent batch is observed
 either wholly committed or wholly absent. The executor's virtual destructor is
 protected: scheduler code may run the borrowed object but cannot delete
 compute-owned storage through its base pointer.
+
+Non-realtime scheduler-backed full HP work uses a different current path.
+`ComputeRun` shared control owns the `TaskSubmissionPlan`, dependency state,
+runner, and temporary slots. The dispatcher starts an empty borrowed-handle
+batch only to establish the scheduler epoch, then submits every real ready task
+as an owned callback retaining a non-forgeable `ComputeRunLease` and
+`(RunId, RunLocalTaskId)`. No raw `TaskExecutor` is borrowed by full HP work,
+and matching task identity gates failure publication.
 
 ### Batch exception publication and reuse
 
@@ -181,10 +187,11 @@ current contract.
 
 Schedulers do not pull plans. `ComputeTaskDispatcher` discovers readiness and
 pushes concrete callbacks or borrowed task handles through
-`SchedulerTaskRuntime`. The selected scheduler may order and route those ready
-submissions using its queues, priority hints, epoch, and available devices, but
-it never receives graph topology, a compute plan, or dirty-propagation
-ownership.
+`SchedulerTaskRuntime`: scheduler-backed full HP uses lease-backed owned
+callbacks, while request-local dirty execution retains borrowed handles. The
+selected scheduler may order and route those ready submissions using its
+queues, priority hints, epoch, and available devices, but it never receives
+graph topology, a compute plan, or dirty-propagation ownership.
 
 For `RealTimeUpdate`, `IntentUpdateCoordinator` launches the RT dirty sibling
 and then the HP dirty sibling through separate asynchronous calls, allowing
@@ -450,11 +457,12 @@ HP output; otherwise it is a planning contract error.
 Scheduler queues use epochs to cancel stale queued work. Epoch `0` is treated
 as non-cancelable compatibility work. Only submissions carrying a real epoch
 can be dropped as stale. Epoch filtering does not cancel a callback that is
-already running and is not a general `ComputeRun` cancellation contract. The
-current HP Run has identity and exact-once terminal arbitration, but no product
-cancellation claimant. Stable leases, completion isolation, and operational
-cancellation remain later ADR 0007 slices and are not implemented by the
-current epoch.
+already running and is not a general `ComputeRun` cancellation contract. A
+scheduler epoch is not Run identity: current full HP completion isolation uses
+`(RunId, RunLocalTaskId)` under a stable lease. The current HP Run has
+exact-once terminal arbitration but no product cancellation claimant.
+Operational cancellation remains a later ADR 0007 slice and is not implemented
+by the current epoch.
 
 ## Observability
 
@@ -523,7 +531,8 @@ governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-ex
 records the high-level replacement direction;
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 fixes its detailed Run, ready-task, completion, resource, and lifecycle
-ownership; only the bounded issue #66 HP Run storage/terminal slice is current.
+ownership; the bounded issue #67 HP Run lease and full-HP
+completion-isolation slice is current.
 The exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 summarizes the accepted target without changing this current contract.

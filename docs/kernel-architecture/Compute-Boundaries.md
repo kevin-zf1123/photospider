@@ -76,7 +76,7 @@ and queues. The scheduler-worker ledger does not count these lane workers; its
 | Module | Current responsibility | Does not own |
 | --- | --- | --- |
 | `ComputeService` | Request validation, intent coordination, creation/settlement of one non-realtime HP Run, collaborator construction, and final result selection | Frontend values, worker threads, graph documents |
-| `ComputeRun` | Immutable non-realtime HP descriptor, monotonic phase, exact terminal outcome, and ownership of full-plan/temporary or standalone dirty-HP staging storage | Stable leases, completion routing, paired realtime grouping, Graph state, workers, authoritative revision commit |
+| `ComputeRun` | Immutable non-realtime HP descriptor, monotonic phase, exact terminal outcome, shared-control ownership of full-plan/temporary or standalone dirty-HP staging storage, stable leases, and full-HP composite task identity | Paired realtime grouping, Graph state, workers, authoritative revision commit, cancellation, or resource admission |
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
 | `FullTaskGraphExpander` | Complete node/tile task shape for one graph generation and domain | Request target, cache pruning, dirty pruning |
@@ -86,7 +86,7 @@ and queues. The scheduler-worker ledger does not count these lane workers; its
 | `DirtySnapshotTaskGraphPruner` | Active dirty work selected from an existing plan | Task expansion |
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, or scheduler policy |
-| `TaskSubmissionPlan` | Run-owned task handles, dense indexes, dependency state, variants, and result slots for one full HP request | Lifetime beyond the current synchronous dispatch/drain contract |
+| `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, variants, result slots, and callback owner for one full HP request | Scheduler workers, Run terminal state, or dirty-path execution |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Scheduler trace ownership |
 | `SchedulerFactory` | Resolve `0..8` worker requests and plan each scheduler's conservative slot charge before construction | Process capacity ownership or graph-state access |
@@ -111,12 +111,14 @@ private implementation modules and do not form an installable API.
    the requested target and dependency cone.
 6. A dirty request selects an active work set from that plan. Dirty state does
    not create new task shapes.
-7. Sequential execution walks the same request semantics inline. Parallel
-   execution materializes concrete handles and submits only ready handles or
-   callbacks to the selected scheduler runtime.
+7. Sequential execution walks the same request semantics inline. Parallel full
+   HP execution materializes owned callbacks that retain a Run lease and a
+   `(RunId, RunLocalTaskId)` identity, then submits only ready callbacks to the
+   selected scheduler runtime. Dirty execution retains its separate
+   request-local handle path.
 8. Workers write Run-owned full-plan temporary results or standalone dirty HP
-   staging. Paired realtime staging remains sibling-callback-local in issue
-   #66. Visible graph state is modified only by the appropriate commit path.
+   staging. Paired realtime staging remains sibling-callback-local. Visible
+   graph state is modified only by the appropriate commit path.
 9. The Run publishes one success or failure after validated output or exact
    exception capture, then the result, events, timing, and errors are copied
    back through the Host value boundary.
@@ -269,12 +271,13 @@ It is not yet a general cancellation or graph-revision policy.
   current request.
 - Operation callbacks may already have external side effects; staged graph
   output does not roll those effects back.
-- Current task handles borrow request-local executor state. Their lifetime ends
-  at the current completion wait. Their full HP plan and temporary slots are
-  now Run-owned, but the stack runner and completion identity are not lease
-  backed, so the handles still cannot move unchanged into a process-wide
-  asynchronous queue. ADR 0007 requires stable Run leases for that target
-  queue; issue #67 remains future behavior.
+- Scheduler-backed full HP work no longer borrows a raw `TaskExecutor`.
+  `TaskSubmissionPlan` owns its runner, every real ready task is an owned
+  callback retaining a `ComputeRunLease`, and failure publication must match
+  `(RunId, RunLocalTaskId)`. The empty borrowed-handle batch only establishes
+  the current scheduler epoch. Request-local dirty executors still use their
+  separate synchronous borrowed-handle path and therefore cannot move
+  unchanged into a process-wide asynchronous queue.
 
 ## Boundary Rationale
 
@@ -291,10 +294,10 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted replacement direction and detailed ownership contract.
-This document is authoritative for the current issue #66 HP Run slice,
-per-graph scheduler ownership, and bounded process admission containment. The
-stable lease, authoritative revision, and shared `ExecutionService` portions
-remain future behavior.
+This document is authoritative for the current issue #67 HP Run lease and
+completion-isolation slice, per-graph scheduler ownership, and bounded process
+admission containment. Authoritative revision, paired realtime Runs, general
+dirty-path leases, and the shared `ExecutionService` remain future behavior.
 
 ## Implementation and Validation Entry Points
 

@@ -100,8 +100,12 @@ identity, target, `GlobalHighPrecision` intent, full quality, explicit QoS, and
 the current topology generation as a submission revision. That topology value
 is provenance only, not the authoritative graph-wide `GraphRevision` or a
 commit predicate. Sequential, scheduler-backed, and explicit dirty HP variants
-share this boundary. `RealTimeUpdate` creates no mixed Run or child Runs in
-issue #66; paired Run/`RunGroup` settlement remains future work.
+share this boundary. On the scheduler-backed full HP path, shared Run control
+owns the materialized plan and runner; every real ready callback retains a
+non-forgeable Run lease and `(RunId, RunLocalTaskId)` identity through
+execution, dependency release, validation, and commit. Explicit dirty HP keeps
+its separate synchronous borrowed-handle path. `RealTimeUpdate` creates no
+mixed Run or child Runs; paired Run/`RunGroup` settlement remains future work.
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
@@ -279,14 +283,15 @@ before leaving the boundary; no raw scheduler pointer survives it.
 The current dirty update implementation uses staged output commits for HP/RT
 sibling safety. A standalone `GlobalHighPrecision` dirty request stores its
 `HighPrecisionDirtyWriteBuffer` in the request Run. A `RealTimeUpdate` HP
-sibling still keeps that buffer callback-local in issue #66 and commits to the
+sibling still keeps that buffer callback-local and commits to the
 visible `GraphModel` only after the RT sibling has committed. RT dirty workers
 write `RealtimeProxyWriteBuffer` and commit to the runtime-owned
 `RealtimeProxyGraph`. There is no general graph-revision or interruptible
 commit policy in the current implementation. ADR 0003 and the kernel evolution
 roadmap define that accepted direction separately from current behavior; ADR
-0007 fixes the complete Run/revision/commit race, of which only the bounded HP
-Run ownership slice is current. Commit policy remains conceptually separate
+0007 fixes the complete Run/revision/commit race, of which the bounded HP
+Run/lease/completion-isolation slice is current. Commit policy remains
+conceptually separate
 from `ComputeIntent`, because HP/RT intent semantics do not define visibility
 or interruption.
 
@@ -445,25 +450,29 @@ the ready-task loop. An invalid above-eight request or unknown type maps to
   the execution strategy changes mechanics, not topology or dirty meaning.
 - One non-realtime HP request owns one `ComputeRun` from pre-planning
   descriptor capture through exact terminal publication. The Run owns full-plan
-  temporary results or standalone dirty HP staging, but not Graph state,
-  workers, or the meaning of dependency transitions.
+  temporary results or standalone dirty HP staging. Scheduler-backed full HP
+  callbacks retain stable Run leases and matching composite task identity, but
+  the Run does not own Graph state, workers, or the meaning of dependency
+  transitions.
 - `GraphStateExecutor` protects visible graph coherence, while
   `SchedulerTaskRuntime` receives only ready compute work. Graph-state commands
   therefore never become scheduler tasks.
 - HP cache and RT proxy state use separate staged commit paths, so preview
   state cannot become authoritative HP output by implication.
-- Scheduler epochs reject stale queued callbacks only. The current Run records
-  QoS and a topology-only submission revision but has no authoritative graph
-  revision, supersession, enforced deadline, or cooperative cancellation
-  contract.
+- Scheduler epochs reject stale queued callbacks only and are not Run identity.
+  Full HP task failures route through `(RunId, RunLocalTaskId)` under a stable
+  lease. The current Run records QoS and a topology-only submission revision
+  but has no authoritative graph revision, supersession, enforced deadline, or
+  cooperative cancellation contract.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-defines both the current bounded non-realtime HP Run slice and the later
-independent paired HP/RT Runs, deterministic `RunGroup` settlement, RT-first
-commit gate, admitted-Run registry, completion, and lease ownership, while the
+defines both the current bounded non-realtime HP Run/lease/completion-isolation
+slice and the later independent paired HP/RT Runs, deterministic `RunGroup`
+settlement, RT-first commit gate, admitted-Run registry, and broader lifecycle
+ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 describes the later revision and cancellation boundary without making it part
 of the current flow.

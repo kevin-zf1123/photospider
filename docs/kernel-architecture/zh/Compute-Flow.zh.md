@@ -78,7 +78,10 @@ request-owned `ComputeRun`。它捕获 fresh opaque id、session identity、targ
 `GlobalHighPrecision` intent、full quality、显式 QoS，以及作为 submission revision 的当前
 topology generation。该 topology value 只是 provenance，不是权威 graph-wide
 `GraphRevision` 或 commit predicate。Sequential、scheduler-backed 与显式 dirty HP 变体共享此
-边界。Issue #66 中 `RealTimeUpdate` 不创建 mixed Run 或 child Run；配对 Run/`RunGroup`
+边界。在 scheduler-backed full HP 路径中，共享 Run control 拥有 materialized plan 与 runner；
+每个真实 ready callback 在 execution、dependency release、validation 与 commit 期间都会保留
+不可伪造的 Run lease 与 `(RunId, RunLocalTaskId)` identity。显式 dirty HP 保留独立的同步
+borrowed-handle 路径。`RealTimeUpdate` 不创建 mixed Run 或 child Run；配对 Run/`RunGroup`
 settlement 仍是后续工作。
 
 `FullTaskGraphExpander` 会把原始 graph 展开为一个 compute domain 的完整 node/tile task graph。
@@ -214,12 +217,12 @@ scheduler pointer 逃逸。
 
 当前 dirty update 为 HP/RT sibling 安全使用 staged output commit。Standalone
 `GlobalHighPrecision` dirty request 会把 `HighPrecisionDirtyWriteBuffer` 存入 request Run。
-Issue #66 中，`RealTimeUpdate` HP sibling 仍让该 buffer 保持 callback-local，并且只在 RT sibling
-已提交之后写入可见 `GraphModel`；RT dirty worker 写入 `RealtimeProxyWriteBuffer`，并提交到
+`RealTimeUpdate` HP sibling 仍让该 buffer 保持 callback-local，并且只在 RT sibling 已提交之后
+写入可见 `GraphModel`；RT dirty worker 写入 `RealtimeProxyWriteBuffer`，并提交到
 runtime-owned `RealtimeProxyGraph`。当前实现没有通用 graph-revision 或 interruptible commit
 policy；ADR 0003 和内核演进 roadmap 会把该已接受方向与当前行为分开定义；ADR 0007 固定完整的
-Run/revision/commit 竞态，其中只有有界 HP Run ownership 切片已成为当前行为。Commit policy 在
-概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent 语义不定义可见性或中断。
+Run/revision/commit 竞态，其中有界 HP Run/lease/completion-isolation 切片已成为当前行为。
+Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent 语义不定义可见性或中断。
 
 ## GlobalHighPrecision
 
@@ -345,21 +348,24 @@ embedded Host 与 IPC status 边界保持不变。
   topology 或 dirty 含义。
 - 一个非 realtime HP request 从 planning 前的 descriptor capture 到唯一 terminal publication
   都只拥有一个 `ComputeRun`。Run 拥有 full-plan temporary result 或 standalone dirty HP
-  staging，但不拥有 Graph state、worker 或 dependency transition 的语义。
+  staging。Scheduler-backed full HP callback 会保留稳定 Run lease 与匹配的复合 task identity，
+  但 Run 不拥有 Graph state、worker 或 dependency transition 的语义。
 - `GraphStateExecutor` 保护可见 graph 一致性，`SchedulerTaskRuntime` 只接收 ready compute work，
   因而 graph-state command 绝不会成为 scheduler task。
 - HP cache 与 RT proxy state 使用不同 staged commit path，因此 preview state 不会被隐式提升为
   authoritative HP output。
-- Scheduler epoch 只拒绝陈旧的 queued callback。当前 Run 会记录 QoS 与只表示提交时拓扑的
-  revision，但没有权威 graph revision、supersession、已执行 deadline 或 cooperative
+- Scheduler epoch 只拒绝陈旧的 queued callback，并不是 Run identity。Full HP task failure
+  会在稳定 lease 下通过 `(RunId, RunLocalTaskId)` 路由。当前 Run 会记录 QoS 与只表示提交时
+  拓扑的 revision，但没有权威 graph revision、supersession、已执行 deadline 或 cooperative
   cancellation contract。
 
 这些拆分使 planning、physical dispatch 与 visible commit 可以独立测试。
 [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)约束当前
 graph-state/dispatch 区分。已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-同时定义当前有界的非 realtime HP Run 切片，以及后续独立 HP/RT Run、确定性 `RunGroup`
-settlement、RT-first commit gate、admitted-Run registry、completion 与 lease 所有权，而
+同时定义当前有界的非 realtime HP Run/lease/completion-isolation 切片，以及后续独立 HP/RT
+Run、确定性 `RunGroup` settlement、RT-first commit gate、admitted-Run registry 与更广泛的
+lifecycle 所有权，而
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述后续 revision 与 cancellation
 边界，但不会让它们成为当前流程的一部分。
 

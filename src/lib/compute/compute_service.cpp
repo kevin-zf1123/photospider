@@ -270,14 +270,14 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
  * @return true only for explicit RealTimeUpdate.
  * @throws Nothing.
  * @note Missing intent and explicit GlobalHighPrecision are both non-realtime
- * HP requests and receive one issue #66 ComputeRun.
+ * HP requests and receive one request-owned ComputeRun.
  */
 bool is_realtime_request(const ComputeService::Request& request) {
   return request.intent == ComputeIntent::RealTimeUpdate;
 }
 
 /**
- * @brief Captures immutable issue #66 HP Run inputs before service planning.
+ * @brief Captures immutable HP Run inputs before service planning.
  *
  * @param graph Graph supplying the topology-only submission revision.
  * @param request Service request supplying graph identity, target, and QoS.
@@ -578,14 +578,16 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
  * @param graph Graph being computed.
  * @param runtime Graph runtime that owns the HP scheduler.
  * @param request Full HP target, cache, and telemetry options.
- * @param run Request-owned plan, temporary result, and lifecycle owner.
+ * @param run Request observer for leased plan, runner, callback, temporary
+ * result, exception, and lifecycle state.
  * @return Mutable target HP output stored in the graph.
  * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
  * cache, telemetry, Run storage, or result storage exhausts memory.
  * @throws GraphError from scheduler lookup, task dispatch, cache access, or
  * missing target output.
- * @note The dispatcher retains the current borrowed scheduler and synchronous
- * wait contract while the plan and temporary outputs are Run-owned.
+ * @note The dispatcher retains the current borrowed scheduler runtime and
+ * synchronous wait contract while full-HP callbacks own Run leases and route
+ * composite task identity without borrowed TaskExecutor pointers.
  */
 NodeOutput& ComputeService::compute_parallel_hp_impl(GraphModel& graph,
                                                      GraphRuntime& runtime,
@@ -613,7 +615,7 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(GraphModel& graph,
  * execution, cache access, or missing target output.
  * @note Every non-realtime HP request creates exactly one Run before planning.
  * RealTimeUpdate retains the current paired callback behavior until RunGroup
- * support and creates no mixed-domain issue #66 Run.
+ * support and creates no mixed-domain Run.
  */
 NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
                                              GraphRuntime& runtime,
@@ -666,7 +668,7 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   if (intent == ComputeIntent::RealTimeUpdate && hp_run != nullptr) {
     throw GraphError(
         GraphErrc::ComputeError,
-        "Issue #66 does not attach one mixed-domain Run to RealTimeUpdate.");
+        "RealTimeUpdate does not attach one mixed-domain ComputeRun.");
   }
   IScheduler* hp_scheduler = nullptr;
   IScheduler* rt_scheduler = nullptr;
@@ -784,7 +786,7 @@ NodeOutput& ComputeService::compute_intent_update_impl(
  * @throws GraphError from intent validation or execution.
  * @note Dirty HP and RT callbacks still use the dirty executors, but run node
  * work inline because no scheduler runtime is available. The realtime path
- * deliberately receives no mixed-domain Run in issue #66.
+ * deliberately receives no mixed-domain Run.
  */
 NodeOutput& ComputeService::compute_with_intent_impl(
     GraphModel& graph, const Request& request, compute::ComputeRun* hp_run) {

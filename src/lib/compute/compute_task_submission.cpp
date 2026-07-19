@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -16,14 +19,13 @@ namespace ps::compute {
 namespace {
 
 /**
- * @brief Formats a graph node id with the node name when it is still present.
+ * @brief Formats a graph node id with its name when still present.
  *
  * @param graph GraphModel used for node lookup.
  * @param node_id Node id being reported.
  * @return Human-readable scheduler error context.
  * @throws std::bad_alloc if string construction fails.
- * @note Missing nodes are reported by id only so late scheduling failures still
- * produce usable diagnostics.
+ * @note Missing nodes are reported by id only.
  */
 std::string node_context(const GraphModel& graph, int node_id) {
   const Node* node = graph.find_node(node_id);
@@ -40,9 +42,9 @@ std::string node_context(const GraphModel& graph, int node_id) {
  * @param node_id Node whose dependent release failed.
  * @param detail Original scheduling exception detail.
  * @return Exception pointer carrying GraphErrc::ComputeError.
- * @throws std::bad_alloc if the wrapped error string cannot be allocated.
- * @note This separates compute failures from dependency-release failures while
- * preserving SchedulerTaskRuntime cross-thread exception transport.
+ * @throws std::bad_alloc if the wrapped diagnostic cannot allocate.
+ * @note This preserves scheduler-stage context without relabeling
+ * std::bad_alloc.
  */
 std::exception_ptr scheduling_failure(const GraphModel& graph, int node_id,
                                       const std::string& detail) {
@@ -56,13 +58,9 @@ std::exception_ptr scheduling_failure(const GraphModel& graph, int node_id,
  * @brief Checks whether a candidate matches the planned task shape.
  *
  * @param impl Registered operation implementation candidate.
- * @param require_tiled Whether the planned task graph contains tile tasks for
- * this node.
- * @return True when the implementation shape is compatible.
+ * @param require_tiled Whether the task graph materializes tile work.
+ * @return true when the implementation shape is compatible.
  * @throws Nothing.
- * @note Node/monolithic planned tasks may run either monolithic callbacks or
- * full-node tiled callbacks through NodeExecutor::execute(). Materialized tile
- * tasks must run a TileOpFunc.
  */
 bool implementation_shape_compatible(const OpImplementation& impl,
                                      bool require_tiled) {
@@ -73,14 +71,12 @@ bool implementation_shape_compatible(const OpImplementation& impl,
  * @brief Chooses a shape-compatible per-device implementation for HP compute.
  *
  * @param node Graph node whose operation is being resolved.
- * @param available_devices Devices exposed by the active scheduler runtime.
- * @param require_tiled Whether task graph materialization requires TileOpFunc.
- * @return Selected operation variant, or nullopt when no compatible
- * per-device implementation is available.
- * @throws std::bad_alloc if registry candidate storage allocation fails.
- * @note The registry owns available-device filtering, HP device priority, and
- * cost_score tie-breaking. This helper contributes only the local task-shape
- * predicate required by the already materialized dispatch plan.
+ * @param available_devices Devices exposed by the scheduler runtime.
+ * @param require_tiled Whether the task graph requires TileOpFunc.
+ * @return Selected operation variant, or nullopt.
+ * @throws std::bad_alloc if registry candidate storage allocates
+ * unsuccessfully.
+ * @note Device priority and cost scoring remain registry policy.
  */
 std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
     const Node& node, const std::vector<Device>& available_devices,
@@ -98,13 +94,69 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
   return best->func;
 }
 
+/**
+ * @brief Builds one scheduler-owned callback with Run lifetime and identity.
+ *
+ * @param lease Strong lease copied or moved into callback ownership.
+ * @param identity Composite task identity routed by the callback.
+ * @param task_runtime Runtime that executes and receives dependent work.
+ * @return Owned callback suitable for submit_ready_task_any_thread().
+ * @throws std::bad_alloc if std::function state allocation fails.
+ * @note The callback captures no plan, runner, or TaskExecutor pointer.
+ */
+SchedulerTaskRuntime::Task make_owned_run_task(
+    ComputeRunLease lease, ComputeRunTaskIdentity identity,
+    SchedulerTaskRuntime& task_runtime) {
+  return [lease = std::move(lease), identity, &task_runtime]() mutable {
+    lease.execute_task(identity, task_runtime);
+  };
+}
+
+/**
+ * @brief Best-effort settles a batch whose bootstrap submission threw.
+ *
+ * @param task_runtime Runtime whose empty batch owns one completion unit.
+ * @param failure Original bootstrap submission exception.
+ * @return Nothing.
+ * @throws Nothing; the caller rethrows failure unchanged.
+ * @note wait_for_completion() is attempted only when set_exception() accepted
+ * the failure, avoiding a wait on a runtime that rejected exception transport.
+ */
+void settle_rejected_bootstrap(SchedulerTaskRuntime& task_runtime,
+                               const std::exception_ptr& failure) noexcept {
+  bool exception_published = false;
+  try {
+    task_runtime.set_exception(failure);
+    exception_published = true;
+  } catch (...) {
+  }
+  if (!exception_published) {
+    return;
+  }
+  try {
+    task_runtime.wait_for_completion();
+  } catch (...) {
+  }
+}
+
 }  // namespace
 
-TaskSubmissionPlan::TaskSubmissionPlan(GraphModel& graph,
+/**
+ * @brief Builds one Run-owned full HP scheduler submission plan.
+ *
+ * @param run_id Opaque namespace of the owning Run.
+ * @param graph Graph used for planning and operation resolution.
+ * @param traversal Traversal service used by plan construction.
+ * @param node_id Requested target node.
+ * @param available_devices Scheduler-exposed device labels.
+ * @throws GraphError or standard exceptions from planning and allocation.
+ */
+TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
                                        GraphTraversalService& traversal,
                                        int node_id,
                                        std::vector<Device> available_devices)
-    : graph_(graph),
+    : run_id_(run_id),
+      graph_(graph),
       compute_plan_(
           ComputeDispatchPlanBuilder(traversal).build_high_precision_plan(
               graph, node_id)),
@@ -113,71 +165,176 @@ TaskSubmissionPlan::TaskSubmissionPlan(GraphModel& graph,
       dependency_state_(execution_order_, compute_plan_.task_graph) {
   resolve_operations();
   temp_results_.resize(execution_order_.size());
-  task_handles_.resize(compute_plan_.task_graph.tasks.size());
-}
-
-void TaskSubmissionPlan::build_scheduler_tasks(
-    NodeTaskRunner& runner, SchedulerTaskRuntime& task_runtime) {
-  runner_ = &runner;
-  task_runtime_ = &task_runtime;
-  for (const auto& task : compute_plan_.task_graph.tasks) {
-    if (task.task_id < 0 ||
-        task.task_id >= static_cast<int>(task_handles_.size())) {
-      continue;
-    }
-    task_handles_[task.task_id] = make_handle(task.task_id);
+  task_execution_states_ = std::vector<std::atomic<std::uint8_t>>(size());
+  for (auto& state : task_execution_states_) {
+    state.store(static_cast<std::uint8_t>(TaskExecutionState::Pending),
+                std::memory_order_relaxed);
   }
 }
 
-std::vector<TaskHandle> TaskSubmissionPlan::take_initial_task_handles() {
-  initial_task_handles_.clear();
+/**
+ * @brief Installs the Run-owned node task runner once.
+ *
+ * @param context Borrowed services and Run-owned plan vectors.
+ * @return Nothing.
+ * @throws std::logic_error when already installed.
+ * @throws std::bad_alloc from runner state allocation.
+ */
+void TaskSubmissionPlan::emplace_task_runner(NodeTaskRunnerContext context) {
+  if (task_runner_) {
+    throw std::logic_error(
+        "TaskSubmissionPlan already owns a node task runner.");
+  }
+  task_runner_ = std::make_unique<NodeTaskRunner>(context);
+}
+
+/**
+ * @brief Builds a registered composite task identity.
+ *
+ * @param task_id Dense task id.
+ * @return Run/local identity.
+ * @throws std::out_of_range when task_id is not registered.
+ */
+ComputeRunTaskIdentity TaskSubmissionPlan::task_identity(int task_id) const {
+  if (task_id < 0 || task_id >= static_cast<int>(size()) ||
+      compute_plan_.task_graph.tasks.at(task_id).task_id != task_id) {
+    throw std::out_of_range(
+        "TaskSubmissionPlan local task id is not registered.");
+  }
+  return ComputeRunTaskIdentity(
+      run_id_, ComputeRunLocalTaskId(static_cast<std::uint64_t>(task_id)));
+}
+
+/**
+ * @brief Checks Run namespace and dense local registration.
+ *
+ * @param identity Candidate composite identity.
+ * @return true only when this plan registered the complete identity.
+ * @throws Nothing.
+ */
+bool TaskSubmissionPlan::contains_task_identity(
+    const ComputeRunTaskIdentity& identity) const noexcept {
+  if (identity.run_id() != run_id_) {
+    return false;
+  }
+  const std::uint64_t local_value = identity.local_task_id().value();
+  if (local_value >= compute_plan_.task_graph.tasks.size()) {
+    return false;
+  }
+  const PlannedTask& task =
+      compute_plan_.task_graph.tasks[static_cast<std::size_t>(local_value)];
+  return task.task_id >= 0 &&
+         static_cast<std::uint64_t>(task.task_id) == local_value;
+}
+
+/**
+ * @brief Submits all initial ready identities as scheduler-owned callbacks.
+ *
+ * @param lease Matching Run lease copied into callbacks.
+ * @param task_runtime Active scheduler batch.
+ * @return Nothing.
+ * @throws GraphError when no initial identity exists for a nonempty plan.
+ * @throws std::overflow_error when planned count exceeds scheduler integer
+ * accounting.
+ * @throws std::bad_alloc or scheduler exceptions from submission.
+ */
+void TaskSubmissionPlan::submit_initial_ready_tasks(
+    const ComputeRunLease& lease, SchedulerTaskRuntime& task_runtime) {
+  std::vector<ComputeRunTaskIdentity> initial_identities;
+  initial_identities.reserve(size());
   submitted_initial_task_ids_.clear();
-  append_graph_ready_tasks();
-  if (initial_task_handles_.empty()) {
-    append_zero_dependency_tasks();
+  append_graph_ready_tasks(initial_identities);
+  if (initial_identities.empty()) {
+    append_zero_dependency_tasks(initial_identities);
   }
-  return std::move(initial_task_handles_);
-}
-
-void TaskSubmissionPlan::log_initial_assignments(
-    SchedulerTaskRuntime& task_runtime) const {
-  for (int task_id : submitted_initial_task_ids_) {
-    if (task_id < 0 ||
-        task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size())) {
-      continue;
-    }
-    const int node_id = compute_plan_.task_graph.tasks[task_id].node_id;
-    if (std::find(execution_order_.begin(), execution_order_.end(), node_id) !=
-        execution_order_.end()) {
-      task_runtime.log_event(SchedulerTraceAction::AssignInitial, node_id);
-    }
-  }
-}
-
-void TaskSubmissionPlan::run_task(int task_id) {
-  if (!runner_ || !task_runtime_) {
+  if (!empty() && initial_identities.empty()) {
     throw GraphError(GraphErrc::ComputeError,
-                     "TaskSubmissionPlan has no bound task runner.");
+                     "Full HP plan has no initial ready task.");
   }
+  if (size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error(
+        "Full HP task count exceeds scheduler completion range.");
+  }
+
+  task_runtime.inc_tasks_to_complete(static_cast<int>(size()));
+  log_initial_assignments(task_runtime);
+  for (const ComputeRunTaskIdentity& identity : initial_identities) {
+    task_runtime.submit_ready_task_any_thread(
+        make_owned_run_task(lease, identity, task_runtime));
+  }
+}
+
+/**
+ * @brief Executes one registered task and releases its dependents exactly once.
+ *
+ * @param identity Matching composite task identity.
+ * @param lease Lease copied into dependent callbacks.
+ * @param task_runtime Active scheduler runtime.
+ * @return Nothing.
+ * @throws std::invalid_argument when identity mismatches.
+ * @throws std::logic_error when a duplicate callback enters.
+ * @throws GraphError, std::bad_alloc, or operation/runtime exceptions.
+ * @note The exact original exception is rethrown after best-effort trace.
+ */
+void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
+                                      const ComputeRunLease& lease,
+                                      SchedulerTaskRuntime& task_runtime) {
+  if (!contains_task_identity(identity)) {
+    throw std::invalid_argument(
+        "Task identity does not belong to this Run submission plan.");
+  }
+  const int task_id = static_cast<int>(identity.local_task_id().value());
+  std::uint8_t expected =
+      static_cast<std::uint8_t>(TaskExecutionState::Pending);
+  if (!task_execution_states_.at(task_id).compare_exchange_strong(
+          expected, static_cast<std::uint8_t>(TaskExecutionState::Executing),
+          std::memory_order_acq_rel, std::memory_order_acquire)) {
+    throw std::logic_error(
+        "Run-local task identity entered execution more than once.");
+  }
+  if (!task_runner_) {
+    task_execution_states_.at(task_id).store(
+        static_cast<std::uint8_t>(TaskExecutionState::Failed),
+        std::memory_order_release);
+    throw GraphError(GraphErrc::ComputeError,
+                     "TaskSubmissionPlan has no owned task runner.");
+  }
+
   const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_id);
   const SchedulerTraceAction execute_action =
       task.kind == PlannedTaskKind::Tile ? SchedulerTraceAction::ExecuteTile
                                          : SchedulerTraceAction::Execute;
-  task_runtime_->log_event(execute_action, task.node_id);
+  task_runtime.log_event(execute_action, task.node_id);
   try {
-    runner_->run_task(task_id);
-    release_dependents(task.task_id, task.node_id, *task_runtime_);
+    task_runner_->run_task(task_id);
+    release_dependents(task.task_id, task.node_id, lease, task_runtime);
+    task_runtime.dec_tasks_to_complete();
+    task_execution_states_.at(task_id).store(
+        static_cast<std::uint8_t>(TaskExecutionState::Completed),
+        std::memory_order_release);
   } catch (...) {
-    task_runtime_->log_event(SchedulerTraceAction::RethrowException,
+    const std::exception_ptr failure = std::current_exception();
+    task_execution_states_.at(task_id).store(
+        static_cast<std::uint8_t>(TaskExecutionState::Failed),
+        std::memory_order_release);
+    try {
+      task_runtime.log_event(SchedulerTraceAction::RethrowException,
                              task.node_id);
-    throw;
+    } catch (...) {
+    }
+    std::rethrow_exception(failure);
   }
-  task_runtime_->dec_tasks_to_complete();
 }
 
+/**
+ * @brief Resolves operation variants once for all planned nodes.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc from registry candidate or output allocation.
+ */
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
-  for (size_t i = 0; i < execution_order_.size(); ++i) {
+  for (std::size_t i = 0; i < execution_order_.size(); ++i) {
     const auto& node = graph_.node(execution_order_[i]);
     const bool has_tile_task = std::any_of(
         compute_plan_.task_graph.tasks.begin(),
@@ -208,100 +365,133 @@ void TaskSubmissionPlan::resolve_operations() {
 }
 
 /**
- * @brief Releases and submits dependents made ready by one completed task.
+ * @brief Releases dependencies and submits matching lease-backed callbacks.
  *
- * @param current_task_id Completed task whose dependency edges advance.
- * @param current_node_id Completed node used in scheduling diagnostics.
- * @param task_runtime Scheduler runtime receiving newly ready handles.
+ * @param current_task_id Completed local task id.
+ * @param current_node_id Node used in scheduling diagnostics.
+ * @param lease Matching lease copied into ready callbacks.
+ * @param task_runtime Runtime receiving ready callbacks.
  * @return Nothing.
- * @throws std::bad_alloc if ready-id/handle collection or submission exhausts
- * memory.
- * @throws GraphError wrapping other dependency, range, or scheduler failures.
- * @note The release fence publishes completed output before dependent handles
- * become visible; resource exhaustion is never relabeled as scheduling error.
+ * @throws std::bad_alloc unchanged.
+ * @throws GraphError wrapping other dependency/submission failures.
  */
 void TaskSubmissionPlan::release_dependents(
-    int current_task_id, int current_node_id,
+    int current_task_id, int current_node_id, const ComputeRunLease& lease,
     SchedulerTaskRuntime& task_runtime) {
   try {
     std::atomic_thread_fence(std::memory_order_release);
-    std::vector<int> ready_task_ids =
+    const std::vector<int> ready_task_ids =
         dependency_state_.release_dependents(current_task_id);
-    std::vector<TaskHandle> ready_handles;
-    ready_handles.reserve(ready_task_ids.size());
     for (int dependent_task_id : ready_task_ids) {
-      ready_handles.push_back(task_handles_.at(dependent_task_id));
+      const ComputeRunTaskIdentity identity = task_identity(dependent_task_id);
+      task_runtime.submit_ready_task_any_thread(
+          make_owned_run_task(lease, identity, task_runtime));
     }
-    task_runtime.submit_ready_task_handles_from_worker(
-        std::move(ready_handles));
   } catch (const std::bad_alloc&) {
     throw;
-  } catch (const std::out_of_range& e) {
+  } catch (const std::out_of_range& error) {
     std::rethrow_exception(scheduling_failure(
-        graph_, current_node_id, "out_of_range: " + std::string(e.what())));
-  } catch (const std::exception& e) {
+        graph_, current_node_id, "out_of_range: " + std::string(error.what())));
+  } catch (const std::exception& error) {
     std::rethrow_exception(
-        scheduling_failure(graph_, current_node_id, e.what()));
+        scheduling_failure(graph_, current_node_id, error.what()));
   } catch (...) {
     std::rethrow_exception(
         scheduling_failure(graph_, current_node_id, "unknown exception"));
   }
 }
 
-void TaskSubmissionPlan::append_initial_task_handle(int task_id) {
+/**
+ * @brief Appends one dependency-ready initial composite identity.
+ *
+ * @param task_id Dense task id candidate.
+ * @param identities Output ready list.
+ * @return Nothing.
+ * @throws std::out_of_range for inconsistent task metadata.
+ * @throws std::bad_alloc from deduplication or output growth.
+ */
+void TaskSubmissionPlan::append_initial_task_identity(
+    int task_id, std::vector<ComputeRunTaskIdentity>& identities) {
   if (!dependency_state_.ready_for_initial_submit(task_id)) {
     return;
   }
   if (submitted_initial_task_ids_.insert(task_id).second) {
-    initial_task_handles_.push_back(task_handles_.at(task_id));
+    identities.push_back(task_identity(task_id));
   }
 }
 
-void TaskSubmissionPlan::append_graph_ready_tasks() {
+/**
+ * @brief Appends graph-declared initial ready identities.
+ *
+ * @param identities Output ready list.
+ * @return Nothing.
+ * @throws std::bad_alloc or std::out_of_range from ready discovery.
+ */
+void TaskSubmissionPlan::append_graph_ready_tasks(
+    std::vector<ComputeRunTaskIdentity>& identities) {
   TaskGraphReadyChecker ready_checker;
   const std::vector<int> initial_ready_task_ids =
       ready_checker.initial_ready_task_ids(compute_plan_.task_graph);
   for (int task_id : initial_ready_task_ids) {
-    if (task_id < 0 ||
-        task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size())) {
+    if (task_id < 0 || task_id >= static_cast<int>(size())) {
       continue;
     }
-    append_initial_task_handle(task_id);
+    append_initial_task_identity(task_id, identities);
   }
-}
-
-void TaskSubmissionPlan::append_zero_dependency_tasks() {
-  for (const auto& task : compute_plan_.task_graph.tasks) {
-    append_initial_task_handle(task.task_id);
-  }
-}
-
-TaskHandle TaskSubmissionPlan::make_handle(int task_id) const {
-  if (task_id < 0 ||
-      task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size())) {
-    return {};
-  }
-  const PlannedTask& task = compute_plan_.task_graph.tasks[task_id];
-  return TaskHandle{const_cast<TaskSubmissionPlan*>(this), task_id,
-                    task.node_id};
 }
 
 /**
- * @brief Submits one planned high-precision scheduler task graph.
+ * @brief Appends all zero-dependency identities as fallback.
  *
- * @param graph GraphModel used to validate target cache state for empty plans.
- * @param task_runtime Scheduler runtime receiving initial task handles.
- * @param node_id Request target node id used in empty-plan diagnostics.
- * @param plan Built task submission plan whose task handles are submitted.
- * @throws GraphError when no scheduler tasks were planned and the target has
- * no reusable HP output; otherwise rethrows scheduler submission or task
- * completion failures.
- * @note This function is the planned-dispatch boundary. It intentionally
- * avoids recursive ComputeService execution.
+ * @param identities Output ready list.
+ * @return Nothing.
+ * @throws std::bad_alloc or std::out_of_range from identity construction.
+ */
+void TaskSubmissionPlan::append_zero_dependency_tasks(
+    std::vector<ComputeRunTaskIdentity>& identities) {
+  for (const auto& task : compute_plan_.task_graph.tasks) {
+    append_initial_task_identity(task.task_id, identities);
+  }
+}
+
+/**
+ * @brief Emits AssignInitial traces for selected initial task ids.
+ *
+ * @param task_runtime Runtime receiving trace events.
+ * @return Nothing.
+ * @throws Exceptions from task_runtime.log_event().
+ */
+void TaskSubmissionPlan::log_initial_assignments(
+    SchedulerTaskRuntime& task_runtime) const {
+  for (int task_id : submitted_initial_task_ids_) {
+    if (task_id < 0 || task_id >= static_cast<int>(size())) {
+      continue;
+    }
+    const int node_id = compute_plan_.task_graph.tasks[task_id].node_id;
+    if (std::find(execution_order_.begin(), execution_order_.end(), node_id) !=
+        execution_order_.end()) {
+      task_runtime.log_event(SchedulerTraceAction::AssignInitial, node_id);
+    }
+  }
+}
+
+/**
+ * @brief Establishes one scheduler epoch and submits a leased bootstrap.
+ *
+ * @param graph Graph used to validate empty-plan target output.
+ * @param task_runtime Runtime receiving the empty epoch batch and callbacks.
+ * @param node_id Target node id.
+ * @param plan Run-owned plan.
+ * @param dispatcher_lease Lease copied into bootstrap callback.
+ * @return Nothing.
+ * @throws GraphError for an invalid empty plan.
+ * @throws Scheduler or task exceptions unchanged.
+ * @note The only TaskHandle batch is empty; full HP work uses owned callbacks.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             SchedulerTaskRuntime& task_runtime, int node_id,
-                            TaskSubmissionPlan& plan) {
+                            TaskSubmissionPlan& plan,
+                            const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
     if (!graph.node(node_id).cached_output_high_precision.has_value()) {
       throw GraphError(
@@ -313,11 +503,19 @@ void dispatch_planned_tasks(GraphModel& graph,
     return;
   }
 
-  std::vector<TaskHandle> initial_task_handles =
-      plan.take_initial_task_handles();
-  task_runtime.submit_initial_task_handles(std::move(initial_task_handles),
-                                           static_cast<int>(plan.size()));
-  plan.log_initial_assignments(task_runtime);
+  task_runtime.submit_initial_task_handles({}, 0);
+  task_runtime.inc_tasks_to_complete(1);
+  try {
+    ComputeRunLease bootstrap_lease = dispatcher_lease;
+    task_runtime.submit_ready_task_any_thread(
+        [lease = std::move(bootstrap_lease), &task_runtime]() mutable {
+          lease.execute_bootstrap(task_runtime);
+        });
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    settle_rejected_bootstrap(task_runtime, failure);
+    std::rethrow_exception(failure);
+  }
   task_runtime.wait_for_completion();
 }
 

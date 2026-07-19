@@ -33,7 +33,7 @@ record 使用的 RT proxy coordinate）。HP 与 RT 是不同 compute domain；d
 | `DirtyRegionSnapshotBuilder` | 规范化 source ROI，物化 snapshot-only Micro tile 或 monolithic record | Graph traversal 或 compute request |
 | `RoiPropagationService` | 计算 operation-specific forward inspection 与 backward demand projection | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | 从现有 request plan 中选择并裁剪 active task | 新 task shape |
-| dirty executor 与 write buffer | 按 source-first 顺序执行并暂存 HP/RT output；standalone 非 realtime HP staging 由其 `ComputeRun` 拥有，配对 realtime sibling buffer 仍保持 callback-local | 通用 cancellation、稳定 Run lease/grouping 或 graph revision policy |
+| dirty executor 与 write buffer | 按 source-first 顺序执行并暂存 HP/RT output；standalone 非 realtime HP staging 由其 `ComputeRun` 拥有，配对 realtime sibling buffer 仍保持 callback-local | 通用 cancellation、dirty-path Run lease/grouping 或 graph revision policy |
 
 ## 当前流程
 
@@ -178,7 +178,8 @@ HP dirty task 把 output 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty ta
 `RealtimeProxyWriteBuffer`。成功 request 会通过 intent-specific commit path，把 staged HP state
 提交到 `GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。对于 standalone 非 realtime
 HP request，`HighPrecisionDirtyWriteBuffer` 由 request `ComputeRun` 持有到 commit 或 failure
-cleanup。`RealTimeUpdate` 的 HP child 没有 issue #66 Run，其 callback-local buffer 会保持到后续
+cleanup。这条 dirty path 不使用 issue #67 的 full-HP callback lease/composite-identity 路径。
+`RealTimeUpdate` 的 HP child 没有 child Run，其 callback-local buffer 会保持到后续
 child-Run/`RunGroup` 支持落地。
 
 对于 `RealTimeUpdate`，RT 与 HP 是 sibling computation。RT sibling 可以先提交 proxy state；HP
@@ -200,8 +201,8 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 - Macro dirty-key materialization 或动态 Micro/Macro coarsening；
 - sparse ROI set、dirty-area cap、time-window merge 或 adaptive batching；
 - 自动启动 compute 的 node-to-backend dirty subscription；
-- 稳定 Run lease、配对 realtime child Run/`RunGroup`、权威 graph revision、已执行 deadline、
-  supersession 或 cooperative cancellation。
+- dirty-path Run lease、配对 realtime child Run/`RunGroup`、权威 graph revision、已执行
+  deadline、supersession 或 cooperative cancellation。
 
 当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
 task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和
