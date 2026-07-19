@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -1671,6 +1672,123 @@ TEST(CacheSemantics, InjectedMetadataCodecBadAllocPropagatesUnchanged) {
   EXPECT_THROW(cache.try_load_from_disk_cache(graph, node), std::bad_alloc);
   EXPECT_FALSE(node.cached_output_high_precision.has_value());
   EXPECT_FALSE(graph.last_disk_cache_load_result_snapshot().has_value());
+
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies a metadata `std::runtime_error` uses the standard-exception
+ * fallback after image decode without publishing partial HP output.
+ *
+ * @return Nothing; GoogleTest assertions report codec-call, path, diagnostic,
+ * or HP-state mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Both cache files exist and the image fake returns a valid buffer, so
+ * the metadata failure occurs only after image decoding has succeeded.
+ */
+TEST(CacheSemantics,
+     InjectedMetadataCodecRuntimeErrorRecordsUnknownWithoutPartialHp) {
+  const auto root =
+      clean_temp_path("photospider-contract-metadata-codec-runtime-error");
+  GraphModel graph(root);
+  Node node = make_cached_process_node("output.png");
+  const std::filesystem::path image_file =
+      root / std::to_string(node.id) / node.caches.front().location;
+  auto metadata_file = image_file;
+  metadata_file.replace_extension(".yml");
+  write_text(image_file, "fake image bytes");
+  write_text(metadata_file, "fake metadata presence");
+
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      [](const std::filesystem::path&) -> ImageBuffer {
+        return make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+      });
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [](const std::filesystem::path&) -> plugin::ParameterMap {
+        throw std::runtime_error("injected metadata runtime failure");
+      });
+  GraphCacheService cache{image_codec, metadata_codec};
+
+  EXPECT_FALSE(cache.try_load_from_disk_cache(graph, node));
+  EXPECT_FALSE(node.cached_output_high_precision.has_value());
+
+  const auto image_calls = image_codec->calls();
+  ASSERT_EQ(image_calls.size(), 1U);
+  EXPECT_EQ(image_calls.front().kind,
+            testing::FakeImageArtifactCodec::Call::Kind::Decode);
+  EXPECT_EQ(image_calls.front().path, image_file);
+  const auto metadata_calls = metadata_codec->calls();
+  ASSERT_EQ(metadata_calls.size(), 1U);
+  EXPECT_EQ(metadata_calls.front().kind,
+            testing::FakeCacheMetadataCodec::Call::Kind::Read);
+  EXPECT_EQ(metadata_calls.front().path, metadata_file);
+
+  const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(diagnostic.has_value());
+  EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(diagnostic->code, GraphErrc::Unknown);
+  EXPECT_EQ(diagnostic->cache_file, image_file);
+  EXPECT_EQ(diagnostic->metadata_file, metadata_file);
+  EXPECT_EQ(diagnostic->message,
+            "Unexpected exception while reading disk cache: injected metadata "
+            "runtime failure");
+
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies a non-standard metadata exception uses the unknown fallback
+ * after image decode without publishing partial HP output.
+ *
+ * @return Nothing; GoogleTest assertions report codec-call, path, diagnostic,
+ * or HP-state mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Throwing an integer exercises `GraphCacheService`'s `catch (...)`
+ * branch after a successful image fake decode.
+ */
+TEST(CacheSemantics,
+     InjectedMetadataCodecNonStandardExceptionRecordsUnknownWithoutPartialHp) {
+  const auto root =
+      clean_temp_path("photospider-contract-metadata-codec-non-standard");
+  GraphModel graph(root);
+  Node node = make_cached_process_node("output.png");
+  const std::filesystem::path image_file =
+      root / std::to_string(node.id) / node.caches.front().location;
+  auto metadata_file = image_file;
+  metadata_file.replace_extension(".yml");
+  write_text(image_file, "fake image bytes");
+  write_text(metadata_file, "fake metadata presence");
+
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      [](const std::filesystem::path&) -> ImageBuffer {
+        return make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+      });
+  auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>(
+      [](const std::filesystem::path&) -> plugin::ParameterMap { throw 73; });
+  GraphCacheService cache{image_codec, metadata_codec};
+
+  EXPECT_FALSE(cache.try_load_from_disk_cache(graph, node));
+  EXPECT_FALSE(node.cached_output_high_precision.has_value());
+
+  const auto image_calls = image_codec->calls();
+  ASSERT_EQ(image_calls.size(), 1U);
+  EXPECT_EQ(image_calls.front().kind,
+            testing::FakeImageArtifactCodec::Call::Kind::Decode);
+  EXPECT_EQ(image_calls.front().path, image_file);
+  const auto metadata_calls = metadata_codec->calls();
+  ASSERT_EQ(metadata_calls.size(), 1U);
+  EXPECT_EQ(metadata_calls.front().kind,
+            testing::FakeCacheMetadataCodec::Call::Kind::Read);
+  EXPECT_EQ(metadata_calls.front().path, metadata_file);
+
+  const auto diagnostic = graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(diagnostic.has_value());
+  EXPECT_EQ(diagnostic->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(diagnostic->code, GraphErrc::Unknown);
+  EXPECT_EQ(diagnostic->cache_file, image_file);
+  EXPECT_EQ(diagnostic->metadata_file, metadata_file);
+  EXPECT_EQ(diagnostic->message,
+            "Unknown non-standard exception while reading disk cache.");
 
   std::filesystem::remove_all(root);
 }
