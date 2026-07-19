@@ -27,6 +27,13 @@ the capability state:
 | `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS` | Follows `PHOTOSPIDER_ENABLE_OPENCV`; explicitly requesting it while OpenCV is disabled is invalid. |
 | `PHOTOSPIDER_BUILD_GRAPH_CLI` | Defaults to `ON` only when both OpenCV and YAML are enabled; explicitly requesting it without both capabilities is invalid. |
 
+With `BUILD_TESTING=ON`, the provider-dependent broad suite is available only
+when both capabilities, the graph CLI, the repository OpenCV provider, and the
+repository OpenCV plugins are enabled. Explicitly disabling only the provider
+keeps provider-independent focused targets and
+`DependencyDisabledInstallSmoke` available without registering the broad
+suite.
+
 A dependency-disabled installed Host build is:
 
 ```bash

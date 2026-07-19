@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import shutil
@@ -154,6 +155,138 @@ def cmake_cache_values(build: pathlib.Path) -> dict[str, str]:
     return values
 
 
+def validate_provider_disabled_cache(values: dict[str, str]) -> None:
+    """@brief Validate the exact supported provider-disabled test profile.
+
+    @param values Effective assignments parsed from the nested CMake cache.
+    @return None after every required capability and target choice matches.
+    @throws RuntimeError If a required cache entry is missing or has an
+      unexpected value.
+    @note OpenCV, YAML, graph CLI, and operation plugins intentionally remain
+      enabled; only the repository operation provider and IPC are disabled.
+    """
+
+    expected = {
+        "BUILD_TESTING": "ON",
+        "PHOTOSPIDER_ENABLE_OPENCV": "ON",
+        "PHOTOSPIDER_ENABLE_YAML": "ON",
+        "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "OFF",
+        "PHOTOSPIDER_BUILD_IPC": "OFF",
+    }
+    mismatches = {
+        key: (expected_value, values.get(key))
+        for key, expected_value in expected.items()
+        if values.get(key) != expected_value
+    }
+    if mismatches:
+        raise RuntimeError(
+            "nested provider-disabled cache profile mismatch: "
+            f"{mismatches}"
+        )
+
+
+def parse_ctest_inventory(payload: str) -> set[str]:
+    """@brief Parse test names from CTest's versioned JSON inventory.
+
+    @param payload Complete stdout from `ctest --show-only=json-v1`.
+    @return Unique registered test names.
+    @throws RuntimeError If the payload is invalid JSON, lacks a test list,
+      contains a malformed entry, or repeats a test name.
+    @note The parser consumes CTest's machine-readable schema rather than
+      locale-sensitive human inventory text.
+    """
+
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("CTest inventory is not valid JSON") from error
+    tests = document.get("tests") if isinstance(document, dict) else None
+    if not isinstance(tests, list):
+        raise RuntimeError("CTest inventory has no test list")
+    names: list[str] = []
+    for test in tests:
+        name = test.get("name") if isinstance(test, dict) else None
+        if not isinstance(name, str) or not name:
+            raise RuntimeError("CTest inventory contains a malformed test")
+        names.append(name)
+    unique_names = set(names)
+    if len(unique_names) != len(names):
+        raise RuntimeError("CTest inventory contains duplicate test names")
+    return unique_names
+
+
+def query_ctest_inventory(
+    ctest_executable: str,
+    build: pathlib.Path,
+    configuration: str,
+    cwd: pathlib.Path,
+) -> set[str]:
+    """@brief Query one configured build's real CTest inventory.
+
+    @param ctest_executable CTest executable paired with the selected CMake.
+    @param build Configured nested provider-disabled build directory.
+    @param configuration Exact build configuration to query.
+    @param cwd Existing working directory for the child process.
+    @return Registered test names parsed from the JSON-v1 inventory.
+    @throws OSError If CTest cannot be started.
+    @throws subprocess.CalledProcessError If inventory discovery exits nonzero.
+    @throws RuntimeError If the JSON inventory violates its expected schema.
+    @note Captured stdout and stderr are echoed before validation so CTest
+      retains complete nested-profile diagnostics.
+    """
+
+    command = [
+        ctest_executable,
+        "--test-dir",
+        str(build),
+        "--show-only=json-v1",
+        "-C",
+        configuration,
+    ]
+    print("+", " ".join(command), flush=True)
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="", flush=True)
+    if completed.stderr:
+        print(completed.stderr, end="", flush=True)
+    return parse_ctest_inventory(completed.stdout)
+
+
+def validate_provider_disabled_inventory(names: set[str]) -> None:
+    """@brief Require the runnable provider-disabled CTest surface.
+
+    @param names Unique registered test names from the nested build.
+    @return None when only the install smoke and focused provider test exist.
+    @throws RuntimeError If either focused test is missing or any broad-suite
+      test remains registered.
+    @note `test_kernel_contracts` remains a buildable focused target for the
+      separate injected-codec smoke but is deliberately not broadly discovered
+      in this provider-disabled CTest inventory.
+    """
+
+    expected = {
+        "DependencyDisabledInstallSmoke",
+        (
+            "OptionalOpenCvOperationProvider."
+            "ReplacementExecutesAndRestores"
+        ),
+    }
+    if names != expected:
+        raise RuntimeError(
+            "provider-disabled CTest inventory mismatch: "
+            f"expected {sorted(expected)}, got {sorted(names)}"
+        )
+
+
 def configured_test_executable(
     build: pathlib.Path, configuration: str
 ) -> pathlib.Path:
@@ -236,6 +369,7 @@ def main() -> int:
     parser.add_argument("--repo", required=True, type=pathlib.Path)
     parser.add_argument("--work", required=True, type=pathlib.Path)
     parser.add_argument("--cmake-executable", required=True)
+    parser.add_argument("--ctest-executable", required=True)
     parser.add_argument("--config", default="RelWithDebInfo")
     args = parser.parse_args()
 
@@ -257,6 +391,7 @@ def main() -> int:
         ],
         repo,
     )
+    validate_provider_disabled_cache(cmake_cache_values(work))
 
     build_command = [
         args.cmake_executable,
@@ -276,7 +411,26 @@ def main() -> int:
             "nested provider test executable is missing for cached "
             f"configuration: {executable}"
         )
-    run([str(executable)], repo)
+    inventory = query_ctest_inventory(
+        args.ctest_executable, work, configuration, repo
+    )
+    validate_provider_disabled_inventory(inventory)
+    run(
+        [
+            args.ctest_executable,
+            "--test-dir",
+            str(work),
+            "--output-on-failure",
+            "-C",
+            configuration,
+            "-R",
+            (
+                "^OptionalOpenCvOperationProvider\\."
+                "ReplacementExecutesAndRestores$"
+            ),
+        ],
+        repo,
+    )
     return 0
 
 

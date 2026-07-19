@@ -20,7 +20,8 @@ namespace {
  * @param source Source proxy image buffer.
  * @return Independent CPU buffer when CPU pixels are present, or a shared
  * immutable descriptor for an opaque non-CPU backend resource.
- * @throws GraphError when adapter conversion fails.
+ * @throws GraphError when the selected image-processing clone implementation
+ *         fails.
  * @note Empty buffers keep shape metadata but drop ownership. Opaque backend
  * descriptors are shared because the generic downsampler cannot clone or map
  * their resource; passthrough later replaces the complete proxy output.

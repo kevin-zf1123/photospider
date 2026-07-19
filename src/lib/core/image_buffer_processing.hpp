@@ -20,8 +20,8 @@ namespace ps::image_processing {
  * @throws std::overflow_error if allocation or copy arithmetic is
  *         unrepresentable.
  * @throws std::bad_alloc if destination or alias-safe staging allocation fails.
- * @throws std::exception if the selected build-time adapter cannot copy the
- *         image.
+ * @throws std::exception if the build-selected image-processing implementation
+ *         cannot copy the image.
  * @note CMake selects exactly one implementation. The returned buffer never
  *       aliases source storage or retains provider-specific context.
  */

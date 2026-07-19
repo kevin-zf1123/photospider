@@ -63,7 +63,14 @@ if(PHOTOSPIDER_BUILD_GRAPH_CLI AND
         "PHOTOSPIDER_BUILD_GRAPH_CLI=ON requires PHOTOSPIDER_ENABLE_OPENCV=ON and PHOTOSPIDER_ENABLE_YAML=ON")
 endif()
 if(BUILD_TESTING AND PHOTOSPIDER_ENABLE_OPENCV AND
-   PHOTOSPIDER_ENABLE_YAML AND PHOTOSPIDER_BUILD_GRAPH_CLI AND
+   PHOTOSPIDER_ENABLE_YAML)
+    set(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS ON)
+else()
+    set(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS OFF)
+endif()
+if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS AND
+   PHOTOSPIDER_BUILD_GRAPH_CLI AND
+   PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER AND
    PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     set(PHOTOSPIDER_BUILD_FULL_TEST_SUITE ON)
 else()
@@ -676,11 +683,14 @@ endif()
 if(PHOTOSPIDER_ENABLE_YAML)
     target_compile_definitions(photospider PRIVATE PHOTOSPIDER_HAS_YAML)
 endif()
+if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
+    target_compile_definitions(photospider PRIVATE
+        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+endif()
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(photospider PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING
-        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
@@ -1216,10 +1226,10 @@ if(BUILD_TESTING)
         RUN_SERIAL TRUE TIMEOUT 900)
 endif()
 
-if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
     file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
-    
+
     include(GoogleTest)
     find_package(GTest REQUIRED)
     macro(add_ps_test TEST_NAME SOURCE_FILE)
@@ -1241,6 +1251,42 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             ${OpenCV_LIBS})
     endmacro()
 
+    # These targets exercise provider-independent product seams. Keep them
+    # buildable when the repository OpenCV operation provider is disabled
+    # without registering the provider-dependent broad suite.
+    add_ps_test(test_kernel_contracts
+        tests/integration/test_kernel_contracts.cpp)
+    target_compile_definitions(test_kernel_contracts PRIVATE
+        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+        target_compile_definitions(test_kernel_contracts PRIVATE
+            PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
+    endif()
+
+    add_ps_test(test_optional_opencv_operation_provider
+        tests/integration/test_optional_opencv_operation_provider.cpp)
+    target_link_libraries(test_optional_opencv_operation_provider PRIVATE
+        ${CMAKE_DL_LIBS})
+    target_compile_definitions(
+        test_optional_opencv_operation_provider PRIVATE
+        PS_RESIZE_REPLACEMENT_PLUGIN_PATH="$<TARGET_FILE:resize_replacement_op_plugin>")
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        target_compile_definitions(
+            test_optional_opencv_operation_provider PRIVATE
+            PS_EXPECT_OPENCV_OPERATION_PROVIDER=1)
+    else()
+        target_compile_definitions(
+            test_optional_opencv_operation_provider PRIVATE
+            PS_EXPECT_OPENCV_OPERATION_PROVIDER=0)
+    endif()
+    add_dependencies(test_optional_opencv_operation_provider
+        resize_replacement_op_plugin)
+    gtest_discover_tests(test_optional_opencv_operation_provider
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+endif()
+
+if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_scheduler tests/integration/test_scheduler.cpp)
     target_link_libraries(test_scheduler PRIVATE nlohmann_json::nlohmann_json)
 
@@ -1426,10 +1472,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_graph_topology_boundaries.cpp)
     add_ps_test(test_graph_document_adapter
         tests/unit/test_graph_document_adapter.cpp)
-    add_ps_test(test_kernel_contracts
-        tests/integration/test_kernel_contracts.cpp)
-    target_compile_definitions(test_kernel_contracts PRIVATE
-        PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
     add_executable(test_stdlib_image_buffer_processing
@@ -1569,25 +1611,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     )
     add_dependencies(test_plugin_manager lifecycle_op_plugin
         override_lifecycle_op_plugin v1_only_op_plugin ${OP_PLUGIN_TARGETS})
-
-    add_ps_test(test_optional_opencv_operation_provider
-        tests/integration/test_optional_opencv_operation_provider.cpp)
-    target_link_libraries(test_optional_opencv_operation_provider PRIVATE
-        ${CMAKE_DL_LIBS})
-    target_compile_definitions(
-        test_optional_opencv_operation_provider PRIVATE
-        PS_RESIZE_REPLACEMENT_PLUGIN_PATH="$<TARGET_FILE:resize_replacement_op_plugin>")
-    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
-        target_compile_definitions(
-            test_optional_opencv_operation_provider PRIVATE
-            PS_EXPECT_OPENCV_OPERATION_PROVIDER=1)
-    else()
-        target_compile_definitions(
-            test_optional_opencv_operation_provider PRIVATE
-            PS_EXPECT_OPENCV_OPERATION_PROVIDER=0)
-    endif()
-    add_dependencies(test_optional_opencv_operation_provider
-        resize_replacement_op_plugin)
 
     # [M3.5] GPU Pipeline 调度器测试
     add_ps_test(test_gpu_pipeline_scheduler
@@ -1735,6 +1758,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --work
                     "${CMAKE_BINARY_DIR}/tests/optional_opencv_provider_disabled"
                 --cmake-executable "${CMAKE_COMMAND}"
+                --ctest-executable "${CMAKE_CTEST_COMMAND}"
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(OpenCvOperationProviderDisabledBuild PROPERTIES
@@ -1794,9 +1818,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_milestone3 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_plugin_manager WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_optional_opencv_operation_provider
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
@@ -1875,6 +1896,7 @@ message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
 message(STATUS "  Scheduler Plugins : ${SCHEDULER_PLUGIN_DIR}")
 message(STATUS "  OpenCV Op Provider: ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER}")
+message(STATUS "  Focused Tests     : ${PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS}")
 message(STATUS "  Full Test Suite   : ${PHOTOSPIDER_BUILD_FULL_TEST_SUITE}")
 if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     message(STATUS "  Metal Plugins     : ${METAL_ROOT_DIR}")

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import tempfile
@@ -445,6 +446,94 @@ class ConfigurationLayoutTest(unittest.TestCase):
                 subject.configured_test_executable(
                     multi_mismatch, "RelWithDebInfo"
                 )
+
+
+class ProviderDisabledProfileTest(unittest.TestCase):
+    """@brief Verifies cache and CTest inventory profile contracts.
+
+    @throws AssertionError When the validator accepts a mismatched capability
+      profile or provider-dependent broad-suite inventory.
+    @note Tests use only synthetic dictionaries and JSON; no CMake process or
+      real build tree is accessed.
+    """
+
+    def test_accepts_exact_cache_and_rejects_provider_mismatch(self) -> None:
+        """@brief Require the intended provider-off capability combination.
+
+        @return None after the exact profile succeeds and an enabled provider
+          is rejected.
+        @throws AssertionError If either validation outcome is incorrect.
+        @note Unrelated cache entries are allowed because generator/toolchain
+          metadata is outside this profile contract.
+        """
+
+        values = {
+            "BUILD_TESTING": "ON",
+            "PHOTOSPIDER_ENABLE_OPENCV": "ON",
+            "PHOTOSPIDER_ENABLE_YAML": "ON",
+            "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
+            "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
+            "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "OFF",
+            "PHOTOSPIDER_BUILD_IPC": "OFF",
+            "CMAKE_GENERATOR": "Synthetic",
+        }
+        subject.validate_provider_disabled_cache(values)
+
+        values["PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER"] = "ON"
+        with self.assertRaisesRegex(RuntimeError, "cache profile mismatch"):
+            subject.validate_provider_disabled_cache(values)
+
+    def test_accepts_exact_focused_ctest_inventory(self) -> None:
+        """@brief Parse and accept the supported provider-off CTest surface.
+
+        @return None after JSON parsing preserves both exact test names.
+        @throws AssertionError If parsing or validation rejects the inventory.
+        @note Test properties are intentionally omitted because only registered
+          names define this gate.
+        """
+
+        expected = {
+            "DependencyDisabledInstallSmoke",
+            (
+                "OptionalOpenCvOperationProvider."
+                "ReplacementExecutesAndRestores"
+            ),
+        }
+        payload = json.dumps(
+            {"tests": [{"name": name} for name in sorted(expected)]}
+        )
+
+        names = subject.parse_ctest_inventory(payload)
+
+        self.assertEqual(names, expected)
+        subject.validate_provider_disabled_inventory(names)
+
+    def test_rejects_malformed_or_broad_ctest_inventory(self) -> None:
+        """@brief Reject malformed JSON and a residual broad-suite test.
+
+        @return None after both invalid inventory forms raise RuntimeError.
+        @throws AssertionError If malformed or over-broad inventory is accepted.
+        @note The broad example uses the scheduler placeholder CTest emits for
+          an unbuilt discovered GoogleTest target.
+        """
+
+        with self.assertRaisesRegex(RuntimeError, "no test list"):
+            subject.parse_ctest_inventory("{}")
+        with self.assertRaisesRegex(RuntimeError, "duplicate"):
+            subject.parse_ctest_inventory(
+                '{"tests":[{"name":"duplicate"},{"name":"duplicate"}]}'
+            )
+
+        broad_names = {
+            "DependencyDisabledInstallSmoke",
+            (
+                "OptionalOpenCvOperationProvider."
+                "ReplacementExecutesAndRestores"
+            ),
+            "test_scheduler_NOT_BUILT",
+        }
+        with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
+            subject.validate_provider_disabled_inventory(broad_names)
 
 
 if __name__ == "__main__":

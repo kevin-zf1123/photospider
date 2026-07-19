@@ -319,11 +319,13 @@ the production runtime and cache service.
 
 `ImageArtifactCodecDependencyDisabledBuild` configures a fresh nested build with
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`,
-builds `test_kernel_contracts`, and runs only the injected-codec cases. This
-proves the Graph/cache injection contract and fake do not depend on the optional
-operation provider. The separate `DependencyDisabledInstallSmoke` covers the
-complete product profile that omits OpenCV discovery and selects the unavailable
-production codec.
+builds the provider-independent focused `test_kernel_contracts` target, and
+runs only the injected-codec cases. The target remains available without
+registering the complete kernel-contract binary in that profile's CTest
+inventory. This proves the Graph/cache injection contract and fake do not
+depend on the optional operation provider. The separate
+`DependencyDisabledInstallSmoke` covers the complete product profile that omits
+OpenCV discovery and selects the unavailable production codec.
 
 Run the focused validation with:
 
@@ -359,14 +361,22 @@ the actual monolithic and tiled exception wrappers directly. Two independent
 the public ABI.
 
 `OpenCvOperationProviderDisabledBuild` configures a transient nested build with
-`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, builds only that focused
-binary and its stdlib-only fixture, and runs it. The disabled profile requires
-dependency-neutral analyzer/math operations to remain seeded, OpenCV-backed
-operation keys to be absent, and the replacement provider to publish, execute,
-and fully retire its resize key. The transient build is a long-lived product
-configuration check; it emits commands/results to CTest and retains no
-per-run report. This stage disables the operation provider, not the separate
-OpenCV codec, normalization, adapter, or embedded-product dependencies.
+`BUILD_TESTING=ON` and
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph
+CLI, and operation-plugin defaults remain enabled. The provider-aware broad
+suite gate is therefore off. The driver validates the exact CMake cache
+profile, builds only the provider-independent focused binary and its
+stdlib-only fixture, then queries the machine-readable CTest inventory. That
+inventory must contain exactly `DependencyDisabledInstallSmoke` and
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`; no broad
+provider-dependent test may remain registered. The driver runs the focused
+case through CTest. The disabled profile requires dependency-neutral
+analyzer/math operations to remain seeded, OpenCV-backed operation keys to be
+absent, and the replacement provider to publish, execute, and fully retire its
+resize key. The transient build is a long-lived product configuration check;
+it emits commands/results to CTest and retains no per-run report. This stage
+disables the operation provider, not the separate OpenCV codec, normalization,
+adapter, or embedded-product dependencies.
 
 Before removing its transient tree, the nested-build driver derives an
 absolute work spelling without resolving it for deletion. It rejects parent
@@ -476,11 +486,20 @@ GoogleTest binary. CMake keeps it buildable for manual scripts and ad hoc
 validation, but CTest does not discover or run it. Do not claim that CTest
 covers `test_propagation`; run the exact manual command separately when needed.
 
-The default full test suite registers `test_stdlib_image_buffer_processing` and
-compiles the standard-library implementation directly even though that producer
-uses OpenCV. It verifies clone independence, stride-safe deterministic bilinear
-border behavior, channel conversions, and ROI copying. The default CTest
-inventory also includes `DependencyDisabledInstallSmoke`.
+The provider-dependent default full test suite is registered only when
+`BUILD_TESTING`, OpenCV, YAML, graph CLI, the repository OpenCV operation
+provider, and repository OpenCV operation plugins are all enabled. It registers
+`test_stdlib_image_buffer_processing` and compiles the standard-library
+implementation directly even though that producer uses OpenCV. The test
+verifies clone independence, stride-safe deterministic bilinear border
+behavior, channel conversions, and ROI copying. The default CTest inventory
+also includes `DependencyDisabledInstallSmoke`.
+
+When only `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is disabled from that
+otherwise default test profile, CMake does not create or discover the broad
+suite. It keeps the provider-independent `test_kernel_contracts` target
+buildable for the injected-codec smoke and registers exactly the focused
+optional-provider GoogleTest plus `DependencyDisabledInstallSmoke`.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific

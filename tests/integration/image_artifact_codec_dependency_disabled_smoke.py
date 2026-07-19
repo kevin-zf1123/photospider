@@ -39,7 +39,8 @@ def main() -> int:
       exits nonzero.
     @note This profile intentionally disables the repository OpenCV operation
       provider while retaining the separately configured OpenCV artifact adapter.
-      Complete OpenCV-free product composition remains issue #63.
+      `DependencyDisabledInstallSmoke` separately validates complete
+      OpenCV-free product composition.
     """
 
     parser = argparse.ArgumentParser()
