@@ -1215,7 +1215,7 @@ if(BUILD_TESTING)
     enable_testing()
     find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     add_test(NAME DependencyDisabledInstallSmoke
-        COMMAND ${Python3_EXECUTABLE}
+        COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/dependency_disabled_install_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --work
@@ -1722,7 +1722,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         set_tests_properties(PhotospiderdCapabilityHelp PROPERTIES
             TIMEOUT 10)
         add_test(NAME StaticProductConsumerSmoke
-            COMMAND ${Python3_EXECUTABLE}
+            COMMAND ${Python3_EXECUTABLE} -B
                 "${PROJECT_SOURCE_DIR}/tests/integration/static_product_consumer_smoke.py"
                 --repo "${PROJECT_SOURCE_DIR}"
                 --build "${CMAKE_BINARY_DIR}"
@@ -1736,7 +1736,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             TIMEOUT 900)
     endif()
     add_test(NAME IpcDisabledInstallSmoke
-        COMMAND ${Python3_EXECUTABLE}
+        COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/ipc_disabled_install_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --work "${CMAKE_BINARY_DIR}/tests/ipc_disabled_install_smoke"

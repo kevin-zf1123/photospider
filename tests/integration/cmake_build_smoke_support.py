@@ -7,6 +7,10 @@ import platform
 from pathlib import Path
 
 
+#: @brief Module-owned lookup set for exact CMake false cache serializations.
+#: @note Values are compared only after whitespace trimming and uppercasing.
+#:   The set lives for the importing process and excludes suffixed
+#:   ``-NOTFOUND`` values, which the propagation policy handles separately.
 _CMAKE_FALSE_VALUES = {
     "",
     "0",

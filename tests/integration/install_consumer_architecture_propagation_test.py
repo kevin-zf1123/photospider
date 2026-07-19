@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -15,7 +16,13 @@ import ipc_disabled_install_smoke as ipc_disabled
 import static_product_consumer_smoke as static_product
 
 
+#: @brief Module-owned multi-architecture CMake cache fixture for all cases.
+#: @note The semicolon remains part of one value for the test-process lifetime;
+#:   tests treat this fixture as read-only subprocess argv data.
 ARCHITECTURES = "arm64;x86_64"
+#: @brief Exact child CMake argument derived from the architecture fixture.
+#: @note This process-lifetime assertion value must stay aligned with
+#:   ``ARCHITECTURES`` and remain one unsplit argv element.
 ARCHITECTURE_ARGUMENT = f"-DCMAKE_OSX_ARCHITECTURES={ARCHITECTURES}"
 
 
@@ -84,8 +91,19 @@ class CommandRecorder:
           affect the synthetic build lookup.
         """
 
+        #: @brief Successful command argv snapshots owned by this recorder.
+        #: @note Detached lists retain call order for one test-local recorder
+        #:   lifetime and are never shared back with production drivers.
         self.commands: list[list[str]] = []
+        #: @brief Expected-failure argv snapshots owned by this recorder.
+        #: @note Detached lists live for one test-local recorder lifetime and
+        #:   are merged with successful snapshots only by
+        #:   ``configure_commands``.
         self.expected_failure_commands: list[list[str]] = []
+        #: @brief Private resolved build-to-executable fixture map.
+        #: @note The recorder owns this detached mapping for its lifetime;
+        #:   ``run`` only reads it when synthesizing disposable executable
+        #:   files.
         self._executable_by_build = {
             path.resolve(): name
             for path, name in executable_by_build.items()
@@ -152,6 +170,60 @@ class CommandRecorder:
             )
             if len(command) >= 2 and command[1] == "-S"
         ]
+
+
+class InstallConsumerCTestRegistrationTest(unittest.TestCase):
+    """@brief Lock Python bytecode policy for the three real install smokes.
+
+    @throws OSError If the repository CMake source cannot be read.
+    @throws AssertionError If a named smoke is absent, duplicated, points at a
+      different driver, or does not place ``-B`` immediately after Python.
+    @note This source-level regression starts no process and does not classify
+      itself as a build smoke. It keeps the durable six-test labelled inventory
+      unchanged while failing closed on registration drift.
+    """
+
+    def test_real_install_smokes_disable_python_bytecode(self) -> None:
+        """@brief Require ``python -B`` for every helper-importing real smoke.
+
+        @return None after all three exact CMake registrations match once.
+        @throws OSError If the root CMake source cannot be read.
+        @throws AssertionError If any registration or launcher token differs.
+        @note The expression permits whitespace-only formatting changes but
+          binds each test name directly to its maintained driver path. It does
+          not inspect or modify CTest labels.
+        """
+
+        cmake_source = (
+            pathlib.Path(__file__).resolve().parents[2] / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        registrations = (
+            (
+                "DependencyDisabledInstallSmoke",
+                "dependency_disabled_install_smoke.py",
+            ),
+            (
+                "IpcDisabledInstallSmoke",
+                "ipc_disabled_install_smoke.py",
+            ),
+            (
+                "StaticProductConsumerSmoke",
+                "static_product_consumer_smoke.py",
+            ),
+        )
+        for test_name, driver_name in registrations:
+            with self.subTest(test_name=test_name):
+                name_pattern = re.compile(
+                    rf"add_test\(\s*NAME\s+{re.escape(test_name)}(?=\s)"
+                )
+                self.assertEqual(len(name_pattern.findall(cmake_source)), 1)
+                pattern = re.compile(
+                    rf"add_test\(\s*NAME\s+{re.escape(test_name)}"
+                    rf"\s+COMMAND\s+\$\{{Python3_EXECUTABLE\}}\s+-B"
+                    rf"\s+\"\$\{{PROJECT_SOURCE_DIR\}}/tests/integration/"
+                    rf"{re.escape(driver_name)}\""
+                )
+                self.assertEqual(len(pattern.findall(cmake_source)), 1)
 
 
 class ProducerArchitectureArgumentPolicyTest(unittest.TestCase):
