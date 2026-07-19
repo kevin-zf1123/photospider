@@ -3,7 +3,8 @@
 ## 状态
 
 作为目标架构已接受；在迁移完成前，当前每图 scheduler 所有权仍是现行软件行为。当前进程级
-scheduler-worker admission ledger 是 containment 步骤，并不是本决策的实现。
+scheduler-worker admission ledger 是 containment 步骤，并不是本决策的实现。ADR 0007
+只在目标所有权与生命周期细节上取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 
 ## 背景
 
@@ -65,3 +66,10 @@ replacement 需要 transient candidate headroom，move-only RAII owner 只有在
 因此，`SchedulerWorkerBudget` 不是目标 `ExecutionService` 或 `ResourceLedger`：它不拥有 executor、
 Run identity、cancellation、fairness、memory/device/I/O quota 或 ready-store capacity，其 slot 也不
 计算所有进程 thread。未来迁移会完整替换这个过渡 ownership 与 ABI boundary，而不会保留兼容 wrapper。
+
+## 与 ADR 0007 的关系
+
+[ADR 0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+保留本决策的进程级执行方向与 ADR 0001 边界，同时取代原先隐含的细节。Run 身份与 lease、
+单调终态、completion routing、目标 `GraphRuntime` 的非所有权、账本 token 权威、提交竞争、
+Graph/进程 shutdown 范围，以及 issue #66–#76 的依赖契约，均以 ADR 0007 为权威。

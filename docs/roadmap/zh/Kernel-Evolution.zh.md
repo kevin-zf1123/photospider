@@ -59,6 +59,9 @@ graph-state executor，也不计算 operation 内部 thread、daemon/frontend wo
 的 ABI，不能在其上永久叠加 adapter。特别是 [#68](https://github.com/kevin-zf1123/photospider/issues/68)
 与 [#69](https://github.com/kevin-zf1123/photospider/issues/69) 跟踪的 shared executor 纵向切片会移除
 per-Graph worker，而不是把当前 ledger 当作最终 worker pool。
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+是目标 Run 详细生命周期、owner 边界、resource mint、close/shutdown 作用域与交付依赖的权威来源；
+它不会让这些对象成为当前行为。
 
 ## 架构原则
 
@@ -119,20 +122,44 @@ execution 发生在 `GraphModel` 独占变更边界之外，因此一个 `Comput
 `docs/kernel-architecture/Compute-Boundaries.md` 所记录的当前
 有界 `GraphStateExecutor` 整体 callback FIFO lane 的目标变更。
 
-## `ComputeRun`
+## Run 与进程执行域契约
+
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+细化 ADR 0003 的高层方向。本节汇总其持久目标约束；当摘要省略细节时，以 ADR 为权威。
+
+### `ComputeRun`
 
 `ComputeRun` 是计算身份和生命周期单元，与 `GraphRuntime`、scheduler batch 和
 `ComputeIntent` 不同。
 
-一个 Run 预计拥有或捕获：
+非 realtime HP request 拥有一个 Run。协调独立规划的 HP 与 RT sibling 的 request 拥有一个
+request/run-group identity，并为每个 domain 拥有一个 child Run。Group identity 协调 caller-visible
+completion，但不会创建跨 domain task dependency。
 
-- `RunId` 与可选 parent/run-group identity；
-- immutable `GraphRevision`；
-- `ComputeIntent`、quality、QoS、deadline、weight 和 maximum parallelism；
+一个 Run 拥有或捕获：
+
+- 一个不透明、不复用的 `RunId`，以及可选的 request/parent/run-group identity；
+- immutable graph identity、`GraphRevision`、target 与 request input snapshot；
+- single-domain `ComputeIntent`、quality、QoS、monotonic deadline、weight 和 maximum
+  parallelism；
 - supersession key 与 generation；
-- cancellation state 和唯一 terminal outcome；
-- request plan、dispatcher dependency state、staged output 和 exception state 的稳定存储与 lease；
+- monotonic cancellation state 和唯一 terminal outcome；
+- request plan、dispatcher dependency state、staged output 和 exception state 的稳定存储，
+  并由 Run lease 让这些存储保持存活；
 - resource reservation 和 commit policy。
+
+Task 使用 `(RunId, RunLocalTaskId)` 寻址。Local task id 在所属 Run 之外没有意义。
+
+目标 phase progression 为：
+
+```text
+Created -> Admitted -> Queued -> Running -> CommitPending -> Terminal
+```
+
+安全路径可以跳过非 terminal phase，但绝不倒退。只发布一个 `Succeeded`、`Failed` 或
+`Cancelled` outcome。Completion 本身不等于成功：dependency aggregation 与串行化 graph-state
+commit predicate 都必须成功。Cancellation、failure 与 commit 共享一个 terminal arbiter。当不可抢占
+work 仍需排空时，terminal publication 可以先于物理 quiescence。
 
 `ComputeRun` 为 request-local state 提供稳定生命周期，但不拥有 dependency transition 的语义；
 dependency counter、ready detection 和 dependent release 仍由 `ComputeTaskDispatcher` 负责。
@@ -140,14 +167,67 @@ dependency counter、ready detection 和 dependent release 仍由 `ComputeTaskDi
 `ComputeIntent` 描述 HP/RT 业务语义；QoS 和 deadline 描述资源策略；
 `ComputeCommitPolicy` 决定完成结果能否可见。三者不能互相推导。
 
+### Run lease、ready task 与 completion
+
+每个已接受的 ready-store entry、执行中的 callback、completion record、dispatcher continuation
+与 commit continuation 都拥有或转移一个不可伪造的 `RunLease`。该 lease 让 plan、dispatcher、
+temporary/staged output、exception state 与 completion endpoint 保持存活，但不会转移 Graph 或
+resource authority。
+
+只有 dispatcher-ready `ReadyTaskSubmission` value 能进入执行域。它们携带 immutable metadata、
+`(RunId, RunLocalTaskId)`、稳定 executable state、resource requirement 与一个 Run lease；绝不会
+携带 `GraphModel`、plan/task graph、dirty state、dependency map、cache authority 或 visible commit
+authority。
+
+Completion 通过 lease 返回匹配的 Run dispatcher。新就绪的 dependent 会重新进入进程 admission、
+有界 ready store 与 global policy。不同 Run 可以复用 local task id，而不会发生 completion、
+dependency 或 exception 串扰。
+
+Run destruction 不抛异常，且只会在发布一个 terminal outcome、达到 quiescence、释放全部 lease，
+以及精确释放全部 reservation/grant 后发生。Caller observer 被丢弃不会隐式取消已经 admission 的 work。
+
+### 目标 `GraphRuntime`
+
+目标 `GraphRuntime` 拥有 `GraphModel`、graph-scoped runtime state、graph-state lane、monotonic
+`GraphRevision`、revision capture、串行化 commit validation/publication、graph event、
+platform/session metadata，以及 Graph open/closing lifetime state。
+
+它不拥有 Run、CPU/device/I/O/plugin worker、process ready store、process admission、
+`ResourceLedger`、`SchedulerPolicy` 或物理 scheduler instance。Run 可以持有 graph-lifetime lease，
+但不会反转这项所有权。
+
+目标 lane 只在捕获 immutable revision 和执行经过验证的 visible commit 时持有，不覆盖长时间 planning/
+execution。这仍是未来行为；在 revision/commit 迁移落地前，当前 whole-callback graph-state lane
+仍是权威行为。
+
 ## 进程执行域
 
 `ExecutionService` 是深模块：调用方提交 ready work 并接收 completion；admission、queueing、
 policy validation、reservation、executor 和 completion routing 保持在内部。
 
-`SchedulerPolicy` 是内部策略 seam，不是物理 executor，也不是资源权威。它可以排列 ready work
-或建议有界 quantum；`ResourceLedger` 验证所有决定，并拥有 CPU、queue、memory、scratch、
-device、I/O byte 和 plugin-process 预算。
+产品 composition root 根据进程配置构造一个显式 service，并将其注入。它不是 static singleton。
+Root 会先于参与其中的 Kernel/Host 构造该 service，并保留它，直到这些 owner 停止 Run admission
+并排空自身 Run。Graph close 不会停止该 service；只有 process execution-domain shutdown 才会停止。
+
+最终 service 拥有物理 CPU worker 与后续 resource executor、有界 ready storage、Run/resource
+admission、policy-result validation、execution exception fence 与 completion routing。它不拥有
+planning、dependency semantic、Graph/document persistence、cache authority、dirty propagation、
+visible commit 或 Graph state。
+
+`ExecutionService` 独占一个由 composition-root limit 初始化、Host 权威的 `ResourceLedger`。只有
+受信任 Host code 能铸造其 move-only、不可伪造的 reservation 与 grant。Policy 或 plugin 可以请求
+或建议 resource，但不能构造、复制、扩大或直接释放 token。
+
+Ledger 会验证事务性 resource vector，并拥有 CPU、ready-store entry/byte、retained/in-flight
+memory、scratch、device queue/memory/in-flight、compute-I/O operation/byte，以及
+plugin-process/invocation/IPC budget。每个 Run reservation 与 child grant 都会在 success、error、
+cancellation、rollback、close、shutdown 或 worker failure 后恰好释放一次。Capacity exhaustion
+与 checked overflow 会在无 partial reservation、overcommit 或 silent clamping 的情况下失败。
+
+`SchedulerPolicy` 是内部策略 seam，不是物理 executor 或 resource authority。它可以排列 immutable
+ready work 或建议有界 quantum。它不拥有 worker、ready store、Run、Graph state、reservation、
+grant/token、native device handle、executor、completion route 或 lifecycle authority。受信任 service
+code 会在 execution 或 ledger mutation 前验证每项建议。
 
 在稳定新 plugin ABI 前，至少使用两个真实内建 policy 证明该 seam：
 
@@ -156,6 +236,55 @@ device、I/O byte 和 plugin-process 预算。
 
 当前拥有 worker 的 scheduler ABI 是过渡契约。未来 policy ABI 是破坏性替换，不保留永久
 forwarding layer。
+
+`SchedulerWorkerBudget` 同样是过渡契约。它会被移除，而不会包装、重命名或别名为目标
+`ResourceLedger`。
+
+### Revision、cancellation 与可见 commit
+
+Run 在 planning 前捕获一个 immutable `GraphRevision`。最小串行化 commit predicate 要求 Graph
+仍处于 open、graph-lifetime lease 有效、captured revision 与当前权威 revision 精确相等、
+supersession generation 仍为 current、没有已接受的 cancellation/failure，并且 staged output
+对该 Run 有效。
+
+Validation 失败会丢弃 staged output，且不能修改 visible Graph state。Supersession 会选择一个更新
+generation，并请求取消此前匹配的 Run，但不会复用其 identity 或修改其 plan。不可抢占 work 与外部
+side effect 可以完成，但 stale、cancelled、failed 或 overdue output 不能 commit。
+
+任何未来 compatible-revision 优化都要求另一个显式决策；不能从 topology 相等推断 compatibility。
+
+### Graph close 与 process shutdown 作用域
+
+Graph close 会停止该 Graph 的新 Run admission 与普通外部 graph-state admission，同时为已经
+admission 的 Run 保留 finalization path。它会拒绝这些 Run 的 visible commit，取消或排空它们，
+让 continuation 观察 closing 并 settle，等待全部 ready/running/completion/dispatcher/commit/
+resource lease 达到 quiescence，随后才停止 graph-state lane 并销毁 graph state。不相关 Graph
+的 Run 与 shared service 会继续运行。
+
+Process execution-domain shutdown 会先停止新 Run admission。只为选择 cancel 或 drain 的已
+admission Run 保留有界 ready submission、execution、completion routing 与 graph-state
+finalization。每个 Run settle 并恰好一次释放 resource 后，shutdown 才停止其余 work admission、
+join 全部物理 executor 并销毁 service。Worker/operation exception 会被 fence，并通过匹配 Run
+lease 路由；late completion 只执行 cleanup。
+
+### 交付依赖契约
+
+| Issue | 必需结果 | 依赖 |
+| --- | --- | --- |
+| [#66](https://github.com/kevin-zf1123/photospider/issues/66) | HP `ComputeRun` descriptor、state、storage 与唯一 terminal outcome | #63、#65 |
+| [#67](https://github.com/kevin-zf1123/photospider/issues/67) | 稳定 Run lease 与 `(RunId, RunLocalTaskId)` completion isolation | #66 |
+| [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Injected CPU-only service、一个 Run、ready-only input | #67 |
+| [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain，且无 per-Graph worker | #68 |
+| [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Production admission、有界 ready store 与 ledger | #69 |
+| [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Interactive 与 throughput 内建 policy | #70 |
+| [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Revision capture 与 staged commit predicate | #67 |
+| [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Queued/running/commit cancellation | #70、#72 |
+| [#74](https://github.com/kevin-zf1123/photospider/issues/74) | Latest-wins supersession | #71、#73 |
+| [#75](https://github.com/kevin-zf1123/photospider/issues/75) | 完整 policy-generation ABI replacement | #71 |
+| [#76](https://github.com/kevin-zf1123/photospider/issues/76) | Graph close、process shutdown、telemetry 与最终不变量 | #69、#73、#74、#75 |
+
+该图无环。#72 可在 #67 后与 #68–#71 并行推进；#75 可在 #71 后与 #72–#74 并行推进。该表固定
+所有权依赖，不固定实现算法或完成状态。
 
 ## 依赖中立内核
 
@@ -272,8 +401,11 @@ sandbox/capability policy、shared-memory 或 FD transport、quota 和 output de
 5. Deadline 使用 monotonic clock；不可抢占 kernel 可以 overrun，但过期结果不能作为当前结果展示。
 6. 每项 reservation 在成功、错误、取消或 worker failure 后恰好释放一次。
 7. 新就绪 dependent work 重新进入全局 policy，不会通过 local queue 永久绕过公平性。
-8. Graph close 停止该 graph 的 admission，并取消或排空其 Run；只有进程关闭才停止整个执行域。
+8. Graph close 停止该 graph 的新 Run admission，为已 admission Run 保留 settlement，并取消或
+   排空它们；只有进程关闭才会在 admitted work quiesce 后停止整个执行域。
 9. 第三方 policy 和 plugin code 不能制造 resource token，也不能突破 Host-owned quota。
+10. Terminal publication 不表示 Run 可以回收；必须先让全部 lease/grant 达到 quiescence 并释放。
+11. `(RunId, RunLocalTaskId)` 是 completion identity；scheduler epoch 不是 Run identity。
 
 ## 依赖顺序
 

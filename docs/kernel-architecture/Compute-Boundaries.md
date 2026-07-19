@@ -261,7 +261,8 @@ It is not yet a general cancellation or graph-revision policy.
   output does not roll those effects back.
 - Current task handles borrow request-local executor state. Their lifetime ends
   at the current completion wait, which is why they cannot be moved unchanged
-  into a process-wide asynchronous queue.
+  into a process-wide asynchronous queue. ADR 0007 requires stable Run-backed
+  leases for the target queue; that target lease is not current behavior.
 
 ## Boundary Rationale
 
@@ -273,12 +274,14 @@ four independent correctness points:
 3. Temporary output can be validated before becoming visible.
 4. Physical execution ownership remains separable from dependency correctness.
 
-[ADR 0003](../adr/0003-process-owned-execution-resources.md) and the exact
+[ADR 0003](../adr/0003-process-owned-execution-resources.md),
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
+and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-record a different accepted ownership decision for later implementation. This
-document is authoritative for current per-graph scheduler ownership plus its
-bounded process admission containment; the ledger is not the target shared
-`ExecutionService`.
+record the accepted replacement direction and detailed ownership contract for
+later implementation. This document is authoritative for current per-graph
+scheduler ownership plus its bounded process admission containment; the ledger
+is not the target shared `ExecutionService`.
 
 ## Implementation and Validation Entry Points
 

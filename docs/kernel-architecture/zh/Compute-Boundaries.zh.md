@@ -211,7 +211,8 @@ metadata 推导该关系。
 - 已 admission 的 scheduler batch 会在异常离开当前请求前 settle。
 - Operation callback 可能已经产生外部副作用；staged graph output 不会回滚这些副作用。
 - 当前 task handle 借用请求级 executor 状态，其生命周期在当前 completion wait 结束；因此不能
-  原样移入进程级异步队列。
+  原样移入进程级异步队列。ADR 0007 要求目标队列使用由 Run 支撑的稳定 lease；该目标 lease
+  不是当前行为。
 
 ## 边界原理
 
@@ -222,10 +223,11 @@ metadata 推导该关系。
 3. 临时输出可以在可见前验证。
 4. 物理执行所有权与 dependency correctness 保持可分离。
 
-[ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)与精确的
+[ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了供后续实现的另一项
-已接受 ownership decision。本文是当前 per-graph scheduler ownership 及其有界进程 admission
-containment 的权威说明；该 ledger 不是目标 shared `ExecutionService`。
+已接受替代方向和详细所有权契约。本文是当前 per-graph scheduler ownership 及其有界进程
+admission containment 的权威说明；该 ledger 不是目标 shared `ExecutionService`。
 
 ## 实现与验证入口
 

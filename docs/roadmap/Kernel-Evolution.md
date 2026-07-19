@@ -78,6 +78,10 @@ migrations, not layer permanent adapters over them. In particular, the shared
 executor slices tracked by [#68](https://github.com/kevin-zf1123/photospider/issues/68)
 and [#69](https://github.com/kevin-zf1123/photospider/issues/69) remove
 per-Graph workers rather than treating the current ledger as the final pool.
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+is authoritative for the detailed target Run lifetime, owner boundaries,
+resource mint, close/shutdown scope, and delivery dependencies; it does not make
+those objects current behavior.
 
 ## Architectural Principles
 
@@ -145,21 +149,50 @@ the frontend from producing a newer revision. This is a target change from the
 current bounded `GraphStateExecutor` whole-callback FIFO lane documented in
 `docs/kernel-architecture/Compute-Boundaries.md`.
 
-## `ComputeRun`
+## Run and Process Execution Domain Contract
+
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+refines the high-level direction from ADR 0003. This section summarizes its
+durable target constraints; the ADR is authoritative when a summary omits
+detail.
+
+### `ComputeRun`
 
 `ComputeRun` is the unit of compute identity and lifetime. It is distinct from
 `GraphRuntime`, a scheduler batch, and `ComputeIntent`.
 
-A Run is expected to own or capture:
+A non-realtime HP request owns one Run. A request coordinating independently
+planned HP and RT siblings owns a request/run-group identity plus one child Run
+per domain. Group identity coordinates caller-visible completion but does not
+create cross-domain task dependencies.
 
-- `RunId` and optional parent/run-group identity;
-- immutable `GraphRevision`;
-- `ComputeIntent`, quality, QoS, deadline, weight, and maximum parallelism;
+A Run owns or captures:
+
+- one opaque, non-reused `RunId` and optional request/parent/run-group identity;
+- immutable graph identity, `GraphRevision`, target, and request input snapshot;
+- single-domain `ComputeIntent`, quality, QoS, monotonic deadline, weight, and
+  maximum parallelism;
 - supersession key and generation;
-- cancellation state and one terminal outcome;
-- stable storage and leases for the request plan, dispatcher dependency state,
-  staged outputs, and exception state;
+- monotonic cancellation state and one terminal outcome;
+- stable storage for the request plan, dispatcher dependency state, staged
+  outputs, and exception state, kept alive through Run leases;
 - resource reservations and commit policy.
+
+Tasks are addressed by `(RunId, RunLocalTaskId)`. A local task id has no meaning
+outside its Run.
+
+The target phase progression is:
+
+```text
+Created -> Admitted -> Queued -> Running -> CommitPending -> Terminal
+```
+
+Safe paths may skip nonterminal phases but never move backward. Exactly one
+`Succeeded`, `Failed`, or `Cancelled` outcome is published. Completion alone is
+not success: dependency aggregation and the serialized graph-state commit
+predicate must succeed. Cancellation, failure, and commit share one terminal
+arbiter. Terminal publication may precede physical quiescence when
+non-preemptible work must drain.
 
 `ComputeRun` gives request-local state a stable lifetime. It does not own the
 meaning of dependency transitions: `ComputeTaskDispatcher` remains responsible
@@ -169,16 +202,83 @@ for dependency counters, ready detection, and dependent release.
 resource policy. `ComputeCommitPolicy` decides whether a completed result may
 become visible. None may be inferred from another.
 
+### Run leases, ready tasks, and completion
+
+Every accepted ready-store entry, executing callback, completion record,
+dispatcher continuation, and commit continuation owns or transfers one
+non-forgeable `RunLease`. The lease keeps the plan, dispatcher, temporary/staged
+output, exception state, and completion endpoint alive without transferring
+Graph or resource authority.
+
+Only dispatcher-ready `ReadyTaskSubmission` values enter the execution domain.
+They carry immutable metadata, `(RunId, RunLocalTaskId)`, stable executable
+state, resource requirements, and a Run lease. They never carry `GraphModel`, a
+plan/task graph, dirty state, dependency maps, cache authority, or visible
+commit authority.
+
+Completion returns through the lease to the matching Run dispatcher. Newly
+ready dependents re-enter process admission, the bounded ready store, and global
+policy. Different Runs may reuse local task ids without completion,
+dependency, or exception cross-talk.
+
+Run destruction is non-throwing and occurs only after one terminal outcome,
+quiescence, release of every lease, and exact release of every reservation and
+grant. Dropping a caller observer does not implicitly cancel admitted work.
+
+### Target `GraphRuntime`
+
+The target `GraphRuntime` owns `GraphModel`, graph-scoped runtime state, the
+graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit
+validation/publication, graph events, platform/session metadata, and Graph
+open/closing lifetime state.
+
+It owns no Run, CPU/device/I/O/plugin worker, process ready store, process
+admission, `ResourceLedger`, `SchedulerPolicy`, or physical scheduler instance.
+A Run may hold a graph-lifetime lease without reversing that ownership.
+
+The target lane is held for immutable revision capture and validated visible
+commit, not for long-running planning/execution. This remains future behavior;
+the current whole-callback graph-state lane remains authoritative until the
+revision/commit migration lands.
+
 ## Process Execution Domain
 
 `ExecutionService` is a deep module: callers submit ready work and receive
 completion; admission, queueing, policy validation, reservations, executors,
 and completion routing remain internal.
 
-`SchedulerPolicy` is an internal strategy seam, not a physical executor and
-not a resource authority. It may rank ready work or suggest a bounded quantum.
-`ResourceLedger` validates every decision and owns CPU, queue, memory, scratch,
-device, I/O byte, and plugin-process budgets.
+The product composition root constructs one explicit service from process
+configuration and injects it. It is not a static singleton. The root constructs
+it before participating Kernels/Hosts and retains it until they stop Run
+admission and drain their Runs. Graph close does not stop the service; only
+process execution-domain shutdown does.
+
+The final service owns physical CPU workers and later resource executors,
+bounded ready storage, Run/resource admission, policy-result validation,
+execution exception fences, and completion routing. It does not own planning,
+dependency semantics, Graph/document persistence, cache authority, dirty
+propagation, visible commit, or Graph state.
+
+`ExecutionService` exclusively owns a host-authoritative `ResourceLedger`
+initialized from composition-root limits. Only trusted host code mints its
+move-only, non-forgeable reservations and grants. A policy or plugin may request
+or suggest resources but cannot construct, duplicate, enlarge, or directly
+release a token.
+
+The ledger validates transactional resource vectors and owns CPU, ready-store
+entry/byte, retained/in-flight memory, scratch, device queue/memory/in-flight,
+compute-I/O operation/byte, and plugin-process/invocation/IPC budgets. Every Run
+reservation and child grant releases exactly once after success, error,
+cancellation, rollback, close, shutdown, or worker failure. Capacity exhaustion
+and checked overflow fail without partial reservation, overcommit, or silent
+clamping.
+
+`SchedulerPolicy` is an internal strategy seam, not a physical executor or
+resource authority. It may rank immutable ready work or suggest a bounded
+quantum. It owns no worker, ready store, Run, Graph state, reservation,
+grant/token, native device handle, executor, completion route, or lifecycle
+authority. Trusted service code validates every suggestion before execution or
+ledger mutation.
 
 At least two real built-in policies must prove the seam before a new plugin ABI
 is stabilized:
@@ -190,6 +290,63 @@ is stabilized:
 
 The current worker-owning scheduler ABI is transitional. The future policy ABI
 is a breaking replacement, not a permanent forwarding layer.
+
+`SchedulerWorkerBudget` is also transitional. It is removed rather than wrapped,
+renamed, or aliased into the target `ResourceLedger`.
+
+### Revision, cancellation, and visible commit
+
+A Run captures one immutable `GraphRevision` before planning. The minimum
+serialized commit predicate requires an open Graph, a valid graph-lifetime
+lease, exact equality with the current authoritative revision, a current
+supersession generation, no accepted cancellation/failure, and staged output
+valid for that Run.
+
+Failed validation discards staged output and cannot mutate visible Graph state.
+Supersession selects a newer generation and requests cancellation of older
+matching Runs without reusing their identity or mutating their plans.
+Non-preemptible work and external side effects may finish, but stale,
+cancelled, failed, or overdue output cannot commit.
+
+Any future compatible-revision optimization requires another explicit decision;
+compatibility is not inferred from equal topology.
+
+### Close and shutdown scopes
+
+Graph close stops new Run and ordinary external graph-state admission for that
+Graph while preserving a finalization path for already-admitted Runs. It denies
+their visible commits, cancels or drains them, lets their continuations observe
+closing and settle, waits every ready/running/completion/dispatcher/commit/
+resource lease to quiesce, and only then stops the graph-state lane and destroys
+graph state. Unrelated Graph Runs and the shared service continue.
+
+Process execution-domain shutdown first stops new-Run admission. Bounded ready
+submission, execution, completion routing, and graph-state finalization remain
+available only for already-admitted Runs chosen to cancel or drain. After every
+Run settles and releases resources exactly once, shutdown stops remaining work
+admission, joins all physical executors, and destroys the service.
+Worker/operation exceptions are fenced and routed through the matching Run
+lease; late completion performs cleanup only.
+
+### Delivery dependency contract
+
+| Issue | Required outcome | Depends on |
+| --- | --- | --- |
+| [#66](https://github.com/kevin-zf1123/photospider/issues/66) | HP `ComputeRun` descriptor, state, storage, and one terminal outcome | #63, #65 |
+| [#67](https://github.com/kevin-zf1123/photospider/issues/67) | Stable Run leases and `(RunId, RunLocalTaskId)` completion isolation | #66 |
+| [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Injected CPU-only service, one Run, ready-only input | #67 |
+| [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain and no per-Graph workers | #68 |
+| [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Production admission, bounded ready store, and ledger | #69 |
+| [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Interactive and throughput built-in policies | #70 |
+| [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Revision capture and staged commit predicate | #67 |
+| [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Queued/running/commit cancellation | #70, #72 |
+| [#74](https://github.com/kevin-zf1123/photospider/issues/74) | Latest-wins supersession | #71, #73 |
+| [#75](https://github.com/kevin-zf1123/photospider/issues/75) | Complete policy-generation ABI replacement | #71 |
+| [#76](https://github.com/kevin-zf1123/photospider/issues/76) | Graph close, process shutdown, telemetry, final invariants | #69, #73, #74, #75 |
+
+The graph is acyclic. #72 may proceed after #67 in parallel with #68–#71;
+#75 may proceed after #71 in parallel with #72–#74. The table freezes ownership
+dependencies, not implementation algorithms or completion status.
 
 ## Dependency-Neutral Kernel
 
@@ -338,10 +495,15 @@ cross-process GPU handles require a later device/fence protocol.
    cancellation, or worker failure.
 7. Newly ready dependent work re-enters global policy rather than permanently
    bypassing fairness through local queues.
-8. Graph close stops admission for that graph and cancels or drains its Runs;
-   only process shutdown stops the whole execution domain.
+8. Graph close stops new-Run admission for that graph, preserves settlement for
+   admitted Runs, and cancels or drains them; only process shutdown stops the
+   whole execution domain after admitted work quiesces.
 9. Third-party policy and plugin code cannot mint resource tokens or exceed
    host-owned quotas.
+10. Terminal publication does not imply Run reclamation; all leases and grants
+    must quiesce and release first.
+11. `(RunId, RunLocalTaskId)` is the completion identity; scheduler epoch is not
+    a Run identity.
 
 ## Dependency Ordering
 

@@ -419,7 +419,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   provider 时，同一 registration transaction 可以替换 active key，卸载后恢复 builtin
   predecessor。
 - 当前 scheduler 按 graph 和 intent 拥有物理 worker，但受单实例 grant 与共享 32-slot admission
-  ledger 约束。ADR 0003 记录了已接受的替代所有权，但 shared `ExecutionService` 不是当前行为。
+  ledger 约束。ADR 0003 记录已接受的替代方向，ADR 0007 记录其详细所有权/生命周期契约，但
+  shared `ExecutionService` 不是当前行为。
 
 - [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)
   分开 graph-state access 与 scheduler dispatch。
@@ -432,6 +433,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   定义已实现的图文档摄取事务。
 - [ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
   定义当前事实、决策、目标与实施状态如何保持分离。
+- [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+  固定目标 Run、completion、execution-service、ledger 与 lifecycle 所有权，而不把这些对象表述为当前行为。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

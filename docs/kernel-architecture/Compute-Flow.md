@@ -269,8 +269,9 @@ and commit to the visible `GraphModel` only after the RT sibling has committed;
 RT dirty workers write `RealtimeProxyWriteBuffer` and commit to the
 runtime-owned `RealtimeProxyGraph`. There is no general graph-revision or
 interruptible commit policy in the current implementation. ADR 0003 and the
-kernel evolution roadmap define that accepted target separately from current
-behavior. Commit policy remains conceptually separate from `ComputeIntent`,
+kernel evolution roadmap define that accepted direction separately from current
+behavior; ADR 0007 fixes its detailed Run/revision/commit race without making it
+current. Commit policy remains conceptually separate from `ComputeIntent`,
 because HP/RT intent semantics do not define visibility or interruption.
 
 ## GlobalHighPrecision
@@ -438,6 +439,8 @@ the ready-task loop. An invalid above-eight request or unknown type maps to
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+details the later Run lease, completion, and commit ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 describes the later revision and cancellation boundary without making it part
 of the current flow.

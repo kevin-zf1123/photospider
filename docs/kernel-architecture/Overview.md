@@ -527,8 +527,9 @@ Important current behavior:
   unload restores the built-in predecessor.
 - Current schedulers own physical workers per graph and intent, subject to
   bounded per-instance grants and the shared 32-slot admission ledger. The
-  accepted replacement for that ownership is recorded in ADR 0003, but the
-  shared `ExecutionService` is not current behavior.
+  accepted replacement direction is recorded in ADR 0003 and its detailed
+  ownership/lifetime contract in ADR 0007, but the shared `ExecutionService`
+  is not current behavior.
 
 - [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
   separates graph-state access from scheduler dispatch.
@@ -543,6 +544,9 @@ Important current behavior:
 - [ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
   defines how current facts, decisions, targets, and implementation status
   remain distinct.
+- [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+  fixes the target Run, completion, execution-service, ledger, and lifecycle
+  ownership without presenting those objects as current.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

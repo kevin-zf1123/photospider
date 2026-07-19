@@ -573,9 +573,14 @@ leases and matching destroy functions keep callback state and plugin-created
 instances inside the lifetime of their defining library. Those mechanisms make
 the provisional C++ boundary explicit rather than mistaking a C symbol for a
 stable C value ABI.
-[ADR 0003](../adr/0003-process-owned-execution-resources.md) and the exact
+[ADR 0003](../adr/0003-process-owned-execution-resources.md) records the
+high-level process-owned execution direction. The detailed
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+requires a complete replacement of this worker-owning scheduler generation by
+a policy generation; no permanent compatibility shim preserves the old
+ownership model. The exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-record the accepted scheduler replacement direction. The exact
+records the delivery direction. The exact
 [server and plugin isolation target](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation)
 records the operation-isolation direction. Neither changes the current loader
 contracts described here.

@@ -416,10 +416,14 @@ allocator/runtime、exception model 与 RTTI configuration。C linkage 是 ident
 Shadow transaction 会阻止 registry 或 type map 局部发布；DSO lease 与匹配 destroy function 则让
 callback state 和 plugin-created instance 保持在其定义库的生命周期内。这些机制会显式呈现临时
 C++ 边界，而不会把 C symbol 错当成稳定 C value ABI。
-[ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)与精确的
-[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录已接受的 scheduler 替代
-方向；精确的[服务器与插件隔离目标](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)记录
-operation isolation 方向。二者都不会改变本文说明的当前 loader contract。
+[ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)记录进程拥有执行资源的
+高层方向。详细的
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+要求用 policy generation 完整替代当前这个拥有 worker 的 scheduler generation；不得用永久兼容 shim
+保留旧所有权模型。精确的
+[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录交付方向；精确的
+[服务器与插件隔离目标](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)记录 operation
+isolation 方向。两者都不会改变本文说明的当前 loader contract。
 
 ## 兼容性指南
 

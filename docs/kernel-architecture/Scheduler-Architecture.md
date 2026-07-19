@@ -446,7 +446,9 @@ HP output; otherwise it is a planning contract error.
 Scheduler queues use epochs to cancel stale queued work. Epoch `0` is treated
 as non-cancelable compatibility work. Only submissions carrying a real epoch
 can be dropped as stale. Epoch filtering does not cancel a callback that is
-already running and is not a general `ComputeRun` cancellation contract.
+already running and is not a general `ComputeRun` cancellation contract. The
+target Run identity, stable lease, and terminal cancellation race are fixed by
+ADR 0007 but are not implemented by the current epoch.
 
 ## Observability
 
@@ -512,9 +514,12 @@ process ledger contains the current per-graph physical ownership without
 reinterpreting a reservation as a running thread or shared pool.
 [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-execution-resources.md)
-and the exact
+records the high-level replacement direction;
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+fixes its detailed Run, ready-task, completion, resource, and lifecycle
+ownership; and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-record the accepted replacement ownership without changing this contract.
+summarizes the accepted target without changing this current contract.
 
 ## Implementation and Validation Entry Points
 

@@ -418,6 +418,35 @@ CMake rules:
   toolchain. A future pure C plugin ABI remains a separate versioned
   compatibility change.
 
+## Target Process-Execution Composition Boundary
+
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+fixes the later process-execution ownership without making it current source
+layout. The product composition root will construct one explicit
+`ExecutionService` from process configuration and inject it into participating
+backend owners. It will not use a static singleton.
+
+In that target:
+
+- `GraphRuntime` remains graph-scoped and owns Graph state, the graph-state lane,
+  revision capture/commit validation, events, and platform/session metadata;
+- `ComputeRun` owns request-local plan/dispatcher storage, staged output,
+  exception/cancellation/terminal state, and reservations; non-forgeable Run
+  leases keep that control block alive across asynchronous work;
+- `ExecutionService` owns physical workers, bounded ready storage, admission,
+  trusted policy validation, and completion routing, while accepting only
+  dispatcher-ready submissions;
+- the internal host-authoritative `ResourceLedger` is the only reservation and
+  grant mint; and
+- `SchedulerPolicy` ranks work or suggests a bounded quantum but owns no worker,
+  queue, token, native resource, Run, or Graph state.
+
+This ownership target does not select a new source directory, build target,
+queue implementation, or plugin ABI shape. Those choices belong to the
+corresponding implementation slices. The current worker-owning scheduler SDK and
+`SchedulerWorkerBudget` are removed as complete migrations; neither remains
+behind a permanent compatibility wrapper.
+
 ## Daemon Shape
 
 `photospiderd` is an executable with a small process shell and a deep Host-only
@@ -639,8 +668,14 @@ coordinates every Host and Kernel in the process. Graph load reserves the HP/RT
 pair atomically; replacement holds the old grant until the candidate is
 published; scheduler destruction precedes exact reservation release. This is
 current containment only. Per-Graph workers and the transitional process
-singleton remain until ADR 0003 and issues #68/#69 introduce an injected
-process-owned `ExecutionService` and shared executors.
+function-static `SchedulerWorkerBudget::process()` owner remain until
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+and issues #68/#69 introduce an injected process-owned `ExecutionService` and
+shared executors. Issues #70/#71 then add the final host-authoritative ledger,
+bounded ready store, and built-in policies; #72–#74 add revision, cancellation,
+and supersession; #75 replaces the worker-owning ABI; and #76 closes lifecycle
+and telemetry invariants. The authoritative acyclic dependency table is in the
+[kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 
 1. **Completed:** Establish public-header installation and self-containment
    boundaries.

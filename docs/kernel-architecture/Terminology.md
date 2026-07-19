@@ -1,9 +1,10 @@
 # Kernel Terminology
 
 This glossary defines the language used by the current kernel implementation.
-Terms that exist only in the accepted
-[kernel evolution target](../roadmap/Kernel-Evolution.md) must not be described
-as current runtime objects.
+Terms that exist only in an accepted target decision, including
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
+or the [kernel evolution target](../roadmap/Kernel-Evolution.md) must not be
+described as current runtime objects.
 
 ## Product and Runtime Ownership
 
@@ -143,7 +144,8 @@ thread, graph-state executor, daemon worker, or observed OS thread.
 The process-lifetime, mutex-serialized ledger with a fixed 32-slot ceiling
 shared by every embedded Host and Kernel. It admits scheduler plans but owns no
 threads, queue, policy, or fairness. It is current containment for per-graph
-workers, not the target `ExecutionService` or `ResourceLedger` from ADR 0003.
+workers, not the target `ExecutionService` or `ResourceLedger` detailed by
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md).
 
 **Scheduler worker reservation**
 A move-only RAII owner of admitted slots. Graph load atomically acquires an
@@ -219,7 +221,9 @@ planning, cache, or scheduling semantics.
 - `SchedulerWorkerBudget` is not a worker pool, fairness authority, or a limit
   on every thread in the process.
 - The current per-graph `IScheduler` is not the
-  [target process execution domain](../roadmap/Kernel-Evolution.md#process-execution-domain).
+  [target process execution domain](../roadmap/Kernel-Evolution.md#process-execution-domain);
+  its detailed future owner and Run-lifetime constraints are fixed by
+  [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md).
 
 ## Implementation and Validation Entry Points
 

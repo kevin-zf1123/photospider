@@ -5,7 +5,9 @@
 Accepted as a target architecture. The current per-graph scheduler ownership
 remains current behavior until the migration is implemented. The current
 process-wide scheduler-worker admission ledger is a containment step, not an
-implementation of this decision.
+implementation of this decision. ADR 0007 supersedes this ADR only as the
+detailed target ownership and lifecycle contract; the high-level process
+ownership decision and its historical context remain in force.
 
 ## Context
 
@@ -87,3 +89,12 @@ workers, queues, epochs, and policies inside each `IScheduler`.
 memory/device/I/O quota, or ready-store capacity, and its slots do not count all
 process threads. The future migration replaces this transitional ownership and
 ABI boundary completely rather than retaining a compatibility wrapper.
+
+## Relationship to ADR 0007
+
+[ADR 0007](0007-compute-runs-and-process-execution-have-separate-owners.md)
+preserves this decision's process-owned execution direction and ADR 0001
+boundary while superseding the implicit details. It is authoritative for Run
+identity and leases, monotonic terminal state, completion routing, target
+`GraphRuntime` non-ownership, ledger token authority, commit races, graph/process
+shutdown scope, and the issue #66–#76 dependency contract.

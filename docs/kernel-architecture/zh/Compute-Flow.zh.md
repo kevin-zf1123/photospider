@@ -202,7 +202,8 @@ scheduler pointer 逃逸。
 `HighPrecisionDirtyWriteBuffer`，并且只在 RT sibling 已提交之后写入可见 `GraphModel`；
 RT dirty worker 写入 `RealtimeProxyWriteBuffer`，并提交到 runtime-owned
 `RealtimeProxyGraph`。当前实现没有通用 graph-revision 或 interruptible commit policy；
-ADR 0003 和内核演进 roadmap 会把该目标与当前行为分开定义。Commit policy 在概念上仍与
+ADR 0003 和内核演进 roadmap 会把该已接受方向与当前行为分开定义；ADR 0007 固定其详细的
+Run/revision/commit 竞态，但不会使其成为当前行为。Commit policy 在概念上仍与
 `ComputeIntent` 分离，因为 HP/RT intent 语义不定义可见性或中断。
 
 ## GlobalHighPrecision
@@ -337,6 +338,8 @@ embedded Host 与 IPC status 边界保持不变。
 这些拆分使 planning、physical dispatch 与 visible commit 可以独立测试。
 [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)约束当前
 graph-state/dispatch 区分。已接受的
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+详细定义后续 Run lease、completion 与 commit 所有权，而
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述后续 revision 与 cancellation
 边界，但不会让它们成为当前流程的一部分。
 

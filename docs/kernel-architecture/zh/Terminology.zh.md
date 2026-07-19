@@ -1,7 +1,8 @@
 # 内核术语
 
-本词汇表定义当前内核实现使用的语言。只属于已接受
-[内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md)的术语不得被描述为当前运行时对象。
+本词汇表定义当前内核实现使用的语言。只属于已接受目标决策的术语，包括
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+或[内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md)中的术语，都不得被描述为当前运行时对象。
 
 ## 产品与运行时所有权
 
@@ -117,7 +118,9 @@ daemon worker 或观测到的 OS thread。
 **`SchedulerWorkerBudget`**
 进程生命周期、由 mutex 串行化且固定为 32-slot 的 ledger，由所有 embedded Host 与 Kernel 共享。
 它准入 scheduler plan，但不拥有 thread、queue、policy 或 fairness。它是当前 per-graph worker 的
-containment，不是 ADR 0003 中的目标 `ExecutionService` 或 `ResourceLedger`。
+containment，不是
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
+详细定义的目标 `ExecutionService` 或 `ResourceLedger`。
 
 **Scheduler worker reservation**
 已准入 slot 的 move-only RAII owner。Graph load 会在构造任一 scheduler 前原子取得 HP/RT
@@ -177,7 +180,9 @@ cache 或 scheduling 语义的所有者。
 - Worker request 不是 resolved grant，grant 也不一定等于最终 scheduler slot 计费。
 - 已预留 scheduler worker slot 不能证明当前正好有一个 thread 在运行。
 - `SchedulerWorkerBudget` 不是 worker pool、fairness authority，也不是进程中所有 thread 的上限。
-- 当前每图 `IScheduler` 不是[目标进程执行域](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)。
+- 当前每图 `IScheduler` 不是[目标进程执行域](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)；
+  它未来的详细 owner 与 Run 生命周期约束由
+  [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)固定。
 
 ## 实现与验证入口
 
