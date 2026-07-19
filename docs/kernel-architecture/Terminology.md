@@ -74,6 +74,17 @@ The internal compute facade. It coordinates request validation, planning,
 cache policy, dirty work selection, operation resolution, dispatch, metrics,
 and output commit through narrower collaborators.
 
+**`ComputeRun`**
+The current private, request-owned execution record for one non-realtime HP
+service call. Its immutable descriptor contains an opaque non-reused id,
+session identity, topology-only submission revision, target,
+`GlobalHighPrecision` intent, full quality, and explicit QoS. It owns monotonic
+phase and exact-once terminal state plus the full scheduler submission
+plan/temporary results or standalone dirty HP staging buffer. Current task
+handles still borrow executor state until the synchronous completion wait;
+stable Run leases, paired realtime child Runs/`RunGroup`, authoritative
+`GraphRevision`, and process execution ownership remain future work.
+
 **`FullTaskGraph`**
 The complete node/tile task shape for one graph generation, compute intent, and
 task-shape configuration. Request target, cache state, and dirty state do not
@@ -100,10 +111,12 @@ refreshes graph-scoped dirty state. It does not own compute tasks.
 
 **`ComputeTaskDispatcher`**
 The execution orchestrator that owns dependency counters, ready release,
-temporary results, and completion aggregation. Its full HP dispatch owns final
-result commit; dirty executors reuse its source-first submission helper and own
-their staged commit through dirty write buffers. It pushes only concrete ready
-task handles or callbacks to the scheduler.
+temporary-result indexing semantics, and completion aggregation. For current
+full HP work, the request `ComputeRun` owns the `TaskSubmissionPlan` storage and
+temporary result slots while the dispatcher owns their dependency transitions
+and final result commit. Dirty executors reuse its source-first submission
+helper and own their staged commit through dirty write buffers. It pushes only
+concrete ready task handles or callbacks to the scheduler.
 
 **`ReadyTaskSubmission`**
 A conceptual ready submission represented by a borrowed `TaskHandle` or an

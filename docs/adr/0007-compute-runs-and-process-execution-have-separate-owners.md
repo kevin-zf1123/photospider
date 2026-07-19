@@ -2,10 +2,14 @@
 
 ## Status
 
-Accepted as a target architecture. None of `ComputeRun`, `RunGroup`, the
+Accepted as the target architecture. The issue #66 non-realtime HP slice of
+`ComputeRun` is current software behavior: it provides request identity,
+topology-only submission revision, intent/quality/QoS, monotonic phase, one
+terminal outcome, and Run-owned full-plan/temporary or standalone dirty-HP
+staging storage. `RunGroup`, stable Run leases and completion identity, the
 injected process-owned `ExecutionService` and its `RunLifecycleRegistry`,
-`GraphRevision`, the target `ResourceLedger`, or the policy-only scheduler
-generation is current software behavior at the time of this decision.
+authoritative `GraphRevision` commit validation, the target `ResourceLedger`,
+and the policy-only scheduler generation remain target behavior.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -21,11 +25,13 @@ counters, exception publication, and ordering policy. The function-static
 to 32 across embedded Hosts, but it owns no worker, ready-store capacity, Run,
 memory, scratch, device, I/O, or plugin-process budget.
 
-Current `TaskHandle` values borrow a `TaskExecutor*`. `TaskSubmissionPlan`,
-temporary results, dependency state, and executor objects stay on a request
-lifetime bounded by the matching scheduler completion wait. Moving those
-handles into a process queue without first creating a stable request lifetime
-would introduce use-after-free and cross-request completion risks.
+Current `TaskHandle` values borrow a `TaskExecutor*`. For non-realtime full HP
+work, `ComputeRun` now owns `TaskSubmissionPlan`, temporary results, and
+dependency state. The dispatcher, stack `NodeTaskRunner`, and scheduler
+completion identity are still borrowed and bounded by the matching synchronous
+completion wait. Moving those handles into a process queue before issue #67
+introduces stable leases would create use-after-free and cross-request
+completion risks.
 
 ADR 0003 chose the direction—request-owned `ComputeRun`, process-owned
 `ExecutionService`, host-owned `ResourceLedger`, and policy-only
@@ -423,11 +429,13 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract without implementing the slices:
+This decision fixes the dependency contract. Issue #66 is now implemented as
+the current non-realtime HP slice; the following slices remain ordered target
+work:
 
 | Issue | Consumes this decision | Explicit non-goal of the slice |
 | --- | --- | --- |
-| #66 | HP `ComputeRun` descriptor, state, storage, and one terminal outcome | Process worker migration |
+| #66 (current) | HP `ComputeRun` descriptor, state, storage, and one terminal outcome | Process worker migration |
 | #67 | Stable Run leases and `(RunId, RunLocalTaskId)` completion isolation | Shared CPU service |
 | #68 | Injected CPU-only `ExecutionService` for one Run, ready-only input | Multi-Graph migration and final ledger |
 | #69 | Shared multi-Graph and HP/RT CPU domain; removal of per-Graph workers | Full admission/policy model |
@@ -441,8 +449,8 @@ This decision fixes the dependency contract without implementing the slices:
 
 The dependency graph is acyclic. #72 may proceed after #67 in parallel with
 #68–#71; #75 may proceed after #71 in parallel with #72–#74. Current-state
-documentation changes only when each implementation and its long-lived
-behavioral tests land.
+documentation changes only when each additional implementation and its
+long-lived behavioral tests land.
 
 ## Consequences
 
@@ -540,8 +548,10 @@ static composition object.
   Issue/Project status to remain distinct.
 - [Kernel Evolution](../roadmap/Kernel-Evolution.md#run-and-process-execution-domain-contract)
   records the durable target and delivery dependency order.
-- Current behavior remains authoritative in
+- Current behavior, including the bounded issue #66 HP Run slice, remains
+  authoritative in
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md),
   [Compute Flow](../kernel-architecture/Compute-Flow.md), and
-  [Scheduler Architecture](../kernel-architecture/Scheduler-Architecture.md)
-  until implementation and durable verification promote each target.
+  [Scheduler Architecture](../kernel-architecture/Scheduler-Architecture.md);
+  the remaining targets become current only after implementation and durable
+  verification.

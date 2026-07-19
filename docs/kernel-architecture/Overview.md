@@ -182,6 +182,7 @@ graph TD
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
     Kernel --> SchedulerWorkerBudget["process SchedulerWorkerBudget"]
+    Kernel --> ComputeService
 
     GraphRuntime --> GraphModel
     GraphRuntime --> GraphStateExecutor
@@ -196,6 +197,10 @@ graph TD
     ComputeService --> GraphEventService
     ComputeService --> OpRegistry
     ComputeService --> IScheduler
+    ComputeService --> ComputeRun["request-owned HP ComputeRun"]
+    ComputeService --> ComputeTaskDispatcher
+    ComputeRun --> TaskSubmissionPlan
+    ComputeTaskDispatcher --> TaskSubmissionPlan
 
     PluginManager --> OpRegistry
 ```
@@ -254,6 +259,7 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
+| `ComputeRun` | Private request owner for one non-realtime HP descriptor, monotonic phase, exact terminal outcome, and full-plan/temporary or standalone dirty-HP staging storage. It does not yet provide stable leases, realtime Run grouping, or process execution ownership. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -274,14 +280,19 @@ Typical REPL compute flow:
    `InteractionService` / `Kernel` requests.
 3. `Kernel` resolves the active `GraphRuntime`.
 4. `Kernel` creates or uses services needed by `ComputeService`.
-5. `ComputeService` resolves topology order with `GraphTraversalService`.
-6. `ComputeService` checks memory and disk cache with `GraphCacheService`.
-7. Dirty-region paths use `RoiPropagationService` and `GraphExtentResolver`
+5. For non-realtime HP, `ComputeService` creates one `ComputeRun` before
+   planning and captures session identity, topology-only submission revision,
+   target, intent, quality, and explicit QoS.
+6. `ComputeService` resolves topology order with `GraphTraversalService`.
+7. `ComputeService` checks memory and disk cache with `GraphCacheService`.
+8. Dirty-region paths use `RoiPropagationService` and `GraphExtentResolver`
    for ROI demand and HP-authoritative extents.
-8. `ComputeService` selects operation implementations from `OpRegistry`.
-9. Work executes recursively or through the configured scheduler path.
-10. `GraphEventService` records per-node events and timing data.
-11. The embedded Host adapter copies results into public Host value snapshots,
+9. `ComputeService` selects operation implementations from `OpRegistry`.
+10. Work executes recursively or through the configured scheduler path; full
+    scheduler plans/temporary results and standalone dirty HP staging remain
+    owned by that Run until exact terminal publication.
+11. `GraphEventService` records per-node events and timing data.
+12. The embedded Host adapter copies results into public Host value snapshots,
     and the CLI renders those values.
 
 Typical embedded Host compute flow:
@@ -507,6 +518,10 @@ Important current behavior:
 - `Kernel` composes graph-scoped services and exposes no installable API.
 - `ComputeService` coordinates private collaborators; its module boundaries are
   implementation details behind `ps::Host`.
+- The current `ComputeRun` is a bounded non-realtime HP request owner. Its
+  topology generation is submission provenance, not authoritative
+  `GraphRevision`, and its scheduler handles still drain synchronously without
+  stable Run leases.
 - `GraphTraversalService` owns topology queries only.
 - `RoiPropagationService` and `GraphExtentResolver` own spatial propagation and
   HP-authoritative extent resolution.
@@ -545,8 +560,8 @@ Important current behavior:
   defines how current facts, decisions, targets, and implementation status
   remain distinct.
 - [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-  fixes the target Run, completion, execution-service, ledger, and lifecycle
-  ownership without presenting those objects as current.
+  fixes the complete target Run, completion, execution-service, ledger, and
+  lifecycle ownership. Only its issue #66 non-realtime HP Run slice is current.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of
@@ -570,6 +585,7 @@ this current-state document.
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
+- `src/lib/compute/compute_run.*`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
@@ -578,4 +594,5 @@ this current-state document.
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
+- `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

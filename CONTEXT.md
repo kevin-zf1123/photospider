@@ -11,7 +11,7 @@ That glossary defines the vocabulary of the current implementation, including:
 
 - `ps::Host`, `Kernel`, `GraphRuntime`, and `GraphModel` ownership;
 - graph-state operations and `GraphStateExecutor`;
-- `ComputeIntent`, `ComputePlan`, `DirtyRegionSnapshot`, and
+- `ComputeIntent`, `ComputeRun`, `ComputePlan`, `DirtyRegionSnapshot`, and
   `ComputeTaskDispatcher`;
 - `ReadyTaskSubmission`, `IScheduler`, cache, `ImageBuffer`, providers, and
   adapters.
@@ -24,12 +24,19 @@ are authoritative; reader-oriented Chinese copies live under
 
 ## Current and Target Concepts
 
-Do not describe accepted future objects as if they already exist. In
-particular, `ComputeRun`, request-owned `RunGroup`,
+The current issue #66 slice gives each non-realtime HP request one private,
+request-owned `ComputeRun`. It captures an opaque id, the session label, a
+topology-only submission revision, target, HP intent, full quality, explicit
+QoS, monotonic phase, and one terminal outcome. It owns the full scheduler
+submission plan and temporary results, or the standalone dirty HP staging
+buffer. It still drains borrowed task handles synchronously before returning.
+
+Do not describe the remaining accepted future objects as if they already
+exist. Request-owned `RunGroup`, stable `RunLease`,
 `ExecutionService::RunLifecycleRegistry`, process-owned `ExecutionService`,
-`ResourceLedger`, the general `Value` model, heterogeneous executors, server
-control plane, and isolated plugin workers remain target-only until their
-implementation lands.
+authoritative `GraphRevision` commit validation, `ResourceLedger`, the general
+`Value` model, heterogeneous executors, server control plane, and isolated
+plugin workers remain target-only until their implementation lands.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains
@@ -49,8 +56,9 @@ context document.
 - `ImageBuffer` is not a general Tensor, Deep Image, or vector-scene model.
 - The current worker-owning `IScheduler` is not the target process execution
   domain.
-- A scheduler epoch or task id is not a `RunId`; target completion identity is
-  scoped by one stable Run lease.
+- A scheduler epoch or task id is not the current `RunId`. Current completion
+  still uses borrowed scheduler state; target `(RunId, RunLocalTaskId)`
+  completion identity is scoped by one stable Run lease.
 - A target `RunGroup` coordinates results and lifecycle for independent HP/RT
   Runs; it is not a mixed-domain Run or a cross-domain task graph.
 - A graph-lifetime lease protects a target Graph lifetime; it does not make

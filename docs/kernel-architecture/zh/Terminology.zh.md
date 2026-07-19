@@ -61,6 +61,14 @@ mode 或 commit policy。
 内部计算 facade。它通过更窄的协作者协调请求验证、规划、缓存策略、脏工作选择、operation
 解析、派发、指标和输出提交。
 
+**`ComputeRun`**
+当前用于一次非 realtime HP service call 的私有、request-owned 执行记录。其不可变 descriptor
+包含不透明且不复用的 id、session identity、只表示提交时拓扑的 revision、target、
+`GlobalHighPrecision` intent、full quality 与显式 QoS。它拥有单调 phase、exact-once terminal
+state，以及 full scheduler submission plan/temporary result 或 standalone dirty HP staging
+buffer。当前 task handle 仍借用 executor state，直到同步 completion wait 结束；稳定 Run lease、
+配对 realtime child Run/`RunGroup`、权威 `GraphRevision` 与进程执行所有权仍是后续工作。
+
 **`FullTaskGraph`**
 一个 graph generation、compute intent 和 task-shape 配置下完整的 node/tile task 形态。
 请求目标、cache 状态和 dirty 状态不会创建该形态。
@@ -81,10 +89,11 @@ scheduler-visible task 可能执行，它就保持不可变。
 应用 node-originated dirty lifecycle update 并刷新图级 dirty 状态的串行路径，不拥有计算任务。
 
 **`ComputeTaskDispatcher`**
-拥有请求级 dependency counter、ready release、temporary result 与 completion aggregation 的执行
-协调器。其 full HP dispatch 拥有 final result commit；dirty executor 复用它的 source-first
-submission helper，并通过 dirty write buffer 拥有自己的 staged commit。它只向 scheduler 推送
-具体 ready task handle 或 callback。
+拥有 dependency counter、ready release、temporary-result indexing 语义与 completion aggregation
+的执行协调器。对于当前 full HP 工作，request `ComputeRun` 拥有 `TaskSubmissionPlan` storage 和
+temporary result slot，而 dispatcher 拥有其中的 dependency transition 与 final result commit。
+Dirty executor 复用它的 source-first submission helper，并通过 dirty write buffer 拥有自己的
+staged commit。它只向 scheduler 推送具体 ready task handle 或 callback。
 
 **`ReadyTaskSubmission`**
 一个概念性的 ready submission，表现为计算依赖已满足的借用 `TaskHandle` 或 owned callback。它可以

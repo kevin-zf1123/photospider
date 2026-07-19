@@ -101,15 +101,17 @@ worker can observe a prefix and the original exception identity propagates.
 
 `TaskHandle` is a borrowed pair of executor pointer and task id. Its
 `TaskExecutor` must outlive every successfully committed callback through
-`wait_for_completion()`. A failed batch commits no handle and executes zero
-callbacks, so request-local dirty executors may unwind immediately without
-leaving a queue entry that points into destroyed stack storage. The scheduler
-can accept the next batch on the same object after rollback. Exception
-publication uses the same queue transaction gate before choosing its epoch,
-so a concurrent batch is observed either wholly committed or wholly absent.
-The executor's virtual destructor is protected: scheduler code may run the
-borrowed object but cannot delete dispatcher-owned storage through its base
-pointer.
+`wait_for_completion()`. For non-realtime full HP work, the current
+`ComputeRun` owns the `TaskSubmissionPlan`, dependency state, handles, and
+temporary slots, but the stack runner and completion identity remain borrowed.
+A failed batch commits no handle and executes zero callbacks, so request-local
+dirty executors may unwind immediately without leaving a queue entry that
+points into destroyed stack storage. The scheduler can accept the next batch
+on the same object after rollback. Exception publication uses the same queue
+transaction gate before choosing its epoch, so a concurrent batch is observed
+either wholly committed or wholly absent. The executor's virtual destructor is
+protected: scheduler code may run the borrowed object but cannot delete
+compute-owned storage through its base pointer.
 
 ### Batch exception publication and reuse
 
@@ -203,7 +205,9 @@ collaborators: `FullTaskGraphExpander`, `NodeCacheTaskGraphPruner`,
 `ComputeTaskDispatcher` materializes either the node/cache-pruned task graph or
 the dirty-clipped update work set into concrete tasks and submits ready work
 through the configured `IScheduler` instance for the relevant `ComputeIntent`
-via `SchedulerTaskRuntime`.
+via `SchedulerTaskRuntime`. For current non-realtime full HP work, the request
+Run owns the materialized plan and temporary slots while the dispatcher retains
+dependency/ready/completion semantics.
 
 `GraphRuntime` owns graph state, the `GraphStateExecutor`, scheduler
 registration, events, and platform resources. It does not expose a general
@@ -447,8 +451,10 @@ Scheduler queues use epochs to cancel stale queued work. Epoch `0` is treated
 as non-cancelable compatibility work. Only submissions carrying a real epoch
 can be dropped as stale. Epoch filtering does not cancel a callback that is
 already running and is not a general `ComputeRun` cancellation contract. The
-target Run identity, stable lease, and terminal cancellation race are fixed by
-ADR 0007 but are not implemented by the current epoch.
+current HP Run has identity and exact-once terminal arbitration, but no product
+cancellation claimant. Stable leases, completion isolation, and operational
+cancellation remain later ADR 0007 slices and are not implemented by the
+current epoch.
 
 ## Observability
 
@@ -517,7 +523,8 @@ governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-ex
 records the high-level replacement direction;
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 fixes its detailed Run, ready-task, completion, resource, and lifecycle
-ownership; and the exact
+ownership; only the bounded issue #66 HP Run storage/terminal slice is current.
+The exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 summarizes the accepted target without changing this current contract.
 
@@ -527,6 +534,7 @@ summarizes the accepted target without changing this current contract.
 - `include/photospider/scheduler/scheduler_task_runtime.hpp`
 - `include/photospider/scheduler/scheduler_plugin_api.hpp`
 - `src/lib/runtime/graph_runtime.*`
+- `src/lib/compute/compute_run.*`
 - `src/lib/scheduler/cpu_work_stealing_scheduler.*`
 - `src/lib/scheduler/gpu_pipeline_scheduler.*`
 - `src/lib/scheduler/scheduler_factory.*`
@@ -540,3 +548,4 @@ summarizes the accepted target without changing this current contract.
 - `tests/unit/test_scheduler_factory_plan.cpp`
 - `tests/unit/test_scheduler_reservation_owner.cpp`
 - `tests/unit/test_scheduler_exception_publication.cpp`
+- `tests/unit/test_compute_run.cpp`

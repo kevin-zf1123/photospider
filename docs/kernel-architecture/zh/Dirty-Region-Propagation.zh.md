@@ -33,7 +33,7 @@ record 使用的 RT proxy coordinate）。HP 与 RT 是不同 compute domain；d
 | `DirtyRegionSnapshotBuilder` | 规范化 source ROI，物化 snapshot-only Micro tile 或 monolithic record | Graph traversal 或 compute request |
 | `RoiPropagationService` | 计算 operation-specific forward inspection 与 backward demand projection | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | 从现有 request plan 中选择并裁剪 active task | 新 task shape |
-| dirty executor 与 write buffer | 按 source-first 顺序执行，并暂存 HP/RT output | 通用 cancellation 或 graph revision policy |
+| dirty executor 与 write buffer | 按 source-first 顺序执行并暂存 HP/RT output；standalone 非 realtime HP staging 由其 `ComputeRun` 拥有，配对 realtime sibling buffer 仍保持 callback-local | 通用 cancellation、稳定 Run lease/grouping 或 graph revision policy |
 
 ## 当前流程
 
@@ -51,7 +51,7 @@ flowchart TD
   SELECT --> DOWNSTREAM["downstream task group"]
   SOURCE --> VALIDATE["source-boundary validation"]
   VALIDATE --> DOWNSTREAM
-  DOWNSTREAM --> STAGE["request-local write buffer"]
+  DOWNSTREAM --> STAGE["Run-owned standalone HP 或 callback-local sibling buffer"]
   STAGE --> COMMIT["HP cache or RT proxy commit"]
 ```
 
@@ -176,7 +176,10 @@ supersession、deadline handling 或 cooperative cancellation。
 
 HP dirty task 把 output 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty task 暂存到
 `RealtimeProxyWriteBuffer`。成功 request 会通过 intent-specific commit path，把 staged HP state
-提交到 `GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。
+提交到 `GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。对于 standalone 非 realtime
+HP request，`HighPrecisionDirtyWriteBuffer` 由 request `ComputeRun` 持有到 commit 或 failure
+cleanup。`RealTimeUpdate` 的 HP child 没有 issue #66 Run，其 callback-local buffer 会保持到后续
+child-Run/`RunGroup` 支持落地。
 
 对于 `RealTimeUpdate`，RT 与 HP 是 sibling computation。RT sibling 可以先提交 proxy state；HP
 sibling 则在发布 authoritative HP state 前观察 sibling commit gate。该协调不会创建 HP-to-RT task
@@ -197,7 +200,8 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 - Macro dirty-key materialization 或动态 Micro/Macro coarsening；
 - sparse ROI set、dirty-area cap、time-window merge 或 adaptive batching；
 - 自动启动 compute 的 node-to-backend dirty subscription；
-- 通用 `ComputeRun`、graph revision、deadline、supersession 或 cooperative cancellation contract。
+- 稳定 Run lease、配对 realtime child Run/`RunGroup`、权威 graph revision、已执行 deadline、
+  supersession 或 cooperative cancellation。
 
 当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
 task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和
@@ -224,6 +228,7 @@ update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明
 - `src/lib/compute/dirty_control_lane.cpp`
 - `src/lib/compute/task_graph_planning.cpp`
 - `src/lib/compute/dirty_execution_common.cpp`
+- `src/lib/compute/compute_run.*`
 - `src/lib/compute/dirty_update_executor.cpp`
 - `src/lib/compute/tiled_input_normalizer.cpp`
 - `src/lib/compute/node_executor.cpp`
@@ -232,4 +237,5 @@ update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

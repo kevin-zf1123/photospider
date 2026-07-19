@@ -66,15 +66,34 @@ std::string make_async_exception_message(bool intent_aware, int node_id,
 }
 
 /**
+ * @brief Builds the explicit current HP QoS captured by issue #66 Runs.
+ *
+ * @param use_parallel_executor Whether the request selects scheduler-backed
+ * execution.
+ * @return Throughput QoS with no deadline, weight one, and a sequential
+ * maximum-parallelism cap only for inline execution.
+ * @throws Nothing.
+ * @note The value is descriptor input only. Current schedulers do not apply
+ * policy from it; admission and policy work remain later roadmap issues.
+ */
+compute::ComputeRunQos make_default_compute_run_qos(
+    bool use_parallel_executor) {
+  return compute::ComputeRunQos{
+      compute::ComputeRunQosClass::Throughput, std::nullopt, 1,
+      use_parallel_executor ? std::nullopt : std::optional<uint32_t>{1}};
+}
+
+/**
  * @brief Converts a Kernel request into the narrower ComputeService request.
  *
  * @param request Internal Kernel compute request produced by the embedded Host
  * adapter or an internal backend/test caller.
- * @return Service request containing only target, cache, telemetry, intent, and
- * dirty ROI data.
+ * @return Service request containing target, cache, telemetry, intent, dirty
+ * ROI, stable session identity, and explicit default Run QoS.
  * @throws std::bad_alloc if copying the cache precision string allocates.
- * @note Graph name, quiet mode, skip-save, and scheduler selection stay in the
- * internal Kernel boundary because they belong to GraphRuntime orchestration.
+ * @note Quiet mode, skip-save, and scheduler selection stay in the internal
+ * Kernel boundary because they belong to GraphRuntime orchestration. The graph
+ * name is copied only as immutable ComputeRun identity.
  */
 ComputeService::Request make_service_compute_request(
     const Kernel::ComputeRequest& request) {
@@ -85,7 +104,10 @@ ComputeService::Request make_service_compute_request(
                                    request.cache.disable_disk_cache},
       ComputeService::TelemetryOptions{request.telemetry.enable_timing,
                                        request.telemetry.benchmark_events},
-      request.intent, request.dirty_roi};
+      request.intent,
+      request.dirty_roi,
+      request.name,
+      make_default_compute_run_qos(request.execution.parallel)};
 }
 
 /**

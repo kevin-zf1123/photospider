@@ -35,7 +35,7 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_graph_internal` | 仅用于构建的 `GraphModel` 与 graph-service helper。 | `GraphModel` 继续私有地位于 `src/lib/graph`。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation v2 loader、adapter 与 lifetime helper。 | 不导出。 |
 | `photospider_scheduler_internal` | 仅用于构建的 scheduler planning/factory、ABI-v2 loader、内置实现、reservation owner 与 process-budget helper。 | 固定 32-slot process ledger 是过渡性 private containment，不是目标 injected execution service。 |
-| `photospider_compute_internal` | 仅用于构建的 compute、runtime、dirty-region 与 interaction helper。 | 单向依赖 scheduler helper。 |
+| `photospider_compute_internal` | 仅用于构建的 compute、request-owned HP `ComputeRun`、runtime、dirty-region 与 interaction helper。 | Run 保持私有，其借用 scheduler completion 仍单向依赖 scheduler helper。 |
 | `photospider_operation_runtime` | 可安装的静态 image-buffer factory 实现。 | 没有外部 package，也不反向链接 operation SDK。 |
 | `photospider_operation_sdk` | 可安装的 operation v2 interface SDK。 | 传递链接 `operation_runtime`，是普通插件唯一所需 link target。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
@@ -77,6 +77,11 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 - Graph、compute、runtime、Host、plugin、scheduler、benchmark 与 adapter 的实现文件和私有头
   现在都位于按角色归属的 `src/lib/**` 目录。内部 target 通过私有 `src/lib/` root 构建，
   可安装 public header inventory 则继续限定在 `include/photospider/**`。
+- 当前 issue #66 Run 实现只位于 `src/lib/compute/compute_run.*`。`Kernel` 把 session identity
+  与显式默认 QoS 传给私有 service request；`ComputeService` 为每次非 realtime HP call 创建一个
+  Run，Run 会持有 full-plan/temporary storage 或 standalone dirty-HP staging storage，直到唯一
+  terminal publication。Installed header、Host value、operation ABI 与 scheduler ABI 都不会命名
+  这个私有对象。
 - dirty-region 诊断、compute planning 诊断和 scheduler trace 诊断都通过 Host 的拷贝值
   snapshot 暴露。公开头不再需要命名后端 graph/runtime/service/planning 类型或具体 scheduler
   class，就能提供这些诊断。
@@ -360,17 +365,20 @@ CMake 规则：
 ## 目标进程执行组合边界
 
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-固定后续进程执行所有权，但不会让它成为当前源码布局。产品 composition root 会根据进程配置构造一个
-显式 `ExecutionService`，并把它注入参与其中的 backend owner；它不会使用 static singleton。
+固定完整的进程执行所有权。其 issue #66 私有 HP Run 源码现在已经位于当前
+`src/lib/compute/`；稳定 lease、配对 Run、process service composition、resource ownership 与
+revision-safe commit 仍是目标布局。产品 composition root 后续会根据进程配置构造一个显式
+`ExecutionService`，并把它注入参与其中的 backend owner；它不会使用 static singleton。
 
 在该目标中：
 
 - `GraphRuntime` 仍以 graph 为作用域，拥有 Graph state、graph-state lane、revision capture/commit
   validation、稳定 graph-instance identity 与 lifetime anchor、event 与 platform/session
   metadata；
-- `ComputeRun` 拥有 request-local plan/dispatcher storage、staged output、
-  exception/cancellation/terminal state 与 reservation；不可伪造的 Run lease 会让该 control
-  block 在异步 work 期间保持存活；
+- 当前 `ComputeRun` 拥有非 realtime HP descriptor/phase/terminal state，以及 full-plan/temporary
+  storage 或 standalone dirty-HP staging storage；目标会把该 owner 扩展为稳定 dispatcher/
+  completion state、cancellation、reservation，并通过不可伪造的 Run lease 让异步 work
+  期间的 control block 保持存活；
 - request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - `ExecutionService` 拥有物理 worker、有界 ready storage、admission、可信 policy validation 与

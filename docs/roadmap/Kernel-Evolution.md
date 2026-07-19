@@ -71,11 +71,12 @@ containment contract instead:
 The 32 slots cover only accounted scheduler-owned workers. They do not count
 graph-state executors, which have their separate one-worker-per-Graph bound;
 nor do they count operation-internal threads, daemon/frontend workers, or all
-OS threads. They provide neither shared execution nor fairness. The
-`ComputeRun`/`ExecutionService` work in the later execution-domain issues must
-replace this transitional ledger and worker-owning ABI as complete ownership
-migrations, not layer permanent adapters over them. In particular, the shared
-executor slices tracked by [#68](https://github.com/kevin-zf1123/photospider/issues/68)
+OS threads. They provide neither shared execution nor fairness. The current
+issue #66 `ComputeRun` slice adds request-owned HP identity/state/storage but
+does not replace this transitional ledger or worker-owning ABI. The later
+`ExecutionService` work must replace those owners as complete migrations, not
+layer permanent adapters over them. In particular, the shared executor slices
+tracked by [#68](https://github.com/kevin-zf1123/photospider/issues/68)
 and [#69](https://github.com/kevin-zf1123/photospider/issues/69) remove
 per-Graph workers rather than treating the current ledger as the final pool.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
@@ -157,6 +158,19 @@ durable target constraints; the ADR is authoritative when a summary omits
 detail.
 
 ### `ComputeRun`
+
+The current issue #66 slice implements exactly one private Run around every
+non-realtime HP service call. It captures a process-lifetime opaque id, session
+identity, topology-only submission revision, target, HP intent, full quality,
+and explicit QoS; owns monotonic phase and exact-once terminal state; and owns
+the full scheduler submission plan/temporary results or standalone dirty HP
+staging. Current scheduler handles and the stack runner still drain
+synchronously. The captured topology generation is not the target authoritative
+`GraphRevision` or commit predicate. Paired realtime Runs/`RunGroup`, stable
+leases and completion identity, process execution ownership, resources,
+revision-safe commit, cancellation, and supersession remain subsequent slices.
+
+The remainder of this section describes the complete accepted target.
 
 `ComputeRun` is the unit of compute identity and lifetime. It is distinct from
 `GraphRuntime`, a scheduler batch, and `ComputeIntent`.
@@ -385,7 +399,7 @@ lease; late completion performs cleanup only.
 
 | Issue | Required outcome | Depends on |
 | --- | --- | --- |
-| [#66](https://github.com/kevin-zf1123/photospider/issues/66) | HP `ComputeRun` descriptor, state, storage, and one terminal outcome | #63, #65 |
+| [#66](https://github.com/kevin-zf1123/photospider/issues/66) | Current HP `ComputeRun` descriptor, state, storage, and one terminal outcome | #63, #65 |
 | [#67](https://github.com/kevin-zf1123/photospider/issues/67) | Stable Run leases and `(RunId, RunLocalTaskId)` completion isolation | #66 |
 | [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Injected CPU-only service, one Run, ready-only input | #67 |
 | [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain and no per-Graph workers | #68 |

@@ -14,6 +14,7 @@
 #include "compute/compute_service.hpp"
 
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,7 @@
 #include "benchmark/benchmark_types.hpp"
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_metrics_recorder.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/compute_task_dispatcher.hpp"
 #include "compute/dirty_sibling_commit_gate.hpp"
 #include "compute/dirty_update_executor.hpp"
@@ -261,6 +263,74 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
   return node_cache_pruner.prune(*full_graph, request, execution_order, graph);
 }
 
+/**
+ * @brief Reports whether one service request belongs to paired realtime work.
+ *
+ * @param request Request whose optional intent selects the domain.
+ * @return true only for explicit RealTimeUpdate.
+ * @throws Nothing.
+ * @note Missing intent and explicit GlobalHighPrecision are both non-realtime
+ * HP requests and receive one issue #66 ComputeRun.
+ */
+bool is_realtime_request(const ComputeService::Request& request) {
+  return request.intent == ComputeIntent::RealTimeUpdate;
+}
+
+/**
+ * @brief Captures immutable issue #66 HP Run inputs before service planning.
+ *
+ * @param graph Graph supplying the topology-only submission revision.
+ * @param request Service request supplying graph identity, target, and QoS.
+ * @return Owned descriptor inputs for one GlobalHighPrecision ComputeRun.
+ * @throws std::bad_alloc if graph identity copying allocates.
+ * @note topology_generation is an audit snapshot only, not the authoritative
+ * GraphRevision or commit predicate introduced by issue #72.
+ */
+compute::ComputeRunSubmission make_hp_run_submission(
+    const GraphModel& graph, const ComputeService::Request& request) {
+  return compute::ComputeRunSubmission{
+      request.graph_identity,
+      compute::ComputeRunSubmissionRevision{graph.topology_generation()},
+      request.node_id,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      request.qos};
+}
+
+/**
+ * @brief Settles one request-owned HP Run around an execution callback.
+ *
+ * @tparam Execute Callable returning the validated target NodeOutput reference.
+ * @param run Run whose admission and exactly-one terminal outcome are owned by
+ * this wrapper.
+ * @param execute Sequential, full scheduler, or standalone dirty HP callback.
+ * @return Mutable target output returned by execute.
+ * @throws Rethrows the exact callback exception after publishing Run failure.
+ * @throws GraphError if another terminal claimant unexpectedly wins before a
+ * normal current-path return.
+ * @note A normal return publishes success only after the callback has validated
+ * committed or reusable target output. Failure publication retains the
+ * original std::exception_ptr before rethrow.
+ */
+template <typename Execute>
+NodeOutput& execute_request_owned_hp_run(compute::ComputeRun& run,
+                                         Execute&& execute) {
+  try {
+    run.advance_to(compute::ComputeRunPhase::Admitted);
+    NodeOutput& output = std::forward<Execute>(execute)();
+    if (!run.publish_succeeded()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "ComputeRun terminal outcome was claimed before HP success.");
+    }
+    return output;
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    (void)run.publish_failed(failure);
+    std::rethrow_exception(failure);
+  }
+}
+
 }  // namespace
 
 /**
@@ -418,6 +488,8 @@ NodeOutput& ComputeService::compute_internal(
  * @param sibling_commit_gate Optional RealTimeUpdate gate that delays HP graph
  * commit until RT proxy commit succeeds.
  * @param stabilized_parameters Optional immutable connected-parameter snapshot.
+ * @param run Optional standalone GlobalHighPrecision Run that owns dirty HP
+ * staging and phase state. Paired realtime HP siblings pass null.
  * @return Mutable target HP output stored in the graph.
  * @throws std::bad_alloc unchanged when dirty planning, task, cache, or output
  * storage exhausts memory.
@@ -433,12 +505,14 @@ NodeOutput& ComputeService::compute_high_precision_update(
     const ExecutionStrategy& strategy, const Request& request,
     std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate,
     std::shared_ptr<const compute::StabilizedDirtyParameters>
-        stabilized_parameters) {
+        stabilized_parameters,
+    compute::ComputeRun* run) {
   compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
   return executor.execute(
       graph, proxy_graph, strategy.runtime,
       make_dirty_update_request(request, false, std::move(sibling_commit_gate),
-                                std::move(stabilized_parameters)));
+                                std::move(stabilized_parameters)),
+      run);
 }
 
 /**
@@ -499,32 +573,64 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
 }
 
 /**
- * @brief Executes a full high-precision compute request through a scheduler.
+ * @brief Executes one full scheduler-backed HP request through its Run.
  *
  * @param graph Graph being computed.
  * @param runtime Graph runtime that owns the HP scheduler.
- * @param request Service request carrying target, cache, telemetry, and
- * optional intent semantics.
+ * @param request Full HP target, cache, and telemetry options.
+ * @param run Request-owned plan, temporary result, and lifecycle owner.
  * @return Mutable target HP output stored in the graph.
  * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
- * cache, telemetry, or result storage exhausts memory.
+ * cache, telemetry, Run storage, or result storage exhausts memory.
  * @throws GraphError from scheduler lookup, task dispatch, cache access, or
  * missing target output.
- * @note Legacy HP requests run the full-frame dispatcher directly. Requests
- * with intent are routed through compute_intent_update_impl.
+ * @note The dispatcher retains the current borrowed scheduler and synchronous
+ * wait contract while the plan and temporary outputs are Run-owned.
+ */
+NodeOutput& ComputeService::compute_parallel_hp_impl(GraphModel& graph,
+                                                     GraphRuntime& runtime,
+                                                     const Request& request,
+                                                     compute::ComputeRun& run) {
+  compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
+  IScheduler& scheduler = compute::ensure_running_scheduler(
+      runtime, ComputeIntent::GlobalHighPrecision);
+  return executor.execute(graph, scheduler, make_dispatch_request(request),
+                          run);
+}
+
+/**
+ * @brief Executes a scheduler-backed compute request through the selected
+ * domain boundary.
+ *
+ * @param graph Graph being computed.
+ * @param runtime Graph runtime that owns current intent schedulers.
+ * @param request Service request carrying target, cache, telemetry, intent,
+ * dirty ROI, graph identity, and QoS.
+ * @return Mutable target output selected by the request.
+ * @throws std::bad_alloc unchanged when Run construction, planning, task
+ * dispatch, operation, cache, telemetry, or result storage exhausts memory.
+ * @throws GraphError from scheduler lookup, planning, task dispatch, dirty
+ * execution, cache access, or missing target output.
+ * @note Every non-realtime HP request creates exactly one Run before planning.
+ * RealTimeUpdate retains the current paired callback behavior until RunGroup
+ * support and creates no mixed-domain issue #66 Run.
  */
 NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
                                              GraphRuntime& runtime,
                                              const Request& request) {
-  if (request.intent) {
+  if (is_realtime_request(request)) {
     return compute_intent_update_impl(graph, ExecutionStrategy{&runtime, true},
-                                      request);
+                                      request, nullptr);
   }
 
-  compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
-  IScheduler& scheduler = compute::ensure_running_scheduler(
-      runtime, ComputeIntent::GlobalHighPrecision);
-  return executor.execute(graph, scheduler, make_dispatch_request(request));
+  compute::ComputeRun run(make_hp_run_submission(graph, request));
+  return execute_request_owned_hp_run(run, [&]() -> NodeOutput& {
+    if (request.intent) {
+      return compute_intent_update_impl(
+          graph, ExecutionStrategy{&runtime, true}, request, &run);
+    }
+    return compute_parallel_hp_impl(graph, runtime, request, run);
+  });
 }
 
 /**
@@ -534,20 +640,34 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
  * @param strategy Runtime and scheduler-backed execution policy.
  * @param request Intent-aware request carrying target, cache, telemetry, and
  * optional dirty ROI.
+ * @param hp_run Request-owned Run for GlobalHighPrecision, or null for
+ * RealTimeUpdate.
  * @return Mutable output selected by IntentUpdateCoordinator.
  * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
  * output storage exhausts memory.
  * @throws GraphError from intent validation, callback execution, scheduler
  * lookup, or missing target output.
  * @note The coordinator owns HP/RT dual-path semantics; ComputeService only
- * supplies the concrete execution callbacks.
+ * supplies the concrete execution callbacks. Explicit GlobalHighPrecision
+ * callbacks reuse hp_run and never recurse through a Run-creating public
+ * entry.
  */
 NodeOutput& ComputeService::compute_intent_update_impl(
     GraphModel& graph, const ExecutionStrategy& strategy,
-    const Request& request) {
+    const Request& request, compute::ComputeRun* hp_run) {
   compute::IntentUpdateCallbacks callbacks;
   const ComputeIntent intent = request.intent.value();
   compute::IntentUpdateCoordinator::validate(intent, request.dirty_roi);
+  if (intent == ComputeIntent::GlobalHighPrecision && hp_run == nullptr) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "GlobalHighPrecision intent requires its request-owned ComputeRun.");
+  }
+  if (intent == ComputeIntent::RealTimeUpdate && hp_run != nullptr) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Issue #66 does not attach one mixed-domain Run to RealTimeUpdate.");
+  }
   IScheduler* hp_scheduler = nullptr;
   IScheduler* rt_scheduler = nullptr;
   if (strategy.use_parallel_executor) {
@@ -601,19 +721,25 @@ NodeOutput& ComputeService::compute_intent_update_impl(
       coordinator_node ? coordinator_node->name : std::string();
   callbacks.run_global_high_precision = [&]() -> NodeOutput& {
     const Request hp_request = make_global_high_precision_request(request);
+    if (!hp_run) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "GlobalHighPrecision callback has no request-owned ComputeRun.");
+    }
     if (strategy.use_parallel_executor) {
       if (!strategy.runtime) {
         throw GraphError(GraphErrc::ComputeError,
                          "Parallel HP compute requires a runtime.");
       }
-      return compute_parallel(graph, *strategy.runtime, hp_request);
+      return compute_parallel_hp_impl(graph, *strategy.runtime, hp_request,
+                                      *hp_run);
     }
-    return compute(graph, hp_request);
+    return compute_sequential_impl(graph, hp_request, *hp_run);
   };
   callbacks.run_global_high_precision_dirty_update = [&]() -> NodeOutput& {
     return compute_high_precision_update(graph, rt_proxy_graph, strategy,
                                          request, nullptr,
-                                         stabilized_parameters);
+                                         stabilized_parameters, hp_run);
   };
   callbacks.run_high_precision_update = [&]() {
     const Request silent_request = make_silent_dirty_request(request);
@@ -650,16 +776,20 @@ NodeOutput& ComputeService::compute_intent_update_impl(
  * @param graph Graph being computed.
  * @param request Intent-aware request carrying target, cache, telemetry, and
  * optional dirty ROI.
+ * @param hp_run Request-owned Run for GlobalHighPrecision, or null for
+ * RealTimeUpdate.
  * @return Mutable output selected by IntentUpdateCoordinator.
  * @throws std::bad_alloc unchanged when coordination, dirty execution, cache,
  * or output storage exhausts memory.
  * @throws GraphError from intent validation or execution.
  * @note Dirty HP and RT callbacks still use the dirty executors, but run node
- * work inline because no scheduler runtime is available.
+ * work inline because no scheduler runtime is available. The realtime path
+ * deliberately receives no mixed-domain Run in issue #66.
  */
-NodeOutput& ComputeService::compute_with_intent_impl(GraphModel& graph,
-                                                     const Request& request) {
-  return compute_intent_update_impl(graph, ExecutionStrategy{}, request);
+NodeOutput& ComputeService::compute_with_intent_impl(
+    GraphModel& graph, const Request& request, compute::ComputeRun* hp_run) {
+  return compute_intent_update_impl(graph, ExecutionStrategy{}, request,
+                                    hp_run);
 }
 
 /**
@@ -673,13 +803,22 @@ NodeOutput& ComputeService::compute_with_intent_impl(GraphModel& graph,
  * exhausts memory.
  * @throws GraphError from validation, planning, recursive compute, or cache
  * operations.
- * @note A missing intent selects the legacy GlobalHighPrecision path.
+ * @note Missing intent and explicit GlobalHighPrecision both create exactly one
+ * request-owned Run before planning. RealTimeUpdate retains its current paired
+ * callback behavior without a mixed-domain Run.
  */
 NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
-  if (request.intent) {
-    return compute_with_intent_impl(graph, request);
+  if (is_realtime_request(request)) {
+    return compute_with_intent_impl(graph, request, nullptr);
   }
-  return compute_sequential_impl(graph, request);
+
+  compute::ComputeRun run(make_hp_run_submission(graph, request));
+  return execute_request_owned_hp_run(run, [&]() -> NodeOutput& {
+    if (request.intent) {
+      return compute_with_intent_impl(graph, request, &run);
+    }
+    return compute_sequential_impl(graph, request, run);
+  });
 }
 
 /**
@@ -687,16 +826,20 @@ NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
  *
  * @param graph Graph being computed.
  * @param request Legacy HP request with target, cache, and telemetry options.
+ * @param run Request-owned HP descriptor and terminal/storage owner.
  * @return Mutable target HP output stored in the graph.
  * @throws std::bad_alloc unchanged when planning, recursion, cache, telemetry,
  * or result storage exhausts memory.
  * @throws GraphError when the target is missing, topology is invalid, planning
  * fails, recursive compute fails, or target output is unavailable.
  * @note The method records the same node/cache-pruned plan shape used by the
- * parallel path before delegating to the recursive executor.
+ * parallel path before delegating to the recursive executor. The direct
+ * recursive algorithm has no temporary staging object and may skip
+ * CommitPending.
  */
 NodeOutput& ComputeService::compute_sequential_impl(GraphModel& graph,
-                                                    const Request& request) {
+                                                    const Request& request,
+                                                    compute::ComputeRun& run) {
   if (!graph.has_node(request.node_id)) {
     throw GraphError(
         GraphErrc::NotFound,
@@ -715,6 +858,7 @@ NodeOutput& ComputeService::compute_sequential_impl(GraphModel& graph,
     graph.clear_full_task_graph_cache();
   }
 
+  run.advance_to(compute::ComputeRunPhase::Running);
   std::vector<int> execution_order;
   try {
     execution_order = traversal_.topo_postorder_from(graph, request.node_id);

@@ -566,6 +566,7 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_metrics_recorder.cpp
     src/lib/compute/compute_node_task_runner.cpp
     src/lib/compute/compute_result_committer.cpp
+    src/lib/compute/compute_run.cpp
     src/lib/compute/compute_task_dependency_state.cpp
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/task_graph_planning.cpp
@@ -1553,6 +1554,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_scheduler_instance_limits.cpp)
     target_compile_definitions(test_scheduler_instance_limits PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    add_ps_test(test_compute_run tests/unit/test_compute_run.cpp)
     add_ps_test(test_bad_alloc_boundaries
         tests/integration/test_bad_alloc_boundaries.cpp)
     target_sources(test_bad_alloc_boundaries PRIVATE
@@ -1863,6 +1865,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_scheduler_instance_limits
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_compute_run
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_bad_alloc_boundaries

@@ -5,9 +5,12 @@
 Accepted as a target architecture. The current per-graph scheduler ownership
 remains current behavior until the migration is implemented. The current
 process-wide scheduler-worker admission ledger is a containment step, not an
-implementation of this decision. ADR 0007 supersedes this ADR only as the
-detailed target ownership and lifecycle contract; the high-level process
-ownership decision and its historical context remain in force.
+implementation of process execution ownership. Issue #66 now implements the
+bounded non-realtime HP `ComputeRun` identity/state/storage subset, while stable
+leases, process workers, resource accounting, and revision-safe commit remain
+target behavior. ADR 0007 supersedes this ADR only as the detailed ownership
+and lifecycle contract; the high-level process ownership decision and its
+historical context remain in force.
 
 ## Context
 

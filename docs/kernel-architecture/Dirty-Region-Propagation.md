@@ -38,7 +38,7 @@ Ownership is divided as follows:
 | `DirtyRegionSnapshotBuilder` | Normalize source ROIs and materialize snapshot-only Micro tile or monolithic records | Graph traversal or compute requests |
 | `RoiPropagationService` | Compute operator-specific forward inspection and backward demand projections | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | Select and clip active tasks from an existing request plan | New task shapes |
-| dirty executors and write buffers | Execute source-first work and stage HP/RT output | General cancellation or graph revision policy |
+| dirty executors and write buffers | Execute source-first work and stage HP/RT output; standalone non-realtime HP staging is owned by its `ComputeRun`, while paired realtime sibling buffers remain callback-local | General cancellation, stable Run leases/grouping, or graph revision policy |
 
 ## Current Flow
 
@@ -56,7 +56,7 @@ flowchart TD
   SELECT --> DOWNSTREAM["downstream task group"]
   SOURCE --> VALIDATE["source-boundary validation"]
   VALIDATE --> DOWNSTREAM
-  DOWNSTREAM --> STAGE["request-local write buffer"]
+  DOWNSTREAM --> STAGE["Run-owned standalone HP or callback-local sibling buffer"]
   STAGE --> COMMIT["HP cache or RT proxy commit"]
 ```
 
@@ -209,7 +209,11 @@ cooperative cancellation.
 HP dirty tasks stage output in `HighPrecisionDirtyWriteBuffer`; RT dirty tasks
 stage output in `RealtimeProxyWriteBuffer`. A successful request commits staged
 HP state to `GraphModel` or RT state to `RealtimeProxyGraph` through the
-intent-specific commit path.
+intent-specific commit path. For a standalone non-realtime HP request, the
+`HighPrecisionDirtyWriteBuffer` is owned by the request `ComputeRun` until
+commit or failure cleanup. The HP child of `RealTimeUpdate` has no issue #66
+Run and retains its callback-local buffer until later child-Run/`RunGroup`
+support.
 
 For a `RealTimeUpdate`, RT and HP are sibling computations. The RT sibling may
 commit proxy state first, while the HP sibling observes the sibling commit gate
@@ -234,8 +238,8 @@ The current implementation does not provide:
 - Macro dirty-key materialization or dynamic Micro/Macro coarsening;
 - sparse ROI sets, dirty-area caps, time-window merging, or adaptive batching;
 - a node-to-backend dirty subscription that automatically launches compute;
-- a general `ComputeRun`, graph revision, deadline, supersession, or
-  cooperative cancellation contract.
+- stable Run leases, paired realtime child Runs/`RunGroup`, authoritative graph
+  revision, enforced deadline, supersession, or cooperative cancellation.
 
 Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
 across the Host request, graph state, ROI propagation, planning, snapshot,
@@ -265,6 +269,7 @@ what generation and epoch checks can currently guarantee.
 - `src/lib/compute/dirty_control_lane.cpp`
 - `src/lib/compute/task_graph_planning.cpp`
 - `src/lib/compute/dirty_execution_common.cpp`
+- `src/lib/compute/compute_run.*`
 - `src/lib/compute/dirty_update_executor.cpp`
 - `src/lib/compute/tiled_input_normalizer.cpp`
 - `src/lib/compute/node_executor.cpp`
@@ -273,4 +278,5 @@ what generation and epoch checks can currently guarantee.
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
+- `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

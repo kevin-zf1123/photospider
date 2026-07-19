@@ -19,6 +19,7 @@ class SchedulerTaskRuntime;
 }  // namespace ps
 
 namespace ps::compute {
+class ComputeRun;
 class DirtySiblingCommitGate;
 class RealtimeProxyGraph;
 
@@ -371,6 +372,9 @@ class HighPrecisionDirtyExecutor {
    * @param runtime Optional runtime used to dispatch scheduler tasks and record
    * trace events. A null runtime executes source and downstream work inline.
    * @param request Dirty update options inherited from ComputeService.
+   * @param run Optional request-owned standalone HP Run. A
+   * GlobalHighPrecision request supplies it so staging remains Run-owned; the
+   * paired realtime HP sibling leaves it null until RunGroup support.
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
@@ -380,10 +384,12 @@ class HighPrecisionDirtyExecutor {
    * serialized with graph_mutex_, but scheduler task execution is not wrapped
    * by the outer graph lock. Forced HP dirty requests must already have a valid
    * target HP extent because they recompute the full frame instead of
-   * preserving pixels from the old HP cache.
+   * preserving pixels from the old HP cache. A supplied Run receives exactly
+   * one staging buffer and the applicable queued/running/commit phases.
    */
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
-                      GraphRuntime* runtime, const DirtyUpdateRequest& request);
+                      GraphRuntime* runtime, const DirtyUpdateRequest& request,
+                      ComputeRun* run = nullptr);
 
  private:
   /**

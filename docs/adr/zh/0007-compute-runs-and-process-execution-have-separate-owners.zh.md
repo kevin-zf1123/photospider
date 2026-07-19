@@ -2,9 +2,12 @@
 
 ## 状态
 
-作为目标架构已接受。作出本决策时，`ComputeRun`、`RunGroup`、显式注入且由进程拥有的
-`ExecutionService` 及其 `RunLifecycleRegistry`、`GraphRevision`、目标 `ResourceLedger`，
-以及仅负责策略的新一代 scheduler 都还不是当前软件行为。
+作为目标架构已接受。Issue #66 的非 realtime HP `ComputeRun` 切片已经是当前软件行为：它提供
+request identity、只表示提交时拓扑的 revision、intent/quality/QoS、单调 phase、唯一 terminal
+outcome，以及 Run-owned full-plan/temporary storage 或 standalone dirty-HP staging storage。
+`RunGroup`、稳定 Run lease 与 completion identity、显式注入且由进程拥有的 `ExecutionService`
+及其 `RunLifecycleRegistry`、权威 `GraphRevision` commit validation、目标 `ResourceLedger`，
+以及仅负责策略的新一代 scheduler 仍是目标行为。
 
 本决策会细化 ADR 0003，并在详细所有权与生命周期契约上取代它。ADR 0003 仍作为“把物理执行
 资源移出每个 Graph”的历史高层决策保留。ADR 0001 继续完全有效。
@@ -17,9 +20,10 @@
 worker 计费限制为 32，但它不拥有 worker、ready-store 容量、Run、内存、scratch、device、
 I/O 或 plugin process 预算。
 
-当前 `TaskHandle` 会借用一个 `TaskExecutor*`。`TaskSubmissionPlan`、临时结果、依赖状态和
-executor 对象的生命周期局限在一次请求中，并由对应 scheduler completion wait 约束。
-如果不先建立稳定的请求生命周期，就把这些 handle 移入进程级队列，会引入 use-after-free
+当前 `TaskHandle` 会借用一个 `TaskExecutor*`。对于非 realtime full HP 工作，`ComputeRun`
+现在拥有 `TaskSubmissionPlan`、临时结果和依赖状态；dispatcher、栈上的 `NodeTaskRunner`
+与 scheduler completion identity 仍然是借用关系，并由对应的同步 completion wait 约束。
+如果在 issue #67 引入稳定 lease 前就把这些 handle 移入进程级队列，会引入 use-after-free
 与跨请求 completion 串扰风险。
 
 ADR 0003 已选择 request-owned `ComputeRun`、process-owned `ExecutionService`、
@@ -345,11 +349,11 @@ worker thread、使不同 Run 失败或跳过资源释放。终态发布或 Grap
 
 ## 交付边界
 
-本决策冻结依赖契约，但不实现这些切片：
+本决策冻结依赖契约。Issue #66 已作为当前非 realtime HP 切片实现；后续切片仍按以下目标顺序推进：
 
 | Issue | 使用本决策的部分 | 该切片的明确非目标 |
 | --- | --- | --- |
-| #66 | HP `ComputeRun` descriptor、state、storage 与唯一终态 | 进程 worker 迁移 |
+| #66（当前） | HP `ComputeRun` descriptor、state、storage 与唯一终态 | 进程 worker 迁移 |
 | #67 | 稳定 Run lease 与 `(RunId, RunLocalTaskId)` completion 隔离 | 共享 CPU service |
 | #68 | 显式注入的单 Run CPU-only `ExecutionService`，只接受 ready 输入 | 多 Graph 迁移与最终 ledger |
 | #69 | 多 Graph 与 HP/RT 共享 CPU domain；删除 per-Graph worker | 完整 admission/policy 模型 |
@@ -362,7 +366,7 @@ worker thread、使不同 Run 失败或跳过资源释放。终态发布或 Grap
 | #76 | #69/#73/#74/#75 之后的 Graph close、进程 shutdown、telemetry 与最终不变量 | 新执行域能力 |
 
 依赖图无环。#72 可以在 #67 之后与 #68–#71 并行；#75 可以在 #71 之后与 #72–#74 并行。
-只有在每个实现及其长期行为测试落地后，当前事实文档才会改变。
+只有在每项后续实现及其长期行为测试落地后，当前事实文档才会继续改变。
 
 ## 结果
 
@@ -444,7 +448,8 @@ composition object。
 - [ADR 0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
   要求当前事实、本 accepted target 决策、roadmap 方向与 Issue/Project 状态保持分离。
 - [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md) 记录持久目标与交付依赖顺序。
-- 在实现与持久验证将各项目标提升为当前事实前，当前行为继续以
+- 当前行为（包括有界的 issue #66 HP Run 切片）继续以
   [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)、
   [计算流程](../../kernel-architecture/zh/Compute-Flow.zh.md) 和
-  [调度器架构](../../kernel-architecture/zh/Scheduler-Architecture.zh.md) 为权威。
+  [调度器架构](../../kernel-architecture/zh/Scheduler-Architecture.zh.md) 为权威；其余目标只有在
+  实现并经过持久验证后才成为当前事实。

@@ -2009,6 +2009,39 @@ TEST(TaskGraphPlanningSplit,
   verify_domain(ComputeIntent::RealTimeUpdate);
 }
 
+/**
+ * @brief Proves HP creates its Run before target planning while RT skips it.
+ *
+ * @note A zero QoS weight is a Run descriptor error. The missing HP target
+ * would instead produce NotFound if planning ran first. RealTimeUpdate keeps
+ * the same invalid QoS but reaches intent validation because issue #66 creates
+ * no mixed-domain Run for that path.
+ */
+TEST(ComputeRunProductPath,
+     HpValidatesRunBeforePlanningWhileRealtimeSkipsMixedRun) {
+  GraphModel graph("cache/compute-run-product-path");
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+
+  ComputeService::Request hp_request;
+  hp_request.node_id = 404;
+  hp_request.graph_identity = "product-path-hp";
+  hp_request.qos.weight = 0;
+  EXPECT_THROW((void)service.compute(graph, hp_request), std::invalid_argument);
+
+  ComputeService::Request realtime_request = hp_request;
+  realtime_request.intent = ComputeIntent::RealTimeUpdate;
+  try {
+    (void)service.compute(graph, realtime_request);
+    FAIL() << "Expected realtime intent validation failure.";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
+  }
+}
+
 TEST(ComputeServiceSplit,
      DirtyConnectedKernelStabilizesThreeToTwentyOneToThree) {
   register_split_ops();

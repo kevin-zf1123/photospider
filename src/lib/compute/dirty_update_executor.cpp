@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -10,6 +11,7 @@
 
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/dirty_execution_common.hpp"
 #include "compute/dirty_node_executor.hpp"
 #include "compute/dirty_region_planner.hpp"
@@ -678,19 +680,22 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * @param proxy_graph RT proxy graph receiving optional downsample refresh.
  * @param runtime Optional scheduler/trace owner; null executes work inline.
  * @param request Dirty target, ROI, cache, telemetry, and sibling-gate options.
+ * @param run Optional standalone HP Run that owns staging and lifecycle state.
+ * Paired realtime HP sibling execution passes null in issue #66.
  * @return Mutable target HP output owned by graph.
  * @throws std::bad_alloc unchanged when planning, task, cache, staging,
  * telemetry, or output storage exhausts memory.
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
  * target validation failures.
  * @note Planning and commit hold graph_mutex_ while scheduler work runs outside
- * that lock. Staging buffers remain domain-local. Per-node synchronization is
+ * that lock. Standalone HP staging is Run-owned; paired RT sibling staging
+ * remains callback-local until RunGroup support. Per-node synchronization is
  * request-local for standalone HP work and shared only with the matching RT
  * sibling when supplied by ComputeService.
  */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
-    const DirtyUpdateRequest& request) {
+    const DirtyUpdateRequest& request, ComputeRun* run) {
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   if (request.stabilized_parameters &&
@@ -739,7 +744,16 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   HighPrecisionDirtyPlan& prepared_dirty_plan = prepared.dirty_plan;
   graph_lock.unlock();
 
-  HighPrecisionDirtyWriteBuffer hp_write_buffer(!request.force_recache);
+  std::optional<HighPrecisionDirtyWriteBuffer> local_hp_write_buffer;
+  HighPrecisionDirtyWriteBuffer* hp_write_buffer_ptr = nullptr;
+  if (run) {
+    hp_write_buffer_ptr =
+        &run->emplace_dirty_hp_write_buffer(!request.force_recache);
+  } else {
+    hp_write_buffer_ptr =
+        &local_hp_write_buffer.emplace(!request.force_recache);
+  }
+  HighPrecisionDirtyWriteBuffer& hp_write_buffer = *hp_write_buffer_ptr;
   if (request.stabilized_parameters) {
     for (const auto& [node_id, staged] :
          request.stabilized_parameters->staged_outputs()) {
@@ -782,6 +796,12 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
                                         hp_write_buffer);
   };
 
+  if (run && runtime) {
+    run->advance_to(ComputeRunPhase::Queued);
+  }
+  if (run) {
+    run->advance_to(ComputeRunPhase::Running);
+  }
   run_dirty_source_first(
       DirtySourceFirstRunRequest{runtime, ComputeIntent::GlobalHighPrecision,
                                  &prepared.compute_plan, &prepared.selection,
@@ -792,6 +812,9 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
       run_hp_task);
   if (request.sibling_commit_gate) {
     request.sibling_commit_gate->wait_for_rt_commit_or_throw();
+  }
+  if (run) {
+    run->advance_to(ComputeRunPhase::CommitPending);
   }
   graph_lock.lock();
   if (request.stabilized_parameters &&

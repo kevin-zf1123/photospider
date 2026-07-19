@@ -1202,9 +1202,10 @@ class Kernel {
    *         memory.
    * @throws std::exception for other failures propagated by ComputeService.
    * @note intent=nullopt selects legacy HP-only overloads; otherwise intent and
-   * dirty_roi are forwarded to the intent-aware HP/RT path. Callers should
-   * invoke this only from a GraphStateExecutor work item when the graph is a
-   * visible runtime model.
+   * dirty_roi are forwarded to the intent-aware HP/RT path. The service
+   * request also receives the session name and an explicit default QoS value
+   * for issue #66 Run capture. Callers should invoke this only from a
+   * GraphStateExecutor work item when the graph is a visible runtime model.
    */
   NodeOutput& run_compute_request(ComputeService& compute_service,
                                   GraphRuntime& runtime, GraphModel& graph,

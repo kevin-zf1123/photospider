@@ -38,9 +38,11 @@ seam. The embedded Host adapter translates that value to
 `Kernel::ComputeRequest`. `Kernel` owns graph lookup, runtime start, quiet-mode
 and skip-save side effects, async scheduling, image extraction, and LastError
 mapping. It then translates the internal request to
-`ComputeService::Request`, which carries only node target, cache, telemetry,
-intent, and dirty ROI data. Parallel/runtime selection is carried separately as
-`ComputeService::ExecutionStrategy`.
+`ComputeService::Request`, which carries node target, cache, telemetry, intent,
+dirty ROI, session identity, and explicit Run QoS data. Parallel/runtime
+selection is carried separately as `ComputeService::ExecutionStrategy`. The
+added identity and QoS values remain private descriptor inputs and do not
+change the public Host request or plugin ABI.
 
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
@@ -88,9 +90,18 @@ ComputeService facade
   -> DirtyRegionSnapshot
   -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
-  -> TaskSubmissionPlan / ComputeTaskDispatcher
+  -> Run-owned TaskSubmissionPlan / ComputeTaskDispatcher
   -> ready-task scheduler dispatch
 ```
+
+Before any of those planning steps, each non-realtime HP service call creates
+exactly one request-owned `ComputeRun`. It captures a fresh opaque id, session
+identity, target, `GlobalHighPrecision` intent, full quality, explicit QoS, and
+the current topology generation as a submission revision. That topology value
+is provenance only, not the authoritative graph-wide `GraphRevision` or a
+commit predicate. Sequential, scheduler-backed, and explicit dirty HP variants
+share this boundary. `RealTimeUpdate` creates no mixed Run or child Runs in
+issue #66; paired Run/`RunGroup` settlement remains future work.
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
@@ -183,9 +194,10 @@ the parallel path before executing the recursive path.
 Parallel compute derives a `ComputePlan` by expanding the full task graph and
 then pruning it with `NodeCacheTaskGraphPruner` from `topo_postorder_from`.
 `ComputeDispatchPlanBuilder` records that cache-pruned plan for inspection.
-`TaskSubmissionPlan` materializes the plan's `ComputeTaskGraph` into scheduler
-closures, dependency counters, ready handles, operation variants, and temporary
-result slots, then submits ready node tasks through the configured scheduler's
+The request `ComputeRun` owns the `TaskSubmissionPlan` that materializes the
+plan's `ComputeTaskGraph` into scheduler closures, dependency counters, ready
+handles, operation variants, and temporary result slots. The dispatcher then
+submits ready node tasks through the configured scheduler's
 `SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and increment
 scheduler-owned completion counters.
 
@@ -199,13 +211,14 @@ start leaves the old scheduler and its compute behavior unchanged and returns
 only candidate capacity.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
-node-id mapping, temporary result storage, event logging, exception
-propagation, and final target selection inside the compute-service boundary. It
-dispatches already-planned work through scheduler task-runtime queues; it does
-not make the scheduler own dirty propagation, compute-task derivation, or the
-task graph itself. If the pruned planned dispatch is empty while the target has
-no reusable HP output, the dispatcher reports a planning contract error instead
-of falling back to recursive sequential compute.
+node-id mapping, temporary-result indexing, event logging, exception
+propagation, and final target selection inside the compute-service boundary.
+The Run owns the corresponding plan and result-slot storage. The dispatcher
+uses scheduler task-runtime queues for already-planned work; it does not make
+the scheduler own dirty propagation, compute-task derivation, or the task graph
+itself. If the pruned planned dispatch is empty while the target has no reusable
+HP output, the dispatcher reports a planning contract error instead of falling
+back to recursive sequential compute.
 
 For dirty execution, `DirtySnapshotTaskGraphPruner` materializes only the active
 `DirtyUpdateWorkSet` selected from the request's `ComputeTaskGraph`. Runtime
@@ -263,16 +276,19 @@ required-node lookup and the operation in one work item, preventing a
 clear/reload check-then-act gap. Scheduler information copies name/statistics
 before leaving the boundary; no raw scheduler pointer survives it.
 
-The current dirty update implementation uses staged output commits for
-HP/RT sibling safety: HP dirty workers write `HighPrecisionDirtyWriteBuffer`
-and commit to the visible `GraphModel` only after the RT sibling has committed;
-RT dirty workers write `RealtimeProxyWriteBuffer` and commit to the
-runtime-owned `RealtimeProxyGraph`. There is no general graph-revision or
-interruptible commit policy in the current implementation. ADR 0003 and the
-kernel evolution roadmap define that accepted direction separately from current
-behavior; ADR 0007 fixes its detailed Run/revision/commit race without making it
-current. Commit policy remains conceptually separate from `ComputeIntent`,
-because HP/RT intent semantics do not define visibility or interruption.
+The current dirty update implementation uses staged output commits for HP/RT
+sibling safety. A standalone `GlobalHighPrecision` dirty request stores its
+`HighPrecisionDirtyWriteBuffer` in the request Run. A `RealTimeUpdate` HP
+sibling still keeps that buffer callback-local in issue #66 and commits to the
+visible `GraphModel` only after the RT sibling has committed. RT dirty workers
+write `RealtimeProxyWriteBuffer` and commit to the runtime-owned
+`RealtimeProxyGraph`. There is no general graph-revision or interruptible
+commit policy in the current implementation. ADR 0003 and the kernel evolution
+roadmap define that accepted direction separately from current behavior; ADR
+0007 fixes the complete Run/revision/commit race, of which only the bounded HP
+Run ownership slice is current. Commit policy remains conceptually separate
+from `ComputeIntent`, because HP/RT intent semantics do not define visibility
+or interruption.
 
 ## GlobalHighPrecision
 
@@ -427,22 +443,27 @@ the ready-task loop. An invalid above-eight request or unknown type maps to
 
 - One request plan supplies both sequential and parallel execution semantics;
   the execution strategy changes mechanics, not topology or dirty meaning.
+- One non-realtime HP request owns one `ComputeRun` from pre-planning
+  descriptor capture through exact terminal publication. The Run owns full-plan
+  temporary results or standalone dirty HP staging, but not Graph state,
+  workers, or the meaning of dependency transitions.
 - `GraphStateExecutor` protects visible graph coherence, while
   `SchedulerTaskRuntime` receives only ready compute work. Graph-state commands
   therefore never become scheduler tasks.
 - HP cache and RT proxy state use separate staged commit paths, so preview
   state cannot become authoritative HP output by implication.
-- Scheduler epochs reject stale queued callbacks only. The current flow has no
-  general graph revision, supersession, deadline, or cooperative cancellation
+- Scheduler epochs reject stale queued callbacks only. The current Run records
+  QoS and a topology-only submission revision but has no authoritative graph
+  revision, supersession, enforced deadline, or cooperative cancellation
   contract.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-details the later independent HP/RT Runs, deterministic `RunGroup` settlement,
-RT-first commit gate, admitted-Run registry, completion, and lease ownership,
-while the
+defines both the current bounded non-realtime HP Run slice and the later
+independent paired HP/RT Runs, deterministic `RunGroup` settlement, RT-first
+commit gate, admitted-Run registry, completion, and lease ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 describes the later revision and cancellation boundary without making it part
 of the current flow.
@@ -451,6 +472,7 @@ of the current flow.
 
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/compute_run.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/intent_update_coordinator.*`
@@ -460,4 +482,5 @@ of the current flow.
 - `tests/integration/test_scheduler.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_event_stream_boundaries.cpp`

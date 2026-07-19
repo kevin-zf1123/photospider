@@ -152,6 +152,7 @@ graph TD
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
     Kernel --> SchedulerWorkerBudget["进程级 SchedulerWorkerBudget"]
+    Kernel --> ComputeService
 
     GraphRuntime --> GraphModel
     GraphRuntime --> GraphStateExecutor
@@ -166,6 +167,10 @@ graph TD
     ComputeService --> GraphEventService
     ComputeService --> OpRegistry
     ComputeService --> IScheduler
+    ComputeService --> ComputeRun["request-owned HP ComputeRun"]
+    ComputeService --> ComputeTaskDispatcher
+    ComputeRun --> TaskSubmissionPlan
+    ComputeTaskDispatcher --> TaskSubmissionPlan
 
     PluginManager --> OpRegistry
 ```
@@ -213,6 +218,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
+| `ComputeRun` | 私有 request owner，拥有一次非 realtime HP descriptor、单调 phase、唯一 terminal outcome，以及 full-plan/temporary storage 或 standalone dirty-HP staging storage；尚不提供稳定 lease、realtime Run grouping 或进程执行所有权。 |
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
 | `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
@@ -232,13 +238,16 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 2. embedded Host adapter 将 public value 转换为内部 `InteractionService` / `Kernel` request。
 3. `Kernel` 解析活跃的 `GraphRuntime`。
 4. `Kernel` 创建或使用 `ComputeService` 所需服务。
-5. `ComputeService` 通过 `GraphTraversalService` 解析拓扑顺序。
-6. `ComputeService` 通过 `GraphCacheService` 检查内存和磁盘缓存。
-7. 脏区路径通过 `RoiPropagationService` 和 `GraphExtentResolver` 计算 ROI 需求和 HP 权威范围。
-8. `ComputeService` 从 `OpRegistry` 选择操作实现。
-9. 工作通过递归或配置的调度器路径执行。
-10. `GraphEventService` 记录每节点事件和计时数据。
-11. embedded Host adapter 将结果复制为 public Host value snapshot，CLI 再渲染这些 value。
+5. 对于非 realtime HP，`ComputeService` 会在 planning 前创建一个 `ComputeRun`，捕获 session
+   identity、只表示提交时拓扑的 revision、target、intent、quality 与显式 QoS。
+6. `ComputeService` 通过 `GraphTraversalService` 解析拓扑顺序。
+7. `ComputeService` 通过 `GraphCacheService` 检查内存和磁盘缓存。
+8. 脏区路径通过 `RoiPropagationService` 和 `GraphExtentResolver` 计算 ROI 需求和 HP 权威范围。
+9. `ComputeService` 从 `OpRegistry` 选择操作实现。
+10. 工作通过递归或配置的调度器路径执行；full scheduler plan/temporary result 与 standalone
+    dirty HP staging 会由该 Run 持有到唯一 terminal publication。
+11. `GraphEventService` 记录每节点事件和计时数据。
+12. embedded Host adapter 将结果复制为 public Host value snapshot，CLI 再渲染这些 value。
 
 典型 embedded Host 计算流程：
 
@@ -406,6 +415,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 
 - `Kernel` 组合图级 service，不暴露可安装 API。
 - `ComputeService` 协调私有协作者，其模块边界是 `ps::Host` 后方的实现细节。
+- 当前 `ComputeRun` 是有界的非 realtime HP request owner。其 topology generation 只是
+  submission provenance，不是权威 `GraphRevision`；scheduler handle 仍在没有稳定 Run lease
+  的情况下同步 drain。
 - `GraphTraversalService` 只拥有 topology query。
 - `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
@@ -434,7 +446,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - [ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
   定义当前事实、决策、目标与实施状态如何保持分离。
 - [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-  固定目标 Run、completion、execution-service、ledger 与 lifecycle 所有权，而不把这些对象表述为当前行为。
+  固定完整的目标 Run、completion、execution-service、ledger 与 lifecycle 所有权；当前只实现其
+  issue #66 非 realtime HP Run 切片。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。
@@ -457,6 +470,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
+- `src/lib/compute/compute_run.*`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
@@ -465,4 +479,5 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
+- `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

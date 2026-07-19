@@ -54,9 +54,10 @@ Containment contract 改为：
 
 这 32 个 slot 只覆盖已计数的 scheduler-owned worker，不计算具有独立“每 Graph 一个 worker”上限的
 graph-state executor，也不计算 operation 内部 thread、daemon/frontend worker 或所有 OS thread。
-它们不提供 shared execution 或 fairness。
-后续执行域 issue 中的 `ComputeRun`/`ExecutionService` 必须完整替换这个过渡 ledger 与拥有 worker
-的 ABI，不能在其上永久叠加 adapter。特别是 [#68](https://github.com/kevin-zf1123/photospider/issues/68)
+它们不提供 shared execution 或 fairness。当前 issue #66 `ComputeRun` 切片增加 request-owned HP
+identity/state/storage，但不会替换这个过渡 ledger 或拥有 worker 的 ABI。后续
+`ExecutionService` 工作必须完整替换这些 owner，不能在其上永久叠加 adapter。特别是
+[#68](https://github.com/kevin-zf1123/photospider/issues/68)
 与 [#69](https://github.com/kevin-zf1123/photospider/issues/69) 跟踪的 shared executor 纵向切片会移除
 per-Graph worker，而不是把当前 ledger 当作最终 worker pool。
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
@@ -128,6 +129,16 @@ execution 发生在 `GraphModel` 独占变更边界之外，因此一个 `Comput
 细化 ADR 0003 的高层方向。本节汇总其持久目标约束；当摘要省略细节时，以 ADR 为权威。
 
 ### `ComputeRun`
+
+当前 issue #66 切片会为每次非 realtime HP service call 创建且只创建一个私有 Run。它捕获
+process-lifetime opaque id、session identity、只表示提交时拓扑的 revision、target、HP intent、
+full quality 与显式 QoS；拥有单调 phase 和 exact-once terminal state；并拥有 full scheduler
+submission plan/temporary result 或 standalone dirty HP staging。当前 scheduler handle 与栈上的
+runner 仍会同步 drain。捕获的 topology generation 不是目标权威 `GraphRevision` 或 commit
+predicate。配对 realtime Run/`RunGroup`、稳定 lease 与 completion identity、进程执行所有权、
+resource、revision-safe commit、cancellation 与 supersession 仍属于后续切片。
+
+本节其余内容说明完整的已接受目标。
 
 `ComputeRun` 是计算身份和生命周期单元，与 `GraphRuntime`、scheduler batch 和
 `ComputeIntent` 不同。
@@ -310,7 +321,7 @@ work admission、join 全部物理 executor 并销毁 service。Worker/operation
 
 | Issue | 必需结果 | 依赖 |
 | --- | --- | --- |
-| [#66](https://github.com/kevin-zf1123/photospider/issues/66) | HP `ComputeRun` descriptor、state、storage 与唯一 terminal outcome | #63、#65 |
+| [#66](https://github.com/kevin-zf1123/photospider/issues/66) | 当前 HP `ComputeRun` descriptor、state、storage 与唯一 terminal outcome | #63、#65 |
 | [#67](https://github.com/kevin-zf1123/photospider/issues/67) | 稳定 Run lease 与 `(RunId, RunLocalTaskId)` completion isolation | #66 |
 | [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Injected CPU-only service、一个 Run、ready-only input | #67 |
 | [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain，且无 per-Graph worker | #68 |

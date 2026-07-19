@@ -16,16 +16,18 @@ class GraphEventService;
 }  // namespace ps
 
 namespace ps::compute {
+class ComputeRun;
 
 /**
  * @brief Dispatches the GlobalHighPrecision compute task graph through a
  * SchedulerTaskRuntime.
  *
  * ComputeTaskDispatcher owns the execution bridge between the compute-service
- * planning layer and the scheduler runtime. For one request it builds the
- * cache-pruned task graph, materializes scheduler closures, releases
- * dependency-ready work, collects worker outputs in temporary slots, and
- * serializes final GraphModel cache mutation after the scheduler drains.
+ * planning layer and the scheduler runtime. For one request it asks the
+ * caller-owned ComputeRun to build and retain the cache-pruned task graph,
+ * materializes scheduler closures, releases dependency-ready work, collects
+ * worker outputs in Run-owned temporary slots, and serializes final GraphModel
+ * cache mutation after the scheduler drains.
  *
  * The dispatcher does not choose scheduling policy. Thread ownership, worker
  * queues, task prioritization, and exception capture remain responsibilities
@@ -103,6 +105,8 @@ class ComputeTaskDispatcher {
    * @param task_runtime Scheduler runtime that receives initial and
    * dependency-ready tasks.
    * @param request Immutable execution options for this dispatch.
+   * @param run Request-owned HP Run that retains the plan, dependency state,
+   * task handles, resolved operations, and temporary outputs.
    * @return Mutable target high-precision output stored in the graph.
    * @throws GraphError when the node is missing, no operation exists, a
    * dependency is unavailable, scheduling fails, or dispatch finishes without
@@ -112,10 +116,12 @@ class ComputeTaskDispatcher {
    * telemetry, or result storage exhausts memory.
    * @note Worker tasks do not mutate GraphModel caches directly. They publish
    * temporary results, and execute() serializes final cache ownership after the
-   * scheduler drains.
+   * scheduler drains. Task callbacks still borrow Run-owned and stack runner
+   * state, so the existing synchronous wait must finish before return; stable
+   * leases are reserved for issue #67.
    */
   NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-                      const ComputeDispatchRequest& request);
+                      const ComputeDispatchRequest& request, ComputeRun& run);
 
   /**
    * @brief Runs dirty task handles with source-before-downstream ordering.

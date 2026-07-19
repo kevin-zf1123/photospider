@@ -8,6 +8,7 @@
 
 #include "compute/compute_node_task_runner.hpp"
 #include "compute/compute_result_committer.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/compute_task_submission.hpp"
 
 namespace ps::compute {
@@ -99,6 +100,8 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @param graph GraphModel whose target output is computed.
  * @param task_runtime Scheduler runtime used for this dispatch.
  * @param request Per-call dispatch options.
+ * @param run Request-owned HP Run retaining dispatcher-local plan and output
+ * storage until synchronous drainage and commit complete.
  * @return Mutable high-precision output stored on the target graph node.
  * @throws GraphError for missing targets, missing final output, compute
  * failures, or scheduling failures; may also propagate operation/cache
@@ -106,11 +109,12 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @throws std::bad_alloc unchanged when plan, task, operation, cache,
  * telemetry, or result storage exhausts memory.
  * @note The function builds all worker closures before submission, waits for
- * completion, then commits temp outputs under graph_mutex_.
+ * completion, then commits Run-owned temp outputs under graph_mutex_. The
+ * runner and scheduler runtime remain borrowed until that wait completes.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-    const ComputeDispatchRequest& request) {
+    const ComputeDispatchRequest& request, ComputeRun& run) {
   const int node_id = request.node_id;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
@@ -130,8 +134,8 @@ NodeOutput& ComputeTaskDispatcher::execute(
     graph.clear_full_task_graph_cache();
   }
 
-  TaskSubmissionPlan plan(graph, traversal_, node_id,
-                          task_runtime.available_devices());
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal_, node_id, task_runtime.available_devices());
   if (request.force_recache) {
     clear_planned_high_precision_caches(graph, graph_mutex,
                                         plan.execution_order());
@@ -155,7 +159,10 @@ NodeOutput& ComputeTaskDispatcher::execute(
       request.benchmark_events,
   });
   plan.build_scheduler_tasks(runner, task_runtime);
+  run.advance_to(ComputeRunPhase::Queued);
+  run.advance_to(ComputeRunPhase::Running);
   dispatch_planned_tasks(graph, task_runtime, node_id, plan);
+  run.advance_to(ComputeRunPhase::CommitPending);
 
   ComputeResultCommitter committer(cache_, graph_mutex,
                                    request.cache_precision);

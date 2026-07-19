@@ -28,11 +28,14 @@ flowchart TD
   KERNEL --> BUDGET["process SchedulerWorkerBudget"]
   KERNEL --> GSE["GraphStateExecutor"]
   GSE --> SERVICE["ComputeService"]
+  SERVICE --> RUN["request-owned HP ComputeRun"]
   SERVICE --> PLAN["planning and pruning collaborators"]
   PLAN --> DISPATCH["ComputeTaskDispatcher"]
+  DISPATCH --> RUN
   DISPATCH --> RUNTIME["SchedulerTaskRuntime"]
   RUNTIME --> CALLBACK["ready TaskHandle or callback"]
-  CALLBACK --> TEMP["temporary results"]
+  CALLBACK --> TEMP["Run-owned temporary or dirty HP staging"]
+  RUN --> TEMP
   TEMP --> COMMIT["validated result commit"]
   COMMIT --> GRAPH["GraphModel or RealtimeProxyGraph"]
 ```
@@ -72,7 +75,8 @@ and queues. The scheduler-worker ledger does not count these lane workers; its
 
 | Module | Current responsibility | Does not own |
 | --- | --- | --- |
-| `ComputeService` | Request validation, intent coordination, collaborator construction, and final result selection | Frontend values, worker threads, graph documents |
+| `ComputeService` | Request validation, intent coordination, creation/settlement of one non-realtime HP Run, collaborator construction, and final result selection | Frontend values, worker threads, graph documents |
+| `ComputeRun` | Immutable non-realtime HP descriptor, monotonic phase, exact terminal outcome, and ownership of full-plan/temporary or standalone dirty-HP staging storage | Stable leases, completion routing, paired realtime grouping, Graph state, workers, authoritative revision commit |
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
 | `FullTaskGraphExpander` | Complete node/tile task shape for one graph generation and domain | Request target, cache pruning, dirty pruning |
@@ -81,8 +85,8 @@ and queues. The scheduler-worker ledger does not count these lane workers; its
 | `DirtyRegionPlanner` | Graph-scoped dirty propagation snapshot | Compute dependency counters |
 | `DirtySnapshotTaskGraphPruner` | Active dirty work selected from an existing plan | Task expansion |
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
-| `ComputeTaskDispatcher` | Dependency counters, ready release, temporary results, completion, exceptions, full HP commit, and dirty source-first submission helper | Graph topology derivation, dirty staged commit, or scheduler policy |
-| `TaskSubmissionPlan` | Request-local task handles, dense indexes, dependency state, variants, and result slots | Lifetime beyond the current dispatch contract |
+| `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, or scheduler policy |
+| `TaskSubmissionPlan` | Run-owned task handles, dense indexes, dependency state, variants, and result slots for one full HP request | Lifetime beyond the current synchronous dispatch/drain contract |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Scheduler trace ownership |
 | `SchedulerFactory` | Resolve `0..8` worker requests and plan each scheduler's conservative slot charge before construction | Process capacity ownership or graph-state access |
@@ -98,19 +102,24 @@ private implementation modules and do not form an installable API.
 1. `Kernel` resolves the session and enters the graph-state access boundary.
 2. `ComputeService` validates target, intent, dirty ROI, cache flags, and the
    selected execution strategy.
-3. Connected parameter producers are stabilized into one request-local HP
+3. For non-realtime HP, `ComputeService` creates one `ComputeRun` before
+   planning, capturing a fresh id, session identity, topology-only submission
+   revision, target, HP intent, full quality, and explicit QoS.
+4. Connected parameter producers are stabilized into one request-local HP
    snapshot before extent, ROI, or task-shape decisions use them.
-4. The planner expands the complete task shape for one domain and prunes it to
+5. The planner expands the complete task shape for one domain and prunes it to
    the requested target and dependency cone.
-5. A dirty request selects an active work set from that plan. Dirty state does
+6. A dirty request selects an active work set from that plan. Dirty state does
    not create new task shapes.
-6. Sequential execution walks the same request semantics inline. Parallel
+7. Sequential execution walks the same request semantics inline. Parallel
    execution materializes concrete handles and submits only ready handles or
    callbacks to the selected scheduler runtime.
-7. Workers write request-local temporary or staged outputs. Visible graph state
-   is modified only by the appropriate commit path.
-8. The result, events, timing, and errors are copied back through the Host
-   value boundary.
+8. Workers write Run-owned full-plan temporary results or standalone dirty HP
+   staging. Paired realtime staging remains sibling-callback-local in issue
+   #66. Visible graph state is modified only by the appropriate commit path.
+9. The Run publishes one success or failure after validated output or exact
+   exception capture, then the result, events, timing, and errors are copied
+   back through the Host value boundary.
 
 ## Planning Invariants
 
@@ -135,12 +144,13 @@ pruning. Lazy task creation is not part of the current planning contract.
 
 ## Dispatcher and Scheduler Boundary
 
-The dispatcher owns request correctness:
+The dispatcher owns request correctness while `ComputeRun` owns the current
+full HP storage:
 
 - dependency counters and dependent maps;
 - source-first dirty task release;
 - task reference accounting;
-- temporary result slots;
+- indexing and transitions over Run-owned temporary result slots;
 - exception normalization and completion aggregation;
 - validation of an empty plan;
 - final target selection and full HP commit; dirty executors own their staged
@@ -260,9 +270,11 @@ It is not yet a general cancellation or graph-revision policy.
 - Operation callbacks may already have external side effects; staged graph
   output does not roll those effects back.
 - Current task handles borrow request-local executor state. Their lifetime ends
-  at the current completion wait, which is why they cannot be moved unchanged
-  into a process-wide asynchronous queue. ADR 0007 requires stable Run-backed
-  leases for the target queue; that target lease is not current behavior.
+  at the current completion wait. Their full HP plan and temporary slots are
+  now Run-owned, but the stack runner and completion identity are not lease
+  backed, so the handles still cannot move unchanged into a process-wide
+  asynchronous queue. ADR 0007 requires stable Run leases for that target
+  queue; issue #67 remains future behavior.
 
 ## Boundary Rationale
 
@@ -278,14 +290,16 @@ four independent correctness points:
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-record the accepted replacement direction and detailed ownership contract for
-later implementation. This document is authoritative for current per-graph
-scheduler ownership plus its bounded process admission containment; the ledger
-is not the target shared `ExecutionService`.
+record the accepted replacement direction and detailed ownership contract.
+This document is authoritative for the current issue #66 HP Run slice,
+per-graph scheduler ownership, and bounded process admission containment. The
+stable lease, authoritative revision, and shared `ExecutionService` portions
+remain future behavior.
 
 ## Implementation and Validation Entry Points
 
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/compute_run.*`
 - `src/lib/compute/task_graph_planning.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_submission.*`
@@ -305,4 +319,5 @@ is not the target shared `ExecutionService`.
 - `tests/unit/test_scheduler_factory_plan.cpp`
 - `tests/unit/test_scheduler_reservation_owner.cpp`
 - `tests/unit/test_scheduler_worker_budget.cpp`
+- `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
