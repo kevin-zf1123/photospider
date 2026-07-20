@@ -19,10 +19,12 @@
 #include <filesystem>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "compute/execution_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/scheduler_worker_budget.hpp"
@@ -95,9 +97,15 @@ void notify_required_target_test_hook(RequiredTargetTestEvent event) noexcept {
 Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
                std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                std::shared_ptr<const GraphDocumentReader> document_reader,
-               std::shared_ptr<const GraphDocumentWriter> document_writer)
+               std::shared_ptr<const GraphDocumentWriter> document_writer,
+               std::shared_ptr<compute::ExecutionService> execution_service)
     : cache_service_(std::move(image_codec), std::move(metadata_codec)),
-      io_service_(std::move(document_reader), std::move(document_writer)) {
+      io_service_(std::move(document_reader), std::move(document_writer)),
+      execution_service_(std::move(execution_service)) {
+  if (!execution_service_) {
+    throw std::invalid_argument(
+        "Kernel requires an injected ExecutionService owner.");
+  }
 }  // NOLINT
 
 /** @copydoc Kernel::~Kernel */
@@ -320,8 +328,14 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
                          "instance during Graph load");
   }
 
+  GraphRuntime::SchedulerExecutionRoute hp_execution_route;
+  if (hp_plan->is_builtin_cpu()) {
+    hp_execution_route.domain =
+        GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService;
+    hp_execution_route.worker_count = hp_plan->worker_grant();
+  }
   runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::move(hp_scheduler));
+                        std::move(hp_scheduler), hp_execution_route);
   runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
   clear_last_error(name);
 }

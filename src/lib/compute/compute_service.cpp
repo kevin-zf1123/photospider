@@ -31,6 +31,7 @@
 #include "compute/compute_task_dispatcher.hpp"
 #include "compute/dirty_sibling_commit_gate.hpp"
 #include "compute/dirty_update_executor.hpp"
+#include "compute/execution_service.hpp"
 #include "compute/intent_update_coordinator.hpp"
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
@@ -50,13 +51,19 @@ namespace ps {
  * @param traversal Traversal service used by planning and dirty execution.
  * @param cache Cache service used by sequential and scheduler HP paths.
  * @param events Event sink used by compute and dirty telemetry.
+ * @param execution_service Explicit process CPU execution owner.
  * @throws Nothing directly.
- * @note All three services must outlive this ComputeService instance.
+ * @note All four services must outlive this ComputeService instance.
  */
 ComputeService::ComputeService(GraphTraversalService& traversal,
                                GraphCacheService& cache,
-                               GraphEventService& events)
-    : traversal_(traversal), cache_(cache), events_(events) {}
+                               GraphEventService& events,
+                               compute::ExecutionService& execution_service)
+    : traversal_(traversal),
+      cache_(cache),
+      events_(events),
+      execution_service_(execution_service) {
+}  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Destroys service-owned inline RT proxy graph storage.
@@ -585,15 +592,24 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
  * cache, telemetry, Run storage, or result storage exhausts memory.
  * @throws GraphError from scheduler lookup, task dispatch, cache access, or
  * missing target output.
- * @note The dispatcher retains the current borrowed scheduler runtime and
- * synchronous wait contract while full-HP callbacks own Run leases and route
- * composite task identity without borrowed TaskExecutor pointers.
+ * @note Built-in CPU planning routes ready submissions through the injected
+ * ExecutionService; plugin, GPU, and serial planning retain the Graph-owned
+ * scheduler path. Both routes synchronously settle while full-HP callbacks own
+ * Run leases and composite identity without borrowed TaskExecutor pointers.
  */
 NodeOutput& ComputeService::compute_parallel_hp_impl(GraphModel& graph,
                                                      GraphRuntime& runtime,
                                                      const Request& request,
                                                      compute::ComputeRun& run) {
   compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
+  const GraphRuntime::SchedulerExecutionRoute execution_route =
+      runtime.get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
+  if (execution_route.domain ==
+      GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService) {
+    return executor.execute(graph, execution_service_, runtime,
+                            execution_route.worker_count,
+                            make_dispatch_request(request), run);
+  }
   IScheduler& scheduler = compute::ensure_running_scheduler(
       runtime, ComputeIntent::GlobalHighPrecision);
   return executor.execute(graph, scheduler, make_dispatch_request(request),

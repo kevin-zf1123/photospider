@@ -13,10 +13,12 @@ namespace ps {
 class GraphTraversalService;
 class GraphCacheService;
 class GraphEventService;
+class SchedulerHostContext;
 }  // namespace ps
 
 namespace ps::compute {
 class ComputeRun;
+class ExecutionService;
 
 /**
  * @brief Dispatches the GlobalHighPrecision compute task graph through a
@@ -126,6 +128,28 @@ class ComputeTaskDispatcher {
                       const ComputeDispatchRequest& request, ComputeRun& run);
 
   /**
+   * @brief Executes one full-HP plan through the injected CPU service.
+   *
+   * @param graph Graph whose temporary outputs are committed after settlement.
+   * @param execution_service Process-owned single-Run CPU execution domain.
+   * @param host Active Graph observation context for worker trace forwarding.
+   * @param worker_count Exact built-in CPU scheduler-plan grant.
+   * @param request Immutable full-HP dispatch options.
+   * @param run Request owner retaining plan, runner, results, and leases.
+   * @return Mutable target high-precision output stored in Graph state.
+   * @throws GraphError for planning, operation, service, cache, or output
+   * validation failures.
+   * @throws std::bad_alloc unchanged from planning, submission, or commit.
+   * @throws The exact first service worker exception after batch settlement.
+   * @note Only ready submissions cross into execution_service. This overload
+   * retains all planning, dependency, result, and commit authority in the
+   * dispatcher/Run boundary.
+   */
+  NodeOutput& execute(GraphModel& graph, ExecutionService& execution_service,
+                      SchedulerHostContext& host, unsigned int worker_count,
+                      const ComputeDispatchRequest& request, ComputeRun& run);
+
+  /**
    * @brief Runs dirty task handles with source-before-downstream ordering.
    *
    * Source handles are submitted as the first dirty dependency batch with high
@@ -166,6 +190,31 @@ class ComputeTaskDispatcher {
    * @note Holds graph.timing_mutex_ while mutating timing fields.
    */
   static void clear_timing_results(GraphModel& graph);
+
+  /**
+   * @brief Shares full-HP planning, runner setup, and commit across routes.
+   *
+   * @param graph Graph whose plan and final cache state are mutated.
+   * @param task_runtime Legacy scheduler or injected ready-submission runtime
+   * used by the Run-owned node runner and completion routes.
+   * @param execution_service Non-null only for the migrated CPU service route.
+   * @param host Non-null active trace target only for the service route.
+   * @param worker_count Exact service CPU grant, or zero for the legacy route.
+   * @param request Immutable dispatch controls.
+   * @param run Request owner retaining all asynchronous state.
+   * @return Mutable committed target output.
+   * @throws GraphError or standard exceptions from planning, execution,
+   * service/scheduler settlement, cache, telemetry, or commit.
+   * @note The optional route pointers select only physical dispatch; every
+   * semantic planning and visible commit stage is shared.
+   */
+  NodeOutput& execute_impl(GraphModel& graph,
+                           SchedulerTaskRuntime& task_runtime,
+                           ExecutionService* execution_service,
+                           SchedulerHostContext* host,
+                           unsigned int worker_count,
+                           const ComputeDispatchRequest& request,
+                           ComputeRun& run);
 
   /** @brief Borrowed traversal service used to build target execution order. */
   GraphTraversalService& traversal_;

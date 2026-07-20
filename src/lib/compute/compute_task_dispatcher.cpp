@@ -3,6 +3,7 @@
 #include <exception>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include "compute/compute_result_committer.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/compute_task_submission.hpp"
+#include "compute/execution_service.hpp"
 
 namespace ps::compute {
 
@@ -117,6 +119,51 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
     const ComputeDispatchRequest& request, ComputeRun& run) {
+  return execute_impl(graph, task_runtime, nullptr, nullptr, 0U, request, run);
+}
+
+/**
+ * @brief Executes one full-HP dispatch through the injected CPU service.
+ *
+ * @param graph Graph whose target is computed and committed.
+ * @param execution_service Process-owned ready-only CPU runtime.
+ * @param host Active Graph trace observation context.
+ * @param worker_count Exact built-in CPU grant.
+ * @param request Per-call dispatch options.
+ * @param run Request owner retaining leased dispatcher state.
+ * @return Mutable committed target output.
+ * @throws GraphError or standard exceptions from shared planning, service
+ * execution, cache, telemetry, and commit.
+ */
+NodeOutput& ComputeTaskDispatcher::execute(
+    GraphModel& graph, ExecutionService& execution_service,
+    SchedulerHostContext& host, unsigned int worker_count,
+    const ComputeDispatchRequest& request, ComputeRun& run) {
+  return execute_impl(graph, execution_service, &execution_service, &host,
+                      worker_count, request, run);
+}
+
+/**
+ * @brief Executes shared full-HP semantics through one physical route.
+ *
+ * @param graph GraphModel whose target output is computed.
+ * @param task_runtime Runtime used for task execution traces and completion.
+ * @param execution_service Optional migrated CPU service selector.
+ * @param host Optional Graph observation target for service execution.
+ * @param worker_count Exact service grant or zero on the legacy path.
+ * @param request Per-call dispatch options.
+ * @param run Request observer that mints all retained leases.
+ * @return Mutable high-precision output stored on the target graph node.
+ * @throws GraphError or standard exceptions from the selected route and shared
+ * semantic stages.
+ * @note Only dispatch selection differs; plan, runner, temporary results, and
+ * commit remain shared and Run/dispatcher-owned.
+ */
+NodeOutput& ComputeTaskDispatcher::execute_impl(
+    GraphModel& graph, SchedulerTaskRuntime& task_runtime,
+    ExecutionService* execution_service, SchedulerHostContext* host,
+    unsigned int worker_count, const ComputeDispatchRequest& request,
+    ComputeRun& run) {
   const int node_id = request.node_id;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
@@ -163,7 +210,17 @@ NodeOutput& ComputeTaskDispatcher::execute(
   });
   run.advance_to(ComputeRunPhase::Queued);
   run.advance_to(ComputeRunPhase::Running);
-  dispatch_planned_tasks(graph, task_runtime, node_id, plan, dispatcher_lease);
+  if (execution_service != nullptr) {
+    if (host == nullptr || worker_count == 0U) {
+      throw std::logic_error(
+          "ExecutionService dispatch requires host context and worker grant.");
+    }
+    dispatch_planned_tasks(graph, *execution_service, *host, worker_count,
+                           node_id, plan, dispatcher_lease);
+  } else {
+    dispatch_planned_tasks(graph, task_runtime, node_id, plan,
+                           dispatcher_lease);
+  }
   run.advance_to(ComputeRunPhase::CommitPending);
 
   ComputeResultCommitter committer(cache_, graph_mutex,

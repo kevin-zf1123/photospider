@@ -173,6 +173,65 @@ TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
 }
 
 /**
+ * @brief Discovers one validated initial ready identity set.
+ *
+ * @return Initial composite identities in this Run namespace.
+ * @throws GraphError when no initial identity exists for a nonempty plan.
+ * @throws std::overflow_error when task count exceeds scheduler accounting.
+ * @throws std::bad_alloc or std::out_of_range from ready discovery.
+ */
+std::vector<ComputeRunTaskIdentity>
+TaskSubmissionPlan::initial_ready_identities() {
+  std::vector<ComputeRunTaskIdentity> initial_identities;
+  initial_identities.reserve(size());
+  submitted_initial_task_ids_.clear();
+  append_graph_ready_tasks(initial_identities);
+  if (initial_identities.empty()) {
+    append_zero_dependency_tasks(initial_identities);
+  }
+  if (!empty() && initial_identities.empty()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Full HP plan has no initial ready task.");
+  }
+  if (size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error(
+        "Full HP task count exceeds scheduler completion range.");
+  }
+  return initial_identities;
+}
+
+/**
+ * @brief Builds one lease-routed ready submission.
+ *
+ * @param lease Matching Run lease.
+ * @param identity Registered composite task identity.
+ * @param is_initial_ready Whether initial discovery selected this task.
+ * @return Move-owned service submission.
+ * @throws std::out_of_range for an unregistered local identity.
+ * @throws std::invalid_argument for a lease/identity mismatch.
+ * @throws std::bad_alloc from submission ownership.
+ */
+ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
+    const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+    bool is_initial_ready) {
+  if (!contains_task_identity(identity)) {
+    throw std::out_of_range(
+        "Ready submission identity is not registered by this Run plan.");
+  }
+  const std::size_t task_index =
+      static_cast<std::size_t>(identity.local_task_id().value());
+  const int trace_node_id =
+      compute_plan_.task_graph.tasks.at(task_index).node_id;
+  return ReadyTaskSubmission(lease, identity, trace_node_id, is_initial_ready,
+                             [](ComputeRunLease& ready_lease,
+                                const ComputeRunTaskIdentity& ready_identity,
+                                SchedulerTaskRuntime& task_runtime) {
+                               ready_lease.execute_task(ready_identity,
+                                                        task_runtime);
+                             });
+}
+
+/**
  * @brief Installs the Run-owned node task runner once.
  *
  * @param context Borrowed services and Run-owned plan vectors.
@@ -240,21 +299,8 @@ bool TaskSubmissionPlan::contains_task_identity(
  */
 void TaskSubmissionPlan::submit_initial_ready_tasks(
     const ComputeRunLease& lease, SchedulerTaskRuntime& task_runtime) {
-  std::vector<ComputeRunTaskIdentity> initial_identities;
-  initial_identities.reserve(size());
-  submitted_initial_task_ids_.clear();
-  append_graph_ready_tasks(initial_identities);
-  if (initial_identities.empty()) {
-    append_zero_dependency_tasks(initial_identities);
-  }
-  if (!empty() && initial_identities.empty()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Full HP plan has no initial ready task.");
-  }
-  if (size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::overflow_error(
-        "Full HP task count exceeds scheduler completion range.");
-  }
+  const std::vector<ComputeRunTaskIdentity> initial_identities =
+      initial_ready_identities();
 
   task_runtime.inc_tasks_to_complete(static_cast<int>(size()));
   log_initial_assignments(task_runtime);
@@ -262,6 +308,27 @@ void TaskSubmissionPlan::submit_initial_ready_tasks(
     task_runtime.submit_ready_task_any_thread(
         make_owned_run_task(lease, identity, task_runtime));
   }
+}
+
+/**
+ * @brief Materializes the service-owned initial ready set.
+ *
+ * @param lease Matching Run lease copied into every submission.
+ * @return Move-owned ready submissions.
+ * @throws GraphError, std::overflow_error, std::out_of_range, or
+ * std::bad_alloc from ready discovery and submission ownership.
+ */
+std::vector<ReadyTaskSubmission>
+TaskSubmissionPlan::make_initial_ready_submissions(
+    const ComputeRunLease& lease) {
+  const std::vector<ComputeRunTaskIdentity> initial_identities =
+      initial_ready_identities();
+  std::vector<ReadyTaskSubmission> submissions;
+  submissions.reserve(initial_identities.size());
+  for (const ComputeRunTaskIdentity& identity : initial_identities) {
+    submissions.push_back(make_ready_submission(lease, identity, true));
+  }
+  return submissions;
 }
 
 /**
@@ -384,8 +451,15 @@ void TaskSubmissionPlan::release_dependents(
         dependency_state_.release_dependents(current_task_id);
     for (int dependent_task_id : ready_task_ids) {
       const ComputeRunTaskIdentity identity = task_identity(dependent_task_id);
-      task_runtime.submit_ready_task_any_thread(
-          make_owned_run_task(lease, identity, task_runtime));
+      auto* ready_runtime =
+          dynamic_cast<ReadyTaskSubmissionRuntime*>(&task_runtime);
+      if (ready_runtime != nullptr) {
+        ready_runtime->submit_ready_submission(
+            make_ready_submission(lease, identity, false));
+      } else {
+        task_runtime.submit_ready_task_any_thread(
+            make_owned_run_task(lease, identity, task_runtime));
+      }
     }
   } catch (const std::bad_alloc&) {
     throw;
@@ -517,6 +591,44 @@ void dispatch_planned_tasks(GraphModel& graph,
     std::rethrow_exception(failure);
   }
   task_runtime.wait_for_completion();
+}
+
+/**
+ * @brief Establishes one service-owned CPU batch from ready submissions.
+ *
+ * @param graph Graph used only for empty-plan target validation.
+ * @param execution_service Injected process CPU service.
+ * @param host Active Graph observation context.
+ * @param worker_count Exact built-in CPU grant.
+ * @param node_id Requested target node.
+ * @param plan Run-owned dispatcher submission plan.
+ * @param dispatcher_lease Matching Run lease.
+ * @return Nothing after service settlement.
+ * @throws GraphError for an invalid empty plan.
+ * @throws Service setup or exact task exceptions unchanged.
+ */
+void dispatch_planned_tasks(GraphModel& graph,
+                            ExecutionService& execution_service,
+                            SchedulerHostContext& host,
+                            unsigned int worker_count, int node_id,
+                            TaskSubmissionPlan& plan,
+                            const ComputeRunLease& dispatcher_lease) {
+  if (plan.empty() && graph.has_node(node_id)) {
+    if (!graph.node(node_id).cached_output_high_precision.has_value()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Planned dispatch produced no scheduler tasks for node " +
+              std::to_string(node_id) +
+              " and the target has no reusable high-precision output.");
+    }
+    return;
+  }
+
+  std::vector<ReadyTaskSubmission> initial_submissions =
+      plan.make_initial_ready_submissions(dispatcher_lease);
+  execution_service.execute_cpu_run(host, worker_count,
+                                    std::move(initial_submissions),
+                                    static_cast<int>(plan.size()));
 }
 
 }  // namespace ps::compute

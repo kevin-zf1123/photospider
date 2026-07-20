@@ -68,6 +68,7 @@ TEST(SchedulerFactoryPlanning, SerialDebugConsumesNoWorkerSlots) {
   EXPECT_EQ(automatic->type_name(), "serial_debug");
   EXPECT_EQ(automatic->worker_grant(), 0U);
   EXPECT_EQ(automatic->reservation_slots(), 0U);
+  EXPECT_FALSE(automatic->is_builtin_cpu());
 
   const auto explicit_limit = SchedulerFactory::plan_for_hardware(
       "serial_debug", kSchedulerWorkerRequestMax, 1U);
@@ -89,18 +90,21 @@ TEST(SchedulerFactoryPlanning, CpuPlanChargesResolvedGrant) {
   ASSERT_TRUE(unavailable.has_value());
   EXPECT_EQ(unavailable->worker_grant(), 1U);
   EXPECT_EQ(unavailable->reservation_slots(), 1U);
+  EXPECT_TRUE(unavailable->is_builtin_cpu());
 
   const auto clamped = SchedulerFactory::plan_for_hardware(
       "cpu_work_stealing", 0U, kSchedulerWorkerRequestMax + 42U);
   ASSERT_TRUE(clamped.has_value());
   EXPECT_EQ(clamped->worker_grant(), kSchedulerWorkerRequestMax);
   EXPECT_EQ(clamped->reservation_slots(), kSchedulerWorkerRequestMax);
+  EXPECT_TRUE(clamped->is_builtin_cpu());
 
   const auto explicit_workers =
       SchedulerFactory::plan_for_hardware("cpu_work_stealing", 4U, 1U);
   ASSERT_TRUE(explicit_workers.has_value());
   EXPECT_EQ(explicit_workers->worker_grant(), 4U);
   EXPECT_EQ(explicit_workers->reservation_slots(), 4U);
+  EXPECT_TRUE(explicit_workers->is_builtin_cpu());
 }
 
 /**
@@ -113,6 +117,7 @@ TEST(SchedulerFactoryPlanning, GpuAliasesChargeGrantPlusPotentialDeviceWorker) {
     ASSERT_TRUE(automatic.has_value()) << type;
     EXPECT_EQ(automatic->worker_grant(), 1U) << type;
     EXPECT_EQ(automatic->reservation_slots(), 2U) << type;
+    EXPECT_FALSE(automatic->is_builtin_cpu()) << type;
 
     const auto exact_limit = SchedulerFactory::plan_for_hardware(
         type, kSchedulerWorkerRequestMax, 1U);
@@ -138,6 +143,7 @@ TEST(SchedulerFactoryPlanning, RegisteredTypeChargesGrantWithoutConstruction) {
   ASSERT_TRUE(automatic.has_value());
   EXPECT_EQ(automatic->worker_grant(), kSchedulerWorkerRequestMax);
   EXPECT_EQ(automatic->reservation_slots(), kSchedulerWorkerRequestMax);
+  EXPECT_FALSE(automatic->is_builtin_cpu());
   const auto explicit_workers =
       SchedulerFactory::plan_for_hardware(kPlanningOnlyRegisteredType, 3U, 1U);
   ASSERT_TRUE(explicit_workers.has_value());

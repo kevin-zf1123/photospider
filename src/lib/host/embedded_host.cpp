@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "compute/dirty_region_snapshot.hpp"
+#include "compute/execution_service.hpp"
 #include "core/parameter_value_text.hpp"
 #include "host/embedded_host_dependencies.hpp"
 #include "photospider/host/host.hpp"
@@ -363,6 +364,14 @@ struct EmbeddedHostState {
     std::shared_future<Kernel::AsyncComputeResult> future;
   };
 
+  /**
+   * @brief Process-domain CPU execution owner shared with Kernel.
+   *
+   * @note Declaration order makes this service outlive Kernel and every
+   * request-local ComputeService that borrows it.
+   */
+  std::shared_ptr<compute::ExecutionService> execution_service;
+
   /** @brief Backend Kernel instance owned by the embedded adapter. */
   Kernel kernel;
 
@@ -378,14 +387,17 @@ struct EmbeddedHostState {
    * @param document_writer Shared graph/node document writer owner.
    * @throws std::invalid_argument when any required owner is empty.
    * @throws std::bad_alloc if backend ownership allocation fails.
-   * @note Kernel is fully composed before InteractionService borrows it.
+   * @note ExecutionService is composed first, Kernel retains the same explicit
+   * owner, and InteractionService borrows only the completed Kernel.
    */
   EmbeddedHostState(std::shared_ptr<const ImageArtifactCodec> image_codec,
                     std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                     std::shared_ptr<const GraphDocumentReader> document_reader,
                     std::shared_ptr<const GraphDocumentWriter> document_writer)
-      : kernel(std::move(image_codec), std::move(metadata_codec),
-               std::move(document_reader), std::move(document_writer)),
+      : execution_service(std::make_shared<compute::ExecutionService>()),
+        kernel(std::move(image_codec), std::move(metadata_codec),
+               std::move(document_reader), std::move(document_writer),
+               execution_service),
         interaction(kernel) {}
 
   /**

@@ -147,10 +147,14 @@ TEST(M34_KernelScheduler, CustomSchedulerConfigOnLoad) {
 
 TEST(M34_KernelScheduler, ReplaceScheduler) {
   using ps::ComputeIntent;
+  using ps::GraphRuntime;
   using ps::InteractionService;
   using ps::Kernel;
 
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  Kernel::SchedulerConfig scheduler_config;
+  scheduler_config.worker_count = 3;
+  kernel.set_scheduler_config(scheduler_config);
   InteractionService svc(kernel);
 
   svc.cmd_seed_builtin_ops();
@@ -166,6 +170,12 @@ TEST(M34_KernelScheduler, ReplaceScheduler) {
       kernel.get_scheduler_info(graph_name, ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(hp_info_before.has_value());
   EXPECT_EQ(hp_info_before->first, "CpuWorkStealingScheduler");
+  const auto initial_route =
+      ps::testing::KernelTestAccess::runtime(kernel, graph_name)
+          .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(initial_route.domain,
+            GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService);
+  EXPECT_EQ(initial_route.worker_count, 3u);
 
   // Replace with serial_debug
   bool replaced = kernel.replace_scheduler(
@@ -177,6 +187,21 @@ TEST(M34_KernelScheduler, ReplaceScheduler) {
       kernel.get_scheduler_info(graph_name, ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(hp_info_after.has_value());
   EXPECT_EQ(hp_info_after->first, "serial_debug");
+  const auto serial_route =
+      ps::testing::KernelTestAccess::runtime(kernel, graph_name)
+          .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(serial_route.domain,
+            GraphRuntime::SchedulerExecutionRoute::Domain::PerGraphScheduler);
+  EXPECT_EQ(serial_route.worker_count, 0u);
+
+  ASSERT_TRUE(kernel.replace_scheduler(
+      graph_name, ComputeIntent::GlobalHighPrecision, "cpu_work_stealing"));
+  const auto restored_route =
+      ps::testing::KernelTestAccess::runtime(kernel, graph_name)
+          .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(restored_route.domain,
+            GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService);
+  EXPECT_EQ(restored_route.worker_count, 3u);
 }
 
 TEST(M34_KernelScheduler, ReplaceSchedulerInvalidType) {

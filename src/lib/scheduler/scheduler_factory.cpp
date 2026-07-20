@@ -46,6 +46,11 @@ unsigned int SchedulerPlan::reservation_slots() const noexcept {
   return reservation_slots_;
 }
 
+/** @copydoc SchedulerPlan::is_builtin_cpu */
+bool SchedulerPlan::is_builtin_cpu() const noexcept {
+  return kind_ == Kind::Cpu;
+}
+
 /** @copydoc SchedulerFactory::plan */
 std::optional<SchedulerPlan> SchedulerFactory::plan(
     const std::string& type_name, unsigned int num_workers) {

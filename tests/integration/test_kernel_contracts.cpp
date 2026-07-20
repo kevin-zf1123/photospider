@@ -20,6 +20,7 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
+#include "compute/execution_service.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
@@ -1294,7 +1295,8 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
 
   GraphModel graph(temp_path("photospider-contract-cache"));
   graph.add_node(make_contract_node());
@@ -1345,7 +1347,8 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreNodesWithoutHpState) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
 
   auto root = temp_path("photospider-contract-disk-cache");
   std::filesystem::remove_all(root);
@@ -1955,7 +1958,8 @@ TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
 
   GraphModel graph(temp_path("photospider-contract-rt-error"));
   graph.add_node(make_contract_node());

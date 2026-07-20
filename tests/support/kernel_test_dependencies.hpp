@@ -8,6 +8,7 @@
 #include <memory>
 #include <utility>
 
+#include "compute/execution_service.hpp"  // NOLINT(build/include_subdir)
 #include "core/image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
 #include "providers/configured_image_artifact_codec.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/kernel.hpp"  // NOLINT(build/include_subdir)
@@ -15,6 +16,17 @@
 #include "support/graph_document_test_dependencies.hpp"
 
 namespace ps::testing {
+
+/**
+ * @brief Creates one isolated process execution domain for a direct test.
+ * @return Shared explicit owner suitable for Kernel injection.
+ * @throws std::bad_alloc if service or host-proxy ownership cannot allocate.
+ * @note The returned service is never stored in hidden process-global state.
+ */
+inline std::shared_ptr<compute::ExecutionService>
+make_test_execution_service() {
+  return std::make_shared<compute::ExecutionService>();
+}
 
 /**
  * @brief Creates a direct-test Kernel with configured product dependencies.
@@ -29,7 +41,8 @@ namespace ps::testing {
 inline Kernel make_kernel_with_yaml_graph_documents() {
   auto adapter = make_yaml_graph_document_adapter();
   return Kernel(providers::make_configured_image_artifact_codec(),
-                make_yaml_cache_metadata_codec(), adapter, adapter);
+                make_yaml_cache_metadata_codec(), adapter, adapter,
+                make_test_execution_service());
 }
 
 /**
@@ -46,7 +59,7 @@ inline Kernel make_kernel_with_yaml_graph_documents(
     std::shared_ptr<const ImageArtifactCodec> image_codec) {
   auto adapter = make_yaml_graph_document_adapter();
   return Kernel(std::move(image_codec), make_yaml_cache_metadata_codec(),
-                adapter, adapter);
+                adapter, adapter, make_test_execution_service());
 }
 
 /**
@@ -66,7 +79,7 @@ inline Kernel make_kernel_with_yaml_graph_documents(
     std::shared_ptr<const CacheMetadataCodec> metadata_codec) {
   auto adapter = make_yaml_graph_document_adapter();
   return Kernel(std::move(image_codec), std::move(metadata_codec), adapter,
-                adapter);
+                adapter, make_test_execution_service());
 }
 
 /**
@@ -84,7 +97,7 @@ inline std::unique_ptr<Kernel> make_unique_kernel_with_yaml_graph_documents(
   auto adapter = make_yaml_graph_document_adapter();
   return std::make_unique<Kernel>(std::move(image_codec),
                                   make_yaml_cache_metadata_codec(), adapter,
-                                  adapter);
+                                  adapter, make_test_execution_service());
 }
 
 /**
@@ -102,7 +115,8 @@ inline std::unique_ptr<Kernel> make_unique_kernel_with_yaml_graph_documents(
     std::shared_ptr<const CacheMetadataCodec> metadata_codec) {
   auto adapter = make_yaml_graph_document_adapter();
   return std::make_unique<Kernel>(std::move(image_codec),
-                                  std::move(metadata_codec), adapter, adapter);
+                                  std::move(metadata_codec), adapter, adapter,
+                                  make_test_execution_service());
 }
 
 }  // namespace ps::testing

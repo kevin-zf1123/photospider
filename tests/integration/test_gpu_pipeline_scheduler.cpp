@@ -25,6 +25,7 @@
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
+#include "compute/execution_service.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_traversal_service.hpp"
@@ -566,7 +567,9 @@ TEST_F(GpuPipelineSchedulerTest, ProductionComputeUsesDeviceImplementation) {
   GraphTraversalService traversal;
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
-  ComputeService compute(traversal, cache, runtime.event_service());
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, runtime.event_service(),
+                         execution_service);
   ComputeService::Request request;
   request.node_id = node.id;
   request.cache.force_recache = true;
@@ -630,7 +633,9 @@ TEST_F(GpuPipelineSchedulerTest,
   GraphTraversalService traversal;
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
-  ComputeService compute(traversal, cache, runtime.event_service());
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, runtime.event_service(),
+                         execution_service);
   ComputeService::Request request;
   request.node_id = node.id;
   request.cache.force_recache = true;
@@ -945,7 +950,9 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   GraphTraversalService traversal;
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
-  ComputeService compute(traversal, cache, runtime.event_service());
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, runtime.event_service(),
+                         execution_service);
 
   ComputeService::Request rt_request;
   rt_request.node_id = node_id;

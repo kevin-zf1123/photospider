@@ -85,6 +85,7 @@ class Kernel {
    * @param metadata_codec Shared metadata owner used by graph cache operations.
    * @param document_reader Shared reader owner used by graph and node loads.
    * @param document_writer Shared writer owner used by graph and node saves.
+   * @param execution_service Explicit process CPU execution owner.
    * @throws std::invalid_argument when any required owner is empty.
    * @note The embedded product composition root selects concrete
    *       implementations. Kernel retains them through its cache and graph IO
@@ -93,7 +94,8 @@ class Kernel {
   Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
          std::shared_ptr<const CacheMetadataCodec> metadata_codec,
          std::shared_ptr<const GraphDocumentReader> document_reader,
-         std::shared_ptr<const GraphDocumentWriter> document_writer);
+         std::shared_ptr<const GraphDocumentWriter> document_writer,
+         std::shared_ptr<compute::ExecutionService> execution_service);
 
   /**
    * @brief Drains every owned graph runtime before releasing Kernel services.
@@ -1285,6 +1287,15 @@ class Kernel {
    */
   GraphIOService io_service_;
   RoiPropagationService roi_propagation_service_;
+
+  /**
+   * @brief Explicitly injected process CPU execution owner.
+   *
+   * @note Kernel passes a reference to request-local ComputeService instances.
+   * The destructor body first drains and clears every Graph runtime, so no
+   * admitted work can retain a ComputeService when this owner releases.
+   */
+  std::shared_ptr<compute::ExecutionService> execution_service_;
 
   // [M3.4] 调度器配置
   SchedulerConfig scheduler_config_;

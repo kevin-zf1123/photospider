@@ -184,9 +184,9 @@ GraphRuntime::~GraphRuntime() noexcept {
   }
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   running_.store(false, std::memory_order_release);
-  for (auto& [intent, scheduler] : schedulers_) {
+  for (auto& [intent, binding] : schedulers_) {
     (void)intent;
-    (void)cleanup_scheduler_lifecycle(scheduler.get());
+    (void)cleanup_scheduler_lifecycle(binding.scheduler.get());
   }
   schedulers_.clear();
 }
@@ -232,8 +232,9 @@ void GraphRuntime::start() {
   std::vector<IScheduler*> started_schedulers;
   started_schedulers.reserve(schedulers_.size());
   try {
-    for (auto& [intent, scheduler] : schedulers_) {
+    for (auto& [intent, binding] : schedulers_) {
       (void)intent;
+      auto& scheduler = binding.scheduler;
       if (scheduler && !scheduler->is_running()) {
         started_schedulers.push_back(scheduler.get());
         scheduler->start();
@@ -261,8 +262,9 @@ void GraphRuntime::stop() {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   running_.store(false, std::memory_order_release);
   std::exception_ptr first_stop_error;
-  for (auto& [intent, scheduler] : schedulers_) {
+  for (auto& [intent, binding] : schedulers_) {
     (void)intent;
+    auto& scheduler = binding.scheduler;
     if (!scheduler) {
       continue;
     }
@@ -499,28 +501,65 @@ void GraphRuntime::set_scheduler(ComputeIntent intent,
   replace_scheduler(intent, std::move(scheduler));
 }
 
+/** @copydoc GraphRuntime::set_scheduler */
+void GraphRuntime::set_scheduler(ComputeIntent intent,
+                                 std::unique_ptr<IScheduler> scheduler,
+                                 SchedulerExecutionRoute execution_route) {
+  replace_scheduler(intent, std::move(scheduler), execution_route);
+}
+
 /** @copydoc GraphRuntime::get_scheduler(ComputeIntent) */
 IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   auto it = schedulers_.find(intent);
-  return (it != schedulers_.end()) ? it->second.get() : nullptr;
+  return (it != schedulers_.end()) ? it->second.scheduler.get() : nullptr;
 }
 
 /** @copydoc GraphRuntime::get_scheduler(ComputeIntent) const */
 const IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) const {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   auto it = schedulers_.find(intent);
-  return (it != schedulers_.end()) ? it->second.get() : nullptr;
+  return (it != schedulers_.end()) ? it->second.scheduler.get() : nullptr;
+}
+
+/** @copydoc GraphRuntime::get_scheduler_execution_route */
+GraphRuntime::SchedulerExecutionRoute
+GraphRuntime::get_scheduler_execution_route(ComputeIntent intent) const {
+  std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  const auto it = schedulers_.find(intent);
+  return it != schedulers_.end() ? it->second.execution_route
+                                 : SchedulerExecutionRoute{};
 }
 
 /** @copydoc GraphRuntime::replace_scheduler */
 void GraphRuntime::replace_scheduler(ComputeIntent intent,
                                      std::unique_ptr<IScheduler> scheduler) {
+  replace_scheduler(intent, std::move(scheduler), SchedulerExecutionRoute{});
+}
+
+/** @copydoc GraphRuntime::replace_scheduler */
+void GraphRuntime::replace_scheduler(ComputeIntent intent,
+                                     std::unique_ptr<IScheduler> scheduler,
+                                     SchedulerExecutionRoute execution_route) {
+  if (execution_route.domain ==
+      SchedulerExecutionRoute::Domain::ProcessCpuService) {
+    if (scheduler == nullptr || intent != ComputeIntent::GlobalHighPrecision ||
+        execution_route.worker_count == 0U ||
+        execution_route.worker_count > kSchedulerWorkerRequestMax) {
+      throw std::invalid_argument(
+          "Process CPU scheduler route requires a GlobalHighPrecision owner "
+          "and worker count in [1,8].");
+    }
+  } else if (execution_route.worker_count != 0U) {
+    throw std::invalid_argument(
+        "Per-Graph scheduler route cannot carry a service worker grant.");
+  }
+
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
 
   // Reserve any new map node before candidate lifecycle calls. Once this
   // succeeds, publication into the existing unique_ptr slot cannot allocate.
-  auto [slot, inserted] = schedulers_.try_emplace(intent, nullptr);
+  auto [slot, inserted] = schedulers_.try_emplace(intent);
   try {
     if (scheduler) {
       scheduler->attach(*this);
@@ -539,7 +578,8 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
 
   // Candidate preparation is complete. Swap publishes it without allocation
   // or ownership destruction; scheduler now owns the previous map value.
-  slot->second.swap(scheduler);
+  slot->second.scheduler.swap(scheduler);
+  slot->second.execution_route = execution_route;
 
   // Publication cannot be rolled back truthfully. Cleanup remains a complete
   // best-effort sweep, but a displaced-owner lifecycle error is post-commit
@@ -552,7 +592,7 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
 bool GraphRuntime::has_scheduler(ComputeIntent intent) const {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   auto it = schedulers_.find(intent);
-  return it != schedulers_.end() && it->second != nullptr;
+  return it != schedulers_.end() && it->second.scheduler != nullptr;
 }
 
 }  // namespace ps

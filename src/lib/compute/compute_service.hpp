@@ -21,6 +21,7 @@ struct BenchmarkEvent;
 namespace compute {
 class DirtyNodeSynchronization;
 class DirtySiblingCommitGate;
+class ExecutionService;
 class RealtimeProxyGraph;
 class StabilizedDirtyParameters;
 }  // namespace compute
@@ -165,12 +166,15 @@ class ComputeService {
    * planning.
    * @param cache Cache service used for disk cache reads and writes.
    * @param events Event service used for compute status and timing events.
+   * @param execution_service Explicit process CPU execution owner.
    * @throws Nothing directly; referenced services must already be valid.
    * @note ComputeService does not own the supplied services and must not
-   * outlive them.
+   * outlive them. The execution service is injected even when a request uses
+   * an unmigrated inline, plugin, GPU, dirty, or RT path.
    */
   ComputeService(GraphTraversalService& traversal, GraphCacheService& cache,
-                 GraphEventService& events);
+                 GraphEventService& events,
+                 compute::ExecutionService& execution_service);
 
   /**
    * @brief Destroys inline RT proxy graph storage owned by the service.
@@ -445,6 +449,13 @@ class ComputeService {
   GraphCacheService& cache_;
   /** @brief Borrowed graph event sink used for request telemetry. */
   GraphEventService& events_;
+  /**
+   * @brief Borrowed explicitly injected process CPU execution owner.
+   *
+   * @note Only built-in CPU non-realtime non-dirty full-HP requests use this
+   * service in issue #68; it outlives every request-local ComputeService.
+   */
+  compute::ExecutionService& execution_service_;
   /** @brief Protects service-owned inline RT proxy graph map access. */
   std::mutex inline_rt_proxy_graphs_mutex_;
   /**

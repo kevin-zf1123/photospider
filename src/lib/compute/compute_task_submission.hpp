@@ -12,6 +12,7 @@
 #include "compute/compute_node_task_runner.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/compute_task_dependency_state.hpp"
+#include "compute/execution_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -172,6 +173,24 @@ class TaskSubmissionPlan {
                                   SchedulerTaskRuntime& task_runtime);
 
   /**
+   * @brief Materializes the initial dependency-ready set for ExecutionService.
+   *
+   * @param lease Matching Run lease copied into every ready submission.
+   * @return Move-owned submissions carrying immutable metadata, executable,
+   * composite identity, and matching leases.
+   * @throws GraphError when a nonempty plan has no initial ready work.
+   * @throws std::overflow_error when planned count exceeds scheduler integer
+   * accounting.
+   * @throws std::bad_alloc from ready identity, metadata, executable, or output
+   * storage.
+   * @note This method performs readiness discovery but no queue submission or
+   * completion-count mutation. ExecutionService receives no task graph or
+   * dependency map.
+   */
+  std::vector<ReadyTaskSubmission> make_initial_ready_submissions(
+      const ComputeRunLease& lease);
+
+  /**
    * @brief Executes one lease-validated planned task exactly once.
    *
    * @param identity Matching composite identity already checked by the lease.
@@ -234,6 +253,36 @@ class TaskSubmissionPlan {
   void release_dependents(int current_task_id, int current_node_id,
                           const ComputeRunLease& lease,
                           SchedulerTaskRuntime& task_runtime);
+
+  /**
+   * @brief Discovers and validates the full initial ready identity set.
+   *
+   * @return Composite identities in this plan's Run namespace.
+   * @throws GraphError when a nonempty plan has no initial ready work.
+   * @throws std::overflow_error when planned count exceeds scheduler integer
+   * accounting.
+   * @throws std::bad_alloc or std::out_of_range from ready discovery.
+   * @note The method resets only initial-submission deduplication state; it
+   * mutates no dependency counter or scheduler state.
+   */
+  std::vector<ComputeRunTaskIdentity> initial_ready_identities();
+
+  /**
+   * @brief Builds one owned service submission for a registered ready task.
+   *
+   * @param lease Matching Run lease copied into submission ownership.
+   * @param identity Registered composite task identity.
+   * @param is_initial_ready Whether initial discovery selected the task.
+   * @return Move-owned ready submission.
+   * @throws std::out_of_range when identity does not name a registered task.
+   * @throws std::invalid_argument for an unexpected lease/identity mismatch.
+   * @throws std::bad_alloc from metadata or executable ownership.
+   * @note The executable captures no plan, runner, Graph, or dispatcher stack
+   * pointer; it reaches Run-owned state only through the supplied lease.
+   */
+  ReadyTaskSubmission make_ready_submission(
+      const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+      bool is_initial_ready);
 
   /**
    * @brief Appends one initially ready composite identity.
@@ -328,6 +377,30 @@ class TaskSubmissionPlan {
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             SchedulerTaskRuntime& task_runtime, int node_id,
+                            TaskSubmissionPlan& plan,
+                            const ComputeRunLease& dispatcher_lease);
+
+/**
+ * @brief Submits one planned full-HP Run through the injected CPU service.
+ *
+ * @param graph GraphModel used only to validate an empty reusable target.
+ * @param execution_service Process-owned CPU execution service.
+ * @param host Active Graph scheduler observation context.
+ * @param worker_count Exact built-in CPU scheduler-plan grant.
+ * @param node_id Target node used in empty-plan diagnostics.
+ * @param plan Run-owned scheduler submission plan.
+ * @param dispatcher_lease Matching lease copied into ready submissions.
+ * @return Nothing after the service batch settles.
+ * @throws GraphError when an empty plan lacks reusable target output.
+ * @throws std::bad_alloc from submission/service setup.
+ * @throws The exact service worker or operation exception after settlement.
+ * @note Dispatcher readiness and completion state stay inside plan/Run
+ * ownership. Only move-owned ready submissions cross into the service.
+ */
+void dispatch_planned_tasks(GraphModel& graph,
+                            ExecutionService& execution_service,
+                            SchedulerHostContext& host,
+                            unsigned int worker_count, int node_id,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease);
 

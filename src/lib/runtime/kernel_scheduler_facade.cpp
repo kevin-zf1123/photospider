@@ -68,7 +68,15 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
               if (!scheduler) {
                 return SchedulerReplacementOutcome::Rejected;
               }
-              runtime.replace_scheduler(intent, std::move(scheduler));
+              GraphRuntime::SchedulerExecutionRoute execution_route;
+              if (intent == ComputeIntent::GlobalHighPrecision &&
+                  plan->is_builtin_cpu()) {
+                execution_route.domain = GraphRuntime::SchedulerExecutionRoute::
+                    Domain::ProcessCpuService;
+                execution_route.worker_count = plan->worker_grant();
+              }
+              runtime.replace_scheduler(intent, std::move(scheduler),
+                                        execution_route);
               return SchedulerReplacementOutcome::Success;
             })
             .get();

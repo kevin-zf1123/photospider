@@ -17,6 +17,7 @@
 #include "adapters/opencv/buffer_adapter_opencv.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "compute/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "compute/compute_task_dispatcher.hpp"
+#include "compute/execution_service.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "graph/graph_cache_service.hpp"      // <--- 修正点: 添加缺失的头文件
 #include "graph/graph_model.hpp"              // NOLINT(build/include_subdir)
@@ -393,8 +394,10 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
         ps::GraphCacheService cache_service{
             ps::providers::make_configured_image_artifact_codec(),
             ps::testing::make_yaml_cache_metadata_codec()};
+        ps::compute::ExecutionService execution_service;
         ps::ComputeService compute_svc(traversal_service, cache_service,
-                                       runtime.event_service());
+                                       runtime.event_service(),
+                                       execution_service);
 
         ps::ComputeService::Request request;
         request.node_id = final_node_id;
@@ -536,8 +539,10 @@ TEST(Scheduler,
         ps::GraphCacheService cache_service{
             ps::providers::make_configured_image_artifact_codec(),
             ps::testing::make_yaml_cache_metadata_codec()};
+        ps::compute::ExecutionService execution_service;
         ps::ComputeService compute_svc(traversal_service, cache_service,
-                                       stale_runtime.event_service());
+                                       stale_runtime.event_service(),
+                                       execution_service);
         ps::ComputeService::Request request;
         request.node_id = 3;
         request.cache.precision = "int8";
@@ -586,8 +591,10 @@ TEST(Scheduler,
         ps::GraphCacheService cache_service{
             ps::providers::make_configured_image_artifact_codec(),
             ps::testing::make_yaml_cache_metadata_codec()};
+        ps::compute::ExecutionService execution_service;
         ps::ComputeService compute_svc(traversal_service, cache_service,
-                                       exception_runtime.event_service());
+                                       exception_runtime.event_service(),
+                                       execution_service);
         ps::ComputeService::Request request;
         request.node_id = 3;
         request.cache.precision = "int8";
@@ -656,8 +663,10 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveParameterValueState) {
           ps::GraphCacheService cache_service{
               ps::providers::make_configured_image_artifact_codec(),
               ps::testing::make_yaml_cache_metadata_codec()};
+          ps::compute::ExecutionService execution_service;
           ps::ComputeService compute_service(traversal_service, cache_service,
-                                             runtime.event_service());
+                                             runtime.event_service(),
+                                             execution_service);
           ps::ComputeService::Request request;
           request.node_id = 3;
           request.cache.precision = "int8";

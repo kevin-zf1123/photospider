@@ -207,7 +207,7 @@ bool Kernel::compute_request(const ComputeRequest& request) {
           }
           ScopedComputeRequestState request_state(graph, request);
           ComputeService service(traversal_service_, cache_service_,
-                                 runtime.event_service());
+                                 runtime.event_service(), *execution_service_);
           (void)run_compute_request(service, runtime, graph, request);
           return 0;
         })
@@ -275,7 +275,8 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
                    }
                    ScopedComputeRequestState request_state(graph, request);
                    ComputeService service(traversal_service_, cache_service_,
-                                          runtime.event_service());
+                                          runtime.event_service(),
+                                          *execution_service_);
                    return run_compute_request(service, runtime, graph, request);
                  })
                  .get();
@@ -352,7 +353,8 @@ Kernel::compute_async_request(ComputeRequest request) {
           }
           ScopedComputeRequestState request_state(graph, request);
           ComputeService service(traversal_service_, cache_service_,
-                                 runtime_ptr->event_service());
+                                 runtime_ptr->event_service(),
+                                 *execution_service_);
           (void)run_compute_request(service, *runtime_ptr, graph, request);
           clear_last_error(request.name);
           return AsyncComputeResult{true, std::nullopt};

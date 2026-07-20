@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <future>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -15,8 +16,10 @@
 #include "compute/compute_run.hpp"
 #include "compute/compute_task_submission.hpp"
 #include "compute/dirty_write_buffers.hpp"
+#include "compute/execution_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 #include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps::compute {
@@ -336,6 +339,134 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
   /** @brief Whether the required empty epoch marker initialized a batch. */
   bool batch_initialized_ = false;
 };
+
+/**
+ * @brief Minimal CPU-only observation target for ExecutionService unit tests.
+ *
+ * @throws Nothing through worker-facing SchedulerHostContext callbacks.
+ * @note The fixture owns no Graph or cache state and records only balanced task
+ * context and trace counts.
+ */
+class ExecutionServiceHost final : public SchedulerHostContext {
+ public:
+  /**
+   * @brief Reports the fixture's only physical capability.
+   * @param device Capability requested by the CPU scheduler.
+   * @return True only for CPU.
+   * @throws Nothing.
+   */
+  bool is_device_available(Device device) const noexcept override {
+    return device == Device::CPU;
+  }
+
+  /**
+   * @brief Records one worker-context entry.
+   * @param worker_id CPU worker id, ignored after validation by scheduler.
+   * @param epoch Active nonzero scheduler epoch.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+    (void)worker_id;
+    (void)epoch;
+    context_entries_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Records one balanced worker-context exit.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void clear_task_context() noexcept override {
+    context_exits_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Records one forwarded scheduler trace.
+   * @param action Trace action copied from the service CPU runtime.
+   * @param node_id Planned node id.
+   * @param worker_id Active CPU worker id.
+   * @param epoch Active scheduler epoch.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void log_event(SchedulerTraceAction action, int node_id, int worker_id,
+                 std::uint64_t epoch) noexcept override {
+    (void)action;
+    (void)node_id;
+    (void)worker_id;
+    (void)epoch;
+    trace_events_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Returns worker-context entries observed by the proxy.
+   * @return Total top-level CPU callback entries.
+   * @throws Nothing.
+   */
+  int context_entries() const noexcept {
+    return context_entries_.load(std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Returns balanced worker-context exits.
+   * @return Total top-level CPU callback exits.
+   * @throws Nothing.
+   */
+  int context_exits() const noexcept {
+    return context_exits_.load(std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Returns forwarded trace events.
+   * @return Total trace publications.
+   * @throws Nothing.
+   */
+  int trace_events() const noexcept {
+    return trace_events_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  /** @brief Top-level CPU callback context entries. */
+  std::atomic_int context_entries_{0};
+
+  /** @brief Balanced top-level CPU callback context exits. */
+  std::atomic_int context_exits_{0};
+
+  /** @brief Scheduler traces forwarded while one Run is active. */
+  std::atomic_int trace_events_{0};
+};
+
+/**
+ * @brief Builds one test submission that explicitly retires its logical unit.
+ *
+ * @param lease Matching Run lease transferred into the submission.
+ * @param local_task_id Run-local identity value.
+ * @param trace_node_id Diagnostic node id.
+ * @param entered Counter incremented when the service executes the value.
+ * @return Move-owned ready task.
+ * @throws std::bad_alloc from metadata or executable ownership.
+ * @note The helper is intentionally independent from TaskSubmissionPlan so
+ * service boundary validation can be tested in isolation.
+ */
+ReadyTaskSubmission make_counted_ready_submission(ComputeRunLease lease,
+                                                  uint64_t local_task_id,
+                                                  int trace_node_id,
+                                                  std::atomic_int& entered) {
+  const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
+  return ReadyTaskSubmission(
+      std::move(lease), identity, trace_node_id, true,
+      [&entered](ComputeRunLease& retained_lease,
+                 const ComputeRunTaskIdentity& retained_identity,
+                 SchedulerTaskRuntime& runtime) {
+        if (retained_lease.descriptor().id() != retained_identity.run_id()) {
+          throw std::logic_error(
+              "Counted submission observed a mismatched retained Run.");
+        }
+        entered.fetch_add(1, std::memory_order_relaxed);
+        runtime.dec_tasks_to_complete();
+      });
+}
 
 /**
  * @brief Verifies immutable Run request identity and explicit QoS.
@@ -667,6 +798,232 @@ TEST(ComputeRunTaskIdentity,
   ASSERT_TRUE(second_outcome.has_value());
   EXPECT_EQ(second_outcome->kind, ComputeRunTerminalKind::Failed);
   EXPECT_TRUE(second_outcome->failure == failure);
+}
+
+/**
+ * @brief Verifies one ready value owns immutable metadata and matching lease.
+ *
+ * @note A local id from another Run is legal only with that Run id; pairing
+ * another Run's composite identity with the first lease must fail before queue
+ * admission.
+ */
+TEST(ReadyTaskSubmission,
+     CapturesImmutableMetadataAndRejectsMismatchedRunIdentity) {
+  ComputeRun first(make_test_submission("ready-first", 41, 51));
+  ComputeRun second(make_test_submission("ready-second", 42, 52));
+  ComputeRunLease first_lease = first.acquire_lease();
+  ComputeRunLease second_lease = second.acquire_lease();
+  std::atomic_int entered{0};
+
+  ReadyTaskSubmission submission =
+      make_counted_ready_submission(first_lease, 7, 71, entered);
+  EXPECT_EQ(submission.metadata().run_id(), first.descriptor().id());
+  EXPECT_EQ(submission.metadata().graph_identity(), "ready-first");
+  EXPECT_EQ(submission.metadata().revision().topology_generation, 41U);
+  EXPECT_EQ(submission.metadata().target_node_id(), 51);
+  EXPECT_EQ(submission.metadata().intent(), ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(submission.metadata().quality(), ComputeRunQuality::Full);
+  EXPECT_EQ(submission.metadata().qos().weight, 3U);
+  EXPECT_EQ(submission.metadata().trace_node_id(), 71);
+  EXPECT_TRUE(submission.metadata().is_initial_ready());
+  EXPECT_EQ(submission.identity().local_task_id().value(), 7U);
+
+  const ComputeRunTaskIdentity second_identity = second_lease.task_identity(7);
+  EXPECT_THROW((void)ReadyTaskSubmission(
+                   first_lease, second_identity, 71, true,
+                   [](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                      SchedulerTaskRuntime&) {}),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Verifies one isolated service executes one Run and can be reused.
+ *
+ * @note Equal local task values across sequential Runs remain isolated by
+ * composite Run id. Balanced host context proves the proxy is cleared only
+ * after each accepted callback settles.
+ */
+TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
+  ExecutionService service;
+  ExecutionServiceHost host;
+  ComputeRun first(make_test_submission("service-first", 51, 61));
+  ComputeRun second(make_test_submission("service-second", 52, 62));
+  std::atomic_int entered{0};
+
+  std::vector<ReadyTaskSubmission> first_ready;
+  first_ready.push_back(
+      make_counted_ready_submission(first.acquire_lease(), 0, 61, entered));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, 1U, std::move(first_ready), 1));
+
+  std::vector<ReadyTaskSubmission> second_ready;
+  second_ready.push_back(
+      make_counted_ready_submission(second.acquire_lease(), 0, 62, entered));
+  EXPECT_NO_THROW(
+      service.execute_cpu_run(host, 2U, std::move(second_ready), 1));
+
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(host.context_entries(), 2);
+  EXPECT_EQ(host.context_exits(), 2);
+  EXPECT_GE(host.trace_events(), 2);
+}
+
+/**
+ * @brief Verifies concurrent callers cannot overlap two service Run batches.
+ *
+ * @note The first callback blocks after entering its worker. A second caller
+ * may prepare its ready value but cannot enter the CPU scheduler until the
+ * first batch settles and releases the service Run gate.
+ */
+TEST(ExecutionService, SerializesCompleteConcurrentRunIntervals) {
+  ExecutionService service;
+  ExecutionServiceHost first_host;
+  ExecutionServiceHost second_host;
+  ComputeRun first(make_test_submission("service-gate-first", 53, 63));
+  ComputeRun second(make_test_submission("service-gate-second", 54, 64));
+  std::promise<void> release_first;
+  const std::shared_future<void> first_release =
+      release_first.get_future().share();
+  std::promise<void> first_entered;
+  std::atomic_bool second_entered{false};
+
+  std::vector<ReadyTaskSubmission> first_ready;
+  ComputeRunLease first_lease = first.acquire_lease();
+  const ComputeRunTaskIdentity first_identity = first_lease.task_identity(0);
+  first_ready.emplace_back(std::move(first_lease), first_identity, 63, true,
+                           [&first_entered, first_release](
+                               ComputeRunLease&, const ComputeRunTaskIdentity&,
+                               SchedulerTaskRuntime& runtime) {
+                             first_entered.set_value();
+                             first_release.wait();
+                             runtime.dec_tasks_to_complete();
+                           });
+
+  std::vector<ReadyTaskSubmission> second_ready;
+  ComputeRunLease second_lease = second.acquire_lease();
+  const ComputeRunTaskIdentity second_identity = second_lease.task_identity(0);
+  second_ready.emplace_back(
+      std::move(second_lease), second_identity, 64, true,
+      [&second_entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                        SchedulerTaskRuntime& runtime) {
+        second_entered.store(true, std::memory_order_release);
+        runtime.dec_tasks_to_complete();
+      });
+
+  auto first_future = std::async(
+      std::launch::async,
+      [&service, &first_host, ready = std::move(first_ready)]() mutable {
+        service.execute_cpu_run(first_host, 1U, std::move(ready), 1);
+      });
+  ASSERT_EQ(first_entered.get_future().wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  auto second_future = std::async(
+      std::launch::async,
+      [&service, &second_host, ready = std::move(second_ready)]() mutable {
+        service.execute_cpu_run(second_host, 2U, std::move(ready), 1);
+      });
+
+  EXPECT_EQ(second_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+  EXPECT_FALSE(second_entered.load(std::memory_order_acquire));
+
+  release_first.set_value();
+  EXPECT_NO_THROW(first_future.get());
+  EXPECT_NO_THROW(second_future.get());
+  EXPECT_TRUE(second_entered.load(std::memory_order_acquire));
+  EXPECT_EQ(first_host.context_entries(), first_host.context_exits());
+  EXPECT_EQ(second_host.context_entries(), second_host.context_exits());
+}
+
+/**
+ * @brief Verifies mixed Run ids are rejected before any callback executes.
+ *
+ * @note Both submissions intentionally reuse local id zero. Their Run ids,
+ * rather than that local value, drive service validation.
+ */
+TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
+  ExecutionService service;
+  ExecutionServiceHost host;
+  ComputeRun first(make_test_submission("mixed-first", 61, 71));
+  ComputeRun second(make_test_submission("mixed-second", 62, 72));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> mixed;
+  mixed.push_back(
+      make_counted_ready_submission(first.acquire_lease(), 0, 71, entered));
+  mixed.push_back(
+      make_counted_ready_submission(second.acquire_lease(), 0, 72, entered));
+
+  EXPECT_THROW(service.execute_cpu_run(host, 2U, std::move(mixed), 2),
+               std::invalid_argument);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(host.context_entries(), 0);
+}
+
+/**
+ * @brief Verifies registered worker failure preserves exception identity.
+ *
+ * @note The custom executable publishes through its retained matching lease
+ * and then rethrows the same exception_ptr. The service CPU fence must settle
+ * the batch before surfacing that exact pointer.
+ */
+TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
+  ExecutionService service;
+  ExecutionServiceHost host;
+  GraphModel graph("cache/execution-service-failure");
+  graph.add_node(make_plan_node(81));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  ComputeRun run(
+      make_test_submission("service-failure", graph.topology_generation(), 81));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, 81, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 1U);
+  ComputeRunLease lease = run.acquire_lease();
+  const ComputeRunTaskIdentity identity = lease.task_identity(0);
+  const std::exception_ptr failure =
+      std::make_exception_ptr(std::runtime_error("service exact failure"));
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(lease, identity, 81, true,
+                     [failure](ComputeRunLease& retained_lease,
+                               const ComputeRunTaskIdentity& retained_identity,
+                               SchedulerTaskRuntime&) {
+                       (void)retained_lease.publish_task_failure(
+                           retained_identity, failure);
+                       std::rethrow_exception(failure);
+                     });
+
+  std::exception_ptr observed;
+  try {
+    service.execute_cpu_run(host, 2U, std::move(ready), 1);
+    FAIL() << "Expected service worker failure.";
+  } catch (...) {
+    observed = std::current_exception();
+  }
+  EXPECT_TRUE(observed == failure);
+  const auto terminal = run.terminal_outcome();
+  ASSERT_TRUE(terminal.has_value());
+  EXPECT_EQ(terminal->kind, ComputeRunTerminalKind::Failed);
+  EXPECT_TRUE(terminal->failure == failure);
+  EXPECT_EQ(host.context_entries(), host.context_exits());
+}
+
+/**
+ * @brief Verifies generic scheduler lanes cannot bypass ready-only admission.
+ *
+ * @note This is a private implementation contract and changes no installed
+ * SchedulerTaskRuntime vtable.
+ */
+TEST(ExecutionService, RejectsBorrowedHandlesAndAnonymousCallbacks) {
+  ExecutionService service;
+  EXPECT_THROW(
+      service.submit_initial_task_handles({}, 0, SchedulerTaskPriority::Normal),
+      std::logic_error);
+  EXPECT_THROW(service.submit_ready_task_handles_from_worker(
+                   {}, SchedulerTaskPriority::Normal),
+               std::logic_error);
+  EXPECT_THROW(service.submit_ready_task_any_thread(
+                   [] {}, SchedulerTaskPriority::Normal, std::nullopt),
+               std::logic_error);
 }
 
 /**

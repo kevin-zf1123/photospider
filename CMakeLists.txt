@@ -569,6 +569,7 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_run.cpp
     src/lib/compute/compute_task_dependency_state.cpp
     src/lib/compute/compute_task_submission.cpp
+    src/lib/compute/execution_service.cpp
     src/lib/compute/task_graph_planning.cpp
     src/lib/compute/task_population_strategy.cpp
     src/lib/compute/tiled_input_normalizer.cpp

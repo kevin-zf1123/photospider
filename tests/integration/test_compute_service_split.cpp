@@ -27,6 +27,7 @@
 #include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/downsample_executor.hpp"
+#include "compute/execution_service.hpp"
 #include "compute/intent_update_coordinator.hpp"
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
@@ -2273,7 +2274,8 @@ TEST(TaskGraphPlanningSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request execution_request;
   execution_request.node_id = 2;
   execution_request.intent = ComputeIntent::GlobalHighPrecision;
@@ -2401,7 +2403,8 @@ TEST(ComputeRunProductPath,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
 
   ComputeService::Request hp_request;
   hp_request.node_id = 404;
@@ -2454,7 +2457,8 @@ TEST(ComputeRunProductPath,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 1;
   request.graph_identity = info.name;
@@ -2486,7 +2490,8 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
 
   ComputeService::Request full;
   full.node_id = 2;
@@ -2535,7 +2540,8 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2596,7 +2602,8 @@ TEST(ComputeServiceSplit,
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    ComputeService service(traversal, cache, events);
+    compute::ExecutionService execution_service;
+    ComputeService service(traversal, cache, events, execution_service);
     ComputeService::Request request;
     request.node_id = 2;
     request.cache.precision = "float32";
@@ -2648,7 +2655,8 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2676,7 +2684,8 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2728,7 +2737,8 @@ TEST(ComputeServiceSplit,
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    ComputeService service(traversal, cache, events);
+    compute::ExecutionService execution_service;
+    ComputeService service(traversal, cache, events, execution_service);
     ComputeService::Request request;
     request.node_id = 2;
     request.cache.precision = "float32";
@@ -2908,7 +2918,8 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
   request.intent = ComputeIntent::RealTimeUpdate;
@@ -2954,7 +2965,8 @@ TEST(ComputeServiceSplit,
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    ComputeService service(traversal, cache, events);
+    compute::ExecutionService execution_service;
+    ComputeService service(traversal, cache, events, execution_service);
     ComputeService::Request request;
     request.node_id = 2;
     request.intent = ComputeIntent::RealTimeUpdate;
@@ -2994,7 +3006,8 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -3041,7 +3054,8 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -3205,7 +3219,8 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
 
   ComputeService::Request request;
   request.node_id = 1;
@@ -3344,7 +3359,8 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   graph.mutate_node_runtime_state(
       1, [](auto& state) { state.cached_output_high_precision.reset(); });
 
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 1;
   request.cache.precision = "int8";
@@ -3824,7 +3840,8 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
 
   ComputeService::Request request;
   request.node_id = 2;
@@ -3887,7 +3904,8 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
 
   ComputeService::Request full_request;
   full_request.node_id = 2;
@@ -3947,7 +3965,8 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
 
   ComputeService::Request full_request;
   full_request.node_id = 2;
@@ -4002,6 +4021,12 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   constexpr char kGraphName[] = "split_hp_parity";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
                   .has_value());
+  const auto service_route =
+      testing::KernelTestAccess::runtime(kernel, kGraphName)
+          .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(service_route.domain,
+            GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService);
+  EXPECT_EQ(service_route.worker_count, 2u);
 
   GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
   Node source = make_node(1, "split_plan", "source");
