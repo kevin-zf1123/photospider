@@ -560,6 +560,28 @@ std::uint64_t StabilizedDirtyParameters::retained_memory_bytes() const {
   return estimate.bytes();
 }
 
+/** @copydoc
+ * StabilizedDirtyParameters::missing_staged_output_entry_retained_memory_bytes
+ */
+std::uint64_t
+StabilizedDirtyParameters::missing_staged_output_entry_retained_memory_bytes(
+    const std::vector<int>& anticipated_node_ids) const {
+  RetainedMemoryEstimator estimate("StabilizedDirtyParameters pending outputs");
+  const NodeOutput empty_output;
+  std::unordered_set<int> unique_node_ids;
+  unique_node_ids.reserve(anticipated_node_ids.size());
+  for (int node_id : anticipated_node_ids) {
+    if (!unique_node_ids.insert(node_id).second ||
+        staged_outputs_.find(node_id) != staged_outputs_.end()) {
+      continue;
+    }
+    estimate.add_objects<decltype(staged_outputs_)::value_type>();
+    estimate.add_objects<void*>(3U);
+    estimate.add_bytes(node_output_dynamic_retained_memory_bytes(empty_output));
+  }
+  return estimate.bytes();
+}
+
 /** @copydoc stabilize_connected_dirty_parameters */
 std::shared_ptr<const StabilizedDirtyParameters>
 stabilize_connected_dirty_parameters(
@@ -752,6 +774,8 @@ stabilize_connected_dirty_parameters(
       RetainedMemoryEstimator shared_demand("connected-parameter preflight");
       shared_demand.add_bytes(lease.retained_memory_bytes());
       shared_demand.add_bytes(result->retained_memory_bytes());
+      shared_demand.add_bytes(
+          result->missing_staged_output_entry_retained_memory_bytes({node_id}));
       shared_demand.add_objects<std::vector<Device>>();
       shared_demand.add_objects<Device>(
           static_cast<std::uint64_t>(available_devices_owner->capacity()));
@@ -994,6 +1018,12 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   }
   source_first_request.additional_shared_retained_memory_bytes =
       hp_shared_demand.bytes();
+  source_first_request.phase_shared_retained_memory_bytes =
+      [&graph, &hp_write_buffer, &compute_plan = prepared.compute_plan](
+          const std::vector<int>& task_ids) {
+        return hp_write_buffer.missing_entry_retained_memory_bytes(
+            graph, planned_nodes_for_task_ids(compute_plan, task_ids));
+      };
   source_first_request.source_task_ids = &prepared.source_task_ids;
   source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
   source_first_request.dirty_generation =
@@ -1187,13 +1217,21 @@ NodeOutput& RealTimeDirtyExecutor::execute(
   source_first_request.selection = &prepared.selection;
   RetainedMemoryEstimator rt_shared_demand("RT dirty request");
   rt_shared_demand.add_bytes(prepared_dirty_retained_memory_bytes(prepared));
-  rt_shared_demand.add_bytes(rt_write_buffer.retained_memory_bytes());
   if (request.stabilized_parameters) {
     rt_shared_demand.add_bytes(
         request.stabilized_parameters->retained_memory_bytes());
   }
   source_first_request.additional_shared_retained_memory_bytes =
       rt_shared_demand.bytes();
+  source_first_request.phase_shared_retained_memory_bytes =
+      [&rt_write_buffer, &compute_plan = prepared.compute_plan](
+          const std::vector<int>& task_ids) {
+        RetainedMemoryEstimator estimate("RT dirty staging phase");
+        estimate.add_bytes(rt_write_buffer.retained_memory_bytes());
+        estimate.add_bytes(rt_write_buffer.missing_entry_retained_memory_bytes(
+            planned_nodes_for_task_ids(compute_plan, task_ids)));
+        return estimate.bytes();
+      };
   source_first_request.source_task_ids = &prepared.source_task_ids;
   source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
   source_first_request.dirty_generation =

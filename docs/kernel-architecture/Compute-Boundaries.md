@@ -113,10 +113,16 @@ retained storage is charged once. Uniform per-task retained and scratch demand
 is multiplied by maximum callback concurrency, while ready entries and bytes
 are multiplied by every logical task so dependency release is already covered.
 Initial and dependent entries use the same estimator and insertion boundary.
-The estimator counts only visible Host-owned C++ storage; image pixels and
-opaque backend, device, plugin, or allocator-owned allocations are not
-fabricated. Current built-in adapters declare zero scratch only because they own
-no separately metered fixed Host scratch.
+Copied graph-identity metadata is charged by actual string capacity plus its
+terminator. Before each dirty or connected-preflight service segment, the
+adapter adds current staging/snapshot storage and deduplicated missing
+staging-map entries, including ordered-map linkage and deterministic empty or
+seeded visible output metadata. Later dirty phases re-evaluate the live map so
+earlier source entries are not counted twice. The estimator counts only visible
+Host-owned C++ storage; future operation-produced image pixels, named-value
+growth, and opaque backend, device, plugin, or allocator-owned allocations are
+not fabricated. Current built-in adapters declare zero scratch only because
+they own no separately metered fixed Host scratch.
 
 Issue #70 deliberately removes the installed inline
 `kSchedulerWorkerProcessMax` constant. Source consumers that referenced it must

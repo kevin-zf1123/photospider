@@ -137,6 +137,25 @@ class HighPrecisionDirtyWriteBuffer {
    */
   std::uint64_t retained_memory_bytes() const;
 
+  /**
+   * @brief Estimates map storage for anticipated entries not yet retained.
+   * @param graph Stable graph supplying any HP output that a new entry will
+   * deterministically seed.
+   * @param anticipated_node_ids Nodes whose current service phase may stage;
+   * duplicate ids and ids already present in this buffer are ignored.
+   * @return Checked value, tree-linkage, bookkeeping, and minimum visible
+   * output-metadata bytes for missing entries only.
+   * @throws GraphError when a node is absent or checked arithmetic overflows.
+   * @throws std::bad_alloc when temporary deduplication storage cannot grow.
+   * @note Seeded visible output metadata is charged from current graph state;
+   * otherwise the deterministic empty `NodeOutput` metadata created by
+   * ensure_output() is charged. Future operation-produced pixels, named-value
+   * growth, and opaque backend/plugin allocations remain excluded.
+   */
+  std::uint64_t missing_entry_retained_memory_bytes(
+      const GraphModel& graph,
+      const std::vector<int>& anticipated_node_ids) const;
+
  private:
   /**
    * @brief Complete staged HP state for one graph node.
@@ -261,6 +280,22 @@ class RealtimeProxyWriteBuffer {
    * are excluded.
    */
   std::uint64_t retained_memory_bytes() const;
+
+  /**
+   * @brief Estimates map storage for anticipated entries not yet retained.
+   * @param anticipated_node_ids Nodes whose current service phase may stage;
+   * duplicate ids and ids already present in this buffer are ignored.
+   * @return Checked value, tree-linkage, bookkeeping, and minimum visible
+   * output-metadata bytes for missing entries only.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @throws std::bad_alloc when temporary deduplication storage cannot grow.
+   * @note Seeded visible output metadata is charged from current proxy state;
+   * otherwise the deterministic empty `NodeOutput` metadata created by
+   * ensure_output() is charged. Future operation-produced pixels, named-value
+   * growth, and opaque backend/plugin allocations remain excluded.
+   */
+  std::uint64_t missing_entry_retained_memory_bytes(
+      const std::vector<int>& anticipated_node_ids) const;
 
  private:
   /**

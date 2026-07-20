@@ -178,6 +178,18 @@ struct DirtySourceFirstRunRequest {
    */
   std::uint64_t additional_shared_retained_memory_bytes = 0U;
 
+  /**
+   * @brief Computes phase-local retained bytes immediately before admission.
+   *
+   * @note The callback receives the exact source or downstream task ids for
+   * that synchronous segment. It may inspect request-owned staging state to
+   * charge current storage plus predictable missing map entries without
+   * recounting keys created by an earlier source phase. It must not execute
+   * operations or mutate staging state.
+   */
+  std::function<std::uint64_t(const std::vector<int>&)>  // NOLINT
+      phase_shared_retained_memory_bytes;
+
   /** @brief Dirty source task ids submitted before downstream work. */
   const std::vector<int>* source_task_ids = nullptr;
 
@@ -377,14 +389,15 @@ ComputePlan prune_dirty_snapshot_task_graph(const ComputePlan& node_cache_plan,
                                             const GraphModel& graph);
 
 /**
- * @brief Resolves task ids back to unique node ids for compatibility reports.
+ * @brief Resolves phase task ids to unique node ids for retained admission.
  *
  * @param compute_plan Plan containing task-to-node ownership.
- * @param task_ids Task ids selected by a work set or overlay.
- * @return Node ids in planned-work order with duplicates removed.
+ * @param task_ids Exact task ids selected for one service segment.
+ * @return Node ids in first-task occurrence order with duplicates removed.
+ * @throws std::out_of_range when a task id is outside the plan.
  * @throws std::bad_alloc if temporary set or vector allocation fails.
- * @note Dirty execution must not call this helper for scheduling. It exists
- * only for legacy diagnostics that need node-level labels.
+ * @note The result predicts Host-owned per-node staging entries only. It
+ * carries no scheduling, dependency, or execution authority.
  */
 std::vector<int> planned_nodes_for_task_ids(const ComputePlan& compute_plan,
                                             const std::vector<int>& task_ids);
@@ -688,6 +701,16 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
             static_cast<std::uint64_t>(sizeof(RunTask)));
     std::function<void(int)> owned_run_task(std::move(run_task));
     ComputeRunLease phase_lease = request.run->acquire_lease();
+    const auto additional_phase_retained_bytes =
+        [&request](const std::vector<int>& task_ids) {
+          RetainedMemoryEstimator estimate("dirty phase retained demand");
+          estimate.add_bytes(request.additional_shared_retained_memory_bytes);
+          if (request.phase_shared_retained_memory_bytes) {
+            estimate.add_bytes(
+                request.phase_shared_retained_memory_bytes(task_ids));
+          }
+          return estimate.bytes();
+        };
 
     if (!source_task_ids.empty()) {
       auto source_context = std::make_shared<DirtyReadyTaskContext>(
@@ -700,7 +723,7 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           *request.host, std::move(source_submissions),
           static_cast<int>(source_task_ids.size()),
           source_context->run_resource_demand(
-              request.additional_shared_retained_memory_bytes));
+              additional_phase_retained_bytes(source_task_ids)));
     }
     if (request.before_downstream) {
       request.before_downstream();
@@ -728,7 +751,7 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           *request.host, std::move(downstream_submissions),
           static_cast<int>(downstream_task_ids.size()),
           downstream_context->run_resource_demand(
-              request.additional_shared_retained_memory_bytes));
+              additional_phase_retained_bytes(downstream_task_ids)));
     }
     return;
   }

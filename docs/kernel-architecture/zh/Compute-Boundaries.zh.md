@@ -97,9 +97,14 @@ scheduler planning/ownership 位于 `src/lib/scheduler/`。这些类都是私有
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
 scratch demand 按最大 callback 并发数相乘，ready entry 与 byte 则按所有逻辑任务相乘，因此
 dependency release 已被预先覆盖。初始与 dependent entry 使用同一个 estimator 和 insertion
-boundary。Estimator 只计算所有权与大小均可见的 Host-owned C++ storage；不会伪造 image pixel
-以及不透明的 backend、device、plugin 或 allocator-owned allocation。当前内建 adapter 声明
-scratch 为零，仅因为它们不拥有需要独立计量的固定 Host scratch。
+boundary。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在每个 dirty
+或 connected-preflight service segment 之前，adapter 会加入当前 staging/snapshot storage 与
+去重后的缺失 staging-map entry，其中包括有序 map linkage，以及确定性的空 output metadata
+或 seeded 可见 output metadata。后续 dirty phase 会针对 live map 重新计算，因此不会重复计费
+先前 source entry。Estimator 只计算所有权与大小均可见的 Host-owned C++ storage；不会伪造
+未来由 operation 产生的 image pixel、named-value 增长，以及不透明的 backend、device、plugin
+或 allocator-owned allocation。当前内建 adapter 声明 scratch 为零，仅因为它们不拥有需要
+独立计量的固定 Host scratch。
 
 Issue #70 有意删除已安装的 inline `kSchedulerWorkerProcessMax` 常量。引用该常量的源码 consumer
 必须停止依赖这项 policy constant；不提供 alias 或已安装 public replacement。组合 limits 现在使用

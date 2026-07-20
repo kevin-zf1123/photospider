@@ -604,7 +604,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Calculates the exact structural vector used for CPU Run admission.
    * @param representative Any submission from the Run, used for immutable
-   * graph-identity metadata size.
+   * graph-identity metadata capacity.
    * @param total_task_count Positive complete logical task count.
    * @param run_resource_demand Shared and per-task adapter declarations.
    * @return Checked CPU, retained, scratch, ready-entry, and ready-byte vector.
@@ -762,6 +762,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param graph_identity Stable copied metadata string.
    * @return Queue, shared-control, store-handle, and string envelope bytes.
    * @throws GraphError when checked structural arithmetic overflows.
+   * @note String storage uses the copied value's actual capacity plus its null
+   * terminator, not logical character count.
    */
   static std::uint64_t service_submission_envelope_bytes(
       const std::string& graph_identity);

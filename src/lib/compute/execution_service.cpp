@@ -248,7 +248,8 @@ struct ExecutionService::CpuRunAdmissionEstimate final {
  * @return Queue entry, shared owner, ready-store handle, and string bytes.
  * @throws GraphError when checked structural arithmetic overflows.
  * @note The returned envelope excludes adapter-declared capture bytes so they
- * can be added exactly once in the relevant lifecycle dimension.
+ * can be added exactly once in the relevant lifecycle dimension. Copied string
+ * storage is charged by actual capacity plus its null terminator.
  */
 std::uint64_t ExecutionService::service_submission_envelope_bytes(
     const std::string& graph_identity) {
@@ -256,7 +257,7 @@ std::uint64_t ExecutionService::service_submission_envelope_bytes(
   estimate.add_objects<QueueEntry>();
   estimate.add_objects<std::shared_ptr<QueueEntry>>();
   estimate.add_shared_control_block();
-  estimate.add_bytes(static_cast<std::uint64_t>(graph_identity.size()));
+  estimate.add_bytes(static_cast<std::uint64_t>(graph_identity.capacity()));
   estimate.add_bytes(1U);
   return estimate.bytes();
 }

@@ -2,6 +2,7 @@
 
 #include <new>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -187,6 +188,36 @@ std::uint64_t HighPrecisionDirtyWriteBuffer::retained_memory_bytes() const {
   return estimate.bytes();
 }
 
+/** @copydoc HighPrecisionDirtyWriteBuffer::missing_entry_retained_memory_bytes
+ */
+std::uint64_t
+HighPrecisionDirtyWriteBuffer::missing_entry_retained_memory_bytes(
+    const GraphModel& graph,
+    const std::vector<int>& anticipated_node_ids) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  RetainedMemoryEstimator estimate(
+      "HighPrecisionDirtyWriteBuffer pending entries");
+  const NodeOutput empty_output;
+  std::unordered_set<int> unique_node_ids;
+  unique_node_ids.reserve(anticipated_node_ids.size());
+  for (int node_id : anticipated_node_ids) {
+    if (!unique_node_ids.insert(node_id).second ||
+        entries_.find(node_id) != entries_.end()) {
+      continue;
+    }
+    estimate.add_objects<decltype(entries_)::value_type>();
+    estimate.add_objects<void*>(3U);
+    const Node& node = graph.node(node_id);
+    const NodeOutput* seeded_output =
+        seed_existing_outputs_ && node.cached_output_high_precision
+            ? &*node.cached_output_high_precision
+            : &empty_output;
+    estimate.add_bytes(
+        node_output_dynamic_retained_memory_bytes(*seeded_output));
+  }
+  return estimate.bytes();
+}
+
 HighPrecisionDirtyWriteBuffer::Entry&
 HighPrecisionDirtyWriteBuffer::ensure_entry_locked(const Node& node) {
   Entry& entry = entries_[node.id];
@@ -279,6 +310,32 @@ std::uint64_t RealtimeProxyWriteBuffer::retained_memory_bytes() const {
       estimate.add_bytes(
           node_output_dynamic_retained_memory_bytes(*entry.state.output));
     }
+  }
+  return estimate.bytes();
+}
+
+/** @copydoc RealtimeProxyWriteBuffer::missing_entry_retained_memory_bytes */
+std::uint64_t RealtimeProxyWriteBuffer::missing_entry_retained_memory_bytes(
+    const std::vector<int>& anticipated_node_ids) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  RetainedMemoryEstimator estimate("RealtimeProxyWriteBuffer pending entries");
+  const NodeOutput empty_output;
+  std::unordered_set<int> unique_node_ids;
+  unique_node_ids.reserve(anticipated_node_ids.size());
+  for (int node_id : anticipated_node_ids) {
+    if (!unique_node_ids.insert(node_id).second ||
+        entries_.find(node_id) != entries_.end()) {
+      continue;
+    }
+    estimate.add_objects<decltype(entries_)::value_type>();
+    estimate.add_objects<void*>(3U);
+    const RealtimeProxyGraph::NodeState* state =
+        proxy_graph_.find_state(node_id);
+    const NodeOutput* seeded_output =
+        seed_existing_outputs_ && state && state->output ? &*state->output
+                                                         : &empty_output;
+    estimate.add_bytes(
+        node_output_dynamic_retained_memory_bytes(*seeded_output));
   }
   return estimate.bytes();
 }

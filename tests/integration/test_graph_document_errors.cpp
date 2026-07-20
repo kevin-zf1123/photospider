@@ -132,8 +132,9 @@ std::string read_document(const std::filesystem::path& path) {
  * @param host Embedded Host under test.
  * @return Nothing.
  * @throws std::runtime_error If Host rejects the deterministic scheduler.
- * @note The serial scheduler avoids consuming the process worker budget while
- *       preserving the real Kernel graph-load lifecycle.
+ * @note The serial scheduler declares zero CPU slots in the
+ *       `ExecutionService`-owned Host `ResourceLedger` while preserving the
+ *       real Kernel graph-load lifecycle.
  */
 void configure_document_host(Host& host) {
   HostSchedulerConfig config;

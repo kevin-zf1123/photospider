@@ -190,6 +190,22 @@ class StabilizedDirtyParameters {
    */
   std::uint64_t retained_memory_bytes() const;
 
+  /**
+   * @brief Estimates map storage for preflight outputs not yet retained.
+   * @param anticipated_node_ids Unique closure nodes that the current service
+   * segment may insert; duplicates and already staged ids are ignored.
+   * @return Checked value, ordered-map linkage, and minimum empty-output
+   * metadata bytes for missing entries.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @throws std::bad_alloc when temporary deduplication storage cannot grow.
+   * @note The deterministic empty `NodeOutput` metadata retained by every
+   * result is included. Future operation-produced pixels, named-value growth,
+   * and opaque backend/plugin allocations remain outside pre-admission
+   * accounting.
+   */
+  std::uint64_t missing_staged_output_entry_retained_memory_bytes(
+      const std::vector<int>& anticipated_node_ids) const;
+
  private:
   friend std::shared_ptr<const StabilizedDirtyParameters>
   stabilize_connected_dirty_parameters(GraphModel&, GraphTraversalService&, int,

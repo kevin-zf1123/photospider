@@ -240,19 +240,18 @@ ComputePlan prune_dirty_snapshot_task_graph(const ComputePlan& node_cache_plan,
 
 std::vector<int> planned_nodes_for_task_ids(const ComputePlan& compute_plan,
                                             const std::vector<int>& task_ids) {
-  std::unordered_set<int> selected_task_ids(task_ids.begin(), task_ids.end());
   std::vector<int> node_ids;
   std::unordered_set<int> selected_node_ids;
-  for (const auto& work : compute_plan.planned_work) {
-    bool selected = false;
-    for (int task_id : work.task_ids) {
-      if (selected_task_ids.count(task_id)) {
-        selected = true;
-        break;
-      }
+  node_ids.reserve(task_ids.size());
+  selected_node_ids.reserve(task_ids.size());
+  for (int task_id : task_ids) {
+    if (task_id < 0 ||
+        task_id >= static_cast<int>(compute_plan.task_graph.tasks.size())) {
+      throw std::out_of_range("Dirty phase task id is outside ComputePlan.");
     }
-    if (selected && selected_node_ids.insert(work.node_id).second) {
-      node_ids.push_back(work.node_id);
+    const int node_id = compute_plan.task_graph.tasks.at(task_id).node_id;
+    if (selected_node_ids.insert(node_id).second) {
+      node_ids.push_back(node_id);
     }
   }
   return node_ids;

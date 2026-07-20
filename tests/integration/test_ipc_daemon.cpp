@@ -4461,9 +4461,10 @@ TEST(IpcDaemonOperationPlugins,
  *         propagation mismatches.
  * @throws std::bad_alloc, std::runtime_error, std::system_error, or filesystem
  *         exceptions if daemon, socket, request, graph, or result setup fails.
- * @note The transitional process budget charges the Host's fixed CPU pool once
- *       rather than once per built-in CPU Graph binding. Legacy scheduler
- *       capacity propagation is covered by its own integration tests.
+ * @note The Host's fixed `ExecutionService` pool is pre-existing process
+ *       infrastructure and is not separately charged as a scheduler owner.
+ *       Built-in CPU Graph bindings share that pool; legacy scheduler capacity
+ *       propagation is covered by its own integration tests.
  */
 TEST(IpcDaemonSchedulers,
      RealDaemonPreservesDefaultsAndSharesFixedCpuPoolAcrossGraphs) {

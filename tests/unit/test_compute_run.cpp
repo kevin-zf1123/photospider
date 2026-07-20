@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <limits>
@@ -23,6 +24,7 @@
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/execution_service.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#include "core/image_buffer_processing.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
@@ -31,6 +33,7 @@
 #include "photospider/scheduler/scheduler_task_runtime.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
+#include "runtime/graph_runtime.hpp"
 #include "support/cache_test_dependencies.hpp"
 
 namespace ps::compute {
@@ -94,6 +97,38 @@ std::atomic_int g_resource_product_operation_calls{0};
 std::atomic_int g_resource_preflight_operation_calls{0};
 
 /**
+ * @brief Counts real HP dirty product-operation entry.
+ *
+ * @note The owning test resets the process-lifetime counter after all prior
+ * service work has synchronously drained.
+ */
+std::atomic_int g_resource_dirty_hp_operation_calls{0};
+
+/**
+ * @brief Counts real RT dirty product-operation entry.
+ *
+ * @note The RT executor selects the dedicated HP-monolithic fallback key, so
+ * this counter still observes the real RT staging and service adapter path.
+ */
+std::atomic_int g_resource_dirty_rt_operation_calls{0};
+
+/**
+ * @brief Builds one small CPU image output for dirty product tests.
+ * @param value Named scalar retained with the deterministic image.
+ * @return Owned 8-by-8 FLOAT32 output.
+ * @throws GraphError or std::bad_alloc when CPU storage cannot allocate.
+ * @note Pixel capacity is intentionally outside issue #70 retained admission;
+ * the named value keeps successful output validation deterministic.
+ */
+NodeOutput make_resource_dirty_output(int value) {
+  NodeOutput output;
+  output.image_buffer =
+      make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  output.data["value"] = value;
+  return output;
+}
+
+/**
  * @brief Registers deterministic operations used by product-adapter tests.
  *
  * @return Nothing.
@@ -125,6 +160,22 @@ void ensure_resource_product_operations_registered() {
               output.data["value"] = 9;
               return output;
             }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_resource", "dirty_hp",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              g_resource_dirty_hp_operation_calls.fetch_add(
+                  1, std::memory_order_relaxed);
+              return make_resource_dirty_output(11);
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_resource", "dirty_rt",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              g_resource_dirty_rt_operation_calls.fetch_add(
+                  1, std::memory_order_relaxed);
+              return make_resource_dirty_output(12);
+            }));
   });
 }
 
@@ -145,29 +196,67 @@ Node make_resource_product_node(int id) {
 }
 
 /**
- * @brief Builds a one-task dirty plan for source-first adapter admission.
+ * @brief Builds one real dirty-product node with an existing HP extent.
  *
- * @param node_id Graph-local trace identity carried by the task.
- * @param domain HP or RT task domain under test.
- * @return Self-contained one-task plan with task zero initially ready.
- * @throws std::bad_alloc when vector storage cannot allocate.
+ * @param node_id Graph-local node identity.
+ * @param subtype Registered HP or RT-fallback operation subtype.
+ * @return Node with an 8-by-8 reusable HP output and full-frame ROI.
+ * @throws GraphError or std::bad_alloc when node/output ownership allocates.
+ * @note The reusable output supplies deterministic dirty planning geometry;
+ * successful execution replaces it through the production staging buffer.
  */
-ComputePlan make_resource_dirty_plan(int node_id, DirtyDomain domain) {
-  ComputePlan plan;
-  plan.execution_order.push_back(node_id);
-  plan.planned_nodes.push_back(node_id);
-  PlannedTask task;
-  task.task_id = 0;
-  task.node_id = node_id;
-  task.kind = PlannedTaskKind::Monolithic;
-  task.domain = domain;
-  task.whole_output = true;
-  task.source_boundary_eligible = true;
-  task.dirty_selected = true;
-  plan.task_graph.tasks.push_back(std::move(task));
-  plan.task_graph.initial_task_ids.push_back(0);
-  return plan;
+Node make_resource_dirty_product_node(int node_id, const std::string& subtype) {
+  Node node = make_resource_product_node(node_id);
+  node.subtype = subtype;
+  node.cached_output_high_precision = make_resource_dirty_output(3);
+  node.hp_roi = PixelRect{0, 0, 8, 8};
+  node.hp_version = 1;
+  return node;
 }
+
+/**
+ * @brief Removes one test-owned GraphRuntime directory at scope exit.
+ *
+ * @throws Nothing from cleanup.
+ * @note Removal uses error-code overloads so temporary cleanup never masks a
+ * resource-admission assertion.
+ */
+class ScopedResourceRuntimeDirectory final {
+ public:
+  /**
+   * @brief Prepares one deterministic temporary directory.
+   * @param label Stable test-case suffix.
+   * @throws std::bad_alloc when path ownership cannot allocate.
+   * @throws std::filesystem::filesystem_error when the system temporary root
+   * cannot be resolved.
+   */
+  explicit ScopedResourceRuntimeDirectory(const std::string& label)
+      : path_(std::filesystem::temp_directory_path() /
+              ("photospider-issue70-" + label)) {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+
+  /**
+   * @brief Removes runtime directories created by the owning test.
+   * @throws Nothing.
+   */
+  ~ScopedResourceRuntimeDirectory() noexcept {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+
+  /**
+   * @brief Returns the runtime root.
+   * @return Immutable path borrowed for this guard's lifetime.
+   * @throws Nothing.
+   */
+  const std::filesystem::path& path() const noexcept { return path_; }
+
+ private:
+  /** @brief Test-owned root removed at destruction. */
+  std::filesystem::path path_;
+};
 
 /**
  * @brief Deterministic owned-callback runtime for completion-isolation tests.
@@ -769,6 +858,145 @@ ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
       resources.scratch_bytes, resources.ready_entries,
       resources.ready_bytes,
   };
+}
+
+/**
+ * @brief Estimates the mandatory zero-adapter service envelope.
+ * @param graph_identity Metadata identity copied by every logical submission.
+ * @param total_task_count Positive logical submission count.
+ * @param worker_count Positive fixed service worker count.
+ * @return Complete service-only resource vector.
+ * @throws Standard Run, service, metadata, or estimator exceptions unchanged.
+ * @note The representative declares no adapter bytes, so the result isolates
+ * the service Run/submission/ready envelopes used to construct limit
+ * intervals for real product adapters.
+ */
+ResourceVector estimate_service_only_resources(
+    const std::string& graph_identity, int total_task_count = 1,
+    unsigned int worker_count = 1U) {
+  ExecutionService probe(worker_count);
+  ComputeRun run(make_test_submission(graph_identity, 1U, 1));
+  std::atomic_int entered{0};
+  ReadyTaskSubmission representative =
+      make_counted_ready_submission(run.acquire_lease(), 0U, 1, entered);
+  return probe.estimate_cpu_run_resources(representative, total_task_count,
+                                          CpuRunResourceDemand{});
+}
+
+/**
+ * @brief Proves one exact service-only limit admits a zero-adapter Run.
+ * @param graph_identity Metadata identity matching the product rejection path.
+ * @param service_only Exact envelope previously calculated for one task.
+ * @return Nothing.
+ * @throws Standard Run, service, or worker exceptions unchanged.
+ * @note Successful settlement and a zero five-dimensional snapshot prove the
+ * lower endpoint of the product-test interval is itself usable.
+ */
+void expect_service_only_envelope_executes(const std::string& graph_identity,
+                                           const ResourceVector& service_only) {
+  ExecutionService service(1U, execution_limits(service_only));
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission(graph_identity, 1U, 1));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> submissions;
+  submissions.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 1, entered));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(submissions), 1,
+                                          CpuRunResourceDemand{}));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves one predictable map-entry charge closes an exact interval.
+ * @param graph_identity Stable metadata label reused for every interval point.
+ * @param current_shared_bytes Already retained staging/snapshot bytes.
+ * @param missing_entry_bytes Predictable structural bytes for one insertion.
+ * @return Nothing.
+ * @throws Standard Run, service, metadata, or estimator exceptions unchanged.
+ * @note The lower exact capacity admits the current state but rejects the
+ * inevitable insertion before callback entry. Adding exactly the missing
+ * entry bytes admits the same callback and every path releases its root
+ * reservation.
+ */
+void expect_pending_entry_interval(const std::string& graph_identity,
+                                   std::uint64_t current_shared_bytes,
+                                   std::uint64_t missing_entry_bytes) {
+  ASSERT_GT(missing_entry_bytes, 0U);
+  ExecutionService probe(1U);
+  std::atomic_int entered{0};
+  ComputeRun representative_run(make_test_submission(graph_identity, 1U, 1));
+  ReadyTaskSubmission representative = make_counted_ready_submission(
+      representative_run.acquire_lease(), 0U, 1, entered);
+  const ResourceVector current_required = probe.estimate_cpu_run_resources(
+      representative, 1, CpuRunResourceDemand{current_shared_bytes, {}});
+  const ResourceVector complete_required = probe.estimate_cpu_run_resources(
+      representative, 1,
+      CpuRunResourceDemand{current_shared_bytes + missing_entry_bytes, {}});
+  EXPECT_EQ(complete_required.retained_memory_bytes -
+                current_required.retained_memory_bytes,
+            missing_entry_bytes);
+  EXPECT_EQ(complete_required.cpu_slots, current_required.cpu_slots);
+  EXPECT_EQ(complete_required.scratch_bytes, current_required.scratch_bytes);
+  EXPECT_EQ(complete_required.ready_entries, current_required.ready_entries);
+  EXPECT_EQ(complete_required.ready_bytes, current_required.ready_bytes);
+
+  ExecutionService lower_service(1U, execution_limits(current_required));
+  ExecutionServiceHost lower_host;
+  ComputeRun lower_run(make_test_submission(graph_identity, 2U, 1));
+  std::vector<ReadyTaskSubmission> lower_ready;
+  lower_ready.push_back(
+      make_counted_ready_submission(lower_run.acquire_lease(), 0U, 1, entered));
+  EXPECT_NO_THROW(lower_service.execute_cpu_run(
+      lower_host, std::move(lower_ready), 1,
+      CpuRunResourceDemand{current_shared_bytes, {}}));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(lower_service.resource_snapshot().reserved, ResourceVector{});
+
+  ComputeRun rejected_run(make_test_submission(graph_identity, 3U, 1));
+  std::vector<ReadyTaskSubmission> rejected_ready;
+  rejected_ready.push_back(make_counted_ready_submission(
+      rejected_run.acquire_lease(), 0U, 1, entered));
+  EXPECT_THROW(
+      lower_service.execute_cpu_run(
+          lower_host, std::move(rejected_ready), 1,
+          CpuRunResourceDemand{current_shared_bytes + missing_entry_bytes, {}}),
+      GraphError);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(lower_service.resource_snapshot().reserved, ResourceVector{});
+
+  ExecutionService complete_service(1U, execution_limits(complete_required));
+  ExecutionServiceHost complete_host;
+  ComputeRun complete_run(make_test_submission(graph_identity, 4U, 1));
+  std::vector<ReadyTaskSubmission> complete_ready;
+  complete_ready.push_back(make_counted_ready_submission(
+      complete_run.acquire_lease(), 0U, 1, entered));
+  EXPECT_NO_THROW(complete_service.execute_cpu_run(
+      complete_host, std::move(complete_ready), 1,
+      CpuRunResourceDemand{current_shared_bytes + missing_entry_bytes, {}}));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(complete_service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Builds one HP or RT descriptor for dirty product paths.
+ * @param graph_identity Stable GraphRuntime/session identity.
+ * @param topology_generation Current graph topology identity.
+ * @param node_id Dirty target node.
+ * @param intent HP or RT single-domain intent.
+ * @return Valid full-HP or interactive-RT submission.
+ * @throws std::bad_alloc when graph identity ownership cannot allocate.
+ */
+ComputeRunSubmission make_dirty_resource_submission(
+    const std::string& graph_identity, std::uint64_t topology_generation,
+    int node_id, ComputeIntent intent) {
+  ComputeRunSubmission submission =
+      make_test_submission(graph_identity, topology_generation, node_id);
+  submission.intent = intent;
+  submission.quality = intent == ComputeIntent::RealTimeUpdate
+                           ? ComputeRunQuality::Interactive
+                           : ComputeRunQuality::Full;
+  return submission;
 }
 
 /**
@@ -1440,19 +1668,76 @@ TEST(ExecutionService, SeparatesSharedConcurrentAndLogicalTaskResources) {
 }
 
 /**
+ * @brief Verifies metadata string capacity uses both admission multipliers.
+ *
+ * @return Nothing.
+ * @throws Standard Run, metadata, service, or estimator exceptions unchanged.
+ * @note The chosen short and long strings have different actual copied
+ * capacities on supported standard libraries, and that capacity delta differs
+ * from their size delta. Retained bytes scale it by two fixed workers while
+ * ready bytes scale it by five logical tasks.
+ */
+TEST(ExecutionService,
+     ChargesActualMetadataStringCapacityForReadyAndExecutionEnvelopes) {
+  constexpr int kLogicalTaskCount = 5;
+  constexpr unsigned int kWorkerCount = 2U;
+  const std::string short_identity(1U, 's');
+  const std::string long_identity(24U, 'l');
+  ExecutionService service(kWorkerCount);
+  std::atomic_int entered{0};
+  ComputeRun short_run(make_test_submission(short_identity, 1U, 1));
+  ComputeRun long_run(make_test_submission(long_identity, 1U, 1));
+  ReadyTaskSubmission short_representative =
+      make_counted_ready_submission(short_run.acquire_lease(), 0U, 1, entered);
+  ReadyTaskSubmission long_representative =
+      make_counted_ready_submission(long_run.acquire_lease(), 0U, 1, entered);
+
+  const std::string& copied_short =
+      short_representative.metadata().graph_identity();
+  const std::string& copied_long =
+      long_representative.metadata().graph_identity();
+  ASSERT_GT(copied_long.capacity(), copied_short.capacity());
+  const std::uint64_t capacity_delta = static_cast<std::uint64_t>(
+      copied_long.capacity() - copied_short.capacity());
+  const std::uint64_t size_delta =
+      static_cast<std::uint64_t>(copied_long.size() - copied_short.size());
+  ASSERT_NE(capacity_delta, size_delta);
+
+  const ResourceVector short_resources = service.estimate_cpu_run_resources(
+      short_representative, kLogicalTaskCount, CpuRunResourceDemand{});
+  const ResourceVector long_resources = service.estimate_cpu_run_resources(
+      long_representative, kLogicalTaskCount, CpuRunResourceDemand{});
+  EXPECT_EQ(long_resources.retained_memory_bytes -
+                short_resources.retained_memory_bytes,
+            kWorkerCount * capacity_delta);
+  EXPECT_EQ(long_resources.ready_bytes - short_resources.ready_bytes,
+            static_cast<std::uint64_t>(kLogicalTaskCount) * capacity_delta);
+  EXPECT_EQ(long_resources.cpu_slots, short_resources.cpu_slots);
+  EXPECT_EQ(long_resources.ready_entries, short_resources.ready_entries);
+}
+
+/**
  * @brief Exercises full-HP product admission below and above its estimate.
  *
  * @return Nothing.
  * @throws Standard allocation, registry, codec, or graph exceptions from
  * fixture setup.
- * @note The one-byte retained-memory service must reject before operation
- * entry. A default-capacity service then executes the same real
- * `TaskSubmissionPlan` adapter and releases its complete root reservation.
+ * @note The exact service-only envelope is first proved usable, then rejects
+ * the real `TaskSubmissionPlan` adapter before operation entry because it
+ * omits the Run-owned plan/runner interval. A default-capacity service
+ * executes the same production adapter and releases its complete root
+ * reservation.
  */
 TEST(ExecutionServiceProductResources,
      FullPlanRejectsSmallLimitAndExecutesWithDefaultLimit) {
   ensure_resource_product_operations_registered();
   g_resource_product_operation_calls.store(0, std::memory_order_relaxed);
+  const std::string graph_identity = "resource-full-product";
+  const ResourceVector service_only =
+      estimate_service_only_resources(graph_identity);
+  ASSERT_NO_FATAL_FAILURE(
+      expect_service_only_envelope_executes(graph_identity, service_only));
+
   GraphModel graph("cache/resource-full-product");
   graph.add_node(make_resource_product_node(101));
   graph.validate_topology();
@@ -1461,13 +1746,10 @@ TEST(ExecutionServiceProductResources,
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
 
-  ExecutionResourceLimits small_limits =
-      ExecutionService::default_resource_limits();
-  small_limits.retained_memory_bytes = 1U;
-  ExecutionService small_service(1U, small_limits);
+  ExecutionService small_service(1U, execution_limits(service_only));
   ExecutionServiceHost small_host;
-  ComputeRun small_run(make_test_submission("resource-full-small",
-                                            graph.topology_generation(), 101));
+  ComputeRun small_run(
+      make_test_submission(graph_identity, graph.topology_generation(), 101));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& small_plan = small_run.emplace_submission_plan(
       graph, traversal, 101, std::vector<Device>{Device::CPU});
@@ -1493,6 +1775,23 @@ TEST(ExecutionServiceProductResources,
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Running));
   ComputeRunLease small_lease = small_run.acquire_lease();
+  const std::uint64_t adapter_shared_bytes =
+      small_lease.retained_memory_bytes();
+  ASSERT_GT(adapter_shared_bytes, 0U);
+  std::atomic_int estimate_entered{0};
+  ReadyTaskSubmission adapter_representative =
+      make_counted_ready_submission(small_lease, 0U, 101, estimate_entered);
+  const ResourceVector with_adapter = small_service.estimate_cpu_run_resources(
+      adapter_representative, 1,
+      CpuRunResourceDemand{adapter_shared_bytes, {}});
+  EXPECT_EQ(
+      with_adapter.retained_memory_bytes - service_only.retained_memory_bytes,
+      adapter_shared_bytes);
+  EXPECT_EQ(with_adapter.cpu_slots, service_only.cpu_slots);
+  EXPECT_EQ(with_adapter.scratch_bytes, service_only.scratch_bytes);
+  EXPECT_EQ(with_adapter.ready_entries, service_only.ready_entries);
+  EXPECT_EQ(with_adapter.ready_bytes, service_only.ready_bytes);
+
   EXPECT_THROW(dispatch_planned_tasks(graph, small_service, small_host, 101,
                                       small_plan, small_lease),
                GraphError);
@@ -1505,8 +1804,8 @@ TEST(ExecutionServiceProductResources,
 
   ExecutionService large_service(1U);
   ExecutionServiceHost large_host;
-  ComputeRun large_run(make_test_submission("resource-full-large",
-                                            graph.topology_generation(), 101));
+  ComputeRun large_run(
+      make_test_submission(graph_identity, graph.topology_generation(), 101));
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& large_plan = large_run.emplace_submission_plan(
       graph, traversal, 101, std::vector<Device>{Device::CPU});
@@ -1548,80 +1847,124 @@ TEST(ExecutionServiceProductResources,
  * @brief Exercises the shared dirty adapter for HP and RT service Runs.
  *
  * @return Nothing.
- * @throws Standard allocation or service exceptions from fixture setup.
- * @note Both intent routes use the real `DirtyReadyTaskContext` estimator. A
- * one-byte retained limit rejects before task entry; default capacity executes
- * exactly once and returns every reserved dimension to zero.
+ * @throws Standard allocation, filesystem, graph, or service exceptions from
+ * fixture setup.
+ * @note Each exact service-only envelope is proved usable before the real
+ * HP/RT executor plans and stages production work. That lower endpoint rejects
+ * before registered operation entry; default capacity then commits exactly
+ * one output and returns every reserved dimension to zero.
  */
 TEST(ExecutionServiceProductResources,
      DirtyHpAndRtRejectSmallLimitAndExecuteWithDefaultLimit) {
+  ensure_resource_product_operations_registered();
   for (const ComputeIntent intent :
        {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
     const bool is_rt = intent == ComputeIntent::RealTimeUpdate;
     SCOPED_TRACE(is_rt ? "RT" : "HP");
-    const DirtyDomain domain =
-        is_rt ? DirtyDomain::RealTime : DirtyDomain::HighPrecision;
-    const ComputePlan plan =
-        make_resource_dirty_plan(is_rt ? 112 : 111, domain);
-    const std::vector<int> source_task_ids{0};
-    const std::vector<int> downstream_task_ids;
+    const int node_id = is_rt ? 112 : 111;
+    const std::string graph_identity =
+        is_rt ? "resource-dirty-rt-product" : "resource-dirty-hp-product";
+    const std::string subtype = is_rt ? "dirty_rt" : "dirty_hp";
+    std::atomic_int& operation_calls =
+        is_rt ? g_resource_dirty_rt_operation_calls
+              : g_resource_dirty_hp_operation_calls;
+    operation_calls.store(0, std::memory_order_relaxed);
 
-    ExecutionResourceLimits small_limits =
-        ExecutionService::default_resource_limits();
-    small_limits.retained_memory_bytes = 1U;
-    ExecutionService small_service(1U, small_limits);
-    ExecutionServiceHost small_host;
-    ComputeRunSubmission small_submission = make_test_submission(
-        is_rt ? "resource-dirty-rt-small" : "resource-dirty-hp-small", 1U,
-        is_rt ? 112 : 111);
-    small_submission.intent = intent;
-    small_submission.quality =
-        is_rt ? ComputeRunQuality::Interactive : ComputeRunQuality::Full;
-    ComputeRun small_run(std::move(small_submission));
-    DirtySourceFirstRunRequest small_request;
-    small_request.intent = intent;
-    small_request.execution_service = &small_service;
-    small_request.host = &small_host;
-    small_request.run = &small_run;
-    small_request.compute_plan = &plan;
-    small_request.additional_shared_retained_memory_bytes = 4096U;
-    small_request.source_task_ids = &source_task_ids;
-    small_request.downstream_task_ids = &downstream_task_ids;
-    std::atomic_int small_entered{0};
-    EXPECT_THROW(run_dirty_source_first(small_request,
-                                        [&small_entered](int task_id) {
-                                          EXPECT_EQ(task_id, 0);
-                                          small_entered.fetch_add(
-                                              1, std::memory_order_relaxed);
-                                        }),
-                 GraphError);
-    EXPECT_EQ(small_entered.load(std::memory_order_relaxed), 0);
-    EXPECT_EQ(small_host.context_entries(), 0);
+    const ResourceVector service_only =
+        estimate_service_only_resources(graph_identity);
+    ASSERT_NO_FATAL_FAILURE(
+        expect_service_only_envelope_executes(graph_identity, service_only));
+
+    ScopedResourceRuntimeDirectory directory(is_rt ? "dirty-rt-product"
+                                                   : "dirty-hp-product");
+    GraphRuntime::Info info;
+    info.name = graph_identity;
+    info.root = directory.path();
+    info.cache_root = directory.path() / "cache";
+    GraphRuntime runtime(info);
+    GraphModel& graph = runtime.model();
+    graph.add_node(make_resource_dirty_product_node(node_id, subtype));
+    graph.validate_topology();
+    GraphTraversalService traversal;
+    GraphEventService events;
+    DirtyUpdateRequest request;
+    request.node_id = node_id;
+    request.cache_precision = "float32";
+    request.disable_disk_cache = true;
+    request.dirty_roi = PixelRect{0, 0, 8, 8};
+    request.suppress_graph_downsample = !is_rt;
+    HighPrecisionDirtyExecutor hp_executor(traversal, events);
+    RealTimeDirtyExecutor rt_executor(traversal, events);
+
+    ExecutionService small_service(1U, execution_limits(service_only));
+    ComputeRun small_run(make_dirty_resource_submission(
+        graph_identity, graph.topology_generation(), node_id, intent));
+    ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
+    if (is_rt) {
+      EXPECT_THROW((void)rt_executor.execute(
+                       graph, runtime.realtime_proxy_graph(), &runtime, request,
+                       &small_run, &small_service),
+                   GraphError);
+    } else {
+      EXPECT_THROW((void)hp_executor.execute(
+                       graph, runtime.realtime_proxy_graph(), &runtime, request,
+                       &small_run, &small_service),
+                   GraphError);
+    }
+    EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(small_service.resource_snapshot().reserved, ResourceVector{});
+    ASSERT_TRUE(graph.node(node_id).cached_output_high_precision.has_value());
+    EXPECT_EQ(graph.node(node_id)
+                  .cached_output_high_precision->data.at("value")
+                  .as_int64(),
+              3);
+    EXPECT_EQ(runtime.realtime_proxy_graph().find_output(node_id), nullptr);
+
+    ComputeRunLease retained_small_run = small_run.acquire_lease();
+    const std::uint64_t retained_run_bytes =
+        retained_small_run.retained_memory_bytes();
+    ASSERT_GT(retained_run_bytes, 0U);
+    std::atomic_int estimate_entered{0};
+    ReadyTaskSubmission run_representative = make_counted_ready_submission(
+        retained_small_run, 0U, node_id, estimate_entered);
+    const ResourceVector with_run = small_service.estimate_cpu_run_resources(
+        run_representative, 1, CpuRunResourceDemand{retained_run_bytes, {}});
+    EXPECT_EQ(
+        with_run.retained_memory_bytes - service_only.retained_memory_bytes,
+        retained_run_bytes);
 
     ExecutionService large_service(1U);
-    ExecutionServiceHost large_host;
-    ComputeRunSubmission large_submission = make_test_submission(
-        is_rt ? "resource-dirty-rt-large" : "resource-dirty-hp-large", 2U,
-        is_rt ? 112 : 111);
-    large_submission.intent = intent;
-    large_submission.quality =
-        is_rt ? ComputeRunQuality::Interactive : ComputeRunQuality::Full;
-    ComputeRun large_run(std::move(large_submission));
-    DirtySourceFirstRunRequest large_request = small_request;
-    large_request.execution_service = &large_service;
-    large_request.host = &large_host;
-    large_request.run = &large_run;
-    std::atomic_int large_entered{0};
-    EXPECT_NO_THROW(
-        run_dirty_source_first(large_request, [&large_entered](int task_id) {
-          EXPECT_EQ(task_id, 0);
-          large_entered.fetch_add(1, std::memory_order_relaxed);
-        }));
-    EXPECT_EQ(large_entered.load(std::memory_order_relaxed), 1);
-    EXPECT_EQ(large_host.context_entries(), 1);
-    EXPECT_EQ(large_host.context_entries(), large_host.context_exits());
+    ComputeRun large_run(make_dirty_resource_submission(
+        graph_identity, graph.topology_generation(), node_id, intent));
+    ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
+    NodeOutput* output = nullptr;
+    if (is_rt) {
+      EXPECT_NO_THROW(output = &rt_executor.execute(
+                          graph, runtime.realtime_proxy_graph(), &runtime,
+                          request, &large_run, &large_service));
+    } else {
+      EXPECT_NO_THROW(output = &hp_executor.execute(
+                          graph, runtime.realtime_proxy_graph(), &runtime,
+                          request, &large_run, &large_service));
+    }
+    ASSERT_NE(output, nullptr);
+    EXPECT_EQ(output->data.at("value").as_int64(), is_rt ? 12 : 11);
+    EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(large_run.phase(), ComputeRunPhase::CommitPending);
     EXPECT_EQ(large_service.resource_snapshot().reserved, ResourceVector{});
+    if (is_rt) {
+      ASSERT_NE(runtime.realtime_proxy_graph().find_output(node_id), nullptr);
+      EXPECT_EQ(graph.node(node_id)
+                    .cached_output_high_precision->data.at("value")
+                    .as_int64(),
+                3);
+    } else {
+      ASSERT_TRUE(graph.node(node_id).cached_output_high_precision.has_value());
+      EXPECT_EQ(graph.node(node_id)
+                    .cached_output_high_precision->data.at("value")
+                    .as_int64(),
+                11);
+    }
   }
 }
 
@@ -1631,14 +1974,21 @@ TEST(ExecutionServiceProductResources,
  * @return Nothing.
  * @throws Standard allocation, registry, graph, or service exceptions from
  * fixture setup.
- * @note The small service rejects the product preflight callback before the
- * registered producer runs. Default capacity executes and retains the named
- * output in the immutable stabilization snapshot with exact root release.
+ * @note The exact zero-adapter envelope is proved usable, then rejects the
+ * production preflight adapter before the registered producer runs because
+ * its Run/snapshot/staging interval is absent. Default capacity executes and
+ * retains the named output with exact root release.
  */
 TEST(ExecutionServiceProductResources,
      PreflightRejectsSmallLimitAndExecutesWithDefaultLimit) {
   ensure_resource_product_operations_registered();
   g_resource_preflight_operation_calls.store(0, std::memory_order_relaxed);
+  const std::string graph_identity = "resource-preflight-product";
+  const ResourceVector service_only =
+      estimate_service_only_resources(graph_identity);
+  ASSERT_NO_FATAL_FAILURE(
+      expect_service_only_envelope_executes(graph_identity, service_only));
+
   GraphModel graph("cache/resource-preflight-product");
   Node producer = make_resource_product_node(201);
   producer.subtype = "parameter_source";
@@ -1649,13 +1999,10 @@ TEST(ExecutionServiceProductResources,
   graph.validate_topology();
   GraphTraversalService traversal;
 
-  ExecutionResourceLimits small_limits =
-      ExecutionService::default_resource_limits();
-  small_limits.retained_memory_bytes = 1U;
-  ExecutionService small_service(1U, small_limits);
+  ExecutionService small_service(1U, execution_limits(service_only));
   ExecutionServiceHost small_host;
-  ComputeRun small_run(make_test_submission("resource-preflight-small",
-                                            graph.topology_generation(), 202));
+  ComputeRun small_run(
+      make_test_submission(graph_identity, graph.topology_generation(), 202));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
   EXPECT_THROW((void)stabilize_connected_dirty_parameters(
                    graph, traversal, 202, 1U, graph.topology_generation(),
@@ -1665,11 +2012,22 @@ TEST(ExecutionServiceProductResources,
       g_resource_preflight_operation_calls.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(small_host.context_entries(), 0);
   EXPECT_EQ(small_service.resource_snapshot().reserved, ResourceVector{});
+  ComputeRunLease retained_small_run = small_run.acquire_lease();
+  const std::uint64_t retained_run_bytes =
+      retained_small_run.retained_memory_bytes();
+  ASSERT_GT(retained_run_bytes, 0U);
+  std::atomic_int estimate_entered{0};
+  ReadyTaskSubmission run_representative = make_counted_ready_submission(
+      retained_small_run, 0U, 201, estimate_entered);
+  const ResourceVector with_run = small_service.estimate_cpu_run_resources(
+      run_representative, 1, CpuRunResourceDemand{retained_run_bytes, {}});
+  EXPECT_EQ(with_run.retained_memory_bytes - service_only.retained_memory_bytes,
+            retained_run_bytes);
 
   ExecutionService large_service(1U);
   ExecutionServiceHost large_host;
-  ComputeRun large_run(make_test_submission("resource-preflight-large",
-                                            graph.topology_generation(), 202));
+  ComputeRun large_run(
+      make_test_submission(graph_identity, graph.topology_generation(), 202));
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
   std::shared_ptr<const StabilizedDirtyParameters> stabilized;
   EXPECT_NO_THROW(stabilized = stabilize_connected_dirty_parameters(
@@ -1685,6 +2043,111 @@ TEST(ExecutionServiceProductResources,
   EXPECT_EQ(large_host.context_entries(), 1);
   EXPECT_EQ(large_host.context_entries(), large_host.context_exits());
   EXPECT_EQ(large_service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies HP, RT, and preflight map growth is predicted exactly once.
+ *
+ * @return Nothing.
+ * @throws Standard staging, metadata, allocation, or service exceptions
+ * unchanged.
+ * @note Duplicate ids collapse to one charge, existing HP/RT keys contribute
+ * zero, empty-output metadata closes the observed insertion delta exactly,
+ * and seeded projections never understate cloned Host-owned metadata. An exact
+ * current-state capacity rejects before callback entry while
+ * current-plus-one-entry capacity succeeds.
+ */
+TEST(ExecutionServiceProductResources,
+     PredictableStagingEntriesCloseExactAdmissionIntervals) {
+  constexpr int kFirstNodeId = 301;
+  constexpr int kSecondNodeId = 302;
+  constexpr int kSeededNodeId = 303;
+  GraphModel staging_graph("cache/resource-staging-entries");
+  staging_graph.add_node(make_resource_product_node(kFirstNodeId));
+  staging_graph.add_node(make_resource_product_node(kSecondNodeId));
+  staging_graph.add_node(
+      make_resource_dirty_product_node(kSeededNodeId, "dirty_hp"));
+  staging_graph.validate_topology();
+
+  HighPrecisionDirtyWriteBuffer hp_buffer(false);
+  const std::uint64_t hp_current = hp_buffer.retained_memory_bytes();
+  const std::uint64_t hp_one = hp_buffer.missing_entry_retained_memory_bytes(
+      staging_graph, {kFirstNodeId});
+  ASSERT_GT(hp_one, 0U);
+  EXPECT_EQ(hp_buffer.missing_entry_retained_memory_bytes(
+                staging_graph, {kFirstNodeId, kFirstNodeId}),
+            hp_one);
+  EXPECT_EQ(hp_buffer.missing_entry_retained_memory_bytes(
+                staging_graph, {kFirstNodeId, kSecondNodeId}),
+            2U * hp_one);
+  ASSERT_NO_FATAL_FAILURE(
+      expect_pending_entry_interval("resource-staging-hp", hp_current, hp_one));
+  const Node& hp_node = staging_graph.node(kFirstNodeId);
+  (void)hp_buffer.ensure_output(hp_node);
+  EXPECT_EQ(hp_buffer.retained_memory_bytes() - hp_current, hp_one);
+  EXPECT_EQ(hp_buffer.missing_entry_retained_memory_bytes(staging_graph,
+                                                          {kFirstNodeId}),
+            0U);
+  EXPECT_EQ(hp_buffer.missing_entry_retained_memory_bytes(
+                staging_graph, {kFirstNodeId, kSecondNodeId}),
+            hp_one);
+  HighPrecisionDirtyWriteBuffer seeded_hp_buffer(true);
+  const std::uint64_t seeded_hp_current =
+      seeded_hp_buffer.retained_memory_bytes();
+  const std::uint64_t seeded_hp_projected =
+      seeded_hp_buffer.missing_entry_retained_memory_bytes(staging_graph,
+                                                           {kSeededNodeId});
+  (void)seeded_hp_buffer.ensure_output(staging_graph.node(kSeededNodeId));
+  EXPECT_GE(seeded_hp_projected,
+            seeded_hp_buffer.retained_memory_bytes() - seeded_hp_current);
+
+  RealtimeProxyGraph proxy_graph;
+  RealtimeProxyWriteBuffer rt_buffer(proxy_graph, false);
+  const std::uint64_t rt_current = rt_buffer.retained_memory_bytes();
+  const std::uint64_t rt_one =
+      rt_buffer.missing_entry_retained_memory_bytes({kFirstNodeId});
+  ASSERT_GT(rt_one, 0U);
+  EXPECT_EQ(rt_buffer.missing_entry_retained_memory_bytes(
+                {kFirstNodeId, kFirstNodeId}),
+            rt_one);
+  EXPECT_EQ(rt_buffer.missing_entry_retained_memory_bytes(
+                {kFirstNodeId, kSecondNodeId}),
+            2U * rt_one);
+  ASSERT_NO_FATAL_FAILURE(
+      expect_pending_entry_interval("resource-staging-rt", rt_current, rt_one));
+  (void)rt_buffer.ensure_output(kFirstNodeId);
+  EXPECT_EQ(rt_buffer.retained_memory_bytes() - rt_current, rt_one);
+  EXPECT_EQ(rt_buffer.missing_entry_retained_memory_bytes({kFirstNodeId}), 0U);
+  EXPECT_EQ(rt_buffer.missing_entry_retained_memory_bytes(
+                {kFirstNodeId, kSecondNodeId}),
+            rt_one);
+  proxy_graph.synchronize_with_graph(staging_graph);
+  RealtimeProxyGraph::NodeState seeded_proxy_state;
+  seeded_proxy_state.output = make_resource_dirty_output(4);
+  proxy_graph.commit_node_state(kSeededNodeId, std::move(seeded_proxy_state));
+  RealtimeProxyWriteBuffer seeded_rt_buffer(proxy_graph, true);
+  const std::uint64_t seeded_rt_current =
+      seeded_rt_buffer.retained_memory_bytes();
+  const std::uint64_t seeded_rt_projected =
+      seeded_rt_buffer.missing_entry_retained_memory_bytes({kSeededNodeId});
+  (void)seeded_rt_buffer.ensure_output(kSeededNodeId);
+  EXPECT_GE(seeded_rt_projected,
+            seeded_rt_buffer.retained_memory_bytes() - seeded_rt_current);
+
+  StabilizedDirtyParameters preflight;
+  const std::uint64_t preflight_current = preflight.retained_memory_bytes();
+  const std::uint64_t preflight_one =
+      preflight.missing_staged_output_entry_retained_memory_bytes(
+          {kFirstNodeId});
+  ASSERT_GT(preflight_one, 0U);
+  EXPECT_EQ(preflight.missing_staged_output_entry_retained_memory_bytes(
+                {kFirstNodeId, kFirstNodeId}),
+            preflight_one);
+  EXPECT_EQ(preflight.missing_staged_output_entry_retained_memory_bytes(
+                {kFirstNodeId, kSecondNodeId}),
+            2U * preflight_one);
+  ASSERT_NO_FATAL_FAILURE(expect_pending_entry_interval(
+      "resource-staging-preflight", preflight_current, preflight_one));
 }
 
 /**
