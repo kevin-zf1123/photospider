@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -986,6 +987,99 @@ class LargeDirtyPhaseTask final {
 
 static_assert(sizeof(LargeDirtyPhaseTask) > sizeof(std::function<void(int)>),
               "Large dirty phase task must exceed std::function storage.");
+
+/**
+ * @brief Adversarial holder whose move deliberately preserves its source.
+ *
+ * The move constructor copies the owned `std::function` target instead of
+ * clearing the source. This models the valid-but-unspecified nonempty
+ * moved-from state that production must handle without depending on the
+ * current standard-library implementation.
+ *
+ * @throws std::bad_alloc when callable ownership must allocate.
+ * @note Null assignment is non-throwing and releases exactly this holder's
+ * target. The fixture is private test code and never crosses a product ABI.
+ */
+class MovePreservingDirtyCallableHolder final {
+ public:
+  /**
+   * @brief Takes one oversized callable into holder ownership.
+   * @param task Callable target moved into private `std::function` storage.
+   * @throws std::bad_alloc when the non-SSO target allocation fails.
+   * @note Successful construction retains exactly one registered target.
+   */
+  explicit MovePreservingDirtyCallableHolder(LargeDirtyPhaseTask task)
+      : task_(std::move(task)) {}
+
+  /**
+   * @brief Prevents ordinary copying from bypassing the adversarial move seam.
+   * @param other Source holder that remains unchanged.
+   * @throws Nothing because copying is unavailable.
+   */
+  MovePreservingDirtyCallableHolder(
+      const MovePreservingDirtyCallableHolder& other) = delete;
+
+  /**
+   * @brief Creates a destination target while intentionally preserving source.
+   * @param other Source holder left nonempty after this move.
+   * @throws std::bad_alloc when copying the non-SSO function target fails.
+   * @note Both holders own independently tracked targets after success.
+   */
+  MovePreservingDirtyCallableHolder(MovePreservingDirtyCallableHolder&& other)
+      : task_(other.task_) {}
+
+  /**
+   * @brief Prevents replacing an existing adversarial holder by copy.
+   * @param other Source holder that remains unchanged.
+   * @return No value because copy assignment is unavailable.
+   * @throws Nothing because copying is unavailable.
+   */
+  MovePreservingDirtyCallableHolder& operator=(
+      const MovePreservingDirtyCallableHolder& other) = delete;
+
+  /**
+   * @brief Prevents replacing an existing adversarial holder by move.
+   * @param other Source holder that remains unchanged.
+   * @return No value because move assignment is unavailable.
+   * @throws Nothing because move assignment is unavailable.
+   */
+  MovePreservingDirtyCallableHolder& operator=(
+      MovePreservingDirtyCallableHolder&& other) = delete;
+
+  /**
+   * @brief Explicitly releases this holder's callable target.
+   * @param null_value Required null marker.
+   * @return This now-empty holder.
+   * @throws Nothing.
+   */
+  MovePreservingDirtyCallableHolder& operator=(
+      std::nullptr_t null_value) noexcept {
+    task_ = null_value;
+    return *this;
+  }
+
+  /**
+   * @brief Reports whether this holder still owns a callable target.
+   * @return True while a target remains live.
+   * @throws Nothing.
+   */
+  bool has_target() const noexcept { return static_cast<bool>(task_); }
+
+  /**
+   * @brief Transfers this destination copy into context callable ownership.
+   * @return Nonempty function previously owned by this holder.
+   * @throws Nothing.
+   * @note The explicit exchange leaves this temporary holder empty even when
+   * the standard library preserves a moved-from function target.
+   */
+  std::function<void(int)> release_for_context() && noexcept {
+    return std::exchange(task_, nullptr);
+  }
+
+ private:
+  /** @brief Oversized callable storage copied by the source-preserving move. */
+  std::function<void(int)> task_;
+};
 
 /**
  * @brief Captures one real execute_cpu_run initial-storage retirement event.
@@ -2339,6 +2433,99 @@ TEST(ExecutionService,
 }
 
 /**
+ * @brief Proves the product context-transfer helper clears a preserved source.
+ *
+ * @return Nothing.
+ * @throws Standard plan, Run, callable, or context exceptions unchanged.
+ * @note The adversarial holder's move leaves both source and destination
+ * targets live. The factory builds a real `DirtyReadyTaskContext`; after the
+ * same helper used by production returns, only that context target may remain.
+ * A second factory throws before returning a destination and proves temporary
+ * ownership unwinds while the outer holder remains available for normal RAII.
+ * Deleting the helper's explicit null assignment makes this test fail on every
+ * standard-library moved-from representation.
+ */
+TEST(DirtyExecutionCommon,
+     ContextTransferExplicitlyClearsMovePreservingOuterCallable) {
+  constexpr int kNodeId = 130;
+  const std::vector<int> task_ids{0};
+
+  ComputePlan compute_plan;
+  compute_plan.intent = ComputeIntent::GlobalHighPrecision;
+  compute_plan.target_node_id = kNodeId;
+  compute_plan.parallel = true;
+  compute_plan.execution_order = {kNodeId};
+  compute_plan.planned_nodes = {kNodeId};
+  compute_plan.task_graph.tasks.resize(1U);
+  compute_plan.task_graph.tasks[0].task_id = 0;
+  compute_plan.task_graph.tasks[0].node_id = kNodeId;
+  compute_plan.task_graph.initial_task_ids = task_ids;
+
+  ComputeRun run(
+      make_test_submission("dirty-callable-transfer-boundary", 1U, kNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
+
+  const std::uint64_t callable_bytes = owned_callable_retained_memory_bytes(
+      static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
+  LargeDirtyPhaseTaskProbe success_probe;
+  MovePreservingDirtyCallableHolder outer_holder{
+      LargeDirtyPhaseTask(success_probe)};
+  ASSERT_TRUE(outer_holder.has_target());
+  ASSERT_EQ(success_probe.live_targets.load(std::memory_order_relaxed), 1);
+
+  bool factory_observed_preserved_source = false;
+  int factory_live_targets = -1;
+  auto context = make_dirty_context_and_release_outer_callable(
+      outer_holder, [&](MovePreservingDirtyCallableHolder transferred_holder) {
+        factory_observed_preserved_source =
+            outer_holder.has_target() && transferred_holder.has_target();
+        factory_live_targets =
+            success_probe.live_targets.load(std::memory_order_relaxed);
+        return std::make_shared<DirtyReadyTaskContext>(
+            compute_plan, nullptr, task_ids,
+            std::move(transferred_holder).release_for_context(), callable_bytes,
+            run.acquire_lease(), true, SchedulerTaskPriority::Normal);
+      });
+
+  EXPECT_TRUE(factory_observed_preserved_source);
+  EXPECT_EQ(factory_live_targets, 2);
+  EXPECT_FALSE(outer_holder.has_target());
+  ASSERT_NE(context, nullptr);
+  EXPECT_EQ(success_probe.live_targets.load(std::memory_order_relaxed), 1);
+  context.reset();
+  EXPECT_EQ(success_probe.live_targets.load(std::memory_order_relaxed), 0);
+
+  LargeDirtyPhaseTaskProbe failure_probe;
+  {
+    MovePreservingDirtyCallableHolder failure_outer_holder{
+        LargeDirtyPhaseTask(failure_probe)};
+    bool throwing_factory_observed_preserved_source = false;
+    int throwing_factory_live_targets = -1;
+    EXPECT_THROW(
+        (void)make_dirty_context_and_release_outer_callable(
+            failure_outer_holder,
+            [&](MovePreservingDirtyCallableHolder transferred_holder)
+                -> std::shared_ptr<DirtyReadyTaskContext> {
+              throwing_factory_observed_preserved_source =
+                  failure_outer_holder.has_target() &&
+                  transferred_holder.has_target();
+              throwing_factory_live_targets =
+                  failure_probe.live_targets.load(std::memory_order_relaxed);
+              throw std::runtime_error(
+                  "Synthetic dirty context construction failure.");
+            }),
+        std::runtime_error);
+    EXPECT_TRUE(throwing_factory_observed_preserved_source);
+    EXPECT_EQ(throwing_factory_live_targets, 2);
+    EXPECT_TRUE(failure_outer_holder.has_target());
+    EXPECT_EQ(failure_probe.live_targets.load(std::memory_order_relaxed), 1);
+  }
+  EXPECT_EQ(failure_probe.live_targets.load(std::memory_order_relaxed), 0);
+}
+
+/**
  * @brief Proves dirty source charges its live outer callable copy exactly once.
  *
  * @return Nothing.
@@ -2354,11 +2541,11 @@ TEST(ExecutionService,
  * then succeeds at the independently calculated single-target vector. A
  * combined source-to-downstream call directly observes two targets during
  * source demand, one outer target between phases, one context target before
- * downstream admission, and zero targets after settlement. This proves the
- * moved-from outer holder is explicitly released before downstream demand
- * without relying on its implementation-selected post-move state. Removing
- * the production source addition makes the reduced-cap endpoint execute and
- * fails this test.
+ * downstream admission, and zero targets after settlement. This preserves
+ * product-path integration coverage, while the source-preserving holder test
+ * on the same production helper supplies the implementation-independent reset
+ * proof. Removing the production source addition makes the reduced-cap
+ * endpoint execute and fails this test.
  */
 TEST(ExecutionServiceProductResources,
      DirtySourceChargesOuterCallableCopyWithoutDownstreamDoubleCount) {

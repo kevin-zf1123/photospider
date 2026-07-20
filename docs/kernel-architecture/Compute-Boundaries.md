@@ -144,11 +144,16 @@ During a process-service dirty source segment, the outer task
 context. Source demand therefore adds one audited callable payload alongside
 the context-owned target. The downstream context receives that outer callable
 by move. Because C++17 does not require a moved-from `std::function` to be
-empty, the adapter explicitly clears the outer holder after successful context
-construction and before submission construction, phase retained-demand
-calculation, or admission. Construction failure instead unwinds the outer
-owner normally. Downstream demand consequently covers only the context-owned
-target without relying on a standard-library moved-from representation.
+empty, one private context-construction helper makes destination construction
+and outer release inseparable: the factory must return the owned context
+successfully, then the helper explicitly clears the outer holder before any
+submission construction, phase retained-demand calculation, or admission can
+run. Construction failure instead unwinds the outer owner and factory
+temporaries normally. Downstream demand consequently covers only the
+context-owned target without relying on a standard-library moved-from
+representation. A durable regression invokes that same production helper with
+an adversarial holder whose move preserves its source target, so deleting the
+explicit release fails independently of the active standard library.
 
 Issue #70 deliberately removes the installed inline
 `kSchedulerWorkerProcessMax` constant. Source consumers that referenced it must

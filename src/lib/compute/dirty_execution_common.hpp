@@ -695,6 +695,37 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
 };
 
 /**
+ * @brief Constructs a dirty context before releasing its outer callable owner.
+ *
+ * @tparam CallableHolder Move source accepted by ContextFactory and resettable
+ * through a non-throwing null assignment.
+ * @tparam ContextFactory Factory that accepts CallableHolder as an rvalue and
+ * returns an owning destination value.
+ * @param callable_holder Outer callable owner transferred to the destination.
+ * @param context_factory Factory that must finish destination construction
+ * before the outer owner is released.
+ * @return Owning destination returned by context_factory after the outer
+ * holder has been explicitly cleared.
+ * @throws Any exception propagated by context_factory or destination return
+ * movement.
+ * @note The null assignment is part of the successful construction boundary:
+ * no caller code can run between destination construction and outer release.
+ * If construction throws, the holder and every factory temporary unwind
+ * through RAII; the outer holder remains valid but may be moved from. This
+ * private source-tree helper adds no installed API or ABI.
+ */
+template <typename CallableHolder, typename ContextFactory>
+auto make_dirty_context_and_release_outer_callable(
+    CallableHolder& callable_holder, ContextFactory&& context_factory) {
+  static_assert(noexcept(callable_holder = nullptr),
+                "Dirty callable holder reset must not throw.");
+  auto context =
+      std::forward<ContextFactory>(context_factory)(std::move(callable_holder));
+  callable_holder = nullptr;
+  return context;
+}
+
+/**
  * @brief Runs dirty source tasks before downstream dirty tasks.
  *
  * @tparam RunTask Callable that executes one dirty task id.
@@ -707,12 +738,13 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
  * service execution materializes heap-owned Run submissions. Its source
  * context copies the outer `std::function`, so source admission charges both
  * live callable targets until synchronous settlement. Downstream transfers
- * that outer target by move, then explicitly clears the valid-but-unspecified
- * moved-from function before submission construction, retained-demand
- * calculation, or admission. Downstream therefore charges only its
- * context-owned target without depending on the standard library's moved-from
- * representation. The dirty executor retains request-local inline fallback
- * ordering.
+ * that outer target through
+ * make_dirty_context_and_release_outer_callable(), which makes successful
+ * context construction and explicit release of the valid-but-unspecified
+ * moved-from function one boundary. Submission construction, retained-demand
+ * calculation, and admission therefore see only the context-owned target
+ * without depending on the standard library's moved-from representation. The
+ * dirty executor retains request-local inline fallback ordering.
  */
 template <typename RunTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
@@ -772,14 +804,16 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
         initial_downstream_ids = ready_checker.initial_ready_task_ids(
             compute_plan.task_graph, &downstream_task_ids);
       }
-      auto downstream_context = std::make_shared<DirtyReadyTaskContext>(
-          compute_plan, request.selection, downstream_task_ids,
-          std::move(owned_run_task), run_task_retained_memory_bytes,
-          phase_lease, true,
-          request.intent == ComputeIntent::RealTimeUpdate
-              ? SchedulerTaskPriority::High
-              : SchedulerTaskPriority::Normal);
-      owned_run_task = nullptr;
+      auto downstream_context = make_dirty_context_and_release_outer_callable(
+          owned_run_task, [&](std::function<void(int)> transferred_run_task) {
+            return std::make_shared<DirtyReadyTaskContext>(
+                compute_plan, request.selection, downstream_task_ids,
+                std::move(transferred_run_task), run_task_retained_memory_bytes,
+                phase_lease, true,
+                request.intent == ComputeIntent::RealTimeUpdate
+                    ? SchedulerTaskPriority::High
+                    : SchedulerTaskPriority::Normal);
+          });
       std::vector<ReadyTaskSubmission> downstream_submissions =
           downstream_context->make_submissions(initial_downstream_ids, true);
       request.execution_service->execute_cpu_run(
