@@ -1,14 +1,24 @@
 #include "compute/execution_service.hpp"
 
-#include <atomic>
+#include <algorithm>
+#include <condition_variable>
+#include <cstddef>
+#include <deque>
 #include <exception>
+#include <limits>
 #include <memory>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
+#include <string>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "photospider/core/graph_error.hpp"
 #include "photospider/scheduler/scheduler.hpp"
-#include "scheduler/cpu_work_stealing_scheduler.hpp"
+#include "scheduler/scheduler_worker_budget.hpp"
 
 namespace ps::compute {
 
@@ -31,11 +41,13 @@ ReadyTaskSubmission::ReadyTaskSubmission(ComputeRunLease lease,
                                          ComputeRunTaskIdentity identity,
                                          int trace_node_id,
                                          bool is_initial_ready,
-                                         Executable executable)
+                                         Executable executable,
+                                         SchedulerTaskPriority priority)
     : metadata_(lease.descriptor(), trace_node_id, is_initial_ready),
       identity_(identity),
       lease_(std::move(lease)),
-      executable_(std::move(executable)) {
+      executable_(std::move(executable)),
+      priority_(priority) {
   if (identity_.run_id() != metadata_.run_id()) {
     throw std::invalid_argument(
         "ReadyTaskSubmission identity does not match its Run lease.");
@@ -61,217 +73,265 @@ void ReadyTaskSubmission::execute(SchedulerTaskRuntime& task_runtime) {
 }
 
 /**
- * @brief Forwards service-owned CPU worker observations to one active Graph.
+ * @brief Owns isolated completion and observation state for one active Run.
  *
- * The CPU scheduler borrows this proxy for its complete configured lifetime.
- * One atomic delegate is installed only while `execute_cpu_run()` holds the
- * single-Run gate and is cleared after every in-flight callback settles.
- *
- * @throws Nothing through scheduler worker callbacks.
- * @note Binding is caller-thread serialized. Atomic publication transfers no
- * ownership and never exposes Graph, cache, or scheduler controls.
+ * @throws Nothing from construction after caller-owned values are available.
+ * @note The service registry and every queued entry retain shared ownership.
+ * The host remains borrowed only until `execute_cpu_run()` observes settlement.
  */
-class ExecutionService::HostContextProxy final : public SchedulerHostContext {
- public:
+struct ExecutionService::RunState final
+    : public std::enable_shared_from_this<ExecutionService::RunState> {
   /**
-   * @brief Binds one active Graph observation target.
-   * @param host Borrowed host context valid through the settled Run.
-   * @return Nothing.
-   * @throws std::logic_error if another target remains bound.
-   * @note The service Run gate serializes bind and clear operations.
-   */
-  void bind(SchedulerHostContext& host) {
-    SchedulerHostContext* expected = nullptr;
-    if (!delegate_.compare_exchange_strong(expected, &host,
-                                           std::memory_order_release,
-                                           std::memory_order_relaxed)) {
-      throw std::logic_error("ExecutionService host context is already bound.");
-    }
-  }
-
-  /**
-   * @brief Clears the active Graph observation target.
-   * @return Nothing.
+   * @brief Creates one active Run state before queue publication.
+   * @param run_id Opaque Run namespace shared by every initial submission.
+   * @param host_context Borrowed Graph observation target.
+   * @param total_task_count Positive logical completion count.
    * @throws Nothing.
-   * @note The settled CPU wait guarantees no worker can enter a later proxy
-   * call for the cleared Run.
    */
-  void clear() noexcept { delegate_.store(nullptr, std::memory_order_release); }
+  RunState(ComputeRunId run_id, SchedulerHostContext& host_context,
+           int total_task_count) noexcept
+      : id(run_id), host(&host_context), tasks_to_complete(total_task_count) {}
 
-  /** @copydoc SchedulerHostContext::is_device_available */
-  bool is_device_available(Device device) const noexcept override {
-    SchedulerHostContext* const delegate =
-        delegate_.load(std::memory_order_acquire);
-    return delegate != nullptr && delegate->is_device_available(device);
+  /**
+   * @brief Tests whether the caller-side Run wait may finish.
+   * @return True after successful logical completion and callback drainage, or
+   * after failure and callback drainage.
+   * @throws Nothing.
+   * @note Caller holds `mutex`.
+   */
+  bool settled() const noexcept {
+    return in_flight == 0 &&
+           (first_exception != nullptr || tasks_to_complete == 0);
   }
 
-  /** @copydoc SchedulerHostContext::set_task_context */
-  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
-    SchedulerHostContext* const delegate =
-        delegate_.load(std::memory_order_acquire);
-    if (delegate != nullptr) {
-      delegate->set_task_context(worker_id, epoch);
-    }
-  }
+  /** @brief Opaque Run namespace used for route and trace isolation. */
+  const ComputeRunId id;
 
-  /** @copydoc SchedulerHostContext::clear_task_context */
-  void clear_task_context() noexcept override {
-    SchedulerHostContext* const delegate =
-        delegate_.load(std::memory_order_acquire);
-    if (delegate != nullptr) {
-      delegate->clear_task_context();
-    }
-  }
+  /**
+   * @brief Borrowed observation target valid through synchronous settlement.
+   */
+  SchedulerHostContext* const host;
 
-  /** @copydoc SchedulerHostContext::log_event */
-  void log_event(SchedulerTraceAction action, int node_id, int worker_id,
-                 std::uint64_t epoch) noexcept override {
-    SchedulerHostContext* const delegate =
-        delegate_.load(std::memory_order_acquire);
-    if (delegate != nullptr) {
-      delegate->log_event(action, node_id, worker_id, epoch);
-    }
-  }
+  /** @brief Guards completion, failure, admission, and in-flight state. */
+  mutable std::mutex mutex;
 
- private:
-  /** @brief Borrowed active Graph observation target, or null between Runs. */
-  std::atomic<SchedulerHostContext*> delegate_{nullptr};
+  /** @brief Wakes the one caller waiting for this Run to settle. */
+  std::condition_variable settled_cv;
+
+  /** @brief Remaining logical tasks for a successful Run. */
+  int tasks_to_complete = 0;
+
+  /** @brief Worker callbacks that have left the process queue but not exited.
+   */
+  int in_flight = 0;
+
+  /** @brief Exact first callback exception, or null before failure. */
+  std::exception_ptr first_exception;
+
+  /** @brief Whether dependency release may publish additional ready work. */
+  bool accepting = true;
 };
-
-namespace {
 
 /**
- * @brief Clears one service host binding and active Run on every exit.
+ * @brief Move-owned process queue entry paired with matching Run state.
  *
- * @throws Nothing.
- * @note The scope is created only after both fields have been published and is
- * destroyed after batch submission either fails transactionally or settles.
+ * @throws Nothing while moved after caller allocation succeeds.
+ * @note Queue storage owns the complete submission and therefore its Run lease.
  */
-class ActiveRunScope final {
- public:
+struct ExecutionService::QueueEntry final {
   /**
-   * @brief Captures cleanup callbacks for one published active Run.
-   * @param clear Function that clears service active state.
-   * @throws std::bad_alloc if function ownership cannot allocate.
+   * @brief Transfers one ready submission into process queue ownership.
+   * @param run_state Matching active Run retained through callback exit.
+   * @param ready_submission Dependency-ready owned work.
+   * @throws Nothing after argument evaluation.
    */
-  explicit ActiveRunScope(std::function<void()> clear)
-      : clear_(std::move(clear)) {}
+  QueueEntry(std::shared_ptr<RunState> run_state,
+             ReadyTaskSubmission ready_submission) noexcept
+      : run(std::move(run_state)),
+        priority(ready_submission.priority()),
+        submission(std::move(ready_submission)) {}
 
-  /** @brief Runs non-throwing active-state cleanup. @throws Nothing. */
-  ~ActiveRunScope() noexcept {
-    try {
-      clear_();
-    } catch (...) {
-      std::terminate();
-    }
-  }
+  /** @brief Matching active Run state. */
+  std::shared_ptr<RunState> run;
 
-  /** @brief Prevents duplicate cleanup ownership. */
-  ActiveRunScope(const ActiveRunScope& other) = delete;
+  /** @brief Queue selection hint captured before submission movement. */
+  SchedulerTaskPriority priority = SchedulerTaskPriority::Normal;
 
-  /** @brief Prevents replacing cleanup ownership. */
-  ActiveRunScope& operator=(const ActiveRunScope& other) = delete;
-
- private:
-  /** @brief Owned cleanup callback invoked exactly once. */
-  std::function<void()> clear_;
+  /** @brief Complete owned callback, identity, metadata, and lease. */
+  ReadyTaskSubmission submission;
 };
 
-}  // namespace
+/**
+ * @brief Owns all fixed-pool implementation details and reservation state.
+ *
+ * @throws std::bad_alloc from container growth and worker creation staging.
+ * @note One mutex defines queue-to-Run lock order: pool mutex is acquired
+ * before a Run mutex whenever both are needed.
+ */
+class ExecutionService::PoolState final {
+ public:
+  /** @brief Serializes fixed configuration, queues, and active Run registry. */
+  mutable std::mutex mutex;
+
+  /** @brief Wakes fixed workers when ready work or shutdown is published. */
+  std::condition_variable ready_cv;
+
+  /** @brief Latency-hint FIFO used by RT and explicit high-priority work. */
+  std::deque<std::shared_ptr<QueueEntry>> high_ready;
+
+  /** @brief Throughput FIFO used by normal HP work. */
+  std::deque<std::shared_ptr<QueueEntry>> normal_ready;
+
+  /** @brief Active Run states keyed by non-reused numeric Run id. */
+  std::unordered_map<uint64_t, std::weak_ptr<RunState>> active_runs;
+
+  /** @brief Fixed service-owned worker threads. */
+  std::vector<std::thread> workers;
+
+  /** @brief One transitional process-budget share for the complete pool. */
+  std::optional<SchedulerWorkerBudget::Reservation> reservation;
+
+  /** @brief Frozen worker count, or zero before complete configuration. */
+  unsigned int configured_workers = 0U;
+
+  /** @brief True after destructor requests worker-loop exit. */
+  bool stopping = false;
+};
+
+/** @brief Current service-worker Run context, null outside callbacks. */
+thread_local ExecutionService::RunState* ExecutionService::tls_run_state_ =
+    nullptr;
+
+/** @brief Current service worker id, or -1 outside callbacks. */
+thread_local int ExecutionService::tls_worker_id_ = -1;
 
 /** @copydoc ExecutionService::ExecutionService */
-ExecutionService::ExecutionService()
-    : host_context_(std::make_unique<HostContextProxy>()) {}
+ExecutionService::ExecutionService() : pool_(std::make_unique<PoolState>()) {}
+
+/** @copydoc ExecutionService::ExecutionService */
+ExecutionService::ExecutionService(unsigned int worker_count)
+    : ExecutionService() {
+  configure_worker_count(worker_count);
+}
 
 /** @copydoc ExecutionService::~ExecutionService */
 ExecutionService::~ExecutionService() noexcept {
-  if (!cpu_scheduler_) {
+  if (!pool_) {
     return;
   }
+
+  std::vector<std::thread> workers;
   try {
-    if (cpu_scheduler_->is_running()) {
-      cpu_scheduler_->shutdown();
+    {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      pool_->stopping = true;
+      pool_->high_ready.clear();
+      pool_->normal_ready.clear();
+      workers.swap(pool_->workers);
+    }
+    pool_->ready_cv.notify_all();
+    for (std::thread& worker : workers) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      pool_->active_runs.clear();
+      pool_->configured_workers = 0U;
+      pool_->reservation.reset();
     }
   } catch (...) {
-  }
-  try {
-    cpu_scheduler_->detach();
-  } catch (...) {
+    std::terminate();
   }
 }
 
-/** @copydoc ExecutionService::configure_cpu_scheduler */
-void ExecutionService::configure_cpu_scheduler(unsigned int worker_count) {
-  if (cpu_scheduler_ && configured_workers_ == worker_count &&
-      cpu_scheduler_->is_running()) {
-    return;
+/** @copydoc ExecutionService::configure_worker_count */
+void ExecutionService::configure_worker_count(unsigned int worker_count) {
+  if (worker_count > kSchedulerWorkerRequestMax) {
+    throw std::invalid_argument(
+        "ExecutionService CPU worker count must be in [0,8].");
   }
 
-  if (cpu_scheduler_) {
-    if (cpu_scheduler_->is_running()) {
-      cpu_scheduler_->shutdown();
+  std::unique_lock<std::mutex> lock(pool_->mutex);
+  if (pool_->configured_workers != 0U) {
+    if (worker_count == 0U || worker_count == pool_->configured_workers) {
+      return;
     }
-    cpu_scheduler_->detach();
-    cpu_scheduler_.reset();
-    configured_workers_ = 0U;
+    throw std::invalid_argument(
+        "ExecutionService CPU worker count is already fixed.");
+  }
+  if (pool_->stopping) {
+    throw std::logic_error("ExecutionService is stopping.");
   }
 
-  auto candidate = std::make_unique<CpuWorkStealingScheduler>(worker_count);
+  const unsigned int resolved_workers = resolve_scheduler_worker_count(
+      worker_count, std::thread::hardware_concurrency());
+  std::optional<SchedulerWorkerBudget::Reservation> reservation =
+      SchedulerWorkerBudget::process().try_reserve(resolved_workers);
+  if (!reservation.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "process scheduler worker budget cannot admit the fixed "
+                     "ExecutionService CPU pool");
+  }
+
+  std::vector<std::thread> staged_workers;
+  staged_workers.reserve(resolved_workers);
+  pool_->configured_workers = resolved_workers;
   try {
-    candidate->attach(*host_context_);
-    candidate->start();
+    for (unsigned int index = 0; index < resolved_workers; ++index) {
+      staged_workers.emplace_back(&ExecutionService::worker_loop, this,
+                                  static_cast<int>(index));
+    }
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
-    try {
-      if (candidate->is_running()) {
-        candidate->shutdown();
+    pool_->stopping = true;
+    lock.unlock();
+    pool_->ready_cv.notify_all();
+    for (std::thread& worker : staged_workers) {
+      if (worker.joinable()) {
+        worker.join();
       }
-    } catch (...) {
     }
-    try {
-      candidate->detach();
-    } catch (...) {
-    }
+    lock.lock();
+    pool_->stopping = false;
+    pool_->configured_workers = 0U;
+    lock.unlock();
     std::rethrow_exception(failure);
   }
-  cpu_scheduler_ = std::move(candidate);
-  configured_workers_ = worker_count;
+
+  pool_->workers.swap(staged_workers);
+  pool_->reservation.emplace(std::move(*reservation));
 }
 
-/** @copydoc ExecutionService::active_scheduler */
-CpuWorkStealingScheduler& ExecutionService::active_scheduler() {
-  if (!cpu_scheduler_ || !active_run_id_.has_value()) {
-    throw std::logic_error(
-        "ExecutionService runtime operation requires an active Run.");
-  }
-  return *cpu_scheduler_;
+/** @copydoc ExecutionService::worker_count */
+unsigned int ExecutionService::worker_count() const {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  return pool_->configured_workers;
 }
 
-/** @copydoc ExecutionService::make_cpu_task */
-SchedulerTaskRuntime::Task ExecutionService::make_cpu_task(
-    ReadyTaskSubmission submission) {
-  auto owned = std::make_shared<ReadyTaskSubmission>(std::move(submission));
-  return [this, owned = std::move(owned)]() mutable {
-    if (owned->metadata().is_initial_ready()) {
-      try {
-        log_event(SchedulerTraceAction::AssignInitial,
-                  owned->metadata().trace_node_id());
-      } catch (...) {
-      }
-    }
-    owned->execute(*this);
-  };
+/** @copydoc ExecutionService::is_configured */
+bool ExecutionService::is_configured() const {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  return pool_->configured_workers != 0U && !pool_->stopping &&
+         pool_->workers.size() == pool_->configured_workers;
+}
+
+/** @copydoc ExecutionService::get_stats */
+std::string ExecutionService::get_stats() const {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  std::ostringstream stream;
+  stream << "Workers: " << pool_->configured_workers
+         << ", Active runs: " << pool_->active_runs.size() << ", Ready tasks: "
+         << (pool_->high_ready.size() + pool_->normal_ready.size());
+  return stream.str();
 }
 
 /** @copydoc ExecutionService::execute_cpu_run */
 void ExecutionService::execute_cpu_run(
-    SchedulerHostContext& host, unsigned int worker_count,
+    SchedulerHostContext& host,
     std::vector<ReadyTaskSubmission> initial_submissions,
     int total_task_count) {
-  if (worker_count == 0U || worker_count > kSchedulerWorkerRequestMax) {
-    throw std::invalid_argument(
-        "ExecutionService CPU worker count must be in [1,8].");
-  }
   if (total_task_count <= 0 || initial_submissions.empty()) {
     throw std::invalid_argument(
         "ExecutionService requires a nonempty active Run batch.");
@@ -289,35 +349,145 @@ void ExecutionService::execute_cpu_run(
     }
   }
 
-  std::vector<Task> initial_tasks;
-  initial_tasks.reserve(initial_submissions.size());
+  auto run = std::make_shared<RunState>(run_id, host, total_task_count);
+  std::vector<std::shared_ptr<QueueEntry>> staged_entries;
+  staged_entries.reserve(initial_submissions.size());
   for (ReadyTaskSubmission& submission : initial_submissions) {
-    initial_tasks.push_back(make_cpu_task(std::move(submission)));
+    staged_entries.push_back(
+        std::make_shared<QueueEntry>(run, std::move(submission)));
   }
 
-  std::lock_guard<std::mutex> lock(run_mutex_);
-  configure_cpu_scheduler(worker_count);
-  ActiveRunScope active_scope([this]() {
-    active_run_id_.reset();
-    host_context_->clear();
-  });
-  host_context_->bind(host);
-  active_run_id_ = run_id;
+  {
+    std::lock_guard<std::mutex> lock(pool_->mutex);
+    if (pool_->configured_workers == 0U || pool_->workers.empty()) {
+      throw std::logic_error(
+          "ExecutionService worker count is not configured.");
+    }
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+    const uint64_t key = run_id.value();
+    const auto existing = pool_->active_runs.find(key);
+    if (existing != pool_->active_runs.end() && !existing->second.expired()) {
+      throw std::logic_error("ExecutionService Run id is already active.");
+    }
 
-  cpu_scheduler_->submit_initial_tasks(std::move(initial_tasks),
-                                       total_task_count);
-  wait_for_completion();
+    pool_->active_runs.insert_or_assign(key, run);
+    std::size_t high_insertions = 0;
+    std::size_t normal_insertions = 0;
+    try {
+      for (const std::shared_ptr<QueueEntry>& entry : staged_entries) {
+        const bool high = entry->priority == SchedulerTaskPriority::High ||
+                          entry->submission.metadata().intent() ==
+                              ComputeIntent::RealTimeUpdate;
+        if (high) {
+          pool_->high_ready.push_back(entry);
+          ++high_insertions;
+        } else {
+          pool_->normal_ready.push_back(entry);
+          ++normal_insertions;
+        }
+      }
+    } catch (...) {
+      while (high_insertions-- > 0U) {
+        pool_->high_ready.pop_back();
+      }
+      while (normal_insertions-- > 0U) {
+        pool_->normal_ready.pop_back();
+      }
+      pool_->active_runs.erase(key);
+      throw;
+    }
+  }
+  pool_->ready_cv.notify_all();
+
+  std::exception_ptr failure;
+  {
+    std::unique_lock<std::mutex> lock(run->mutex);
+    run->settled_cv.wait(lock, [&run]() { return run->settled(); });
+    run->accepting = false;
+    failure = run->first_exception;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pool_->mutex);
+    const auto current = pool_->active_runs.find(run_id.value());
+    if (current != pool_->active_runs.end()) {
+      const std::shared_ptr<RunState> published = current->second.lock();
+      if (!published || published.get() == run.get()) {
+        pool_->active_runs.erase(current);
+      }
+    }
+  }
+
+  if (failure) {
+    std::rethrow_exception(failure);
+  }
+}
+
+/** @copydoc ExecutionService::enqueue_submission */
+void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
+                                          ReadyTaskSubmission submission) {
+  if (submission.metadata().run_id() != run->id) {
+    throw std::invalid_argument(
+        "ReadyTaskSubmission does not belong to its routed Run.");
+  }
+  auto entry = std::make_shared<QueueEntry>(run, std::move(submission));
+
+  {
+    std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+    const auto active = pool_->active_runs.find(run->id.value());
+    if (active == pool_->active_runs.end() ||
+        active->second.lock().get() != run.get()) {
+      throw std::logic_error(
+          "ExecutionService Run no longer accepts ready work.");
+    }
+    std::lock_guard<std::mutex> run_lock(run->mutex);
+    if (!run->accepting || run->first_exception) {
+      throw std::logic_error(
+          "ExecutionService Run no longer accepts ready work.");
+    }
+
+    const bool high =
+        entry->priority == SchedulerTaskPriority::High ||
+        entry->submission.metadata().intent() == ComputeIntent::RealTimeUpdate;
+    if (high) {
+      pool_->high_ready.push_back(std::move(entry));
+    } else {
+      pool_->normal_ready.push_back(std::move(entry));
+    }
+  }
+  pool_->ready_cv.notify_one();
+}
+
+/** @copydoc ExecutionService::find_active_run */
+std::shared_ptr<ExecutionService::RunState> ExecutionService::find_active_run(
+    ComputeRunId run_id) {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  const auto active = pool_->active_runs.find(run_id.value());
+  if (active == pool_->active_runs.end()) {
+    throw std::invalid_argument("ReadyTaskSubmission names no active Run.");
+  }
+  std::shared_ptr<RunState> run = active->second.lock();
+  if (!run || run->id != run_id) {
+    throw std::invalid_argument("ReadyTaskSubmission names no active Run.");
+  }
+  return run;
 }
 
 /** @copydoc ExecutionService::submit_ready_submission */
 void ExecutionService::submit_ready_submission(ReadyTaskSubmission submission) {
-  if (!active_run_id_.has_value() ||
-      submission.metadata().run_id() != *active_run_id_) {
-    throw std::invalid_argument(
-        "ReadyTaskSubmission does not belong to the active Run.");
+  const ComputeRunId run_id = submission.metadata().run_id();
+  std::shared_ptr<RunState> run;
+  if (tls_run_state_ != nullptr && tls_run_state_->id == run_id) {
+    run = tls_run_state_->shared_from_this();
+  } else {
+    run = find_active_run(run_id);
   }
-  active_scheduler().submit_ready_task_any_thread(
-      make_cpu_task(std::move(submission)));
+  enqueue_submission(run, std::move(submission));
 }
 
 /** @copydoc ExecutionService::available_devices */
@@ -357,27 +527,158 @@ void ExecutionService::submit_ready_task_any_thread(
 
 /** @copydoc ExecutionService::wait_for_completion */
 void ExecutionService::wait_for_completion() {
-  active_scheduler().wait_for_completion();
+  throw std::logic_error(
+      "ExecutionService requires an explicit Run-scoped completion wait.");
+}
+
+/** @copydoc ExecutionService::current_worker_run */
+ExecutionService::RunState& ExecutionService::current_worker_run() {
+  if (tls_run_state_ == nullptr || tls_worker_id_ < 0) {
+    throw std::logic_error(
+        "ExecutionService runtime operation requires a worker Run.");
+  }
+  return *tls_run_state_;
 }
 
 /** @copydoc ExecutionService::set_exception */
 void ExecutionService::set_exception(std::exception_ptr error) {
-  active_scheduler().set_exception(std::move(error));
+  if (!error) {
+    return;
+  }
+  RunState& current = current_worker_run();
+  fail_run(current.shared_from_this(), std::move(error));
 }
 
 /** @copydoc ExecutionService::inc_tasks_to_complete */
 void ExecutionService::inc_tasks_to_complete(int delta) {
-  active_scheduler().inc_tasks_to_complete(delta);
+  if (delta <= 0) {
+    throw std::invalid_argument(
+        "ExecutionService completion increment must be positive.");
+  }
+  RunState& run = current_worker_run();
+  std::lock_guard<std::mutex> lock(run.mutex);
+  if (run.first_exception) {
+    return;
+  }
+  if (run.tasks_to_complete > std::numeric_limits<int>::max() - delta) {
+    throw std::overflow_error("ExecutionService completion count overflow.");
+  }
+  run.tasks_to_complete += delta;
 }
 
 /** @copydoc ExecutionService::dec_tasks_to_complete */
 void ExecutionService::dec_tasks_to_complete() {
-  active_scheduler().dec_tasks_to_complete();
+  RunState& run = current_worker_run();
+  std::lock_guard<std::mutex> lock(run.mutex);
+  if (run.first_exception) {
+    return;
+  }
+  if (run.tasks_to_complete <= 0) {
+    throw std::logic_error("ExecutionService completion count underflow.");
+  }
+  --run.tasks_to_complete;
+  if (run.tasks_to_complete == 0) {
+    run.settled_cv.notify_all();
+  }
 }
 
 /** @copydoc ExecutionService::log_event */
 void ExecutionService::log_event(SchedulerTraceAction action, int node_id) {
-  active_scheduler().log_event(action, node_id);
+  RunState& run = current_worker_run();
+  run.host->log_event(action, node_id, tls_worker_id_, run.id.value());
+}
+
+/** @copydoc ExecutionService::fail_run */
+void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
+                                std::exception_ptr failure) noexcept {
+  if (!failure) {
+    return;
+  }
+  try {
+    {
+      std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+      std::lock_guard<std::mutex> run_lock(run->mutex);
+      if (!run->first_exception) {
+        run->first_exception = std::move(failure);
+      }
+      run->accepting = false;
+      const auto belongs_to_run =
+          [&run](const std::shared_ptr<QueueEntry>& entry) {
+            return entry && entry->run.get() == run.get();
+          };
+      pool_->high_ready.erase(
+          std::remove_if(pool_->high_ready.begin(), pool_->high_ready.end(),
+                         belongs_to_run),
+          pool_->high_ready.end());
+      pool_->normal_ready.erase(
+          std::remove_if(pool_->normal_ready.begin(), pool_->normal_ready.end(),
+                         belongs_to_run),
+          pool_->normal_ready.end());
+    }
+    run->settled_cv.notify_all();
+  } catch (...) {
+  }
+}
+
+/** @copydoc ExecutionService::worker_loop */
+void ExecutionService::worker_loop(int worker_id) noexcept {
+  for (;;) {
+    std::shared_ptr<QueueEntry> entry;
+    {
+      std::unique_lock<std::mutex> lock(pool_->mutex);
+      pool_->ready_cv.wait(lock, [this]() {
+        return pool_->stopping || !pool_->high_ready.empty() ||
+               !pool_->normal_ready.empty();
+      });
+      if (pool_->stopping) {
+        return;
+      }
+      if (!pool_->high_ready.empty()) {
+        entry = std::move(pool_->high_ready.front());
+        pool_->high_ready.pop_front();
+      } else {
+        entry = std::move(pool_->normal_ready.front());
+        pool_->normal_ready.pop_front();
+      }
+      std::lock_guard<std::mutex> run_lock(entry->run->mutex);
+      if (!entry->run->accepting || entry->run->first_exception) {
+        entry.reset();
+      } else {
+        ++entry->run->in_flight;
+      }
+    }
+    if (!entry) {
+      continue;
+    }
+
+    const std::shared_ptr<RunState> run = entry->run;
+    tls_run_state_ = run.get();
+    tls_worker_id_ = worker_id;
+    run->host->set_task_context(worker_id, run->id.value());
+    try {
+      if (entry->submission.metadata().is_initial_ready()) {
+        log_event(SchedulerTraceAction::AssignInitial,
+                  entry->submission.metadata().trace_node_id());
+      }
+      entry->submission.execute(*this);
+    } catch (...) {
+      fail_run(run, std::current_exception());
+    }
+    run->host->clear_task_context();
+    tls_worker_id_ = -1;
+    tls_run_state_ = nullptr;
+
+    {
+      std::lock_guard<std::mutex> lock(run->mutex);
+      if (run->in_flight <= 0) {
+        std::terminate();
+      }
+      --run->in_flight;
+      if (run->settled()) {
+        run->settled_cv.notify_all();
+      }
+    }
+  }
 }
 
 }  // namespace ps::compute

@@ -4448,33 +4448,27 @@ TEST(IpcDaemonOperationPlugins,
 }
 
 /**
- * @brief Preserves remote defaults and propagates process-budget exhaustion.
+ * @brief Preserves remote defaults and shares one fixed CPU pool across Graphs.
  *
  * A real product daemon first accepts distinguishable CPU defaults, rejects a
- * raw count-nine update, and loads four Graphs whose HP and RT schedulers each
- * retain four workers. Scheduler inspection proves the rejected update did not
- * replace the defaults. The exact thirty-two-slot aggregate then rejects one
- * additional Graph with the Host's Graph `ComputeError`; closing one owner
- * makes an identical retry succeed.
+ * raw count-nine update, and loads several Graphs whose HP and RT built-in CPU
+ * bindings all reuse the daemon Host's four-worker `ExecutionService`.
+ * Scheduler inspection proves the rejected update did not replace the fixed
+ * defaults, and an additional Graph remains admissible without a per-Graph CPU
+ * reservation.
  *
  * @return Nothing; GoogleTest records protocol, Host, lifecycle, or status
  *         propagation mismatches.
  * @throws std::bad_alloc, std::runtime_error, std::system_error, or filesystem
  *         exceptions if daemon, socket, request, graph, or result setup fails.
- * @note No IPC field configures or reports the process aggregate. The test
- *       derives saturation solely from legal per-scheduler defaults and uses
- *       no diagnostic message assertions.
+ * @note The transitional process budget charges the Host's fixed CPU pool once
+ *       rather than once per built-in CPU Graph binding. Legacy scheduler
+ *       capacity propagation is covered by its own integration tests.
  */
 TEST(IpcDaemonSchedulers,
-     RealDaemonPreservesDefaultsAndPropagatesAggregateCapacity) {
-  constexpr unsigned int kWorkersPerScheduler = 4U;
-  constexpr std::size_t kSchedulersPerGraph = 2U;
-  constexpr std::size_t kSaturatingGraphCount =
-      kSchedulerWorkerProcessMax / (kSchedulersPerGraph * kWorkersPerScheduler);
-  static_assert(kSaturatingGraphCount == 4U);
-  static_assert(kSaturatingGraphCount * kSchedulersPerGraph *
-                    kWorkersPerScheduler ==
-                kSchedulerWorkerProcessMax);
+     RealDaemonPreservesDefaultsAndSharesFixedCpuPoolAcrossGraphs) {
+  constexpr unsigned int kServiceWorkers = 4U;
+  constexpr std::size_t kInitialGraphCount = 4U;
 
   ScopedDaemonDirectory temp("ps-scheduler-budget", true);
   const std::string socket_path = (temp.path() / "budget.sock").string();
@@ -4486,7 +4480,7 @@ TEST(IpcDaemonSchedulers,
       raw_daemon_call(socket_path, "scheduler.configure_defaults",
                       internal::Json{{"hp_type", "cpu_work_stealing"},
                                      {"rt_type", "cpu_work_stealing"},
-                                     {"worker_count", kWorkersPerScheduler}},
+                                     {"worker_count", kServiceWorkers}},
                       "scheduler-budget-accepted-defaults");
   ASSERT_TRUE(response.contains("result")) << response.dump();
 
@@ -4506,8 +4500,8 @@ TEST(IpcDaemonSchedulers,
   Client client;
   ASSERT_TRUE(client.connect(socket_path).ok);
   std::vector<GraphSessionSummary> loaded;
-  loaded.reserve(kSaturatingGraphCount);
-  for (std::size_t index = 0; index < kSaturatingGraphCount; ++index) {
+  loaded.reserve(kInitialGraphCount);
+  for (std::size_t index = 0; index < kInitialGraphCount; ++index) {
     GraphLoadRequest request;
     request.session =
         GraphSessionId{"scheduler_budget_" + std::to_string(index)};
@@ -4532,29 +4526,24 @@ TEST(IpcDaemonSchedulers,
   ASSERT_TRUE(rt.status.ok) << rt.status.message;
   EXPECT_EQ(rt.value.scheduler_name, "CpuWorkStealingScheduler");
 
-  GraphLoadRequest overflow;
-  overflow.session = GraphSessionId{"scheduler_budget_overflow"};
-  overflow.root_dir = (temp.path() / "sessions-overflow").string();
-  overflow.yaml_path = yaml_path.string();
-  overflow.cache_root_dir = (temp.path() / "cache-overflow").string();
-  const IpcResult<GraphSessionSummary> rejected = client.load_graph(overflow);
-  ASSERT_FALSE(rejected.status.ok);
-  EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Graph);
-  EXPECT_EQ(rejected.status.code,
-            static_cast<std::int32_t>(GraphErrc::ComputeError));
-  EXPECT_EQ(rejected.status.name, "compute_error");
+  GraphLoadRequest additional;
+  additional.session = GraphSessionId{"scheduler_budget_additional"};
+  additional.root_dir = (temp.path() / "sessions-additional").string();
+  additional.yaml_path = yaml_path.string();
+  additional.cache_root_dir = (temp.path() / "cache-additional").string();
+  const IpcResult<GraphSessionSummary> shared = client.load_graph(additional);
+  ASSERT_TRUE(shared.status.ok) << shared.status.message;
+  const IpcResult<SchedulerInfoSnapshot> shared_hp = client.scheduler_info(
+      shared.value.session_id, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(shared_hp.status.ok) << shared_hp.status.message;
+  EXPECT_EQ(shared_hp.value.scheduler_name, "CpuWorkStealingScheduler");
 
-  const VoidResult closed = client.close_graph(loaded.front().session_id);
-  ASSERT_TRUE(closed.status.ok) << closed.status.message;
-  const IpcResult<GraphSessionSummary> retried = client.load_graph(overflow);
-  ASSERT_TRUE(retried.status.ok) << retried.status.message;
-
-  for (std::size_t index = 1; index < loaded.size(); ++index) {
-    const VoidResult cleanup = client.close_graph(loaded[index].session_id);
+  for (const GraphSessionSummary& graph : loaded) {
+    const VoidResult cleanup = client.close_graph(graph.session_id);
     EXPECT_TRUE(cleanup.status.ok) << cleanup.status.message;
   }
-  const VoidResult retry_cleanup = client.close_graph(retried.value.session_id);
-  EXPECT_TRUE(retry_cleanup.status.ok) << retry_cleanup.status.message;
+  const VoidResult shared_cleanup = client.close_graph(shared.value.session_id);
+  EXPECT_TRUE(shared_cleanup.status.ok) << shared_cleanup.status.message;
   client.disconnect();
   daemon.stop();
   EXPECT_TRUE(daemon.exited_successfully());

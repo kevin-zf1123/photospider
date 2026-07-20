@@ -709,7 +709,8 @@ TEST(OpenCvOperationConcurrency,
  *         records mismatches and C++ setup exceptions fail the test.
  * @note Each requested grant is reached exactly while the grant-plus-one
  *       observation remains bounded, so the verdict does not use workload
- *       timing or scheduler display statistics.
+ *       timing or scheduler display statistics. Every grant uses a fresh Host
+ *       because one Host's issue #69 CPU pool freezes its resolved count.
  */
 TEST(OpenCvOperationConcurrency,
      BenchmarkThreadsConfigureExactHostSchedulerWorkers) {
@@ -718,13 +719,12 @@ TEST(OpenCvOperationConcurrency,
   const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
   write_benchmark_probe_graph(yaml_path);
 
-  std::unique_ptr<Host> host = create_embedded_host();
-  ASSERT_NE(host, nullptr);
-  BenchmarkService service(*host);
-
   CallbackConcurrencyGate gate;
   ScopedCallbackGatePublication publication(gate);
   for (const int configured_threads : {0, 1, 2, 4, 8}) {
+    std::unique_ptr<Host> host = create_embedded_host();
+    ASSERT_NE(host, nullptr);
+    BenchmarkService service(*host);
     const std::size_t expected_workers =
         expected_benchmark_workers(configured_threads);
     const BenchmarkSessionConfig config =
@@ -791,22 +791,22 @@ TEST(OpenCvOperationConcurrency,
  *         contract; GoogleTest records any mismatch.
  * @note The observer blocks inside the built-in callback body so every grant
  *       is reached exactly; elapsed operation performance is not part of the
- *       verdict.
+ *       verdict. Each grant/repetition pair owns a fresh Host so the fixed
+ *       process-service pool is never reconfigured.
  */
 TEST(OpenCvOperationConcurrency,
      BuiltinCurveCallbacksReachRequestedWorkerConcurrency) {
   ScopedBenchmarkTempDir temp("photospider_opencv_curve_concurrency");
-  std::unique_ptr<Host> host = create_embedded_host();
-  ASSERT_NE(host, nullptr);
-  const VoidResult seeded = host->seed_builtin_ops();
-  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
-  BenchmarkService service(*host);
-
   CallbackConcurrencyGate gate;
   CurveOperationObserver observer(gate);
   ScopedOpenCvObserverPublication publication(observer);
   for (int repetition = 0; repetition < 3; ++repetition) {
     for (const int worker_count : {1, 2, 4, 8}) {
+      std::unique_ptr<Host> host = create_embedded_host();
+      ASSERT_NE(host, nullptr);
+      const VoidResult seeded = host->seed_builtin_ops();
+      ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+      BenchmarkService service(*host);
       const BenchmarkSessionConfig config =
           make_curve_benchmark_config(worker_count);
       const std::size_t expected_workers =
@@ -843,7 +843,8 @@ TEST(OpenCvOperationConcurrency,
  * @throws Nothing when deterministic output is preserved; setup exceptions
  *         fail the test and GoogleTest records descriptor or pixel mismatches.
  * @note Comparison ignores aligned row padding and checks every packed pixel
- *       byte retained by the public Host image snapshots.
+ *       byte retained by the public Host image snapshots. The two grants use
+ *       separate Host lifetimes because a Host's CPU pool is fixed once.
  */
 TEST(OpenCvOperationConcurrency,
      BuiltinCurveOutputMatchesBetweenOneAndEightWorkers) {
@@ -851,15 +852,25 @@ TEST(OpenCvOperationConcurrency,
   const std::filesystem::path yaml_path = temp.root() / "curve.yaml";
   write_curve_output_graph(yaml_path);
 
-  std::unique_ptr<Host> host = create_embedded_host();
-  ASSERT_NE(host, nullptr);
-  const VoidResult seeded = host->seed_builtin_ops();
-  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+  ImageBuffer serial;
+  {
+    std::unique_ptr<Host> host = create_embedded_host();
+    ASSERT_NE(host, nullptr);
+    const VoidResult seeded = host->seed_builtin_ops();
+    ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+    serial = compute_curve_image(*host, temp.root(), yaml_path, 1U,
+                                 "curve_output_serial");
+  }
 
-  const ImageBuffer serial = compute_curve_image(*host, temp.root(), yaml_path,
-                                                 1U, "curve_output_serial");
-  const ImageBuffer parallel = compute_curve_image(
-      *host, temp.root(), yaml_path, 8U, "curve_output_parallel");
+  ImageBuffer parallel;
+  {
+    std::unique_ptr<Host> host = create_embedded_host();
+    ASSERT_NE(host, nullptr);
+    const VoidResult seeded = host->seed_builtin_ops();
+    ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+    parallel = compute_curve_image(*host, temp.root(), yaml_path, 8U,
+                                   "curve_output_parallel");
+  }
 
   ASSERT_EQ(serial.width, parallel.width);
   ASSERT_EQ(serial.height, parallel.height);

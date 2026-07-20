@@ -119,7 +119,7 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
     const ComputeDispatchRequest& request, ComputeRun& run) {
-  return execute_impl(graph, task_runtime, nullptr, nullptr, 0U, request, run);
+  return execute_impl(graph, task_runtime, nullptr, nullptr, request, run);
 }
 
 /**
@@ -128,7 +128,6 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * @param graph Graph whose target is computed and committed.
  * @param execution_service Process-owned ready-only CPU runtime.
  * @param host Active Graph trace observation context.
- * @param worker_count Exact built-in CPU grant.
  * @param request Per-call dispatch options.
  * @param run Request owner retaining leased dispatcher state.
  * @return Mutable committed target output.
@@ -137,10 +136,10 @@ NodeOutput& ComputeTaskDispatcher::execute(
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, ExecutionService& execution_service,
-    SchedulerHostContext& host, unsigned int worker_count,
-    const ComputeDispatchRequest& request, ComputeRun& run) {
+    SchedulerHostContext& host, const ComputeDispatchRequest& request,
+    ComputeRun& run) {
   return execute_impl(graph, execution_service, &execution_service, &host,
-                      worker_count, request, run);
+                      request, run);
 }
 
 /**
@@ -150,7 +149,6 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * @param task_runtime Runtime used for task execution traces and completion.
  * @param execution_service Optional migrated CPU service selector.
  * @param host Optional Graph observation target for service execution.
- * @param worker_count Exact service grant or zero on the legacy path.
  * @param request Per-call dispatch options.
  * @param run Request observer that mints all retained leases.
  * @return Mutable high-precision output stored on the target graph node.
@@ -162,8 +160,7 @@ NodeOutput& ComputeTaskDispatcher::execute(
 NodeOutput& ComputeTaskDispatcher::execute_impl(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
     ExecutionService* execution_service, SchedulerHostContext* host,
-    unsigned int worker_count, const ComputeDispatchRequest& request,
-    ComputeRun& run) {
+    const ComputeDispatchRequest& request, ComputeRun& run) {
   const int node_id = request.node_id;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
@@ -211,12 +208,12 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
   run.advance_to(ComputeRunPhase::Queued);
   run.advance_to(ComputeRunPhase::Running);
   if (execution_service != nullptr) {
-    if (host == nullptr || worker_count == 0U) {
+    if (host == nullptr) {
       throw std::logic_error(
-          "ExecutionService dispatch requires host context and worker grant.");
+          "ExecutionService dispatch requires a host context.");
     }
-    dispatch_planned_tasks(graph, *execution_service, *host, worker_count,
-                           node_id, plan, dispatcher_lease);
+    dispatch_planned_tasks(graph, *execution_service, *host, node_id, plan,
+                           dispatcher_lease);
   } else {
     dispatch_planned_tasks(graph, task_runtime, node_id, plan,
                            dispatcher_lease);

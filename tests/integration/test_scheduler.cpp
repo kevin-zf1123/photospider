@@ -15,14 +15,9 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"  // <--- 修正点: 添加缺失的头文件
-#include "compute/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "compute/compute_task_dispatcher.hpp"
-#include "compute/execution_service.hpp"
 #include "compute/realtime_proxy_graph.hpp"
-#include "graph/graph_cache_service.hpp"      // <--- 修正点: 添加缺失的头文件
-#include "graph/graph_model.hpp"              // NOLINT(build/include_subdir)
-#include "graph/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
-#include "providers/configured_image_artifact_codec.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
 #include "scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
@@ -386,30 +381,19 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
             << std::endl;
   runtime.clear_scheduler_log();
 
-  // 修正点: post 的 Lambda 返回 NodeOutput，并接收 future 的结果
-  auto future =
-      runtime.graph_state().submit([&](ps::GraphModel& g) -> ps::NodeOutput {
-        // 修正点: 直接构造服务类，不访问 kernel 的私有成员
-        ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service{
-            ps::providers::make_configured_image_artifact_codec(),
-            ps::testing::make_yaml_cache_metadata_codec()};
-        ps::compute::ExecutionService execution_service;
-        ps::ComputeService compute_svc(traversal_service, cache_service,
-                                       runtime.event_service(),
-                                       execution_service);
-
-        ps::ComputeService::Request request;
-        request.node_id = final_node_id;
-        request.cache.precision = "int8";
-        request.cache.disable_disk_cache = true;
-        request.intent = ps::ComputeIntent::RealTimeUpdate;
-        request.dirty_roi = dirty_rect;
-        return compute_svc.compute_parallel(g, runtime, request);
-      });
-
-  // 等待并获取结果（尽管我们不使用结果，但 get() 会等待完成并传播异常）
-  future.get();
+  ps::Kernel::ComputeRequest dirty_request;
+  dirty_request.name = graph_name;
+  dirty_request.node_id = final_node_id;
+  dirty_request.cache.precision = "int8";
+  dirty_request.cache.disable_disk_cache = true;
+  dirty_request.execution.parallel = true;
+  dirty_request.intent = ps::ComputeIntent::RealTimeUpdate;
+  dirty_request.dirty_roi = dirty_rect;
+  auto future = svc.cmd_compute_async(dirty_request);
+  ASSERT_TRUE(future.has_value());
+  const ps::Kernel::AsyncComputeResult outcome = future->get();
+  ASSERT_TRUE(outcome.ok);
+  EXPECT_FALSE(outcome.error.has_value());
 
   runtime.graph_state()
       .submit([&](ps::GraphModel& g) -> void {
@@ -533,25 +517,19 @@ TEST(Scheduler,
       })
       .get();
   stale_runtime.clear_scheduler_log();
-  auto stale_future = stale_runtime.graph_state().submit(
-      [&](ps::GraphModel& g) -> ps::NodeOutput {
-        ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service{
-            ps::providers::make_configured_image_artifact_codec(),
-            ps::testing::make_yaml_cache_metadata_codec()};
-        ps::compute::ExecutionService execution_service;
-        ps::ComputeService compute_svc(traversal_service, cache_service,
-                                       stale_runtime.event_service(),
-                                       execution_service);
-        ps::ComputeService::Request request;
-        request.node_id = 3;
-        request.cache.precision = "int8";
-        request.cache.disable_disk_cache = true;
-        request.intent = ps::ComputeIntent::RealTimeUpdate;
-        request.dirty_roi = dirty_rect;
-        return compute_svc.compute_parallel(g, stale_runtime, request);
-      });
-  EXPECT_NO_THROW(stale_future.get());
+  ps::Kernel::ComputeRequest stale_request;
+  stale_request.name = stale_graph_name;
+  stale_request.node_id = 3;
+  stale_request.cache.precision = "int8";
+  stale_request.cache.disable_disk_cache = true;
+  stale_request.execution.parallel = true;
+  stale_request.intent = ps::ComputeIntent::RealTimeUpdate;
+  stale_request.dirty_roi = dirty_rect;
+  auto stale_future = svc.cmd_compute_async(stale_request);
+  ASSERT_TRUE(stale_future.has_value());
+  const ps::Kernel::AsyncComputeResult stale_outcome = stale_future->get();
+  ASSERT_TRUE(stale_outcome.ok);
+  EXPECT_FALSE(stale_outcome.error.has_value());
   const auto stale_log =
       stale_runtime.scheduler_trace_page(0, ps::kSchedulerTraceMaxLimit).events;
   EXPECT_TRUE(
@@ -585,25 +563,21 @@ TEST(Scheduler,
       })
       .get();
   exception_runtime.clear_scheduler_log();
-  auto exception_future = exception_runtime.graph_state().submit(
-      [&](ps::GraphModel& g) -> ps::NodeOutput {
-        ps::GraphTraversalService traversal_service;
-        ps::GraphCacheService cache_service{
-            ps::providers::make_configured_image_artifact_codec(),
-            ps::testing::make_yaml_cache_metadata_codec()};
-        ps::compute::ExecutionService execution_service;
-        ps::ComputeService compute_svc(traversal_service, cache_service,
-                                       exception_runtime.event_service(),
-                                       execution_service);
-        ps::ComputeService::Request request;
-        request.node_id = 3;
-        request.cache.precision = "int8";
-        request.cache.disable_disk_cache = true;
-        request.intent = ps::ComputeIntent::RealTimeUpdate;
-        request.dirty_roi = dirty_rect;
-        return compute_svc.compute_parallel(g, exception_runtime, request);
-      });
-  EXPECT_THROW(exception_future.get(), ps::GraphError);
+  ps::Kernel::ComputeRequest exception_request;
+  exception_request.name = exception_graph_name;
+  exception_request.node_id = 3;
+  exception_request.cache.precision = "int8";
+  exception_request.cache.disable_disk_cache = true;
+  exception_request.execution.parallel = true;
+  exception_request.intent = ps::ComputeIntent::RealTimeUpdate;
+  exception_request.dirty_roi = dirty_rect;
+  auto exception_future = svc.cmd_compute_async(exception_request);
+  ASSERT_TRUE(exception_future.has_value());
+  const ps::Kernel::AsyncComputeResult exception_outcome =
+      exception_future->get();
+  EXPECT_FALSE(exception_outcome.ok);
+  ASSERT_TRUE(exception_outcome.error.has_value());
+  EXPECT_EQ(exception_outcome.error->code, ps::GraphErrc::NoOperation);
   const auto exception_log =
       exception_runtime.scheduler_trace_page(0, ps::kSchedulerTraceMaxLimit)
           .events;
@@ -656,29 +630,25 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveParameterValueState) {
   ASSERT_TRUE(svc.cmd_compute(hp_request));
 
   constexpr int kConcurrentUpdateCount = 8;
+  ps::Kernel::ComputeRequest update_request;
+  update_request.name = graph_name;
+  update_request.node_id = 3;
+  update_request.cache.precision = "int8";
+  update_request.cache.disable_disk_cache = true;
+  update_request.execution.parallel = true;
+  update_request.intent = ps::ComputeIntent::RealTimeUpdate;
+  update_request.dirty_roi = ps::PixelRect{200, 200, 128, 128};
   for (int update = 0; update < kConcurrentUpdateCount; ++update) {
-    auto update_future = runtime.graph_state().submit(
-        [&](ps::GraphModel& graph) -> ps::NodeOutput {
-          ps::GraphTraversalService traversal_service;
-          ps::GraphCacheService cache_service{
-              ps::providers::make_configured_image_artifact_codec(),
-              ps::testing::make_yaml_cache_metadata_codec()};
-          ps::compute::ExecutionService execution_service;
-          ps::ComputeService compute_service(traversal_service, cache_service,
-                                             runtime.event_service(),
-                                             execution_service);
-          ps::ComputeService::Request request;
-          request.node_id = 3;
-          request.cache.precision = "int8";
-          request.cache.disable_disk_cache = true;
-          request.intent = ps::ComputeIntent::RealTimeUpdate;
-          request.dirty_roi = ps::PixelRect{200, 200, 128, 128};
-          return compute_service.compute_parallel(graph, runtime, request);
-        });
-    ps::NodeOutput output;
-    ASSERT_NO_THROW(output = update_future.get());
-    EXPECT_GT(output.image_buffer.width, 0);
-    EXPECT_GT(output.image_buffer.height, 0);
+    auto update_future = svc.cmd_compute_async(update_request);
+    ASSERT_TRUE(update_future.has_value());
+    const ps::Kernel::AsyncComputeResult update_outcome = update_future->get();
+    ASSERT_TRUE(update_outcome.ok);
+    EXPECT_FALSE(update_outcome.error.has_value());
+    const ps::NodeOutput* output =
+        runtime.realtime_proxy_graph().find_output(3);
+    ASSERT_NE(output, nullptr);
+    EXPECT_GT(output->image_buffer.width, 0);
+    EXPECT_GT(output->image_buffer.height, 0);
   }
 
   runtime.graph_state()

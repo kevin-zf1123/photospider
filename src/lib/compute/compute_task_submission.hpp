@@ -386,7 +386,6 @@ void dispatch_planned_tasks(GraphModel& graph,
  * @param graph GraphModel used only to validate an empty reusable target.
  * @param execution_service Process-owned CPU execution service.
  * @param host Active Graph scheduler observation context.
- * @param worker_count Exact built-in CPU scheduler-plan grant.
  * @param node_id Target node used in empty-plan diagnostics.
  * @param plan Run-owned scheduler submission plan.
  * @param dispatcher_lease Matching lease copied into ready submissions.
@@ -399,8 +398,7 @@ void dispatch_planned_tasks(GraphModel& graph,
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,
-                            SchedulerHostContext& host,
-                            unsigned int worker_count, int node_id,
+                            SchedulerHostContext& host, int node_id,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease);
 

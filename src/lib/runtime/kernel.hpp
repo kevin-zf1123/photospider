@@ -742,9 +742,10 @@ class Kernel {
    *
    * @throws std::bad_alloc If constructing or copying scheduler type storage
    * exhausts memory.
-   * @note Type availability and aggregate capacity are deliberately validated
-   * by transactional Graph load, not while defaults are stored. Existing
-   * runtimes retain their installed schedulers.
+   * @note Selecting built-in CPU may resolve and reserve the fixed service pool
+   * while defaults are stored. Type availability and legacy Graph-owned
+   * aggregate capacity are validated by transactional Graph load. Existing
+   * runtimes retain their installed bindings.
    */
   struct SchedulerConfig {
     /** @brief Scheduler type planned for global high-precision compute. */
@@ -762,13 +763,23 @@ class Kernel {
   };
 
   /**
-   * @brief Replaces scheduler planning defaults for future Graph loads.
+   * @brief Stores future Graph defaults and freezes CPU workers when selected.
    * @param config Type names and worker request copied into Kernel ownership.
    * @return Nothing.
-   * @throws std::bad_alloc If scheduler type copying exhausts memory.
-   * @note The method creates no plan, reservation, scheduler, or worker. Type
-   * and aggregate-budget rejection occur transactionally during later load;
-   * existing Graphs remain unchanged.
+   * @throws std::invalid_argument If a positive worker request conflicts with
+   * the already fixed injected service count.
+   * @throws GraphError If the first fixed CPU pool cannot reserve transitional
+   * process capacity.
+   * @throws std::bad_alloc or std::system_error If scheduler type copying or
+   * first fixed-pool construction fails.
+   * @note A configuration selecting built-in CPU freezes and starts the one
+   * injected service pool owned for this Kernel. Legacy-only defaults remain
+   * mutable until a CPU route is first selected by configuration, load, or
+   * replacement. After that point, later zero/equal requests preserve the pool
+   * and a conflicting positive request is rejected. Graph load and replacement
+   * never resize a configured pool. Scheduler type availability and
+   * legacy-owner budget rejection still occur transactionally during later
+   * load; existing Graph bindings remain unchanged.
    */
   void set_scheduler_config(const SchedulerConfig& config);
 
@@ -778,7 +789,8 @@ class Kernel {
    * or Kernel destruction.
    * @throws Nothing.
    * @note The snapshot may name a type that later becomes unavailable; Graph
-   * load always performs fresh planning before pair admission.
+   * load always performs fresh planning before pair admission. Once the CPU
+   * service is configured, worker_count contains its resolved fixed count.
    */
   const SchedulerConfig& get_scheduler_config() const;
 
@@ -794,13 +806,13 @@ class Kernel {
    * cannot reserve candidate headroom.
    * @throws std::bad_alloc if scheduler creation or graph-state submission
    *         exhausts memory.
-   * @note Planning, single-candidate reservation, construction, preparation,
-   * and publication occur inside the graph-state boundary while the old
-   * scheduler remains attached, running, and fully reserved. Capacity or
-   * preparation failure therefore cannot stop or displace the old owner; only
-   * a successful no-throw publication swap begins its teardown and release.
-   * Candidate/plugin GraphError remains a handled false result to preserve the
-   * established Kernel bool boundary outside budget exhaustion.
+   * @note Built-in CPU replacement publishes an ownerless process-service
+   * binding and reserves no per-Graph workers. Legacy planning,
+   * single-candidate reservation, construction, preparation, and publication
+   * occur inside the graph-state boundary while the old binding remains
+   * usable. Capacity or preparation failure therefore cannot displace it.
+   * Candidate/plugin GraphError remains a handled false result outside budget
+   * exhaustion.
    */
   bool replace_scheduler(const std::string& name, ComputeIntent intent,
                          const std::string& type);
@@ -1214,13 +1226,15 @@ class Kernel {
                                   const ComputeRequest& request);
 
   /**
-   * @brief Atomically admits and installs both schedulers on an unpublished
+   * @brief Atomically installs HP/RT execution bindings on an unpublished
    * runtime.
    *
-   * The method first plans HP and RT without side effects, reserves their
-   * aggregate process capacity with one commit, constructs both reservation-
-   * owned schedulers as local candidates, and only then attaches them to the
-   * caller-owned runtime. Successful installation clears stale diagnostics.
+   * The method plans both intents, fixes the shared CPU service when either
+   * plan selects built-in CPU, and replans with that resolved grant. It then
+   * reserves only the aggregate legacy-owner capacity, constructs only legacy
+   * scheduler candidates, and attaches either an ownerless process-service
+   * route or the matching scheduler owner for each intent. Successful
+   * installation clears stale diagnostics.
    *
    * @param name Graph/session label whose stale LastError is cleared only
    *             after both candidates are installed.
@@ -1229,15 +1243,18 @@ class Kernel {
    * @throws GraphError with `GraphErrc::InvalidParameter` when either type is
    *         unsupported, a planned plugin becomes unavailable, or its factory
    *         returns no scheduler instance.
-   * @throws GraphError with `GraphErrc::ComputeError` when aggregate process
-   *         capacity cannot admit both intent plans.
+   * @throws GraphError with `GraphErrc::ComputeError` when process capacity
+   *         cannot admit the first fixed service pool or aggregate legacy
+   *         intent plans.
    * @throws std::invalid_argument or std::overflow_error for invalid planning
-   *         inputs and arithmetic.
-   * @throws Any scheduler construction or attach failure unchanged.
+   *         inputs, a conflicting fixed worker request, or arithmetic.
+   * @throws std::bad_alloc or std::system_error if fixed-pool or scheduler
+   *         construction fails.
+   * @throws Any other scheduler construction or attach failure unchanged.
    * @note Every exceptional exit occurs before Graph-map publication. Local
-   *       candidates and the unpublished runtime release all transferred and
-   *       untransferred reservations through RAII; no scheduler is constructed
-   *       when planning or pair admission fails.
+   *       legacy candidates and the unpublished runtime release all transferred
+   *       and untransferred reservations through RAII. Built-in CPU bindings
+   *       never construct or charge a per-Graph scheduler owner.
    */
   void setup_schedulers_for_runtime(const std::string& name,
                                     GraphRuntime& runtime);

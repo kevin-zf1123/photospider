@@ -7,14 +7,15 @@
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
-namespace ps {
-class GraphRuntime;
-class IScheduler;
-}  // namespace ps
-
 namespace ps::compute {
 class DirtySiblingCommitGate;
 
+/**
+ * @brief Pure coordination decision for one compute intent request.
+ *
+ * @throws Nothing for construction and scalar value access.
+ * @note The value owns no Run, scheduler, service, callback, or graph state.
+ */
 struct IntentUpdateDecision {
   /** @brief Intent being coordinated. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
@@ -27,7 +28,7 @@ struct IntentUpdateDecision {
   /**
    * @brief Whether HP and RT dirty siblings may start concurrently.
    *
-   * @note This is true only when both sibling scheduler runtimes are available
+   * @note This is true only when both sibling execution domains are available
    * and dirty output commits are protected by staged buffers plus the sibling
    * commit gate.
    */
@@ -67,12 +68,12 @@ struct IntentUpdateCallbacks {
  * @brief Coordinates compute intent callbacks without owning task graphs.
  *
  * The coordinator decides which intent paths must run. Under the staged commit
- * policy it starts RT before HP and overlaps HP with RT when both scheduler
- * runtimes are available. Actual task graph planning, dependency release,
- * graph mutation, and scheduler submission remain inside the callbacks.
+ * policy it starts RT before HP and overlaps HP with RT when both execution
+ * domains are available. Actual task graph planning, dependency release,
+ * graph mutation, and execution submission remain inside the callbacks.
  *
- * @note Scheduler queues still receive the fine-grained ready work emitted by
- * each callback through their intent-specific dispatchers.
+ * @note The selected physical domain still receives the fine-grained ready
+ * work emitted by each callback through its intent-specific dispatcher.
  */
 class IntentUpdateCoordinator {
  public:
@@ -80,8 +81,8 @@ class IntentUpdateCoordinator {
    * @brief Builds the execution decision for one requested intent.
    *
    * @param intent Requested compute intent.
-   * @param can_submit_concurrently Whether HP and RT runtimes are available and
-   * running.
+   * @param can_submit_concurrently Whether HP and RT execution domains are
+   * available for overlap.
    * @param has_dirty_roi Whether the request supplied a dirty ROI.
    * @return Decision describing required HP/RT paths and execution mode.
    * @throws Nothing directly.
@@ -104,10 +105,8 @@ class IntentUpdateCoordinator {
    * @brief Executes the callbacks required by one compute intent.
    *
    * @param intent Requested compute intent.
-   * @param hp_scheduler Optional HP scheduler used to decide whether
-   * scheduler-backed work may run inside each sibling callback.
-   * @param rt_scheduler Optional RT scheduler used to decide whether
-   * scheduler-backed work may run inside each sibling callback.
+   * @param can_submit_concurrently Whether both sibling execution domains are
+   * available for overlapping callback launch.
    * @param dirty_roi Optional dirty ROI for dirty intents.
    * @param callbacks Callback bundle that performs actual compute work.
    * @return Output for the requested target after required paths complete.
@@ -115,13 +114,14 @@ class IntentUpdateCoordinator {
    * memory, including a sibling HP failure observed during RT-failure cleanup.
    * @throws GraphError for invalid inputs or missing callbacks; rethrows other
    * callback exceptions from the active sibling path.
-   * @note The coordinator never owns scheduler dependency state. It records
-   * sibling stages, while callbacks submit concrete dirty task batches to
-   * scheduler queues. Resource exhaustion takes precedence over an already
-   * active recoverable sibling failure so it cannot be silently discarded.
+   * @note The coordinator never owns execution-domain dependency state. It
+   * records sibling stages, while callbacks submit concrete dirty task batches
+   * to their selected physical domains. Resource exhaustion takes precedence
+   * over an already active recoverable sibling failure so it cannot be
+   * silently discarded.
    */
   static NodeOutput& coordinate_intent_update(
-      ComputeIntent intent, IScheduler* hp_scheduler, IScheduler* rt_scheduler,
+      ComputeIntent intent, bool can_submit_concurrently,
       const std::optional<PixelRect>& dirty_roi,
       const IntentUpdateCallbacks& callbacks);
 };

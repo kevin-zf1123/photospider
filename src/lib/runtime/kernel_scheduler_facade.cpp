@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 
+#include "compute/execution_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "runtime/kernel.hpp"
 #include "scheduler/scheduler_factory.hpp"
@@ -20,10 +21,10 @@ namespace {
  * @brief Internal result of one serialized scheduler replacement attempt.
  *
  * @throws Nothing for value construction and comparison.
- * @note The outcome distinguishes only the newly specified budget exhaustion
- * category from legacy handled rejection. Candidate/plugin GraphError and
+ * @note The outcome distinguishes legacy-owner or first process-service pool
+ * budget exhaustion from handled rejection. Candidate/plugin GraphError and
  * ordinary lifecycle failures remain folded into `Rejected` by the outer
- * Kernel boundary, preserving behavior outside issue #43's frozen matrix.
+ * Kernel boundary.
  */
 enum class SchedulerReplacementOutcome {
   /** @brief Candidate published and the displaced owner cleanup completed. */
@@ -57,6 +58,23 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
                 return SchedulerReplacementOutcome::Rejected;
               }
 
+              GraphRuntime::SchedulerExecutionRoute execution_route;
+              if (plan->is_builtin_cpu()) {
+                try {
+                  execution_service_->configure_worker_count(
+                      scheduler_config_.worker_count);
+                } catch (const GraphError& error) {
+                  if (error.code() == GraphErrc::ComputeError) {
+                    return SchedulerReplacementOutcome::BudgetExhausted;
+                  }
+                  throw;
+                }
+                execution_route.domain = GraphRuntime::SchedulerExecutionRoute::
+                    Domain::ProcessCpuService;
+                runtime.replace_scheduler(intent, nullptr, execution_route);
+                return SchedulerReplacementOutcome::Success;
+              }
+
               auto reservation = SchedulerWorkerBudget::process().try_reserve(
                   plan->reservation_slots());
               if (!reservation.has_value()) {
@@ -67,13 +85,6 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
                   SchedulerFactory::create(*plan, std::move(*reservation));
               if (!scheduler) {
                 return SchedulerReplacementOutcome::Rejected;
-              }
-              GraphRuntime::SchedulerExecutionRoute execution_route;
-              if (intent == ComputeIntent::GlobalHighPrecision &&
-                  plan->is_builtin_cpu()) {
-                execution_route.domain = GraphRuntime::SchedulerExecutionRoute::
-                    Domain::ProcessCpuService;
-                execution_route.worker_count = plan->worker_grant();
               }
               runtime.replace_scheduler(intent, std::move(scheduler),
                                         execution_route);
@@ -105,8 +116,15 @@ std::optional<std::pair<std::string, std::string>> Kernel::get_scheduler_info(
   auto& runtime = *runtime_it->second;
   try {
     return runtime.graph_state()
-        .submit([&runtime, intent](GraphModel&)
+        .submit([this, &runtime, intent](GraphModel&)
                     -> std::optional<std::pair<std::string, std::string>> {
+          const GraphRuntime::SchedulerExecutionRoute route =
+              runtime.get_scheduler_execution_route(intent);
+          if (route.domain == GraphRuntime::SchedulerExecutionRoute::Domain::
+                                  ProcessCpuService) {
+            return std::make_pair(std::string("CpuWorkStealingScheduler"),
+                                  execution_service_->get_stats());
+          }
           const IScheduler* scheduler = runtime.get_scheduler(intent);
           if (!scheduler) {
             return std::nullopt;

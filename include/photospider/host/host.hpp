@@ -214,10 +214,12 @@ struct HostSchedulerConfig {
 
   /**
    * @brief CPU/plugin worker request; zero means bounded automatic selection.
-   * @note Zero resolves once before construction to a value in `[1,8]`;
-   *       positive values are exact and must not exceed
-   *       `kSchedulerWorkerRequestMax`. This field does not configure the
-   *       fixed process-wide scheduler capacity.
+   * @note For a built-in CPU route, zero resolves once per Host to a value in
+   *       `[1,8]` and fixes that Host's shared CPU service pool. Positive
+   *       values are exact and must not exceed `kSchedulerWorkerRequestMax`.
+   *       Legacy scheduler routes interpret the same request when their
+   *       Graph-owned scheduler is planned. This field does not configure the
+   *       fixed process-wide aggregate capacity.
    */
   unsigned int worker_count = 0;
 };
@@ -1016,14 +1018,20 @@ class PHOTOSPIDER_API Host {
    *
    * @param config Scheduler type names and worker count.
    * @return Success, or `GraphErrc::InvalidParameter` when the positive worker
-   *         request exceeds `kSchedulerWorkerRequestMax`.
+   *         request exceeds `kSchedulerWorkerRequestMax` or conflicts with an
+   *         already fixed built-in CPU service pool; or
+   *         `GraphErrc::ComputeError` when the first fixed pool cannot reserve
+   *         transitional process capacity.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Existing loaded graph sessions keep their current scheduler objects;
-   *       callers can use replace_scheduler() to update them explicitly. A
-   *       rejected candidate leaves the previous future-session defaults
-   *       unchanged. Success validates defaults only and does not reserve
-   *       process capacity for a future graph load.
+   * @note Selecting a built-in CPU type resolves, reserves, and starts exactly
+   *       one Host-lifetime CPU pool. Later zero/equal worker requests are
+   *       idempotent, while a different positive request is rejected. Existing
+   *       loaded graph bindings remain unchanged; callers can use
+   *       replace_scheduler() to update them explicitly. A rejected candidate
+   *       leaves the previous future-session defaults unchanged. Legacy
+   *       Graph-owned scheduler capacity is still reserved transactionally by
+   *       later graph load or replacement.
    */
   virtual VoidResult configure_scheduler_defaults(
       const HostSchedulerConfig& config) = 0;

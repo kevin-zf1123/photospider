@@ -175,7 +175,6 @@ TEST(M34_KernelScheduler, ReplaceScheduler) {
           .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(initial_route.domain,
             GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService);
-  EXPECT_EQ(initial_route.worker_count, 3u);
 
   // Replace with serial_debug
   bool replaced = kernel.replace_scheduler(
@@ -192,7 +191,6 @@ TEST(M34_KernelScheduler, ReplaceScheduler) {
           .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(serial_route.domain,
             GraphRuntime::SchedulerExecutionRoute::Domain::PerGraphScheduler);
-  EXPECT_EQ(serial_route.worker_count, 0u);
 
   ASSERT_TRUE(kernel.replace_scheduler(
       graph_name, ComputeIntent::GlobalHighPrecision, "cpu_work_stealing"));
@@ -201,7 +199,6 @@ TEST(M34_KernelScheduler, ReplaceScheduler) {
           .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(restored_route.domain,
             GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService);
-  EXPECT_EQ(restored_route.worker_count, 3u);
 }
 
 TEST(M34_KernelScheduler, ReplaceSchedulerInvalidType) {

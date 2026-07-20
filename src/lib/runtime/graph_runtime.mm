@@ -543,16 +543,10 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
                                      SchedulerExecutionRoute execution_route) {
   if (execution_route.domain ==
       SchedulerExecutionRoute::Domain::ProcessCpuService) {
-    if (scheduler == nullptr || intent != ComputeIntent::GlobalHighPrecision ||
-        execution_route.worker_count == 0U ||
-        execution_route.worker_count > kSchedulerWorkerRequestMax) {
+    if (scheduler != nullptr) {
       throw std::invalid_argument(
-          "Process CPU scheduler route requires a GlobalHighPrecision owner "
-          "and worker count in [1,8].");
+          "Process CPU scheduler route cannot carry a Graph-owned scheduler.");
     }
-  } else if (execution_route.worker_count != 0U) {
-    throw std::invalid_argument(
-        "Per-Graph scheduler route cannot carry a service worker grant.");
   }
 
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
@@ -592,7 +586,10 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
 bool GraphRuntime::has_scheduler(ComputeIntent intent) const {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   auto it = schedulers_.find(intent);
-  return it != schedulers_.end() && it->second.scheduler != nullptr;
+  return it != schedulers_.end() &&
+         (it->second.scheduler != nullptr ||
+          it->second.execution_route.domain ==
+              SchedulerExecutionRoute::Domain::ProcessCpuService);
 }
 
 }  // namespace ps

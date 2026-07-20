@@ -241,11 +241,15 @@ struct ComputeRunSubmissionRevision {
  * @brief Quality carried independently from compute intent and QoS.
  *
  * @throws Nothing for value operations.
- * @note Current non-realtime HP Runs use only full quality.
+ * @note Current non-realtime HP Runs use full quality; issue #69 RT child Runs
+ * use interactive quality without merging intent and quality.
  */
 enum class ComputeRunQuality {
   /** @brief Full high-precision product output. */
   Full,
+
+  /** @brief Interactive realtime proxy output. */
+  Interactive,
 };
 
 /**
@@ -289,7 +293,7 @@ struct ComputeRunQos {
 };
 
 /**
- * @brief Caller-supplied immutable inputs used to construct one HP Run.
+ * @brief Caller-supplied immutable inputs used to construct one domain Run.
  *
  * @throws std::bad_alloc when graph_identity is copied into Run ownership.
  * @note Kernel supplies a stable session label. Direct private ComputeService
@@ -305,7 +309,7 @@ struct ComputeRunSubmission {
   /** @brief Target graph node id requested by the caller. */
   int target_node_id = -1;
 
-  /** @brief Single-domain intent; current Runs accept only HP. */
+  /** @brief Single-domain HP or RT intent. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
 
   /** @brief Quality independent from intent and QoS. */
@@ -365,7 +369,7 @@ class ComputeRunDescriptor {
   /**
    * @brief Returns the single-domain compute intent.
    *
-   * @return GlobalHighPrecision for current Runs.
+   * @return GlobalHighPrecision or RealTimeUpdate for the single-domain Run.
    * @throws Nothing.
    */
   ComputeIntent intent() const noexcept { return intent_; }

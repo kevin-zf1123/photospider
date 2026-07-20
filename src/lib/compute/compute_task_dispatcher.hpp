@@ -131,9 +131,8 @@ class ComputeTaskDispatcher {
    * @brief Executes one full-HP plan through the injected CPU service.
    *
    * @param graph Graph whose temporary outputs are committed after settlement.
-   * @param execution_service Process-owned single-Run CPU execution domain.
+   * @param execution_service Process-owned multi-Run CPU execution domain.
    * @param host Active Graph observation context for worker trace forwarding.
-   * @param worker_count Exact built-in CPU scheduler-plan grant.
    * @param request Immutable full-HP dispatch options.
    * @param run Request owner retaining plan, runner, results, and leases.
    * @return Mutable target high-precision output stored in Graph state.
@@ -146,7 +145,7 @@ class ComputeTaskDispatcher {
    * dispatcher/Run boundary.
    */
   NodeOutput& execute(GraphModel& graph, ExecutionService& execution_service,
-                      SchedulerHostContext& host, unsigned int worker_count,
+                      SchedulerHostContext& host,
                       const ComputeDispatchRequest& request, ComputeRun& run);
 
   /**
@@ -199,7 +198,6 @@ class ComputeTaskDispatcher {
    * used by the Run-owned node runner and completion routes.
    * @param execution_service Non-null only for the migrated CPU service route.
    * @param host Non-null active trace target only for the service route.
-   * @param worker_count Exact service CPU grant, or zero for the legacy route.
    * @param request Immutable dispatch controls.
    * @param run Request owner retaining all asynchronous state.
    * @return Mutable committed target output.
@@ -212,7 +210,6 @@ class ComputeTaskDispatcher {
                            SchedulerTaskRuntime& task_runtime,
                            ExecutionService* execution_service,
                            SchedulerHostContext* host,
-                           unsigned int worker_count,
                            const ComputeDispatchRequest& request,
                            ComputeRun& run);
 

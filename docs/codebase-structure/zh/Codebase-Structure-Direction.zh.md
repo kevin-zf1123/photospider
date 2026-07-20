@@ -34,8 +34,8 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_core_internal` | 仅用于构建的 core value、private conversion 与 registry helper。 | 按角色归属的源码也会折叠进静态产品。 |
 | `photospider_graph_internal` | 仅用于构建的 `GraphModel` 与 graph-service helper。 | `GraphModel` 继续私有地位于 `src/lib/graph`。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation v2 loader、adapter 与 lifetime helper。 | 不导出。 |
-| `photospider_scheduler_internal` | 仅用于构建的 scheduler planning/factory、ABI-v2 loader、内置实现、reservation owner 与 process-budget helper。 | 固定 32-slot process ledger 是过渡性 private containment，不是目标 injected execution service。 |
-| `photospider_compute_internal` | 仅用于构建的 compute、request-owned HP `ComputeRun`、runtime、dirty-region 与 interaction helper。 | Run 保持私有；其 scheduler-backed full HP callback 会保留稳定 Run lease，而物理 worker 仍由 per-Graph scheduler 拥有。 |
+| `photospider_scheduler_internal` | 仅用于构建的 scheduler planning/factory、ABI-v2 loader、内置实现、reservation owner 与 process-budget helper。 | 固定 32-slot process ledger 会计入共享 service pool 与 legacy scheduler owner，但不是目标 Host 权威 resource ledger。 |
+| `photospider_compute_internal` | 仅用于构建的 compute、request-owned HP/RT `ComputeRun`、runtime、dirty-region 与 interaction helper。 | Run 保持私有；内建 CPU work 使用固定的 multi-Run `ExecutionService`，而 legacy scheduler route 仍拥有自己的 worker。 |
 | `photospider_operation_runtime` | 可安装的静态 image-buffer factory 实现。 | 没有外部 package，也不反向链接 operation SDK。 |
 | `photospider_operation_sdk` | 可安装的 operation v2 interface SDK。 | 传递链接 `operation_runtime`，是普通插件唯一所需 link target。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
@@ -77,13 +77,15 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 - Graph、compute、runtime、Host、plugin、scheduler、benchmark 与 adapter 的实现文件和私有头
   现在都位于按角色归属的 `src/lib/**` 目录。内部 target 通过私有 `src/lib/` root 构建，
   可安装 public header inventory 则继续限定在 `include/photospider/**`。
-- 当前 issue #68 Run/service 实现位于
+- 当前 issue #69 Run/service 实现位于
   `src/lib/compute/{compute_run,execution_service}.*`。`Kernel` 把 session identity 与显式默认
-  QoS 传给私有 request，并注入 composition-root CPU service；`ComputeService` 为每次非
-  realtime HP call 创建一个 Run。共享 Run control 会持有 full-plan/temporary storage 或
-  standalone dirty-HP staging storage，直到唯一 terminal publication。内建 CPU full HP 会把
-  move-only、由 lease 支撑的 submission 转移给单 Run service；legacy full HP 保留 owned
-  callback。Installed header、Host value、operation ABI 与 scheduler ABI 都不会命名这些私有对象。
+  QoS 传给私有 request，并注入 composition-root CPU service。`ComputeService` 为每次非
+  realtime HP call 创建一个 Run，并为 realtime call 创建彼此分离的 HP `Full` 与 RT
+  `Interactive` 子 Run。共享 Run control 会持有对应的 full-plan/temporary storage 或
+  standalone dirty staging storage，直到唯一 terminal publication。内建 CPU 的 HP/RT full、
+  dirty 与 preflight work 会把具有 owned callback context 的 move-only、由 lease 支撑的
+  submission 转移给固定的 multi-Run service；legacy scheduler route 保留 owned callback。
+  Installed header、Host value、operation ABI 与 scheduler ABI 都不会命名这些私有对象。
 - dirty-region 诊断、compute planning 诊断和 scheduler trace 诊断都通过 Host 的拷贝值
   snapshot 暴露。公开头不再需要命名后端 graph/runtime/service/planning 类型或具体 scheduler
   class，就能提供这些诊断。
@@ -367,27 +369,28 @@ CMake 规则：
 ## 目标进程执行组合边界
 
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-固定完整的进程执行所有权。其 issue #68 私有 HP Run、稳定 lease/复合 identity、
-ready-submission 与注入的单 Run CPU service 切片现在已经位于当前 `src/lib/compute/`。
-`EmbeddedHostState` 会在 Kernel 前构造该 owner，Kernel 再把它注入 request-local
-`ComputeService`，不使用 static singleton。配对 Run、多 Graph execution、完整 resource
-ownership 与 revision-safe commit 仍是目标布局。
+固定完整的进程执行所有权。其 issue #69 私有 HP/RT Run、稳定 lease/复合 identity、
+owned ready-submission 与注入的 multi-Run CPU service 切片现在已经位于当前
+`src/lib/compute/`。`EmbeddedHostState` 会在 Kernel 前构造该 owner，Kernel 再把它注入
+request-local `ComputeService`，不使用 static singleton。`RunGroup`、完整 resource ownership
+与 revision-safe commit 仍是目标布局。
 
 在该目标中：
 
 - `GraphRuntime` 仍以 graph 为作用域，拥有 Graph state、graph-state lane、revision capture/commit
   validation、稳定 graph-instance identity 与 lifetime anchor、event 与 platform/session
   metadata；
-- 当前 `ComputeRun` 的共享 control 拥有非 realtime HP descriptor/phase/terminal state，以及
-  full-plan/temporary storage 或 standalone dirty-HP staging storage；scheduler-backed full HP
-  work 会保留不可伪造的 lease 与复合 task identity，目标则会把该 owner 扩展到通用
-  dirty/realtime 覆盖、cancellation 与 reservation；
+- 当前 `ComputeRun` 的共享 control 拥有非 realtime HP Run，以及 realtime call 中彼此分离的
+  HP `Full`/RT `Interactive` 子 Run，包括 descriptor/phase/terminal state 与对应的
+  full-plan/temporary storage 或 standalone dirty staging storage；scheduler-backed full HP
+  work 会保留不可伪造的 lease 与复合 task identity，目标则会把该 owner 扩展到 cancellation
+  与 reservation；
 - request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
-- 当前 `ExecutionService` 拥有一个内建 CPU runtime、精确 grant 重配置、单 Run 排他、
-  ready-only admission、settled failure transport 与 active-Graph trace 转发；目标会进一步增加
-  多 Graph 物理 worker、有界 ready storage、admission、可信 policy validation 与
-  completion routing；
+- 当前 `ExecutionService` 拥有一个固定的内建 CPU worker pool、幂等的一次性 grant 配置、
+  直接的 high/normal ready queue、并发的 multi-Graph Run，以及按 Run 隔离的 completion、
+  first-failure、trace 与 Host-context routing；目标会进一步增加有界 ready storage、
+  生产级 admission、可信 policy validation 与通用 resource execution；
 - 其私有 `RunLifecycleRegistry` 提供唯一 process admission/Graph-close/process-shutdown
   fence、pending-candidate tracking、按 Graph 建索引且由 registry 持有的 `RunLease` entry 与
   process enumeration，同时不拥有 Run plan、dispatcher、terminal state、Graph state 或 resource
@@ -582,19 +585,19 @@ Collection snapshot 规则：
 Frontend boundary、物理布局、daemon、typed Client、完整 IPC Host 与 extension SDK 的第 1-8 步都已
 在当前仓库落地，且没有改变 `ps::Host` 作为唯一 public seam 的地位。
 
-Issue #43 在现有 per-Graph scheduler model 外增加 bounded migration gate：request 会解析为最多八个
-CPU/plugin worker，内置 GPU plan 会保守地增加一个潜在 device worker，并由一个 private 32-slot
-ledger 协调进程内全部 Host 与 Kernel。Graph load 会原子预留 HP/RT pair；replacement 会保留旧
-grant 直到 candidate 发布；scheduler destruction 先于精确 reservation release。这只是当前
-containment。Issue #68 现在为内建非 dirty full HP 增加了一个注入的单 Run CPU
-`ExecutionService`，但有意保留被计费的 per-Graph CPU owner，也不会把固定 budget 变成 service
-ledger。Per-Graph worker 与过渡性的 process function-static
-`SchedulerWorkerBudget::process()` owner 会继续存在，直到
-[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-和 issue #69 引入 shared multi-Graph executor 并删除重复 owner。随后 #70/#71 增加最终的 Host
-权威 ledger、有界 ready store 与内建 policy；#72–#74 增加 revision、cancellation
-与 supersession；#75 替换拥有 worker 的 ABI；#76 收束 lifecycle 与 telemetry 不变量。权威的无环
-依赖表位于[内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md#交付依赖契约)。
+Issue #43 在 per-Graph scheduler model 外增加了 bounded migration gate：request 会解析为最多
+八个 CPU/plugin worker，内置 GPU plan 会保守地增加一个潜在 device worker，并由一个 private
+32-slot ledger 协调进程内全部 Host 与 Kernel。Graph load 会原子预留 legacy HP/RT scheduler
+pair；replacement 会保留旧 grant 直到 candidate 发布；scheduler destruction 先于精确
+reservation release。Issue #69 现在为来自多个 Graph 的内建 CPU HP/RT full、dirty 与
+preflight work 增加了一个固定 `ExecutionService` pool。这些 CPU binding 不再拥有 scheduler，
+而 legacy serial/GPU/plugin scheduler route 仍然保留。过渡性的 process function-static
+`SchedulerWorkerBudget::process()` owner 会为每个 Kernel 的 service pool 计费一次，并同时
+计入 legacy scheduler owner；它是当前防止超额订阅的 containment，不是最终 service ledger。
+随后 #70/#71 增加 Host 权威 ledger、有界 ready store、生产级 admission 与内建 policy；
+#72–#74 增加 revision、cancellation 与 supersession；#75 替换拥有 worker 的 ABI；#76 收束
+lifecycle 与 telemetry 不变量。权威的无环依赖表位于
+[内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md#交付依赖契约)。
 
 1. **已完成：** 建立 public header 安装与 self-containment 边界。
    - 只安装 `include/photospider/**` 下的头文件；`src/lib/` 下的实现头保持在 package 之外。

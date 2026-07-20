@@ -13,6 +13,7 @@
 #include "compute/compute_task_dependency_state.hpp"
 #include "compute/compute_task_dispatcher.hpp"
 #include "compute/dirty_region_planner.hpp"
+#include "compute/execution_service.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -21,6 +22,7 @@
 namespace ps {
 class GraphModel;
 class GraphRuntime;
+class SchedulerHostContext;
 }  // namespace ps
 
 namespace ps::compute {
@@ -92,11 +94,11 @@ IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
  * The prepared state packages the graph-scoped dirty snapshot, the
  * immutable node/cache-pruned compute plan, the generation-local dirty
  * selection overlay, and the materialized source/downstream task groups that
- * will be submitted to the scheduler. The dirty plan itself owns the per-node
- * HP or RT ROI entries used by node execution.
+ * will be submitted to the selected physical execution domain. The dirty plan
+ * itself owns the per-node HP or RT ROI entries used by node execution.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
- * @note The struct is request-local. It must not be stored after scheduler
+ * @note The struct is request-local. It must not be stored after execution
  * callbacks derived from it have drained.
  */
 template <typename DirtyPlan>
@@ -125,15 +127,36 @@ struct PreparedDirtyPlan {
  *
  * The request object lowers helper parameter count and makes the dispatch
  * contract explicit: source boundary work completes before downstream work.
- * Scheduler batches allocate their own epochs; dirty generation remains
- * separate snapshot and source-commit provenance.
+ * Legacy scheduler batches allocate their own epochs; process-service batches
+ * use Run identity. Dirty generation remains separate snapshot and
+ * source-commit provenance.
  */
 struct DirtySourceFirstRunRequest {
   /** @brief Optional runtime that owns intent schedulers and trace events. */
   GraphRuntime* runtime = nullptr;
 
-  /** @brief Intent-specific scheduler task pool to target. */
+  /** @brief Intent whose physical execution domain receives the work. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+
+  /**
+   * @brief Injected process CPU service, or null for inline/legacy routing.
+   */
+  ExecutionService* execution_service = nullptr;
+
+  /**
+   * @brief Observation target borrowed for process-service settlement.
+   *
+   * @note Required exactly when execution_service is non-null and valid until
+   * every synchronous service batch in this request has drained.
+   */
+  SchedulerHostContext* host = nullptr;
+
+  /**
+   * @brief Single-domain Run owning service submission leases.
+   *
+   * @note Required exactly when execution_service is non-null.
+   */
+  ComputeRun* run = nullptr;
 
   /** @brief Compute plan containing immutable dirty task graph metadata. */
   const ComputePlan* compute_plan = nullptr;
@@ -150,14 +173,110 @@ struct DirtySourceFirstRunRequest {
   /**
    * @brief Dirty snapshot generation associated with this request.
    * @note The current source-first runner does not forward this value as the
-   *       scheduler epoch; scheduler initial batches allocate independent
-   *       scheduler-local epochs.
+   *       scheduler epoch or service Run id; legacy scheduler initial batches
+   *       allocate independent scheduler-local epochs.
    */
   uint64_t dirty_generation = 0;
 
   /** @brief Boundary validation invoked between source and downstream groups.
    */
   std::function<void()> before_downstream;
+};
+
+/**
+ * @brief Heap-owned dirty phase context for process-service submissions.
+ *
+ * The context owns a copy of the immutable compute plan, optional dirty
+ * selection, active task membership, dependency counters, task callable, and
+ * one matching Run lease. Each materialized `ReadyTaskSubmission` retains this
+ * context and another matching lease, so no stack `TaskExecutor*` crosses the
+ * process-service boundary.
+ *
+ * @throws std::bad_alloc if plan, selection, dependency, callable, or task
+ * ownership cannot allocate.
+ * @note Stable Graph/cache/staging references captured by the owned callable
+ * remain protected by Graph-state admission and synchronous Run settlement.
+ */
+class DirtyReadyTaskContext final
+    : public std::enable_shared_from_this<DirtyReadyTaskContext> {
+ public:
+  /**
+   * @brief Builds one owned source or downstream dirty phase.
+   *
+   * @param compute_plan Immutable task graph copied into context ownership.
+   * @param selection Optional dirty dependency overlay copied into ownership.
+   * @param active_task_ids Exact task ids active in this phase.
+   * @param run_task Owned callable that executes one dense task id.
+   * @param lease Matching Run lease retained for dependent submissions.
+   * @param release_dependents Whether completion releases dependency-ready
+   * work from this phase.
+   * @param priority Process queue hint for every phase submission.
+   * @throws std::invalid_argument if run_task is empty.
+   * @throws std::bad_alloc from owned state construction.
+   */
+  DirtyReadyTaskContext(const ComputePlan& compute_plan,
+                        const DirtyTaskSelectionOverlay* selection,
+                        const std::vector<int>& active_task_ids,
+                        std::function<void(int)> run_task,
+                        ComputeRunLease lease, bool release_dependents,
+                        SchedulerTaskPriority priority);
+
+  /**
+   * @brief Materializes owned submissions for selected ready task ids.
+   *
+   * @param task_ids Dependency-ready ids within this phase.
+   * @param initial_ready Whether these values form the initial phase batch.
+   * @return Move-owned submissions retaining this context and matching leases.
+   * @throws std::invalid_argument for an inactive or invalid task id.
+   * @throws std::bad_alloc when output, executable, or lease storage allocates.
+   * @note Readiness is caller-established; this method performs membership and
+   * identity validation only.
+   */
+  std::vector<ReadyTaskSubmission> make_submissions(
+      const std::vector<int>& task_ids, bool initial_ready);
+
+ private:
+  /**
+   * @brief Executes one matching service callback and releases dependents.
+   *
+   * @param lease Submission-owned lease naming this context's Run.
+   * @param identity Composite identity whose local id selects the dirty task.
+   * @param task_runtime Active service runtime used for ready release,
+   * completion, and failure trace.
+   * @return Nothing.
+   * @throws std::invalid_argument for mismatched or inactive identity.
+   * @throws Exact task, dependency, submission, trace, or completion
+   * exception.
+   */
+  void execute(ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+               SchedulerTaskRuntime& task_runtime);
+
+  /** @brief Immutable task shape copied into Run-phase ownership. */
+  ComputePlan compute_plan_;
+
+  /** @brief Optional copied dirty dependency and readiness overlay. */
+  std::optional<DirtyTaskSelectionOverlay> selection_;
+
+  /** @brief Exact active ids retained for dependency-state construction. */
+  std::vector<int> active_task_ids_;
+
+  /** @brief Fast active membership guard for composite identity validation. */
+  std::unordered_set<int> active_task_id_set_;
+
+  /** @brief Owned dependency counters and dependent adjacency. */
+  std::unique_ptr<TaskDependencyState> dependency_state_;
+
+  /** @brief Owned dirty node/task callable. */
+  std::function<void(int)> run_task_;
+
+  /** @brief Base matching lease copied into every materialized submission. */
+  ComputeRunLease lease_;
+
+  /** @brief Whether task completion releases ready dependents. */
+  bool release_dependents_ = false;
+
+  /** @brief Process ready-queue hint for this phase. */
+  SchedulerTaskPriority priority_ = SchedulerTaskPriority::Normal;
 };
 
 /**
@@ -505,10 +624,10 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
  * @param run_task Task runner invoked with dense task ids.
  * @throws Exceptions from task construction, task execution, boundary
  * validation, scheduler lookup, or scheduler submission.
- * @note Scheduler-backed execution delegates source-first submission to
- * ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first. The dirty
- * executor owns only request-local TaskExecutor construction and inline
- * fallback ordering.
+ * @note Legacy scheduler execution delegates source-first submission to
+ * ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first. Process
+ * service execution materializes heap-owned Run submissions. The dirty
+ * executor retains request-local inline fallback ordering.
  */
 template <typename RunTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
@@ -516,6 +635,52 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
   const ComputePlan& compute_plan = *request.compute_plan;
   const std::vector<int>& source_task_ids = *request.source_task_ids;
   const std::vector<int>& downstream_task_ids = *request.downstream_task_ids;
+
+  if (request.execution_service) {
+    if (!request.host || !request.run) {
+      throw std::invalid_argument(
+          "Dirty process-service routing requires a host and Run.");
+    }
+    std::function<void(int)> owned_run_task(std::move(run_task));
+    ComputeRunLease phase_lease = request.run->acquire_lease();
+
+    if (!source_task_ids.empty()) {
+      auto source_context = std::make_shared<DirtyReadyTaskContext>(
+          compute_plan, request.selection, source_task_ids, owned_run_task,
+          phase_lease, false, SchedulerTaskPriority::High);
+      std::vector<ReadyTaskSubmission> source_submissions =
+          source_context->make_submissions(source_task_ids, true);
+      request.execution_service->execute_cpu_run(
+          *request.host, std::move(source_submissions),
+          static_cast<int>(source_task_ids.size()));
+    }
+    if (request.before_downstream) {
+      request.before_downstream();
+    }
+
+    if (!downstream_task_ids.empty()) {
+      std::vector<int> initial_downstream_ids;
+      if (request.selection) {
+        initial_downstream_ids = request.selection->initial_downstream_task_ids;
+      } else {
+        TaskGraphReadyChecker ready_checker;
+        initial_downstream_ids = ready_checker.initial_ready_task_ids(
+            compute_plan.task_graph, &downstream_task_ids);
+      }
+      auto downstream_context = std::make_shared<DirtyReadyTaskContext>(
+          compute_plan, request.selection, downstream_task_ids,
+          std::move(owned_run_task), phase_lease, true,
+          request.intent == ComputeIntent::RealTimeUpdate
+              ? SchedulerTaskPriority::High
+              : SchedulerTaskPriority::Normal);
+      std::vector<ReadyTaskSubmission> downstream_submissions =
+          downstream_context->make_submissions(initial_downstream_ids, true);
+      request.execution_service->execute_cpu_run(
+          *request.host, std::move(downstream_submissions),
+          static_cast<int>(downstream_task_ids.size()));
+    }
+    return;
+  }
 
   if (request.runtime) {
     IScheduler& dirty_task_runtime =

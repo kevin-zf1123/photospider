@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,7 +11,6 @@
 #include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
-class CpuWorkStealingScheduler;
 class SchedulerHostContext;
 }  // namespace ps
 
@@ -185,9 +183,10 @@ class ReadyTaskSubmission final {
    * @note Readiness is a caller-established precondition. Construction does
    * not inspect a task graph or dependency map.
    */
-  ReadyTaskSubmission(ComputeRunLease lease, ComputeRunTaskIdentity identity,
-                      int trace_node_id, bool is_initial_ready,
-                      Executable executable);
+  ReadyTaskSubmission(
+      ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
+      bool is_initial_ready, Executable executable,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal);
 
   /** @brief Transfers complete submission ownership. @throws Nothing. */
   ReadyTaskSubmission(ReadyTaskSubmission&& other) noexcept = default;
@@ -222,6 +221,15 @@ class ReadyTaskSubmission final {
   ComputeRunTaskIdentity identity() const noexcept { return identity_; }
 
   /**
+   * @brief Returns the private process-ready queue hint for this submission.
+   * @return High for latency-sensitive work, otherwise Normal.
+   * @throws Nothing.
+   * @note Priority does not establish dependency correctness or global
+   * fairness. The dispatcher must already have established readiness.
+   */
+  SchedulerTaskPriority priority() const noexcept { return priority_; }
+
+  /**
    * @brief Executes this accepted ready task through its matching lease.
    * @param task_runtime Active service runtime receiving completion and newly
    * ready submissions.
@@ -244,6 +252,9 @@ class ReadyTaskSubmission final {
 
   /** @brief Owned operation containing no borrowed dispatcher stack state. */
   Executable executable_;
+
+  /** @brief Private ready-queue hint that carries no dependency authority. */
+  SchedulerTaskPriority priority_ = SchedulerTaskPriority::Normal;
 };
 
 /**
@@ -280,11 +291,13 @@ class ReadyTaskSubmissionRuntime : public SchedulerTaskRuntime {
 };
 
 /**
- * @brief Owns the current process CPU execution slice for one active Run.
+ * @brief Owns one fixed process CPU execution domain for concurrent Runs.
  *
- * The service owns a concrete CPU worker scheduler, serializes one complete
- * Run batch, and accepts only `ReadyTaskSubmission`. It owns no planning,
- * dependency, Graph/cache, dirty, commit, admission-ledger, or policy state.
+ * The service owns a fixed worker pool and accepts only
+ * `ReadyTaskSubmission`. Each active Run has isolated completion, exception,
+ * trace-target, and settlement state while independent Runs may overlap. The
+ * service owns no planning, dependency, Graph/cache, dirty propagation,
+ * visible commit, final admission-ledger, or fairness policy state.
  *
  * @throws std::bad_alloc or std::system_error from explicit execution setup.
  * @note This private source-tree service is explicitly composed and injected;
@@ -293,11 +306,24 @@ class ReadyTaskSubmissionRuntime : public SchedulerTaskRuntime {
 class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
   /**
-   * @brief Creates a stopped execution domain with no worker threads.
-   * @throws std::bad_alloc if host-proxy ownership cannot allocate.
-   * @note CPU workers are created lazily for the first migrated Run.
+   * @brief Creates an unconfigured execution domain with no worker threads.
+   * @throws std::bad_alloc if private pool-state ownership cannot allocate.
+   * @note `configure_worker_count()` must freeze the process grant before the
+   * first Run is submitted.
    */
   ExecutionService();
+
+  /**
+   * @brief Creates and configures one fixed execution domain.
+   * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
+   * @throws std::invalid_argument if the request exceeds eight.
+   * @throws GraphError if the transitional process budget cannot admit the
+   * fixed pool.
+   * @throws std::bad_alloc or std::system_error if pool construction fails.
+   * @note Construction acquires one pool-lifetime transitional reservation;
+   * it does not create a `ResourceLedger`.
+   */
+  explicit ExecutionService(unsigned int worker_count);
 
   /**
    * @brief Joins and releases service-owned CPU workers.
@@ -306,32 +332,71 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   ~ExecutionService() noexcept override;
 
-  /** @brief Prevents copying physical worker and Run-gate ownership. */
+  /** @brief Prevents copying physical worker and Run-registry ownership. */
   ExecutionService(const ExecutionService& other) = delete;
 
-  /** @brief Prevents assigning physical worker and Run-gate ownership. */
+  /** @brief Prevents assigning physical worker and Run-registry ownership. */
   ExecutionService& operator=(const ExecutionService& other) = delete;
 
   /**
-   * @brief Executes one complete ready-only CPU Run batch synchronously.
+   * @brief Resolves and freezes the process worker count exactly once.
+   *
+   * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
+   * @return Nothing.
+   * @throws std::invalid_argument for an out-of-range request or a positive
+   * request that conflicts with the already fixed count.
+   * @throws GraphError if the transitional process budget cannot admit the
+   * first fixed pool.
+   * @throws std::bad_alloc or std::system_error if worker construction fails.
+   * @note A later zero request preserves an existing fixed value and an equal
+   * positive request is idempotent. Graph load, replacement, Run execution,
+   * and dirty phases never resize the pool.
+   */
+  void configure_worker_count(unsigned int worker_count);
+
+  /**
+   * @brief Returns the fixed process worker count.
+   * @return Zero before configuration, otherwise a value in `[1,8]`.
+   * @throws std::system_error if private state locking fails.
+   */
+  unsigned int worker_count() const;
+
+  /**
+   * @brief Reports whether fixed workers have been configured.
+   * @return True only after the complete worker pool is running.
+   * @throws std::system_error if private state locking fails.
+   */
+  bool is_configured() const;
+
+  /**
+   * @brief Copies process CPU execution diagnostics.
+   * @return Text containing fixed workers, active Runs, and queued work.
+   * @throws std::bad_alloc if formatting storage cannot allocate.
+   * @throws std::system_error if private state locking fails.
+   * @note The snapshot grants no worker, queue, Run, or lifecycle authority.
+   */
+  std::string get_stats() const;
+
+  /**
+   * @brief Executes one complete ready-only CPU Run synchronously.
    *
    * @param host Active Graph runtime observation context, borrowed only until
    * the settled wait finishes.
-   * @param worker_count Exact built-in CPU grant in `[1,8]`.
    * @param initial_submissions Dispatcher-discovered initial ready values from
    * one Run.
    * @param total_task_count Complete logical planned-task count.
    * @return Nothing after every callback in the batch settles.
-   * @throws std::invalid_argument for invalid grants, counts, empty active
-   * batches, or mixed Run ids.
-   * @throws std::logic_error for invalid service lifecycle or generic runtime
-   * use.
+   * @throws std::invalid_argument for invalid counts, empty active batches,
+   * mixed Run ids, or duplicate active Run ids.
+   * @throws std::logic_error before fixed pool configuration or for invalid
+   * generic runtime use.
    * @throws std::bad_alloc or std::system_error from pool/queue setup.
    * @throws The exact first worker task exception after settlement.
-   * @note The single-Run mutex spans setup, submission, wait, and host unbind.
-   * No Graph, plan, dependency, result, or commit object enters this method.
+   * @note Independent calls may overlap. Run-local state is removed only after
+   * queued work is retired and every in-flight callback has exited. No Graph,
+   * plan, dependency, result, or commit object enters this method.
    */
-  void execute_cpu_run(SchedulerHostContext& host, unsigned int worker_count,
+  void execute_cpu_run(SchedulerHostContext& host,
                        std::vector<ReadyTaskSubmission> initial_submissions,
                        int total_task_count);
 
@@ -374,92 +439,111 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       std::optional<std::uint64_t> epoch) override;
 
   /**
-   * @brief Waits for the active CPU batch to settle.
-   * @return Nothing on success.
-   * @throws std::logic_error outside an active Run.
-   * @throws The exact first worker exception.
+   * @brief Rejects unscoped generic completion waits.
+   * @return Nothing.
+   * @throws std::logic_error unconditionally.
+   * @note `execute_cpu_run()` owns the caller-side wait for one explicit Run;
+   * a generic wait has no unambiguous Run state in the multi-Run domain.
    */
   void wait_for_completion() override;
 
   /**
-   * @brief Publishes an exact exception into the active CPU fence.
+   * @brief Publishes an exact exception into the current worker's Run fence.
    * @param error Non-null worker exception identity.
    * @return Nothing.
-   * @throws std::logic_error outside an active Run.
+   * @throws std::logic_error outside a service worker callback.
    */
   void set_exception(std::exception_ptr error) override;
 
   /**
-   * @brief Adds logical work to the active CPU completion count.
+   * @brief Adds logical work to the current worker's Run completion count.
    * @param delta Positive work count.
    * @return Nothing.
-   * @throws std::logic_error outside an active Run.
+   * @throws std::logic_error outside a service worker callback.
    * @throws std::overflow_error when CPU completion accounting overflows.
    */
   void inc_tasks_to_complete(int delta) override;
 
   /**
-   * @brief Retires one logical task from the active CPU batch.
+   * @brief Retires one logical task from the current worker's Run.
    * @return Nothing.
-   * @throws std::logic_error outside an active Run.
+   * @throws std::logic_error outside a service worker callback.
    */
   void dec_tasks_to_complete() override;
 
   /**
-   * @brief Publishes one active-worker scheduler trace.
+   * @brief Publishes one current-worker Run trace.
    * @param action Stable trace action.
    * @param node_id Planned Graph node id.
    * @return Nothing.
-   * @throws std::logic_error outside an active Run.
+   * @throws std::logic_error outside a service worker callback.
    */
   void log_event(SchedulerTraceAction action, int node_id) override;
 
  private:
-  /** @brief Service-owned host proxy attached for the CPU pool lifetime. */
-  class HostContextProxy;
+  /** @brief Per-Run completion, failure, trace, and settlement state. */
+  struct RunState;
+
+  /** @brief One owned ready queue entry paired with matching Run state. */
+  struct QueueEntry;
+
+  /** @brief Private worker, queue, registry, and reservation ownership. */
+  class PoolState;
 
   /**
-   * @brief Creates or replaces the CPU pool for an exact worker grant.
-   * @param worker_count Validated exact grant in `[1,8]`.
+   * @brief Runs the shared worker loop until service shutdown.
+   * @param worker_id Stable zero-based id in the fixed service pool.
    * @return Nothing.
-   * @throws std::bad_alloc or std::system_error from scheduler setup.
-   * @throws Any built-in lifecycle exception unchanged.
-   * @note The Run gate is held and no callback is active.
+   * @throws Nothing; task exceptions are routed into matching Run state.
    */
-  void configure_cpu_scheduler(unsigned int worker_count);
+  void worker_loop(int worker_id) noexcept;
 
   /**
-   * @brief Returns the scheduler serving the active Run.
-   * @return Borrowed stable CPU scheduler.
-   * @throws std::logic_error when no Run batch is active.
-   * @note The caller executes under the single-Run lifetime interval.
+   * @brief Enqueues one owned ready submission for a registered Run.
+   * @param run Matching active Run state.
+   * @param submission Ready value transferred into process queue ownership.
+   * @return Nothing.
+   * @throws std::invalid_argument when Run identity does not match.
+   * @throws std::logic_error when the Run or service no longer accepts work.
+   * @throws std::bad_alloc if queue ownership cannot allocate.
    */
-  CpuWorkStealingScheduler& active_scheduler();
+  void enqueue_submission(const std::shared_ptr<RunState>& run,
+                          ReadyTaskSubmission submission);
 
   /**
-   * @brief Wraps one owned submission for CPU queue storage.
-   * @param submission Ready value transferred into shared callback ownership.
-   * @return Scheduler-owned callback retaining the submission.
-   * @throws std::bad_alloc when shared or function state cannot allocate.
-   * @note The callback captures this service, which outlives the settled batch.
+   * @brief Claims one Run's first failure and retires its queued work.
+   * @param run Matching Run state retained through cleanup.
+   * @param failure Exact non-null worker exception.
+   * @return Nothing.
+   * @throws Nothing; worker failure transport cannot be replaced by cleanup.
    */
-  Task make_cpu_task(ReadyTaskSubmission submission);
+  void fail_run(const std::shared_ptr<RunState>& run,
+                std::exception_ptr failure) noexcept;
 
-  /** @brief Serializes the complete setup-to-settlement single-Run interval. */
-  std::mutex run_mutex_;
-
-  /** @brief Stable observation proxy attached to the current CPU scheduler. */
-  std::unique_ptr<HostContextProxy> host_context_;
-
-  /** @brief Lazily configured service-owned physical CPU runtime. */
-  std::unique_ptr<CpuWorkStealingScheduler> cpu_scheduler_;
-
-  /** @brief Exact grant used by the current CPU scheduler, or zero if absent.
+  /**
+   * @brief Resolves a registered Run from one submission identity.
+   * @param run_id Run namespace carried by an owned submission.
+   * @return Strong active Run state.
+   * @throws std::invalid_argument when no matching active Run exists.
+   * @throws std::system_error if private state locking fails.
    */
-  unsigned int configured_workers_ = 0U;
+  std::shared_ptr<RunState> find_active_run(ComputeRunId run_id);
 
-  /** @brief Active Run namespace while callbacks may enter, otherwise empty. */
-  std::optional<ComputeRunId> active_run_id_;
+  /**
+   * @brief Returns the Run currently executing on this service worker.
+   * @return Borrowed Run state valid for the callback interval.
+   * @throws std::logic_error outside a service worker callback.
+   */
+  static RunState& current_worker_run();
+
+  /** @brief Private fixed-pool implementation and reservation owner. */
+  std::unique_ptr<PoolState> pool_;
+
+  /** @brief Current service-worker Run context, null outside callbacks. */
+  static thread_local RunState* tls_run_state_;
+
+  /** @brief Current fixed worker id, or -1 outside service callbacks. */
+  static thread_local int tls_worker_id_;
 };
 
 }  // namespace ps::compute

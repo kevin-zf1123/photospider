@@ -45,10 +45,10 @@ inline constexpr unsigned int kGpuSchedulerWorkerInstanceMax = 9U;
  * @brief Fixed aggregate scheduler-worker admission ceiling for one process.
  *
  * @throws Nothing.
- * @note This is the migration safety ceiling for per-Graph schedulers, not a
- *       remotely configurable execution-service capacity. It is shared by all
- *       embedded Hosts and Kernels in one process and counts planned
- *       scheduler-owned workers only, not all process threads.
+ * @note This transitional migration ceiling is shared by all embedded Hosts
+ *       and Kernels in one process. It counts legacy scheduler-owned workers
+ *       plus each Kernel's one fixed private CPU ExecutionService pool, not
+ *       all process threads. It is not the final ResourceLedger contract.
  */
 inline constexpr unsigned int kSchedulerWorkerProcessMax = 32U;
 

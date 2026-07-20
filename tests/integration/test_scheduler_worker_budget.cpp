@@ -46,26 +46,23 @@ constexpr char kBudgetProbeOperationSubtype[] = "callback";
 /** @brief Non-blocking sink subtype joining parallel callback sources. */
 constexpr char kBudgetProbeSinkSubtype[] = "sink";
 
-/** @brief Number of saturated built-in Graphs in the physical worker probe. */
+/** @brief Number of Graph Runs sharing one process service in the probe. */
 constexpr std::size_t kWorkerProbeGraphCount = 4U;
 
-/** @brief CPU grant owned by each HP and RT scheduler in the worker probe. */
+/** @brief Fixed process CPU service grant shared by every probe Graph. */
 constexpr unsigned int kWorkerProbeGrant = 4U;
 
 /** @brief Independent ready callback sources placed in each probe Graph. */
-constexpr std::size_t kWorkerProbeSources = 8U;
+constexpr std::size_t kWorkerProbeSources = 1U;
 
 /** @brief Join-node id following every physical probe source. */
 constexpr int kWorkerProbeSinkId = static_cast<int>(kWorkerProbeSources + 1U);
 
 /** @brief Maximum simultaneous HP callbacks admitted across probe Graphs. */
-constexpr std::size_t kWorkerProbeActive = 16U;
+constexpr std::size_t kWorkerProbeActive = kWorkerProbeGrant;
 
-static_assert(kWorkerProbeGraphCount * 2U * kWorkerProbeGrant ==
-                  kSchedulerWorkerProcessMax,
-              "physical worker probe must saturate the process budget");
-static_assert(kWorkerProbeActive == kWorkerProbeGraphCount * kWorkerProbeGrant,
-              "physical worker probe active count must match HP grants");
+static_assert(kWorkerProbeActive == kWorkerProbeGraphCount,
+              "each overlapping Graph must contribute one blocked callback");
 
 /**
  * @brief Records real operation callbacks entered through scheduler execution.
@@ -555,40 +552,14 @@ class ScopedBorrowedSchedulerHook final {
 };
 
 /**
- * @brief Counts cross-instance CPU worker-creation entrances for one load.
+ * @brief Counts legacy CPU scheduler worker-creation hook entrances.
  * @throws Nothing for atomic construction and destruction.
- * @note GraphRuntime starts intent schedulers serially, so the second entrance
- * occurs only after the first one-worker scheduler has fully started.
+ * @note The process ExecutionService does not invoke this legacy-owner hook.
  */
 struct CpuWorkerCreationFailureProbe final {
-  /** @brief Process-hook entrances observed across both intent schedulers. */
+  /** @brief Legacy scheduler hook entrances observed by the test. */
   std::atomic<unsigned int> entrances{0U};
 };
-
-/**
- * @brief Injects allocation failure before the second CPU worker is created.
- * @param context Borrowed CpuWorkerCreationFailureProbe owned by the test.
- * @param point Scheduler lifecycle point about to execute.
- * @param attempt One-based attempt within the current lifecycle operation.
- * @return Nothing when the selected failure point has not been reached.
- * @throws std::bad_alloc At the second cross-instance CPU thread entrance.
- * @note Each one-worker instance reports local attempt one. The shared counter
- * lets HP start completely before RT fails, exercising GraphRuntime rollback
- * of a previously running scheduler without transient excess concurrency.
- */
-void fail_second_cpu_worker_creation(void* context,
-                                     testing::SchedulerFailurePoint point,
-                                     std::size_t attempt) {
-  if (point == testing::SchedulerFailurePoint::CpuThreadCreate &&
-      attempt == 1U) {
-    auto* probe = static_cast<CpuWorkerCreationFailureProbe*>(context);
-    const unsigned int entrance =
-        probe->entrances.fetch_add(1U, std::memory_order_relaxed) + 1U;
-    if (entrance == 2U) {
-      throw std::bad_alloc{};
-    }
-  }
-}
 
 /**
  * @brief Counts every first CPU worker-creation entrance without failing it.
@@ -617,8 +588,8 @@ void count_cpu_worker_creation(void* context,
  * @param attempt One-based attempt within the current lifecycle operation.
  * @return Nothing for unrelated lifecycle points.
  * @throws std::bad_alloc At the first CPU worker-creation entrance.
- * @note Replacement has already admitted and attached its one-slot candidate
- * when start reaches this hook, so rollback must return only that capacity.
+ * @note Ownerless process-service routing must never reach this legacy
+ * scheduler hook.
  */
 void fail_first_cpu_worker_creation(void* context,
                                     testing::SchedulerFailurePoint point,
@@ -629,19 +600,6 @@ void fail_first_cpu_worker_creation(void* context,
     probe->entrances.fetch_add(1U, std::memory_order_relaxed);
     throw std::bad_alloc{};
   }
-}
-
-/**
- * @brief Records one complete CPU worker-set publication checkpoint.
- * @param context Borrowed atomic counter owned by the test scope.
- * @return Nothing.
- * @throws Nothing.
- * @note The scheduler invokes this only after installing its worker vector and
- * immediately before publishing running state.
- */
-void count_cpu_start_publication(void* context) noexcept {
-  auto* count = static_cast<std::atomic<unsigned int>*>(context);
-  count->fetch_add(1U, std::memory_order_relaxed);
 }
 
 /**
@@ -1262,62 +1220,67 @@ TEST(EmbeddedHostSchedulerBudget,
 }
 
 /**
- * @brief Proves deterministic scheduler-start failure returns the exact pair.
+ * @brief Proves CPU Graph loads create no per-Graph scheduler workers.
  * @return Nothing.
- * @throws Nothing when bad_alloc propagation, unpublished ownership, and exact
- * ledger recovery agree; GoogleTest records mismatches.
- * @note Both one-slot CPU scheduler owners exist and are reserved; the first
- * intent completes start before the second reaches the injected failure.
+ * @throws Nothing when public load, route inspection, and construction probes
+ * agree; GoogleTest records mismatches.
+ * @note The legacy CPU scheduler hook would throw on the first owner worker.
+ * Two successful Graph loads with zero hook entries therefore prove both HP
+ * and RT bindings reuse the already configured process service.
  */
 TEST(EmbeddedHostSchedulerBudget,
-     SchedulerStartFailureDoesNotPublishAndReturnsPairExactlyOnce) {
-  ScopedSchedulerBudgetTempDir temp(
-      "photospider_scheduler_start_failure_release_test");
+     BuiltInCpuGraphLoadsCreateNoPerGraphSchedulers) {
+  ScopedSchedulerBudgetTempDir temp("photospider_shared_cpu_graph_load_test");
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
 
   const VoidResult configured =
       configure_budget_scheduler(*host, "cpu_work_stealing", 1U);
   ASSERT_TRUE(configured.status.ok) << configured.status.message;
-  const GraphSessionId rejected_id{"scheduler_start_failure_rejected"};
-  const GraphLoadRequest request =
-      make_budget_load_request(temp.root(), rejected_id.value);
-
   CpuWorkerCreationFailureProbe failure_probe;
-  std::atomic<unsigned int> start_publications{0U};
   const testing::SchedulerFailureInjectionHook failure_hook{
-      &failure_probe, fail_second_cpu_worker_creation};
-  const testing::SchedulerStartPublicationHook start_hook{
-      &start_publications, count_cpu_start_publication};
+      &failure_probe, fail_first_cpu_worker_creation};
+  Result<GraphSessionId> first;
+  Result<GraphSessionId> second;
   {
     ScopedBorrowedSchedulerHook<testing::SchedulerFailureInjectionHook>
         failure_guard(testing::set_cpu_scheduler_failure_injection_hook,
                       &failure_hook);
-    ScopedBorrowedSchedulerHook<testing::SchedulerStartPublicationHook>
-        start_guard(testing::set_cpu_scheduler_start_publication_hook,
-                    &start_hook);
-    EXPECT_THROW((void)host->load_graph(request), std::bad_alloc);
+    first = host->load_graph(
+        make_budget_load_request(temp.root(), "shared_cpu_first"));
+    second = host->load_graph(
+        make_budget_load_request(temp.root(), "shared_cpu_second"));
   }
 
-  EXPECT_EQ(failure_probe.entrances.load(std::memory_order_relaxed), 2U);
-  EXPECT_EQ(start_publications.load(std::memory_order_relaxed), 1U);
-  expect_graph_absent(*host, rejected_id);
-  ASSERT_NO_FATAL_FAILURE(expect_exact_process_budget_recovery(
-      *host, temp.root(), "start_failure_recovery"));
+  ASSERT_TRUE(first.status.ok) << first.status.message;
+  ASSERT_TRUE(second.status.ok) << second.status.message;
+  EXPECT_EQ(failure_probe.entrances.load(std::memory_order_relaxed), 0U);
+  for (const GraphSessionId& session : {first.value, second.value}) {
+    const Result<SchedulerInfoSnapshot> hp =
+        host->scheduler_info(session, ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(hp.status.ok) << hp.status.message;
+    EXPECT_EQ(hp.value.scheduler_name, "CpuWorkStealingScheduler");
+    const Result<SchedulerInfoSnapshot> rt =
+        host->scheduler_info(session, ComputeIntent::RealTimeUpdate);
+    ASSERT_TRUE(rt.status.ok) << rt.status.message;
+    EXPECT_EQ(rt.value.scheduler_name, "CpuWorkStealingScheduler");
+    EXPECT_TRUE(host->close_graph(session).status.ok);
+  }
 }
 
 /**
- * @brief Proves invalid Graph YAML destroys two already-started schedulers.
+ * @brief Proves invalid YAML does not destroy or recreate the shared CPU pool.
  * @return Nothing.
- * @throws Nothing when exact load classification, unpublished ownership, and
- * exact ledger recovery agree; GoogleTest records mismatches.
- * @note A CPU start-publication hook observes both one-worker schedulers before
- * GraphIO rejects the syntactically valid mapping root.
+ * @throws Nothing when load classification, fixed configuration, and a later
+ * valid Graph agree; GoogleTest records mismatches.
+ * @note A conflicting positive worker request must be rejected after the
+ * initial CPU configuration, while the original one-worker service remains
+ * usable by a later Graph.
  */
 TEST(EmbeddedHostSchedulerBudget,
-     InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce) {
+     InvalidYamlPreservesFixedSharedPoolForLaterGraph) {
   ScopedSchedulerBudgetTempDir temp(
-      "photospider_invalid_yaml_reservation_release_test");
+      "photospider_invalid_yaml_shared_pool_test");
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
 
@@ -1332,24 +1295,26 @@ TEST(EmbeddedHostSchedulerBudget,
   write_invalid_graph_yaml(yaml_path);
   request.yaml_path = yaml_path.string();
 
-  std::atomic<unsigned int> start_publications{0U};
-  const testing::SchedulerStartPublicationHook hook{
-      &start_publications, count_cpu_start_publication};
-  Result<GraphSessionId> rejected;
-  {
-    ScopedBorrowedSchedulerHook<testing::SchedulerStartPublicationHook> guard(
-        testing::set_cpu_scheduler_start_publication_hook, &hook);
-    rejected = host->load_graph(request);
-  }
+  const Result<GraphSessionId> rejected = host->load_graph(request);
 
-  EXPECT_EQ(start_publications.load(std::memory_order_relaxed), 2U);
   EXPECT_FALSE(rejected.status.ok);
   EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(checked_graph_error_code(rejected.status), GraphErrc::InvalidYaml);
   EXPECT_EQ(rejected.status.name, "invalid_yaml");
   expect_graph_absent(*host, rejected_id);
-  ASSERT_NO_FATAL_FAILURE(expect_exact_process_budget_recovery(
-      *host, temp.root(), "invalid_yaml_recovery"));
+
+  const VoidResult conflicting =
+      configure_budget_scheduler(*host, "cpu_work_stealing", 2U);
+  EXPECT_FALSE(conflicting.status.ok);
+  EXPECT_EQ(conflicting.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(conflicting.status),
+            GraphErrc::InvalidParameter);
+
+  const GraphSessionId valid_id{"valid_after_invalid_yaml"};
+  const Result<GraphSessionId> valid =
+      host->load_graph(make_budget_load_request(temp.root(), valid_id.value));
+  ASSERT_TRUE(valid.status.ok) << valid.status.message;
+  EXPECT_TRUE(host->close_graph(valid_id).status.ok);
 }
 
 /**
@@ -1728,40 +1693,29 @@ TEST(EmbeddedHostSchedulerBudget,
 }
 
 /**
- * @brief Proves candidate-start rollback returns only candidate capacity.
+ * @brief Proves CPU replacement publishes an ownerless service binding.
  * @return Nothing.
- * @throws std::bad_alloc At the intentional candidate start failure and for
- * ordinary fixture, Host, scheduler, or result allocation failures.
- * @throws GoogleTest assertion failures when rollback changes the old owner,
- * loses candidate capacity, or releases any old capacity.
- * @note Old Graphs retain thirty charged slots while a one-slot CPU candidate
- * reaches its first worker-creation hook and fails. A later two-slot Graph must
- * fill the ledger exactly, and a further one-slot Graph must remain rejected;
- * the retained old serial scheduler also executes one real forced callback.
+ * @throws std::bad_alloc From ordinary fixture, Host, callback, or result
+ * allocation.
+ * @throws GoogleTest assertion failures when replacement constructs a legacy
+ * CPU owner, fails to execute through the service, or permits pool resizing.
+ * @note The legacy CPU worker hook throws on first construction. Successful
+ * replacement with zero hook entries proves the existing serial owner is
+ * replaced by a process-service route rather than another scheduler object.
  */
 TEST(EmbeddedHostSchedulerBudget,
-     ReplacementStartFailureReturnsOnlyCandidateCapacity) {
-  ensure_charged_serial_scheduler_registered();
+     ReplacementPublishesOwnerlessFixedCpuServiceBinding) {
   ScopedSchedulerBudgetTempDir temp(
-      "photospider_scheduler_replacement_candidate_rollback_test");
+      "photospider_ownerless_cpu_replacement_test");
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
 
-  VoidResult configured = configure_budget_scheduler(
-      *host, kChargedSerialSchedulerType, kSchedulerWorkerRequestMax);
+  VoidResult configured = configure_budget_scheduler(*host, "serial_debug", 0U);
   ASSERT_TRUE(configured.status.ok) << configured.status.message;
-  const GraphSessionId target_id{"candidate_failure_target"};
+  const GraphSessionId target_id{"ownerless_cpu_replacement_target"};
   const Result<GraphSessionId> target = host->load_graph(
       make_budget_probe_load_request(temp.root(), target_id.value));
   ASSERT_TRUE(target.status.ok) << target.status.message;
-
-  configured =
-      configure_budget_scheduler(*host, kChargedSerialSchedulerType, 7U);
-  ASSERT_TRUE(configured.status.ok) << configured.status.message;
-  const GraphSessionId filler_id{"candidate_failure_filler"};
-  const Result<GraphSessionId> filler =
-      host->load_graph(make_budget_load_request(temp.root(), filler_id.value));
-  ASSERT_TRUE(filler.status.ok) << filler.status.message;
 
   BudgetOperationProbe operation_probe;
   ScopedBudgetOperationProbe operation_guard(operation_probe);
@@ -1769,12 +1723,10 @@ TEST(EmbeddedHostSchedulerBudget,
       make_budget_probe_compute_request(target_id);
   const VoidResult before_compute = host->compute(compute_request);
   ASSERT_TRUE(before_compute.status.ok) << before_compute.status.message;
-  const std::vector<std::thread::id> before_threads =
-      operation_probe.callback_threads();
-  ASSERT_EQ(before_threads.size(), 1U);
+  ASSERT_EQ(operation_probe.callback_threads().size(), 1U);
 
   HostSchedulerConfig replacement_defaults;
-  replacement_defaults.hp_type = kChargedSerialSchedulerType;
+  replacement_defaults.hp_type = "serial_debug";
   replacement_defaults.rt_type = "serial_debug";
   replacement_defaults.worker_count = 1U;
   configured = host->configure_scheduler_defaults(replacement_defaults);
@@ -1786,71 +1738,69 @@ TEST(EmbeddedHostSchedulerBudget,
   {
     ScopedBorrowedSchedulerHook<testing::SchedulerFailureInjectionHook> guard(
         testing::set_cpu_scheduler_failure_injection_hook, &worker_hook);
-    EXPECT_THROW(
-        (void)host->replace_scheduler(
-            target_id, ComputeIntent::GlobalHighPrecision, "cpu_work_stealing"),
-        std::bad_alloc);
+    const VoidResult replaced = host->replace_scheduler(
+        target_id, ComputeIntent::GlobalHighPrecision, "cpu_work_stealing");
+    ASSERT_TRUE(replaced.status.ok) << replaced.status.message;
   }
-  EXPECT_EQ(worker_probe.entrances.load(std::memory_order_relaxed), 1U);
+  EXPECT_EQ(worker_probe.entrances.load(std::memory_order_relaxed), 0U);
 
-  const Result<SchedulerInfoSnapshot> retained =
+  const Result<SchedulerInfoSnapshot> replaced_info =
       host->scheduler_info(target_id, ComputeIntent::GlobalHighPrecision);
-  ASSERT_TRUE(retained.status.ok) << retained.status.message;
-  EXPECT_EQ(retained.value.scheduler_name, "serial_debug");
+  ASSERT_TRUE(replaced_info.status.ok) << replaced_info.status.message;
+  EXPECT_EQ(replaced_info.value.scheduler_name, "CpuWorkStealingScheduler");
   operation_probe.reset();
-  const VoidResult retained_compute = host->compute(compute_request);
-  ASSERT_TRUE(retained_compute.status.ok) << retained_compute.status.message;
-  const std::vector<std::thread::id> retained_threads =
+  const std::thread::id caller_thread = std::this_thread::get_id();
+  const VoidResult service_compute = host->compute(compute_request);
+  ASSERT_TRUE(service_compute.status.ok) << service_compute.status.message;
+  const std::vector<std::thread::id> service_threads =
       operation_probe.callback_threads();
-  ASSERT_EQ(retained_threads.size(), 1U);
+  ASSERT_EQ(service_threads.size(), 1U);
+  EXPECT_NE(service_threads.front(), caller_thread);
 
-  ASSERT_NO_FATAL_FAILURE(expect_exact_two_slots_remaining(
-      *host, temp.root(), "candidate_failure_recovery"));
-  EXPECT_TRUE(host->close_graph(filler_id).status.ok);
+  const VoidResult conflicting =
+      configure_budget_scheduler(*host, "cpu_work_stealing", 2U);
+  EXPECT_FALSE(conflicting.status.ok);
+  EXPECT_EQ(conflicting.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(conflicting.status),
+            GraphErrc::InvalidParameter);
   EXPECT_TRUE(host->close_graph(target_id).status.ok);
 }
 
 /**
- * @brief Proves admitted built-in workers bound real callback concurrency.
+ * @brief Proves multiple Graph Runs overlap on one fixed built-in CPU pool.
  * @return Nothing.
  * @throws std::bad_alloc If Host, Graph, scheduler, callback, future, or result
  * storage allocation fails.
  * @throws std::system_error If probe or scheduler synchronization fails.
  * @throws std::future_error If asynchronous result ownership is invalid.
  * @throws GoogleTest assertion failures when public product execution exceeds
- * its exact admitted HP worker grants.
- * @note Four independent Host/Graph pairs each retain four HP plus four RT CPU
- * workers, saturating the thirty-two-slot process budget without concurrent
- * calls on one Host object. Each HP compute exposes eight initially ready
- * source callbacks, so the blocking gate must observe exactly sixteen active
- * callbacks. A bounded half-second observation rejects a seventeenth while the
- * first sixteen remain blocked. The explicit HP path does not claim to observe
- * the sixteen separately admitted idle RT workers. Evidence is collected only
- * inside registered operation callbacks; scheduler statistics, internal worker
- * ids, and OS thread snapshots are never consulted.
+ * its exact fixed process worker grant.
+ * @note Four Graphs belong to one Host and each exposes one blocking source.
+ * Observing four simultaneous callbacks proves four independent Runs share the
+ * same four-worker service without a complete-Run gate. A bounded half-second
+ * observation rejects a fifth callback while all workers remain blocked.
+ * Evidence is collected only inside registered operation callbacks; scheduler
+ * statistics, internal worker ids, and OS thread snapshots are never consulted.
  */
 TEST(EmbeddedHostSchedulerBudget,
-     AcceptedBuiltInWorkersBoundRealOperationCallbacks) {
+     SharedBuiltInWorkersOverlapMultipleGraphRunsWithinFixedGrant) {
   ScopedSchedulerBudgetTempDir temp(
       "photospider_physical_scheduler_worker_bound_test");
   BudgetOperationProbe operation_probe;
   ScopedBudgetOperationProbe operation_guard(operation_probe);
-  std::vector<std::unique_ptr<Host>> hosts;
-  hosts.reserve(kWorkerProbeGraphCount);
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const VoidResult configured =
+      configure_budget_scheduler(*host, "cpu_work_stealing", kWorkerProbeGrant);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
   std::vector<GraphSessionId> sessions;
   sessions.reserve(kWorkerProbeGraphCount);
   for (std::size_t index = 0U; index < kWorkerProbeGraphCount; ++index) {
-    std::unique_ptr<Host> host = create_embedded_host();
-    ASSERT_NE(host, nullptr);
-    const VoidResult configured = configure_budget_scheduler(
-        *host, "cpu_work_stealing", kWorkerProbeGrant);
-    ASSERT_TRUE(configured.status.ok) << configured.status.message;
     const GraphSessionId session{"physical_worker_probe_" +
                                  std::to_string(index)};
     const Result<GraphSessionId> loaded = host->load_graph(
         make_parallel_budget_probe_load_request(temp.root(), session.value));
     ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
-    hosts.push_back(std::move(host));
     sessions.push_back(session);
   }
 
@@ -1862,7 +1812,7 @@ TEST(EmbeddedHostSchedulerBudget,
     const HostComputeRequest request =
         make_parallel_budget_probe_compute_request(sessions[index]);
     Result<std::future<OperationStatus>> scheduled =
-        hosts[index]->compute_async(request);
+        host->compute_async(request);
     if (!scheduled.status.ok) {
       ADD_FAILURE() << scheduled.status.message;
       every_compute_scheduled = false;
@@ -1900,8 +1850,8 @@ TEST(EmbeddedHostSchedulerBudget,
             kWorkerProbeGraphCount * kWorkerProbeSources);
   EXPECT_EQ(operation_probe.unique_callback_thread_count(), kWorkerProbeActive);
 
-  for (std::size_t index = 0U; index < sessions.size(); ++index) {
-    const VoidResult closed = hosts[index]->close_graph(sessions[index]);
+  for (const GraphSessionId& session : sessions) {
+    const VoidResult closed = host->close_graph(session);
     EXPECT_TRUE(closed.status.ok) << closed.status.message;
   }
 }

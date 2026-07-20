@@ -15,6 +15,7 @@ namespace ps {
 class GraphEventService;
 class GraphRuntime;
 class GraphTraversalService;
+class SchedulerHostContext;
 class SchedulerTaskRuntime;
 }  // namespace ps
 
@@ -184,7 +185,8 @@ class StabilizedDirtyParameters {
   friend std::shared_ptr<const StabilizedDirtyParameters>
   stabilize_connected_dirty_parameters(GraphModel&, GraphTraversalService&, int,
                                        uint64_t, uint64_t,
-                                       SchedulerTaskRuntime*);
+                                       SchedulerTaskRuntime*, ExecutionService*,
+                                       SchedulerHostContext*, ComputeRun*);
 
   /** @brief Generation shared by every domain of one dirty request. */
   uint64_t request_generation_ = 0;
@@ -231,6 +233,11 @@ class StabilizedDirtyParameters {
  * @param task_runtime Optional HP scheduler runtime. When supplied, every
  * preflight node is opened as a high-priority single-handle initial batch and
  * its matching completion wait drains before the next topological node.
+ * @param execution_service Optional process CPU service used instead of
+ * task_runtime.
+ * @param host Optional service trace target; required with execution_service.
+ * @param run Optional HP child Run whose leases name owned preflight work;
+ * required with execution_service.
  * @return Immutable shared request snapshot. An empty producer set means no
  * connected-parameter preflight was needed, but generation identity remains.
  * @throws GraphError for missing targets, dependencies, operations, or empty
@@ -246,7 +253,9 @@ std::shared_ptr<const StabilizedDirtyParameters>
 stabilize_connected_dirty_parameters(
     GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
     uint64_t request_generation, uint64_t topology_generation,
-    SchedulerTaskRuntime* task_runtime = nullptr);
+    SchedulerTaskRuntime* task_runtime = nullptr,
+    ExecutionService* execution_service = nullptr,
+    SchedulerHostContext* host = nullptr, ComputeRun* run = nullptr);
 
 /**
  * @brief Immutable options for one dirty update executor call.
@@ -372,9 +381,11 @@ class HighPrecisionDirtyExecutor {
    * @param runtime Optional runtime used to dispatch scheduler tasks and record
    * trace events. A null runtime executes source and downstream work inline.
    * @param request Dirty update options inherited from ComputeService.
-   * @param run Optional request-owned standalone HP Run. A
-   * GlobalHighPrecision request supplies it so staging remains Run-owned; the
-   * paired realtime HP sibling leaves it null until RunGroup support.
+   * @param run Optional request-owned HP Run. GlobalHighPrecision and
+   * scheduler-backed realtime HP children supply it so staging and service
+   * submissions remain Run-scoped.
+   * @param execution_service Optional process CPU service selected by the
+   * runtime route. It requires non-null runtime and run.
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
@@ -389,7 +400,8 @@ class HighPrecisionDirtyExecutor {
    */
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
                       GraphRuntime* runtime, const DirtyUpdateRequest& request,
-                      ComputeRun* run = nullptr);
+                      ComputeRun* run = nullptr,
+                      ExecutionService* execution_service = nullptr);
 
  private:
   /**
@@ -457,6 +469,9 @@ class RealTimeDirtyExecutor {
    * @param runtime Optional runtime used to dispatch scheduler tasks and record
    * trace events. A null runtime executes all work inline.
    * @param request Dirty update options inherited from ComputeService.
+   * @param run Optional RT child Run required for process-service routing.
+   * @param execution_service Optional process CPU service selected by the
+   * runtime route.
    * @return Mutable real-time target output stored in the proxy graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
@@ -467,7 +482,9 @@ class RealTimeDirtyExecutor {
    * execution runs outside the outer graph lock.
    */
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
-                      GraphRuntime* runtime, const DirtyUpdateRequest& request);
+                      GraphRuntime* runtime, const DirtyUpdateRequest& request,
+                      ComputeRun* run = nullptr,
+                      ExecutionService* execution_service = nullptr);
 
  private:
   /**

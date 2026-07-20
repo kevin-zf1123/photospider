@@ -5,11 +5,19 @@
 #include <string>
 
 #include "compute/dirty_sibling_commit_gate.hpp"
-#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps::compute {
 namespace {
 
+/**
+ * @brief Publishes one optional coarse coordinator stage.
+ *
+ * @param callbacks Request-local callback bundle.
+ * @param stage Stable stage label to publish when a recorder exists.
+ * @return Nothing.
+ * @throws Any callback exception unchanged.
+ * @note A missing recorder intentionally makes stage publication a no-op.
+ */
 void record_stage(const IntentUpdateCallbacks& callbacks,
                   const std::string& stage) {
   if (callbacks.record_stage) {
@@ -17,6 +25,16 @@ void record_stage(const IntentUpdateCallbacks& callbacks,
   }
 }
 
+/**
+ * @brief Validates that a required callback is callable.
+ *
+ * @tparam Fn std::function-compatible callback type.
+ * @param fn Candidate callback.
+ * @param name Stable diagnostic name.
+ * @return Nothing.
+ * @throws GraphError when fn is empty.
+ * @note The helper invokes no callback and retains no reference.
+ */
 template <typename Fn>
 void require_callback(const Fn& fn, const std::string& name) {
   if (!fn) {
@@ -60,8 +78,8 @@ void IntentUpdateCoordinator::validate(
  * @brief Executes the callback set required by one compute intent.
  *
  * @param intent Requested global-HP or realtime intent.
- * @param hp_scheduler Optional HP scheduler used for concurrency capability.
- * @param rt_scheduler Optional RT scheduler used for concurrency capability.
+ * @param can_submit_concurrently Whether both child execution domains are
+ * available for overlap.
  * @param dirty_roi Optional dirty ROI validated for realtime requests.
  * @param callbacks Borrowed compute, output, trace, and commit-gate callbacks.
  * @return Target output after the selected intent paths complete.
@@ -73,7 +91,7 @@ void IntentUpdateCoordinator::validate(
  * preserves resource-exhaustion identity before rethrowing the primary error.
  */
 NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
-    ComputeIntent intent, IScheduler* hp_scheduler, IScheduler* rt_scheduler,
+    ComputeIntent intent, bool can_submit_concurrently,
     const std::optional<PixelRect>& dirty_roi,
     const IntentUpdateCallbacks& callbacks) {
   switch (intent) {
@@ -95,9 +113,6 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
                        "run_high_precision_update");
       require_callback(callbacks.run_real_time_update, "run_real_time_update");
       require_callback(callbacks.real_time_output, "real_time_output");
-      const bool can_submit_concurrently =
-          hp_scheduler != nullptr && rt_scheduler != nullptr &&
-          hp_scheduler->is_running() && rt_scheduler->is_running();
       const IntentUpdateDecision decision =
           decide(intent, can_submit_concurrently, dirty_roi.has_value());
       record_stage(callbacks, decision.submit_updates_concurrently

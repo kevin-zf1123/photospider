@@ -2389,15 +2389,14 @@ TEST(TaskGraphPlanningSplit,
 }
 
 /**
- * @brief Proves HP creates its Run before target planning while RT skips it.
+ * @brief Proves HP and realtime child Runs validate before target planning.
  *
  * @note A zero QoS weight is a Run descriptor error. The missing HP target
- * would instead produce NotFound if planning ran first. RealTimeUpdate keeps
- * the same invalid QoS but reaches intent validation because realtime creates
- * no mixed-domain Run for that path.
+ * would instead produce NotFound if planning ran first. RealTimeUpdate creates
+ * its separate HP/RT children before intent planning, so the same invalid QoS
+ * is rejected without manufacturing a mixed-domain Run.
  */
-TEST(ComputeRunProductPath,
-     HpValidatesRunBeforePlanningWhileRealtimeSkipsMixedRun) {
+TEST(ComputeRunProductPath, HpAndRealtimeChildrenValidateBeforePlanning) {
   GraphModel graph("cache/compute-run-product-path");
   GraphTraversalService traversal;
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
@@ -2414,12 +2413,8 @@ TEST(ComputeRunProductPath,
 
   ComputeService::Request realtime_request = hp_request;
   realtime_request.intent = ComputeIntent::RealTimeUpdate;
-  try {
-    (void)service.compute(graph, realtime_request);
-    FAIL() << "Expected realtime intent validation failure.";
-  } catch (const GraphError& error) {
-    EXPECT_EQ(error.code(), GraphErrc::InvalidParameter);
-  }
+  EXPECT_THROW((void)service.compute(graph, realtime_request),
+               std::invalid_argument);
 }
 
 /**
@@ -3569,8 +3564,8 @@ TEST(IntentUpdateCoordinatorSplit,
 
   NodeOutput& coordinated =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, nullptr, nullptr,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::RealTimeUpdate, false, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3595,8 +3590,8 @@ TEST(IntentUpdateCoordinatorSplit,
   stages.clear();
   NodeOutput& coordinated_global_dirty =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::GlobalHighPrecision, nullptr, nullptr,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::GlobalHighPrecision, false, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated_global_dirty, &rt_output);
   EXPECT_TRUE(ran_global_dirty);
   EXPECT_NE(std::find(stages.begin(), stages.end(),
@@ -3612,8 +3607,8 @@ TEST(IntentUpdateCoordinatorSplit,
   stages.clear();
   NodeOutput& coordinated_without_runtime =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, nullptr, nullptr,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::RealTimeUpdate, false, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated_without_runtime, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3629,10 +3624,6 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_LT(std::distance(stages.begin(), inline_rt_stage),
             std::distance(stages.begin(), inline_hp_stage));
 
-  SerialDebugScheduler hp_runtime;
-  SerialDebugScheduler rt_runtime;
-  hp_runtime.start();
-  rt_runtime.start();
   ran_hp.store(false);
   ran_rt.store(false);
   active_callbacks.store(0);
@@ -3672,8 +3663,8 @@ TEST(IntentUpdateCoordinatorSplit,
   };
   NodeOutput& coordinated_with_runtimes =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, &hp_runtime, &rt_runtime,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::RealTimeUpdate, true, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated_with_runtimes, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3692,8 +3683,6 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_TRUE(hp_callback_entered);
   EXPECT_FALSE(concurrent_callbacks_timed_out);
   EXPECT_GE(max_active_callbacks.load(), 2);
-  hp_runtime.shutdown();
-  rt_runtime.shutdown();
 }
 
 TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
@@ -4026,7 +4015,6 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
           .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(service_route.domain,
             GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService);
-  EXPECT_EQ(service_route.worker_count, 2u);
 
   GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
   Node source = make_node(1, "split_plan", "source");
@@ -4081,7 +4069,7 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
 }
 
 TEST(KernelComputeRuntimeSplit,
-     AsyncHpThenInlineRtDirtyExposesFullEventChainAndState) {
+     AsyncHpThenParallelRtDirtyUsesSharedServiceAndExposesState) {
   register_split_ops();
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-async-inline-dirty");
@@ -4128,7 +4116,7 @@ TEST(KernelComputeRuntimeSplit,
 
   Kernel::ComputeRequest rt_request = hp_request;
   rt_request.cache.force_recache = false;
-  rt_request.execution.parallel = false;
+  rt_request.execution.parallel = true;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
   rt_request.dirty_roi = (PixelRect{8, 8, 16, 16});
   auto rt_image = interaction.cmd_compute_and_get_image(rt_request);
@@ -4141,28 +4129,23 @@ TEST(KernelComputeRuntimeSplit,
   ASSERT_TRUE(rt_events.has_value());
   EXPECT_TRUE(contains_event_sources(
       rt_events->events,
-      {"intent_coordinator_decision_inline", "intent_coordinator_inline_rt",
-       "rt_update", "intent_coordinator_inline_hp", "hp_update"}));
+      {"intent_coordinator_decision_concurrent",
+       "intent_coordinator_concurrent_rt_start",
+       "intent_coordinator_concurrent_hp_start", "rt_update", "hp_update"}));
   std::vector<std::string> event_sources;
   event_sources.reserve(rt_events->events.size());
   std::transform(rt_events->events.begin(), rt_events->events.end(),
                  std::back_inserter(event_sources),
                  [](const auto& event) { return event.source; });
-  const auto inline_rt = std::find(event_sources.begin(), event_sources.end(),
-                                   "intent_coordinator_inline_rt");
-  const auto rt_update =
-      std::find(event_sources.begin(), event_sources.end(), "rt_update");
-  const auto inline_hp = std::find(event_sources.begin(), event_sources.end(),
-                                   "intent_coordinator_inline_hp");
-  const auto hp_update =
-      std::find(event_sources.begin(), event_sources.end(), "hp_update");
-  ASSERT_NE(inline_rt, event_sources.end());
-  ASSERT_NE(rt_update, event_sources.end());
-  ASSERT_NE(inline_hp, event_sources.end());
-  ASSERT_NE(hp_update, event_sources.end());
-  EXPECT_LT(inline_rt, rt_update);
-  EXPECT_LT(rt_update, inline_hp);
-  EXPECT_LT(inline_hp, hp_update);
+  const auto concurrent_rt_start =
+      std::find(event_sources.begin(), event_sources.end(),
+                "intent_coordinator_concurrent_rt_start");
+  const auto concurrent_hp_start =
+      std::find(event_sources.begin(), event_sources.end(),
+                "intent_coordinator_concurrent_hp_start");
+  ASSERT_NE(concurrent_rt_start, event_sources.end());
+  ASSERT_NE(concurrent_hp_start, event_sources.end());
+  EXPECT_LT(concurrent_rt_start, concurrent_hp_start);
 
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
   EXPECT_GT(graph.node(2).hp_version, 0);

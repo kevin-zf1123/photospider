@@ -1,7 +1,9 @@
 #include "compute/dirty_execution_common.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -41,6 +43,116 @@ IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
     scheduler->start();
   }
   return *scheduler;
+}
+
+/** @copydoc DirtyReadyTaskContext::DirtyReadyTaskContext */
+DirtyReadyTaskContext::DirtyReadyTaskContext(
+    const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
+    const std::vector<int>& active_task_ids, std::function<void(int)> run_task,
+    ComputeRunLease lease, bool release_dependents,
+    SchedulerTaskPriority priority)
+    : compute_plan_(compute_plan),
+      selection_(selection
+                     ? std::optional<DirtyTaskSelectionOverlay>(*selection)
+                     : std::nullopt),
+      active_task_ids_(active_task_ids),
+      active_task_id_set_(active_task_ids.begin(), active_task_ids.end()),
+      run_task_(std::move(run_task)),
+      lease_(std::move(lease)),
+      release_dependents_(release_dependents),
+      priority_(priority) {
+  if (!run_task_) {
+    throw std::invalid_argument(
+        "DirtyReadyTaskContext requires an owned task callable.");
+  }
+  if (selection_) {
+    dependency_state_ = std::make_unique<TaskDependencyState>(
+        compute_plan_.execution_order, compute_plan_.task_graph,
+        active_task_ids_, selection_->dependency_task_ids);
+  } else {
+    dependency_state_ = std::make_unique<TaskDependencyState>(
+        compute_plan_.execution_order, compute_plan_.task_graph,
+        active_task_ids_);
+  }
+}
+
+/** @copydoc DirtyReadyTaskContext::make_submissions */
+std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
+    const std::vector<int>& task_ids, bool initial_ready) {
+  std::vector<ReadyTaskSubmission> submissions;
+  submissions.reserve(task_ids.size());
+  const std::shared_ptr<DirtyReadyTaskContext> self = shared_from_this();
+  for (int task_id : task_ids) {
+    if (task_id < 0 ||
+        task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size()) ||
+        active_task_id_set_.count(task_id) == 0U) {
+      throw std::invalid_argument(
+          "Dirty ready submission names an inactive task.");
+    }
+    const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_id);
+    ComputeRunLease submission_lease = lease_;
+    const ComputeRunTaskIdentity identity =
+        submission_lease.task_identity(static_cast<uint64_t>(task_id));
+    submissions.emplace_back(
+        std::move(submission_lease), identity, task.node_id, initial_ready,
+        [self](ComputeRunLease& lease,
+               const ComputeRunTaskIdentity& accepted_identity,
+               SchedulerTaskRuntime& task_runtime) {
+          self->execute(lease, accepted_identity, task_runtime);
+        },
+        priority_);
+  }
+  return submissions;
+}
+
+/** @copydoc DirtyReadyTaskContext::execute */
+void DirtyReadyTaskContext::execute(ComputeRunLease& lease,
+                                    const ComputeRunTaskIdentity& identity,
+                                    SchedulerTaskRuntime& task_runtime) {
+  if (identity.run_id() != lease.descriptor().id() ||
+      identity.run_id() != lease_.descriptor().id()) {
+    throw std::invalid_argument(
+        "Dirty ready task identity does not match its Run lease.");
+  }
+  const uint64_t local_value = identity.local_task_id().value();
+  if (local_value > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("Dirty ready task id exceeds int range.");
+  }
+  const int task_id = static_cast<int>(local_value);
+  if (task_id < 0 ||
+      task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size()) ||
+      active_task_id_set_.count(task_id) == 0U) {
+    throw std::invalid_argument(
+        "Dirty ready task identity is not active in this Run phase.");
+  }
+
+  const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_id);
+  try {
+    run_task_(task_id);
+    if (release_dependents_) {
+      const std::vector<int> ready_ids =
+          dependency_state_->release_dependents(task_id);
+      std::vector<ReadyTaskSubmission> ready_submissions =
+          make_submissions(ready_ids, false);
+      auto* ready_runtime =
+          dynamic_cast<ReadyTaskSubmissionRuntime*>(&task_runtime);
+      if (ready_runtime == nullptr) {
+        throw std::logic_error(
+            "Dirty owned context requires a ready-submission runtime.");
+      }
+      for (ReadyTaskSubmission& submission : ready_submissions) {
+        ready_runtime->submit_ready_submission(std::move(submission));
+      }
+    }
+    task_runtime.dec_tasks_to_complete();
+  } catch (...) {
+    try {
+      task_runtime.log_event(SchedulerTraceAction::RethrowException,
+                             task.node_id);
+    } catch (...) {
+    }
+    throw;
+  }
 }
 
 void remember_dirty_snapshot(GraphModel& graph,

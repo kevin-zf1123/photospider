@@ -53,21 +53,22 @@ class RealtimeProxyGraph;
  * @note Graph-state operations are serialized by `graph_state_`; event and
  *       trace rings have independent mutexes. Scheduler replacement and
  *       inspection must use the graph-state lane whenever active compute may
- *       retain scheduler state. The runtime owns every model, scheduler,
- *       cache-facing resource, and observation slot until destruction.
+ *       retain scheduler state. The runtime owns every model, legacy
+ *       scheduler, cache-facing resource, and observation slot until
+ *       destruction; a process-service route is an ownerless binding.
  */
 class GraphRuntime : public SchedulerHostContext {
  public:
   /**
-   * @brief Private physical-dispatch route paired with one scheduler owner.
+   * @brief Private physical-dispatch route paired with one intent binding.
    *
    * The value distinguishes transitional per-Graph scheduler execution from
-   * issue #68's built-in CPU full-HP service route. It carries no policy,
+   * issue #69's built-in CPU HP/RT service route. It carries no policy,
    * admission, resource reservation, or public scheduler ABI state.
    *
    * @throws Nothing for construction, copy, and scalar access.
    * @note Scheduler planning and replacement publish this value in the same
-   * registry transaction as the corresponding scheduler owner.
+   * registry transaction as the optional legacy scheduler owner.
    */
   struct SchedulerExecutionRoute {
     /**
@@ -79,17 +80,12 @@ class GraphRuntime : public SchedulerHostContext {
       /** @brief Existing scheduler instance executes its own ready work. */
       PerGraphScheduler,
 
-      /** @brief Injected process CPU ExecutionService executes full-HP work. */
+      /** @brief Injected process CPU ExecutionService executes HP/RT work. */
       ProcessCpuService,
     };
 
     /** @brief Selected physical execution owner. */
     Domain domain = Domain::PerGraphScheduler;
-
-    /**
-     * @brief Exact CPU service worker grant, or zero for the per-Graph route.
-     */
-    unsigned int worker_count = 0U;
   };
 
   /**
@@ -510,10 +506,12 @@ class GraphRuntime : public SchedulerHostContext {
   /**
    * @brief Transactionally installs a scheduler and explicit execution route.
    * @param intent Compute intent whose scheduler owner is installed.
-   * @param scheduler Candidate owner; null removes an existing scheduler.
+   * @param scheduler Candidate owner; null publishes an ownerless
+   * process-service route or removes a legacy scheduler.
    * @param execution_route Private physical route published with the owner.
    * @return Nothing.
-   * @throws std::invalid_argument for an inconsistent service route.
+   * @throws std::invalid_argument when a process-service route carries a
+   * Graph-owned scheduler.
    * @throws Any replacement transaction exception documented above.
    * @note This overload is used only by trusted Kernel scheduler planning.
    */
@@ -562,7 +560,8 @@ class GraphRuntime : public SchedulerHostContext {
    * destroyed in that order.
    *
    * @param intent Compute intent whose scheduler owner is replaced.
-   * @param scheduler Candidate owner; null removes an existing scheduler.
+   * @param scheduler Candidate owner; null publishes an ownerless
+   * process-service route or removes a legacy scheduler.
    * @return Nothing.
    * @throws std::bad_alloc If reserving a previously absent map slot fails.
    * @throws Any candidate attach/start exception unchanged after rollback.
@@ -580,7 +579,8 @@ class GraphRuntime : public SchedulerHostContext {
    * @param scheduler Candidate owner; null removes an existing scheduler.
    * @param execution_route Private physical route published with the owner.
    * @return Nothing.
-   * @throws std::invalid_argument for an inconsistent service route.
+   * @throws std::invalid_argument when a process-service route carries a
+   * Graph-owned scheduler.
    * @throws Any replacement transaction exception documented above.
    * @note Trusted Kernel planning uses this overload; direct callers retain
    * the legacy per-Graph route through the two-argument overload.
@@ -590,10 +590,12 @@ class GraphRuntime : public SchedulerHostContext {
                          SchedulerExecutionRoute execution_route);
 
   /**
-   * @brief Tests whether one compute intent has a non-null scheduler owner.
+   * @brief Tests whether one compute intent has a usable execution binding.
    * @param intent Compute intent route.
-   * @return True when a scheduler is installed.
+   * @return True for a legacy scheduler owner or process CPU service route.
    * @throws std::system_error only if locking a valid mutex fails.
+   * @note This query reports execution availability, not Graph-local
+   * scheduler ownership.
    */
   bool has_scheduler(ComputeIntent intent) const;
 
@@ -602,11 +604,14 @@ class GraphRuntime : public SchedulerHostContext {
    * @brief Transactionally published scheduler owner and execution route.
    *
    * @throws Nothing for default construction and non-allocating swaps.
-   * @note The route never outlives or disagrees with its scheduler owner
-   * because both values share one map slot and publication transaction.
+   * @note The route and optional legacy scheduler owner share one map slot and
+   * publication transaction. Process-service bindings intentionally have no
+   * Graph-owned scheduler.
    */
   struct SchedulerBinding {
-    /** @brief Exclusively owned transitional scheduler instance. */
+    /**
+     * @brief Exclusively owned legacy scheduler, null for process CPU routes.
+     */
     std::unique_ptr<IScheduler> scheduler;
 
     /** @brief Private physical route published with that owner. */

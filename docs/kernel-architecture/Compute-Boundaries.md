@@ -29,7 +29,7 @@ flowchart TD
   KERNEL --> EXEC["injected CPU ExecutionService"]
   KERNEL --> GSE["GraphStateExecutor"]
   GSE --> SERVICE["ComputeService"]
-  SERVICE --> RUN["request-owned HP ComputeRun"]
+  SERVICE --> RUN["request-owned HP or HP/RT child ComputeRun"]
   SERVICE --> PLAN["planning and pruning collaborators"]
   PLAN --> DISPATCH["ComputeTaskDispatcher"]
   DISPATCH --> RUN
@@ -38,7 +38,7 @@ flowchart TD
   READY --> RUNTIME["legacy per-Graph SchedulerTaskRuntime"]
   EXEC --> CALLBACK["service-owned ready callback"]
   RUNTIME --> CALLBACK
-  CALLBACK --> TEMP["Run-owned temporary or dirty HP staging"]
+  CALLBACK --> TEMP["Run-scoped temporary or dirty staging"]
   RUN --> TEMP
   TEMP --> COMMIT["validated result commit"]
   COMMIT --> GRAPH["GraphModel or RealtimeProxyGraph"]
@@ -72,15 +72,16 @@ caller or creating a second worker. `GraphRuntime` performs the join before
 scheduler teardown. If explicit close later fails in scheduler shutdown,
 Kernel starts one replacement lane worker before returning the failure so the
 retained session remains retryable. Different graphs have independent workers
-and queues. The scheduler-worker ledger does not count these lane workers; its
-32-slot ceiling covers only workers charged by scheduler planning.
+and queues. The transitional worker budget does not count these lane workers;
+its 32-slot ceiling covers fixed CPU service pools and workers charged to
+legacy scheduler plans.
 
 ## Current Collaborators
 
 | Module | Current responsibility | Does not own |
 | --- | --- | --- |
-| `ComputeService` | Request validation, intent coordination, creation/settlement of one non-realtime HP Run, collaborator construction, and final result selection | Frontend values, worker threads, graph documents |
-| `ComputeRun` | Immutable non-realtime HP descriptor, monotonic phase, exact terminal outcome, shared-control ownership of full-plan/temporary or standalone dirty-HP staging storage, stable leases, and full-HP composite task identity | Paired realtime grouping, Graph state, workers, authoritative revision commit, cancellation, or resource admission |
+| `ComputeService` | Request validation, intent coordination, creation/settlement of one HP Run or separate HP/RT child Runs, collaborator construction, and final result selection | Frontend values, worker threads, graph documents, or target `RunGroup` policy |
+| `ComputeRun` | Immutable single-domain HP/RT descriptor, monotonic phase, exact terminal outcome, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, authoritative revision commit, cancellation, or resource admission |
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
 | `FullTaskGraphExpander` | Complete node/tile task shape for one graph generation and domain | Request target, cache pruning, dirty pruning |
@@ -92,11 +93,11 @@ and queues. The scheduler-worker ledger does not count these lane workers; its
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, or scheduler policy |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, variants, result slots, and callback owner for one full HP request | Scheduler workers, Run terminal state, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One injected single-Run built-in CPU worker domain, exact grant reconfiguration, ready-only queue admission, settled exception fence, and active-Graph trace forwarding | Planning, dependencies, Graph/cache state, admission ledger, policy, dirty/RT/GPU/plugin execution, or visible commit |
+| `ExecutionService` | One injected fixed built-in CPU worker domain, concurrent Run registry, high/normal ready queues, Run-local completion/failure/trace settlement, and HP/RT dirty/preflight execution | Planning, dependencies, Graph/cache state, final admission ledger, fairness policy, GPU/plugin execution, or visible commit |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Scheduler trace ownership |
 | `SchedulerFactory` | Resolve `0..8` worker requests and plan each scheduler's conservative slot charge before construction | Process capacity ownership or graph-state access |
-| `SchedulerWorkerBudget` | Serialize one fixed 32-slot process admission ledger shared by all embedded Hosts/Kernels | Worker creation, scheduling policy, fairness, or whole-process thread counting |
+| `SchedulerWorkerBudget` | Serialize one fixed 32-slot transitional process budget for fixed CPU service pools and legacy scheduler workers across all embedded Hosts/Kernels | Worker creation, scheduling policy, fairness, or whole-process thread counting |
 | `ReservationOwnedScheduler` | Keep a move-only reservation live through concrete scheduler shutdown and destruction | Capacity planning or task-graph correctness |
 
 Compute collaborators live under `src/lib/compute/`; the three admission and
@@ -109,26 +110,31 @@ private implementation modules and do not form an installable API.
 2. `ComputeService` validates target, intent, dirty ROI, cache flags, and the
    selected execution strategy.
 3. For non-realtime HP, `ComputeService` creates one `ComputeRun` before
-   planning, capturing a fresh id, session identity, topology-only submission
-   revision, target, HP intent, full quality, and explicit QoS.
+   planning. For realtime it creates separate HP and RT child Runs before
+   preflight. Each captures a fresh id, session identity, topology-only
+   submission revision, target, single-domain intent, full or interactive
+   quality, and explicit QoS. No target `RunGroup` exists yet.
 4. Connected parameter producers are stabilized into one request-local HP
    snapshot before extent, ROI, or task-shape decisions use them.
 5. The planner expands the complete task shape for one domain and prunes it to
    the requested target and dependency cone.
 6. A dirty request selects an active work set from that plan. Dirty state does
    not create new task shapes.
-7. Sequential execution walks the same request semantics inline. Built-in CPU
-   parallel full HP materializes move-only `ReadyTaskSubmission` values that
-   retain a Run lease and `(RunId, RunLocalTaskId)`, then sends only ready work
-   to the injected `ExecutionService`. Serial, GPU, and plugin full HP retain
-   the lease-backed callback route through the selected per-Graph scheduler.
-   Dirty and realtime execution retain their existing request-local routes.
-8. Workers write Run-owned full-plan temporary results or standalone dirty HP
-   staging. Paired realtime staging remains sibling-callback-local. Visible
-   graph state is modified only by the appropriate commit path.
-9. The Run publishes one success or failure after validated output or exact
-   exception capture, then the result, events, timing, and errors are copied
-   back through the Host value boundary.
+7. Sequential execution walks the same request semantics inline. Every
+   built-in CPU parallel phase materializes move-only
+   `ReadyTaskSubmission` values that retain a Run lease and
+   `(RunId, RunLocalTaskId)`, then sends only ready work to the fixed
+   `ExecutionService`. Full HP uses `TaskSubmissionPlan`; preflight and dirty
+   HP/RT use heap-owned phase contexts. Serial, GPU, and plugin routes retain
+   their selected per-Graph schedulers.
+8. Workers write Run-owned full-plan temporary results or dirty-HP staging.
+   RT staging remains sibling-callback-local but all service callbacks retain
+   the RT child lease through synchronous settlement. Visible graph state is
+   modified only by the appropriate commit path.
+9. A single HP Run, or each realtime child independently, publishes one
+   success or failure after validated output or exact exception capture. The
+   coordinator returns RT output only after both children settle; result,
+   events, timing, and errors then cross the Host value boundary.
 
 ## Planning Invariants
 
@@ -165,12 +171,13 @@ full HP storage:
 - final target selection and full HP commit; dirty executors own their staged
   commit after reusing the source-first submission helper.
 
-The selected execution runtime owns the current physical mechanism:
+The selected physical domain owns the current mechanism:
 
 - worker lifecycle and ready queues;
-- batch state and scheduler-local epoch filtering;
+- Run-local settlement in the service or batch/epoch state in legacy
+  schedulers;
 - implementation-specific task ordering;
-- scheduler completion and exception publication;
+- completion and exception publication;
 - bounded trace publication through the Host context.
 
 Neither route receives `GraphModel`, `ComputeTaskGraph`,
@@ -179,23 +186,22 @@ released by `TaskSubmissionPlan`: the migrated route creates another
 `ReadyTaskSubmission`, while legacy routes push another lease-backed callback
 or dirty handle.
 
-The issue #68 CPU service is explicitly composed before Kernel, owns one
-concrete CPU scheduler, and serializes one complete Run at a time. It lazily
-creates or reconfigures that scheduler to the exact resolved built-in CPU
-grant, forwards trace context to the active `GraphRuntime`, and clears that
-borrowed host only after settled wait. It has no cross-Graph fairness,
-admission, bounded ready store, cancellation, or policy authority.
+The issue #69 CPU service is explicitly composed before Kernel and owns one
+direct fixed worker pool. Configuration resolves and freezes `[1,8]` workers
+once; Graph load, replacement, Run execution, and dirty phases never resize it.
+Independent Runs from multiple Graphs share the high/normal ready queues while
+completion counts, first exceptions, in-flight drainage, Host trace targets,
+and settlement remain Run-local. This is priority separation, not final
+cross-Run fairness, bounded admission, cancellation, or policy authority.
 
-Transitional threaded scheduler resources remain owned per `GraphRuntime` and
-intent route, including a CPU owner that stays allocated while migrated full-HP
-work uses the service pool. The process `SchedulerWorkerBudget` still charges
-only those transitional owners: graph load atomically reserves HP+RT, and
-replacement reserves candidate headroom while the old owner remains live.
-The service pool is not charged by that ledger. Built-in serial charges zero;
-built-in CPU and registered ABI v2 plugins charge the resolved one-through-eight
-grant; built-in GPU/heterogeneous also charges its potential device worker.
-Issue #69 owns removal of the duplicate per-Graph CPU workers and multi-Graph
-sharing.
+Built-in CPU bindings are ownerless at `GraphRuntime` for both intents.
+Transitional serial, GPU, and plugin scheduler resources remain owned per Graph
+and intent. The process `SchedulerWorkerBudget` charges one pool-lifetime
+reservation for each fixed service and charges only legacy scheduler plans at
+Graph load/replacement. Legacy replacement reserves candidate headroom while
+the old owner remains live. Built-in serial charges zero; registered ABI v2
+plugins charge their resolved grant; built-in GPU/heterogeneous also charges
+its potential device worker.
 
 ## OpenCV Operation Concurrency
 
@@ -279,14 +285,15 @@ It is not yet a general cancellation or graph-revision policy.
   values.
 - Resource exhaustion may propagate as `std::bad_alloc` across documented
   non-destructor Host boundaries.
-- An above-eight worker request or unknown scheduler type fails before worker
-  construction as `InvalidParameter`; process-ledger exhaustion at graph load
-  or replacement preserves `GraphErrc::ComputeError`.
-- Scheduler reservations outlive their concrete workers during teardown:
-  candidate rollback returns only candidate capacity, successful graph close
-  or Host destruction returns retained capacity exactly once, a failed close
-  retains it for retry, and replacement requires transient headroom while
-  preserving the old scheduler on failure.
+- An above-eight worker request, a positive request conflicting with the fixed
+  service count, or an unknown scheduler type fails as `InvalidParameter`;
+  transitional budget exhaustion while creating the first service pool or
+  admitting a legacy owner preserves `GraphErrc::ComputeError`.
+- A fixed service reservation outlives all Graphs in its Kernel and releases
+  only with service destruction. Legacy scheduler reservations outlive their
+  concrete workers during teardown: candidate rollback returns only candidate
+  capacity, successful graph close or Host destruction returns retained
+  capacity exactly once, and legacy replacement requires transient headroom.
 - An admitted scheduler batch is settled before its exception escapes the
   current request.
 - Operation callbacks may already have external side effects; staged graph
@@ -296,9 +303,9 @@ It is not yet a general cancellation or graph-revision policy.
   service boundary as `ReadyTaskSubmission`; legacy full HP uses an owned
   callback. Both retain a `ComputeRunLease`, and failure publication must match
   `(RunId, RunLocalTaskId)`. Only the legacy path uses an empty borrowed-handle
-  batch to establish its scheduler epoch. Request-local dirty executors still
-  use their separate synchronous borrowed-handle path and therefore cannot
-  move unchanged into a process-wide asynchronous queue.
+  batch to establish its scheduler epoch. Built-in CPU dirty/preflight work
+  uses heap-owned phase contexts and child Run leases; only legacy dirty
+  schedulers retain the synchronous borrowed-handle path.
 
 ## Boundary Rationale
 
@@ -315,11 +322,12 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted replacement direction and detailed ownership contract.
-This document is authoritative for the current issue #68 single-Run injected
-CPU service and ready-submission slice, retained per-Graph scheduler ownership,
-and bounded transitional admission containment. Multi-Graph service execution,
-authoritative revision, paired realtime Runs, general dirty-path leases,
-resource admission, bounded ready storage, and policy remain future behavior.
+This document is authoritative for the current issue #69 fixed multi-Graph
+HP/RT CPU service, ownerless built-in CPU bindings, separate realtime child
+Runs, owned dirty/preflight submissions, retained legacy per-Graph schedulers,
+and bounded transitional worker containment. Authoritative revision,
+`RunGroup`, production resource admission, bounded ready storage,
+cancellation, supersession, and final policy remain future behavior.
 
 ## Implementation and Validation Entry Points
 

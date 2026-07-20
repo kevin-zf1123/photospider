@@ -1,9 +1,12 @@
 #include "compute/dirty_update_executor.hpp"
 
+#include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -29,6 +32,45 @@
 
 namespace ps::compute {
 namespace {
+
+/**
+ * @brief Advances an optional dirty-domain Run to executable phase.
+ *
+ * @param run Child or standalone Run, or null for legacy callers.
+ * @param queued Whether work crosses a scheduler/service queue.
+ * @return Nothing.
+ * @throws std::logic_error when the Run was not admitted or has already
+ * reached commit/terminal state.
+ * @throws std::invalid_argument from invalid phase transitions.
+ * @note Repeated calls while Running are idempotent so connected-parameter
+ * preflight and the following dirty phase may share one domain Run.
+ */
+void advance_dirty_run_for_execution(ComputeRun* run, bool queued) {
+  if (!run) {
+    return;
+  }
+  switch (run->phase()) {
+    case ComputeRunPhase::Created:
+      throw std::logic_error(
+          "Dirty execution requires an admitted ComputeRun.");
+    case ComputeRunPhase::Admitted:
+      if (queued) {
+        run->advance_to(ComputeRunPhase::Queued);
+      }
+      run->advance_to(ComputeRunPhase::Running);
+      return;
+    case ComputeRunPhase::Queued:
+      run->advance_to(ComputeRunPhase::Running);
+      return;
+    case ComputeRunPhase::Running:
+      return;
+    case ComputeRunPhase::CommitPending:
+    case ComputeRunPhase::Terminal:
+      throw std::logic_error(
+          "Dirty execution cannot reuse a settled or committing ComputeRun.");
+  }
+  throw std::logic_error("Dirty execution observed an unknown Run phase.");
+}
 
 /**
  * @brief Clips an HP dirty entry to a planned task ROI.
@@ -440,12 +482,16 @@ bool StabilizedDirtyParameters::geometry_affected(int node_id) const noexcept {
 
 /** @copydoc stabilize_connected_dirty_parameters */
 std::shared_ptr<const StabilizedDirtyParameters>
-stabilize_connected_dirty_parameters(GraphModel& graph,
-                                     GraphTraversalService& traversal,
-                                     int target_node_id,
-                                     uint64_t request_generation,
-                                     uint64_t topology_generation,
-                                     SchedulerTaskRuntime* task_runtime) {
+stabilize_connected_dirty_parameters(
+    GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
+    uint64_t request_generation, uint64_t topology_generation,
+    SchedulerTaskRuntime* task_runtime, ExecutionService* execution_service,
+    SchedulerHostContext* host, ComputeRun* run) {
+  if (execution_service != nullptr &&
+      (task_runtime != nullptr || host == nullptr || run == nullptr)) {
+    throw std::invalid_argument(
+        "Connected-parameter service preflight requires only a host and Run.");
+  }
   if (request_generation == 0) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Connected-parameter stabilization requires a non-zero "
@@ -479,9 +525,14 @@ stabilize_connected_dirty_parameters(GraphModel& graph,
     return result;
   }
 
+  advance_dirty_run_for_execution(
+      run, execution_service != nullptr || task_runtime != nullptr);
   const std::vector<Device> available_devices =
-      task_runtime ? task_runtime->available_devices()
-                   : std::vector<Device>{Device::CPU};
+      execution_service ? execution_service->available_devices()
+                        : (task_runtime ? task_runtime->available_devices()
+                                        : std::vector<Device>{Device::CPU});
+  const auto available_devices_owner =
+      std::make_shared<const std::vector<Device>>(available_devices);
 
   std::vector<int> closure_stack(result->parameter_producer_node_ids_.begin(),
                                  result->parameter_producer_node_ids_.end());
@@ -530,11 +581,12 @@ stabilize_connected_dirty_parameters(GraphModel& graph,
     }
   }
 
+  uint64_t preflight_task_id = 0U;
   for (int node_id : execution_order) {
     if (!result->staged_node_ids_.count(node_id)) {
       continue;
     }
-    auto execute_preflight_node = [&graph, &result, &available_devices,
+    auto execute_preflight_node = [&graph, result, available_devices_owner,
                                    node_id]() {
       Node node_for_exec = graph.node(node_id);
       const NodeInputResolver::OutputLookup lookup =
@@ -555,8 +607,8 @@ stabilize_connected_dirty_parameters(GraphModel& graph,
       std::optional<OpRegistry::OpVariant> operation;
       const auto device_implementation =
           OpRegistry::instance().select_best_implementation(
-              node_for_exec.type, node_for_exec.subtype, available_devices,
-              ComputeIntent::GlobalHighPrecision);
+              node_for_exec.type, node_for_exec.subtype,
+              *available_devices_owner, ComputeIntent::GlobalHighPrecision);
       if (device_implementation) {
         operation = device_implementation->func;
       } else {
@@ -591,7 +643,34 @@ stabilize_connected_dirty_parameters(GraphModel& graph,
           StabilizedDirtyNodeOutput{
               std::move(output), graph.node(node_id).hp_version + 1, hp_roi});
     };
-    if (task_runtime) {
+    if (execution_service) {
+      auto owned_preflight =
+          std::make_shared<std::function<void()>>(execute_preflight_node);
+      ComputeRunLease lease = run->acquire_lease();
+      const ComputeRunTaskIdentity identity = lease.task_identity(
+          std::numeric_limits<uint64_t>::max() - preflight_task_id);
+      std::vector<ReadyTaskSubmission> submissions;
+      submissions.emplace_back(
+          std::move(lease), identity, node_id, true,
+          [owned_preflight, node_id](ComputeRunLease&,
+                                     const ComputeRunTaskIdentity&,
+                                     SchedulerTaskRuntime& service_runtime) {
+            try {
+              service_runtime.log_event(SchedulerTraceAction::Execute, node_id);
+              (*owned_preflight)();
+              service_runtime.dec_tasks_to_complete();
+            } catch (...) {
+              try {
+                service_runtime.log_event(
+                    SchedulerTraceAction::RethrowException, node_id);
+              } catch (...) {
+              }
+              throw;
+            }
+          },
+          SchedulerTaskPriority::High);
+      execution_service->execute_cpu_run(*host, std::move(submissions), 1);
+    } else if (task_runtime) {
       PreflightTaskExecutor<decltype(execute_preflight_node)> executor(
           execute_preflight_node, *task_runtime, node_id);
       std::vector<TaskHandle> handles{TaskHandle{&executor, 0, node_id}};
@@ -601,6 +680,7 @@ stabilize_connected_dirty_parameters(GraphModel& graph,
     } else {
       execute_preflight_node();
     }
+    ++preflight_task_id;
   }
 
   for (int producer_id : result->parameter_producer_node_ids_) {
@@ -680,22 +760,25 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * @param proxy_graph RT proxy graph receiving optional downsample refresh.
  * @param runtime Optional scheduler/trace owner; null executes work inline.
  * @param request Dirty target, ROI, cache, telemetry, and sibling-gate options.
- * @param run Optional standalone HP Run that owns staging and lifecycle state.
- * Paired realtime HP sibling execution passes null in issue #66.
+ * @param run Optional standalone or realtime-child HP Run that owns staging,
+ * task leases, and lifecycle state.
+ * @param execution_service Optional fixed process CPU service used for owned
+ * ready submissions.
  * @return Mutable target HP output owned by graph.
  * @throws std::bad_alloc unchanged when planning, task, cache, staging,
  * telemetry, or output storage exhausts memory.
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
  * target validation failures.
- * @note Planning and commit hold graph_mutex_ while scheduler work runs outside
- * that lock. Standalone HP staging is Run-owned; paired RT sibling staging
- * remains callback-local until RunGroup support. Per-node synchronization is
- * request-local for standalone HP work and shared only with the matching RT
- * sibling when supplied by ComputeService.
+ * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
+ * outside that lock. Both standalone and realtime-child HP staging are
+ * Run-owned. Per-node synchronization is request-local for standalone HP work
+ * and shared only with the matching RT sibling when supplied by
+ * ComputeService.
  */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
-    const DirtyUpdateRequest& request, ComputeRun* run) {
+    const DirtyUpdateRequest& request, ComputeRun* run,
+    ExecutionService* execution_service) {
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   if (request.stabilized_parameters &&
@@ -796,20 +879,21 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
                                         hp_write_buffer);
   };
 
-  if (run && runtime) {
-    run->advance_to(ComputeRunPhase::Queued);
-  }
-  if (run) {
-    run->advance_to(ComputeRunPhase::Running);
-  }
-  run_dirty_source_first(
-      DirtySourceFirstRunRequest{runtime, ComputeIntent::GlobalHighPrecision,
-                                 &prepared.compute_plan, &prepared.selection,
-                                 &prepared.source_task_ids,
-                                 &prepared.downstream_task_ids,
-                                 prepared_dirty_plan.snapshot.graph_generation,
-                                 validate_hp_source_boundaries},
-      run_hp_task);
+  advance_dirty_run_for_execution(run, runtime != nullptr);
+  DirtySourceFirstRunRequest source_first_request;
+  source_first_request.runtime = runtime;
+  source_first_request.intent = ComputeIntent::GlobalHighPrecision;
+  source_first_request.execution_service = execution_service;
+  source_first_request.host = runtime;
+  source_first_request.run = run;
+  source_first_request.compute_plan = &prepared.compute_plan;
+  source_first_request.selection = &prepared.selection;
+  source_first_request.source_task_ids = &prepared.source_task_ids;
+  source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
+  source_first_request.dirty_generation =
+      prepared_dirty_plan.snapshot.graph_generation;
+  source_first_request.before_downstream = validate_hp_source_boundaries;
+  run_dirty_source_first(source_first_request, run_hp_task);
   if (request.sibling_commit_gate) {
     request.sibling_commit_gate->wait_for_rt_commit_or_throw();
   }
@@ -885,18 +969,21 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  * @param proxy_graph RT proxy graph receiving the staged result.
  * @param runtime Optional scheduler/trace owner; null executes work inline.
  * @param request Dirty target, ROI, cache, and telemetry options.
+ * @param run Optional RT child Run owning task leases and lifecycle state.
+ * @param execution_service Optional fixed process CPU service used for owned
+ * ready submissions.
  * @return Mutable target RT output owned by proxy_graph.
  * @throws std::bad_alloc unchanged when planning, task, proxy, staging,
  * telemetry, or output storage exhausts memory.
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
  * target validation failures.
- * @note Planning and commit hold graph_mutex_ while scheduler work runs outside
- * that lock. RT output never becomes formal reusable GraphModel cache.
+ * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
+ * outside that lock. RT output never becomes formal reusable GraphModel cache.
  */
-NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
-                                           RealtimeProxyGraph& proxy_graph,
-                                           GraphRuntime* runtime,
-                                           const DirtyUpdateRequest& request) {
+NodeOutput& RealTimeDirtyExecutor::execute(
+    GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
+    const DirtyUpdateRequest& request, ComputeRun* run,
+    ExecutionService* execution_service) {
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   if (request.stabilized_parameters &&
@@ -982,14 +1069,21 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
         graph, proxy_graph, prepared_dirty_plan.snapshot, rt_write_buffer);
   };
 
-  run_dirty_source_first(
-      DirtySourceFirstRunRequest{runtime, ComputeIntent::RealTimeUpdate,
-                                 &prepared.compute_plan, &prepared.selection,
-                                 &prepared.source_task_ids,
-                                 &prepared.downstream_task_ids,
-                                 prepared_dirty_plan.snapshot.graph_generation,
-                                 validate_rt_source_boundaries},
-      run_rt_task);
+  advance_dirty_run_for_execution(run, runtime != nullptr);
+  DirtySourceFirstRunRequest source_first_request;
+  source_first_request.runtime = runtime;
+  source_first_request.intent = ComputeIntent::RealTimeUpdate;
+  source_first_request.execution_service = execution_service;
+  source_first_request.host = runtime;
+  source_first_request.run = run;
+  source_first_request.compute_plan = &prepared.compute_plan;
+  source_first_request.selection = &prepared.selection;
+  source_first_request.source_task_ids = &prepared.source_task_ids;
+  source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
+  source_first_request.dirty_generation =
+      prepared_dirty_plan.snapshot.graph_generation;
+  source_first_request.before_downstream = validate_rt_source_boundaries;
+  run_dirty_source_first(source_first_request, run_rt_task);
   graph_lock.lock();
   if (request.stabilized_parameters &&
       request.stabilized_parameters->topology_generation() !=
@@ -998,6 +1092,9 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
                      "Graph topology changed during RT dirty execution.");
   }
   graph_lock.unlock();
+  if (run) {
+    run->advance_to(ComputeRunPhase::CommitPending);
+  }
   rt_write_buffer.commit_to_proxy_graph();
   return require_target_output(proxy_graph, request.node_id);
 }

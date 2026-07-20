@@ -493,15 +493,24 @@ TEST(ComputeRunDescriptor, CapturesIdRevisionIntentQualityAndQosWithoutReuse) {
 }
 
 /**
- * @brief Verifies invalid domain/QoS values are rejected before Run admission.
+ * @brief Verifies RT child quality and invalid quality/QoS rejection.
  *
- * @note Validation happens before a Run id is minted, avoiding identities for
- * descriptors that never become Runs.
+ * @note The interactive RT descriptor is accepted. Each mismatched or
+ * nonpositive descriptor is rejected before it can become an admitted Run.
  */
-TEST(ComputeRunDescriptor, RejectsRealtimeAndNonpositiveQosValues) {
+TEST(ComputeRunDescriptor, AcceptsRtChildAndRejectsMismatchedQualityOrQos) {
   ComputeRunSubmission realtime = make_test_submission("rt", 1, 1);
   realtime.intent = ComputeIntent::RealTimeUpdate;
-  EXPECT_THROW((void)ComputeRun(std::move(realtime)), std::invalid_argument);
+  realtime.quality = ComputeRunQuality::Interactive;
+  ComputeRun realtime_run(realtime);
+  EXPECT_EQ(realtime_run.descriptor().intent(), ComputeIntent::RealTimeUpdate);
+  EXPECT_EQ(realtime_run.descriptor().quality(),
+            ComputeRunQuality::Interactive);
+
+  ComputeRunSubmission mismatched_realtime = std::move(realtime);
+  mismatched_realtime.quality = ComputeRunQuality::Full;
+  EXPECT_THROW((void)ComputeRun(std::move(mismatched_realtime)),
+               std::invalid_argument);
 
   ComputeRunSubmission zero_weight = make_test_submission("weight", 1, 1);
   zero_weight.qos.weight = 0;
@@ -844,7 +853,7 @@ TEST(ReadyTaskSubmission,
  * after each accepted callback settles.
  */
 TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
-  ExecutionService service;
+  ExecutionService service(1);
   ExecutionServiceHost host;
   ComputeRun first(make_test_submission("service-first", 51, 61));
   ComputeRun second(make_test_submission("service-second", 52, 62));
@@ -853,13 +862,12 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
   std::vector<ReadyTaskSubmission> first_ready;
   first_ready.push_back(
       make_counted_ready_submission(first.acquire_lease(), 0, 61, entered));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, 1U, std::move(first_ready), 1));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(first_ready), 1));
 
   std::vector<ReadyTaskSubmission> second_ready;
   second_ready.push_back(
       make_counted_ready_submission(second.acquire_lease(), 0, 62, entered));
-  EXPECT_NO_THROW(
-      service.execute_cpu_run(host, 2U, std::move(second_ready), 1));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(second_ready), 1));
 
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 2);
   EXPECT_EQ(host.context_entries(), 2);
@@ -868,16 +876,15 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
 }
 
 /**
- * @brief Verifies concurrent callers cannot overlap two service Run batches.
+ * @brief Verifies independent Run batches overlap on one fixed service pool.
  *
  * @note The first callback blocks after entering its worker. The second caller
- * signals immediately before calling `execute_cpu_run()`, so the blocking
- * assertions run only after that caller is scheduled at the service boundary.
- * It cannot enter the CPU scheduler until the first batch settles and releases
- * the service Run gate.
+ * signals immediately before calling `execute_cpu_run()`. With two fixed
+ * service workers, the second Run must enter and settle while the first Run
+ * remains blocked, proving there is no whole-service Run gate.
  */
-TEST(ExecutionService, SerializesCompleteConcurrentRunIntervals) {
-  ExecutionService service;
+TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
+  ExecutionService service(2);
   ExecutionServiceHost first_host;
   ExecutionServiceHost second_host;
   ComputeRun first(make_test_submission("service-gate-first", 53, 63));
@@ -914,7 +921,7 @@ TEST(ExecutionService, SerializesCompleteConcurrentRunIntervals) {
   auto first_future = std::async(
       std::launch::async,
       [&service, &first_host, ready = std::move(first_ready)]() mutable {
-        service.execute_cpu_run(first_host, 1U, std::move(ready), 1);
+        service.execute_cpu_run(first_host, std::move(ready), 1);
       });
   ASSERT_EQ(first_entered.get_future().wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
@@ -925,21 +932,125 @@ TEST(ExecutionService, SerializesCompleteConcurrentRunIntervals) {
       std::launch::async, [&service, &second_host, &second_call_started,
                            ready = std::move(second_ready)]() mutable {
         second_call_started.set_value();
-        service.execute_cpu_run(second_host, 2U, std::move(ready), 1);
+        service.execute_cpu_run(second_host, std::move(ready), 1);
       });
 
   EXPECT_EQ(second_call_started_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
-  EXPECT_EQ(second_future.wait_for(std::chrono::milliseconds(100)),
-            std::future_status::timeout);
-  EXPECT_FALSE(second_entered.load(std::memory_order_acquire));
+  EXPECT_EQ(second_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(second_future.get());
+  EXPECT_TRUE(second_entered.load(std::memory_order_acquire));
 
   release_first.set_value();
   EXPECT_NO_THROW(first_future.get());
-  EXPECT_NO_THROW(second_future.get());
-  EXPECT_TRUE(second_entered.load(std::memory_order_acquire));
   EXPECT_EQ(first_host.context_entries(), first_host.context_exits());
   EXPECT_EQ(second_host.context_entries(), second_host.context_exits());
+}
+
+/**
+ * @brief Verifies one active Run failure does not fail or drain its peer.
+ *
+ * @note Both callbacks enter the same fixed two-worker pool. The failing Run
+ * waits until the peer is executing, then rethrows one exact exception while
+ * the peer remains blocked. The peer later completes normally and publishes
+ * its independent success outcome.
+ */
+TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
+  ExecutionService service(2);
+  ExecutionServiceHost failing_host;
+  ExecutionServiceHost peer_host;
+  GraphModel failing_graph("cache/execution-service-isolated-failure");
+  failing_graph.add_node(make_plan_node(65));
+  failing_graph.validate_topology();
+  GraphModel peer_graph("cache/execution-service-isolated-peer");
+  peer_graph.add_node(make_plan_node(66));
+  peer_graph.validate_topology();
+  GraphTraversalService traversal;
+  ComputeRun failing(make_test_submission(
+      "service-isolated-failure", failing_graph.topology_generation(), 65));
+  ComputeRun peer(make_test_submission("service-isolated-peer",
+                                       peer_graph.topology_generation(), 66));
+  failing.advance_to(ComputeRunPhase::Admitted);
+  peer.advance_to(ComputeRunPhase::Admitted);
+  failing.emplace_submission_plan(failing_graph, traversal, 65,
+                                  std::vector<Device>{Device::CPU});
+  peer.emplace_submission_plan(peer_graph, traversal, 66,
+                               std::vector<Device>{Device::CPU});
+
+  std::promise<void> peer_entered;
+  const std::shared_future<void> peer_entered_future =
+      peer_entered.get_future().share();
+  std::promise<void> release_peer;
+  const std::shared_future<void> peer_release =
+      release_peer.get_future().share();
+  const std::exception_ptr failure =
+      std::make_exception_ptr(std::runtime_error("isolated Run failure"));
+
+  ComputeRunLease failing_lease = failing.acquire_lease();
+  const ComputeRunTaskIdentity failing_identity =
+      failing_lease.task_identity(0);
+  std::vector<ReadyTaskSubmission> failing_ready;
+  failing_ready.emplace_back(
+      std::move(failing_lease), failing_identity, 65, true,
+      [peer_entered_future, failure](ComputeRunLease&,
+                                     const ComputeRunTaskIdentity&,
+                                     SchedulerTaskRuntime&) {
+        peer_entered_future.wait();
+        std::rethrow_exception(failure);
+      });
+
+  ComputeRunLease peer_lease = peer.acquire_lease();
+  const ComputeRunTaskIdentity peer_identity = peer_lease.task_identity(0);
+  std::vector<ReadyTaskSubmission> peer_ready;
+  peer_ready.emplace_back(std::move(peer_lease), peer_identity, 66, true,
+                          [&peer_entered, peer_release](
+                              ComputeRunLease&, const ComputeRunTaskIdentity&,
+                              SchedulerTaskRuntime& runtime) {
+                            peer_entered.set_value();
+                            peer_release.wait();
+                            runtime.dec_tasks_to_complete();
+                          });
+
+  auto failing_future = std::async(
+      std::launch::async,
+      [&service, &failing_host, ready = std::move(failing_ready)]() mutable {
+        service.execute_cpu_run(failing_host, std::move(ready), 1);
+      });
+  auto peer_future = std::async(
+      std::launch::async,
+      [&service, &peer_host, ready = std::move(peer_ready)]() mutable {
+        service.execute_cpu_run(peer_host, std::move(ready), 1);
+      });
+
+  ASSERT_EQ(peer_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(failing_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  std::exception_ptr observed;
+  try {
+    failing_future.get();
+    FAIL() << "Expected isolated Run failure.";
+  } catch (...) {
+    observed = std::current_exception();
+  }
+  EXPECT_TRUE(observed == failure);
+  EXPECT_EQ(peer_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+  EXPECT_FALSE(peer.is_terminal());
+
+  release_peer.set_value();
+  EXPECT_NO_THROW(peer_future.get());
+  EXPECT_TRUE(peer.publish_succeeded());
+  const auto failing_outcome = failing.terminal_outcome();
+  ASSERT_TRUE(failing_outcome.has_value());
+  EXPECT_EQ(failing_outcome->kind, ComputeRunTerminalKind::Failed);
+  EXPECT_TRUE(failing_outcome->failure == failure);
+  const auto peer_outcome = peer.terminal_outcome();
+  ASSERT_TRUE(peer_outcome.has_value());
+  EXPECT_EQ(peer_outcome->kind, ComputeRunTerminalKind::Succeeded);
+  EXPECT_EQ(failing_host.context_entries(), failing_host.context_exits());
+  EXPECT_EQ(peer_host.context_entries(), peer_host.context_exits());
 }
 
 /**
@@ -949,7 +1060,7 @@ TEST(ExecutionService, SerializesCompleteConcurrentRunIntervals) {
  * rather than that local value, drive service validation.
  */
 TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
-  ExecutionService service;
+  ExecutionService service(2);
   ExecutionServiceHost host;
   ComputeRun first(make_test_submission("mixed-first", 61, 71));
   ComputeRun second(make_test_submission("mixed-second", 62, 72));
@@ -960,7 +1071,7 @@ TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
   mixed.push_back(
       make_counted_ready_submission(second.acquire_lease(), 0, 72, entered));
 
-  EXPECT_THROW(service.execute_cpu_run(host, 2U, std::move(mixed), 2),
+  EXPECT_THROW(service.execute_cpu_run(host, std::move(mixed), 2),
                std::invalid_argument);
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(host.context_entries(), 0);
@@ -974,7 +1085,7 @@ TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
  * the batch before surfacing that exact pointer.
  */
 TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
-  ExecutionService service;
+  ExecutionService service(2);
   ExecutionServiceHost host;
   GraphModel graph("cache/execution-service-failure");
   graph.add_node(make_plan_node(81));
@@ -1002,7 +1113,7 @@ TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
 
   std::exception_ptr observed;
   try {
-    service.execute_cpu_run(host, 2U, std::move(ready), 1);
+    service.execute_cpu_run(host, std::move(ready), 1);
     FAIL() << "Expected service worker failure.";
   } catch (...) {
     observed = std::current_exception();

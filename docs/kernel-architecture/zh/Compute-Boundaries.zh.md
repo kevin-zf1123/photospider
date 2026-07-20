@@ -25,7 +25,7 @@ flowchart TD
   KERNEL --> EXEC["注入的 CPU ExecutionService"]
   KERNEL --> GSE["GraphStateExecutor"]
   GSE --> SERVICE["ComputeService"]
-  SERVICE --> RUN["request-owned HP ComputeRun"]
+  SERVICE --> RUN["request-owned HP 或 HP/RT child ComputeRun"]
   SERVICE --> PLAN["planning 与 pruning 协作者"]
   PLAN --> DISPATCH["ComputeTaskDispatcher"]
   DISPATCH --> RUN
@@ -34,7 +34,7 @@ flowchart TD
   READY --> RUNTIME["legacy per-Graph SchedulerTaskRuntime"]
   EXEC --> CALLBACK["service-owned ready callback"]
   RUNTIME --> CALLBACK
-  CALLBACK --> TEMP["Run-owned 临时结果或 dirty HP staging"]
+  CALLBACK --> TEMP["Run-scoped 临时结果或 dirty staging"]
   RUN --> TEMP
   TEMP --> COMMIT["通过验证的结果提交"]
   COMMIT --> GRAPH["GraphModel 或 RealtimeProxyGraph"]
@@ -61,15 +61,15 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 重新开放后续 accepting generation，但不会困住该 caller，也不会创建第二个 worker。
 `GraphRuntime` 会在 scheduler teardown 前完成该 join。如果显式 close 随后在 scheduler shutdown
 中失败，Kernel 会先启动一个 replacement lane worker 再返回失败，使保留的 session 仍可重试。
-不同 graph 具有独立的 worker 和队列。Scheduler-worker ledger 不计这些 lane worker；其 32-slot
-上限只覆盖 scheduler planning 计费的 worker。
+不同 graph 具有独立的 worker 和队列。过渡期 worker budget 不计这些 lane worker；其 32-slot
+上限覆盖固定 CPU service pool，以及向 legacy scheduler plan 计费的 worker。
 
 ## 当前协作者
 
 | 模块 | 当前职责 | 不拥有 |
 | --- | --- | --- |
-| `ComputeService` | 请求验证、intent 协调、创建/settle 一个非 realtime HP Run、协作者构造和最终结果选择 | 前端值、worker thread、图文档 |
-| `ComputeRun` | 不可变的非 realtime HP descriptor、单调 phase、唯一 terminal outcome、通过共享 control 对 full-plan/temporary storage 或 standalone dirty-HP staging storage 的所有权、稳定 lease，以及 full-HP 复合 task identity | 配对 realtime grouping、Graph state、worker、权威 revision commit、cancellation 或 resource admission |
+| `ComputeService` | 请求验证、intent 协调、创建/settle 一个 HP Run 或不同的 HP/RT child Run、协作者构造和最终结果选择 | 前端值、worker thread、图文档或目标 `RunGroup` policy |
+| `ComputeRun` | 不可变的单 domain HP/RT descriptor、单调 phase、唯一 terminal outcome、通过共享 control 对 full-plan/temporary storage 或 dirty-HP staging storage 的所有权、稳定 lease，以及复合 task identity | 配对 realtime grouping、Graph state、worker、权威 revision commit、cancellation 或 resource admission |
 | `ComputeCachePolicy` | HP cache eligibility 与缓存路径决定 | 磁盘 I/O 所有权或 operation 执行 |
 | `NodeInputResolver` | runtime parameter 和 ready image input | 图遍历或输出提交 |
 | `FullTaskGraphExpander` | 一个 graph generation/domain 的完整 node/tile task 形态 | 请求目标、cache pruning、dirty pruning |
@@ -81,11 +81,11 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit 或 scheduler policy |
 | `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、variant、结果槽与 callback owner | Scheduler worker、Run terminal state 或 dirty-path execution |
 | `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
-| `ExecutionService` | 一个注入的单 Run 内建 CPU worker domain、精确 grant 重配置、ready-only queue admission、settled exception fence 与 active-Graph trace 转发 | Planning、dependency、Graph/cache state、admission ledger、policy、dirty/RT/GPU/plugin 执行或 visible commit |
+| `ExecutionService` | 一个注入的固定内建 CPU worker domain、并发 Run registry、high/normal ready queue、按 Run 隔离的 completion/failure/trace settlement，以及 HP/RT dirty/preflight 执行 | Planning、dependency、Graph/cache state、最终 admission ledger、公平性 policy、GPU/plugin 执行或 visible commit |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | scheduler trace 所有权 |
 | `SchedulerFactory` | 在构造前解析 `0..8` worker 请求，并规划每个 scheduler 的保守 slot 计费 | 进程容量所有权或 graph-state access |
-| `SchedulerWorkerBudget` | 在所有 embedded Host/Kernel 间串行化固定 32-slot 进程 admission ledger | worker 构造、scheduling policy、fairness 或整个进程 thread 计数 |
+| `SchedulerWorkerBudget` | 在所有 embedded Host/Kernel 间串行化固定 32-slot 过渡期进程 budget，覆盖固定 CPU service pool 与 legacy scheduler worker | worker 构造、scheduling policy、fairness 或整个进程 thread 计数 |
 | `ReservationOwnedScheduler` | 让 move-only reservation 保持到 concrete scheduler shutdown 与销毁完成 | 容量 planning 或 task-graph correctness |
 
 Compute collaborator 位于 `src/lib/compute/`；三个 admission/ownership collaborator 位于
@@ -95,20 +95,24 @@ Compute collaborator 位于 `src/lib/compute/`；三个 admission/ownership coll
 
 1. `Kernel` 解析 session 并进入图状态访问边界。
 2. `ComputeService` 验证 target、intent、dirty ROI、cache flag 和 execution strategy。
-3. 对于非 realtime HP，`ComputeService` 在 planning 前创建一个 `ComputeRun`，捕获 fresh id、
-   session identity、只表示提交时拓扑的 revision、target、HP intent、full quality 与显式 QoS。
+3. 对于非 realtime HP，`ComputeService` 在 planning 前创建一个 `ComputeRun`；对于 realtime，
+   它会在 preflight 前创建不同的 HP 与 RT child Run。每个 Run 都捕获 fresh id、session
+   identity、只表示提交时拓扑的 revision、target、单 domain intent、full 或 interactive
+   quality 与显式 QoS。目前尚无目标 `RunGroup`。
 4. 在 extent、ROI 或 task-shape 决定使用连接参数之前，parameter producer 会稳定为一个
    request-local HP snapshot。
 5. Planner 展开一个 domain 的完整 task 形态，再裁剪到请求目标和依赖锥。
 6. Dirty request 从该 plan 选择活动 work set；dirty 状态不会创建新的 task 形态。
-7. 顺序执行 inline 遍历同一请求语义。内建 CPU 并行 full HP 会 materialize 保留 Run lease 与
-   `(RunId, RunLocalTaskId)` 的 move-only `ReadyTaskSubmission`，并且只把 ready work 发送到
-   注入的 `ExecutionService`。Serial、GPU 与 plugin full HP 保留通过选定 per-Graph scheduler
-   的 lease-backed callback route。Dirty 与 realtime execution 保留既有 request-local route。
-8. Worker 写入 Run-owned full-plan 临时结果或 standalone dirty HP staging。配对 realtime
-   staging 仍由 sibling callback 局部持有；只有相应 commit path 能修改可见图状态。
-9. Run 在输出验证或精确异常捕获后发布唯一 success/failure，随后结果、事件、计时和错误通过
-   Host value 边界复制返回。
+7. 顺序执行 inline 遍历同一请求语义。每个内建 CPU 并行阶段都会 materialize 保留 Run lease
+   与 `(RunId, RunLocalTaskId)` 的 move-only `ReadyTaskSubmission`，并且只把 ready work 发送到
+   固定 `ExecutionService`。Full HP 使用 `TaskSubmissionPlan`；preflight 与 dirty HP/RT 使用
+   heap-owned phase context。Serial、GPU 与 plugin route 保留各自选定的 per-Graph scheduler。
+8. Worker 写入 Run-owned full-plan 临时结果或 dirty-HP staging。RT staging 仍由 sibling
+   callback 局部持有，但所有 service callback 都会在同步 settlement 前保留 RT child lease。
+   只有相应 commit path 能修改可见图状态。
+9. 单个 HP Run 或每个 realtime child 会在输出验证或精确异常捕获后独立发布唯一
+   success/failure。Coordinator 只有在两个 child 都 settle 后才返回 RT output；随后结果、事件、
+   计时和错误通过 Host value 边界复制返回。
 
 ## 规划不变量
 
@@ -139,29 +143,31 @@ Dispatcher 拥有请求正确性，而 `ComputeRun` 拥有当前 full HP storage
 - 最终 target 选择与 full HP commit；dirty executor 在复用 source-first submission helper 后拥有
   自己的 staged commit。
 
-选定的 execution runtime 拥有当前物理机制：
+选定的物理 domain 拥有当前机制：
 
 - worker lifecycle 和 ready queue；
-- batch state 与 scheduler-local epoch filtering；
+- service 中按 Run 隔离的 settlement，或 legacy scheduler 中的 batch/epoch state；
 - 实现特定 task ordering；
-- scheduler completion 和 exception publication；
+- completion 和 exception publication；
 - 通过 Host context 发布有界 trace。
 
 两条 route 都不会收到 `GraphModel`、`ComputeTaskGraph`、`DirtyRegionSnapshot` 或 cache
 authority。新就绪的 dependent work 由 `TaskSubmissionPlan` 释放：迁移 route 会创建另一个
 `ReadyTaskSubmission`，legacy route 则推送另一条 lease-backed callback 或 dirty handle。
 
-Issue #68 的 CPU service 在 Kernel 之前显式组合，拥有一个 concrete CPU scheduler，并且每次
-串行化一个完整 Run。它会按精确解析后的内建 CPU grant 延迟创建或重新配置 scheduler，把 trace
-context 转发到 active `GraphRuntime`，并且只会在 settled wait 后清除该 borrowed host。它不拥有
-cross-Graph fairness、admission、有界 ready store、cancellation 或 policy authority。
+Issue #69 的 CPU service 在 Kernel 之前显式组合，并直接拥有一个固定 worker pool。配置只会
+解析并冻结一次 `[1,8]` worker；Graph load、replacement、Run execution 与 dirty 阶段都不会
+调整其大小。来自多个 Graph 的独立 Run 共享 high/normal ready queue，而 completion count、
+first exception、in-flight drainage、Host trace target 与 settlement 都按 Run 隔离。这只是
+priority separation，不是最终 cross-Run fairness、有界 admission、cancellation 或 policy
+authority。
 
-过渡期 threaded scheduler resource 仍按 `GraphRuntime` 和 intent route 拥有，其中包括 migrated
-full-HP work 使用 service pool 时仍保持已分配的 CPU owner。进程 `SchedulerWorkerBudget`
-仍只计费这些过渡 owner：graph load 原子预留 HP+RT，replacement 则在旧 owner 保持存活时预留
-candidate headroom。该 ledger 不计费 service pool。内建 serial 计费为零；内建 CPU 与已注册
-ABI v2 plugin 按解析后的一到八 grant 计费；内建 GPU/heterogeneous 还要计入潜在 device
-worker。Issue #69 负责删除重复 per-Graph CPU worker 并实现多 Graph 共享。
+两个 intent 的内建 CPU binding 在 `GraphRuntime` 中都不拥有 owner。过渡期 serial、GPU 与
+plugin scheduler resource 仍按 Graph 和 intent 拥有。进程 `SchedulerWorkerBudget` 为每个固定
+service 计入一项 pool-lifetime reservation，并只在 Graph load/replacement 时对 legacy
+scheduler plan 计费。Legacy replacement 会在旧 owner 保持存活时预留 candidate headroom。
+内建 serial 计费为零；已注册 ABI v2 plugin 按解析后的 grant 计费；内建 GPU/heterogeneous
+还要计入潜在 device worker。
 
 ## OpenCV Operation 并发
 
@@ -227,19 +233,21 @@ metadata 推导该关系。
 - 非法 target、intent/ROI 组合、planning contract 和 operation failure 通过分类图错误和 Host
   status value 报告。
 - 资源耗尽可以按已记录的非析构 Host 边界传播为 `std::bad_alloc`。
-- 超过八的 worker 请求或未知 scheduler type 会在 worker 构造前作为 `InvalidParameter` 失败；graph
-  load 或 replacement 的进程 ledger 耗尽会保留 `GraphErrc::ComputeError`。
-- Scheduler reservation 在 teardown 期间比 concrete worker 活得更久：candidate rollback 只归还
-  candidate 容量，成功的 graph close 或 Host 销毁恰好一次归还 retained capacity，close 失败则
-  保留容量供重试；replacement 在失败时保留旧 scheduler，因此需要 transient headroom。
+- 超过八的 worker 请求、与固定 service 数量冲突的正数请求，或未知 scheduler type 会作为
+  `InvalidParameter` 失败；创建第一个 service pool 或准入 legacy owner 时的过渡期 budget 耗尽
+  会保留 `GraphErrc::ComputeError`。
+- 固定 service reservation 会比其 Kernel 中的所有 Graph 活得更久，并且只在 service 析构时
+  释放。Legacy scheduler reservation 在 teardown 期间比 concrete worker 活得更久：candidate
+  rollback 只归还 candidate 容量，成功的 graph close 或 Host 销毁恰好一次归还 retained
+  capacity，legacy replacement 需要 transient headroom。
 - 已 admission 的 scheduler batch 会在异常离开当前请求前 settle。
 - Operation callback 可能已经产生外部副作用；staged graph output 不会回滚这些副作用。
 - Scheduler-backed full HP work 不再借用 raw `TaskExecutor`。`TaskSubmissionPlan` 拥有其
   runner。内建 CPU ready work 以 `ReadyTaskSubmission` 跨越 service boundary；legacy full HP
   使用 owned callback。两者都保留 `ComputeRunLease`，failure publication 必须匹配
   `(RunId, RunLocalTaskId)`。只有 legacy 路径会用空 borrowed-handle batch 建立 scheduler epoch。
-  Request-local dirty executor 仍使用独立的同步 borrowed-handle 路径，因此仍不能原样移入
-  process-wide asynchronous queue。
+  内建 CPU dirty/preflight 工作使用 heap-owned phase context 与 child Run lease；只有 legacy
+  dirty scheduler 保留同步 borrowed-handle 路径。
 
 ## 边界原理
 
@@ -253,10 +261,11 @@ metadata 推导该关系。
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受替代方向和详细
-所有权契约。本文是当前 issue #68 单 Run 注入 CPU service 与 ready-submission 切片、保留的
-per-Graph scheduler ownership 及其有界过渡期 admission containment 的权威说明。多 Graph
-service 执行、权威 revision、配对 realtime Run、通用 dirty-path lease、resource admission、
-有界 ready storage 与 policy 仍是未来行为。
+所有权契约。本文是当前 issue #69 固定多 Graph HP/RT CPU service、ownerless 内建 CPU binding、
+不同的 realtime child Run、owned dirty/preflight submission、保留的 legacy per-Graph
+scheduler，以及有界过渡期 worker containment 的权威说明。权威 revision、`RunGroup`、
+production resource admission、有界 ready storage、cancellation、supersession 与最终 policy
+仍是未来行为。
 
 ## 实现与验证入口
 

@@ -21,10 +21,11 @@ CLI / TUI
 ```
 
 `Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, the
-per-graph `GraphStateExecutor`, event service, platform context, and scheduler
-instances. The embedded composition root also creates one private CPU
-`ExecutionService` before Kernel; Kernel injects that owner into each
-request-local `ComputeService`.
+per-graph `GraphStateExecutor`, event service, platform context, and one
+execution binding per intent. Legacy bindings own scheduler instances;
+built-in CPU bindings select an ownerless process-service route. The embedded
+composition root also creates one private fixed CPU `ExecutionService` before
+Kernel; Kernel injects that owner into each request-local `ComputeService`.
 
 `ps::Host` is the public frontend-facing interface. The embedded Host adapter
 copies public request/result values and uses the internal `InteractionService`
@@ -60,21 +61,17 @@ as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
 kernel/test callers, but the CLI does not expose them and must not be treated as
 a production realtime control surface.
 
-Compute does not acquire scheduler capacity per request. Before a graph can be
-published, load resolves its configured worker request (`0` becomes
-`min(max(1, hardware_concurrency()), 8)`, explicit `1..8` remains exact), plans
-the HP and RT scheduler charges, and atomically reserves their combined demand
-from the process-wide 32-slot ledger. The accepted pair contains one move-only
-reservation for each scheduler owner, retained across every synchronous or
-asynchronous compute request. Only built-in `serial_debug` is a zero-slot
-scheduler; built-in CPU and ABI v2 plugin schedulers charge the resolved grant,
-while the built-in GPU/heterogeneous scheduler also charges its potential
-device worker.
-This admission step bounds current Graph-owned scheduler workers, not callback
-count or all threads used by compute and its operations. In particular, issue
-#68's injected CPU service pool is not charged by this transitional ledger;
-the still-allocated per-Graph CPU scheduler retains the existing charge until
-issue #69 removes duplicate owners.
+Compute does not acquire worker capacity per request. The first configuration,
+load, or replacement that selects built-in CPU resolves `0` to
+`min(max(1, hardware_concurrency()), 8)` or preserves an explicit `1..8`,
+freezes that count, starts one fixed service pool, and retains one pool-lifetime
+reservation from the process-wide 32-slot budget. Later zero/equal requests are
+idempotent; a conflicting positive request is rejected. Graph load reserves
+only the combined demand of legacy HP/RT scheduler owners. Built-in
+`serial_debug` charges zero; ABI v2 plugin schedulers charge the resolved grant,
+and built-in GPU/heterogeneous also charges its potential device worker.
+This containment bounds fixed service workers and legacy Graph-owned scheduler
+workers, not callback count or all threads used by compute and operations.
 
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.
@@ -100,20 +97,21 @@ ComputeService facade
 ```
 
 Before any of those planning steps, each non-realtime HP service call creates
-exactly one request-owned `ComputeRun`. It captures a fresh opaque id, session
-identity, target, `GlobalHighPrecision` intent, full quality, explicit QoS, and
-the current topology generation as a submission revision. That topology value
-is provenance only, not the authoritative graph-wide `GraphRevision` or a
-commit predicate. Sequential, scheduler-backed, and explicit dirty HP variants
-share this boundary. On the scheduler-backed full HP path, shared Run control
-owns the materialized plan and runner; every real ready task retains a
-non-forgeable Run lease and `(RunId, RunLocalTaskId)` identity through
-execution, dependency release, validation, and commit. Built-in CPU full HP
-packages each dependency-ready task as a move-only `ReadyTaskSubmission` and
-uses the injected service's single-Run CPU batch. Serial, GPU, and plugin full
-HP retain the lease-backed callback path. Explicit dirty HP keeps its separate
-synchronous borrowed-handle path. `RealTimeUpdate` creates no mixed Run or child
-Runs; paired Run/`RunGroup` settlement remains future work.
+exactly one request-owned `ComputeRun`; a realtime call creates separate HP and
+RT child Runs. Each captures a fresh opaque id, session identity, target,
+single-domain intent, full or interactive quality, explicit QoS, and the
+current topology generation as a submission revision. That topology value is
+provenance only, not the authoritative graph-wide `GraphRevision` or a commit
+predicate. Sequential, legacy-scheduler, built-in CPU, and dirty variants share
+this boundary. Full HP Run control owns the materialized plan and runner; every
+real ready task retains a non-forgeable Run lease and
+`(RunId, RunLocalTaskId)` through execution, dependency release, validation,
+and commit. Built-in CPU full HP, connected-parameter preflight, and dirty
+HP/RT package dependency-ready work as move-only `ReadyTaskSubmission` values
+for the fixed multi-Run service. Dirty phases use heap-owned contexts, so no
+stack `TaskExecutor*` crosses that boundary. Serial, GPU, and plugin routes
+retain legacy scheduler callbacks/handles. Realtime children settle
+independently; deterministic target `RunGroup` settlement remains future work.
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
@@ -170,18 +168,19 @@ The kernel recognizes two formal compute intents:
 | `RealTimeUpdate` | Interactive realtime update. Requires a dirty ROI and enables the HP/RT dual path. |
 
 The intent model is formal. `ComputeService` remains the compute facade and
-planning boundary. Private scheduler-route metadata pairs the configured
-scheduler owner with its physical path: built-in CPU non-dirty full HP uses the
-injected service, while other full-HP, dirty, and realtime routes use the
-configured per-Graph `IScheduler` task runtime.
+planning boundary. Private route metadata selects the physical path: built-in
+CPU HP, RT, connected-parameter preflight, and dirty phases use the fixed
+injected service without a Graph-owned scheduler; serial, GPU, and plugin
+routes use their configured per-Graph `IScheduler` runtime.
 
 HP/RT dual path semantics belong to realtime intent, not to the parallel
 execution mode. In realtime mode, HP computes the full-size authoritative node
 work while RT computes the downscaled proxy, currently one quarter of width and
 height, or one sixteenth of the pixel count. `IntentUpdateCoordinator` launches
-two sibling calls, and each sibling looks up the per-graph scheduler registered
-for its intent route. `ComputeIntent` does not itself specify QoS or physical
-priority.
+two sibling calls, and each sibling resolves either its ownerless process
+service binding or per-Graph scheduler. `ComputeIntent` does not itself specify
+QoS or final physical policy; the current service treats RT submissions as a
+high queue hint.
 
 The current collaborator responsibilities and non-ownership boundaries are
 documented in `Compute-Boundaries.md`.
@@ -217,16 +216,15 @@ creates further submissions through the same active Run. Legacy full-HP routes
 retain owned scheduler callbacks. Tiled operations may spawn micro-tasks and
 retire the selected runtime's logical completion count.
 
-The selected transitional scheduler has already been admitted for its full
-lifetime before ready work is submitted. A running compute therefore consumes
-no new ledger slots. The current service likewise performs no ledger
-admission; it serializes one Run and reconfigures its concrete CPU runtime to
-the exact trusted built-in grant. Scheduler inspection and replacement share
-the per-graph `GraphStateExecutor` boundary with compute; replacement cannot
-overlap a compute callback sequence, and it publishes scheduler ownership plus
-private route metadata in one transaction. Failed candidate planning, attach,
-or start leaves the old scheduler, route, and compute behavior unchanged and
-returns only candidate capacity.
+The selected legacy scheduler or fixed service pool has already retained its
+transitional worker reservation before ready work is submitted. A running
+compute therefore consumes no new budget slots. The service never resizes per
+Run; it registers isolated Run settlement state and submits owned values to the
+shared queues. Scheduler inspection and replacement share the per-graph
+`GraphStateExecutor` boundary with compute. Replacement publishes either a
+legacy scheduler owner or an ownerless service route in one transaction.
+Failed legacy candidate planning, attach, or start leaves the old binding and
+compute behavior unchanged and returns only candidate capacity.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
 node-id mapping, temporary-result indexing, event logging, exception
@@ -296,16 +294,16 @@ before leaving the boundary; no raw scheduler pointer survives it.
 
 The current dirty update implementation uses staged output commits for HP/RT
 sibling safety. A standalone `GlobalHighPrecision` dirty request stores its
-`HighPrecisionDirtyWriteBuffer` in the request Run. A `RealTimeUpdate` HP
-sibling still keeps that buffer callback-local and commits to the
-visible `GraphModel` only after the RT sibling has committed. RT dirty workers
-write `RealtimeProxyWriteBuffer` and commit to the runtime-owned
-`RealtimeProxyGraph`. There is no general graph-revision or interruptible
-commit policy in the current implementation. ADR 0003 and the kernel evolution
-roadmap define that accepted direction separately from current behavior; ADR
-0007 fixes the complete Run/revision/commit race, of which the bounded HP
-Run/lease/completion-isolation slice is current. Commit policy remains
-conceptually separate
+`HighPrecisionDirtyWriteBuffer` in the request Run. A `RealTimeUpdate` HP child
+stores that buffer in its own Run and commits to visible `GraphModel` only
+after the RT sibling has committed. RT dirty workers retain their RT child
+lease while writing a callback-local `RealtimeProxyWriteBuffer`, then commit to
+the runtime-owned `RealtimeProxyGraph`. There is no general graph-revision or
+interruptible commit policy in the current implementation. ADR 0003 and the
+kernel evolution roadmap define that accepted direction separately from
+current behavior; ADR 0007 fixes the complete Run/revision/commit race, of
+which the current child-Run and completion-isolation slice is only a part.
+Commit policy remains conceptually separate
 from `ComputeIntent`, because HP/RT intent semantics do not define visibility
 or interruption.
 
@@ -350,11 +348,14 @@ first and updates a low-resolution `RealtimeProxyGraph`; HP updates the
 full-size authoritative output for the affected graph work through a staged
 buffer. If the request is forced, the HP sibling follows the same full-frame HP
 planning rule as Global HP dirty update, while RT proxy work remains scoped to
-the RT dirty plan. When HP and RT scheduler runtimes are available,
-`IntentUpdateCoordinator` starts both siblings concurrently, waits for RT first,
-and uses a sibling commit gate so HP mutates `GraphModel` only after RT proxy
-commit succeeds. Without scheduler runtimes, the same callbacks run inline in
-RT-then-HP order.
+the RT dirty plan. The request creates one HP child Run with full quality and
+one RT child Run with interactive quality. When both physical execution domains
+are available, `IntentUpdateCoordinator` starts both siblings concurrently,
+waits for RT first, and uses a sibling commit gate so HP mutates `GraphModel`
+only after RT proxy commit succeeds. Built-in CPU children share the fixed
+service; legacy routes use their intent schedulers. Without parallel domains,
+the same callbacks run inline in RT-then-HP order. Each child publishes its own
+terminal outcome; the target aggregate `RunGroup` policy is not implemented.
 
 The concurrent path also shares one request-owned per-node synchronization
 object between the siblings. It protects live `Node` snapshot and
@@ -453,40 +454,42 @@ mutable mirror. The embedded adapter maps these values to public
 observe only the public Host surface and never inspect Kernel or
 `InteractionService` directly.
 
-Scheduler-admission failures occur at graph load or replacement rather than in
-the ready-task loop. An invalid above-eight request or unknown type maps to
-`InvalidParameter`; exhaustion of the fixed process worker ledger preserves
-`GraphErrc::ComputeError` through embedded Host and IPC status boundaries.
+Worker-containment failures occur during first service configuration or legacy
+graph load/replacement rather than in the ready-task loop. An invalid
+above-eight request, conflicting positive fixed-pool request, or unknown type
+maps to `InvalidParameter`; exhaustion of the transitional process worker
+budget preserves `GraphErrc::ComputeError` through embedded Host and IPC status
+boundaries.
 
 ## Boundaries and Rationale
 
 - One request plan supplies both sequential and parallel execution semantics;
   the execution strategy changes mechanics, not topology or dirty meaning.
-- One non-realtime HP request owns one `ComputeRun` from pre-planning
-  descriptor capture through exact terminal publication. The Run owns full-plan
-  temporary results or standalone dirty HP staging. Scheduler-backed full HP
-  callbacks retain stable Run leases and matching composite task identity, but
-  the Run does not own Graph state, workers, or the meaning of dependency
-  transitions.
+- One non-realtime HP request owns one `ComputeRun`; realtime owns separate HP
+  and RT child Runs from pre-planning descriptor capture through independent
+  terminal publication. HP Runs own full-plan temporary results or dirty HP
+  staging. Every built-in CPU callback retains a matching child lease and
+  composite task identity, but a Run does not own Graph state, workers, or the
+  meaning of dependency transitions.
 - `GraphStateExecutor` protects visible graph coherence, while
   `SchedulerTaskRuntime` receives only ready compute work. Graph-state commands
   therefore never become scheduler tasks.
 - HP cache and RT proxy state use separate staged commit paths, so preview
   state cannot become authoritative HP output by implication.
-- Scheduler epochs reject stale queued callbacks only and are not Run identity.
-  Full HP task failures route through `(RunId, RunLocalTaskId)` under a stable
-  lease. The current Run records QoS and a topology-only submission revision
-  but has no authoritative graph revision, supersession, enforced deadline, or
-  cooperative cancellation contract.
+- Legacy scheduler epochs reject stale queued callbacks only and are not Run
+  identity. Built-in CPU HP/RT failures route through
+  `(RunId, RunLocalTaskId)` under a stable lease. Current Runs record QoS and a
+  topology-only submission revision but have no authoritative graph revision,
+  supersession, enforced deadline, or cooperative cancellation contract.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-defines both the current bounded non-realtime HP Run/lease/completion-isolation
-slice and the later independent paired HP/RT Runs, deterministic `RunGroup`
-settlement, RT-first commit gate, admitted-Run registry, and broader lifecycle
-ownership, while the
+defines both the current fixed multi-Graph HP/RT service, independent child
+Runs, lease/completion isolation, and RT-first commit gate, plus the later
+deterministic `RunGroup` settlement, admitted-Run registry, and broader
+lifecycle ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 describes the later revision and cancellation boundary without making it part
 of the current flow.

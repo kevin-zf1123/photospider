@@ -50,8 +50,9 @@ class SchedulerPlan final {
    * @brief Reports whether planning froze the built-in CPU branch.
    * @return True only for built-in CPU aliases resolved without plugin lookup.
    * @throws Nothing.
-   * @note Kernel uses this private planning fact to publish issue #68 execution
-   * route metadata. Scheduler display names are not a route authority.
+   * @note Kernel uses this private planning fact to publish issue #69 ownerless
+   * process-service routes for both intents. Scheduler display names are not a
+   * route authority.
    */
   bool is_builtin_cpu() const noexcept;
 

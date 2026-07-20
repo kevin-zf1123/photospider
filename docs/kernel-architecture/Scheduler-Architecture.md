@@ -20,15 +20,17 @@ create -> attach(host_context) -> start -> submit ready callbacks -> shutdown ->
 ```
 
 `GraphRuntime` implements and owns the host context plus this lifecycle ordering
-for registered per-Graph schedulers. The issue #68 `ExecutionService` owns one
-additional concrete CPU scheduler attached to a stable service host proxy; the
-proxy delegates trace/TLS observations to the active Graph only while one
-synchronous service Run is executing. A per-Graph scheduler is attached before
-it starts; `GraphRuntime::start()` starts
+for registered legacy per-Graph schedulers. The issue #69 `ExecutionService`
+instead owns a direct fixed CPU worker pool and stores a borrowed Host context
+inside each active Run state; worker TLS routes trace and completion to the
+matching Run while independent Graphs overlap. A per-Graph scheduler is
+attached before it starts; `GraphRuntime::start()` starts
 previously registered schedulers, `GraphRuntime::set_scheduler()` starts a new
 scheduler only after attach when the runtime is already running, and
-`GraphRuntime::stop()` shuts registered schedulers down. `Kernel` bootstrap code
-must register schedulers through `GraphRuntime` instead of pre-starting them.
+`GraphRuntime::stop()` shuts registered schedulers down. Ownerless built-in CPU
+bindings perform none of those scheduler lifecycle calls. `Kernel` bootstrap
+code must register bindings through `GraphRuntime` instead of pre-starting
+legacy schedulers.
 Scheduler shutdown must publish the stop state under the same synchronization
 used by idle worker waits and completion waits before notifying those waiters.
 This prevents shutdown from missing a worker that is transitioning into
@@ -104,30 +106,36 @@ worker can observe a prefix and the original exception identity propagates.
 
 `TaskHandle` is a borrowed pair of executor pointer and task id. Its
 `TaskExecutor` must outlive every successfully committed callback through
-`wait_for_completion()`. Request-local dirty executors still use this
-synchronous path. A failed batch commits no handle and executes zero callbacks,
-so those executors may unwind immediately without leaving a queue entry that
-points into destroyed stack storage. The scheduler can accept the next batch
-on the same object after rollback. Exception publication uses the same queue
-transaction gate before choosing its epoch, so a concurrent batch is observed
-either wholly committed or wholly absent. The executor's virtual destructor is
-protected: scheduler code may run the borrowed object but cannot delete
-compute-owned storage through its base pointer.
+`wait_for_completion()`. Legacy request-local dirty schedulers still use this
+synchronous path; built-in CPU dirty/preflight work uses heap-owned
+`ReadyTaskSubmission` contexts instead. A failed legacy batch commits no handle
+and executes zero callbacks, so those executors may unwind immediately without
+leaving a queue entry that points into destroyed stack storage. The scheduler
+can accept the next batch on the same object after rollback. Exception
+publication uses the same queue transaction gate before choosing its epoch, so
+a concurrent batch is observed either wholly committed or wholly absent. The
+executor's virtual destructor is protected: scheduler code may run the borrowed
+object but cannot delete compute-owned storage through its base pointer.
 
-Non-realtime scheduler-backed full HP work uses different current paths.
+Full HP work uses different current paths.
 `ComputeRun` shared control owns the `TaskSubmissionPlan`, dependency state,
 runner, and temporary slots. For built-in CPU planning, the dispatcher creates
 one move-only `ReadyTaskSubmission` per dependency-ready task. Each value owns
 immutable request/trace metadata, a matching non-forgeable `ComputeRunLease`,
 `(RunId, RunLocalTaskId)`, and an executable. The injected
-`ExecutionService` accepts only those values for its active Run and rejects
-borrowed handles or anonymous callbacks.
+`ExecutionService` accepts only those values for the matching active Run and
+rejects borrowed handles, anonymous callbacks, or mixed Run identities.
 
 Serial, GPU, and plugin full HP retain the legacy owned-callback path. That path
 starts an empty borrowed-handle batch only to establish the scheduler epoch,
 then submits every real ready task as an owned callback retaining the same
 lease and identity. No raw `TaskExecutor` is borrowed by either full-HP path,
 and matching task identity gates failure publication.
+
+Built-in CPU connected-parameter preflight and dirty HP/RT phases also cross
+the service boundary as owned values. Heap-owned phase contexts copy immutable
+plan/selection/dependency state, retain a child Run lease, and materialize newly
+ready dependents without exporting a stack `TaskExecutor*`.
 
 Every accepted full-HP bootstrap or planned-task callback retires exactly the
 completion unit already counted for it. If its matching Run is terminal when
@@ -197,32 +205,35 @@ Shutdown remains a separate lifecycle transition; the GPU pipeline publishes
 its stop state while holding the CPU idle-queue, GPU idle-queue, and
 completion-wait mutexes before notifying and joining workers.
 
-`GraphRuntime` stores a scheduler map keyed by `ComputeIntent`. Each private map
-binding atomically pairs the transitional scheduler owner with either the
-per-Graph execution route or the built-in process CPU route and exact grant.
-Kernel load and replacement derive that route from the frozen
-`SchedulerPlan` construction branch, never from a display name. Direct runtime
-installation defaults to the legacy route. The key and route do not define QoS,
-deadline, fairness, cancellation, resource reservation, or a process-wide
-priority class. Those concepts are not inferred from `ComputeIntent`.
+`GraphRuntime` stores an execution-binding map keyed by `ComputeIntent`. Each
+private binding atomically pairs a route with an optional transitional
+scheduler owner. Built-in process CPU routes intentionally have no Graph-owned
+scheduler or per-Graph grant. Kernel load and replacement derive the route from
+the frozen `SchedulerPlan` construction branch, never from a display name.
+Direct runtime installation defaults to the legacy route. The key and route do
+not define QoS, deadline, final fairness, cancellation, resource reservation,
+or a process-wide priority class. Those concepts are not inferred from
+`ComputeIntent`.
 
-Schedulers do not pull plans. `ComputeTaskDispatcher` discovers readiness and
-pushes concrete callbacks or borrowed task handles through
-`SchedulerTaskRuntime`: scheduler-backed full HP uses lease-backed owned
-callbacks, while request-local dirty execution retains borrowed handles. The
-selected scheduler may order and route those ready submissions using its
-queues, priority hints, epoch, and available devices, but it never receives
-graph topology, a compute plan, or dirty-propagation ownership.
+Physical domains do not pull plans. `ComputeTaskDispatcher` and dirty phase
+contexts discover readiness and push concrete owned submissions, callbacks, or
+legacy borrowed task handles through `SchedulerTaskRuntime`. A selected legacy
+scheduler may order and route ready work using its queues, priority hints,
+epoch, and available devices; the service uses high/normal queues and Run-local
+settlement. Neither receives graph topology, a compute plan, or
+dirty-propagation ownership.
 
 For `RealTimeUpdate`, `IntentUpdateCoordinator` launches the RT dirty sibling
 and then the HP dirty sibling through separate asynchronous calls, allowing
-them to compute concurrently when both selected scheduler runtimes are running.
+them to compute concurrently when both physical execution domains are
+available. The request owns separate HP and RT child Runs. Built-in CPU
+children share the fixed service; legacy children use their intent schedulers.
 RT writes are staged in
 `RealtimeProxyWriteBuffer` and committed to `RealtimeProxyGraph`; HP writes are
 staged in `HighPrecisionDirtyWriteBuffer` and commit to `GraphModel` only after
-the RT proxy commit gate opens. Each scheduler handles the ready callbacks,
-scheduler-local batch epochs, and queue policy for its sibling; it does not
-create the siblings or make RT output a formal HP cache source.
+the RT proxy commit gate opens. Each physical domain handles ready callbacks
+and its local queue/settlement mechanism; it does not create the siblings,
+aggregate a target `RunGroup`, or make RT output a formal HP cache source.
 
 ## Current Dispatch State
 
@@ -232,11 +243,12 @@ collaborators: `FullTaskGraphExpander`, `NodeCacheTaskGraphPruner`,
 `IntentUpdateCoordinator`, and `ComputeTaskDispatcher`. After pruning,
 `ComputeTaskDispatcher` materializes either the node/cache-pruned task graph or
 the dirty-clipped update work set into concrete tasks. For current built-in CPU
-non-realtime full HP it submits ready values through `ExecutionService`; for
-serial, GPU, plugin, dirty, and realtime routes it uses the configured
-per-Graph `IScheduler` via `SchedulerTaskRuntime`. The request Run owns the
-materialized full-HP plan and temporary slots while the dispatcher retains
-dependency/ready/completion semantics on both physical routes.
+HP, RT, connected-parameter preflight, and dirty work it submits owned ready
+values through `ExecutionService`; serial, GPU, and plugin routes use the
+configured per-Graph `IScheduler` via `SchedulerTaskRuntime`. Full HP Run
+control owns the materialized plan and temporary slots; dirty phase contexts
+own copied dependency state and leases. Compute retains
+dependency/ready/completion semantics on every physical route.
 
 `GraphRuntime` owns graph state, the `GraphStateExecutor`, scheduler
 registration, events, and platform resources. It does not expose a general
@@ -262,7 +274,7 @@ and destroy the old owner until active compute has released it.
 
 | Type | Meaning |
 | --- | --- |
-| `cpu_work_stealing` | Multi-threaded CPU scheduler. |
+| `cpu_work_stealing` | Built-in CPU planning label; Kernel routes it to the fixed process service, while direct factory tests retain the concrete scheduler implementation. |
 | `serial_debug` | Deterministic single-threaded debugging scheduler. |
 | `gpu_pipeline` | CPU scheduler with optional GPU HP queue and device availability reporting. |
 | `heterogeneous` | Alias for `gpu_pipeline`. |
@@ -276,12 +288,13 @@ named for RT work; normal-priority work may enter the GPU queue when
 source batches currently use high priority, and both downstream groups use
 normal priority, so queue naming must not be interpreted as an intent contract.
 
-### Transitional per-graph ownership and the CPU service slice
+### Fixed CPU service and transitional legacy ownership
 
-Each `GraphRuntime` owns a scheduler object for HP and another for RT. Graph
-load creates both objects and runtime start starts both. A configured worker
-request is valid only from zero through eight. Before scheduler or plugin
-construction, zero resolves once to:
+Each `GraphRuntime` owns one binding for HP and another for RT. A binding either
+selects the ownerless built-in CPU service or owns a transitional serial, GPU,
+or plugin scheduler. A configured worker request is valid only from zero
+through eight. Before the first built-in CPU pool or legacy scheduler/plugin
+construction, zero resolves to:
 
 ```text
 min(max(1, hardware_concurrency()), 8)
@@ -289,54 +302,54 @@ min(max(1, hardware_concurrency()), 8)
 
 An explicit value from one through eight remains exact; a larger request is
 rejected before worker construction and does not change future-Graph defaults.
-The built-in CPU scheduler owns no more than the resolved grant. A registered
-plugin is charged the full resolved grant and may own fewer workers but not
-more. `gpu_pipeline` and `heterogeneous` are charged the resolved CPU grant plus
-their one configured potential GPU worker, even when the device is unavailable
-at admission time. Their absolute current instance charge is therefore nine.
-`serial_debug` is the sole zero-slot exception and executes synchronously on
-the calling thread.
+The first built-in CPU selection freezes the resolved count and starts one
+direct `ExecutionService` pool. Later zero/equal requests are idempotent; a
+conflicting positive request is rejected. Graph load, replacement, Run
+execution, and dirty phases never resize that pool.
 
-These schedulers still own physical resources per graph and intent. In
-addition, issue #68 explicitly composes one private `ExecutionService` and
-routes only built-in CPU non-realtime, non-dirty full HP to its concrete CPU
-runtime. The service holds a mutex across complete Run setup, initial and
-dependent ready submission, exception-fenced wait, and host-proxy unbind, so
-there is at most one active Run. It lazily recreates its pool when the trusted
-resolved grant changes. It provides neither concurrent multi-Graph sharing nor
-fairness.
+Issue #69 routes built-in CPU HP and RT work, including dirty and preflight
+phases, to the service. Independent Runs from multiple Graphs share its fixed
+workers. The service registry isolates completion count, first exception,
+in-flight drainage, trace Host, and settlement per Run. High and normal FIFOs
+provide the current priority hint, but not final fairness, bounded admission,
+or policy authority. Built-in CPU `GraphRuntime` bindings own no scheduler.
 
-The Graph-owned built-in CPU scheduler remains allocated and charged during
-this transitional slice even though migrated full-HP work executes on the
-service. The current containment layer uses one process-lifetime
+A registered plugin is charged the full resolved grant and may own fewer
+workers but not more. `gpu_pipeline` and `heterogeneous` are charged the
+resolved CPU grant plus their one configured potential GPU worker, even when
+the device is unavailable at admission time. Their absolute current instance
+charge is therefore nine. `serial_debug` is the sole zero-slot exception and
+executes synchronously on the calling thread.
+
+The current containment layer uses one process-lifetime
 `SchedulerWorkerBudget` with a fixed 32-slot ceiling shared by every embedded
-`Host` and `Kernel`. Graph load plans
-both intent schedulers and reserves their combined charge atomically before
-constructing either. The returned pair contains one move-only reservation per
-intent; each remains outside the concrete scheduler during construction, then
-moves into its `ReservationOwnedScheduler`. `GraphRuntime` remains responsible
-for scheduler shutdown and detach; the reservation owner guarantees only that
-concrete scheduler destruction precedes slot release. Failed attach/start/YAML
-publication, successful graph close, and Host destruction therefore return
-every acquired slot exactly once. A failed close instead retains the runtime
-and both reservations for retry.
+`Host` and `Kernel`. Each fixed service pool holds one reservation for its
+complete lifetime. Graph load atomically reserves only the combined charge of
+legacy HP/RT bindings before constructing either owner. Each returned
+reservation moves into its `ReservationOwnedScheduler`. `GraphRuntime` remains
+responsible for legacy scheduler shutdown and detach; the reservation owner
+guarantees only that concrete scheduler destruction precedes slot release.
+Failed attach/start/YAML publication, successful graph close, and Host
+destruction therefore return legacy slots exactly once. A failed close instead
+retains the runtime and legacy reservations for retry. Closing all Graphs does
+not release a configured service pool; Kernel/service destruction does.
 
-Scheduler replacement is a strong transaction: it plans and reserves the
-candidate while the old scheduler and reservation remain live, then
-attach/starts the candidate and publishes it before retiring the old owner.
-Consequently replacement requires transient headroom. Capacity exhaustion is
-reported as `GraphErrc::ComputeError` without constructing a candidate and
-without disturbing old compute behavior; invalid requests and unknown types
-remain `InvalidParameter`. After publication, old-owner shutdown and detach
-remain a best-effort sweep; their failures do not turn the committed
-replacement into a reported failure, and destruction returns the displaced
-reservation exactly once. This 32-slot ledger bounds only workers represented
-by built-in planning or the trusted plugin grant. It does not bound graph-state
-executors, the new service pool, daemon threads, frontend helpers,
-operation-internal threads, or all operating-system threads in the process.
-`GraphStateExecutor` has a separate structural bound: one worker and at most 64
-waiting callbacks per loaded Graph. Issue #69 owns removal of the duplicate
-per-Graph CPU workers and true multi-Graph CPU sharing.
+Legacy scheduler replacement is a strong transaction: it plans and reserves
+the candidate while the old binding and reservation remain live, then
+attach/starts and publishes it before retiring the old owner. Consequently
+legacy replacement requires transient headroom. Built-in CPU replacement
+instead configures the fixed pool if needed and publishes an ownerless service
+binding. Capacity exhaustion is reported as `GraphErrc::ComputeError` without
+disturbing old compute behavior; invalid requests, conflicting fixed counts,
+and unknown types remain `InvalidParameter`. After legacy publication,
+old-owner shutdown and detach remain a best-effort sweep; destruction returns
+the displaced reservation exactly once.
+
+This 32-slot budget bounds fixed service workers and workers represented by
+legacy built-in/plugin planning. It does not bound graph-state executors,
+daemon threads, frontend helpers, operation-internal threads, or all
+operating-system threads in the process. `GraphStateExecutor` has a separate
+structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
 
 ## Plugin Discovery vs Graph Selection
 
@@ -549,25 +562,25 @@ whole-process operating-system thread snapshot.
   accepted scheduler object remains part of a provisional C++ ABI.
 - Scheduler attachment is limited to `SchedulerHostContext`; the context does
   not expose graph/runtime ownership or native backend handles.
-- Per-instance worker grants and the shared 32-slot admission ledger contain
-  transitional per-graph ownership; they do not admit or count the service
-  pool and do not claim a whole-process OS-thread limit.
+- The shared 32-slot transitional budget counts each fixed CPU service pool
+  once and legacy per-instance grants; it is not production Run admission and
+  does not claim a whole-process OS-thread limit.
 - The current `IScheduler` interface still combines policy and physical worker
-  ownership. The issue #68 service reuses one concrete built-in CPU scheduler
-  behind a private ready-submission boundary; it is not yet the multi-Run
-  executor, ledger, or policy architecture.
+  ownership for legacy routes. The issue #69 service owns a direct fixed
+  multi-Run CPU pool behind a private ready-submission boundary; it is not yet
+  the final ledger, admission, fairness, or policy architecture.
 
 The ready-task-only boundary lets scheduler ordering, worker lifecycle, and
 failure publication be tested without graph topology or cache ownership. The
-process ledger contains the current per-graph physical ownership without
-reinterpreting a reservation as a running thread or shared pool.
+process budget contains current fixed-service and legacy physical ownership
+without reinterpreting a reservation as one currently running thread.
 [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-execution-resources.md)
 records the high-level replacement direction;
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 fixes its detailed Run, ready-task, completion, resource, and lifecycle
-ownership; the bounded issue #68 single-Run CPU service and ready-submission
-slice is current.
+ownership; the bounded issue #69 fixed multi-Graph HP/RT service, ownerless CPU
+bindings, child Runs, and owned dirty/preflight submission slice is current.
 The exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 summarizes the accepted target without changing this current contract.

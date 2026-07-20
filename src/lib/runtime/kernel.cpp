@@ -275,8 +275,21 @@ std::vector<std::string> Kernel::list_graphs() const {
   return names;
 }
 
+/** @copydoc Kernel::set_scheduler_config */
 void Kernel::set_scheduler_config(const SchedulerConfig& config) {
-  scheduler_config_ = config;
+  SchedulerConfig candidate = config;
+  const std::optional<SchedulerPlan> hp_plan =
+      SchedulerFactory::plan(candidate.hp_type, candidate.worker_count);
+  const std::optional<SchedulerPlan> rt_plan =
+      SchedulerFactory::plan(candidate.rt_type, candidate.worker_count);
+  const bool selects_process_cpu =
+      (hp_plan.has_value() && hp_plan->is_builtin_cpu()) ||
+      (rt_plan.has_value() && rt_plan->is_builtin_cpu());
+  if (execution_service_->is_configured() || selects_process_cpu) {
+    execution_service_->configure_worker_count(candidate.worker_count);
+    candidate.worker_count = execution_service_->worker_count();
+  }
+  scheduler_config_ = std::move(candidate);
 }
 
 const Kernel::SchedulerConfig& Kernel::get_scheduler_config() const {
@@ -286,9 +299,9 @@ const Kernel::SchedulerConfig& Kernel::get_scheduler_config() const {
 /** @copydoc Kernel::setup_schedulers_for_runtime */
 void Kernel::setup_schedulers_for_runtime(const std::string& name,
                                           GraphRuntime& runtime) {
-  const std::optional<SchedulerPlan> hp_plan = SchedulerFactory::plan(
+  std::optional<SchedulerPlan> hp_plan = SchedulerFactory::plan(
       scheduler_config_.hp_type, scheduler_config_.worker_count);
-  const std::optional<SchedulerPlan> rt_plan = SchedulerFactory::plan(
+  std::optional<SchedulerPlan> rt_plan = SchedulerFactory::plan(
       scheduler_config_.rt_type, scheduler_config_.worker_count);
   if (!hp_plan.has_value()) {
     throw GraphError(
@@ -300,43 +313,68 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
         GraphErrc::InvalidParameter,
         "unsupported RT scheduler type '" + scheduler_config_.rt_type + "'");
   }
+  if (hp_plan->is_builtin_cpu() || rt_plan->is_builtin_cpu()) {
+    execution_service_->configure_worker_count(scheduler_config_.worker_count);
+    scheduler_config_.worker_count = execution_service_->worker_count();
+    hp_plan = SchedulerFactory::plan(scheduler_config_.hp_type,
+                                     scheduler_config_.worker_count);
+    rt_plan = SchedulerFactory::plan(scheduler_config_.rt_type,
+                                     scheduler_config_.worker_count);
+    if (!hp_plan.has_value() || !rt_plan.has_value()) {
+      throw GraphError(
+          GraphErrc::InvalidParameter,
+          "scheduler type became unavailable during fixed CPU planning");
+    }
+  }
 
   std::optional<SchedulerWorkerBudget::ReservationPair> reservations =
       SchedulerWorkerBudget::process().try_reserve_pair(
-          hp_plan->reservation_slots(), rt_plan->reservation_slots());
+          hp_plan->is_builtin_cpu() ? 0U : hp_plan->reservation_slots(),
+          rt_plan->is_builtin_cpu() ? 0U : rt_plan->reservation_slots());
   if (!reservations.has_value()) {
     throw GraphError(GraphErrc::ComputeError,
                      "process scheduler worker budget cannot admit the "
                      "configured HP and RT scheduler pair");
   }
 
-  std::unique_ptr<IScheduler> hp_scheduler = SchedulerFactory::create(
-      *hp_plan, std::move(reservations->high_precision));
-  if (hp_scheduler == nullptr) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "HP scheduler type '" + scheduler_config_.hp_type +
-                         "' became unavailable or returned no scheduler "
-                         "instance during Graph load");
+  std::unique_ptr<IScheduler> hp_scheduler;
+  if (!hp_plan->is_builtin_cpu()) {
+    hp_scheduler = SchedulerFactory::create(
+        *hp_plan, std::move(reservations->high_precision));
+    if (hp_scheduler == nullptr) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "HP scheduler type '" + scheduler_config_.hp_type +
+                           "' became unavailable or returned no scheduler "
+                           "instance during Graph load");
+    }
   }
 
-  std::unique_ptr<IScheduler> rt_scheduler =
-      SchedulerFactory::create(*rt_plan, std::move(reservations->real_time));
-  if (rt_scheduler == nullptr) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "RT scheduler type '" + scheduler_config_.rt_type +
-                         "' became unavailable or returned no scheduler "
-                         "instance during Graph load");
+  std::unique_ptr<IScheduler> rt_scheduler;
+  if (!rt_plan->is_builtin_cpu()) {
+    rt_scheduler =
+        SchedulerFactory::create(*rt_plan, std::move(reservations->real_time));
+    if (rt_scheduler == nullptr) {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "RT scheduler type '" + scheduler_config_.rt_type +
+                           "' became unavailable or returned no scheduler "
+                           "instance during Graph load");
+    }
   }
 
   GraphRuntime::SchedulerExecutionRoute hp_execution_route;
   if (hp_plan->is_builtin_cpu()) {
     hp_execution_route.domain =
         GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService;
-    hp_execution_route.worker_count = hp_plan->worker_grant();
+  }
+  GraphRuntime::SchedulerExecutionRoute rt_execution_route;
+  if (rt_plan->is_builtin_cpu()) {
+    rt_execution_route.domain =
+        GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService;
   }
   runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
                         std::move(hp_scheduler), hp_execution_route);
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler),
+                        rt_execution_route);
   clear_last_error(name);
 }
 

@@ -218,12 +218,13 @@ class ComputeService {
    * missing output failures; may propagate operation-specific exceptions.
    * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
    * cache, telemetry, or result storage exhausts memory.
-   * @note Dirty RT updates pass HP and RT scheduler task runtimes to
-   * IntentUpdateCoordinator when both runtimes are available. The staged dirty
-   * commit path starts RT before HP, waits for RT proxy commit before HP graph
-   * commit, and returns the RT proxy output. Kernel callers must enter this
-   * method from GraphStateExecutor so scheduler-backed work remains serialized
-   * with graph-state operations.
+   * @note Dirty RT updates create separate HP and RT child Runs. Built-in CPU
+   * routes submit both children to the fixed process ExecutionService, while
+   * plugin, GPU, and serial routes retain their Graph-owned schedulers. The
+   * staged dirty commit path starts RT before HP, waits for RT proxy commit
+   * before HP graph commit, and returns the RT proxy output. Kernel callers
+   * must enter this method from GraphStateExecutor so scheduler-backed work
+   * remains serialized with graph-state operations.
    */
   NodeOutput& compute_parallel(GraphModel& graph, GraphRuntime& runtime,
                                const Request& request);
@@ -288,15 +289,15 @@ class ComputeService {
    * @param sibling_commit_gate Optional RT sibling gate protecting HP commit.
    * @param stabilized_parameters Optional immutable connected-parameter
    * snapshot shared by paired dirty work.
-   * @param run Optional standalone GlobalHighPrecision Run owning staging.
+   * @param run GlobalHighPrecision Run owning staging and task leases.
    * @return Mutable target HP output owned by graph.
    * @throws std::bad_alloc unchanged when planning, task, cache, or output
    * storage exhausts memory.
    * @throws GraphError for dirty planning, dispatch, operation, or target
    * validation failures; std::bad_optional_access for an unvalidated request.
    * @note The executor owns phase locking and scheduler lifetime. The optional
-   * gate is shared only for the active RealTimeUpdate request. Its HP sibling
-   * passes no Run until later RunGroup support.
+   * gate is shared only for the active RealTimeUpdate request. A realtime HP
+   * sibling uses its own child Run; no mixed-domain Run is created.
    */
   NodeOutput& compute_high_precision_update(
       GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
@@ -317,14 +318,15 @@ class ComputeService {
    * @param stabilized_parameters Optional immutable parameter preflight output.
    * @param node_synchronization Optional per-node critical sections shared with
    * the concurrent HP sibling of the same RealTimeUpdate transaction.
+   * @param run RealTimeUpdate child Run owning task leases and lifecycle state.
    * @return Mutable target RT output owned by proxy_graph.
    * @throws std::bad_alloc unchanged when planning, task, proxy, or output
    * storage exhausts memory.
    * @throws GraphError for dirty planning, dispatch, operation, or target
    * validation failures; std::bad_optional_access for an unvalidated request.
    * @note RT output never becomes formal reusable GraphModel cache state. The
-   * optional synchronization owner is retained only for this synchronous call
-   * and is not stored in the Graph or runtime.
+   * optional synchronization owner and Run are retained only for this
+   * synchronous call and are not stored in the Graph or runtime.
    */
   NodeOutput& compute_real_time_update(
       GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
@@ -332,7 +334,8 @@ class ComputeService {
       std::shared_ptr<const compute::StabilizedDirtyParameters>
           stabilized_parameters = nullptr,
       std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization =
-          nullptr);
+          nullptr,
+      compute::ComputeRun* run = nullptr);
 
   /**
    * @brief Resolves the RT proxy graph for one compute request.
@@ -405,20 +408,24 @@ class ComputeService {
    *
    * @param graph Graph whose HP state or service-owned RT proxy is updated.
    * @param request Intent and dirty request to coordinate inline.
-   * @param hp_run Request-owned Run for GlobalHighPrecision, or null for
-   * RealTimeUpdate.
+   * @param hp_run Request-owned HP Run. Realtime requests supply their HP
+   * child.
+   * @param rt_run Request-owned RT child Run, or null for
+   * GlobalHighPrecision.
    * @return Mutable HP or RT output selected by the intent.
    * @throws std::bad_alloc unchanged when coordination, dirty execution, cache,
    * or output storage exhausts memory.
    * @throws GraphError for intent validation, operation, planning, or output
    * failures.
    * @note Inline RT proxy storage remains owned by ComputeService until service
-   * destruction and is protected by inline_rt_proxy_graphs_mutex_. Current
-   * realtime coordination deliberately creates no mixed-domain Run.
+   * destruction and is protected by inline_rt_proxy_graphs_mutex_. Realtime
+   * coordination uses separate child Runs and never creates a mixed-domain
+   * Run.
    */
   NodeOutput& compute_with_intent_impl(GraphModel& graph,
                                        const Request& request,
-                                       compute::ComputeRun* hp_run);
+                                       compute::ComputeRun* hp_run,
+                                       compute::ComputeRun* rt_run);
 
   /**
    * @brief Binds intent coordinator callbacks to concrete compute executors.
@@ -426,8 +433,10 @@ class ComputeService {
    * @param graph Graph supplying HP state and topology.
    * @param strategy Inline or scheduler-backed execution policy.
    * @param request Intent-aware request including any dirty ROI.
-   * @param hp_run Request-owned Run for GlobalHighPrecision, or null for
-   * RealTimeUpdate.
+   * @param hp_run Request-owned HP Run. Realtime requests supply their HP
+   * child.
+   * @param rt_run Request-owned RT child Run, or null for
+   * GlobalHighPrecision.
    * @return Mutable output selected by IntentUpdateCoordinator.
    * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
    * output storage exhausts memory.
@@ -436,12 +445,13 @@ class ComputeService {
    * @note Callback captures, the optional sibling gate, and concurrent per-node
    * synchronization are request-local; scheduler and proxy graph ownership
    * remain with strategy/runtime/service. Explicit full HP callbacks reuse the
-   * supplied outer Run and never create a nested Run.
+   * supplied outer Run. Realtime callbacks settle separate HP and RT children.
    */
   NodeOutput& compute_intent_update_impl(GraphModel& graph,
                                          const ExecutionStrategy& strategy,
                                          const Request& request,
-                                         compute::ComputeRun* hp_run);
+                                         compute::ComputeRun* hp_run,
+                                         compute::ComputeRun* rt_run);
 
   /** @brief Borrowed traversal service used by planning and dirty execution. */
   GraphTraversalService& traversal_;
@@ -452,8 +462,9 @@ class ComputeService {
   /**
    * @brief Borrowed explicitly injected process CPU execution owner.
    *
-   * @note Only built-in CPU non-realtime non-dirty full-HP requests use this
-   * service in issue #68; it outlives every request-local ComputeService.
+   * @note Built-in CPU full HP, dirty HP, dirty preflight, and RT work share
+   * this fixed process service. It outlives every request-local
+   * ComputeService.
    */
   compute::ExecutionService& execution_service_;
   /** @brief Protects service-owned inline RT proxy graph map access. */

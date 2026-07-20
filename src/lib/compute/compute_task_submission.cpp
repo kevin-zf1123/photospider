@@ -599,7 +599,6 @@ void dispatch_planned_tasks(GraphModel& graph,
  * @param graph Graph used only for empty-plan target validation.
  * @param execution_service Injected process CPU service.
  * @param host Active Graph observation context.
- * @param worker_count Exact built-in CPU grant.
  * @param node_id Requested target node.
  * @param plan Run-owned dispatcher submission plan.
  * @param dispatcher_lease Matching Run lease.
@@ -609,8 +608,7 @@ void dispatch_planned_tasks(GraphModel& graph,
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,
-                            SchedulerHostContext& host,
-                            unsigned int worker_count, int node_id,
+                            SchedulerHostContext& host, int node_id,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
@@ -626,8 +624,7 @@ void dispatch_planned_tasks(GraphModel& graph,
 
   std::vector<ReadyTaskSubmission> initial_submissions =
       plan.make_initial_ready_submissions(dispatcher_lease);
-  execution_service.execute_cpu_run(host, worker_count,
-                                    std::move(initial_submissions),
+  execution_service.execute_cpu_run(host, std::move(initial_submissions),
                                     static_cast<int>(plan.size()));
 }
 

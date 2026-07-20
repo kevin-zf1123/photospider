@@ -1,6 +1,6 @@
 /**
  * @file compute_run.cpp
- * @brief Implements request-owned high-precision ComputeRun identity, state,
+ * @brief Implements request-owned single-domain ComputeRun identity, state,
  * terminal arbitration, and temporary storage.
  */
 #include "compute/compute_run.hpp"
@@ -44,19 +44,30 @@ uint64_t mint_compute_run_id_value() {
 }
 
 /**
- * @brief Validates current HP Run submission values before descriptor creation.
+ * @brief Validates current single-domain Run values before descriptor creation.
  *
  * @param submission Candidate HP Run inputs.
  * @return Nothing.
- * @throws std::invalid_argument for non-HP intent, zero QoS weight, or zero
- * maximum parallelism.
+ * @throws std::invalid_argument for unsupported intent, mismatched quality,
+ * zero QoS weight, or zero maximum parallelism.
  * @note Empty graph identity remains valid for direct private service callers;
  * the Kernel product path supplies its stable session name.
  */
 void validate_submission(const ComputeRunSubmission& submission) {
-  if (submission.intent != ComputeIntent::GlobalHighPrecision) {
+  if (submission.intent != ComputeIntent::GlobalHighPrecision &&
+      submission.intent != ComputeIntent::RealTimeUpdate) {
     throw std::invalid_argument(
-        "ComputeRun requires GlobalHighPrecision intent.");
+        "ComputeRun requires one supported compute intent.");
+  }
+  if (submission.intent == ComputeIntent::GlobalHighPrecision &&
+      submission.quality != ComputeRunQuality::Full) {
+    throw std::invalid_argument(
+        "GlobalHighPrecision ComputeRun requires full quality.");
+  }
+  if (submission.intent == ComputeIntent::RealTimeUpdate &&
+      submission.quality != ComputeRunQuality::Interactive) {
+    throw std::invalid_argument(
+        "RealTimeUpdate ComputeRun requires interactive quality.");
   }
   if (submission.qos.weight == 0) {
     throw std::invalid_argument("ComputeRun QoS weight must be positive.");
@@ -195,7 +206,7 @@ ComputeRunControl::ComputeRunControl(ComputeRunSubmission submission)
 ComputeRunControl::~ComputeRunControl() noexcept = default;
 
 /**
- * @brief Constructs one request observer and shared HP Run control block.
+ * @brief Constructs one request observer and shared domain Run control block.
  *
  * @param submission Descriptor inputs captured before HP planning.
  * @throws std::invalid_argument for unsupported intent or invalid QoS.
