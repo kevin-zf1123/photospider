@@ -117,6 +117,15 @@ settle，同时不会让仍存活 Run 的 shared ownership 失去计费覆盖。
 named-value 增长，以及不透明的 backend、device、plugin 或 allocator-owned allocation。
 当前内建 adapter 声明 scratch 为零，仅因为它们不拥有需要独立计量的固定 Host scratch。
 
+在 process-service dirty source segment 期间，source context 拥有外层 task
+`std::function` 的左值副本，而该外层 function 仍保持存活。因此 source demand
+会在 context-owned target 之外额外加入一份经审计的 callable payload。Downstream
+context 通过 move 接收该外层 callable。由于 C++17 不要求 moved-from
+`std::function` 为空，adapter 会在 context 构造成功后、submission 构造、phase
+retained-demand 计算或准入前显式清空外层 holder；构造失败则通过正常栈展开释放
+外层 owner。因此 downstream demand 只覆盖 context-owned target，不依赖标准库的
+moved-from 表示。
+
 Issue #70 有意删除已安装的 inline `kSchedulerWorkerProcessMax` 常量。引用该常量的源码 consumer
 必须停止依赖这项 policy constant；不提供 alias 或已安装 public replacement。组合 limits 现在使用
 source tree 私有的 `ExecutionResourceLimits`。Scheduler ABI v2 的 object layout、vtable 与数字

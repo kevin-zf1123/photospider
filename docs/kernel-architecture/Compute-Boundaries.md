@@ -139,6 +139,17 @@ named-value growth, and opaque backend, device, plugin, or allocator-owned
 allocations are not fabricated. Current built-in adapters declare zero scratch
 only because they own no separately metered fixed Host scratch.
 
+During a process-service dirty source segment, the outer task
+`std::function` remains live while its lvalue copy is owned by the source
+context. Source demand therefore adds one audited callable payload alongside
+the context-owned target. The downstream context receives that outer callable
+by move. Because C++17 does not require a moved-from `std::function` to be
+empty, the adapter explicitly clears the outer holder after successful context
+construction and before submission construction, phase retained-demand
+calculation, or admission. Construction failure instead unwinds the outer
+owner normally. Downstream demand consequently covers only the context-owned
+target without relying on a standard-library moved-from representation.
+
 Issue #70 deliberately removes the installed inline
 `kSchedulerWorkerProcessMax` constant. Source consumers that referenced it must
 stop depending on that policy constant; no alias or installed public

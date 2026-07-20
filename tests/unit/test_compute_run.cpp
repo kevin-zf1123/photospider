@@ -864,6 +864,22 @@ ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
 }
 
 /**
+ * @brief Observes owned large-callable copies across dirty phase boundaries.
+ *
+ * @throws Nothing from construction or atomic counter access.
+ * @note `live_targets` counts only active, non-moved-from task objects. A task
+ * move transfers one registration without incrementing the count, while a
+ * copy creates a separately owned callable target and increments it.
+ */
+struct LargeDirtyPhaseTaskProbe final {
+  /** @brief Number of large callable bodies entered by service workers. */
+  std::atomic_int callback_entries{0};
+
+  /** @brief Number of active large callable target owners. */
+  std::atomic_int live_targets{0};
+};
+
+/**
  * @brief Large copyable dirty task used to force owned `std::function` storage.
  *
  * The production source-first adapter first moves this value into an outer
@@ -873,42 +889,99 @@ ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
  * callable target storage instead of relying on an implementation's SSO
  * threshold.
  *
- * @throws Nothing from copying, movement, construction, or valid invocation.
+ * @throws Nothing from copying, movement, construction, destruction, or valid
+ * invocation.
  * @note The test charges the visible callable payload with
  * `owned_callable_retained_memory_bytes(sizeof(LargeDirtyPhaseTask))`; opaque
  * allocator metadata remains outside the same production estimator boundary.
+ * Explicit copy/move lifetime accounting lets the source-to-downstream
+ * regression observe target ownership without inspecting `std::function`.
  */
 class LargeDirtyPhaseTask final {
  public:
   /**
-   * @brief Binds the callback-entry counter retained by the owning test case.
-   * @param entered Counter that outlives every synchronous phase invocation.
+   * @brief Binds the lifetime probe retained by the owning test case.
+   * @param probe Probe that outlives every synchronous phase invocation.
    * @throws Nothing.
+   * @note Construction registers one active callable target.
    */
-  explicit LargeDirtyPhaseTask(std::atomic_int& entered) noexcept
-      : entered_(&entered) {}
+  explicit LargeDirtyPhaseTask(LargeDirtyPhaseTaskProbe& probe) noexcept
+      : probe_(&probe) {
+    probe_->live_targets.fetch_add(1, std::memory_order_relaxed);
+  }
 
   /**
-   * @brief Records execution of the fixture's sole dense task.
-   * @param task_id Dense task id, which must match the zero-filled payload.
+   * @brief Copies one independently owned callable target.
+   * @param other Active source target whose payload and probe are copied.
+   * @throws Nothing.
+   * @note A copy registers one additional active target.
+   */
+  LargeDirtyPhaseTask(const LargeDirtyPhaseTask& other) noexcept
+      : retained_payload_(other.retained_payload_), probe_(other.probe_) {
+    if (probe_ != nullptr) {
+      probe_->live_targets.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  /**
+   * @brief Transfers one callable-target registration without duplicating it.
+   * @param other Source object made inactive by this move.
+   * @throws Nothing.
+   * @note The moved-from object retains no probe and contributes no live
+   * target.
+   */
+  LargeDirtyPhaseTask(LargeDirtyPhaseTask&& other) noexcept
+      : retained_payload_(std::move(other.retained_payload_)),
+        probe_(std::exchange(other.probe_, nullptr)) {}
+
+  /**
+   * @brief Releases this object's active callable-target registration.
+   * @throws Nothing.
+   */
+  ~LargeDirtyPhaseTask() noexcept {
+    if (probe_ != nullptr) {
+      probe_->live_targets.fetch_sub(1, std::memory_order_relaxed);
+    }
+  }
+
+  /**
+   * @brief Prevents replacement of one independently tracked target.
+   * @param other Source target that remains unchanged.
+   * @return No value because copy assignment is unavailable.
+   * @throws Nothing because copy assignment is unavailable.
+   */
+  LargeDirtyPhaseTask& operator=(const LargeDirtyPhaseTask& other) = delete;
+
+  /**
+   * @brief Prevents replacement of one transferred target registration.
+   * @param other Source target that remains unchanged.
+   * @return No value because move assignment is unavailable.
+   * @throws Nothing because move assignment is unavailable.
+   */
+  LargeDirtyPhaseTask& operator=(LargeDirtyPhaseTask&& other) = delete;
+
+  /**
+   * @brief Records execution of one fixture dense task.
+   * @param task_id Dense task id that must address a zero-filled payload slot.
    * @return Nothing.
-   * @throws std::logic_error if a different task id reaches this fixture.
+   * @throws std::logic_error if an invalid task id reaches this fixture.
    * @note Production `DirtyReadyTaskContext` owns the invoked copy.
    */
   void operator()(int task_id) const {
-    if (task_id != static_cast<int>(retained_payload_.front())) {
+    if (task_id < 0 ||
+        static_cast<std::size_t>(task_id) >= retained_payload_.size() ||
+        retained_payload_.at(static_cast<std::size_t>(task_id)) != 0U) {
       throw std::logic_error("Large dirty phase task received an invalid id.");
     }
-    entered_->fetch_add(1, std::memory_order_relaxed);
+    probe_->callback_entries.fetch_add(1, std::memory_order_relaxed);
   }
 
  private:
   /** @brief Auditable target payload large enough to exclude callable SSO. */
   std::array<std::uint64_t, 64U> retained_payload_{};
 
-  /** @brief Process-local callback-entry counter borrowed through settlement.
-   */
-  std::atomic_int* entered_ = nullptr;
+  /** @brief Process-local lifetime probe borrowed through settlement. */
+  LargeDirtyPhaseTaskProbe* probe_ = nullptr;
 };
 
 static_assert(sizeof(LargeDirtyPhaseTask) > sizeof(std::function<void(int)>),
@@ -1078,12 +1151,12 @@ ResourceVector independently_estimate_large_dirty_phase_resources(
     throw std::logic_error("Dirty callable estimate Run did not start.");
   }
 
-  std::atomic_int entered{0};
+  LargeDirtyPhaseTaskProbe task_probe;
   const std::uint64_t callable_bytes = owned_callable_retained_memory_bytes(
       static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
   auto context = std::make_shared<DirtyReadyTaskContext>(
       compute_plan, nullptr, phase_task_ids,
-      std::function<void(int)>(LargeDirtyPhaseTask(entered)), callable_bytes,
+      std::function<void(int)>(LargeDirtyPhaseTask(task_probe)), callable_bytes,
       run.acquire_lease(), !source_phase,
       source_phase ? SchedulerTaskPriority::High
                    : SchedulerTaskPriority::Normal);
@@ -1148,10 +1221,10 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
   request.source_task_ids = &source_task_ids;
   request.downstream_task_ids = &downstream_task_ids;
 
-  std::atomic_int entered{0};
+  LargeDirtyPhaseTaskProbe task_probe;
   DirtyCallablePhaseRunResult result;
   try {
-    run_dirty_source_first(request, LargeDirtyPhaseTask(entered));
+    run_dirty_source_first(request, LargeDirtyPhaseTask(task_probe));
   } catch (const GraphError& error) {
     result.failure_code = error.code();
   }
@@ -1162,7 +1235,8 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
     result.admitted_resources = observation.admitted_resources;
   }
   result.reserved_after = service.resource_snapshot().reserved;
-  result.callback_entries = entered.load(std::memory_order_relaxed);
+  result.callback_entries =
+      task_probe.callback_entries.load(std::memory_order_relaxed);
   return result;
 }
 
@@ -2277,9 +2351,14 @@ TEST(ExecutionService,
  * captures and matches that complete vector. Reducing only retained capacity
  * by the extra target must reject before callback entry with a zero ledger;
  * the exact vector must execute and settle. A downstream-only production call
- * then succeeds at the independently calculated single-target vector, proving
- * the source addition is not repeated after move. Removing the production
- * source addition makes the reduced-cap endpoint execute and fails this test.
+ * then succeeds at the independently calculated single-target vector. A
+ * combined source-to-downstream call directly observes two targets during
+ * source demand, one outer target between phases, one context target before
+ * downstream admission, and zero targets after settlement. This proves the
+ * moved-from outer holder is explicitly released before downstream demand
+ * without relying on its implementation-selected post-move state. Removing
+ * the production source addition makes the reduced-cap endpoint execute and
+ * fails this test.
  */
 TEST(ExecutionServiceProductResources,
      DirtySourceChargesOuterCallableCopyWithoutDownstreamDoubleCount) {
@@ -2365,6 +2444,63 @@ TEST(ExecutionServiceProductResources,
   EXPECT_EQ(exact_downstream.observation_count, 1);
   EXPECT_EQ(exact_downstream.callback_entries, 1);
   EXPECT_EQ(exact_downstream.reserved_after, ResourceVector{});
+
+  ComputePlan combined_plan = compute_plan;
+  combined_plan.execution_order.push_back(kNodeId + 1);
+  combined_plan.planned_nodes.push_back(kNodeId + 1);
+  combined_plan.task_graph.tasks.resize(2U);
+  combined_plan.task_graph.tasks[1].task_id = 1;
+  combined_plan.task_graph.tasks[1].node_id = kNodeId + 1;
+  combined_plan.task_graph.initial_task_ids = {0, 1};
+  const std::vector<int> source_task_ids{0};
+  const std::vector<int> downstream_task_ids{1};
+
+  ExecutionService combined_service(1U);
+  ExecutionServiceHost combined_host;
+  ComputeRun combined_run(make_test_submission("dirty-callable-lifetime", 1U,
+                                               combined_plan.target_node_id));
+  ASSERT_TRUE(combined_run.advance_to(ComputeRunPhase::Admitted));
+  ASSERT_TRUE(combined_run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(combined_run.advance_to(ComputeRunPhase::Running));
+
+  LargeDirtyPhaseTaskProbe combined_probe;
+  std::array<int, 2U> phase_live_targets{-1, -1};
+  std::size_t phase_observation_index = 0U;
+  int between_phase_live_targets = -1;
+  DirtySourceFirstRunRequest combined_request;
+  combined_request.intent = ComputeIntent::GlobalHighPrecision;
+  combined_request.execution_service = &combined_service;
+  combined_request.host = &combined_host;
+  combined_request.run = &combined_run;
+  combined_request.compute_plan = &combined_plan;
+  combined_request.phase_shared_retained_memory_bytes =
+      [&combined_probe, &phase_live_targets,
+       &phase_observation_index](const std::vector<int>&) {
+        if (phase_observation_index >= phase_live_targets.size()) {
+          throw std::logic_error(
+              "Dirty callable lifetime observed too many phase demands.");
+        }
+        phase_live_targets.at(phase_observation_index++) =
+            combined_probe.live_targets.load(std::memory_order_relaxed);
+        return 0U;
+      };
+  combined_request.source_task_ids = &source_task_ids;
+  combined_request.downstream_task_ids = &downstream_task_ids;
+  combined_request.before_downstream = [&combined_probe,
+                                        &between_phase_live_targets] {
+    between_phase_live_targets =
+        combined_probe.live_targets.load(std::memory_order_relaxed);
+  };
+
+  EXPECT_NO_THROW(run_dirty_source_first(combined_request,
+                                         LargeDirtyPhaseTask(combined_probe)));
+  EXPECT_EQ(phase_observation_index, phase_live_targets.size());
+  EXPECT_EQ(phase_live_targets.at(0U), 2);
+  EXPECT_EQ(between_phase_live_targets, 1);
+  EXPECT_EQ(phase_live_targets.at(1U), 1);
+  EXPECT_EQ(combined_probe.callback_entries.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(combined_probe.live_targets.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(combined_service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**

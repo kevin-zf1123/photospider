@@ -199,7 +199,10 @@ struct DirtySourceFirstRunRequest {
    * @brief Computes phase-local retained bytes immediately before admission.
    *
    * @note The callback receives the exact source or downstream task ids for
-   * that synchronous segment. It may inspect request-owned staging state to
+   * that synchronous segment after its owned context has been constructed.
+   * Before a downstream callback runs, the source-first adapter explicitly
+   * clears the moved-from outer task function so only the context-owned target
+   * remains live. The callback may inspect request-owned staging state to
    * charge current storage plus predictable missing map entries without
    * recounting keys created by an earlier source phase. It must not execute
    * operations or mutate staging state.
@@ -704,8 +707,12 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
  * service execution materializes heap-owned Run submissions. Its source
  * context copies the outer `std::function`, so source admission charges both
  * live callable targets until synchronous settlement. Downstream transfers
- * that outer target by move and therefore charges only its context-owned
- * target. The dirty executor retains request-local inline fallback ordering.
+ * that outer target by move, then explicitly clears the valid-but-unspecified
+ * moved-from function before submission construction, retained-demand
+ * calculation, or admission. Downstream therefore charges only its
+ * context-owned target without depending on the standard library's moved-from
+ * representation. The dirty executor retains request-local inline fallback
+ * ordering.
  */
 template <typename RunTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
@@ -772,6 +779,7 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           request.intent == ComputeIntent::RealTimeUpdate
               ? SchedulerTaskPriority::High
               : SchedulerTaskPriority::Normal);
+      owned_run_task = nullptr;
       std::vector<ReadyTaskSubmission> downstream_submissions =
           downstream_context->make_submissions(initial_downstream_ids, true);
       request.execution_service->execute_cpu_run(
