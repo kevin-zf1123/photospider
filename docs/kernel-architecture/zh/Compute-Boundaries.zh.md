@@ -97,8 +97,8 @@ scheduler planning/ownership 位于 `src/lib/scheduler/`。这些类都是私有
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
 scratch demand 按最大 callback 并发数相乘，ready entry 与 byte 则按所有逻辑任务相乘，因此
 dependency release 已被预先覆盖。初始与 dependent entry 使用同一个 estimator 和 insertion
-boundary。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在每个 dirty
-每个 initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
+boundary。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在所有
+initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
 active Run 和等待 settlement 之前销毁 caller-side submission vector 的 backing；此后只有暂存
 entry 以及 bounded store 保留这些 submission。在每个 dirty 或 connected-preflight service
 segment 之前，adapter 会加入当前 staging/snapshot storage 与去重后的缺失 staging-map entry，
