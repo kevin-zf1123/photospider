@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -863,6 +864,57 @@ ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
 }
 
 /**
+ * @brief Large copyable dirty task used to force owned `std::function` storage.
+ *
+ * The production source-first adapter first moves this value into an outer
+ * `std::function`, then copies that function into its source context. The
+ * deliberately oversized payload cannot fit inside the complete
+ * `std::function` object, so the source copy exercises independently owned
+ * callable target storage instead of relying on an implementation's SSO
+ * threshold.
+ *
+ * @throws Nothing from copying, movement, construction, or valid invocation.
+ * @note The test charges the visible callable payload with
+ * `owned_callable_retained_memory_bytes(sizeof(LargeDirtyPhaseTask))`; opaque
+ * allocator metadata remains outside the same production estimator boundary.
+ */
+class LargeDirtyPhaseTask final {
+ public:
+  /**
+   * @brief Binds the callback-entry counter retained by the owning test case.
+   * @param entered Counter that outlives every synchronous phase invocation.
+   * @throws Nothing.
+   */
+  explicit LargeDirtyPhaseTask(std::atomic_int& entered) noexcept
+      : entered_(&entered) {}
+
+  /**
+   * @brief Records execution of the fixture's sole dense task.
+   * @param task_id Dense task id, which must match the zero-filled payload.
+   * @return Nothing.
+   * @throws std::logic_error if a different task id reaches this fixture.
+   * @note Production `DirtyReadyTaskContext` owns the invoked copy.
+   */
+  void operator()(int task_id) const {
+    if (task_id != static_cast<int>(retained_payload_.front())) {
+      throw std::logic_error("Large dirty phase task received an invalid id.");
+    }
+    entered_->fetch_add(1, std::memory_order_relaxed);
+  }
+
+ private:
+  /** @brief Auditable target payload large enough to exclude callable SSO. */
+  std::array<std::uint64_t, 64U> retained_payload_{};
+
+  /** @brief Process-local callback-entry counter borrowed through settlement.
+   */
+  std::atomic_int* entered_ = nullptr;
+};
+
+static_assert(sizeof(LargeDirtyPhaseTask) > sizeof(std::function<void(int)>),
+              "Large dirty phase task must exceed std::function storage.");
+
+/**
  * @brief Captures one real execute_cpu_run initial-storage retirement event.
  *
  * @throws Nothing from construction or observation.
@@ -972,6 +1024,147 @@ class ScopedInitialSubmissionStorageObserver final {
   /** @brief Borrowed isolated service whose observer is cleared. */
   ExecutionService* service_ = nullptr;
 };
+
+/**
+ * @brief Result of one real process-service dirty source-first phase.
+ *
+ * @throws Nothing for value construction and movement.
+ * @note Expected ledger rejection is captured as a code; all other exception
+ * categories remain visible to the calling regression.
+ */
+struct DirtyCallablePhaseRunResult final {
+  /** @brief Graph error code when complete phase admission was rejected. */
+  std::optional<GraphErrc> failure_code;
+
+  /** @brief Complete vector observed after successful production admission. */
+  std::optional<ResourceVector> admitted_resources;
+
+  /** @brief Root commitments after synchronous success or rejection returns. */
+  ResourceVector reserved_after;
+
+  /** @brief Number of large callable bodies entered by service workers. */
+  int callback_entries = 0;
+
+  /** @brief Number of production initial-storage boundaries observed. */
+  int observation_count = 0;
+};
+
+/**
+ * @brief Independently calculates one large-callable dirty phase vector.
+ *
+ * @param compute_plan One-task dirty plan copied by the owned phase context.
+ * @param phase_task_ids Exact active source or downstream task ids.
+ * @param graph_identity Stable metadata copied into service submissions.
+ * @param additional_shared_bytes Other request-owned retained phase storage.
+ * @param source_phase True to include the simultaneously live outer callable
+ * copy; false for the downstream move-owned target.
+ * @return Complete checked service vector for the selected phase.
+ * @throws Standard Run, context, estimator, or service exceptions unchanged.
+ * @note This calculation never calls `run_dirty_source_first()`. It constructs
+ * one context-owned callable explicitly and adds the second source-only target
+ * independently, so deleting the production source addition cannot
+ * recalibrate this expected vector.
+ */
+ResourceVector independently_estimate_large_dirty_phase_resources(
+    const ComputePlan& compute_plan, const std::vector<int>& phase_task_ids,
+    const std::string& graph_identity, std::uint64_t additional_shared_bytes,
+    bool source_phase) {
+  ExecutionService probe(1U);
+  ComputeRun run(
+      make_test_submission(graph_identity, 1U, compute_plan.target_node_id));
+  if (!run.advance_to(ComputeRunPhase::Admitted) ||
+      !run.advance_to(ComputeRunPhase::Queued) ||
+      !run.advance_to(ComputeRunPhase::Running)) {
+    throw std::logic_error("Dirty callable estimate Run did not start.");
+  }
+
+  std::atomic_int entered{0};
+  const std::uint64_t callable_bytes = owned_callable_retained_memory_bytes(
+      static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
+  auto context = std::make_shared<DirtyReadyTaskContext>(
+      compute_plan, nullptr, phase_task_ids,
+      std::function<void(int)>(LargeDirtyPhaseTask(entered)), callable_bytes,
+      run.acquire_lease(), !source_phase,
+      source_phase ? SchedulerTaskPriority::High
+                   : SchedulerTaskPriority::Normal);
+  std::vector<ReadyTaskSubmission> submissions =
+      context->make_submissions(phase_task_ids, true);
+
+  RetainedMemoryEstimator additional(
+      "test dirty callable phase retained demand");
+  additional.add_bytes(additional_shared_bytes);
+  if (source_phase) {
+    additional.add_bytes(callable_bytes);
+  }
+  const CpuRunResourceDemand demand =
+      context->run_resource_demand(additional.bytes());
+  return probe.estimate_cpu_run_resources(
+      submissions.front(), static_cast<int>(phase_task_ids.size()), demand);
+}
+
+/**
+ * @brief Executes one real large-callable source or downstream dirty phase.
+ *
+ * @param compute_plan One-task dirty plan used by production source-first code.
+ * @param phase_task_ids Exact active task ids for the selected phase.
+ * @param graph_identity Stable metadata copied into service submissions.
+ * @param additional_shared_bytes Other request-owned retained phase storage.
+ * @param source_phase True for a source-only run; false for downstream-only.
+ * @param limits Immutable ledger limits applied to this fresh service.
+ * @return Admission observation, callback count, and post-settlement ledger.
+ * @throws Unexpected standard allocation, Run, context, or worker exceptions
+ * unchanged. Expected `GraphError` admission rejection is captured.
+ * @note The call enters the same `run_dirty_source_first()` process-service
+ * branch used by HP and RT dirty product executors. Every case owns a fresh
+ * service and Run so prior callback or ledger state cannot affect its cap.
+ */
+DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
+    const ComputePlan& compute_plan, const std::vector<int>& phase_task_ids,
+    const std::string& graph_identity, std::uint64_t additional_shared_bytes,
+    bool source_phase, ExecutionResourceLimits limits) {
+  ExecutionService service(1U, limits);
+  ExecutionServiceHost host;
+  InitialSubmissionStorageProbe observation;
+  ScopedInitialSubmissionStorageObserver observer(service, observation);
+  ComputeRun run(
+      make_test_submission(graph_identity, 1U, compute_plan.target_node_id));
+  if (!run.advance_to(ComputeRunPhase::Admitted) ||
+      !run.advance_to(ComputeRunPhase::Queued) ||
+      !run.advance_to(ComputeRunPhase::Running)) {
+    throw std::logic_error("Dirty callable product Run did not start.");
+  }
+
+  std::vector<int> source_task_ids =
+      source_phase ? phase_task_ids : std::vector<int>{};
+  std::vector<int> downstream_task_ids =
+      source_phase ? std::vector<int>{} : phase_task_ids;
+  DirtySourceFirstRunRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.execution_service = &service;
+  request.host = &host;
+  request.run = &run;
+  request.compute_plan = &compute_plan;
+  request.additional_shared_retained_memory_bytes = additional_shared_bytes;
+  request.source_task_ids = &source_task_ids;
+  request.downstream_task_ids = &downstream_task_ids;
+
+  std::atomic_int entered{0};
+  DirtyCallablePhaseRunResult result;
+  try {
+    run_dirty_source_first(request, LargeDirtyPhaseTask(entered));
+  } catch (const GraphError& error) {
+    result.failure_code = error.code();
+  }
+
+  result.observation_count =
+      observation.observation_count.load(std::memory_order_acquire);
+  if (result.observation_count > 0) {
+    result.admitted_resources = observation.admitted_resources;
+  }
+  result.reserved_after = service.resource_snapshot().reserved;
+  result.callback_entries = entered.load(std::memory_order_relaxed);
+  return result;
+}
 
 /**
  * @brief Result snapshot for one fresh real dirty product execution.
@@ -2069,6 +2262,109 @@ TEST(ExecutionService,
   testing::ExecutionServiceTestAccess::
       clear_initial_submission_storage_observer(service);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves dirty source charges its live outer callable copy exactly once.
+ *
+ * @return Nothing.
+ * @throws Standard plan, Run, context, estimator, or service exceptions
+ * unchanged.
+ * @note The expected source vector is calculated without invoking
+ * `run_dirty_source_first()`: one context-owned large target is included by
+ * `DirtyReadyTaskContext`, and one independently added target covers the
+ * source-only outer `std::function`. A default-limit production call first
+ * captures and matches that complete vector. Reducing only retained capacity
+ * by the extra target must reject before callback entry with a zero ledger;
+ * the exact vector must execute and settle. A downstream-only production call
+ * then succeeds at the independently calculated single-target vector, proving
+ * the source addition is not repeated after move. Removing the production
+ * source addition makes the reduced-cap endpoint execute and fails this test.
+ */
+TEST(ExecutionServiceProductResources,
+     DirtySourceChargesOuterCallableCopyWithoutDownstreamDoubleCount) {
+  constexpr int kNodeId = 131;
+  constexpr std::uint64_t kAdditionalSharedBytes = 173U;
+  const std::string graph_identity = "dirty-callable-cap";
+  const std::vector<int> phase_task_ids{0};
+
+  ComputePlan compute_plan;
+  compute_plan.intent = ComputeIntent::GlobalHighPrecision;
+  compute_plan.target_node_id = kNodeId;
+  compute_plan.parallel = true;
+  compute_plan.execution_order = {kNodeId};
+  compute_plan.planned_nodes = {kNodeId};
+  compute_plan.task_graph.tasks.resize(1U);
+  compute_plan.task_graph.tasks[0].task_id = 0;
+  compute_plan.task_graph.tasks[0].node_id = kNodeId;
+  compute_plan.task_graph.initial_task_ids = phase_task_ids;
+
+  const std::uint64_t extra_callable_bytes =
+      owned_callable_retained_memory_bytes(
+          static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
+  ASSERT_GT(extra_callable_bytes, 0U);
+  const ResourceVector source_required =
+      independently_estimate_large_dirty_phase_resources(
+          compute_plan, phase_task_ids, graph_identity, kAdditionalSharedBytes,
+          true);
+  const ResourceVector downstream_required =
+      independently_estimate_large_dirty_phase_resources(
+          compute_plan, phase_task_ids, graph_identity, kAdditionalSharedBytes,
+          false);
+  ASSERT_GE(source_required.retained_memory_bytes, extra_callable_bytes);
+  EXPECT_EQ(source_required.retained_memory_bytes -
+                downstream_required.retained_memory_bytes,
+            extra_callable_bytes);
+  EXPECT_EQ(source_required.cpu_slots, downstream_required.cpu_slots);
+  EXPECT_EQ(source_required.scratch_bytes, downstream_required.scratch_bytes);
+  EXPECT_EQ(source_required.ready_entries, downstream_required.ready_entries);
+  EXPECT_EQ(source_required.ready_bytes, downstream_required.ready_bytes);
+
+  const DirtyCallablePhaseRunResult calibration =
+      execute_large_dirty_callable_phase_case(
+          compute_plan, phase_task_ids, graph_identity, kAdditionalSharedBytes,
+          true, ExecutionService::default_resource_limits());
+  EXPECT_FALSE(calibration.failure_code.has_value());
+  ASSERT_TRUE(calibration.admitted_resources.has_value());
+  EXPECT_EQ(*calibration.admitted_resources, source_required);
+  EXPECT_EQ(calibration.observation_count, 1);
+  EXPECT_EQ(calibration.callback_entries, 1);
+  EXPECT_EQ(calibration.reserved_after, ResourceVector{});
+
+  ResourceVector omitted_outer_callable = source_required;
+  omitted_outer_callable.retained_memory_bytes -= extra_callable_bytes;
+  const DirtyCallablePhaseRunResult rejected =
+      execute_large_dirty_callable_phase_case(
+          compute_plan, phase_task_ids, graph_identity, kAdditionalSharedBytes,
+          true, execution_limits(omitted_outer_callable));
+  ASSERT_TRUE(rejected.failure_code.has_value());
+  EXPECT_EQ(*rejected.failure_code, GraphErrc::ComputeError);
+  EXPECT_FALSE(rejected.admitted_resources.has_value());
+  EXPECT_EQ(rejected.observation_count, 0);
+  EXPECT_EQ(rejected.callback_entries, 0);
+  EXPECT_EQ(rejected.reserved_after, ResourceVector{});
+
+  const DirtyCallablePhaseRunResult exact_source =
+      execute_large_dirty_callable_phase_case(
+          compute_plan, phase_task_ids, graph_identity, kAdditionalSharedBytes,
+          true, execution_limits(source_required));
+  EXPECT_FALSE(exact_source.failure_code.has_value());
+  ASSERT_TRUE(exact_source.admitted_resources.has_value());
+  EXPECT_EQ(*exact_source.admitted_resources, source_required);
+  EXPECT_EQ(exact_source.observation_count, 1);
+  EXPECT_EQ(exact_source.callback_entries, 1);
+  EXPECT_EQ(exact_source.reserved_after, ResourceVector{});
+
+  const DirtyCallablePhaseRunResult exact_downstream =
+      execute_large_dirty_callable_phase_case(
+          compute_plan, phase_task_ids, graph_identity, kAdditionalSharedBytes,
+          false, execution_limits(downstream_required));
+  EXPECT_FALSE(exact_downstream.failure_code.has_value());
+  ASSERT_TRUE(exact_downstream.admitted_resources.has_value());
+  EXPECT_EQ(*exact_downstream.admitted_resources, downstream_required);
+  EXPECT_EQ(exact_downstream.observation_count, 1);
+  EXPECT_EQ(exact_downstream.callback_entries, 1);
+  EXPECT_EQ(exact_downstream.reserved_after, ResourceVector{});
 }
 
 /**

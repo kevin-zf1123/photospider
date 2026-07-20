@@ -251,7 +251,10 @@ class DirtyReadyTaskContext final
    * @param active_task_ids Exact task ids active in this phase.
    * @param run_task Owned callable that executes one dense task id.
    * @param run_task_retained_memory_bytes Audited capture/allocation bytes
-   * owned by run_task beyond its inline `std::function` object.
+   * owned by run_task beyond its inline `std::function` object. This value
+   * covers exactly the callable target moved into this context; a
+   * simultaneously live external copy must be declared separately by the
+   * owning phase.
    * @param lease Matching Run lease retained for dependent submissions.
    * @param release_dependents Whether completion releases dependency-ready
    * work from this phase.
@@ -698,8 +701,11 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
  * validation, scheduler lookup, or scheduler submission.
  * @note Legacy scheduler execution delegates source-first submission to
  * ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first. Process
- * service execution materializes heap-owned Run submissions. The dirty
- * executor retains request-local inline fallback ordering.
+ * service execution materializes heap-owned Run submissions. Its source
+ * context copies the outer `std::function`, so source admission charges both
+ * live callable targets until synchronous settlement. Downstream transfers
+ * that outer target by move and therefore charges only its context-owned
+ * target. The dirty executor retains request-local inline fallback ordering.
  */
 template <typename RunTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
@@ -736,11 +742,15 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           SchedulerTaskPriority::High);
       std::vector<ReadyTaskSubmission> source_submissions =
           source_context->make_submissions(source_task_ids, true);
+      RetainedMemoryEstimator source_phase_retained(
+          "dirty source phase retained demand");
+      source_phase_retained.add_bytes(
+          additional_phase_retained_bytes(source_task_ids));
+      source_phase_retained.add_bytes(run_task_retained_memory_bytes);
       request.execution_service->execute_cpu_run(
           *request.host, std::move(source_submissions),
           static_cast<int>(source_task_ids.size()),
-          source_context->run_resource_demand(
-              additional_phase_retained_bytes(source_task_ids)));
+          source_context->run_resource_demand(source_phase_retained.bytes()));
     }
     if (request.before_downstream) {
       request.before_downstream();
