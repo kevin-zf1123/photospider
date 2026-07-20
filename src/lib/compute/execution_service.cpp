@@ -834,7 +834,13 @@ void ExecutionService::execute_cpu_run(
     for (ReadyTaskSubmission& submission : initial_submissions) {
       staged_entries.push_back(make_queue_entry(run, std::move(submission)));
     }
+    const std::size_t staged_submission_size = initial_submissions.size();
+    const std::size_t staged_submission_capacity =
+        initial_submissions.capacity();
     release_initial_submission_storage(initial_submissions);
+    observe_initial_submission_storage(
+        admission.resources, staged_submission_size, staged_submission_capacity,
+        initial_submissions);
 
     {
       std::lock_guard<std::mutex> lock(pool_->mutex);
@@ -898,6 +904,19 @@ void ExecutionService::release_initial_submission_storage(
     std::vector<ReadyTaskSubmission>& submissions) noexcept {
   std::vector<ReadyTaskSubmission> released_storage;
   released_storage.swap(submissions);
+}
+
+/** @copydoc ExecutionService::observe_initial_submission_storage */
+void ExecutionService::observe_initial_submission_storage(
+    const ResourceVector& admitted_resources, std::size_t staged_size,
+    std::size_t staged_capacity,
+    const std::vector<ReadyTaskSubmission>& submissions) const noexcept {
+  if (initial_submission_storage_observer_ == nullptr) {
+    return;
+  }
+  initial_submission_storage_observer_(
+      initial_submission_storage_observer_context_, admitted_resources,
+      staged_size, staged_capacity, submissions.size(), submissions.capacity());
 }
 
 /** @copydoc ExecutionService::make_queue_entry */

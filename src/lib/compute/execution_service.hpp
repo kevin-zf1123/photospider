@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -775,6 +776,27 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   struct CpuRunAdmissionEstimate;
 
   /**
+   * @brief Test-only observer invoked at the initial-storage retirement seam.
+   *
+   * @param context Opaque repository-test context installed by the private
+   * test bridge.
+   * @param admitted_resources Complete checked vector already reserved for
+   * this Run.
+   * @param staged_size Moved-from element count before storage retirement.
+   * @param staged_capacity Backing capacity before storage retirement.
+   * @param released_size Element count after the empty-vector swap.
+   * @param released_capacity Backing capacity after the empty-vector swap.
+   * @return Nothing.
+   * @throws Nothing; observers must be allocation-free and noexcept.
+   * @note The bridge definition lives under tests/support. Production leaves
+   * this pointer null, and no public or installed API exposes the seam.
+   */
+  using InitialSubmissionStorageObserver = void (*)(
+      void* context, const ResourceVector& admitted_resources,
+      std::size_t staged_size, std::size_t staged_capacity,
+      std::size_t released_size, std::size_t released_capacity) noexcept;
+
+  /**
    * @brief Calculates mandatory bytes for one service-owned submission.
    * @param graph_identity Stable copied metadata string.
    * @return Queue, shared-control, store-handle, and string envelope bytes.
@@ -857,6 +879,23 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       std::vector<ReadyTaskSubmission>& submissions) noexcept;
 
   /**
+   * @brief Reports deterministic initial-storage retirement to tests.
+   * @param admitted_resources Complete checked Run vector already reserved.
+   * @param staged_size Moved-from element count before retirement.
+   * @param staged_capacity Backing capacity before retirement.
+   * @param submissions Initial vector after production retirement.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note This method runs after all QueueEntry/grant staging and before the
+   * active-Run index, bounded ready store, worker notification, or settlement
+   * wait. A null observer is the production default.
+   */
+  void observe_initial_submission_storage(
+      const ResourceVector& admitted_resources, std::size_t staged_size,
+      std::size_t staged_capacity,
+      const std::vector<ReadyTaskSubmission>& submissions) const noexcept;
+
+  /**
    * @brief Claims one Run's first failure and retires its queued work.
    * @param run Matching Run state retained through cleanup.
    * @param failure Exact non-null worker exception.
@@ -884,6 +923,23 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /** @brief Private fixed-pool, ready-store, registry, and ledger owner. */
   std::unique_ptr<PoolState> pool_;
+
+  /**
+   * @brief Optional repository-test callback for the retirement boundary.
+   *
+   * @note Installed only before isolated test execution and cleared after the
+   * synchronous Run settles; production composition leaves it null.
+   */
+  InitialSubmissionStorageObserver initial_submission_storage_observer_ =
+      nullptr;
+
+  /**
+   * @brief Opaque test context paired with the optional observer.
+   *
+   * @note The private test bridge guarantees this context outlives every Run
+   * that can invoke the observer.
+   */
+  void* initial_submission_storage_observer_context_ = nullptr;
 
   /** @brief Current service-worker Run context, null outside callbacks. */
   static thread_local RunState* tls_run_state_;

@@ -863,6 +863,250 @@ ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
 }
 
 /**
+ * @brief Captures one real execute_cpu_run initial-storage retirement event.
+ *
+ * @throws Nothing from construction or observation.
+ * @note The callback stores ordinary fields before publishing
+ * observation_count with release ordering. Tests acquire-load that count only
+ * after the observed Run has reached callback entry or synchronous settlement.
+ */
+struct InitialSubmissionStorageProbe final {
+  /** @brief Complete root vector admitted by the production Run. */
+  ResourceVector admitted_resources;
+
+  /** @brief Moved-from vector element count before retirement. */
+  std::size_t staged_size = 0U;
+
+  /** @brief Moved-from vector backing capacity before retirement. */
+  std::size_t staged_capacity = 0U;
+
+  /** @brief Vector element count after production retirement. */
+  std::size_t released_size = 0U;
+
+  /** @brief Vector backing capacity after production retirement. */
+  std::size_t released_capacity = 0U;
+
+  /** @brief Number of production Run boundaries observed. */
+  std::atomic_int observation_count{0};
+
+  /**
+   * @brief Records one allocation-free production boundary observation.
+   * @param context Opaque pointer to this probe.
+   * @param resources Complete checked vector admitted for the Run.
+   * @param before_size Moved-from element count before retirement.
+   * @param before_capacity Backing capacity before retirement.
+   * @param after_size Element count after retirement.
+   * @param after_capacity Backing capacity after retirement.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Each owning test observes one synchronous service segment. The
+   * release-store makes preceding scalar writes visible to its assertions.
+   */
+  static void observe(void* context, const ResourceVector& resources,
+                      std::size_t before_size, std::size_t before_capacity,
+                      std::size_t after_size,
+                      std::size_t after_capacity) noexcept {
+    auto* probe = static_cast<InitialSubmissionStorageProbe*>(context);
+    if (probe == nullptr) {
+      return;
+    }
+    probe->admitted_resources = resources;
+    probe->staged_size = before_size;
+    probe->staged_capacity = before_capacity;
+    probe->released_size = after_size;
+    probe->released_capacity = after_capacity;
+    probe->observation_count.fetch_add(1, std::memory_order_release);
+  }
+};
+
+/**
+ * @brief Installs and clears one private service observer for a scoped call.
+ *
+ * @throws Nothing.
+ * @note The owning call is synchronous, so destruction always happens after
+ * the last possible observation and before the probe leaves scope.
+ */
+class ScopedInitialSubmissionStorageObserver final {
+ public:
+  /**
+   * @brief Installs the probe on one isolated service.
+   * @param service Service used by the owning synchronous product call.
+   * @param probe Probe that outlives this guard.
+   * @throws Nothing.
+   */
+  ScopedInitialSubmissionStorageObserver(
+      ExecutionService& service, InitialSubmissionStorageProbe& probe) noexcept
+      : service_(&service) {
+    testing::ExecutionServiceTestAccess::
+        set_initial_submission_storage_observer(
+            service, &InitialSubmissionStorageProbe::observe, &probe);
+  }
+
+  /**
+   * @brief Clears the test-only observer.
+   * @throws Nothing.
+   */
+  ~ScopedInitialSubmissionStorageObserver() noexcept {
+    testing::ExecutionServiceTestAccess::
+        clear_initial_submission_storage_observer(*service_);
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one observer installation.
+   * @param other Guard that retains sole clearing responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedInitialSubmissionStorageObserver(
+      const ScopedInitialSubmissionStorageObserver& other) = delete;
+
+  /**
+   * @brief Prevents replacing one observer installation.
+   * @param other Guard that remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedInitialSubmissionStorageObserver& operator=(
+      const ScopedInitialSubmissionStorageObserver& other) = delete;
+
+ private:
+  /** @brief Borrowed isolated service whose observer is cleared. */
+  ExecutionService* service_ = nullptr;
+};
+
+/**
+ * @brief Result snapshot for one fresh real dirty product execution.
+ *
+ * @throws Nothing for value construction and movement.
+ */
+struct DirtyProductResourceResult final {
+  /** @brief Graph error code when product execution was rejected. */
+  std::optional<GraphErrc> failure_code;
+
+  /** @brief Complete Run vector observed after successful admission. */
+  std::optional<ResourceVector> admitted_resources;
+
+  /** @brief Complete retained bytes owned by the supplied synchronization. */
+  std::uint64_t synchronization_bytes = 0U;
+
+  /** @brief Ledger commitments after success or rejection returns. */
+  ResourceVector reserved_after;
+
+  /** @brief Committed HP named value retained by the fresh graph. */
+  std::int64_t high_precision_value = 0;
+
+  /** @brief Committed RT named value, absent before RT publication. */
+  std::optional<std::int64_t> real_time_value;
+
+  /** @brief Run phase reached by the product executor. */
+  ComputeRunPhase run_phase = ComputeRunPhase::Created;
+
+  /** @brief Number of initial-storage production boundaries observed. */
+  int observation_count = 0;
+};
+
+/**
+ * @brief Declares the HP/RT descriptor builder used by product-case setup.
+ * @param graph_identity Stable GraphRuntime/session identity.
+ * @param topology_generation Current graph topology identity.
+ * @param node_id Dirty target node.
+ * @param intent HP or RT single-domain intent.
+ * @return Valid full-HP or interactive-RT submission.
+ * @throws std::bad_alloc when graph identity ownership cannot allocate.
+ */
+ComputeRunSubmission make_dirty_resource_submission(
+    const std::string& graph_identity, std::uint64_t topology_generation,
+    int node_id, ComputeIntent intent);
+
+/**
+ * @brief Executes one fresh real HP or RT dirty product case.
+ * @param directory_label Unique temporary-runtime suffix.
+ * @param graph_identity Stable service metadata identity shared by interval
+ * endpoints.
+ * @param node_id Sole real graph/plan node.
+ * @param subtype Registered dirty product operation subtype.
+ * @param intent HP or RT single-domain path.
+ * @param synchronization_node_ids Owner ids; these must include node_id and
+ * may add unused ids that do not change the product plan.
+ * @param limits Immutable service limits for this endpoint.
+ * @return Result containing exact admission, callback-visible output, and
+ * post-settlement ledger state.
+ * @throws Unexpected allocation, filesystem, graph, or service exceptions
+ * unchanged. Expected GraphError rejection is captured in the result.
+ * @note Every call rebuilds the same one-node graph and request state so a
+ * successful endpoint cannot seed cache/proxy state for the next endpoint.
+ */
+DirtyProductResourceResult execute_dirty_product_resource_case(
+    const std::string& directory_label, const std::string& graph_identity,
+    int node_id, const std::string& subtype, ComputeIntent intent,
+    const std::vector<int>& synchronization_node_ids,
+    ExecutionResourceLimits limits) {
+  ScopedResourceRuntimeDirectory directory(directory_label);
+  GraphRuntime::Info info;
+  info.name = graph_identity;
+  info.root = directory.path();
+  info.cache_root = directory.path() / "cache";
+  GraphRuntime runtime(info);
+  GraphModel& graph = runtime.model();
+  graph.add_node(make_resource_dirty_product_node(node_id, subtype));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphEventService events;
+  DirtyUpdateRequest request;
+  request.node_id = node_id;
+  request.cache_precision = "float32";
+  request.disable_disk_cache = true;
+  request.dirty_roi = PixelRect{0, 0, 8, 8};
+  request.suppress_graph_downsample = intent != ComputeIntent::RealTimeUpdate;
+  request.node_synchronization =
+      std::make_shared<DirtyNodeSynchronization>(synchronization_node_ids);
+
+  DirtyProductResourceResult result;
+  result.synchronization_bytes =
+      request.node_synchronization->retained_memory_bytes();
+  ExecutionService service(1U, limits);
+  InitialSubmissionStorageProbe observation;
+  ScopedInitialSubmissionStorageObserver observer(service, observation);
+  ComputeRun run(make_dirty_resource_submission(
+      graph_identity, graph.topology_generation(), node_id, intent));
+  if (!run.advance_to(ComputeRunPhase::Admitted)) {
+    throw std::logic_error("Dirty product Run did not enter admission.");
+  }
+
+  HighPrecisionDirtyExecutor hp_executor(traversal, events);
+  RealTimeDirtyExecutor rt_executor(traversal, events);
+  try {
+    if (intent == ComputeIntent::RealTimeUpdate) {
+      (void)rt_executor.execute(graph, runtime.realtime_proxy_graph(), &runtime,
+                                request, &run, &service);
+    } else {
+      (void)hp_executor.execute(graph, runtime.realtime_proxy_graph(), &runtime,
+                                request, &run, &service);
+    }
+  } catch (const GraphError& error) {
+    result.failure_code = error.code();
+  }
+
+  result.observation_count =
+      observation.observation_count.load(std::memory_order_acquire);
+  if (result.observation_count > 0) {
+    result.admitted_resources = observation.admitted_resources;
+  }
+  result.reserved_after = service.resource_snapshot().reserved;
+  result.run_phase = run.phase();
+  result.high_precision_value =
+      graph.node(node_id)
+          .cached_output_high_precision->data.at("value")
+          .as_int64();
+  if (const NodeOutput* rt_output =
+          runtime.realtime_proxy_graph().find_output(node_id);
+      rt_output != nullptr) {
+    result.real_time_value = rt_output->data.at("value").as_int64();
+  }
+  return result;
+}
+
+/**
  * @brief Estimates the mandatory zero-adapter service envelope.
  * @param graph_identity Metadata identity copied by every logical submission.
  * @param total_task_count Positive logical submission count.
@@ -1719,17 +1963,16 @@ TEST(ExecutionService,
 }
 
 /**
- * @brief Verifies initial-submission staging retires its backing allocation.
+ * @brief Verifies the storage-retirement helper performs an empty-vector swap.
  *
  * @return Nothing.
  * @throws Standard Run, submission, vector, or callback allocation exceptions
  * from fixture setup.
- * @note The private production boundary is called after QueueEntry staging and
- * before active-Run publication. Empty size and zero capacity prove neither
- * moved-from values nor their caller-side backing remain available to span the
- * settlement wait.
+ * @note This focused helper check does not replace the production-path test
+ * below, which proves execute_cpu_run invokes the boundary at the required
+ * point.
  */
-TEST(ExecutionService, ReleasesInitialSubmissionStagingStorageBeforeWait) {
+TEST(ExecutionService, ReleaseHelperRetiresInitialSubmissionStorage) {
   ComputeRun run(make_test_submission("released-initial-staging", 1U, 1));
   std::atomic_int entered{0};
   std::vector<ReadyTaskSubmission> submissions;
@@ -1745,6 +1988,87 @@ TEST(ExecutionService, ReleasesInitialSubmissionStagingStorageBeforeWait) {
   EXPECT_TRUE(submissions.empty());
   EXPECT_EQ(submissions.capacity(), 0U);
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+}
+
+/**
+ * @brief Proves a real CPU Run retires initial backing before publication.
+ *
+ * @return Nothing.
+ * @throws Standard Run, service, future, or callback setup exceptions.
+ * @note The production observer runs after QueueEntry/grant staging and the
+ * empty-vector swap. The sole callback then blocks, keeping execute_cpu_run in
+ * settlement while the test verifies the original nonzero backing is gone.
+ * Deleting or moving the production release after this observation leaves a
+ * nonzero released capacity and fails this regression.
+ */
+TEST(ExecutionService,
+     ProductionRunRetiresInitialStorageBeforeBlockedSettlement) {
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(
+      make_test_submission("production-released-initial-staging", 1U, 1));
+  InitialSubmissionStorageProbe observation;
+  testing::ExecutionServiceTestAccess::set_initial_submission_storage_observer(
+      service, &InitialSubmissionStorageProbe::observe, &observation);
+
+  std::promise<void> callback_entered;
+  std::future<void> callback_entered_future = callback_entered.get_future();
+  std::promise<void> release_callback;
+  const std::shared_future<void> release_gate =
+      release_callback.get_future().share();
+  std::atomic_bool observer_visible_before_callback{false};
+  ComputeRunLease lease = run.acquire_lease();
+  const ComputeRunTaskIdentity identity = lease.task_identity(0U);
+  auto blocking_callback = [&callback_entered, release_gate,
+                            &observer_visible_before_callback, &observation](
+                               ComputeRunLease& retained_lease,
+                               const ComputeRunTaskIdentity& retained_identity,
+                               SchedulerTaskRuntime& runtime) {
+    observer_visible_before_callback.store(
+        retained_lease.descriptor().id() == retained_identity.run_id() &&
+            observation.observation_count.load(std::memory_order_acquire) == 1,
+        std::memory_order_release);
+    callback_entered.set_value();
+    release_gate.wait();
+    runtime.dec_tasks_to_complete();
+  };
+  const ReadyTaskResourceDemand task_demand = owned_callback_resource_demand(
+      static_cast<std::uint64_t>(sizeof(blocking_callback)));
+  std::vector<ReadyTaskSubmission> submissions;
+  submissions.reserve(8U);
+  submissions.emplace_back(std::move(lease), identity, 1, true,
+                           std::move(blocking_callback),
+                           SchedulerTaskPriority::Normal, task_demand);
+  ASSERT_EQ(submissions.size(), 1U);
+  ASSERT_GE(submissions.capacity(), 8U);
+
+  auto run_future = std::async(
+      std::launch::async,
+      [&service, &host, ready = std::move(submissions), task_demand]() mutable {
+        service.execute_cpu_run(host, std::move(ready), 1,
+                                CpuRunResourceDemand{0U, task_demand});
+      });
+  ScopedPromiseRelease release_guard(release_callback);
+  ASSERT_EQ(callback_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_TRUE(observer_visible_before_callback.load(std::memory_order_acquire));
+  ASSERT_EQ(observation.observation_count.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(observation.staged_size, 1U);
+  EXPECT_GE(observation.staged_capacity, 8U);
+  EXPECT_EQ(observation.released_size, 0U);
+  EXPECT_EQ(observation.released_capacity, 0U);
+  EXPECT_EQ(service.resource_snapshot().reserved,
+            observation.admitted_resources);
+  EXPECT_EQ(run_future.wait_for(std::chrono::seconds(0)),
+            std::future_status::timeout);
+
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  testing::ExecutionServiceTestAccess::
+      clear_initial_submission_storage_observer(service);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -1909,19 +2233,20 @@ TEST(ExecutionServiceProductResources,
 }
 
 /**
- * @brief Exercises the shared dirty adapter for HP and RT service Runs.
+ * @brief Proves HP and RT charge complete dirty synchronization ownership.
  *
  * @return Nothing.
  * @throws Standard allocation, filesystem, graph, or service exceptions from
  * fixture setup.
- * @note Each exact service-only envelope is proved usable before the real
- * HP/RT executor plans and stages production work. A retained-memory limit
- * below the actual synchronization owner rejects before registered operation
- * entry; default capacity then commits exactly one output and returns every
- * reserved dimension to zero.
+ * @note For each real product path, a default-capacity calibration with a
+ * small owner captures the complete admitted vector. That exact vector then
+ * admits an identical fresh graph/plan with the same small owner. Changing
+ * only the owner to add unused ids exceeds the retained cap before callback
+ * entry. Removing either production synchronization-demand injection makes
+ * the corresponding large-owner endpoint execute and fail this regression.
  */
 TEST(ExecutionServiceProductResources,
-     DirtyHpAndRtRejectSmallLimitAndExecuteWithDefaultLimit) {
+     DirtyHpAndRtUseExactSmallLargeSynchronizationInterval) {
   ensure_resource_product_operations_registered();
   for (const ComputeIntent intent :
        {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
@@ -1934,112 +2259,75 @@ TEST(ExecutionServiceProductResources,
     std::atomic_int& operation_calls =
         is_rt ? g_resource_dirty_rt_operation_calls
               : g_resource_dirty_hp_operation_calls;
+    const std::vector<int> small_owner_ids{node_id};
+    const std::vector<int> large_owner_ids{node_id, node_id + 1000,
+                                           node_id + 2000, node_id + 3000};
+
     operation_calls.store(0, std::memory_order_relaxed);
-
-    const ResourceVector service_only =
-        estimate_service_only_resources(graph_identity);
-    ASSERT_NO_FATAL_FAILURE(
-        expect_service_only_envelope_executes(graph_identity, service_only));
-
-    ScopedResourceRuntimeDirectory directory(is_rt ? "dirty-rt-product"
-                                                   : "dirty-hp-product");
-    GraphRuntime::Info info;
-    info.name = graph_identity;
-    info.root = directory.path();
-    info.cache_root = directory.path() / "cache";
-    GraphRuntime runtime(info);
-    GraphModel& graph = runtime.model();
-    graph.add_node(make_resource_dirty_product_node(node_id, subtype));
-    graph.validate_topology();
-    GraphTraversalService traversal;
-    GraphEventService events;
-    DirtyUpdateRequest request;
-    request.node_id = node_id;
-    request.cache_precision = "float32";
-    request.disable_disk_cache = true;
-    request.dirty_roi = PixelRect{0, 0, 8, 8};
-    request.suppress_graph_downsample = !is_rt;
-    request.node_synchronization =
-        std::make_shared<DirtyNodeSynchronization>(graph.node_ids());
-    const std::uint64_t node_synchronization_bytes =
-        request.node_synchronization->retained_memory_bytes();
-    ASSERT_GT(node_synchronization_bytes, 0U);
-    HighPrecisionDirtyExecutor hp_executor(traversal, events);
-    RealTimeDirtyExecutor rt_executor(traversal, events);
-
-    ExecutionResourceLimits synchronization_too_small =
-        ExecutionService::default_resource_limits();
-    synchronization_too_small.retained_memory_bytes =
-        node_synchronization_bytes - 1U;
-    ExecutionService small_service(1U, synchronization_too_small);
-    ComputeRun small_run(make_dirty_resource_submission(
-        graph_identity, graph.topology_generation(), node_id, intent));
-    ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
-    if (is_rt) {
-      EXPECT_THROW((void)rt_executor.execute(
-                       graph, runtime.realtime_proxy_graph(), &runtime, request,
-                       &small_run, &small_service),
-                   GraphError);
-    } else {
-      EXPECT_THROW((void)hp_executor.execute(
-                       graph, runtime.realtime_proxy_graph(), &runtime, request,
-                       &small_run, &small_service),
-                   GraphError);
-    }
-    EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 0);
-    EXPECT_EQ(small_service.resource_snapshot().reserved, ResourceVector{});
-    ASSERT_TRUE(graph.node(node_id).cached_output_high_precision.has_value());
-    EXPECT_EQ(graph.node(node_id)
-                  .cached_output_high_precision->data.at("value")
-                  .as_int64(),
-              3);
-    EXPECT_EQ(runtime.realtime_proxy_graph().find_output(node_id), nullptr);
-
-    ComputeRunLease retained_small_run = small_run.acquire_lease();
-    const std::uint64_t retained_run_bytes =
-        retained_small_run.retained_memory_bytes();
-    ASSERT_GT(retained_run_bytes, 0U);
-    std::atomic_int estimate_entered{0};
-    ReadyTaskSubmission run_representative = make_counted_ready_submission(
-        retained_small_run, 0U, node_id, estimate_entered);
-    const ResourceVector with_run = small_service.estimate_cpu_run_resources(
-        run_representative, 1, CpuRunResourceDemand{retained_run_bytes, {}});
-    EXPECT_EQ(
-        with_run.retained_memory_bytes - service_only.retained_memory_bytes,
-        retained_run_bytes);
-
-    ExecutionService large_service(1U);
-    ComputeRun large_run(make_dirty_resource_submission(
-        graph_identity, graph.topology_generation(), node_id, intent));
-    ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
-    NodeOutput* output = nullptr;
-    if (is_rt) {
-      EXPECT_NO_THROW(output = &rt_executor.execute(
-                          graph, runtime.realtime_proxy_graph(), &runtime,
-                          request, &large_run, &large_service));
-    } else {
-      EXPECT_NO_THROW(output = &hp_executor.execute(
-                          graph, runtime.realtime_proxy_graph(), &runtime,
-                          request, &large_run, &large_service));
-    }
-    ASSERT_NE(output, nullptr);
-    EXPECT_EQ(output->data.at("value").as_int64(), is_rt ? 12 : 11);
+    const DirtyProductResourceResult calibration =
+        execute_dirty_product_resource_case(
+            is_rt ? "dirty-rt-sync-calibration" : "dirty-hp-sync-calibration",
+            graph_identity, node_id, subtype, intent, small_owner_ids,
+            ExecutionService::default_resource_limits());
+    EXPECT_FALSE(calibration.failure_code.has_value());
+    ASSERT_TRUE(calibration.admitted_resources.has_value());
+    EXPECT_EQ(calibration.observation_count, 1);
     EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 1);
-    EXPECT_EQ(large_run.phase(), ComputeRunPhase::CommitPending);
-    EXPECT_EQ(large_service.resource_snapshot().reserved, ResourceVector{});
+    EXPECT_EQ(calibration.reserved_after, ResourceVector{});
+    ASSERT_GT(calibration.synchronization_bytes, 0U);
+    EXPECT_GT(calibration.admitted_resources->retained_memory_bytes,
+              calibration.synchronization_bytes);
+    EXPECT_EQ(calibration.run_phase, ComputeRunPhase::CommitPending);
+    EXPECT_EQ(calibration.high_precision_value, is_rt ? 3 : 11);
     if (is_rt) {
-      ASSERT_NE(runtime.realtime_proxy_graph().find_output(node_id), nullptr);
-      EXPECT_EQ(graph.node(node_id)
-                    .cached_output_high_precision->data.at("value")
-                    .as_int64(),
-                3);
+      ASSERT_TRUE(calibration.real_time_value.has_value());
+      EXPECT_EQ(*calibration.real_time_value, 12);
     } else {
-      ASSERT_TRUE(graph.node(node_id).cached_output_high_precision.has_value());
-      EXPECT_EQ(graph.node(node_id)
-                    .cached_output_high_precision->data.at("value")
-                    .as_int64(),
-                11);
+      EXPECT_FALSE(calibration.real_time_value.has_value());
     }
+
+    const ExecutionResourceLimits exact_small_limits =
+        execution_limits(*calibration.admitted_resources);
+    operation_calls.store(0, std::memory_order_relaxed);
+    const DirtyProductResourceResult exact_small =
+        execute_dirty_product_resource_case(
+            is_rt ? "dirty-rt-sync-exact-small" : "dirty-hp-sync-exact-small",
+            graph_identity, node_id, subtype, intent, small_owner_ids,
+            exact_small_limits);
+    EXPECT_FALSE(exact_small.failure_code.has_value());
+    ASSERT_TRUE(exact_small.admitted_resources.has_value());
+    EXPECT_EQ(*exact_small.admitted_resources, *calibration.admitted_resources);
+    EXPECT_EQ(exact_small.synchronization_bytes,
+              calibration.synchronization_bytes);
+    EXPECT_EQ(exact_small.observation_count, 1);
+    EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(exact_small.reserved_after, ResourceVector{});
+    EXPECT_EQ(exact_small.run_phase, ComputeRunPhase::CommitPending);
+    EXPECT_EQ(exact_small.high_precision_value, is_rt ? 3 : 11);
+    if (is_rt) {
+      ASSERT_TRUE(exact_small.real_time_value.has_value());
+      EXPECT_EQ(*exact_small.real_time_value, 12);
+    } else {
+      EXPECT_FALSE(exact_small.real_time_value.has_value());
+    }
+
+    operation_calls.store(0, std::memory_order_relaxed);
+    const DirtyProductResourceResult rejected_large =
+        execute_dirty_product_resource_case(
+            is_rt ? "dirty-rt-sync-rejected-large"
+                  : "dirty-hp-sync-rejected-large",
+            graph_identity, node_id, subtype, intent, large_owner_ids,
+            exact_small_limits);
+    ASSERT_TRUE(rejected_large.failure_code.has_value());
+    EXPECT_EQ(*rejected_large.failure_code, GraphErrc::ComputeError);
+    EXPECT_GT(rejected_large.synchronization_bytes,
+              exact_small.synchronization_bytes);
+    EXPECT_FALSE(rejected_large.admitted_resources.has_value());
+    EXPECT_EQ(rejected_large.observation_count, 0);
+    EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(rejected_large.reserved_after, ResourceVector{});
+    EXPECT_EQ(rejected_large.high_precision_value, 3);
+    EXPECT_FALSE(rejected_large.real_time_value.has_value());
   }
 }
 
