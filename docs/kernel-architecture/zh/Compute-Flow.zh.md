@@ -23,7 +23,8 @@ CLI / TUI
 平台 context，以及每个 intent 的一个 execution binding。Legacy binding 拥有 scheduler 实例；
 内建 CPU binding 选择 ownerless process-service route。Embedded composition root 还会在
 Kernel 之前创建一个私有固定 CPU `ExecutionService`；Kernel 会把该 owner 注入每个
-request-local `ComputeService`。该 service 独占 Host 权威 resource ledger 与有界 ready store。
+request-local `ComputeService`。该 service 独占 Host 权威 resource ledger 与 policy-aware
+有界 ready store。
 
 `ps::Host` 是面向 frontend 的 public interface。embedded Host adapter 会复制 public
 request/result value，并在内部使用 `InteractionService` wrapper 与 `Kernel`；CLI/TUI code
@@ -145,7 +146,9 @@ HP/RT 双路径语义属于 realtime intent，而不是 parallel 执行模式。
 计算完整尺寸的权威 node 工作，RT 计算降采样代理版本，目前为宽高各四分之一，也就是像素数的
 十六分之一。`IntentUpdateCoordinator` 会启动两个 sibling call，每个 sibling 再解析自身的
 ownerless process-service binding 或 per-Graph scheduler。`ComputeIntent` 本身不指定 QoS 或
-最终 physical policy；当前 service 会把 RT submission 视为 high queue hint。
+最终 physical policy。Service 消费显式 `ComputeRunQos`；当前由 Kernel 创建的 Run 使用 descriptor
+默认 throughput，除非私有 caller 显式提供 interactive QoS。Intent、quality 与 maximum
+parallelism 都不会推断 class、deadline 或 weight。
 
 当前协作者职责与非所有权边界记录在 `Compute-Boundaries.zh.md`。
 
@@ -184,6 +187,16 @@ ready-entry 与 ready-byte vector。Initial 与 dependent entry 持有 child rea
 `GraphStateExecutor` 边界。Replacement 会在一个
 transaction 中发布 legacy scheduler owner 或 ownerless service route。Legacy candidate
 planning、attach 或 start 失败会保留旧 binding 及其 compute 行为，只归还 candidate 容量。
+
+Ready-store policy 对每次 dispatch 按
+`work_units + ceil(complete_ready_grant_bytes / 4096)` 计费：Graph 公平性使用原始 cost，Run
+公平性使用 `ceil(cost / weight)`。Interactive work 会偏好存在且更早的单调时钟 deadline；
+throughput 排序采用加权且确定的规则。Ready item 在八次成功 dispatch 后 aging，但 throughput
+class 持续 ready 时，会在至多三次 interactive dispatch 后强制获得进展。配置的 interactive
+headroom 从 general Run admission ceiling 中排除。过渡期 legacy scheduler owner 保留 Issue #70
+的 full-ledger admission，不会被重新分类为 Throughput。Initial 与 dependent submission 使用
+同一路径，service 会让每个 Run fairness row 跨越临时为空的阶段继续存在。Policy 策略不拥有
+worker、token、budget、Run 或 Graph；service 与 ledger 仍分别是物理和资源权威。
 
 `ComputeTaskDispatcher` 将 plan execution、依赖计数、稀疏 node-id 映射、temporary-result
 indexing、事件日志、异常传播和最终目标选择保留在 compute-service 边界内；对应 plan 与
@@ -379,15 +392,17 @@ ledger 耗尽时，`GraphErrc::ComputeError` 会通过 embedded Host 与 IPC sta
 - HP cache 与 RT proxy state 使用不同 staged commit path，因此 preview state 不会被隐式提升为
   authoritative HP output。
 - Legacy scheduler epoch 只拒绝陈旧的 queued callback，并不是 Run identity。内建 CPU HP/RT
-  failure 会在稳定 lease 下通过 `(RunId, RunLocalTaskId)` 路由。当前 Run 会记录 QoS 与只表示
-  提交时拓扑的 revision，但没有权威 graph revision、supersession、已执行 deadline 或
-  cooperative cancellation contract。
+  failure 会在稳定 lease 下通过 `(RunId, RunLocalTaskId)` 路由。当前 Run 会记录显式 QoS，service
+  会将其用于 ordering、公平性与 headroom admission，同时记录只表示提交时拓扑的 revision。
+  Deadline 是 ordering input，不是 expiry 或 cancellation trigger。当前没有权威 graph revision、
+  supersession 或 cooperative cancellation contract。
 
 这些拆分使 planning、physical dispatch 与 visible commit 可以独立测试。
 [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)约束当前
 graph-state/dispatch 区分。已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-同时定义当前固定的多 Graph HP/RT service、独立 child Run、lease/completion isolation 与
+同时定义当前固定的多 Graph HP/RT service、独立 child Run、内建 policy ordering、
+lease/completion isolation 与
 RT-first commit gate，以及后续确定性 `RunGroup` settlement、admitted-Run registry 与更广泛的
 lifecycle 所有权，而
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述后续 revision 与 cancellation

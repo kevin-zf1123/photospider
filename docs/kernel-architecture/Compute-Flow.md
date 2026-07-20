@@ -26,8 +26,8 @@ execution binding per intent. Legacy bindings own scheduler instances;
 built-in CPU bindings select an ownerless process-service route. The embedded
 composition root also creates one private fixed CPU `ExecutionService` before
 Kernel. The service exclusively owns the Host-authoritative resource ledger
-and bounded ready store; Kernel injects that owner into each request-local
-`ComputeService`.
+and policy-aware bounded ready store; Kernel injects that owner into each
+request-local `ComputeService`.
 
 `ps::Host` is the public frontend-facing interface. The embedded Host adapter
 copies public request/result values and uses the internal `InteractionService`
@@ -183,8 +183,10 @@ work while RT computes the downscaled proxy, currently one quarter of width and
 height, or one sixteenth of the pixel count. `IntentUpdateCoordinator` launches
 two sibling calls, and each sibling resolves either its ownerless process
 service binding or per-Graph scheduler. `ComputeIntent` does not itself specify
-QoS or final physical policy; the current service treats RT submissions as a
-high queue hint.
+QoS or final physical policy. The service consumes explicit `ComputeRunQos`;
+current Kernel-created Runs use the descriptor default of throughput unless a
+private caller explicitly supplies interactive QoS. Intent, quality, and
+maximum parallelism never infer class, deadline, or weight.
 
 The current collaborator responsibilities and non-ownership boundaries are
 documented in `Compute-Boundaries.md`.
@@ -232,6 +234,20 @@ replacement share the per-graph
 legacy scheduler owner or an ownerless service route in one transaction.
 Failed legacy candidate planning, attach, or start leaves the old binding and
 compute behavior unchanged and returns only candidate capacity.
+
+The ready-store policy charges each dispatch
+`work_units + ceil(complete_ready_grant_bytes / 4096)`: Graph fairness uses raw
+cost and Run fairness uses `ceil(cost / weight)`. Interactive work prefers an
+earlier present monotonic deadline; throughput ordering is weighted and
+deterministic. A ready item ages after eight successful dispatches, but a
+continuously ready throughput class is forced to progress after at most three
+interactive dispatches. Configured interactive headroom is excluded from the
+general Run admission ceiling. Transitional legacy scheduler owners retain
+Issue #70 full-ledger admission and are not reclassified as Throughput. Initial
+and dependent submissions use the same route, and the service retains each Run
+fairness row across temporary emptiness. Policy strategies own no worker,
+token, budget, Run, or Graph; the service and ledger remain the physical and
+resource authorities.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
 node-id mapping, temporary-result indexing, event logging, exception
@@ -486,16 +502,19 @@ published.
   state cannot become authoritative HP output by implication.
 - Legacy scheduler epochs reject stale queued callbacks only and are not Run
   identity. Built-in CPU HP/RT failures route through
-  `(RunId, RunLocalTaskId)` under a stable lease. Current Runs record QoS and a
-  topology-only submission revision but have no authoritative graph revision,
-  supersession, enforced deadline, or cooperative cancellation contract.
+  `(RunId, RunLocalTaskId)` under a stable lease. Current Runs record explicit
+  QoS that the service applies to ordering, fairness, and headroom admission,
+  plus a topology-only submission revision. A deadline is an ordering input,
+  not an expiry or cancellation trigger. There is no authoritative graph
+  revision, supersession, or cooperative cancellation contract.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 defines both the current fixed multi-Graph HP/RT service, independent child
-Runs, lease/completion isolation, and RT-first commit gate, plus the later
+Runs, built-in policy ordering, lease/completion isolation, and RT-first commit
+gate, plus the later
 deterministic `RunGroup` settlement, admitted-Run registry, and broader
 lifecycle ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)

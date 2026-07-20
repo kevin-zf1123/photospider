@@ -443,9 +443,14 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   provider 时，同一 registration transaction 可以替换 active key，卸载后恢复 builtin
   predecessor。
 - 多 graph/intent 的内建 CPU work 会共享每个 embedded Host 的一个固定 `ExecutionService`。
-  其 ledger 会原子准入完整 Run vector 与 legacy scheduler-owner CPU grant；其 high/normal
-  ready store 按 entry 和 byte 有界。Legacy scheduler 保留按 graph/intent 的物理所有权与有界
-  constructor grant。ADR 0003 与 ADR 0007 记录已接受的所有权/生命周期契约。
+  其 ledger 会原子准入完整 Run vector 与 legacy scheduler-owner CPU grant；其 policy-aware
+  ready store 按 entry 和 byte 有界。Ready work 使用经过 checked arithmetic 的 work-unit 加
+  4-KiB byte-quanta cost；Graph score 与按 weight 归一化的 Run score 保持多租户公平；八次成功
+  dispatch 后触发稳定 aging；Throughput work ready 时最多连续执行三个 Interactive task。只有
+  显式 Interactive Run 可以在 Run policy class 内使用配置的受保护 headroom，ledger 仍是最终
+  资源权威。过渡期 legacy scheduler 保留 Issue #70 的 full-ledger admission，不会被分类为
+  Throughput，同时保留按 graph/intent 的物理所有权与有界 constructor grant。ADR 0003 与
+  ADR 0007 记录已接受的所有权/生命周期契约。
 
 - [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)
   分开 graph-state access 与 scheduler dispatch。
@@ -461,8 +466,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
   固定完整的目标 Run、completion、execution-service、ledger 与 lifecycle 所有权；其中 issue
   #67 的 Run-lease 基础、issue #69 的固定多 Graph HP/RT service 与 child Run，以及 issue #70
-  的 ledger 准入与 bounded ready store 已经是当前行为；最终 `RunGroup`、lifecycle registry、
-  close/shutdown fence 与 policy generation 仍是未来行为。
+  的 ledger 准入与 bounded ready store 已经是当前行为。Issue #71 的私有无状态 Interactive/
+  Throughput policy、层级、公平 aging、burst 上限与受保护 headroom 也是当前行为；最终
+  `RunGroup`、revision/cancellation/supersession slice、替代用 scheduler-policy ABI、lifecycle
+  registry 与 close/shutdown fence 仍是未来行为。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

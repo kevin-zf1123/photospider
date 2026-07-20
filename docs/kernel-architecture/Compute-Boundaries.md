@@ -95,7 +95,7 @@ scheduler-owner slots.
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, or scheduler policy |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, variants, result slots, and callback owner for one full HP request | Scheduler workers, Run terminal state, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One injected fixed built-in CPU worker domain, one host-authoritative `ResourceLedger`, entry/byte-bounded high/normal ready storage, atomic whole-Run resource admission, Run-local completion/failure/trace settlement, and HP/RT dirty/preflight execution | Planning, dependencies, Graph/cache state, fairness policy, GPU/plugin execution, lifecycle admission registry, or visible commit |
+| `ExecutionService` | One injected fixed built-in CPU worker domain, one host-authoritative `ResourceLedger`, a policy-aware entry/byte-bounded ready store, private interactive/throughput policy state, atomic whole-Run resource admission, Run-local completion/failure/trace settlement, and HP/RT dirty/preflight execution | Planning, dependencies, Graph/cache state, GPU/plugin execution, lifecycle admission registry, or visible commit |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Scheduler trace ownership |
 | `SchedulerFactory` | Resolve `0..8` worker requests and plan each scheduler's conservative slot charge before construction | Process capacity ownership or graph-state access |
@@ -245,17 +245,33 @@ released by `TaskSubmissionPlan`: the migrated route creates another
 `ReadyTaskSubmission`, while legacy routes push another lease-backed callback
 or dirty handle.
 
-The issue #70 CPU service is explicitly composed before Kernel and owns one
+The CPU service delivered by Issues #70 and #71 is explicitly composed before
+Kernel and owns one
 direct fixed worker pool, one host-authoritative ledger, and one bounded ready
 store. Configuration resolves and freezes `[1,8]` infrastructure workers once;
 Graph load, replacement, Run execution, and dirty phases never resize it.
 Every Run reserves its complete checked CPU/retained/scratch/ready vector
 before publication. Initial and dependency-released work both require matching
-ready-entry/byte grants and enter the same high/normal store. Queue removal
+ready-entry/byte grants and enter the same policy route. Queue removal
 exchanges that grant for CPU/memory/scratch execution authority. Completion,
 failure, and exceptional paths release the exact vector once. Independent Runs
-remain isolated. High-before-normal is priority separation, not final
-cross-Run fairness, cancellation, or policy authority.
+remain isolated.
+
+The ready store charges each dispatch
+`work_units + ceil(complete_ready_grant_bytes / 4096)`. Graph rows accrue raw
+cost; Run rows accrue `ceil(cost / weight)`. Explicit interactive QoS prefers an
+earlier present monotonic deadline, while throughput ordering is weighted and
+deterministic. A ready item ages after eight successful dispatches. When
+throughput remains ready, the service forces its progress after at most three
+consecutive interactive dispatches, even across the aging boundary. Run rows
+remain installed across temporary emptiness so dependent re-entry cannot reset
+fairness history. Configured interactive headroom is unavailable to throughput
+Run admission; Interactive Runs may use it, and every reservation still
+requires final ledger authorization. Transitional legacy scheduler owners keep
+Issue #70 full-ledger admission instead of being classified as Throughput. The
+private policy strategies own no worker, ready entry, resource token, budget,
+Run, or Graph. Revision preference, cancellation, and supersession are not part
+of this scheduling slice.
 
 Built-in CPU bindings are ownerless at `GraphRuntime` for both intents. Serial,
 GPU, and plugin scheduler resources remain owned per Graph and intent, but
@@ -390,12 +406,13 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted replacement direction and detailed ownership contract.
-This document is authoritative through issue #70: the fixed multi-Graph HP/RT
+This document is authoritative through issue #71: the fixed multi-Graph HP/RT
 CPU service, ownerless built-in CPU bindings, separate realtime child Runs,
 owned dirty/preflight submissions, atomic vector admission, bounded ready
-storage, and retained legacy per-Graph schedulers sharing one host ledger.
-Authoritative revision, `RunGroup`, lifecycle admission, cancellation,
-supersession, and final policy remain future behavior.
+storage, built-in interactive/throughput fairness and headroom, and retained
+legacy per-Graph schedulers sharing one host ledger. Authoritative revision,
+`RunGroup`, lifecycle admission, cancellation, supersession, and the scheduler
+ABI replacement remain future behavior.
 
 ## Implementation and Validation Entry Points
 

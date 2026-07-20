@@ -555,8 +555,15 @@ Important current behavior:
   unload restores the built-in predecessor.
 - Built-in CPU work from multiple graphs/intents shares one fixed
   `ExecutionService` per embedded Host. Its ledger atomically admits complete
-  Run vectors and legacy scheduler-owner CPU grants; its high/normal ready
-  store is bounded by entries and bytes. Legacy schedulers retain
+  Run vectors and legacy scheduler-owner CPU grants; its policy-aware ready
+  store is bounded by entries and bytes. Ready work pays checked work-unit plus
+  4-KiB byte-quanta cost, Graph and weight-normalized Run scores preserve
+  multi-tenant fairness, eight successful dispatches trigger stable aging, and
+  at most three Interactive tasks run consecutively while Throughput work is
+  ready. Only explicit Interactive Runs may consume the configured protected
+  headroom within the Run-policy classes, while the ledger remains the final
+  resource authority. Transitional legacy schedulers retain Issue #70
+  full-ledger admission rather than being classified as Throughput, as well as
   per-graph/intent physical ownership and bounded constructor grants. ADR 0003
   and ADR 0007 record the accepted ownership/lifetime contract.
 
@@ -577,8 +584,11 @@ Important current behavior:
   fixes the complete target Run, completion, execution-service, ledger, and
   lifecycle ownership. Its issue #67 Run-lease foundation, issue #69 fixed
   multi-Graph HP/RT service and child Runs, and issue #70 ledger admission and
-  bounded ready store are current; the final `RunGroup`, lifecycle registry,
-  close/shutdown fence, and policy generation remain future.
+  bounded ready store are current. Issue #71's private stateless Interactive
+  and Throughput policies, hierarchy, aging, burst bound, and protected
+  headroom are also current; the final `RunGroup`, revision/cancellation/
+  supersession slices, replacement scheduler-policy ABI, lifecycle registry,
+  and close/shutdown fence remain future.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

@@ -57,9 +57,25 @@ struct ExecutionResourceLimits final {
   std::uint64_t ready_bytes = 0U;
 
   /**
+   * @brief Capacity excluded from Throughput Run admission.
+   *
+   * Throughput Runs must leave this component-wise subset available.
+   * Explicitly Interactive Runs may consume it only after the ordinary ledger
+   * transaction validates complete remaining capacity. Transitional legacy
+   * scheduler owners predate these Run policy classes and continue to use the
+   * full ledger limits established by Issue #70.
+   *
+   * @note This value is an admission ceiling, not a reservation or token.
+   * Zero preserves the full ledger limit for every service class.
+   */
+  ResourceVector interactive_headroom;
+
+  /**
    * @brief Converts the complete private limit set to ledger dimensions.
-   * @return Value-only resource vector with identical fields.
+   * @return Value-only capacity vector with the five ledger dimensions.
    * @throws Nothing.
+   * @note Headroom is policy configuration over these limits and is not a
+   * second ledger dimension.
    */
   ResourceVector resource_vector() const noexcept {
     return ResourceVector{cpu_slots, retained_memory_bytes, scratch_bytes,
@@ -70,17 +86,19 @@ struct ExecutionResourceLimits final {
 /**
  * @brief Immutable adapter-owned resource demand for one ready submission.
  *
- * These fields declare only bytes in addition to the mandatory service
+ * The byte fields declare only ownership in addition to the mandatory service
  * envelope. Retained memory and scratch are held while the callback executes.
  * Ready bytes are held while the owned submission resides in the bounded
- * service store. `ExecutionService` always adds its `RunState`, queue entry,
- * metadata, shared-control, ready-entry, and CPU execution charges.
+ * service store. Positive work units are ordering-only trusted estimates.
+ * `ExecutionService` always adds its `RunState`, queue entry, metadata,
+ * shared-control, ready-entry, and CPU execution charges.
  *
  * @throws Nothing for value construction and comparison.
  * @note Zero scratch means the current host contract declares no separately
  * metered scratch. It does not claim that backend, plugin, or runtime
  * allocation was measured as zero. Zero ready bytes remains valid because the
- * service structural ready envelope is always positive.
+ * service structural ready envelope is always positive. Zero work is invalid
+ * and is rejected before ready publication.
  */
 struct ReadyTaskResourceDemand final {
   /** @brief Additional adapter bytes retained during callback execution. */
@@ -91,6 +109,13 @@ struct ReadyTaskResourceDemand final {
 
   /** @brief Additional adapter bytes occupied while submission is ready. */
   std::uint64_t ready_bytes = 0U;
+
+  /**
+   * @brief Positive trusted estimate used only for fair policy service.
+   * @note One is the conservative default. This abstract unit does not claim
+   * measured callback duration and never changes ledger grant dimensions.
+   */
+  std::uint64_t work_units = 1U;
 };
 
 /**
@@ -116,7 +141,7 @@ bool operator!=(const ReadyTaskResourceDemand& lhs,
 /**
  * @brief Builds one adapter-owned callable demand from its capture size.
  * @param capture_bytes Trusted compile-time size of the owned capture object.
- * @return Equal retained/ready charges and zero separately owned scratch.
+ * @return Equal retained/ready charges, zero scratch, and one work unit.
  * @throws GraphError when checked structural addition overflows.
  * @note The charge covers trusted capture/control storage only. It never
  * estimates opaque plugin or backend callback allocations.
@@ -130,7 +155,9 @@ ReadyTaskResourceDemand owned_callback_resource_demand(
  * Shared retained bytes are charged once for Run/control/plan/context
  * ownership. The per-task declaration is multiplied only by maximum callback
  * concurrency for retained/scratch and by logical task count for ready bytes.
- * Mandatory service structural envelopes are added independently.
+ * Work units are not ledger capacity; policy charges them when selecting each
+ * ready submission. Mandatory service structural envelopes are added
+ * independently.
  *
  * @throws Nothing for value construction.
  * @note Callers must not place the same shared context in the per-task field;
@@ -308,8 +335,8 @@ class ReadyTaskSubmission final {
    * @param is_initial_ready Whether the dispatcher selected initial readiness.
    * @param executable Owned operation invoked only after service admission.
    * @param priority Private high/normal ready-store ordering hint.
-   * @param resource_demand Trusted immutable retained, scratch, and ready-byte
-   * declaration.
+   * @param resource_demand Trusted immutable retained, scratch, ready-byte,
+   * and positive work declaration.
    * @throws std::invalid_argument when executable is empty or the identity Run
    * differs from the lease Run.
    * @throws std::bad_alloc when metadata or executable storage allocates.
@@ -324,11 +351,11 @@ class ReadyTaskSubmission final {
 
   /**
    * @brief Returns the empty adapter-owned demand.
-   * @return Zero additional retained, scratch, and ready bytes.
+   * @return Zero additional bytes and one abstract work unit.
    * @throws Nothing.
    * @note `ExecutionService` always charges its positive mandatory submission
    * envelope. Adapters with owned captures or scratch must pass an explicit
-   * declaration instead of relying on this zero-addition default.
+   * declaration instead of relying on this byte-only zero-addition default.
    */
   static ReadyTaskResourceDemand default_resource_demand() noexcept;
 
@@ -381,16 +408,17 @@ class ReadyTaskSubmission final {
 
   /**
    * @brief Returns the private service-ready queue hint for this submission.
-   * @return High for latency-sensitive work, otherwise Normal.
+   * @return High for same-Run preference, otherwise Normal.
    * @throws Nothing.
    * @note Priority does not establish dependency correctness or global
-   * fairness. The dispatcher must already have established readiness.
+   * fairness or service class. The dispatcher must already have established
+   * readiness, and explicit Run QoS selects the built-in policy.
    */
   SchedulerTaskPriority priority() const noexcept { return priority_; }
 
   /**
    * @brief Returns the immutable trusted-host resource declaration.
-   * @return Per-submission retained, scratch, and ready bytes.
+   * @return Per-submission retained, scratch, ready bytes, and work units.
    * @throws Nothing.
    */
   ReadyTaskResourceDemand resource_demand() const noexcept {
@@ -468,9 +496,12 @@ class ReadyTaskSubmissionRuntime : public SchedulerTaskRuntime {
  * `ReadyTaskSubmission`. Each active Run has isolated completion, exception,
  * trace-target, and settlement state while independent Runs may overlap. The
  * service also exclusively owns the host-authoritative resource ledger and
- * entry/byte-bounded ready store. It owns no planning, dependency,
- * Graph/cache, dirty propagation, visible commit, final lifecycle registry, or
- * fairness policy state.
+ * policy-aware entry/byte-bounded ready store. Two private policy strategies
+ * rank explicit interactive/throughput QoS with checked work/byte service,
+ * Graph/Run fairness, dispatch aging, admission headroom, and bounded batch
+ * progress. Policies own no physical or resource authority. The service owns
+ * no planning, dependency, Graph/cache, dirty propagation, visible commit, or
+ * final lifecycle-registry authority.
  *
  * @throws std::bad_alloc or std::system_error from explicit execution setup.
  * @note This private source-tree service is explicitly composed and injected;
@@ -480,7 +511,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
   /**
    * @brief Returns bounded product defaults supplied by the composition root.
-   * @return CPU, retained-memory, scratch, ready-entry, and ready-byte limits.
+   * @return Ledger limits plus protected interactive admission headroom.
    * @throws Nothing.
    * @note Tests and alternate products may inject smaller isolated limits.
    */
@@ -497,6 +528,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Creates an unconfigured domain with explicit immutable limits.
    * @param resource_limits Complete private Host-composed limits.
+   * @throws std::invalid_argument if interactive headroom exceeds a limit.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
    * @note The composition root must freeze workers before first Run admission.
    */
@@ -516,8 +548,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @brief Creates a configured domain with explicit immutable limits.
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
    * @param resource_limits Complete private Host-composed limits.
-   * @throws std::invalid_argument if the worker request exceeds eight or the
-   * configured CPU limit cannot permit the resolved fixed pool.
+   * @throws std::invalid_argument if the worker request exceeds eight, the
+   * configured CPU limit cannot permit the resolved fixed pool, or interactive
+   * headroom exceeds a ledger limit.
    * @throws std::bad_alloc or std::system_error if setup fails.
    */
   ExecutionService(unsigned int worker_count,
@@ -590,7 +623,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @return Move-only ledger reservation, or `std::nullopt` when capacity is
    * unavailable.
    * @throws std::bad_alloc or std::system_error from ledger admission.
-   * @note Serial's zero-slot reservation remains active and move-only.
+   * @note Serial's zero-slot reservation remains active and move-only. Legacy
+   * owners predate Run policy classification and use the full ledger limits;
+   * interactive headroom partitions only Interactive and Throughput Runs.
    */
   std::optional<ResourceLedger::Reservation>
   try_reserve_legacy_scheduler_workers(unsigned int worker_slots);
@@ -601,6 +636,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param rt_worker_slots Conservative RT owner charge.
    * @return Two owners committed all-or-none, or `std::nullopt`.
    * @throws std::bad_alloc or std::system_error from ledger admission.
+   * @note Both legacy owners use the full ledger limits atomically;
+   * interactive headroom partitions only Interactive and Throughput Runs.
    */
   std::optional<ResourceLedger::ReservationPair>
   try_reserve_legacy_scheduler_worker_pair(unsigned int hp_worker_slots,
@@ -625,7 +662,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws GraphError when any structural aggregation overflows.
    * @note This diagnostic mints no authority. `execute_cpu_run()` uses the same
    * calculation before ledger admission, and initial/dependent queue entries
-   * use the same resulting per-task envelope.
+   * use the same resulting per-task envelope. Ordering-only work units and
+   * interactive headroom do not change this diagnostic resource vector.
    */
   ResourceVector estimate_cpu_run_resources(
       const ReadyTaskSubmission& representative, int total_task_count,
@@ -644,11 +682,12 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * additional declaration for every logical task.
    * @return Nothing after every callback in the batch settles.
    * @throws std::invalid_argument for invalid counts, empty active batches,
-   * mixed Run ids, or duplicate active Run ids.
-   * @throws std::logic_error before fixed pool configuration or for invalid
-   * generic runtime use.
+   * mixed Run ids, or zero work.
+   * @throws std::logic_error before fixed pool configuration, for duplicate
+   * active Run ids, or for invalid generic runtime use.
    * @throws GraphError with `GraphErrc::ComputeError` when checked aggregation
-   * overflows or the ledger cannot admit the complete Run vector.
+   * or policy cost overflows, or the ledger/policy ceiling cannot admit the
+   * complete Run vector.
    * @throws std::bad_alloc or std::system_error from pool/store setup.
    * @throws The exact first worker task exception after settlement.
    * @note Independent calls may overlap. Run-local state is removed only after
@@ -766,7 +805,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /** @brief One owned ready queue entry paired with matching Run state. */
   struct QueueEntry;
 
-  /** @brief Entry/byte-bounded owner of high and normal ready lanes. */
+  /** @brief Authority-free strategy for one explicit QoS service class. */
+  class SchedulerPolicy;
+
+  /** @brief Deadline-aware strategy allowed to consume protected headroom. */
+  class InteractiveSchedulerPolicy;
+
+  /** @brief Weighted deterministic strategy confined to general capacity. */
+  class ThroughputSchedulerPolicy;
+
+  /** @brief Policy-aware entry/byte-bounded owner of all ready entries. */
   class BoundedReadyStore;
 
   /** @brief Private worker, store, registry, and ledger ownership. */
@@ -809,10 +857,26 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Calculates mandatory once-per-Run service retained bytes.
+   * @param graph_identity Pre-copied policy Graph identity retained by Run.
+   * @param graph_key Pre-copied conservative Graph-map key allocation.
    * @return Run, registry, shared-control, and reservation-state bytes.
    * @throws GraphError when checked structural arithmetic overflows.
    */
-  static std::uint64_t service_run_envelope_bytes();
+  static std::uint64_t service_run_envelope_bytes(
+      const std::string& graph_identity, const std::string& graph_key);
+
+  /**
+   * @brief Calculates one checked ordering-only policy service cost.
+   * @param demand Trusted positive work declaration.
+   * @param complete_ready_bytes Exact ready grant bytes including service
+   * envelope.
+   * @return Work units plus started 4096-byte ready quanta.
+   * @throws std::invalid_argument when work units are zero.
+   * @throws GraphError when byte rounding or cost addition overflows.
+   * @note The returned scalar never mints or changes resource authority.
+   */
+  static std::uint64_t calculate_policy_service_cost(
+      ReadyTaskResourceDemand demand, std::uint64_t complete_ready_bytes);
 
   /**
    * @brief Builds one checked service-plus-adapter admission calculation.
@@ -827,6 +891,15 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   static CpuRunAdmissionEstimate calculate_cpu_run_admission(
       unsigned int configured_workers, const std::string& graph_identity,
       int total_task_count, CpuRunResourceDemand demand);
+
+  /** @brief Ready-byte conversion unit used by both built-in policies. */
+  static constexpr std::uint64_t kPolicyReadyByteQuantum = 4096U;
+
+  /** @brief Successful dispatches after which one waiter becomes aged. */
+  static constexpr std::uint64_t kPolicyAgingDispatches = 8U;
+
+  /** @brief Maximum interactive selections while throughput remains ready. */
+  static constexpr std::uint64_t kInteractiveBurstLimit = 3U;
 
   /**
    * @brief Runs the shared worker loop until service shutdown.

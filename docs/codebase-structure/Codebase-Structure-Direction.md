@@ -97,7 +97,7 @@ Resolved seam tightening in the current branch:
   `src/lib/**` directories. Internal targets compile with the private
   `src/lib/` root, while the installable public header inventory remains
   limited to `include/photospider/**`.
-- The current issue #70 Run/service implementation lives under
+- The current issue #70/#71 Run/service implementation lives under
   `src/lib/compute/{compute_run,execution_service}.*`, while the shared
   accounting primitive lives under `src/lib/runtime/resource_ledger.*`.
   `Kernel` supplies
@@ -109,9 +109,16 @@ Resolved seam tightening in the current branch:
   publication. Built-in CPU HP/RT full, dirty, and preflight work transfers
   move-only, lease-backed submissions with owned callback context to the fixed
   multi-Run service. Each Run is admitted with one checked complete vector;
-  initial and dependent work enters the same entry/byte-bounded ready store
-  under child grants, which workers exchange for execution grants. Legacy
-  scheduler routes retain owned callbacks and obtain CPU reservations from the
+  initial and dependent work enters the same policy-aware entry/byte-bounded
+  ready store under child grants, which workers exchange for execution grants.
+  Each ready item pays checked work-unit plus 4-KiB byte-quanta cost. Private
+  stateless Interactive and Throughput strategies use Graph cost,
+  weight-normalized Run cost, stable aging after eight successful dispatches,
+  and a three-Interactive burst bound while Throughput work is ready. Only
+  explicit Interactive Runs may consume configurable protected headroom; the
+  ledger remains the final authority. Transitional legacy scheduler routes
+  retain Issue #70 full-ledger admission rather than being classified as
+  Throughput; they retain owned callbacks and obtain CPU reservations from the
   same service ledger. No
   installed header, Host value, operation ABI, or scheduler ABI names these
   private objects.
@@ -296,8 +303,9 @@ types to role-owned homes, and removed all eight transitional extension headers
 without shims or duplicates. Issue #70 keeps pure worker-request resolution and
 concrete instance planning under `src/lib/scheduler/`, but places the sole
 Host-authoritative ledger and move-only reservation/grant implementation under
-`src/lib/runtime/`. None of those implementation owners becomes a public Host,
-SDK, or IPC type.
+`src/lib/runtime/`. Issue #71 keeps its built-in policy strategies and bounded
+policy store private under `src/lib/compute/`. None of those implementation
+owners becomes a public Host, SDK, or IPC type.
 
 Naming rules:
 
@@ -442,11 +450,12 @@ CMake rules:
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 fixes the complete process-execution ownership. Its issue #69 private HP/RT
 Runs, stable lease/composite identity, owned ready-submission, and injected
-multi-Run CPU service slice is now current under `src/lib/compute/`.
-`EmbeddedHostState` constructs that owner before Kernel, and Kernel injects it
-into request-local `ComputeService` instances without a static singleton.
-`RunGroup`, complete resource ownership, and revision-safe commit remain target
-layout.
+multi-Run CPU service slice is now current under `src/lib/compute/`. Issue #70's
+complete resource admission and issue #71's built-in policy-aware ready store
+are current there as well. `EmbeddedHostState` constructs that owner before
+Kernel, and Kernel injects it into request-local `ComputeService` instances
+without a static singleton. `RunGroup`, revision-safe commit, cancellation,
+supersession, and the final lifecycle fence remain target layout.
 
 In that target:
 
@@ -463,19 +472,26 @@ In that target:
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
 - the current `ExecutionService` owns one fixed built-in CPU worker pool, one
-  Host-authoritative ledger, an entry/byte-bounded high/normal ready store,
-  checked full-vector Run admission, concurrent multi-Graph Runs, exact
-  reservation/grant release, and per-Run completion, first-failure, trace, and
-  Host-context routing; the target extends it with trusted policy validation
-  and general resource execution;
+  Host-authoritative ledger, a policy-aware entry/byte-bounded ready store,
+  checked full-vector Run admission, work/byte cost, Graph and weighted-Run
+  fairness, stable aging, a three-Interactive burst bound, protected
+  Interactive headroom, concurrent multi-Graph Runs, exact reservation/grant
+  release, and per-Run completion, first-failure, trace, and Host-context
+  routing. Transitional legacy scheduler owners keep Issue #70 full-ledger
+  admission outside those Run policy classes; later slices extend the service
+  with general resource execution and the final lifecycle fence without moving
+  ledger authority;
 - its private `RunLifecycleRegistry` supplies the single process admission/
   graph-close/process-shutdown fence, pending-candidate tracking,
   graph-indexed registry-held `RunLease` entries, and process enumeration without
   owning Run plans, dispatchers, terminal state, Graph state, or resource tokens;
 - the internal host-authoritative `ResourceLedger` is the only reservation and
   grant mint; and
-- `SchedulerPolicy` ranks work or suggests a bounded quantum but owns no worker,
-  queue, token, native resource, Run, or Graph state.
+- the current private, stateless `SchedulerPolicy` strategies rank work only;
+  Interactive considers explicit deadlines before the shared fairness scores,
+  while Throughput uses those scores directly. A policy owns no worker, queue,
+  token, native resource, Run, or Graph state. A replacement scheduler-policy
+  ABI remains future work.
 
 This ownership target does not select a new source directory, build target, or
 plugin ABI shape for future policy/general-resource slices. Those choices
@@ -709,10 +725,13 @@ old reservations until candidate publication, and scheduler destruction
 precedes exact release. Built-in CPU Runs reserve complete checked CPU,
 retained-memory, scratch, ready-entry, and ready-byte vectors before
 publication; their initial and dependent work share one entry/byte-bounded
-ready store. Issue #71 next adds built-in policies; #72–#74 add revision,
-cancellation, and supersession; #75 replaces the worker-owning ABI; and #76
-closes lifecycle and telemetry invariants. The authoritative acyclic dependency
-table is in the
+policy store. Issue #71 now adds private stateless Interactive and Throughput
+strategies, checked work/byte cost, Graph/weighted-Run fairness, stable aging,
+a three-Interactive burst bound, and protected headroom without changing final
+ledger authority or Issue #70's full-ledger legacy capacity. #72–#74 add
+revision, cancellation, and supersession; #75 replaces the worker-owning ABI;
+and #76 closes lifecycle and telemetry invariants. The authoritative acyclic
+dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 
 1. **Completed:** Establish public-header installation and self-containment

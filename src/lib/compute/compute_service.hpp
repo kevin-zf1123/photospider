@@ -133,8 +133,10 @@ class ComputeService {
      * @brief Explicit QoS value captured independently from compute intent.
      *
      * @note Current Kernel callers use Throughput, weight one, no deadline, and
-     * an optional sequential parallelism cap. Current Runs record but do not
-     * enforce scheduling policy from this value.
+     * an optional sequential parallelism cap. Built-in CPU ExecutionService
+     * routes apply the explicit class, deadline, and weight without inferring
+     * from intent or quality; inline and legacy routes retain their existing
+     * execution behavior.
      */
     compute::ComputeRunQos qos;
   };

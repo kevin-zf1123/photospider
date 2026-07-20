@@ -211,17 +211,18 @@ scheduler owner. Built-in process CPU routes intentionally have no Graph-owned
 scheduler or per-Graph grant. Kernel load and replacement derive the route from
 the frozen `SchedulerPlan` construction branch, never from a display name.
 Direct runtime installation defaults to the legacy route. The key and route do
-not define QoS, deadline, final fairness, cancellation, resource reservation,
-or a process-wide priority class. Those concepts are not inferred from
-`ComputeIntent`.
+not define QoS, deadline, cancellation, resource reservation, or a
+process-wide priority class. Built-in service Runs carry explicit
+`ComputeRunQos` class, deadline, and weight; none is inferred from
+`ComputeIntent`, output quality, or maximum parallelism.
 
 Physical domains do not pull plans. `ComputeTaskDispatcher` and dirty phase
 contexts discover readiness and push concrete owned submissions, callbacks, or
 legacy borrowed task handles through `SchedulerTaskRuntime`. A selected legacy
 scheduler may order and route ready work using its queues, priority hints,
-epoch, and available devices; the service uses high/normal queues and Run-local
-settlement. Neither receives graph topology, a compute plan, or
-dirty-propagation ownership.
+epoch, and available devices; the service uses a policy-aware bounded ready
+store and Run-local settlement. Neither receives graph topology, a compute
+plan, or dirty-propagation ownership.
 
 For `RealTimeUpdate`, `IntentUpdateCoordinator` launches the RT dirty sibling
 and then the HP dirty sibling through separate asynchronous calls, allowing
@@ -307,12 +308,24 @@ direct `ExecutionService` pool. Later zero/equal requests are idempotent; a
 conflicting positive request is rejected. Graph load, replacement, Run
 execution, and dirty phases never resize that pool.
 
-Issue #70 routes built-in CPU HP and RT work, including dirty and preflight
-phases, through the service's fixed workers, atomic resource admission, and
-entry/byte-bounded ready store. The service isolates completion count, first
-exception, in-flight drainage, trace Host, and settlement per Run. High and
-normal FIFOs provide a priority hint, but not final fairness or policy
-authority. Built-in CPU `GraphRuntime` bindings own no scheduler.
+Issues #70 and #71 route built-in CPU HP and RT work, including dirty and
+preflight phases, through the service's fixed workers, atomic resource
+admission, and policy-aware entry/byte-bounded ready store. The service
+isolates completion count, first exception, in-flight drainage, trace Host, and
+settlement per Run.
+Private interactive and throughput strategies compare immutable descriptors;
+the store owns the fairness rows and physical entries. Built-in CPU
+`GraphRuntime` bindings own no scheduler.
+
+Dispatch cost is `work_units + ceil(complete_ready_grant_bytes / 4096)`.
+Graph rows receive raw cost and Run rows receive `ceil(cost / weight)`.
+Interactive ordering prefers an earlier present monotonic deadline;
+throughput ordering is weighted and deterministic. A ready item ages after
+eight successful dispatches. While throughput remains ready, the service
+requires progress after at most three consecutive interactive dispatches,
+including across the aging threshold. Initial and dependent work share the
+same route, and Run fairness rows persist across temporary emptiness. The
+strategies own no worker, physical ready store, token, budget, Run, or Graph.
 
 A registered plugin is charged the full resolved grant and may own fewer
 workers but not more. `gpu_pipeline` and `heterogeneous` are charged the
@@ -351,6 +364,13 @@ dimensions default to 1 GiB retained memory, 512 MiB scratch, 65,536 ready
 entries, and 256 MiB ready bytes. These are Host-composition limits, not
 whole-process thread or allocation claims. `GraphStateExecutor` has a separate
 structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
+The default interactive headroom is one CPU slot, 64 MiB retained memory,
+32 MiB scratch, 1,024 ready entries, and 16 MiB ready bytes. Throughput
+admission is limited to the general ceiling after subtracting that vector;
+Interactive admission may use the reserve, but every Run still requires ledger
+authorization. Transitional legacy scheduler owners preserve Issue #70
+full-ledger admission; they are not assigned the Throughput Run policy and may
+consume shared capacity inside that headroom.
 
 Issue #70 deliberately removes the installed inline
 `kSchedulerWorkerProcessMax` constant. This is a source-contract break for
@@ -575,9 +595,12 @@ whole-process operating-system thread snapshot.
   grants; fixed service threads remain infrastructure, and the limits do not
   claim a whole-process OS-thread or allocation bound.
 - The current `IScheduler` interface still combines policy and physical worker
-  ownership for legacy routes. The issue #70 service owns a direct fixed
-  multi-Run CPU pool, atomic ledger admission, and bounded ready storage behind
-  a private ready-submission boundary; fairness/policy remains future work.
+  ownership for legacy routes. The service delivered by Issues #70 and #71
+  owns a direct fixed
+  multi-Run CPU pool, atomic ledger admission, policy-aware bounded ready
+  storage, and private interactive/throughput strategies behind a ready-only
+  boundary. The strategies own no physical or resource authority; the
+  replacement plugin policy ABI remains future work.
 
 The ready-task-only boundary lets scheduler ordering, worker lifecycle, and
 failure publication be tested without graph topology or cache ownership. The
@@ -588,9 +611,9 @@ governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-ex
 records the high-level replacement direction;
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 fixes its detailed Run, ready-task, completion, resource, and lifecycle
-ownership; issue #70's fixed multi-Graph HP/RT service, ownerless CPU bindings,
-child Runs, owned dirty/preflight submission, atomic resource vectors, and
-bounded ready store are current.
+ownership; issue #70's fixed multi-Graph HP/RT service and ledger plus issue
+#71's policy-aware bounded store, fairness, aging, headroom, and throughput
+progress are current.
 The exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 summarizes the accepted target without changing this current contract.

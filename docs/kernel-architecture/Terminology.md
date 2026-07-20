@@ -88,6 +88,16 @@ matching `(RunId, RunLocalTaskId)`. Realtime requests currently create paired
 child Runs without a `RunGroup`. Authoritative `GraphRevision`, the final
 lifecycle registry, and request-owned `RunGroup` remain future work.
 
+**`ComputeRunQos`**
+The private immutable scheduling inputs captured by a Run: an explicit
+`Interactive` or `Throughput` service class, an optional absolute monotonic
+deadline, a positive weight, and an optional positive maximum-parallelism
+descriptor. The current service applies class, deadline, and weight to policy
+ordering and headroom admission. Maximum parallelism remains recorded but is
+not yet an execution cap. A deadline orders interactive work; it does not
+expire or cancel a Run. Current Kernel requests use throughput, and none of
+these values is inferred from intent or output quality.
+
 **`FullTaskGraph`**
 The complete node/tile task shape for one graph generation, compute intent, and
 task-shape configuration. Request target, cache state, and dirty state do not
@@ -141,6 +151,14 @@ the fixed Host-composed `ExecutionService` and own no `IScheduler`. The legacy
 interface remains current for those routes, but it is not the accepted final
 policy-only scheduler generation.
 
+**`SchedulerPolicy`**
+The private, stateless comparison seam used by the current service. Its
+interactive and throughput implementations rank immutable ready descriptors;
+the service-owned store retains Graph/Run fairness state and physical entries.
+A policy owns no worker, ready entry, Run, Graph, budget, resource token,
+executor, completion route, or lifecycle authority. It is not the future
+replacement plugin ABI.
+
 **Scheduler worker request**
 The configured pre-planning value. Zero means automatic and one through eight
 are exact; any larger value is invalid. Automatic resolution is
@@ -176,11 +194,16 @@ singleton. It owns no worker, ready ordering, dependency, lifecycle registry,
 device/I/O/plugin estimate, or fairness authority.
 
 **Bounded ready store**
-The `ExecutionService`-owned high/normal store whose aggregate entry and
-accounted-byte counts cannot exceed immutable ledger limits. Initial and
-dependency-released submissions cross the same boundary. Removing an entry
-releases its ready grant only after execution authority is acquired or the
-entry is purged.
+The `ExecutionService`-owned policy-aware store whose aggregate entry and
+accounted-byte counts cannot exceed immutable ledger limits. It bills one
+dispatch as `work_units + ceil(complete_ready_grant_bytes / 4096)`, accumulates
+raw Graph service and weight-normalized Run service, honors interactive
+deadline ordering, ages ready entries after eight successful dispatches, and
+forces throughput progress after at most three consecutive interactive
+dispatches while throughput is ready. Initial and dependency-released
+submissions cross the same boundary, and Run rows persist across temporary
+emptiness. Removing an entry releases its ready grant only after execution
+authority is acquired or the entry is purged.
 
 **Resource reservation and grant**
 A reservation is the move-only RAII owner of one atomically admitted root
@@ -198,9 +221,11 @@ and newly released ready batches; it does not pull from a plan, derive tasks,
 inspect graph topology, or commit graph state.
 
 **`SchedulerTaskPriority`**
-The current independent `Normal` or `High` queue hint. It is orthogonal to
+The current independent `Normal` or `High` ready hint. It is orthogonal to
 `ComputeIntent`: HP and RT dirty source batches both use `High`, while their
-downstream groups use `Normal`.
+downstream groups use `Normal`. In the service policy store it is not an
+absolute priority: aging can select an older normal-hint entry through a
+continuing high-hint stream.
 
 **Scheduler epoch**
 A scheduler-local nonzero batch identity used to reject stale queued work and

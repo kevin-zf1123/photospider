@@ -40,9 +40,10 @@ by [issue #42](https://github.com/kevin-zf1123/photospider/issues/42).
 [Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) established
 the initial scheduler-worker containment and
 [Issue #44](https://github.com/kevin-zf1123/photospider/issues/44) established
-the bounded graph-state lane. Issues #69 and #70 have since replaced the
+the bounded graph-state lane. Issues #69 through #71 have since replaced the
 worker-only containment for built-in CPU execution with one Host-composed
-service, atomic resource vectors, and bounded ready storage. Visible compute
+service, atomic resource vectors, and policy-aware bounded ready storage.
+Visible compute
 still retains the graph-state lane for its whole callback, and legacy
 serial/GPU/plugin schedulers still own per-graph workers, queues, epochs, and
 policy. The current bounded contract:
@@ -60,6 +61,9 @@ policy. The current bounded contract:
 - admits each built-in CPU Run with a complete checked CPU,
   retained-memory, scratch, ready-entry, and ready-byte vector, and sends
   initial/dependent work through the same entry/byte-bounded store;
+- bills dispatch by work plus ready-byte quanta, maintains hierarchical
+  Graph/Run fairness, ages ready work, reserves interactive headroom, and
+  guarantees throughput progress after a bounded interactive burst;
 - releases move-only reservations exactly once after concrete scheduler
   destruction, including load rollback, successful graph close, and Host
   destruction; failed close retains the runtime and reservations for retry;
@@ -82,7 +86,11 @@ resources. Issue #70 replaces the former worker-only counter completely:
 `ExecutionService` now owns the sole Host-authoritative ledger, admits each
 built-in CPU Run with one checked full-vector reservation before publication,
 and requires initial and dependent work to hold entry/byte grants while stored
-in its bounded ready queue. Fairness and policy selection remain future work.
+in its bounded ready queue. Issue #71 adds the current private interactive and
+throughput strategies, explicit QoS ordering, work/byte charging, Graph/Run
+fairness, aging, headroom, and bounded throughput progress. Revision-aware
+preference, cancellation, supersession, and the replacement plugin policy ABI
+remain later work.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 is authoritative for the detailed target Run lifetime, owner boundaries,
 resource mint, close/shutdown scope, and delivery dependencies; it does not make
@@ -163,9 +171,9 @@ detail.
 
 ### `ComputeRun`
 
-The current issue #70 baseline implements exactly one private Run around every
-non-realtime HP service call. A realtime call instead creates separate HP
-`Full` and RT `Interactive` child Runs; it does not yet create the target
+The current baseline from Issues #70 and #71 implements exactly one private Run
+around every non-realtime HP service call. A realtime call instead creates
+separate HP `Full` and RT `Interactive` child Runs; it does not yet create the target
 `RunGroup`. Each Run captures a process-lifetime opaque id, session identity,
 topology-only submission revision, target, intent, quality, and explicit QoS;
 owns monotonic phase and exact-once terminal state; and owns the corresponding
@@ -179,8 +187,9 @@ service obtains one checked full-vector reservation for each Run before
 publication. Initial and dependent ready work must hold bounded-store grants,
 which workers exchange for execution grants. The captured topology generation
 is not the target authoritative `GraphRevision` or commit predicate.
-`RunGroup`, policy selection, revision-safe commit, cancellation, and
-supersession remain subsequent slices.
+Explicit QoS class, deadline, and weight enter the current built-in policy
+route; intent and quality do not infer them. `RunGroup`, revision-safe commit,
+cancellation, and supersession remain subsequent slices.
 
 The remainder of this section describes the complete accepted target.
 
@@ -298,7 +307,8 @@ it before participating Kernels/Hosts and retains it until they stop Run
 admission and drain their Runs. Graph close does not stop the service; only
 process execution-domain shutdown does.
 
-The current issue #70 baseline realizes the shared CPU/resource boundary:
+The current baseline from Issues #70 and #71 realizes the shared CPU/resource
+and policy boundary:
 `EmbeddedHostState` creates one fixed-pool CPU service with explicit limits
 before Kernel, and Kernel injects it into request-local `ComputeService`
 instances. Built-in CPU full HP, full RT, standalone dirty HP/RT, and preflight
@@ -310,8 +320,10 @@ remain available for serial, GPU, and plugin execution. The service exclusively
 owns one Host-authoritative ledger, atomically admits each complete Run vector
 before publication, requires initial and dependent ready work to enter the same
 bounded store with child grants, and releases every reservation/grant exactly
-once. Policy selection, revision validation, cancellation, and the lifecycle
-registry remain future work.
+once. The private interactive and throughput strategies apply explicit QoS,
+work/byte charging, Graph/Run fairness, deadline preference, aging, interactive
+headroom, and bounded throughput progress. Revision validation, cancellation,
+supersession, and the lifecycle registry remain future work.
 
 The final service owns physical CPU workers and later resource executors,
 bounded ready storage, Run/resource admission, policy-result validation,
@@ -358,20 +370,32 @@ exactly once. Later cancellation, close, and shutdown slices must preserve that
 contract. Capacity exhaustion and checked overflow fail without partial
 reservation, overcommit, or silent clamping.
 
-`SchedulerPolicy` is an internal strategy seam, not a physical executor or
-resource authority. It may rank immutable ready work or suggest a bounded
-quantum. It owns no worker, ready store, Run, Graph state, reservation,
-grant/token, native device handle, executor, completion route, or lifecycle
-authority. Trusted service code validates every suggestion before execution or
-ledger mutation.
+`SchedulerPolicy` is an internal comparison seam, not a physical executor or
+resource authority. The current interactive and throughput strategies rank
+immutable ready descriptors; the service-owned store retains every physical
+entry and Graph/Run fairness row. A strategy owns no worker, ready store, Run,
+Graph state, budget, reservation, grant/token, native device handle, executor,
+completion route, or lifecycle authority.
 
-At least two real built-in policies must prove the seam before a new plugin ABI
-is stabilized:
+Issue #71 proves the seam with two real built-in policies and one shared route:
 
-- an interactive policy with deadline awareness, latest-generation preference,
-  aging, and reserved headroom;
-- a throughput policy with weighted fairness, larger quanta, determinism
-  controls, and device-utilization awareness.
+- dispatch cost is `work_units + ceil(complete_ready_grant_bytes / 4096)`;
+- Graph service uses raw cost and Run service uses `ceil(cost / weight)`;
+- interactive ordering prefers an earlier present monotonic deadline, while
+  throughput ordering is weighted and deterministic;
+- a ready entry ages after eight successful dispatches;
+- at most three consecutive interactive dispatches precede required
+  throughput progress while throughput remains ready;
+- configured interactive headroom is excluded from general admission, with the
+  ledger retaining final authority; transitional legacy owners retain Issue
+  #70 full-ledger admission and are not reclassified as Throughput; and
+- initial and dependent work use the same policy route, retaining Run rows
+  across temporary emptiness.
+
+Latest-generation preference remains issue #74 work, revision-safe commit is
+#72, cancellation is #73, and the replacement scheduler policy ABI is #75.
+Larger quanta and device-utilization awareness remain later profile/device
+targets; issue #71 does not claim them.
 
 The current worker-owning scheduler ABI is transitional. The future policy ABI
 is a breaking replacement, not a permanent forwarding layer.
@@ -435,7 +459,7 @@ lease; late completion performs cleanup only.
 | [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Injected CPU-only service foundation, one Run, ready-only input | #67 |
 | [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain and no per-Graph CPU workers | #68 |
 | [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Current production admission, bounded ready store, and ledger | #69 |
-| [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Interactive and throughput built-in policies | #70 |
+| [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Current interactive and throughput built-in policies | #70 |
 | [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Revision capture and staged commit predicate | #67 |
 | [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Queued/running/commit cancellation | #70, #72 |
 | [#74](https://github.com/kevin-zf1123/photospider/issues/74) | Latest-wins supersession | #71, #73 |

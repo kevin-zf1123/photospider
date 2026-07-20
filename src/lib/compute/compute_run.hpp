@@ -254,29 +254,32 @@ enum class ComputeRunQuality {
 };
 
 /**
- * @brief Scheduling service class requested independently from HP intent.
+ * @brief Built-in scheduling service class requested independently from intent.
  *
  * @throws Nothing for value operations.
- * @note Current Host requests use Throughput explicitly. Future policy work may
- * supply Interactive without changing ComputeIntent semantics.
+ * @note ExecutionService selects its private built-in policy only from this
+ * value. Current Kernel requests use Throughput explicitly; private callers
+ * may request Interactive without changing ComputeIntent or output quality.
  */
 enum class ComputeRunQosClass {
-  /** @brief Latency-sensitive policy input reserved for future callers. */
+  /** @brief Deadline-aware latency-sensitive built-in policy input. */
   Interactive,
 
-  /** @brief Completion-oriented policy input used by current HP requests. */
+  /** @brief Weighted completion-oriented built-in policy input. */
   Throughput,
 };
 
 /**
  * @brief Immutable-by-copy QoS inputs captured in a Run descriptor.
  *
- * The value does not own workers, reservations, or scheduler policy. It merely
- * records caller intent for later execution-domain slices.
+ * The value does not own workers, reservations, ready entries, or policy
+ * state. ExecutionService copies it into one admitted Run and consumes the
+ * explicit class, deadline, and weight through its private policy strategies.
  *
  * @throws Nothing for default construction; copying an optional time point
  * does not allocate.
- * @note Weight and maximum_parallelism are validated by ComputeRun. Intent,
+ * @note Weight and maximum_parallelism are validated by ComputeRun. Issue #71
+ * applies weight but leaves maximum_parallelism as descriptor input; intent,
  * QoS, resource admission, and commit policy remain distinct concepts.
  */
 struct ComputeRunQos {
@@ -316,7 +319,7 @@ struct ComputeRunSubmission {
   /** @brief Quality independent from intent and QoS. */
   ComputeRunQuality quality = ComputeRunQuality::Full;
 
-  /** @brief Explicit request QoS captured without applying policy. */
+  /** @brief Explicit request QoS captured before service policy selection. */
   ComputeRunQos qos;
 };
 

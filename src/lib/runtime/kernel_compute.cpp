@@ -66,15 +66,16 @@ std::string make_async_exception_message(bool intent_aware, int node_id,
 }
 
 /**
- * @brief Builds the explicit current HP QoS captured by issue #66 Runs.
+ * @brief Builds the explicit default QoS consumed by built-in CPU Runs.
  *
  * @param use_parallel_executor Whether the request selects scheduler-backed
  * execution.
  * @return Throughput QoS with no deadline, weight one, and a sequential
  * maximum-parallelism cap only for inline execution.
  * @throws Nothing.
- * @note The value is descriptor input only. Current schedulers do not apply
- * policy from it; admission and policy work remain later roadmap issues.
+ * @note Built-in CPU ExecutionService routes apply this throughput class,
+ * weight, and absent deadline. Inline and legacy scheduler routes retain their
+ * existing execution behavior; intent and quality never reclassify the value.
  */
 compute::ComputeRunQos make_default_compute_run_qos(
     bool use_parallel_executor) {
