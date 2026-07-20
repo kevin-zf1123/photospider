@@ -114,15 +114,30 @@ is multiplied by maximum callback concurrency, while ready entries and bytes
 are multiplied by every logical task so dependency release is already covered.
 Initial and dependent entries use the same estimator and insertion boundary.
 Copied graph-identity metadata is charged by actual string capacity plus its
-terminator. Before each dirty or connected-preflight service segment, the
-adapter adds current staging/snapshot storage and deduplicated missing
-staging-map entries, including ordered-map linkage and deterministic empty or
-seeded visible output metadata. Later dirty phases re-evaluate the live map so
-earlier source entries are not counted twice. The estimator counts only visible
-Host-owned C++ storage; future operation-produced image pixels, named-value
-growth, and opaque backend, device, plugin, or allocator-owned allocations are
-not fabricated. Current built-in adapters declare zero scratch only because
-they own no separately metered fixed Host scratch.
+terminator. After every initial value and ready grant has moved into a staged
+queue entry, `ExecutionService` destroys the caller-side submission-vector
+backing before active-Run publication and settlement waiting; only the staged
+entries and then the bounded store retain those submissions. Before each dirty
+or connected-preflight service segment, the adapter adds current
+staging/snapshot storage and deduplicated missing staging-map entries,
+including ordered-map linkage and deterministic empty or seeded visible output
+metadata. HP downstream demand reads the current Run-owned write buffer through
+the live `ComputeRunLease`, then its phase-local estimator adds only still
+missing entries, so source-created entries remain charged without being
+counted twice.
+
+Dirty HP and RT demand also charges the complete request-owned
+`DirtyNodeSynchronization`: the shared allocation, unordered-map buckets,
+values and linkage, every `unique_ptr`-owned `std::mutex`, and visible object
+storage. Allocator-private map metadata and opaque platform mutex allocation
+remain excluded. Concurrent HP/RT siblings conservatively include the same
+shared synchronization object in both independent phase reservations. This
+intentional double reservation lets either sibling settle first without
+leaving the surviving Run's shared ownership unaccounted. The estimator counts
+only visible Host-owned C++ storage; future operation-produced image pixels,
+named-value growth, and opaque backend, device, plugin, or allocator-owned
+allocations are not fabricated. Current built-in adapters declare zero scratch
+only because they own no separately metered fixed Host scratch.
 
 Issue #70 deliberately removes the installed inline
 `kSchedulerWorkerProcessMax` constant. Source consumers that referenced it must

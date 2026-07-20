@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,7 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "support/cache_test_dependencies.hpp"
+#include "support/execution_service_test_access.hpp"
 
 namespace ps::compute {
 namespace {
@@ -1717,6 +1719,69 @@ TEST(ExecutionService,
 }
 
 /**
+ * @brief Verifies initial-submission staging retires its backing allocation.
+ *
+ * @return Nothing.
+ * @throws Standard Run, submission, vector, or callback allocation exceptions
+ * from fixture setup.
+ * @note The private production boundary is called after QueueEntry staging and
+ * before active-Run publication. Empty size and zero capacity prove neither
+ * moved-from values nor their caller-side backing remain available to span the
+ * settlement wait.
+ */
+TEST(ExecutionService, ReleasesInitialSubmissionStagingStorageBeforeWait) {
+  ComputeRun run(make_test_submission("released-initial-staging", 1U, 1));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> submissions;
+  submissions.reserve(8U);
+  submissions.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 1, entered));
+  ASSERT_FALSE(submissions.empty());
+  ASSERT_GE(submissions.capacity(), 8U);
+
+  testing::ExecutionServiceTestAccess::release_initial_submission_storage(
+      submissions);
+
+  EXPECT_TRUE(submissions.empty());
+  EXPECT_EQ(submissions.capacity(), 0U);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+}
+
+/**
+ * @brief Verifies per-node synchronization demand grows with owned mutexes.
+ *
+ * @return Nothing.
+ * @throws Standard vector/map/mutex allocation exceptions from fixture setup.
+ * @throws GraphError if checked retained-memory estimation overflows.
+ * @note The visible minimum covers the shared allocation, one unordered-map
+ * value and linkage, its unique_ptr-owned mutex, and the synchronization
+ * object. The exact bucket count remains implementation-selected.
+ */
+TEST(ExecutionServiceProductResources,
+     DirtyNodeSynchronizationDemandTracksNodePlanGrowth) {
+  DirtyNodeSynchronization one_node({1});
+  std::vector<int> many_node_ids;
+  many_node_ids.reserve(64U);
+  for (int node_id = 1; node_id <= 64; ++node_id) {
+    many_node_ids.push_back(node_id);
+  }
+  DirtyNodeSynchronization many_nodes(many_node_ids);
+
+  const std::uint64_t one_node_bytes = one_node.retained_memory_bytes();
+  const std::uint64_t many_node_bytes = many_nodes.retained_memory_bytes();
+  const std::uint64_t visible_one_node_minimum =
+      static_cast<std::uint64_t>(sizeof(DirtyNodeSynchronization)) +
+      2U * static_cast<std::uint64_t>(sizeof(void*)) +
+      static_cast<std::uint64_t>(sizeof(
+          std::unordered_map<int, std::unique_ptr<std::mutex>>::value_type)) +
+      2U * static_cast<std::uint64_t>(sizeof(void*)) +
+      static_cast<std::uint64_t>(sizeof(std::mutex));
+
+  EXPECT_GE(one_node_bytes, visible_one_node_minimum);
+  EXPECT_GT(many_node_bytes, one_node_bytes);
+}
+
+/**
  * @brief Exercises full-HP product admission below and above its estimate.
  *
  * @return Nothing.
@@ -1850,9 +1915,10 @@ TEST(ExecutionServiceProductResources,
  * @throws Standard allocation, filesystem, graph, or service exceptions from
  * fixture setup.
  * @note Each exact service-only envelope is proved usable before the real
- * HP/RT executor plans and stages production work. That lower endpoint rejects
- * before registered operation entry; default capacity then commits exactly
- * one output and returns every reserved dimension to zero.
+ * HP/RT executor plans and stages production work. A retained-memory limit
+ * below the actual synchronization owner rejects before registered operation
+ * entry; default capacity then commits exactly one output and returns every
+ * reserved dimension to zero.
  */
 TEST(ExecutionServiceProductResources,
      DirtyHpAndRtRejectSmallLimitAndExecuteWithDefaultLimit) {
@@ -1893,10 +1959,19 @@ TEST(ExecutionServiceProductResources,
     request.disable_disk_cache = true;
     request.dirty_roi = PixelRect{0, 0, 8, 8};
     request.suppress_graph_downsample = !is_rt;
+    request.node_synchronization =
+        std::make_shared<DirtyNodeSynchronization>(graph.node_ids());
+    const std::uint64_t node_synchronization_bytes =
+        request.node_synchronization->retained_memory_bytes();
+    ASSERT_GT(node_synchronization_bytes, 0U);
     HighPrecisionDirtyExecutor hp_executor(traversal, events);
     RealTimeDirtyExecutor rt_executor(traversal, events);
 
-    ExecutionService small_service(1U, execution_limits(service_only));
+    ExecutionResourceLimits synchronization_too_small =
+        ExecutionService::default_resource_limits();
+    synchronization_too_small.retained_memory_bytes =
+        node_synchronization_bytes - 1U;
+    ExecutionService small_service(1U, synchronization_too_small);
     ComputeRun small_run(make_dirty_resource_submission(
         graph_identity, graph.topology_generation(), node_id, intent));
     ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
@@ -1966,6 +2041,146 @@ TEST(ExecutionServiceProductResources,
                 11);
     }
   }
+}
+
+/**
+ * @brief Proves downstream HP admission includes source-created staging.
+ *
+ * @return Nothing.
+ * @throws Standard graph, Run, context, service, or staging exceptions
+ * unchanged.
+ * @note A source service segment first inserts one Run-owned HP entry and
+ * settles. The downstream phase then charges that current buffer through its
+ * live Run lease while its phase-local callback adds only one still-missing
+ * node. A cap omitting exactly the existing-entry growth rejects before either
+ * downstream callback; the complete cap executes and releases the ledger.
+ */
+TEST(ExecutionServiceProductResources,
+     HpDownstreamAdmissionIncludesSettledSourceStaging) {
+  constexpr int kSourceNodeId = 221;
+  constexpr int kMissingNodeId = 222;
+  const std::string graph_identity = "resource-hp-phase-current-staging";
+  GraphModel graph("cache/resource-hp-phase-current-staging");
+  graph.add_node(make_resource_product_node(kSourceNodeId));
+  graph.add_node(make_resource_product_node(kMissingNodeId));
+  graph.validate_topology();
+
+  ComputePlan compute_plan;
+  compute_plan.intent = ComputeIntent::GlobalHighPrecision;
+  compute_plan.target_node_id = kMissingNodeId;
+  compute_plan.parallel = true;
+  compute_plan.execution_order = {kSourceNodeId, kMissingNodeId};
+  compute_plan.planned_nodes = {kSourceNodeId, kMissingNodeId};
+  compute_plan.task_graph.tasks.resize(3U);
+  compute_plan.task_graph.tasks[0].task_id = 0;
+  compute_plan.task_graph.tasks[0].node_id = kSourceNodeId;
+  compute_plan.task_graph.tasks[1].task_id = 1;
+  compute_plan.task_graph.tasks[1].node_id = kSourceNodeId;
+  compute_plan.task_graph.tasks[2].task_id = 2;
+  compute_plan.task_graph.tasks[2].node_id = kMissingNodeId;
+
+  ComputeRun run(make_test_submission(
+      graph_identity, graph.topology_generation(), kMissingNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  HighPrecisionDirtyWriteBuffer& hp_buffer =
+      run.emplace_dirty_hp_write_buffer(false);
+  ComputeRunLease baseline_lease = run.acquire_lease();
+  const std::uint64_t baseline_run_bytes =
+      baseline_lease.retained_memory_bytes();
+  const std::uint64_t baseline_buffer_bytes = hp_buffer.retained_memory_bytes();
+
+  std::atomic_int source_calls{0};
+  auto source_context = std::make_shared<DirtyReadyTaskContext>(
+      compute_plan, nullptr, std::vector<int>{0},
+      [&graph, &hp_buffer, &source_calls](int) {
+        (void)hp_buffer.ensure_output(graph.node(kSourceNodeId));
+        source_calls.fetch_add(1, std::memory_order_relaxed);
+      },
+      owned_callable_retained_memory_bytes(static_cast<std::uint64_t>(
+          sizeof(std::reference_wrapper<GraphModel>) +
+          sizeof(std::reference_wrapper<HighPrecisionDirtyWriteBuffer>) +
+          sizeof(std::reference_wrapper<std::atomic_int>))),
+      run.acquire_lease(), false, SchedulerTaskPriority::High);
+  std::vector<ReadyTaskSubmission> source_submissions =
+      source_context->make_submissions({0}, true);
+  const std::uint64_t source_missing_bytes =
+      hp_buffer.missing_entry_retained_memory_bytes(graph, {kSourceNodeId});
+  ExecutionService source_service(1U);
+  ExecutionServiceHost source_host;
+  EXPECT_NO_THROW(source_service.execute_cpu_run(
+      source_host, std::move(source_submissions), 1,
+      source_context->run_resource_demand(source_missing_bytes)));
+  EXPECT_EQ(source_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(source_service.resource_snapshot().reserved, ResourceVector{});
+
+  const std::uint64_t current_buffer_bytes = hp_buffer.retained_memory_bytes();
+  ASSERT_GT(current_buffer_bytes, baseline_buffer_bytes);
+  const std::uint64_t existing_source_entry_bytes =
+      current_buffer_bytes - baseline_buffer_bytes;
+  ComputeRunLease current_lease = run.acquire_lease();
+  EXPECT_EQ(current_lease.retained_memory_bytes() - baseline_run_bytes,
+            existing_source_entry_bytes);
+  EXPECT_EQ(
+      hp_buffer.missing_entry_retained_memory_bytes(graph, {kSourceNodeId}),
+      0U);
+  const std::uint64_t missing_downstream_bytes =
+      hp_buffer.missing_entry_retained_memory_bytes(graph, {kMissingNodeId});
+  ASSERT_GT(missing_downstream_bytes, 0U);
+  EXPECT_EQ(hp_buffer.missing_entry_retained_memory_bytes(
+                graph, {kSourceNodeId, kMissingNodeId}),
+            missing_downstream_bytes);
+
+  std::atomic_int downstream_calls{0};
+  const std::vector<int> downstream_task_ids{1, 2};
+  auto downstream_context = std::make_shared<DirtyReadyTaskContext>(
+      compute_plan, nullptr, downstream_task_ids,
+      [&downstream_calls](int) {
+        downstream_calls.fetch_add(1, std::memory_order_relaxed);
+      },
+      owned_callable_retained_memory_bytes(static_cast<std::uint64_t>(
+          sizeof(std::reference_wrapper<std::atomic_int>))),
+      run.acquire_lease(), false, SchedulerTaskPriority::Normal);
+  const CpuRunResourceDemand downstream_demand =
+      downstream_context->run_resource_demand(missing_downstream_bytes);
+  RetainedMemoryEstimator expected_downstream_shared(
+      "test HP downstream shared demand");
+  expected_downstream_shared.add_bytes(
+      downstream_context->retained_memory_bytes());
+  expected_downstream_shared.add_bytes(current_lease.retained_memory_bytes());
+  expected_downstream_shared.add_bytes(missing_downstream_bytes);
+  EXPECT_EQ(downstream_demand.shared_retained_memory_bytes,
+            expected_downstream_shared.bytes());
+
+  ExecutionService probe(1U);
+  std::vector<ReadyTaskSubmission> representative_submissions =
+      downstream_context->make_submissions(downstream_task_ids, true);
+  const ResourceVector complete_required = probe.estimate_cpu_run_resources(
+      representative_submissions.front(),
+      static_cast<int>(downstream_task_ids.size()), downstream_demand);
+  ASSERT_GT(complete_required.retained_memory_bytes,
+            existing_source_entry_bytes);
+  ResourceVector omitted_existing_entry = complete_required;
+  omitted_existing_entry.retained_memory_bytes -= existing_source_entry_bytes;
+
+  ExecutionService lower_service(1U, execution_limits(omitted_existing_entry));
+  ExecutionServiceHost lower_host;
+  EXPECT_THROW(
+      lower_service.execute_cpu_run(
+          lower_host, std::move(representative_submissions),
+          static_cast<int>(downstream_task_ids.size()), downstream_demand),
+      GraphError);
+  EXPECT_EQ(downstream_calls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(lower_service.resource_snapshot().reserved, ResourceVector{});
+
+  ExecutionService complete_service(1U, execution_limits(complete_required));
+  ExecutionServiceHost complete_host;
+  std::vector<ReadyTaskSubmission> complete_submissions =
+      downstream_context->make_submissions(downstream_task_ids, true);
+  EXPECT_NO_THROW(complete_service.execute_cpu_run(
+      complete_host, std::move(complete_submissions),
+      static_cast<int>(downstream_task_ids.size()), downstream_demand));
+  EXPECT_EQ(downstream_calls.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(complete_service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**

@@ -13,6 +13,17 @@
 
 namespace ps {
 class SchedulerHostContext;
+
+namespace testing {
+
+/**
+ * @brief Test-only bridge for private ExecutionService staging boundaries.
+ *
+ * @note The definition lives under tests/support and is never installed.
+ */
+class ExecutionServiceTestAccess;
+
+}  // namespace testing
 }  // namespace ps
 
 namespace ps::compute {
@@ -625,7 +636,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param host Active Graph runtime observation context, borrowed only until
    * the settled wait finishes.
    * @param initial_submissions Dispatcher-discovered initial ready values from
-   * one Run.
+   * one Run; their values move into QueueEntry ownership and the caller-side
+   * vector backing is retired before publication.
    * @param total_task_count Complete logical planned-task count.
    * @param run_resource_demand Shared once-per-Run bytes plus the uniform
    * additional declaration for every logical task.
@@ -639,8 +651,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::bad_alloc or std::system_error from pool/store setup.
    * @throws The exact first worker task exception after settlement.
    * @note Independent calls may overlap. Run-local state is removed only after
-   * queued work is retired and every in-flight callback has exited. No Graph,
-   * plan, dependency, result, or commit object enters this method.
+   * queued work is retired and every in-flight callback has exited. Initial
+   * QueueEntry construction completes transactionally before the moved-from
+   * input vector is released, so neither that vector nor its backing spans the
+   * settlement wait. No Graph, plan, dependency, result, or commit object
+   * enters this method.
    */
   void execute_cpu_run(SchedulerHostContext& host,
                        std::vector<ReadyTaskSubmission> initial_submissions,
@@ -742,6 +757,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   void log_event(SchedulerTraceAction action, int node_id) override;
 
  private:
+  friend class ::ps::testing::ExecutionServiceTestAccess;
+
   /** @brief Per-Run completion, failure, trace, and settlement state. */
   struct RunState;
 
@@ -823,6 +840,21 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   std::shared_ptr<QueueEntry> make_queue_entry(
       const std::shared_ptr<RunState>& run, ReadyTaskSubmission submission);
+
+  /**
+   * @brief Releases moved-from initial-batch storage before Run publication.
+   * @param submissions Initial values already transferred into QueueEntry
+   * ownership.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The empty-vector swap deterministically transfers the complete
+   * caller-side backing allocation into a temporary that is destroyed before
+   * active-Run publication or settlement waiting. Callers invoke this only
+   * after every initial QueueEntry and ready grant has been staged
+   * successfully; earlier exceptions unwind the original vector normally.
+   */
+  static void release_initial_submission_storage(
+      std::vector<ReadyTaskSubmission>& submissions) noexcept;
 
   /**
    * @brief Claims one Run's first failure and retires its queued work.

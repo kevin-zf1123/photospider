@@ -98,13 +98,24 @@ Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。
 scratch demand 按最大 callback 并发数相乘，ready entry 与 byte 则按所有逻辑任务相乘，因此
 dependency release 已被预先覆盖。初始与 dependent entry 使用同一个 estimator 和 insertion
 boundary。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在每个 dirty
-或 connected-preflight service segment 之前，adapter 会加入当前 staging/snapshot storage 与
-去重后的缺失 staging-map entry，其中包括有序 map linkage，以及确定性的空 output metadata
-或 seeded 可见 output metadata。后续 dirty phase 会针对 live map 重新计算，因此不会重复计费
-先前 source entry。Estimator 只计算所有权与大小均可见的 Host-owned C++ storage；不会伪造
-未来由 operation 产生的 image pixel、named-value 增长，以及不透明的 backend、device、plugin
-或 allocator-owned allocation。当前内建 adapter 声明 scratch 为零，仅因为它们不拥有需要
-独立计量的固定 Host scratch。
+每个 initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
+active Run 和等待 settlement 之前销毁 caller-side submission vector 的 backing；此后只有暂存
+entry 以及 bounded store 保留这些 submission。在每个 dirty 或 connected-preflight service
+segment 之前，adapter 会加入当前 staging/snapshot storage 与去重后的缺失 staging-map entry，
+其中包括有序 map linkage，以及确定性的空 output metadata 或 seeded 可见 output metadata。
+HP downstream demand 会通过仍存活的 `ComputeRunLease` 读取当前 Run-owned write buffer，再由
+phase-local estimator 只加入仍缺失的 entry；这样 source 创建的 entry 会继续被计费，同时不会
+重复计费。
+
+Dirty HP 与 RT demand 还会计入完整的 request-owned `DirtyNodeSynchronization`：shared
+allocation、unordered-map bucket、value 与 linkage、每个由 `unique_ptr` 拥有的
+`std::mutex`，以及可见 object storage。Allocator-private map metadata 与不透明的 platform
+mutex allocation 仍排除在外。并发 HP/RT sibling 会在两个独立 phase reservation 中保守地
+计入同一个 shared synchronization object。这种有意的双 reservation 允许任一 sibling 先
+settle，同时不会让仍存活 Run 的 shared ownership 失去计费覆盖。Estimator 只计算所有权与
+大小均可见的 Host-owned C++ storage；不会伪造未来由 operation 产生的 image pixel、
+named-value 增长，以及不透明的 backend、device、plugin 或 allocator-owned allocation。
+当前内建 adapter 声明 scratch 为零，仅因为它们不拥有需要独立计量的固定 Host scratch。
 
 Issue #70 有意删除已安装的 inline `kSchedulerWorkerProcessMax` 常量。引用该常量的源码 consumer
 必须停止依赖这项 policy constant；不提供 alias 或已安装 public replacement。组合 limits 现在使用

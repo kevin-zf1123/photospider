@@ -32,6 +32,23 @@ std::mutex& DirtyNodeSynchronization::mutex_for(int node_id) const {
   return *node_mutexes_.at(node_id);
 }
 
+/** @copydoc DirtyNodeSynchronization::retained_memory_bytes */
+std::uint64_t DirtyNodeSynchronization::retained_memory_bytes() const {
+  RetainedMemoryEstimator estimate("DirtyNodeSynchronization");
+  const std::uint64_t bucket_count =
+      static_cast<std::uint64_t>(node_mutexes_.bucket_count());
+  const std::uint64_t node_count =
+      static_cast<std::uint64_t>(node_mutexes_.size());
+  estimate.add_objects<DirtyNodeSynchronization>();
+  estimate.add_shared_control_block();
+  estimate.add_objects<void*>(bucket_count);
+  estimate.add_objects<decltype(node_mutexes_)::value_type>(node_count);
+  estimate.add_objects<void*>(node_count);
+  estimate.add_objects<void*>(node_count);
+  estimate.add_objects<std::mutex>(node_count);
+  return estimate.bytes();
+}
+
 /** @copydoc ensure_running_scheduler */
 IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
                                      ComputeIntent intent) {

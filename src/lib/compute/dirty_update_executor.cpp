@@ -889,12 +889,15 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * @throws std::bad_alloc unchanged when planning, task, cache, staging,
  * telemetry, or output storage exhausts memory.
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
- * target validation failures.
+ * target validation failures, including checked shared-resource estimation.
  * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
  * outside that lock. Both standalone and realtime-child HP staging are
  * Run-owned. Per-node synchronization is request-local for standalone HP work
  * and shared only with the matching RT sibling when supplied by
- * ComputeService.
+ * ComputeService. Each process-service phase charges the complete shared
+ * synchronization owner. Concurrent HP/RT siblings therefore reserve the same
+ * object conservatively in both Runs so either reservation can settle first
+ * without leaving the surviving sibling's retained ownership unaccounted.
  */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -1012,6 +1015,7 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   source_first_request.selection = &prepared.selection;
   RetainedMemoryEstimator hp_shared_demand("HP dirty request");
   hp_shared_demand.add_bytes(prepared_dirty_retained_memory_bytes(prepared));
+  hp_shared_demand.add_bytes(node_synchronization->retained_memory_bytes());
   if (request.stabilized_parameters) {
     hp_shared_demand.add_bytes(
         request.stabilized_parameters->retained_memory_bytes());
@@ -1112,9 +1116,12 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  * @throws std::bad_alloc unchanged when planning, task, proxy, staging,
  * telemetry, or output storage exhausts memory.
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
- * target validation failures.
+ * target validation failures, including checked shared-resource estimation.
  * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
  * outside that lock. RT output never becomes formal reusable GraphModel cache.
+ * Each process-service phase charges the complete per-node synchronization
+ * owner; a shared HP/RT sibling object is therefore conservatively present in
+ * both independent Run reservations.
  */
 NodeOutput& RealTimeDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -1217,6 +1224,7 @@ NodeOutput& RealTimeDirtyExecutor::execute(
   source_first_request.selection = &prepared.selection;
   RetainedMemoryEstimator rt_shared_demand("RT dirty request");
   rt_shared_demand.add_bytes(prepared_dirty_retained_memory_bytes(prepared));
+  rt_shared_demand.add_bytes(node_synchronization->retained_memory_bytes());
   if (request.stabilized_parameters) {
     rt_shared_demand.add_bytes(
         request.stabilized_parameters->retained_memory_bytes());

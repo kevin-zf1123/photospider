@@ -834,6 +834,7 @@ void ExecutionService::execute_cpu_run(
     for (ReadyTaskSubmission& submission : initial_submissions) {
       staged_entries.push_back(make_queue_entry(run, std::move(submission)));
     }
+    release_initial_submission_storage(initial_submissions);
 
     {
       std::lock_guard<std::mutex> lock(pool_->mutex);
@@ -890,6 +891,13 @@ void ExecutionService::execute_cpu_run(
   if (failure) {
     std::rethrow_exception(failure);
   }
+}
+
+/** @copydoc ExecutionService::release_initial_submission_storage */
+void ExecutionService::release_initial_submission_storage(
+    std::vector<ReadyTaskSubmission>& submissions) noexcept {
+  std::vector<ReadyTaskSubmission> released_storage;
+  released_storage.swap(submissions);
 }
 
 /** @copydoc ExecutionService::make_queue_entry */

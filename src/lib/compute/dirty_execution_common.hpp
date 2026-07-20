@@ -38,11 +38,14 @@ namespace ps::compute {
  * to the same live node without coupling their task graphs or output buffers.
  *
  * @throws std::bad_alloc If node-id or mutex storage cannot be allocated.
+ * @throws GraphError If checked retained-memory estimation overflows.
  * @note The node map is fully constructed before scheduler submission and is
  * immutable thereafter. Different node ids remain independent, and selected
  * operation execution occurs outside these critical sections. Ownership is
  * request-scoped; no instance is stored in GraphModel, GraphRuntime, or global
- * state.
+ * state. The retained-memory contract includes the shared allocation,
+ * immutable map, and every independently owned mutex while excluding
+ * allocator-private metadata.
  */
 class DirtyNodeSynchronization final {
  public:
@@ -65,6 +68,20 @@ class DirtyNodeSynchronization final {
    * map is never mutated after construction.
    */
   std::mutex& mutex_for(int node_id) const;
+
+  /**
+   * @brief Estimates complete Host-owned synchronization storage.
+   * @return Checked object, shared-control, unordered-map bucket/value/linkage,
+   * unique-owner, and independently allocated mutex bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The estimate includes one shared control block because callers retain
+   * this object through `std::shared_ptr`. The unique_ptr owner itself is
+   * already part of each unordered-map value; every pointee adds one
+   * `sizeof(std::mutex)`. Allocator-private node metadata and any opaque
+   * platform mutex allocation beyond the visible C++ object are excluded.
+   * The immutable map permits concurrent calls without additional locking.
+   */
+  std::uint64_t retained_memory_bytes() const;
 
  private:
   /** @brief Immutable node-id index of independently owned mutexes. */

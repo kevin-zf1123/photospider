@@ -363,7 +363,10 @@ struct DirtyUpdateRequest {
    * scheduler-backed RealTimeUpdate will run HP and RT concurrently. Each
    * executor creates an independent local owner when this pointer is null.
    * Shared ownership lasts through sibling failure cleanup and scheduler drain;
-   * the object is never retained by a Graph or process-wide service.
+   * the object is never retained by a Graph or process-wide service. Every
+   * process-service phase charges its complete Host-visible storage; concurrent
+   * siblings therefore reserve the same shared object conservatively in both
+   * Runs so either reservation may settle first.
    */
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
 };
