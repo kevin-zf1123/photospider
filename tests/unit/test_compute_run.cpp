@@ -870,9 +870,11 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
 /**
  * @brief Verifies concurrent callers cannot overlap two service Run batches.
  *
- * @note The first callback blocks after entering its worker. A second caller
- * may prepare its ready value but cannot enter the CPU scheduler until the
- * first batch settles and releases the service Run gate.
+ * @note The first callback blocks after entering its worker. The second caller
+ * signals immediately before calling `execute_cpu_run()`, so the blocking
+ * assertions run only after that caller is scheduled at the service boundary.
+ * It cannot enter the CPU scheduler until the first batch settles and releases
+ * the service Run gate.
  */
 TEST(ExecutionService, SerializesCompleteConcurrentRunIntervals) {
   ExecutionService service;
@@ -916,12 +918,18 @@ TEST(ExecutionService, SerializesCompleteConcurrentRunIntervals) {
       });
   ASSERT_EQ(first_entered.get_future().wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
+  std::promise<void> second_call_started;
+  std::future<void> second_call_started_future =
+      second_call_started.get_future();
   auto second_future = std::async(
-      std::launch::async,
-      [&service, &second_host, ready = std::move(second_ready)]() mutable {
+      std::launch::async, [&service, &second_host, &second_call_started,
+                           ready = std::move(second_ready)]() mutable {
+        second_call_started.set_value();
         service.execute_cpu_run(second_host, 2U, std::move(ready), 1);
       });
 
+  EXPECT_EQ(second_call_started_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
   EXPECT_EQ(second_future.wait_for(std::chrono::milliseconds(100)),
             std::future_status::timeout);
   EXPECT_FALSE(second_entered.load(std::memory_order_acquire));
