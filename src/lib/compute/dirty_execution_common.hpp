@@ -14,6 +14,7 @@
 #include "compute/compute_task_dispatcher.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/execution_service.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -166,6 +167,17 @@ struct DirtySourceFirstRunRequest {
   /** @brief Dirty generation-local active task view for dependency release. */
   const DirtyTaskSelectionOverlay* selection = nullptr;
 
+  /**
+   * @brief Other request-owned structural bytes retained across phase service
+   * settlement.
+   *
+   * @note This excludes the copied `DirtyReadyTaskContext` and matching Run
+   * control, which the adapter adds itself. Image pixels and opaque
+   * backend/plugin/device allocations must not be declared here without a
+   * trusted size contract.
+   */
+  std::uint64_t additional_shared_retained_memory_bytes = 0U;
+
   /** @brief Dirty source task ids submitted before downstream work. */
   const std::vector<int>* source_task_ids = nullptr;
 
@@ -209,6 +221,8 @@ class DirtyReadyTaskContext final
    * @param selection Optional dirty dependency overlay copied into ownership.
    * @param active_task_ids Exact task ids active in this phase.
    * @param run_task Owned callable that executes one dense task id.
+   * @param run_task_retained_memory_bytes Audited capture/allocation bytes
+   * owned by run_task beyond its inline `std::function` object.
    * @param lease Matching Run lease retained for dependent submissions.
    * @param release_dependents Whether completion releases dependency-ready
    * work from this phase.
@@ -220,8 +234,31 @@ class DirtyReadyTaskContext final
                         const DirtyTaskSelectionOverlay* selection,
                         const std::vector<int>& active_task_ids,
                         std::function<void(int)> run_task,
+                        std::uint64_t run_task_retained_memory_bytes,
                         ComputeRunLease lease, bool release_dependents,
                         SchedulerTaskPriority priority);
+
+  /**
+   * @brief Estimates complete context-owned structural storage.
+   * @return Checked copied plan/selection/dependency/callable/context bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The shared Run control is intentionally excluded and added once by
+   * `run_resource_demand()`. Borrowed Graph/cache/staging references and opaque
+   * output payloads are excluded.
+   */
+  std::uint64_t retained_memory_bytes() const;
+
+  /**
+   * @brief Builds the complete adapter declaration for this dirty phase.
+   * @param additional_shared_retained_memory_bytes Other request-owned
+   * structural bytes that remain live across phase settlement.
+   * @return Shared context/Run bytes plus uniform shared-pointer capture
+   * demand.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @throws std::system_error when matching Run storage locking fails.
+   */
+  CpuRunResourceDemand run_resource_demand(
+      std::uint64_t additional_shared_retained_memory_bytes) const;
 
   /**
    * @brief Materializes owned submissions for selected ready task ids.
@@ -270,6 +307,9 @@ class DirtyReadyTaskContext final
 
   /** @brief Owned dirty node/task callable. */
   std::function<void(int)> run_task_;
+
+  /** @brief Dynamic capture/allocation bytes owned by `run_task_`. */
+  std::uint64_t run_task_retained_memory_bytes_ = 0U;
 
   /** @brief Base matching lease copied into every materialized submission. */
   ComputeRunLease lease_;
@@ -643,18 +683,24 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
       throw std::invalid_argument(
           "Dirty process-service routing requires a host and Run.");
     }
+    const std::uint64_t run_task_retained_memory_bytes =
+        owned_callable_retained_memory_bytes(
+            static_cast<std::uint64_t>(sizeof(RunTask)));
     std::function<void(int)> owned_run_task(std::move(run_task));
     ComputeRunLease phase_lease = request.run->acquire_lease();
 
     if (!source_task_ids.empty()) {
       auto source_context = std::make_shared<DirtyReadyTaskContext>(
           compute_plan, request.selection, source_task_ids, owned_run_task,
-          phase_lease, false, SchedulerTaskPriority::High);
+          run_task_retained_memory_bytes, phase_lease, false,
+          SchedulerTaskPriority::High);
       std::vector<ReadyTaskSubmission> source_submissions =
           source_context->make_submissions(source_task_ids, true);
       request.execution_service->execute_cpu_run(
           *request.host, std::move(source_submissions),
-          static_cast<int>(source_task_ids.size()));
+          static_cast<int>(source_task_ids.size()),
+          source_context->run_resource_demand(
+              request.additional_shared_retained_memory_bytes));
     }
     if (request.before_downstream) {
       request.before_downstream();
@@ -671,7 +717,8 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
       }
       auto downstream_context = std::make_shared<DirtyReadyTaskContext>(
           compute_plan, request.selection, downstream_task_ids,
-          std::move(owned_run_task), phase_lease, true,
+          std::move(owned_run_task), run_task_retained_memory_bytes,
+          phase_lease, true,
           request.intent == ComputeIntent::RealTimeUpdate
               ? SchedulerTaskPriority::High
               : SchedulerTaskPriority::Normal);
@@ -679,7 +726,9 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           downstream_context->make_submissions(initial_downstream_ids, true);
       request.execution_service->execute_cpu_run(
           *request.host, std::move(downstream_submissions),
-          static_cast<int>(downstream_task_ids.size()));
+          static_cast<int>(downstream_task_ids.size()),
+          downstream_context->run_resource_demand(
+              request.additional_shared_retained_memory_bytes));
     }
     return;
   }

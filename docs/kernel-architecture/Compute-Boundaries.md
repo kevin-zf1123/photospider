@@ -73,9 +73,10 @@ caller or creating a second worker. `GraphRuntime` performs the join before
 scheduler teardown. If explicit close later fails in scheduler shutdown,
 Kernel starts one replacement lane worker before returning the failure so the
 retained session remains retryable. Different graphs have independent workers
-and queues. The Host-composition resource ledger does not count these lane
-workers or fixed service threads as infrastructure. It admits per-Run CPU
-execution rights and conservative legacy scheduler-owner slots.
+and queues. The Host-composition resource ledger does not charge these lane
+workers or fixed service threads; they remain infrastructure. Its CPU dimension
+instead admits per-Run execution rights and conservative legacy
+scheduler-owner slots.
 
 ## Current Collaborators
 
@@ -105,6 +106,25 @@ Compute collaborators live under `src/lib/compute/`; the ledger lives under
 `src/lib/runtime/`, and legacy scheduler planning/ownership lives under
 `src/lib/scheduler/`. These classes are private implementation modules and do
 not form an installable API.
+
+Current built-in CPU admission combines a mandatory checked service envelope
+with an auditable adapter envelope. Shared Run/control/plan or phase-context
+retained storage is charged once. Uniform per-task retained and scratch demand
+is multiplied by maximum callback concurrency, while ready entries and bytes
+are multiplied by every logical task so dependency release is already covered.
+Initial and dependent entries use the same estimator and insertion boundary.
+The estimator counts only visible Host-owned C++ storage; image pixels and
+opaque backend, device, plugin, or allocator-owned allocations are not
+fabricated. Current built-in adapters declare zero scratch only because they own
+no separately metered fixed Host scratch.
+
+Issue #70 deliberately removes the installed inline
+`kSchedulerWorkerProcessMax` constant. Source consumers that referenced it must
+stop depending on that policy constant; no alias or installed public
+replacement is provided. Composition limits now use the private source-tree
+`ExecutionResourceLimits`. The scheduler ABI v2 object layout, vtable, and
+numeric plugin handshake remain unchanged; issue #75 owns the complete
+scheduler ABI replacement.
 
 ## Request Behavior
 
@@ -293,17 +313,18 @@ It is not yet a general cancellation or graph-revision policy.
   non-destructor Host boundaries.
 - An above-eight worker request, a positive request conflicting with the fixed
   service count, or an unknown scheduler type fails as `InvalidParameter`;
-  transitional budget exhaustion while creating the first service pool or
-  admitting a legacy owner preserves `GraphErrc::ComputeError`.
-- A fixed service reservation outlives all Graphs in its Kernel and releases
-  only with service destruction. Legacy scheduler reservations outlive their
-  concrete workers during teardown: candidate rollback returns only candidate
-  capacity, successful graph close or Host destruction returns retained
-  capacity exactly once, and legacy replacement requires transient headroom.
+  ledger exhaustion while admitting a Run or legacy owner preserves
+  `GraphErrc::ComputeError`.
+- Fixed service workers remain uncharged infrastructure until service
+  destruction. Active Run reservations and legacy scheduler reservations share
+  the ledger CPU dimension. Legacy reservations outlive their concrete workers
+  during teardown: candidate rollback returns only candidate capacity,
+  successful graph close or Host destruction returns retained capacity exactly
+  once, and legacy replacement requires transient headroom.
 - Once built-in CPU selection successfully configures the fixed pool, even if
   that selecting load later fails during document ingestion, the unpublished
   Graph runtime and legacy candidate owners/reservations roll back while the
-  Kernel-lifetime service configuration and its single reservation remain.
+  uncharged Kernel-lifetime service configuration remains.
 - An admitted scheduler batch is settled before its exception escapes the
   current request.
 - Operation callbacks may already have external side effects; staged graph

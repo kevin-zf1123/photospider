@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -131,6 +132,15 @@ class NodeTaskRunner {
    * monolithic tasks delegate to run_node().
    */
   void run_task(int task_id);
+
+  /**
+   * @brief Estimates complete Host-owned runner structural storage.
+   * @return Checked inline object, vector capacities, and output mutex bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note Borrowed Graph/services/plan vectors and operation-created image
+   * payloads are not owned by the runner and are excluded.
+   */
+  std::uint64_t retained_memory_bytes() const;
 
  private:
   /** @brief Returns whether disk cache reads are allowed for this dispatch. */

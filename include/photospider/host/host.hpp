@@ -258,9 +258,9 @@ class PHOTOSPIDER_API Host {
    * @param request Session name, root, YAML, config, and cache-root values.
    * @return Loaded session id on success; `GraphErrc::InvalidParameter` for a
    *         duplicate session or scheduler-request validation;
-   *         `GraphErrc::ComputeError` when the first fixed CPU pool or a
-   *         complete legacy HP+RT scheduler pair cannot fit the process worker
-   *         budget; `GraphErrc::Io` for an explicit
+   *         `GraphErrc::ComputeError` when a complete legacy HP+RT scheduler
+   *         pair cannot fit the Host resource ledger; `GraphErrc::Io` for an
+   *         explicit
    *         missing/unreadable/uncopyable source or session-path failure;
    *         `GraphErrc::InvalidYaml` for syntax, root-shape, duplicate-id, or
    *         node-schema rejection;
@@ -271,12 +271,13 @@ class PHOTOSPIDER_API Host {
    *         translation, or copied result construction exhausts memory.
    * @note The returned session is a value label, never a runtime pointer. The
    *       embedded implementation plans both scheduler intents before document
-   *       ingestion. The first built-in CPU selection may configure the
-   *       Host-lifetime ExecutionService and retain its single pool reservation
-   *       even if this Graph load later fails. Graph candidates, legacy
-   *       scheduler candidates and reservations, and session publication still
-   *       roll back transactionally; built-in CPU routes create no per-Graph
-   *       scheduler owner. Empty `yaml_path` loads existing session-local
+   *       ingestion. The first built-in CPU selection may configure and start
+   *       the Host-lifetime ExecutionService even if this Graph load later
+   *       fails, but the fixed pool is uncharged infrastructure and retains no
+   *       ledger reservation. Graph candidates, legacy scheduler candidates
+   *       and reservations, and session publication still roll back
+   *       transactionally; built-in CPU routes create no per-Graph scheduler
+   *       owner. Empty `yaml_path` loads existing session-local
    *       content or intentionally creates an empty graph; nonempty `yaml_path`
    *       is explicit and never falls back. Nonempty relative request paths use
    *       the caller process working directory; an IPC implementation resolves
@@ -1020,20 +1021,21 @@ class PHOTOSPIDER_API Host {
    *
    * @param config Scheduler type names and worker count.
    * @return Success, or `GraphErrc::InvalidParameter` when the positive worker
-   *         request exceeds `kSchedulerWorkerRequestMax` or conflicts with an
-   *         already fixed built-in CPU service pool; or
-   *         `GraphErrc::ComputeError` when the first fixed pool cannot reserve
-   *         transitional process capacity.
+   *         request exceeds `kSchedulerWorkerRequestMax`, conflicts with an
+   *         already fixed built-in CPU service pool, or exceeds the private
+   *         composition CPU limit.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Selecting a built-in CPU type resolves, reserves, and starts exactly
-   *       one Host-lifetime CPU pool. Later zero/equal worker requests are
-   *       idempotent, while a different positive request is rejected. Existing
-   *       loaded graph bindings remain unchanged; callers can use
-   *       replace_scheduler() to update them explicitly. A rejected candidate
-   *       leaves the previous future-session defaults unchanged. Legacy
-   *       Graph-owned scheduler capacity is still reserved transactionally by
-   *       later graph load or replacement.
+   * @note Selecting a built-in CPU type resolves and starts exactly one
+   *       Host-lifetime CPU pool. Pool threads are uncharged infrastructure;
+   *       only admitted Runs and legacy scheduler owners reserve the ledger CPU
+   *       dimension. Later zero/equal worker requests are idempotent, while a
+   *       different positive request is rejected. Existing loaded graph
+   *       bindings remain unchanged; callers can use replace_scheduler() to
+   *       update them explicitly. A rejected candidate leaves the previous
+   *       future-session defaults unchanged. Legacy Graph-owned scheduler
+   *       capacity is still reserved transactionally by later graph load or
+   *       replacement.
    */
   virtual VoidResult configure_scheduler_defaults(
       const HostSchedulerConfig& config) = 0;

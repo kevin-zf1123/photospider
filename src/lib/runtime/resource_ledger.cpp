@@ -162,6 +162,15 @@ void release_root_resources(
 
 }  // namespace
 
+/** @copydoc ResourceLedger::reservation_state_retained_memory_bytes */
+std::uint64_t
+ResourceLedger::reservation_state_retained_memory_bytes() noexcept {
+  constexpr std::uint64_t kSharedControlBytes =
+      2U * static_cast<std::uint64_t>(sizeof(void*));
+  return static_cast<std::uint64_t>(sizeof(ResourceReservationState)) +
+         kSharedControlBytes;
+}
+
 /** @copydoc operator==(const ResourceVector&, const ResourceVector&) */
 bool operator==(const ResourceVector& lhs, const ResourceVector& rhs) noexcept {
   return lhs.cpu_slots == rhs.cpu_slots &&

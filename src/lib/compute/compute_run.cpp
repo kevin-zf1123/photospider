@@ -15,6 +15,7 @@
 
 #include "compute/compute_task_submission.hpp"
 #include "compute/dirty_write_buffers.hpp"
+#include "compute/resource_demand_estimator.hpp"
 
 namespace ps::compute {
 namespace {
@@ -570,6 +571,25 @@ void ComputeRunLease::release() noexcept {
  */
 const ComputeRunDescriptor& ComputeRunLease::descriptor() const noexcept {
   return control_->descriptor;
+}
+
+/** @copydoc ComputeRunLease::retained_memory_bytes */
+std::uint64_t ComputeRunLease::retained_memory_bytes() const {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  RetainedMemoryEstimator estimate("ComputeRunControl");
+  estimate.add_objects<ComputeRunControl>();
+  estimate.add_shared_control_block();
+  estimate.add_bytes(static_cast<std::uint64_t>(
+      control_->descriptor.graph_identity().capacity()));
+  estimate.add_bytes(1U);
+  if (control_->submission_plan) {
+    estimate.add_bytes(control_->submission_plan->retained_memory_bytes());
+  }
+  if (control_->dirty_hp_write_buffer) {
+    estimate.add_bytes(
+        control_->dirty_hp_write_buffer->retained_memory_bytes());
+  }
+  return estimate.bytes();
 }
 
 /**

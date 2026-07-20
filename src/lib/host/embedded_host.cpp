@@ -387,9 +387,11 @@ struct EmbeddedHostState {
    * @param document_writer Shared graph/node document writer owner.
    * @throws std::invalid_argument when any required owner is empty.
    * @throws std::bad_alloc if backend ownership allocation fails.
-   * @note ExecutionService is composed first with explicit product resource
-   * limits, Kernel retains the same owner, and InteractionService borrows only
-   * the completed Kernel.
+   * @note ExecutionService is composed first with private source-tree
+   * `ExecutionResourceLimits`; fixed pool workers are uncharged infrastructure.
+   * This private policy is not an installed replacement for the removed
+   * scheduler limit constant. Kernel retains the same service owner, and
+   * InteractionService borrows only the completed Kernel.
    */
   EmbeddedHostState(std::shared_ptr<const ImageArtifactCodec> image_codec,
                     std::shared_ptr<const CacheMetadataCodec> metadata_codec,

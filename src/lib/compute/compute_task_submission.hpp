@@ -82,6 +82,16 @@ class TaskSubmissionPlan {
   const std::vector<int>& execution_order() const { return execution_order_; }
 
   /**
+   * @brief Estimates complete Host-owned submission-plan retained storage.
+   * @return Checked plan, dependency, runner, output-slot, and container bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note Graph/cache/services are borrowed. Image pixels plus opaque
+   * operation/plugin/backend callable allocations are excluded because their
+   * sizes are not available from the host-side planning contract.
+   */
+  std::uint64_t retained_memory_bytes() const;
+
+  /**
    * @brief Returns the immutable compute plan used by this submission.
    *
    * @return Const reference to the cache-pruned plan.

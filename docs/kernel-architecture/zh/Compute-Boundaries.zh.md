@@ -62,9 +62,9 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 重新开放后续 accepting generation，但不会困住该 caller，也不会创建第二个 worker。
 `GraphRuntime` 会在 scheduler teardown 前完成该 join。如果显式 close 随后在 scheduler shutdown
 中失败，Kernel 会先启动一个 replacement lane worker 再返回失败，使保留的 session 仍可重试。
-不同 graph 具有独立的 worker 和队列。Host composition 的 resource ledger 不把这些 lane
-worker 或固定 service thread 作为基础设施计费；它准入每个 Run 的 CPU 执行权，以及 legacy
-scheduler owner 的保守 slot。
+不同 graph 具有独立的 worker 和队列。Host composition 的 resource ledger 不对这些 lane
+worker 或固定 service thread 计费；它们保持为基础设施。其 CPU 维度改为准入每个 Run 的执行权，
+以及 legacy scheduler owner 的保守 slot。
 
 ## 当前协作者
 
@@ -92,6 +92,19 @@ scheduler owner 的保守 slot。
 
 Compute collaborator 位于 `src/lib/compute/`；ledger 位于 `src/lib/runtime/`，legacy
 scheduler planning/ownership 位于 `src/lib/scheduler/`。这些类都是私有实现模块，不构成可安装 API。
+
+当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
+Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
+scratch demand 按最大 callback 并发数相乘，ready entry 与 byte 则按所有逻辑任务相乘，因此
+dependency release 已被预先覆盖。初始与 dependent entry 使用同一个 estimator 和 insertion
+boundary。Estimator 只计算所有权与大小均可见的 Host-owned C++ storage；不会伪造 image pixel
+以及不透明的 backend、device、plugin 或 allocator-owned allocation。当前内建 adapter 声明
+scratch 为零，仅因为它们不拥有需要独立计量的固定 Host scratch。
+
+Issue #70 有意删除已安装的 inline `kSchedulerWorkerProcessMax` 常量。引用该常量的源码 consumer
+必须停止依赖这项 policy constant；不提供 alias 或已安装 public replacement。组合 limits 现在使用
+source tree 私有的 `ExecutionResourceLimits`。Scheduler ABI v2 的 object layout、vtable 与数字
+plugin handshake 保持不变；完整的 scheduler ABI replacement 仍由 issue #75 负责。
 
 ## 请求行为
 
@@ -238,15 +251,15 @@ metadata 推导该关系。
   status value 报告。
 - 资源耗尽可以按已记录的非析构 Host 边界传播为 `std::bad_alloc`。
 - 超过八的 worker 请求、与固定 service 数量冲突的正数请求，或未知 scheduler type 会作为
-  `InvalidParameter` 失败；创建第一个 service pool 或准入 legacy owner 时的过渡期 budget 耗尽
-  会保留 `GraphErrc::ComputeError`。
-- 固定 service reservation 会比其 Kernel 中的所有 Graph 活得更久，并且只在 service 析构时
-  释放。Legacy scheduler reservation 在 teardown 期间比 concrete worker 活得更久：candidate
-  rollback 只归还 candidate 容量，成功的 graph close 或 Host 销毁恰好一次归还 retained
-  capacity，legacy replacement 需要 transient headroom。
+  `InvalidParameter` 失败；准入 Run 或 legacy owner 时的 ledger 耗尽会保留
+  `GraphErrc::ComputeError`。
+- 固定 service worker 作为不计费的基础设施一直存活到 service 析构。Active Run reservation 与
+  legacy scheduler reservation 共用 ledger CPU 维度。Legacy reservation 在 teardown 期间比
+  concrete worker 活得更久：candidate rollback 只归还 candidate 容量，成功的 graph close 或
+  Host 销毁恰好一次归还 retained capacity，legacy replacement 需要 transient headroom。
 - 一旦内建 CPU 选择成功配置固定 pool，即使发起该选择的 load 随后在 document ingestion
   阶段失败，未发布的 Graph runtime 与 legacy candidate owner/reservation 仍会回滚，而
-  Kernel-lifetime service 配置及其唯一 reservation 会继续保留。
+  不计费的 Kernel-lifetime service 配置会继续保留。
 - 已 admission 的 scheduler batch 会在异常离开当前请求前 settle。
 - Operation callback 可能已经产生外部副作用；staged graph output 不会回滚这些副作用。
 - Scheduler-backed full HP work 不再借用 raw `TaskExecutor`。`TaskSubmissionPlan` 拥有其

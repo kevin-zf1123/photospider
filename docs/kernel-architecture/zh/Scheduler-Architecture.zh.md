@@ -270,6 +270,12 @@ reservation 恰好归还一次。
 thread 或 allocation 声明。`GraphStateExecutor` 具有独立结构性上限：每个已加载 Graph 有一个
 worker，最多有 64 个等待 callback。
 
+Issue #70 有意删除已安装的 inline `kSchedulerWorkerProcessMax` 常量。对于引用这项 policy
+constant 的 consumer，这是一次 source-contract break；不提供 alias 或已安装 public replacement。
+Composition root 现在使用 source tree 私有的 `ExecutionResourceLimits`。Scheduler ABI v2 的
+object layout、vtable 与数字 plugin handshake 保持不变。完整的 scheduler ABI replacement 仍由
+issue #75 负责。
+
 ## 插件发现与图调度器选择
 
 `graph_cli` 会在加载配置后、加载 graph 前扫描 `scheduler_dirs`。该扫描只会让 scheduler factory

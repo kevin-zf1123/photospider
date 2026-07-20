@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -73,6 +74,16 @@ class TaskDependencyState {
    * @note The reference remains valid only while this state object lives.
    */
   const std::unordered_map<int, int>& id_to_idx() const { return id_to_idx_; }
+
+  /**
+   * @brief Estimates dynamic Host-owned dependency-state storage.
+   * @return Checked map buckets/nodes, counter, adjacency, and active-bit
+   * bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The result excludes `sizeof(TaskDependencyState)` so enclosing
+   * owners can account the inline object exactly once.
+   */
+  std::uint64_t dynamic_retained_memory_bytes() const;
 
   /**
    * @brief Checks whether a task can be submitted as initial work.

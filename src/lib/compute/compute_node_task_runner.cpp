@@ -14,6 +14,7 @@
 
 #include "compute/compute_metrics_recorder.hpp"
 #include "compute/node_executor.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -122,6 +123,28 @@ std::pair<int, DataType> infer_tile_channels_and_type(
 }
 
 }  // namespace
+
+/** @copydoc NodeTaskRunner::retained_memory_bytes */
+std::uint64_t NodeTaskRunner::retained_memory_bytes() const {
+  RetainedMemoryEstimator estimate("NodeTaskRunner");
+  estimate.add_objects<NodeTaskRunner>();
+  estimate.add_objects<PixelSize>(
+      static_cast<std::uint64_t>(planned_output_sizes_.capacity()));
+  estimate.add_objects<int>(
+      static_cast<std::uint64_t>(tile_task_counts_.capacity()));
+  estimate.add_objects<std::atomic<int>>(
+      static_cast<std::uint64_t>(completed_tile_counts_.capacity()));
+  estimate.add_objects<std::atomic<bool>>(
+      static_cast<std::uint64_t>(node_precomputed_.capacity()));
+  estimate.add_objects<std::unique_ptr<std::mutex>>(
+      static_cast<std::uint64_t>(output_mutexes_.capacity()));
+  for (const std::unique_ptr<std::mutex>& mutex : output_mutexes_) {
+    if (mutex) {
+      estimate.add_objects<std::mutex>();
+    }
+  }
+  return estimate.bytes();
+}
 
 NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
     : graph_(context.graph),

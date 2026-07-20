@@ -253,8 +253,8 @@ class Kernel {
    * @throws GraphError with `GraphErrc::InvalidParameter` when either complete
    *         scheduler intent cannot be planned, becomes unavailable, or a
    *         legacy plan returns no scheduler instance before installation;
-   *         `GraphErrc::ComputeError` when the worker budget cannot admit the
-   *         first fixed CPU pool or aggregate legacy scheduler pair;
+   *         `GraphErrc::ComputeError` when the Host ledger cannot admit the
+   *         aggregate legacy scheduler pair;
    *         `GraphErrc::Io` for explicit-source or session filesystem failure;
    *         `GraphErrc::InvalidYaml` for syntax/schema rejection;
    *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
@@ -264,12 +264,13 @@ class Kernel {
    *         classified by Kernel; InteractionService normalizes them before
    *         the embedded Host boundary.
    * @note Scheduler planning completes before document ingestion. The first
-   *       built-in CPU selection may configure the Kernel-lifetime
-   *       ExecutionService and retain its single pool reservation even if this
-   *       Graph load later fails. An unpublished runtime, every legacy
-   *       scheduler candidate and reservation, and session publication still
-   *       roll back transactionally; built-in CPU routes create no per-Graph
-   *       scheduler owner. An empty yaml_path loads existing
+   *       built-in CPU selection may configure and start the Kernel-lifetime
+   *       ExecutionService even if this Graph load later fails, but the fixed
+   *       pool is uncharged infrastructure and retains no ledger reservation.
+   *       An unpublished runtime, every legacy scheduler candidate and
+   *       reservation, and session publication still roll back transactionally;
+   *       built-in CPU routes create no per-Graph scheduler owner. An empty
+   *       yaml_path loads existing
    *       `<root_dir>/<name>/content.yaml` or intentionally publishes an empty
    *       graph; a nonempty source is explicit and never falls back. Complete
    *       document validation precedes map insertion. The return label is
@@ -746,10 +747,11 @@ class Kernel {
    *
    * @throws std::bad_alloc If constructing or copying scheduler type storage
    * exhausts memory.
-   * @note Selecting built-in CPU may resolve and reserve the fixed service pool
-   * while defaults are stored. Type availability and legacy Graph-owned
-   * aggregate capacity are validated by transactional Graph load. Existing
-   * runtimes retain their installed bindings.
+   * @note Selecting built-in CPU may resolve and start the fixed service pool
+   * while defaults are stored. Pool workers are uncharged infrastructure. Type
+   * availability and legacy Graph-owned aggregate capacity are validated by
+   * transactional Graph load. Existing runtimes retain their installed
+   * bindings.
    */
   struct SchedulerConfig {
     /** @brief Scheduler type planned for global high-precision compute. */
@@ -777,13 +779,14 @@ class Kernel {
    * @throws std::bad_alloc or std::system_error If scheduler type copying or
    * first fixed-pool construction fails.
    * @note A configuration selecting built-in CPU freezes and starts the one
-   * injected service pool owned for this Kernel. Legacy-only defaults remain
-   * mutable until a CPU route is first selected by configuration, load, or
-   * replacement. After that point, later zero/equal requests preserve the pool
-   * and a conflicting positive request is rejected. Graph load and replacement
-   * never resize a configured pool. Scheduler type availability and
-   * legacy-owner ledger rejection still occurs transactionally during later
-   * load; existing Graph bindings remain unchanged.
+   * injected service pool owned for this Kernel, but does not mint a pool
+   * ledger reservation. Legacy-only defaults remain mutable until a CPU route
+   * is first selected by configuration, load, or replacement. After that
+   * point, later zero/equal requests preserve the pool and a conflicting
+   * positive request is rejected. Graph load and replacement never resize a
+   * configured pool. Scheduler type availability and legacy-owner ledger
+   * rejection still occurs transactionally during later load; existing Graph
+   * bindings remain unchanged.
    */
   void set_scheduler_config(const SchedulerConfig& config);
 

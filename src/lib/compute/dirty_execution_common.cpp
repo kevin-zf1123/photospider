@@ -11,6 +11,7 @@
 
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
@@ -49,8 +50,8 @@ IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
 DirtyReadyTaskContext::DirtyReadyTaskContext(
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
     const std::vector<int>& active_task_ids, std::function<void(int)> run_task,
-    ComputeRunLease lease, bool release_dependents,
-    SchedulerTaskPriority priority)
+    std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
+    bool release_dependents, SchedulerTaskPriority priority)
     : compute_plan_(compute_plan),
       selection_(selection
                      ? std::optional<DirtyTaskSelectionOverlay>(*selection)
@@ -58,6 +59,7 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
       active_task_ids_(active_task_ids),
       active_task_id_set_(active_task_ids.begin(), active_task_ids.end()),
       run_task_(std::move(run_task)),
+      run_task_retained_memory_bytes_(run_task_retained_memory_bytes),
       lease_(std::move(lease)),
       release_dependents_(release_dependents),
       priority_(priority) {
@@ -74,6 +76,46 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
         compute_plan_.execution_order, compute_plan_.task_graph,
         active_task_ids_);
   }
+}
+
+/** @copydoc DirtyReadyTaskContext::retained_memory_bytes */
+std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
+  RetainedMemoryEstimator estimate("DirtyReadyTaskContext");
+  estimate.add_objects<DirtyReadyTaskContext>();
+  estimate.add_shared_control_block();
+  estimate.add_bytes(compute_plan_dynamic_retained_memory_bytes(compute_plan_));
+  if (selection_.has_value()) {
+    estimate.add_bytes(
+        dirty_selection_dynamic_retained_memory_bytes(*selection_));
+  }
+  estimate.add_objects<int>(
+      static_cast<std::uint64_t>(active_task_ids_.capacity()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(active_task_id_set_.bucket_count()));
+  estimate.add_objects<decltype(active_task_id_set_)::value_type>(
+      static_cast<std::uint64_t>(active_task_id_set_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(active_task_id_set_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(active_task_id_set_.size()));
+  if (dependency_state_) {
+    estimate.add_objects<TaskDependencyState>();
+    estimate.add_bytes(dependency_state_->dynamic_retained_memory_bytes());
+  }
+  estimate.add_bytes(run_task_retained_memory_bytes_);
+  return estimate.bytes();
+}
+
+/** @copydoc DirtyReadyTaskContext::run_resource_demand */
+CpuRunResourceDemand DirtyReadyTaskContext::run_resource_demand(
+    std::uint64_t additional_shared_retained_memory_bytes) const {
+  RetainedMemoryEstimator shared("dirty service phase");
+  shared.add_bytes(retained_memory_bytes());
+  shared.add_bytes(lease_.retained_memory_bytes());
+  shared.add_bytes(additional_shared_retained_memory_bytes);
+  return CpuRunResourceDemand{
+      shared.bytes(), owned_callback_resource_demand(static_cast<std::uint64_t>(
+                          sizeof(std::shared_ptr<DirtyReadyTaskContext>)))};
 }
 
 /** @copydoc DirtyReadyTaskContext::make_submissions */
@@ -100,7 +142,9 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
                SchedulerTaskRuntime& task_runtime) {
           self->execute(lease, accepted_identity, task_runtime);
         },
-        priority_);
+        priority_,
+        owned_callback_resource_demand(
+            static_cast<std::uint64_t>(sizeof(self))));
   }
   return submissions;
 }

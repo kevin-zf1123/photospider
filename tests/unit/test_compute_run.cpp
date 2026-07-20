@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -16,13 +18,20 @@
 
 #include "compute/compute_run.hpp"
 #include "compute/compute_task_submission.hpp"
+#include "compute/dirty_execution_common.hpp"
+#include "compute/dirty_update_executor.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/execution_service.hpp"
+#include "compute/resource_demand_estimator.hpp"
+#include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/scheduler/scheduler.hpp"
 #include "photospider/scheduler/scheduler_task_runtime.hpp"
+#include "providers/configured_image_artifact_codec.hpp"
+#include "runtime/graph_event_service.hpp"
+#include "support/cache_test_dependencies.hpp"
 
 namespace ps::compute {
 namespace {
@@ -66,6 +75,98 @@ Node make_plan_node(int id) {
   node.type = "compute_run_test";
   node.subtype = "source";
   return node;
+}
+
+/**
+ * @brief Counts actual product-operation entry in resource-admission tests.
+ *
+ * @note The operation registry is process-global, so the callback references
+ * only this process-lifetime counter and never test-local storage.
+ */
+std::atomic_int g_resource_product_operation_calls{0};
+
+/**
+ * @brief Counts connected-parameter preflight operation entry.
+ *
+ * @note Tests reset the counter only after all preceding service work has
+ * synchronously drained.
+ */
+std::atomic_int g_resource_preflight_operation_calls{0};
+
+/**
+ * @brief Registers deterministic operations used by product-adapter tests.
+ *
+ * @return Nothing.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note Registration is process-persistent and idempotent. Both callbacks
+ * return named data so successful execution cannot be confused with an empty
+ * output.
+ */
+void ensure_resource_product_operations_registered() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_resource", "full_source",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              g_resource_product_operation_calls.fetch_add(
+                  1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["value"] = 7;
+              return output;
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_resource", "parameter_source",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              g_resource_preflight_operation_calls.fetch_add(
+                  1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["value"] = 9;
+              return output;
+            }));
+  });
+}
+
+/**
+ * @brief Builds one full-HP node with a registered deterministic operation.
+ *
+ * @param id Stable graph-local node id.
+ * @return Source node resolved by the resource product operation.
+ * @throws std::bad_alloc when node strings cannot allocate.
+ */
+Node make_resource_product_node(int id) {
+  Node node;
+  node.id = id;
+  node.name = "resource_product_node_" + std::to_string(id);
+  node.type = "compute_run_resource";
+  node.subtype = "full_source";
+  return node;
+}
+
+/**
+ * @brief Builds a one-task dirty plan for source-first adapter admission.
+ *
+ * @param node_id Graph-local trace identity carried by the task.
+ * @param domain HP or RT task domain under test.
+ * @return Self-contained one-task plan with task zero initially ready.
+ * @throws std::bad_alloc when vector storage cannot allocate.
+ */
+ComputePlan make_resource_dirty_plan(int node_id, DirtyDomain domain) {
+  ComputePlan plan;
+  plan.execution_order.push_back(node_id);
+  plan.planned_nodes.push_back(node_id);
+  PlannedTask task;
+  task.task_id = 0;
+  task.node_id = node_id;
+  task.kind = PlannedTaskKind::Monolithic;
+  task.domain = domain;
+  task.whole_output = true;
+  task.source_boundary_eligible = true;
+  task.dirty_selected = true;
+  plan.task_graph.tasks.push_back(std::move(task));
+  plan.task_graph.initial_task_ids.push_back(0);
+  return plan;
 }
 
 /**
@@ -657,10 +758,38 @@ ReadyTaskSubmission make_counted_ready_submission(
 }
 
 /**
+ * @brief Converts an exact vector into private service composition limits.
+ * @param resources Complete capacity vector.
+ * @return Private limits with identical dimensions.
+ * @throws Nothing.
+ */
+ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
+  return ExecutionResourceLimits{
+      resources.cpu_slots,     resources.retained_memory_bytes,
+      resources.scratch_bytes, resources.ready_entries,
+      resources.ready_bytes,
+  };
+}
+
+/**
+ * @brief Non-CPU resource dimension reduced below one calculated Run vector.
+ */
+enum class RejectedResourceDimension {
+  /** @brief Host-owned retained-memory capacity. */
+  RetainedMemory,
+  /** @brief Host-declared execution scratch capacity. */
+  Scratch,
+  /** @brief Bounded ready-store entry capacity. */
+  ReadyEntries,
+  /** @brief Bounded ready-store byte capacity. */
+  ReadyBytes,
+};
+
+/**
  * @brief Verifies one non-CPU Run dimension rejects atomically and recovers.
  *
  * @param label Stable graph identity prefix for rejected/recovery Runs.
- * @param resource_limits Complete isolated service limits.
+ * @param rejected_dimension Calculated vector field reduced by one byte/entry.
  * @param rejected_demand Uniform demand that exceeds exactly one tested
  * dimension after whole-Run aggregation.
  * @param rejected_task_count Positive logical count used for aggregation.
@@ -670,9 +799,8 @@ ReadyTaskSubmission make_counted_ready_submission(
  * evidence. The recovery Run uses a one-unit demand in every task dimension.
  */
 void expect_resource_dimension_rejection_and_recovery(
-    const std::string& label, const ResourceVector& resource_limits,
+    const std::string& label, RejectedResourceDimension rejected_dimension,
     ReadyTaskResourceDemand rejected_demand, int rejected_task_count) {
-  ExecutionService service(1U, resource_limits);
   ExecutionServiceHost host;
   std::atomic_int entered{0};
   ComputeRun rejected_run(make_test_submission(label + "-rejected", 1U, 1));
@@ -683,11 +811,34 @@ void expect_resource_dimension_rejection_and_recovery(
         task_index + 1, entered, SchedulerTaskPriority::Normal,
         rejected_demand));
   }
+  const CpuRunResourceDemand rejected_run_demand{0U, rejected_demand};
+  ExecutionService probe(1U);
+  ResourceVector required = probe.estimate_cpu_run_resources(
+      rejected_ready.front(), rejected_task_count, rejected_run_demand);
+  switch (rejected_dimension) {
+    case RejectedResourceDimension::RetainedMemory:
+      ASSERT_GT(required.retained_memory_bytes, 0U);
+      --required.retained_memory_bytes;
+      break;
+    case RejectedResourceDimension::Scratch:
+      ASSERT_GT(required.scratch_bytes, 0U);
+      --required.scratch_bytes;
+      break;
+    case RejectedResourceDimension::ReadyEntries:
+      ASSERT_GT(required.ready_entries, 0U);
+      --required.ready_entries;
+      break;
+    case RejectedResourceDimension::ReadyBytes:
+      ASSERT_GT(required.ready_bytes, 0U);
+      --required.ready_bytes;
+      break;
+  }
+  ExecutionService service(1U, execution_limits(required));
 
   bool rejected = false;
   try {
     service.execute_cpu_run(host, std::move(rejected_ready),
-                            rejected_task_count, rejected_demand);
+                            rejected_task_count, rejected_run_demand);
   } catch (const GraphError& error) {
     rejected = true;
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
@@ -706,8 +857,9 @@ void expect_resource_dimension_rejection_and_recovery(
   recovery_ready.push_back(make_counted_ready_submission(
       recovery_run.acquire_lease(), 0U, 2, entered,
       SchedulerTaskPriority::Normal, kRecoveryDemand));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(recovery_ready), 1,
-                                          kRecoveryDemand));
+  EXPECT_NO_THROW(
+      service.execute_cpu_run(host, std::move(recovery_ready), 1,
+                              CpuRunResourceDemand{0U, kRecoveryDemand}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -1132,16 +1284,16 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
  */
 TEST(ExecutionService, RejectsEveryNonCpuRunDimensionAndRecoversExactly) {
   ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
-      "retained-memory", ResourceVector{1U, 4U, 8U, 2U, 16U},
+      "retained-memory", RejectedResourceDimension::RetainedMemory,
       ReadyTaskResourceDemand{5U, 1U, 1U}, 1));
   ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
-      "scratch", ResourceVector{1U, 8U, 4U, 2U, 16U},
+      "scratch", RejectedResourceDimension::Scratch,
       ReadyTaskResourceDemand{1U, 5U, 1U}, 1));
   ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
-      "ready-entries", ResourceVector{1U, 8U, 8U, 1U, 16U},
+      "ready-entries", RejectedResourceDimension::ReadyEntries,
       ReadyTaskResourceDemand{1U, 1U, 1U}, 2));
   ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
-      "ready-bytes", ResourceVector{1U, 8U, 8U, 2U, 4U},
+      "ready-bytes", RejectedResourceDimension::ReadyBytes,
       ReadyTaskResourceDemand{1U, 1U, 5U}, 1));
 }
 
@@ -1155,9 +1307,10 @@ TEST(ExecutionService, RejectsEveryNonCpuRunDimensionAndRecoversExactly) {
  * infrastructure.
  */
 TEST(ExecutionService, SharesCpuAdmissionWithLegacyOwnerAndRecoversExactly) {
-  constexpr ResourceVector kLimits{1U, 8U, 8U, 2U, 16U};
   constexpr ReadyTaskResourceDemand kDemand{1U, 1U, 1U};
-  ExecutionService service(1U, kLimits);
+  ExecutionResourceLimits limits = ExecutionService::default_resource_limits();
+  limits.cpu_slots = 1U;
+  ExecutionService service(1U, limits);
   ExecutionServiceHost host;
   auto legacy = service.try_reserve_legacy_scheduler_workers(1U);
   ASSERT_TRUE(legacy.has_value());
@@ -1169,7 +1322,8 @@ TEST(ExecutionService, SharesCpuAdmissionWithLegacyOwnerAndRecoversExactly) {
       rejected_run.acquire_lease(), 0U, 1, entered,
       SchedulerTaskPriority::Normal, kDemand));
   try {
-    service.execute_cpu_run(host, std::move(rejected_ready), 1, kDemand);
+    service.execute_cpu_run(host, std::move(rejected_ready), 1,
+                            CpuRunResourceDemand{0U, kDemand});
     FAIL() << "Expected shared CPU admission rejection.";
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
@@ -1184,8 +1338,8 @@ TEST(ExecutionService, SharesCpuAdmissionWithLegacyOwnerAndRecoversExactly) {
   recovery_ready.push_back(make_counted_ready_submission(
       recovery_run.acquire_lease(), 0U, 2, entered,
       SchedulerTaskPriority::Normal, kDemand));
-  EXPECT_NO_THROW(
-      service.execute_cpu_run(host, std::move(recovery_ready), 1, kDemand));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(recovery_ready), 1,
+                                          CpuRunResourceDemand{0U, kDemand}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -1200,7 +1354,8 @@ TEST(ExecutionService, SharesCpuAdmissionWithLegacyOwnerAndRecoversExactly) {
  */
 TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
   constexpr std::uint64_t kMaximum = std::numeric_limits<std::uint64_t>::max();
-  const ResourceVector limits{1U, kMaximum, kMaximum, kMaximum, kMaximum};
+  const ExecutionResourceLimits limits{1U, kMaximum, kMaximum, kMaximum,
+                                       kMaximum};
   constexpr ReadyTaskResourceDemand kOverflowDemand{1U, 1U, kMaximum};
   ExecutionService service(1U, limits);
   ExecutionServiceHost host;
@@ -1215,7 +1370,7 @@ TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
       SchedulerTaskPriority::Normal, kOverflowDemand));
   try {
     service.execute_cpu_run(host, std::move(overflow_ready), 2,
-                            kOverflowDemand);
+                            CpuRunResourceDemand{0U, kOverflowDemand});
     FAIL() << "Expected checked Run resource overflow.";
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
@@ -1230,10 +1385,306 @@ TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
   recovery_ready.push_back(make_counted_ready_submission(
       recovery_run.acquire_lease(), 0U, 2, entered,
       SchedulerTaskPriority::Normal, kRecoveryDemand));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(recovery_ready), 1,
-                                          kRecoveryDemand));
+  EXPECT_NO_THROW(
+      service.execute_cpu_run(host, std::move(recovery_ready), 1,
+                              CpuRunResourceDemand{0U, kRecoveryDemand}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies shared, per-task, and mandatory service estimates differ.
+ *
+ * @return Nothing.
+ * @throws Standard allocation exceptions from test service and Run setup.
+ * @note A once-per-Run shared increment changes retained capacity exactly
+ * once. Per-task retained/scratch scale by worker concurrency, ready bytes
+ * scale by logical task count, and zero adapter demand still carries a
+ * positive service-owned envelope.
+ */
+TEST(ExecutionService, SeparatesSharedConcurrentAndLogicalTaskResources) {
+  constexpr ReadyTaskResourceDemand kTaskDemand{7U, 11U, 13U};
+  constexpr std::uint64_t kSharedBytes = 17U;
+  ExecutionService service(2U);
+  ComputeRun run(make_test_submission("resource-scaling", 1U, 1));
+  std::atomic_int entered{0};
+  ReadyTaskSubmission representative =
+      make_counted_ready_submission(run.acquire_lease(), 0U, 1, entered,
+                                    SchedulerTaskPriority::Normal, kTaskDemand);
+
+  const ResourceVector zero_adapter = service.estimate_cpu_run_resources(
+      representative, 5, CpuRunResourceDemand{});
+  const ResourceVector per_task = service.estimate_cpu_run_resources(
+      representative, 5, CpuRunResourceDemand{0U, kTaskDemand});
+  const ResourceVector with_shared = service.estimate_cpu_run_resources(
+      representative, 5, CpuRunResourceDemand{kSharedBytes, kTaskDemand});
+
+  EXPECT_GT(zero_adapter.retained_memory_bytes, 0U);
+  EXPECT_GT(zero_adapter.ready_bytes, 0U);
+  EXPECT_EQ(zero_adapter.cpu_slots, 2U);
+  EXPECT_EQ(zero_adapter.ready_entries, 5U);
+  EXPECT_EQ(per_task.retained_memory_bytes - zero_adapter.retained_memory_bytes,
+            2U * kTaskDemand.retained_memory_bytes);
+  EXPECT_EQ(per_task.scratch_bytes - zero_adapter.scratch_bytes,
+            2U * kTaskDemand.scratch_bytes);
+  EXPECT_EQ(per_task.ready_bytes - zero_adapter.ready_bytes,
+            5U * kTaskDemand.ready_bytes);
+  EXPECT_EQ(with_shared.retained_memory_bytes - per_task.retained_memory_bytes,
+            kSharedBytes);
+  EXPECT_EQ(with_shared.scratch_bytes, per_task.scratch_bytes);
+  EXPECT_EQ(with_shared.ready_entries, per_task.ready_entries);
+  EXPECT_EQ(with_shared.ready_bytes, per_task.ready_bytes);
+  EXPECT_THROW((void)owned_callback_resource_demand(
+                   std::numeric_limits<std::uint64_t>::max()),
+               GraphError);
+}
+
+/**
+ * @brief Exercises full-HP product admission below and above its estimate.
+ *
+ * @return Nothing.
+ * @throws Standard allocation, registry, codec, or graph exceptions from
+ * fixture setup.
+ * @note The one-byte retained-memory service must reject before operation
+ * entry. A default-capacity service then executes the same real
+ * `TaskSubmissionPlan` adapter and releases its complete root reservation.
+ */
+TEST(ExecutionServiceProductResources,
+     FullPlanRejectsSmallLimitAndExecutesWithDefaultLimit) {
+  ensure_resource_product_operations_registered();
+  g_resource_product_operation_calls.store(0, std::memory_order_relaxed);
+  GraphModel graph("cache/resource-full-product");
+  graph.add_node(make_resource_product_node(101));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+
+  ExecutionResourceLimits small_limits =
+      ExecutionService::default_resource_limits();
+  small_limits.retained_memory_bytes = 1U;
+  ExecutionService small_service(1U, small_limits);
+  ExecutionServiceHost small_host;
+  ComputeRun small_run(make_test_submission("resource-full-small",
+                                            graph.topology_generation(), 101));
+  ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& small_plan = small_run.emplace_submission_plan(
+      graph, traversal, 101, std::vector<Device>{Device::CPU});
+  TimingCollector small_timings;
+  std::mutex small_timing_mutex;
+  small_plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      small_service,
+      small_timings,
+      small_timing_mutex,
+      small_plan.execution_order(),
+      small_plan.id_to_idx(),
+      small_plan.temp_results(),
+      small_plan.resolved_ops(),
+      small_plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease small_lease = small_run.acquire_lease();
+  EXPECT_THROW(dispatch_planned_tasks(graph, small_service, small_host, 101,
+                                      small_plan, small_lease),
+               GraphError);
+  EXPECT_EQ(g_resource_product_operation_calls.load(std::memory_order_relaxed),
+            0);
+  EXPECT_EQ(small_host.context_entries(), 0);
+  EXPECT_EQ(small_service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_EQ(small_plan.temp_results().size(), 1U);
+  EXPECT_FALSE(small_plan.temp_results().front().has_value());
+
+  ExecutionService large_service(1U);
+  ExecutionServiceHost large_host;
+  ComputeRun large_run(make_test_submission("resource-full-large",
+                                            graph.topology_generation(), 101));
+  ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& large_plan = large_run.emplace_submission_plan(
+      graph, traversal, 101, std::vector<Device>{Device::CPU});
+  TimingCollector large_timings;
+  std::mutex large_timing_mutex;
+  large_plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      large_service,
+      large_timings,
+      large_timing_mutex,
+      large_plan.execution_order(),
+      large_plan.id_to_idx(),
+      large_plan.temp_results(),
+      large_plan.resolved_ops(),
+      large_plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease large_lease = large_run.acquire_lease();
+  EXPECT_NO_THROW(dispatch_planned_tasks(graph, large_service, large_host, 101,
+                                         large_plan, large_lease));
+  EXPECT_EQ(g_resource_product_operation_calls.load(std::memory_order_relaxed),
+            1);
+  EXPECT_EQ(large_host.context_entries(), 1);
+  EXPECT_EQ(large_host.context_entries(), large_host.context_exits());
+  EXPECT_EQ(large_service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_EQ(large_plan.temp_results().size(), 1U);
+  ASSERT_TRUE(large_plan.temp_results().front().has_value());
+  EXPECT_EQ(large_plan.temp_results().front()->data.at("value").as_int64(), 7);
+}
+
+/**
+ * @brief Exercises the shared dirty adapter for HP and RT service Runs.
+ *
+ * @return Nothing.
+ * @throws Standard allocation or service exceptions from fixture setup.
+ * @note Both intent routes use the real `DirtyReadyTaskContext` estimator. A
+ * one-byte retained limit rejects before task entry; default capacity executes
+ * exactly once and returns every reserved dimension to zero.
+ */
+TEST(ExecutionServiceProductResources,
+     DirtyHpAndRtRejectSmallLimitAndExecuteWithDefaultLimit) {
+  for (const ComputeIntent intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    const bool is_rt = intent == ComputeIntent::RealTimeUpdate;
+    SCOPED_TRACE(is_rt ? "RT" : "HP");
+    const DirtyDomain domain =
+        is_rt ? DirtyDomain::RealTime : DirtyDomain::HighPrecision;
+    const ComputePlan plan =
+        make_resource_dirty_plan(is_rt ? 112 : 111, domain);
+    const std::vector<int> source_task_ids{0};
+    const std::vector<int> downstream_task_ids;
+
+    ExecutionResourceLimits small_limits =
+        ExecutionService::default_resource_limits();
+    small_limits.retained_memory_bytes = 1U;
+    ExecutionService small_service(1U, small_limits);
+    ExecutionServiceHost small_host;
+    ComputeRunSubmission small_submission = make_test_submission(
+        is_rt ? "resource-dirty-rt-small" : "resource-dirty-hp-small", 1U,
+        is_rt ? 112 : 111);
+    small_submission.intent = intent;
+    small_submission.quality =
+        is_rt ? ComputeRunQuality::Interactive : ComputeRunQuality::Full;
+    ComputeRun small_run(std::move(small_submission));
+    DirtySourceFirstRunRequest small_request;
+    small_request.intent = intent;
+    small_request.execution_service = &small_service;
+    small_request.host = &small_host;
+    small_request.run = &small_run;
+    small_request.compute_plan = &plan;
+    small_request.additional_shared_retained_memory_bytes = 4096U;
+    small_request.source_task_ids = &source_task_ids;
+    small_request.downstream_task_ids = &downstream_task_ids;
+    std::atomic_int small_entered{0};
+    EXPECT_THROW(run_dirty_source_first(small_request,
+                                        [&small_entered](int task_id) {
+                                          EXPECT_EQ(task_id, 0);
+                                          small_entered.fetch_add(
+                                              1, std::memory_order_relaxed);
+                                        }),
+                 GraphError);
+    EXPECT_EQ(small_entered.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(small_host.context_entries(), 0);
+    EXPECT_EQ(small_service.resource_snapshot().reserved, ResourceVector{});
+
+    ExecutionService large_service(1U);
+    ExecutionServiceHost large_host;
+    ComputeRunSubmission large_submission = make_test_submission(
+        is_rt ? "resource-dirty-rt-large" : "resource-dirty-hp-large", 2U,
+        is_rt ? 112 : 111);
+    large_submission.intent = intent;
+    large_submission.quality =
+        is_rt ? ComputeRunQuality::Interactive : ComputeRunQuality::Full;
+    ComputeRun large_run(std::move(large_submission));
+    DirtySourceFirstRunRequest large_request = small_request;
+    large_request.execution_service = &large_service;
+    large_request.host = &large_host;
+    large_request.run = &large_run;
+    std::atomic_int large_entered{0};
+    EXPECT_NO_THROW(
+        run_dirty_source_first(large_request, [&large_entered](int task_id) {
+          EXPECT_EQ(task_id, 0);
+          large_entered.fetch_add(1, std::memory_order_relaxed);
+        }));
+    EXPECT_EQ(large_entered.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(large_host.context_entries(), 1);
+    EXPECT_EQ(large_host.context_entries(), large_host.context_exits());
+    EXPECT_EQ(large_service.resource_snapshot().reserved, ResourceVector{});
+  }
+}
+
+/**
+ * @brief Exercises connected-parameter preflight resource admission.
+ *
+ * @return Nothing.
+ * @throws Standard allocation, registry, graph, or service exceptions from
+ * fixture setup.
+ * @note The small service rejects the product preflight callback before the
+ * registered producer runs. Default capacity executes and retains the named
+ * output in the immutable stabilization snapshot with exact root release.
+ */
+TEST(ExecutionServiceProductResources,
+     PreflightRejectsSmallLimitAndExecutesWithDefaultLimit) {
+  ensure_resource_product_operations_registered();
+  g_resource_preflight_operation_calls.store(0, std::memory_order_relaxed);
+  GraphModel graph("cache/resource-preflight-product");
+  Node producer = make_resource_product_node(201);
+  producer.subtype = "parameter_source";
+  Node target = make_plan_node(202);
+  target.parameter_inputs.push_back({201, "value", "radius"});
+  graph.add_node(producer);
+  graph.add_node(target);
+  graph.validate_topology();
+  GraphTraversalService traversal;
+
+  ExecutionResourceLimits small_limits =
+      ExecutionService::default_resource_limits();
+  small_limits.retained_memory_bytes = 1U;
+  ExecutionService small_service(1U, small_limits);
+  ExecutionServiceHost small_host;
+  ComputeRun small_run(make_test_submission("resource-preflight-small",
+                                            graph.topology_generation(), 202));
+  ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
+  EXPECT_THROW((void)stabilize_connected_dirty_parameters(
+                   graph, traversal, 202, 1U, graph.topology_generation(),
+                   nullptr, &small_service, &small_host, &small_run),
+               GraphError);
+  EXPECT_EQ(
+      g_resource_preflight_operation_calls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(small_host.context_entries(), 0);
+  EXPECT_EQ(small_service.resource_snapshot().reserved, ResourceVector{});
+
+  ExecutionService large_service(1U);
+  ExecutionServiceHost large_host;
+  ComputeRun large_run(make_test_submission("resource-preflight-large",
+                                            graph.topology_generation(), 202));
+  ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
+  std::shared_ptr<const StabilizedDirtyParameters> stabilized;
+  EXPECT_NO_THROW(stabilized = stabilize_connected_dirty_parameters(
+                      graph, traversal, 202, 2U, graph.topology_generation(),
+                      nullptr, &large_service, &large_host, &large_run));
+  ASSERT_TRUE(stabilized);
+  EXPECT_TRUE(stabilized->has_connected_parameters());
+  const NodeOutput* parameter_output = stabilized->find_parameter_output(201);
+  ASSERT_NE(parameter_output, nullptr);
+  EXPECT_EQ(parameter_output->data.at("value").as_int64(), 9);
+  EXPECT_EQ(
+      g_resource_preflight_operation_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(large_host.context_entries(), 1);
+  EXPECT_EQ(large_host.context_entries(), large_host.context_exits());
+  EXPECT_EQ(large_service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -1248,8 +1699,6 @@ TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
  */
 TEST(ExecutionService, BoundsInitialReadyStoreAndPreservesPriorityOrdering) {
   constexpr ReadyTaskResourceDemand kDemand{3U, 4U, 5U};
-  constexpr ResourceVector kLimits{1U, 6U, 8U, 2U, 10U};
-  ExecutionService service(1U, kLimits);
   ExecutionServiceHost host;
   ComputeRun run(make_test_submission("bounded-initial-ready", 1U, 1));
   std::vector<int> execution_order;
@@ -1284,20 +1733,26 @@ TEST(ExecutionService, BoundsInitialReadyStoreAndPreservesPriorityOrdering) {
       },
       SchedulerTaskPriority::High, kDemand);
 
+  const CpuRunResourceDemand run_demand{0U, kDemand};
+  ExecutionService probe(1U);
+  const ResourceVector required =
+      probe.estimate_cpu_run_resources(ready.front(), 2, run_demand);
+  ExecutionService service(1U, execution_limits(required));
   std::future<void> run_future;
   ScopedPromiseRelease release_guard(release_high);
   run_future = std::async(
       std::launch::async,
-      [&service, &host, ready = std::move(ready), kDemand]() mutable {
-        service.execute_cpu_run(host, std::move(ready), 2, kDemand);
+      [&service, &host, ready = std::move(ready), run_demand]() mutable {
+        service.execute_cpu_run(host, std::move(ready), 2, run_demand);
       });
   ASSERT_EQ(high_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   const std::string stats = service.get_stats();
   EXPECT_NE(stats.find("Ready tasks: 1"), std::string::npos);
-  EXPECT_NE(stats.find("Ready bytes: 5"), std::string::npos);
-  EXPECT_EQ(service.resource_snapshot().reserved,
-            (ResourceVector{1U, 6U, 8U, 2U, 10U}));
+  EXPECT_NE(
+      stats.find("Ready bytes: " + std::to_string(required.ready_bytes / 2U)),
+      std::string::npos);
+  EXPECT_EQ(service.resource_snapshot().reserved, required);
 
   EXPECT_TRUE(release_guard.release());
   ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
@@ -1319,8 +1774,6 @@ TEST(ExecutionService, BoundsInitialReadyStoreAndPreservesPriorityOrdering) {
  */
 TEST(ExecutionService, BoundsDependentReentryAndReleasesRootExactly) {
   constexpr ReadyTaskResourceDemand kDemand{3U, 4U, 5U};
-  constexpr ResourceVector kLimits{1U, 6U, 8U, 2U, 10U};
-  ExecutionService service(1U, kLimits);
   ExecutionServiceHost host;
   ComputeRun run(make_test_submission("bounded-dependent-ready", 1U, 1));
   std::atomic_int entered{0};
@@ -1358,20 +1811,26 @@ TEST(ExecutionService, BoundsDependentReentryAndReleasesRootExactly) {
       },
       SchedulerTaskPriority::Normal, kDemand);
 
+  const CpuRunResourceDemand run_demand{0U, kDemand};
+  ExecutionService probe(1U);
+  const ResourceVector required =
+      probe.estimate_cpu_run_resources(ready.front(), 2, run_demand);
+  ExecutionService service(1U, execution_limits(required));
   std::future<void> run_future;
   ScopedPromiseRelease release_guard(release_initial);
   run_future = std::async(
       std::launch::async,
-      [&service, &host, ready = std::move(ready), kDemand]() mutable {
-        service.execute_cpu_run(host, std::move(ready), 2, kDemand);
+      [&service, &host, ready = std::move(ready), run_demand]() mutable {
+        service.execute_cpu_run(host, std::move(ready), 2, run_demand);
       });
   ASSERT_EQ(dependent_queued_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   const std::string stats = service.get_stats();
   EXPECT_NE(stats.find("Ready tasks: 1"), std::string::npos);
-  EXPECT_NE(stats.find("Ready bytes: 5"), std::string::npos);
-  EXPECT_EQ(service.resource_snapshot().reserved,
-            (ResourceVector{1U, 6U, 8U, 2U, 10U}));
+  EXPECT_NE(
+      stats.find("Ready bytes: " + std::to_string(required.ready_bytes / 2U)),
+      std::string::npos);
+  EXPECT_EQ(service.resource_snapshot().reserved, required);
 
   EXPECT_TRUE(release_guard.release());
   ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),

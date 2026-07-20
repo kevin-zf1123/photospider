@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "compute/compute_geometry.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "core/image_buffer_processing.hpp"
 
 namespace ps::compute {
@@ -166,6 +167,26 @@ HighPrecisionDirtyWriteBuffer::downsample_requests() const {
   return requests;
 }
 
+/** @copydoc HighPrecisionDirtyWriteBuffer::retained_memory_bytes */
+std::uint64_t HighPrecisionDirtyWriteBuffer::retained_memory_bytes() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  RetainedMemoryEstimator estimate("HighPrecisionDirtyWriteBuffer");
+  estimate.add_objects<HighPrecisionDirtyWriteBuffer>();
+  estimate.add_objects<decltype(entries_)::value_type>(
+      static_cast<std::uint64_t>(entries_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
+  for (const auto& [node_id, entry] : entries_) {
+    (void)node_id;
+    if (entry.has_output) {
+      estimate.add_bytes(
+          node_output_dynamic_retained_memory_bytes(entry.output));
+    }
+  }
+  return estimate.bytes();
+}
+
 HighPrecisionDirtyWriteBuffer::Entry&
 HighPrecisionDirtyWriteBuffer::ensure_entry_locked(const Node& node) {
   Entry& entry = entries_[node.id];
@@ -240,6 +261,26 @@ void RealtimeProxyWriteBuffer::commit_to_proxy_graph() {
     }
     proxy_graph_.commit_node_state(node_id, std::move(entry.state));
   }
+}
+
+/** @copydoc RealtimeProxyWriteBuffer::retained_memory_bytes */
+std::uint64_t RealtimeProxyWriteBuffer::retained_memory_bytes() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  RetainedMemoryEstimator estimate("RealtimeProxyWriteBuffer");
+  estimate.add_objects<RealtimeProxyWriteBuffer>();
+  estimate.add_objects<decltype(entries_)::value_type>(
+      static_cast<std::uint64_t>(entries_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
+  for (const auto& [node_id, entry] : entries_) {
+    (void)node_id;
+    if (entry.has_output && entry.state.output.has_value()) {
+      estimate.add_bytes(
+          node_output_dynamic_retained_memory_bytes(*entry.state.output));
+    }
+  }
+  return estimate.bytes();
 }
 
 RealtimeProxyWriteBuffer::Entry& RealtimeProxyWriteBuffer::ensure_entry_locked(

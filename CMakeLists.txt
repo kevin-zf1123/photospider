@@ -587,6 +587,7 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/node_executor.cpp
     src/lib/compute/node_input_resolver.cpp
     src/lib/compute/realtime_proxy_graph.cpp
+    src/lib/compute/resource_demand_estimator.cpp
     src/lib/compute/compute_task_dispatcher.cpp
     src/lib/compute/compute_service.cpp
     src/lib/runtime/graph_event_service.cpp

@@ -591,6 +591,18 @@ class ComputeRunLease {
   const ComputeRunDescriptor& descriptor() const noexcept;
 
   /**
+   * @brief Estimates shared Host-owned control and installed Run storage.
+   * @return Checked control block, descriptor string, plan, and HP staging
+   * bytes retained by this lease.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @throws std::system_error when control/staging mutex locking fails.
+   * @note The returned shared estimate must be charged once per service batch,
+   * not once per copied lease. Graph state, image pixels, and opaque
+   * plugin/backend owners are excluded.
+   */
+  std::uint64_t retained_memory_bytes() const;
+
+  /**
    * @brief Builds a composite identity in this lease's Run namespace.
    *
    * @param local_task_id Dense local value to pair with the retained Run id.

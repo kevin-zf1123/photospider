@@ -181,6 +181,15 @@ class StabilizedDirtyParameters {
     return geometry_affected_node_ids_;
   }
 
+  /**
+   * @brief Estimates complete Host-owned stabilization snapshot storage.
+   * @return Checked object, map/set, named-value, and diagnostic-string bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note Image pixels, backend contexts, plugin leases, and allocator-private
+   * capacity hidden behind shared pointers are excluded.
+   */
+  std::uint64_t retained_memory_bytes() const;
+
  private:
   friend std::shared_ptr<const StabilizedDirtyParameters>
   stabilize_connected_dirty_parameters(GraphModel&, GraphTraversalService&, int,

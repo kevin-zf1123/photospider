@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -126,6 +127,16 @@ class HighPrecisionDirtyWriteBuffer {
    */
   std::vector<DownsampleExecutor::Request> downsample_requests() const;
 
+  /**
+   * @brief Estimates complete Host-owned HP staging structure.
+   * @return Checked buffer object, map nodes, and visible output metadata
+   * bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note Image pixels and opaque backend/plugin owners are excluded because
+   * their allocation capacity is unavailable through `ImageBuffer`.
+   */
+  std::uint64_t retained_memory_bytes() const;
+
  private:
   /**
    * @brief Complete staged HP state for one graph node.
@@ -240,6 +251,16 @@ class RealtimeProxyWriteBuffer {
    * @note GraphModel is not read or mutated during this commit.
    */
   void commit_to_proxy_graph();
+
+  /**
+   * @brief Estimates complete Host-owned RT staging structure.
+   * @return Checked buffer object, map nodes, and visible output metadata
+   * bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The borrowed committed proxy graph and opaque image/backend payloads
+   * are excluded.
+   */
+  std::uint64_t retained_memory_bytes() const;
 
  private:
   /**

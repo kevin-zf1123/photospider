@@ -7,6 +7,7 @@
 #include <optional>
 #include <queue>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -24,6 +25,7 @@
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
 #include "compute/realtime_proxy_graph.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
@@ -460,6 +462,48 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
   return planning_graph;
 }
 
+/**
+ * @brief Estimates request-local dirty planning storage retained by callbacks.
+ * @tparam DirtyPlan HP or RT dirty-plan type.
+ * @param prepared Prepared plan whose original values remain live while the
+ * service-owned context executes its separate copies.
+ * @return Checked complete dirty plan, compute plan, overlay, and work-set
+ * structural bytes.
+ * @throws GraphError when checked structural arithmetic overflows.
+ * @note These are distinct original allocations, not duplicate charges for
+ * the context copies. Image/backend/plugin output payloads remain excluded.
+ */
+template <typename DirtyPlan>
+std::uint64_t prepared_dirty_retained_memory_bytes(
+    const PreparedDirtyPlan<DirtyPlan>& prepared) {
+  RetainedMemoryEstimator estimate("prepared dirty request");
+  if constexpr (std::is_same_v<DirtyPlan, HighPrecisionDirtyPlan>) {
+    estimate.add_bytes(
+        high_precision_dirty_plan_retained_memory_bytes(prepared.dirty_plan));
+  } else {
+    static_assert(std::is_same_v<DirtyPlan, RealTimeDirtyPlan>);
+    estimate.add_bytes(
+        real_time_dirty_plan_retained_memory_bytes(prepared.dirty_plan));
+  }
+  estimate.add_objects<ComputePlan>();
+  estimate.add_bytes(
+      compute_plan_dynamic_retained_memory_bytes(prepared.compute_plan));
+  estimate.add_objects<DirtyTaskSelectionOverlay>();
+  estimate.add_bytes(
+      dirty_selection_dynamic_retained_memory_bytes(prepared.selection));
+  estimate.add_objects<DirtyUpdateWorkSet>();
+  estimate.add_objects<int>(static_cast<std::uint64_t>(
+      prepared.work_set.dirty_source_task_ids.capacity()));
+  estimate.add_objects<int>(static_cast<std::uint64_t>(
+      prepared.work_set.downstream_task_ids.capacity()));
+  estimate.add_objects<std::vector<int>>(2U);
+  estimate.add_objects<int>(
+      static_cast<std::uint64_t>(prepared.source_task_ids.capacity()));
+  estimate.add_objects<int>(
+      static_cast<std::uint64_t>(prepared.downstream_task_ids.capacity()));
+  return estimate.bytes();
+}
+
 }  // namespace
 
 const NodeOutput* StabilizedDirtyParameters::find_staged_output(
@@ -478,6 +522,42 @@ const NodeOutput* StabilizedDirtyParameters::find_parameter_output(
 
 bool StabilizedDirtyParameters::geometry_affected(int node_id) const noexcept {
   return geometry_affected_node_ids_.count(node_id) != 0;
+}
+
+/** @copydoc StabilizedDirtyParameters::retained_memory_bytes */
+std::uint64_t StabilizedDirtyParameters::retained_memory_bytes() const {
+  RetainedMemoryEstimator estimate("StabilizedDirtyParameters");
+  estimate.add_objects<StabilizedDirtyParameters>();
+  estimate.add_shared_control_block();
+  estimate.add_objects<decltype(staged_outputs_)::value_type>(
+      static_cast<std::uint64_t>(staged_outputs_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(staged_outputs_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(staged_outputs_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(staged_outputs_.size()));
+  for (const auto& [node_id, staged] : staged_outputs_) {
+    (void)node_id;
+    estimate.add_bytes(
+        node_output_dynamic_retained_memory_bytes(staged.output));
+  }
+
+  const auto add_set = [&estimate](const std::unordered_set<int>& values) {
+    estimate.add_objects<void*>(
+        static_cast<std::uint64_t>(values.bucket_count()));
+    estimate.add_objects<std::unordered_set<int>::value_type>(
+        static_cast<std::uint64_t>(values.size()));
+    estimate.add_objects<void*>(static_cast<std::uint64_t>(values.size()));
+    estimate.add_objects<void*>(static_cast<std::uint64_t>(values.size()));
+  };
+  add_set(staged_node_ids_);
+  add_set(staged_source_node_ids_);
+  add_set(parameter_producer_node_ids_);
+  add_set(rt_satisfied_parameter_node_ids_);
+  add_set(rt_required_parameter_node_ids_);
+  add_set(geometry_affected_node_ids_);
+  return estimate.bytes();
 }
 
 /** @copydoc stabilize_connected_dirty_parameters */
@@ -649,27 +729,44 @@ stabilize_connected_dirty_parameters(
       ComputeRunLease lease = run->acquire_lease();
       const ComputeRunTaskIdentity identity = lease.task_identity(
           std::numeric_limits<uint64_t>::max() - preflight_task_id);
+      auto service_callback = [owned_preflight, node_id](
+                                  ComputeRunLease&,
+                                  const ComputeRunTaskIdentity&,
+                                  SchedulerTaskRuntime& service_runtime) {
+        try {
+          service_runtime.log_event(SchedulerTraceAction::Execute, node_id);
+          (*owned_preflight)();
+          service_runtime.dec_tasks_to_complete();
+        } catch (...) {
+          try {
+            service_runtime.log_event(SchedulerTraceAction::RethrowException,
+                                      node_id);
+          } catch (...) {
+          }
+          throw;
+        }
+      };
+      const ReadyTaskResourceDemand task_demand =
+          owned_callback_resource_demand(
+              static_cast<std::uint64_t>(sizeof(service_callback)));
+      RetainedMemoryEstimator shared_demand("connected-parameter preflight");
+      shared_demand.add_bytes(lease.retained_memory_bytes());
+      shared_demand.add_bytes(result->retained_memory_bytes());
+      shared_demand.add_objects<std::vector<Device>>();
+      shared_demand.add_objects<Device>(
+          static_cast<std::uint64_t>(available_devices_owner->capacity()));
+      shared_demand.add_shared_control_block();
+      shared_demand.add_objects<std::function<void()>>();
+      shared_demand.add_shared_control_block();
+      shared_demand.add_bytes(owned_callable_retained_memory_bytes(
+          static_cast<std::uint64_t>(sizeof(execute_preflight_node))));
       std::vector<ReadyTaskSubmission> submissions;
-      submissions.emplace_back(
-          std::move(lease), identity, node_id, true,
-          [owned_preflight, node_id](ComputeRunLease&,
-                                     const ComputeRunTaskIdentity&,
-                                     SchedulerTaskRuntime& service_runtime) {
-            try {
-              service_runtime.log_event(SchedulerTraceAction::Execute, node_id);
-              (*owned_preflight)();
-              service_runtime.dec_tasks_to_complete();
-            } catch (...) {
-              try {
-                service_runtime.log_event(
-                    SchedulerTraceAction::RethrowException, node_id);
-              } catch (...) {
-              }
-              throw;
-            }
-          },
-          SchedulerTaskPriority::High);
-      execution_service->execute_cpu_run(*host, std::move(submissions), 1);
+      submissions.emplace_back(std::move(lease), identity, node_id, true,
+                               std::move(service_callback),
+                               SchedulerTaskPriority::High, task_demand);
+      execution_service->execute_cpu_run(
+          *host, std::move(submissions), 1,
+          CpuRunResourceDemand{shared_demand.bytes(), task_demand});
     } else if (task_runtime) {
       PreflightTaskExecutor<decltype(execute_preflight_node)> executor(
           execute_preflight_node, *task_runtime, node_id);
@@ -825,6 +922,7 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
                      planning_roi},
       planning_graph != &graph ? &graph : nullptr, externally_satisfied_nodes);
   HighPrecisionDirtyPlan& prepared_dirty_plan = prepared.dirty_plan;
+  planning_graph_owner.reset();
   graph_lock.unlock();
 
   std::optional<HighPrecisionDirtyWriteBuffer> local_hp_write_buffer;
@@ -888,6 +986,14 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   source_first_request.run = run;
   source_first_request.compute_plan = &prepared.compute_plan;
   source_first_request.selection = &prepared.selection;
+  RetainedMemoryEstimator hp_shared_demand("HP dirty request");
+  hp_shared_demand.add_bytes(prepared_dirty_retained_memory_bytes(prepared));
+  if (request.stabilized_parameters) {
+    hp_shared_demand.add_bytes(
+        request.stabilized_parameters->retained_memory_bytes());
+  }
+  source_first_request.additional_shared_retained_memory_bytes =
+      hp_shared_demand.bytes();
   source_first_request.source_task_ids = &prepared.source_task_ids;
   source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
   source_first_request.dirty_generation =
@@ -1032,6 +1138,7 @@ NodeOutput& RealTimeDirtyExecutor::execute(
                      request.dirty_roi},
       planning_graph != &graph ? &graph : nullptr, externally_satisfied_nodes);
   RealTimeDirtyPlan& prepared_dirty_plan = prepared.dirty_plan;
+  planning_graph_owner.reset();
   if (request.force_recache) {
     reset_plan_cache(proxy_graph, prepared_dirty_plan);
   }
@@ -1078,6 +1185,15 @@ NodeOutput& RealTimeDirtyExecutor::execute(
   source_first_request.run = run;
   source_first_request.compute_plan = &prepared.compute_plan;
   source_first_request.selection = &prepared.selection;
+  RetainedMemoryEstimator rt_shared_demand("RT dirty request");
+  rt_shared_demand.add_bytes(prepared_dirty_retained_memory_bytes(prepared));
+  rt_shared_demand.add_bytes(rt_write_buffer.retained_memory_bytes());
+  if (request.stabilized_parameters) {
+    rt_shared_demand.add_bytes(
+        request.stabilized_parameters->retained_memory_bytes());
+  }
+  source_first_request.additional_shared_retained_memory_bytes =
+      rt_shared_demand.bytes();
   source_first_request.source_task_ids = &prepared.source_task_ids;
   source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
   source_first_request.dirty_generation =

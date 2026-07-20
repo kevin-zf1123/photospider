@@ -18,27 +18,66 @@ class SchedulerHostContext;
 namespace ps::compute {
 
 /**
- * @brief Immutable trusted-host resource demand for one ready submission.
+ * @brief Private composition-root limits for one CPU execution domain.
  *
- * Retained memory and scratch are held while the callback executes. Ready
- * bytes are held while the owned submission resides in the bounded service
- * store. One ready entry and one CPU slot are added by `ExecutionService`;
- * callers cannot omit those structural charges.
+ * This source-tree type replaces the removed installed
+ * `kSchedulerWorkerProcessMax` policy constant. It carries every ledger
+ * dimension explicitly and converts to the authority-neutral `ResourceVector`
+ * only when constructing the private service.
+ *
+ * @throws Nothing for aggregate construction and conversion.
+ * @note This is not an installed scheduler API or scheduler ABI surface.
+ */
+struct ExecutionResourceLimits final {
+  /** @brief Concurrent Run and legacy-owner CPU execution rights. */
+  std::uint64_t cpu_slots = 0U;
+
+  /** @brief Host-owned retained-memory capacity. */
+  std::uint64_t retained_memory_bytes = 0U;
+
+  /** @brief Host-declared execution scratch capacity. */
+  std::uint64_t scratch_bytes = 0U;
+
+  /** @brief Logical entries available in the bounded ready store. */
+  std::uint64_t ready_entries = 0U;
+
+  /** @brief Accounted bytes available in the bounded ready store. */
+  std::uint64_t ready_bytes = 0U;
+
+  /**
+   * @brief Converts the complete private limit set to ledger dimensions.
+   * @return Value-only resource vector with identical fields.
+   * @throws Nothing.
+   */
+  ResourceVector resource_vector() const noexcept {
+    return ResourceVector{cpu_slots, retained_memory_bytes, scratch_bytes,
+                          ready_entries, ready_bytes};
+  }
+};
+
+/**
+ * @brief Immutable adapter-owned resource demand for one ready submission.
+ *
+ * These fields declare only bytes in addition to the mandatory service
+ * envelope. Retained memory and scratch are held while the callback executes.
+ * Ready bytes are held while the owned submission resides in the bounded
+ * service store. `ExecutionService` always adds its `RunState`, queue entry,
+ * metadata, shared-control, ready-entry, and CPU execution charges.
  *
  * @throws Nothing for value construction and comparison.
  * @note Zero scratch means the current host contract declares no separately
  * metered scratch. It does not claim that backend, plugin, or runtime
- * allocation was measured as zero.
+ * allocation was measured as zero. Zero ready bytes remains valid because the
+ * service structural ready envelope is always positive.
  */
 struct ReadyTaskResourceDemand final {
-  /** @brief Host bytes retained while this callback may execute. */
+  /** @brief Additional adapter bytes retained during callback execution. */
   std::uint64_t retained_memory_bytes = 0U;
 
-  /** @brief Host-declared temporary bytes required during callback execution.
-   */
+  /** @brief Additional Host-declared temporary execution bytes. */
   std::uint64_t scratch_bytes = 0U;
 
-  /** @brief Accounted bytes occupied while the submission is ready. */
+  /** @brief Additional adapter bytes occupied while submission is ready. */
   std::uint64_t ready_bytes = 0U;
 };
 
@@ -61,6 +100,38 @@ bool operator==(const ReadyTaskResourceDemand& lhs,
  */
 bool operator!=(const ReadyTaskResourceDemand& lhs,
                 const ReadyTaskResourceDemand& rhs) noexcept;
+
+/**
+ * @brief Builds one adapter-owned callable demand from its capture size.
+ * @param capture_bytes Trusted compile-time size of the owned capture object.
+ * @return Equal retained/ready charges and zero separately owned scratch.
+ * @throws GraphError when checked structural addition overflows.
+ * @note The charge covers trusted capture/control storage only. It never
+ * estimates opaque plugin or backend callback allocations.
+ */
+ReadyTaskResourceDemand owned_callback_resource_demand(
+    std::uint64_t capture_bytes);
+
+/**
+ * @brief Complete adapter declaration for one synchronous CPU Run batch.
+ *
+ * Shared retained bytes are charged once for Run/control/plan/context
+ * ownership. The per-task declaration is multiplied only by maximum callback
+ * concurrency for retained/scratch and by logical task count for ready bytes.
+ * Mandatory service structural envelopes are added independently.
+ *
+ * @throws Nothing for value construction.
+ * @note Callers must not place the same shared context in the per-task field;
+ * doing so would conservatively double-count it and can cause batch self-lock.
+ */
+struct CpuRunResourceDemand final {
+  /** @brief Adapter-owned shared bytes retained for complete batch settlement.
+   */
+  std::uint64_t shared_retained_memory_bytes = 0U;
+
+  /** @brief Uniform additional demand carried by every logical task. */
+  ReadyTaskResourceDemand task;
+};
 
 /**
  * @brief Immutable execution metadata copied into one ready submission.
@@ -240,12 +311,12 @@ class ReadyTaskSubmission final {
       ReadyTaskResourceDemand resource_demand = default_resource_demand());
 
   /**
-   * @brief Returns the audited current host envelope demand.
-   * @return Retained and ready bytes for one owned service submission, with no
-   * separately declared scratch.
+   * @brief Returns the empty adapter-owned demand.
+   * @return Zero additional retained, scratch, and ready bytes.
    * @throws Nothing.
-   * @note This accounts the private submission envelope, not arbitrary
-   * operation, device, plugin, or runtime allocations.
+   * @note `ExecutionService` always charges its positive mandatory submission
+   * envelope. Adapters with owned captures or scratch must pass an explicit
+   * declaration instead of relying on this zero-addition default.
    */
   static ReadyTaskResourceDemand default_resource_demand() noexcept;
 
@@ -401,7 +472,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws Nothing.
    * @note Tests and alternate products may inject smaller isolated limits.
    */
-  static ResourceVector default_resource_limits() noexcept;
+  static ExecutionResourceLimits default_resource_limits() noexcept;
 
   /**
    * @brief Creates an unconfigured execution domain with no worker threads.
@@ -413,11 +484,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Creates an unconfigured domain with explicit immutable limits.
-   * @param resource_limits Complete Host-composed ledger limits.
+   * @param resource_limits Complete private Host-composed limits.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
    * @note The composition root must freeze workers before first Run admission.
    */
-  explicit ExecutionService(ResourceVector resource_limits);
+  explicit ExecutionService(ExecutionResourceLimits resource_limits);
 
   /**
    * @brief Creates and configures one fixed execution domain.
@@ -432,12 +503,13 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Creates a configured domain with explicit immutable limits.
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
-   * @param resource_limits Complete Host-composed ledger limits.
+   * @param resource_limits Complete private Host-composed limits.
    * @throws std::invalid_argument if the worker request exceeds eight or the
    * configured CPU limit cannot permit the resolved fixed pool.
    * @throws std::bad_alloc or std::system_error if setup fails.
    */
-  ExecutionService(unsigned int worker_count, ResourceVector resource_limits);
+  ExecutionService(unsigned int worker_count,
+                   ExecutionResourceLimits resource_limits);
 
   /**
    * @brief Joins and releases service-owned CPU workers.
@@ -530,6 +602,24 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   ResourceLedger::Snapshot resource_snapshot() const;
 
   /**
+   * @brief Calculates the exact structural vector used for CPU Run admission.
+   * @param representative Any submission from the Run, used for immutable
+   * graph-identity metadata size.
+   * @param total_task_count Positive complete logical task count.
+   * @param run_resource_demand Shared and per-task adapter declarations.
+   * @return Checked CPU, retained, scratch, ready-entry, and ready-byte vector.
+   * @throws std::invalid_argument for a nonpositive task count.
+   * @throws std::logic_error before fixed worker configuration.
+   * @throws GraphError when any structural aggregation overflows.
+   * @note This diagnostic mints no authority. `execute_cpu_run()` uses the same
+   * calculation before ledger admission, and initial/dependent queue entries
+   * use the same resulting per-task envelope.
+   */
+  ResourceVector estimate_cpu_run_resources(
+      const ReadyTaskSubmission& representative, int total_task_count,
+      CpuRunResourceDemand run_resource_demand) const;
+
+  /**
    * @brief Executes one complete ready-only CPU Run synchronously.
    *
    * @param host Active Graph runtime observation context, borrowed only until
@@ -537,8 +627,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param initial_submissions Dispatcher-discovered initial ready values from
    * one Run.
    * @param total_task_count Complete logical planned-task count.
-   * @param task_resource_demand Uniform trusted declaration for every logical
-   * task, including dependency-blocked tasks.
+   * @param run_resource_demand Shared once-per-Run bytes plus the uniform
+   * additional declaration for every logical task.
    * @return Nothing after every callback in the batch settles.
    * @throws std::invalid_argument for invalid counts, empty active batches,
    * mixed Run ids, or duplicate active Run ids.
@@ -555,8 +645,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   void execute_cpu_run(SchedulerHostContext& host,
                        std::vector<ReadyTaskSubmission> initial_submissions,
                        int total_task_count,
-                       ReadyTaskResourceDemand task_resource_demand =
-                           ReadyTaskSubmission::default_resource_demand());
+                       CpuRunResourceDemand run_resource_demand = {});
 
   /** @copydoc ReadyTaskSubmissionRuntime::submit_ready_submission */
   void submit_ready_submission(ReadyTaskSubmission submission) override;
@@ -665,6 +754,39 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /** @brief Private worker, store, registry, and ledger ownership. */
   class PoolState;
 
+  /** @brief Checked root vector and uniform child-grant envelopes. */
+  struct CpuRunAdmissionEstimate;
+
+  /**
+   * @brief Calculates mandatory bytes for one service-owned submission.
+   * @param graph_identity Stable copied metadata string.
+   * @return Queue, shared-control, store-handle, and string envelope bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   */
+  static std::uint64_t service_submission_envelope_bytes(
+      const std::string& graph_identity);
+
+  /**
+   * @brief Calculates mandatory once-per-Run service retained bytes.
+   * @return Run, registry, shared-control, and reservation-state bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   */
+  static std::uint64_t service_run_envelope_bytes();
+
+  /**
+   * @brief Builds one checked service-plus-adapter admission calculation.
+   * @param configured_workers Frozen positive service worker count.
+   * @param graph_identity Stable metadata copied by every logical task.
+   * @param total_task_count Positive complete task count.
+   * @param demand Shared and uniform per-task adapter declaration.
+   * @return Root vector and uniform ready/execution child envelopes.
+   * @throws std::invalid_argument for a nonpositive task count.
+   * @throws GraphError when any structural arithmetic overflows.
+   */
+  static CpuRunAdmissionEstimate calculate_cpu_run_admission(
+      unsigned int configured_workers, const std::string& graph_identity,
+      int total_task_count, CpuRunResourceDemand demand);
+
   /**
    * @brief Runs the shared worker loop until service shutdown.
    * @param worker_id Stable zero-based id in the fixed service pool.
@@ -685,6 +807,20 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   void enqueue_submission(const std::shared_ptr<RunState>& run,
                           ReadyTaskSubmission submission);
+
+  /**
+   * @brief Grants and owns one uniformly estimated ready queue entry.
+   * @param run Matching active Run whose envelope was admitted.
+   * @param submission Initial or dependency-released submission to transfer.
+   * @return Shared queue entry carrying the exact ready grant.
+   * @throws std::invalid_argument for mismatched Run identity.
+   * @throws GraphError for demand mismatch or unavailable reserved capacity.
+   * @throws std::bad_alloc when queue-entry ownership cannot allocate.
+   * @note Initial and dependent publication both use this helper so neither
+   * path can bypass or recompute a different ready-byte envelope.
+   */
+  std::shared_ptr<QueueEntry> make_queue_entry(
+      const std::shared_ptr<RunState>& run, ReadyTaskSubmission submission);
 
   /**
    * @brief Claims one Run's first failure and retires its queued work.

@@ -319,6 +319,15 @@ class ResourceLedger final {
   };
 
   /**
+   * @brief Returns the structural bytes allocated for one reservation state.
+   * @return Reservation state object plus shared-allocation control payload.
+   * @throws Nothing.
+   * @note This is a source-tree accounting aid for `ExecutionService`; it does
+   * not expose state layout, authority, or allocator-private metadata.
+   */
+  static std::uint64_t reservation_state_retained_memory_bytes() noexcept;
+
+  /**
    * @brief Creates one independent ledger with immutable composition limits.
    * @param limits Maximum committed vector.
    * @throws std::bad_alloc when root state allocation fails.

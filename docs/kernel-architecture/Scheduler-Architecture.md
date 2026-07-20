@@ -352,6 +352,14 @@ entries, and 256 MiB ready bytes. These are Host-composition limits, not
 whole-process thread or allocation claims. `GraphStateExecutor` has a separate
 structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
 
+Issue #70 deliberately removes the installed inline
+`kSchedulerWorkerProcessMax` constant. This is a source-contract break for
+consumers that referenced the policy constant; there is no alias or installed
+public replacement. The composition root now uses the private source-tree
+`ExecutionResourceLimits`. Scheduler ABI v2 object layout, vtables, and the
+numeric plugin handshake remain unchanged. Issue #75 remains responsible for a
+complete scheduler ABI replacement.
+
 ## Plugin Discovery vs Graph Selection
 
 `graph_cli` scans `scheduler_dirs` during startup after config load and before

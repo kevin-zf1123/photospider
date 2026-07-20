@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "compute/compute_dispatch_plan_builder.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps::compute {
@@ -170,6 +171,41 @@ TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
     state.store(static_cast<std::uint8_t>(TaskExecutionState::Pending),
                 std::memory_order_relaxed);
   }
+}
+
+/** @copydoc TaskSubmissionPlan::retained_memory_bytes */
+std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
+  RetainedMemoryEstimator estimate("TaskSubmissionPlan");
+  estimate.add_objects<TaskSubmissionPlan>();
+  estimate.add_bytes(compute_plan_dynamic_retained_memory_bytes(compute_plan_));
+  estimate.add_objects<int>(
+      static_cast<std::uint64_t>(execution_order_.capacity()));
+  estimate.add_objects<Device>(
+      static_cast<std::uint64_t>(available_devices_.capacity()));
+  estimate.add_bytes(dependency_state_.dynamic_retained_memory_bytes());
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(submitted_initial_task_ids_.bucket_count()));
+  estimate.add_objects<decltype(submitted_initial_task_ids_)::value_type>(
+      static_cast<std::uint64_t>(submitted_initial_task_ids_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(submitted_initial_task_ids_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(submitted_initial_task_ids_.size()));
+  estimate.add_objects<std::atomic<std::uint8_t>>(
+      static_cast<std::uint64_t>(task_execution_states_.capacity()));
+  if (task_runner_) {
+    estimate.add_bytes(task_runner_->retained_memory_bytes());
+  }
+  estimate.add_objects<std::optional<NodeOutput>>(
+      static_cast<std::uint64_t>(temp_results_.capacity()));
+  for (const std::optional<NodeOutput>& result : temp_results_) {
+    if (result.has_value()) {
+      estimate.add_bytes(node_output_dynamic_retained_memory_bytes(*result));
+    }
+  }
+  estimate.add_objects<std::optional<OpRegistry::OpVariant>>(
+      static_cast<std::uint64_t>(resolved_ops_.capacity()));
+  return estimate.bytes();
 }
 
 /**
@@ -624,8 +660,12 @@ void dispatch_planned_tasks(GraphModel& graph,
 
   std::vector<ReadyTaskSubmission> initial_submissions =
       plan.make_initial_ready_submissions(dispatcher_lease);
+  const CpuRunResourceDemand resource_demand{
+      dispatcher_lease.retained_memory_bytes(),
+      ReadyTaskSubmission::default_resource_demand()};
   execution_service.execute_cpu_run(host, std::move(initial_submissions),
-                                    static_cast<int>(plan.size()));
+                                    static_cast<int>(plan.size()),
+                                    resource_demand);
 }
 
 }  // namespace ps::compute
