@@ -123,10 +123,11 @@ path pushes lease-backed owned callbacks; dirty paths may still push borrowed
 task handles.
 
 **`ReadyTaskSubmission`**
-A conceptual ready submission represented by a borrowed `TaskHandle` or an
-owned callback whose compute dependencies are already satisfied. It may carry
-scheduler metadata, but never transfers `GraphModel`, a task graph, or dirty
-propagation ownership to the scheduler.
+A move-only service submission whose compute dependencies are already
+satisfied. It owns immutable Run/task identity, a matching lease, an
+executable, a priority hint, and a trusted host resource declaration. Legacy
+schedulers may still receive borrowed handles or owned callbacks, but neither
+route receives `GraphModel`, a task graph, or dirty-propagation ownership.
 
 ## Scheduling, Cache, and Data
 
@@ -157,19 +158,36 @@ worker. A slot may remain reserved when a device is unavailable or a conforming
 plugin creates fewer workers. It is not a ready callback, operation-internal
 thread, graph-state executor, daemon worker, or observed OS thread.
 
-**`SchedulerWorkerBudget`**
-The process-lifetime, mutex-serialized ledger with a fixed 32-slot ceiling
-shared by every embedded Host and Kernel. It admits scheduler plans but owns no
-threads, queue, policy, or fairness. It is current containment for per-graph
-workers, not the target `ExecutionService` or `ResourceLedger` detailed by
-[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md).
+**`ResourceVector`**
+A complete checked request or snapshot with independent CPU-slot,
+retained-memory-byte, scratch-byte, ready-entry, and ready-byte dimensions.
+Zero declares no amount in that dimension; it never means an unknown amount
+that the ledger may invent.
 
-**Scheduler worker reservation**
-A move-only RAII owner of admitted slots. Graph load atomically acquires an
-HP/RT reservation pair before constructing either scheduler, with one owner
-for each intent; replacement acquires one candidate reservation while the old
-owner remains live. A `ReservationOwnedScheduler` destroys its concrete
-scheduler before returning the reservation exactly once.
+**`ResourceLedger`**
+The private Host-authoritative mint exclusively owned by one
+`ExecutionService`. It atomically admits complete vectors, mints only bounded
+child grants, and releases exact capacity after parent and child ownership
+ends. Default limits belong to the Host composition, not a static process
+singleton. It owns no worker, ready ordering, dependency, lifecycle registry,
+device/I/O/plugin estimate, or fairness authority.
+
+**Bounded ready store**
+The `ExecutionService`-owned high/normal store whose aggregate entry and
+accounted-byte counts cannot exceed immutable ledger limits. Initial and
+dependency-released submissions cross the same boundary. Removing an entry
+releases its ready grant only after execution authority is acquired or the
+entry is purged.
+
+**Resource reservation and grant**
+A reservation is the move-only RAII owner of one atomically admitted root
+vector; a grant is a move-only, non-forgeable child authority minted within
+that vector. Graph load atomically acquires an HP/RT legacy CPU-slot
+reservation pair before constructing either scheduler; replacement acquires
+one candidate reservation while the old owner remains live. A
+`ReservationOwnedScheduler` destroys its concrete scheduler before exact
+release. A Run root remains committed until every queued/executing child grant
+has ended.
 
 **`SchedulerTaskRuntime`**
 The scheduler-owned push-only ready-task dispatch mechanism. It accepts initial
@@ -235,8 +253,10 @@ planning, cache, or scheduling semantics.
   final scheduler slot charge.
 - A reserved scheduler worker slot is not proof of one currently running
   thread.
-- `SchedulerWorkerBudget` is not a worker pool, fairness authority, or a limit
-  on every thread in the process.
+- A `ResourceVector` is not a worker pool, observed allocation total, or a
+  license to guess undeclared device/I/O/plugin dimensions.
+- A root reservation is not an executing callback; a child grant is not
+  transferable outside its ledger-created ownership path.
 - The current per-graph `IScheduler` is not the
   [target process execution domain](../roadmap/Kernel-Evolution.md#process-execution-domain);
   its detailed future owner and Run-lifetime constraints are fixed by
@@ -253,7 +273,9 @@ planning, cache, or scheduling semantics.
 - `src/lib/graph/graph_state_executor.hpp`
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
-- `src/lib/scheduler/scheduler_worker_budget.hpp`
+- `src/lib/compute/execution_service.hpp`
+- `src/lib/runtime/resource_ledger.hpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
-- `tests/integration/test_scheduler_worker_budget.cpp`
+- `tests/integration/test_resource_admission.cpp`
+- `tests/unit/test_resource_ledger.cpp`

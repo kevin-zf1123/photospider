@@ -30,10 +30,12 @@ handle。Graph-state mutation 与 visible compute 会进入同一个 per-graph e
   指向同一文件。显式 source failure 返回 `GraphErrc::Io`，绝不回退到旧 session content。
 
 在构造该 runtime 前，Kernel 会规划两个已配置的 intent scheduler。Worker 请求只有零到八有效；
-零解析为 `min(max(1, hardware_concurrency()), 8)`，显式正值保持精确。随后 Kernel 从进程级
-32-slot `SchedulerWorkerBudget` 原子预留 HP+RT 合计计费。内置 `serial_debug` 计费为零，内置 CPU
-与 ABI v2 plugin scheduler 按解析后的授权计费，内置 GPU/heterogeneous scheduler 还要计入已配置的
-潜在 GPU worker。如果 planning 或合并准入失败，两个 scheduler 都不会被构造，也不会发布 session。
+零解析为 `min(max(1, hardware_concurrency()), 8)`，显式正值保持精确。随后 Kernel 从 Host
+composition 的 `ExecutionService` ledger 原子预留 HP+RT 合计计费。内建 CPU 是 ownerless route，
+Graph load 时计费为零；其 Run 会在之后以完整 resource vector 准入。内建 `serial_debug` 同样计费
+为零，ABI v2 plugin scheduler 按解析后的 CPU grant 计费，内建 GPU/heterogeneous scheduler 还要
+计入已配置的潜在 GPU worker。如果 planning 或合并 legacy 准入失败，两个 scheduler 都不会被构造，
+也不会发布 session。
 
 Graph document loading 是“准备后发布”事务：
 

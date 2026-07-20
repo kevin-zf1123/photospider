@@ -387,14 +387,16 @@ struct EmbeddedHostState {
    * @param document_writer Shared graph/node document writer owner.
    * @throws std::invalid_argument when any required owner is empty.
    * @throws std::bad_alloc if backend ownership allocation fails.
-   * @note ExecutionService is composed first, Kernel retains the same explicit
-   * owner, and InteractionService borrows only the completed Kernel.
+   * @note ExecutionService is composed first with explicit product resource
+   * limits, Kernel retains the same owner, and InteractionService borrows only
+   * the completed Kernel.
    */
   EmbeddedHostState(std::shared_ptr<const ImageArtifactCodec> image_codec,
                     std::shared_ptr<const CacheMetadataCodec> metadata_codec,
                     std::shared_ptr<const GraphDocumentReader> document_reader,
                     std::shared_ptr<const GraphDocumentWriter> document_writer)
-      : execution_service(std::make_shared<compute::ExecutionService>()),
+      : execution_service(std::make_shared<compute::ExecutionService>(
+            compute::ExecutionService::default_resource_limits())),
         kernel(std::move(image_codec), std::move(metadata_codec),
                std::move(document_reader), std::move(document_writer),
                execution_service),
@@ -2081,7 +2083,7 @@ class EmbeddedHost final : public Host {
    *
    * @param request Public graph load request.
    * @return Loaded session id, duplicate/scheduler InvalidParameter,
-   *         scheduler-budget ComputeError, explicit-source/session-path Io,
+   *         resource-ledger ComputeError, explicit-source/session-path Io,
    *         syntax/schema InvalidYaml, topology MissingDependency/Cycle, or
    *         Unknown for an unexpected internal failure.
    * @throws std::bad_alloc on allocation failure.
@@ -3616,7 +3618,7 @@ class EmbeddedHost final : public Host {
    *       strong replacement under the graph-state boundary shared with
    *       compute/info/close. The Host session pre-check reserves NotFound for
    *       lifecycle absence, while guarded GraphError mapping preserves only
-   *       the new budget category without releasing the prior owner; other
+   *       resource exhaustion without releasing the prior owner; other
    *       candidate failures keep the established InvalidParameter result.
    */
   VoidResult replace_scheduler(const GraphSessionId& session,

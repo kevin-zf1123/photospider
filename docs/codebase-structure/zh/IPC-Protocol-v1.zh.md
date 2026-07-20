@@ -997,10 +997,10 @@ mutex 或调用 Host 之前，以 Protocol `-32602/invalid_params` 被拒绝。Z
 Connected typed Client 会在发出 frame 前，于本地执行相同的大于八检查，并保持 connection 可用。
 Disconnected Client 会先返回 Transport `not_connected`，不会先校验该值。合法 configuration
 只改变之后加载的 graph session 所使用的 default；现有 session 保留当前 scheduler object，直到
-显式 replacement。进程级 32-slot scheduler admission capacity 是固定 implementation policy，
-由同一进程内全部 Host 与 Kernel 共享，且 protocol v1 不提供远程配置。因此，接受 default 并不
-预留 capacity：之后 graph load 的两个已规划 scheduler instance 无法同时容纳时，仍可返回精确的
-Graph `ComputeError`。
+显式 replacement。Embedded Host 的默认 ledger 有 32 个 CPU slot；这是 protocol v1 不能远程
+配置的固定 implementation policy。内建 CPU Run callback 与 legacy scheduler owner 共享该
+Host-composed capacity。因此，接受 default 并不预留 capacity：之后 graph load 的两个已规划
+scheduler instance 无法同时容纳时，仍可返回精确的 Graph `ComputeError`。
 
 两个 session method 要求有效 opaque daemon `session_id`，且 `intent` 必须是
 `global_high_precision` 或 `real_time_update`：

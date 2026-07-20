@@ -772,8 +772,8 @@ class Kernel {
    * @return Nothing.
    * @throws std::invalid_argument If a positive worker request conflicts with
    * the already fixed injected service count.
-   * @throws GraphError If the first fixed CPU pool cannot reserve transitional
-   * process capacity.
+   * @throws std::invalid_argument If the resolved fixed worker count exceeds
+   * the composition-root CPU limit.
    * @throws std::bad_alloc or std::system_error If scheduler type copying or
    * first fixed-pool construction fails.
    * @note A configuration selecting built-in CPU freezes and starts the one
@@ -782,7 +782,7 @@ class Kernel {
    * replacement. After that point, later zero/equal requests preserve the pool
    * and a conflicting positive request is rejected. Graph load and replacement
    * never resize a configured pool. Scheduler type availability and
-   * legacy-owner budget rejection still occur transactionally during later
+   * legacy-owner ledger rejection still occurs transactionally during later
    * load; existing Graph bindings remain unchanged.
    */
   void set_scheduler_config(const SchedulerConfig& config);
@@ -806,11 +806,11 @@ class Kernel {
    * @return True after candidate publication; false when the Graph or
    * scheduler type is absent, a current plugin factory returns null, or a
    * non-Graph lifecycle failure is handled.
-   * @throws GraphError With `GraphErrc::ComputeError` when the process budget
+   * @throws GraphError With `GraphErrc::ComputeError` when the Host ledger
    * cannot reserve candidate headroom.
    * @throws std::bad_alloc if scheduler creation or graph-state submission
    *         exhausts memory.
-   * @note Built-in CPU replacement publishes an ownerless process-service
+   * @note Built-in CPU replacement publishes an ownerless service
    * binding and reserves no per-Graph workers. Legacy planning,
    * single-candidate reservation, construction, preparation, and publication
    * occur inside the graph-state boundary while the old binding remains
@@ -1249,9 +1249,8 @@ class Kernel {
    * @throws GraphError with `GraphErrc::InvalidParameter` when either type is
    *         unsupported, a planned plugin becomes unavailable, or its factory
    *         returns no scheduler instance.
-   * @throws GraphError with `GraphErrc::ComputeError` when process capacity
-   *         cannot admit the first fixed service pool or aggregate legacy
-   *         intent plans.
+   * @throws GraphError with `GraphErrc::ComputeError` when Host-ledger
+   *         capacity cannot admit the aggregate legacy intent plans.
    * @throws std::invalid_argument or std::overflow_error for invalid planning
    *         inputs, a conflicting fixed worker request, or arithmetic.
    * @throws std::bad_alloc or std::system_error if fixed-pool or scheduler

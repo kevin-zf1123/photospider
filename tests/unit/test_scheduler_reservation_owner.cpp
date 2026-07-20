@@ -10,10 +10,10 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/resource_ledger.hpp"
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"
 #include "scheduler/scheduler_reservation_owner.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
 
 namespace ps {
 namespace {
@@ -68,8 +68,8 @@ struct ProbeSchedulerState final {
   SchedulerTraceAction trace_action = SchedulerTraceAction::AssignInitial;
   /** @brief Last trace node forwarded to the probe. */
   int trace_node_id = -1;
-  /** @brief Optional budget inspected from the concrete destructor. */
-  SchedulerWorkerBudget* destruction_budget = nullptr;
+  /** @brief Optional ledger inspected from the concrete destructor. */
+  ResourceLedger* destruction_ledger = nullptr;
   /** @brief Whether capacity was already free during concrete destruction. */
   bool capacity_available_during_destroy = true;
 };
@@ -141,9 +141,10 @@ class ProbeScheduler final : public IScheduler {
    */
   ~ProbeScheduler() noexcept override {
     state_->lifecycle_events.push_back("destroy");
-    if (state_->destruction_budget != nullptr) {
+    if (state_->destruction_ledger != nullptr) {
       state_->capacity_available_during_destroy =
-          state_->destruction_budget->try_reserve(1U).has_value();
+          state_->destruction_ledger->try_reserve(ResourceVector{1U})
+              .has_value();
     }
   }
 
@@ -269,8 +270,8 @@ void ensure_failure_factories_registered() {
  * @throws Nothing when every argument, result, and moved value is preserved.
  */
 TEST(SchedulerReservationOwner, ForwardsCompleteSchedulerSurface) {
-  SchedulerWorkerBudget budget(1U);
-  auto reservation = budget.try_reserve(1U);
+  ResourceLedger ledger(ResourceVector{1U});
+  auto reservation = ledger.try_reserve(ResourceVector{1U});
   ASSERT_TRUE(reservation.has_value());
   auto state = std::make_shared<ProbeSchedulerState>();
   auto scheduler = make_reservation_owned_scheduler(
@@ -340,11 +341,11 @@ TEST(SchedulerReservationOwner, ForwardsCompleteSchedulerSurface) {
  */
 TEST(SchedulerReservationOwner,
      TearsDownAndDestroysConcreteSchedulerBeforeReservationRelease) {
-  SchedulerWorkerBudget budget(1U);
-  auto reservation = budget.try_reserve(1U);
+  ResourceLedger ledger(ResourceVector{1U});
+  auto reservation = ledger.try_reserve(ResourceVector{1U});
   ASSERT_TRUE(reservation.has_value());
   auto state = std::make_shared<ProbeSchedulerState>();
-  state->destruction_budget = &budget;
+  state->destruction_ledger = &ledger;
   auto scheduler = make_reservation_owned_scheduler(
       std::make_unique<ProbeScheduler>(state), std::move(*reservation));
   ASSERT_NE(scheduler, nullptr);
@@ -352,7 +353,7 @@ TEST(SchedulerReservationOwner,
   ProbeHostContext host;
   scheduler->attach(host);
   scheduler->start();
-  EXPECT_FALSE(budget.try_reserve(1U).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
   scheduler->shutdown();
   scheduler->detach();
   scheduler.reset();
@@ -361,7 +362,7 @@ TEST(SchedulerReservationOwner,
             (std::vector<std::string>{"attach", "start", "shutdown", "detach",
                                       "destroy"}));
   EXPECT_FALSE(state->capacity_available_during_destroy);
-  EXPECT_TRUE(budget.try_reserve(1U).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{1U}).has_value());
 }
 
 /**
@@ -370,11 +371,11 @@ TEST(SchedulerReservationOwner,
  */
 TEST(SchedulerReservationOwner,
      LifecycleExceptionsPreserveReservationUntilConcreteDestruction) {
-  SchedulerWorkerBudget budget(1U);
-  auto reservation = budget.try_reserve(1U);
+  ResourceLedger ledger(ResourceVector{1U});
+  auto reservation = ledger.try_reserve(ResourceVector{1U});
   ASSERT_TRUE(reservation.has_value());
   auto state = std::make_shared<ProbeSchedulerState>();
-  state->destruction_budget = &budget;
+  state->destruction_ledger = &ledger;
   state->throw_on_shutdown = true;
   state->throw_on_detach = true;
   auto scheduler = make_reservation_owned_scheduler(
@@ -385,16 +386,16 @@ TEST(SchedulerReservationOwner,
   scheduler->attach(host);
   scheduler->start();
   EXPECT_THROW(scheduler->shutdown(), std::runtime_error);
-  EXPECT_FALSE(budget.try_reserve(1U).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
   EXPECT_THROW(scheduler->detach(), std::runtime_error);
-  EXPECT_FALSE(budget.try_reserve(1U).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
   scheduler.reset();
 
   EXPECT_EQ(state->lifecycle_events,
             (std::vector<std::string>{"attach", "start", "shutdown", "detach",
                                       "destroy"}));
   EXPECT_FALSE(state->capacity_available_during_destroy);
-  EXPECT_TRUE(budget.try_reserve(1U).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{1U}).has_value());
 }
 
 /**
@@ -403,26 +404,26 @@ TEST(SchedulerReservationOwner,
  */
 TEST(SchedulerReservationOwner, FactoryFailureReturnsCandidateReservation) {
   ensure_failure_factories_registered();
-  SchedulerWorkerBudget budget(1U);
+  ResourceLedger ledger(ResourceVector{1U});
 
   const auto null_plan =
       SchedulerFactory::plan_for_hardware(kNullSchedulerType, 1U, 1U);
   ASSERT_TRUE(null_plan.has_value());
-  auto null_reservation = budget.try_reserve(1U);
+  auto null_reservation = ledger.try_reserve(ResourceVector{1U});
   ASSERT_TRUE(null_reservation.has_value());
   EXPECT_EQ(SchedulerFactory::create(*null_plan, std::move(*null_reservation)),
             nullptr);
-  EXPECT_TRUE(budget.try_reserve(1U).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{1U}).has_value());
 
   const auto throwing_plan =
       SchedulerFactory::plan_for_hardware(kThrowingSchedulerType, 1U, 1U);
   ASSERT_TRUE(throwing_plan.has_value());
-  auto throwing_reservation = budget.try_reserve(1U);
+  auto throwing_reservation = ledger.try_reserve(ResourceVector{1U});
   ASSERT_TRUE(throwing_reservation.has_value());
   EXPECT_THROW((void)SchedulerFactory::create(*throwing_plan,
                                               std::move(*throwing_reservation)),
                std::runtime_error);
-  EXPECT_TRUE(budget.try_reserve(1U).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{1U}).has_value());
 }
 
 /**
@@ -434,16 +435,22 @@ TEST(SchedulerReservationOwner, FactoryRejectsInvalidReservationOwnership) {
       SchedulerFactory::plan_for_hardware("cpu_work_stealing", 1U, 1U);
   ASSERT_TRUE(plan.has_value());
 
-  SchedulerWorkerBudget::Reservation inactive;
-  EXPECT_THROW((void)SchedulerFactory::create(*plan, std::move(inactive)),
-               std::invalid_argument);
+  ResourceLedger ledger(ResourceVector{1U});
+  {
+    auto inactive_source = ledger.try_reserve(ResourceVector{1U});
+    ASSERT_TRUE(inactive_source.has_value());
+    ResourceLedger::Reservation active_owner(std::move(*inactive_source));
+    EXPECT_THROW(
+        (void)SchedulerFactory::create(*plan, std::move(*inactive_source)),
+        std::invalid_argument);
+    EXPECT_TRUE(active_owner.active());
+  }
 
-  SchedulerWorkerBudget budget(1U);
-  auto wrong_size = budget.try_reserve(0U);
+  auto wrong_size = ledger.try_reserve(ResourceVector{});
   ASSERT_TRUE(wrong_size.has_value());
   EXPECT_THROW((void)SchedulerFactory::create(*plan, std::move(*wrong_size)),
                std::invalid_argument);
-  EXPECT_TRUE(budget.try_reserve(1U).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{1U}).has_value());
 }
 
 }  // namespace

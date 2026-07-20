@@ -2,18 +2,20 @@
 
 ## Status
 
-Accepted as the target architecture. Issue #69 is current software behavior
-for the CPU execution slice: the embedded composition root injects one fixed
+Accepted as the target architecture. Issue #70 is current software behavior
+for the CPU execution/resource slice: the embedded composition root injects one fixed
 `ExecutionService`; built-in CPU HP, RT, connected-parameter preflight, and
 dirty source/downstream work crosses a move-only `ReadyTaskSubmission`
 boundary. Independent Runs from multiple Graphs may overlap, with Run-local
 completion, failure, trace, and Host state. Realtime requests create distinct
 HP and RT child Runs, but do not yet create the target `RunGroup`. Built-in CPU
 intent bindings are ownerless at `GraphRuntime`; serial, GPU, and plugin routes
-retain transitional per-Graph schedulers. `RunLifecycleRegistry`,
-authoritative `GraphRevision` commit validation, the target `ResourceLedger`,
-bounded ready storage, final fairness policy, cancellation, supersession, and
-the policy-only scheduler generation remain target behavior.
+retain per-Graph schedulers. The service now exclusively owns one
+Host-authoritative `ResourceLedger`, atomically admits complete Run vectors,
+and routes initial/dependent work through entry/byte-bounded ready storage.
+`RunLifecycleRegistry`, authoritative `GraphRevision` commit validation, final
+fairness policy, cancellation, supersession, and the policy-only scheduler
+generation remain target behavior.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -26,17 +28,16 @@ The current implementation retains one execution binding per intent in each
 `GraphRuntime`. Serial, GPU, and plugin bindings own transitional `IScheduler`
 instances whose interfaces combine workers, ready queues, epochs, completion,
 exception publication, and ordering policy. Built-in CPU bindings instead
-select the issue #69 process service without allocating a Graph-owned
+select the issue #70 process service without allocating a Graph-owned
 scheduler or carrying a per-Graph worker grant.
 
 The explicitly injected service owns a direct fixed CPU worker pool. It freezes
 one resolved `[1,8]` count before first CPU use, accepts multiple active Runs,
-uses separate high and normal ready FIFOs, and keeps completion, first
+uses entry/byte-bounded high and normal ready FIFOs, and keeps completion, first
 exception, in-flight drainage, trace Host, and settlement isolated per Run.
-The function-static `SchedulerWorkerBudget::process()` limits conservative
-worker charges to 32 across embedded Hosts; it now charges each Kernel's fixed
-service pool once as well as legacy Graph-owned workers, but owns no ready
-store, Run, memory, scratch, device, I/O, or plugin-process budget.
+Its private ledger owns immutable composition limits and shared authority for
+both Run vectors and legacy Graph-owned scheduler CPU-slot reservations. Fixed
+service threads remain infrastructure rather than a pool-lifetime charge.
 
 `ComputeRun` shared control owns the plan or dirty staging, temporary results,
 and stable leases. Every built-in CPU ready task retains a non-forgeable Run
@@ -226,14 +227,16 @@ metadata, `(RunId, RunLocalTaskId)`, an owned or otherwise stable executable
 handle, resource estimates/requirements, and a `RunLease` bound to the matching
 completion endpoint.
 
-The current issue #69 value implements immutable metadata, composite identity,
+The current issue #70 value implements immutable metadata, composite identity,
 owned executable, matching `ComputeRunLease`, multi-Run routing, and isolated
 completion/failure settlement. It rejects borrowed handles, anonymous raw
 callbacks, mixed initial Run ids, and submissions outside the matching active
 Run. `TaskSubmissionPlan` and heap-owned dirty contexts still discover initial
 readiness, release dependencies, own result indexes, and retire logical
-completion counts. Production Run admission, bounded ready storage, resource
-estimates/grants, and policy re-entry remain target behavior.
+completion counts. Each submission carries a uniform trusted-host demand;
+whole-Run admission and checked aggregation happen before publication, and
+initial/dependent submissions require matching child grants from the same
+bounded store. Policy re-entry remains target behavior.
 
 The service never receives or derives `GraphModel`, `ComputePlan`,
 `ComputeTaskGraph`, dirty snapshot/state, dependency maps, cache authority, or
@@ -252,7 +255,7 @@ path may not bypass fairness, cancellation, or Run isolation.
 | `GraphRuntime` | `GraphModel`, graph-scoped state, graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit validation/publication, graph events, stable graph-instance identity, graph-lifetime anchor, platform/session metadata | Runs, admitted-Run indexes, CPU/device/I/O/plugin workers, process ready store, admission, `ResourceLedger`, `SchedulerPolicy`, physical schedulers |
 | `ExecutionService::RunLifecycleRegistry` | one process admission fence, service accepting/stopping state, graph-indexed open/closing admission rows, pending admission candidates, graph-indexed admitted `RunLease` entries, and process-wide Run enumeration | Run plans, dispatchers, terminal arbitration, staged output, Graph state, resource minting, execution policy |
 | Process `ExecutionService` | the lifecycle registry, physical CPU workers and later resource executors, bounded ready storage, Run/resource admission, policy-result validation, execution exception fences, completion routing | task planning/dependencies, Graph/document persistence, cache authority, dirty propagation, visible commit, Graph state |
-| `ResourceLedger` | checked process limits, transactional reservations, validated child grants, exact-once release accounting | ordering policy, task dependencies, Graph state, third-party token delegation |
+| `ResourceLedger` | checked composition limits, transactional reservations, validated child grants, exact-once release accounting | ordering policy, task dependencies, Graph state, third-party token delegation |
 | `SchedulerPolicy` | ranking immutable ready descriptors and suggesting a bounded quantum | workers, ready store, Runs, Graph state, reservations/grants/tokens, native device handles, executors, completion or lifecycle authority |
 
 The product composition root now constructs and injects the current CPU-only
@@ -335,33 +338,38 @@ non-forgeable reservations and execution grants. A built-in or third-party
 policy, operation plugin, or policy plugin may request or suggest resources but
 cannot construct, duplicate, enlarge, or directly release a token.
 
-The ledger ultimately accounts for:
+The current issue #70 ledger accounts for:
 
 - CPU execution capacity;
 - ready-store entries and bytes;
-- retained/in-flight memory and scratch;
+- retained/in-flight Host memory and scratch.
+
+The following dimensions remain later target behavior and are not guessed,
+reserved, or represented by fake nonzero values in the current ledger:
+
 - per-device queue, in-flight, memory, and scratch capacity;
 - compute-I/O operations and bytes; and
 - plugin-process, invocation, IPC/shared-memory, and isolation capacity.
 
 Admission validates one checked resource vector transactionally and returns a
-complete Run reservation or nothing. A policy may rank work and suggest a
-bounded quantum. Trusted service code validates the suggestion against process
-limits and the Run reservation before the ledger mints a child grant.
+complete Run reservation or nothing. Trusted service code suballocates
+ready-entry/byte and CPU/memory/scratch child grants within that reservation.
+The future policy may rank work and suggest a bounded quantum; trusted service
+code will validate it before minting authority.
 
-Every reservation and grant releases exactly once after success, failure,
-cancellation, rollback, graph close, process shutdown, or worker failure. A Run
-reservation cannot release while child grants remain live. Checked overflow or
-capacity exhaustion never overcommits, partially reserves, or silently clamps.
-Synchronous documented allocation exhaustion remains `std::bad_alloc`;
-asynchronous failure is captured by the exact Run failure channel and cannot
-commit partial output.
+Current success, callback failure, construction rollback, worker failure,
+legacy Graph close, and owner destruction release each reservation/grant
+exactly once. A Run reservation cannot release while child grants remain live.
+Checked overflow or capacity exhaustion never overcommits, partially reserves,
+or silently clamps. Synchronous documented allocation exhaustion remains
+`std::bad_alloc`; asynchronous failure is captured by the exact Run failure
+channel and cannot commit partial output. Later cancellation and lifecycle
+registry slices must preserve the same invariant.
 
-The current `SchedulerWorkerBudget` remains transitional current behavior until
-its migration slice. It charges one pool-lifetime reservation for each fixed
-CPU service plus legacy per-Graph scheduler workers. It is not wrapped,
-renamed, or aliased into the target ledger and disappears when final
-resource-ledger ownership replaces this containment model.
+The former worker-only counter is completely removed rather than wrapped,
+renamed, aliased, or retained as a second authority. Pure worker-count
+resolution remains a non-owning planning helper; all scheduler-owner admission
+uses the `ExecutionService` ledger.
 
 ### Policy-only scheduler generation
 
@@ -458,7 +466,7 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract. Issues #66 through #69 are now
+This decision fixes the dependency contract. Issues #66 through #70 are now
 implemented as current slices; the following later slices remain ordered target
 work:
 
@@ -467,8 +475,8 @@ work:
 | #66 (current) | HP `ComputeRun` descriptor, state, storage, and one terminal outcome | Process worker migration |
 | #67 (completed foundation) | Stable Run leases and `(RunId, RunLocalTaskId)` full-HP completion isolation | Shared CPU service |
 | #68 (completed foundation) | Injected CPU-only `ExecutionService` for one Run, ready-only input | Multi-Graph migration and final ledger |
-| #69 (current) | Shared multi-Graph and HP/RT CPU domain; removal of per-Graph built-in CPU workers; owned dirty/preflight submissions | Full admission/policy model and `RunGroup` |
-| #70 | Production admission, bounded ready store, and `ResourceLedger` | Fairness algorithms |
+| #69 (completed) | Shared multi-Graph and HP/RT CPU domain; removal of per-Graph built-in CPU workers; owned dirty/preflight submissions | Full admission/policy model and `RunGroup` |
+| #70 (current) | Production resource admission, bounded ready store, and `ResourceLedger` | Fairness algorithms, lifecycle registry, and new device/I/O/plugin dimensions |
 | #71 | Interactive and throughput built-in policies | Plugin ABI migration |
 | #72 | `GraphRevision` capture and staged commit predicate | Cooperative cancellation |
 | #73 | Queued/running/commit cancellation, joining #70 and #72 | Latest-wins policy |
@@ -541,11 +549,11 @@ task-graph semantics.
 Rejected because process queues, device completion, compute I/O, and
 cross-Run fairness may outlive that caller stack and wait.
 
-### Reuse SchedulerWorkerBudget as ResourceLedger
+### Reuse the former worker-only counter as ResourceLedger
 
-Rejected because the transitional counter has the wrong resource model, hidden
-process-static ownership, and no Run, queue, memory, scratch, device, I/O, or
-plugin-process authority.
+Rejected because that removed transitional counter had the wrong resource
+model, hidden process-static ownership, and no Run, queue, memory, scratch,
+device, I/O, or plugin-process authority.
 
 ### Let SchedulerPolicy mint grants
 

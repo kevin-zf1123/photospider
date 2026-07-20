@@ -253,17 +253,24 @@ non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯
 - `test_kernel_contracts` 驱动真实 `GraphIOService` stream 进入 post-write、post-flush 与
   post-close failure state。每个 phase 都必须返回 `GraphErrc::Io`；已创建的 destination 证明
   文档所述 non-atomic post-open 行为。
-- `test_scheduler_worker_budget` 证明 fresh invalid CPU-selecting load 不会发布 session，也不会
-  创建 per-Graph CPU owner。测试会在任何相等请求之前推导权威的 automatic worker count，并
-  要求一个确定的不相等正数请求失败；随后，zero 与显式 resolved count 都必须复用首次固定
-  service pool，且后续有效 Graph 仍能成功 load。
+- `test_resource_ledger` 证明 checked vector arithmetic、当前五个维度各自的 saturation 与 exact
+  recovery、atomic mixed-vector 与 pair admission、bounded child grant、deferred parent release、
+  move-only token contract，以及并发无 overcommit 行为。
+- `test_resource_admission` 证明 load/replacement pair transaction、exact saturation recovery、
+  candidate-headroom rollback、ownerless 内建 CPU binding、彼此独立的 Host composition ledger
+  与共享 multi-Graph execution。Fresh invalid CPU-selecting load 仍不能发布 session，也不能创建
+  per-Graph CPU owner。
 - `test_compute_run` 会记录完整的 action/node/worker/epoch tuple。它证明两个复用 local task id
   zero 的并发 Run 只会向各自 Host 交付匹配的 Run/node epoch；cleanup 会在每条 assertion
   路径释放被阻塞的第一个 Run，使序列化回归以测试失败终止而不是挂起。Realtime Full HP 与
   Interactive RT child 共享同一个物理 Host 和 local task id zero，但不同的 trace-node marker
   会把每个 Host event 映射到对应 epoch，以及 callback 保留的 descriptor/task identity。
   该 realtime case 有意直接测试 `ExecutionService`：worker loop 的 Host/epoch 选择和 callback
-  保留的 identity 可在这一边界观察，无需增加仅供测试的 GraphRuntime hook。
+  保留的 identity 可在这一边界观察，无需增加仅供测试的 GraphRuntime hook。Direct service
+  case 还覆盖 retained Host memory、scratch、ready entry 与 ready byte 的 whole-vector rejection
+  和 recovery、checked-overflow rejection、与 legacy owner 共享 CPU admission、initial
+  ready-store backpressure 与 priority ordering、dependent re-entry backpressure，以及 success
+  或 failure 后的 exact root release。
 - `test_ipc_protocol` 证明精确 Graph status 传递、mutation 只调用一次，以及 failed load 后
   daemon session-name rollback。
 - `test_ipc_daemon` 证明真实 transport 精确返回 save `NotFound` 与 `Io`，destination failure 后
@@ -273,17 +280,18 @@ non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯
 
 ```bash
 cmake --build build --target test_graph_document_errors test_host_adapter \
-  test_kernel_contracts test_scheduler_worker_budget test_compute_run \
-  test_ipc_protocol test_ipc_daemon -j
+  test_kernel_contracts test_resource_ledger test_resource_admission \
+  test_compute_run test_ipc_protocol test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.*Reload*'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='GraphIoContract.Save*'
-./build/tests/test_scheduler_worker_budget \
-  --gtest_filter=EmbeddedHostSchedulerBudget.FreshInvalidYamlLoadRetainsFirstFixedPoolWithoutPerGraphOwner
+./build/tests/test_resource_ledger
+./build/tests/test_resource_admission \
+  --gtest_filter='EmbeddedHostResourceAdmission.*'
 ./build/tests/test_compute_run \
-  --gtest_filter='ExecutionService.OverlapsIndependentConcurrentRunIntervals:ExecutionService.DistinguishesRealtimeHpAndRtChildEpochsOnOneHost'
+  --gtest_filter='ExecutionService.*'
 ./build/tests/test_ipc_protocol \
   --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
 ./build/tests/test_ipc_daemon \

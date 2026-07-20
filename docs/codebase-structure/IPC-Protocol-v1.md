@@ -1179,11 +1179,12 @@ before emitting a frame and keeps the connection usable. A disconnected Client
 returns Transport `not_connected` before validating the value. Legal
 configuration changes defaults for subsequently loaded graph sessions only;
 existing sessions retain their scheduler objects until explicit replacement.
-The process-wide 32-slot scheduler admission capacity is fixed implementation
-policy, is shared across Hosts and Kernels in the process, and is not remotely
-configurable through protocol v1. Consequently, accepting defaults does not
-reserve capacity: a later graph load can still return its exact Graph
-`ComputeError` when the two planned scheduler instances do not fit.
+The embedded Host's default ledger has 32 CPU slots and is fixed implementation
+policy that protocol v1 cannot configure remotely. Built-in CPU Run callbacks
+and legacy scheduler owners share that Host-composed capacity. Consequently,
+accepting defaults does not reserve capacity: a later graph load can still
+return its exact Graph `ComputeError` when the two planned scheduler instances
+do not fit.
 
 The two session methods require a valid opaque daemon `session_id` and an
 `intent` equal to `global_high_precision` or `real_time_update`:

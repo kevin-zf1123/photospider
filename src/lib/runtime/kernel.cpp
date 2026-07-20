@@ -27,7 +27,6 @@
 #include "compute/execution_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "scheduler/scheduler_factory.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 #include "runtime/kernel_required_target_test_access.hpp"
 #endif
@@ -327,20 +326,20 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
     }
   }
 
-  std::optional<SchedulerWorkerBudget::ReservationPair> reservations =
-      SchedulerWorkerBudget::process().try_reserve_pair(
+  std::optional<ResourceLedger::ReservationPair> reservations =
+      execution_service_->try_reserve_legacy_scheduler_worker_pair(
           hp_plan->is_builtin_cpu() ? 0U : hp_plan->reservation_slots(),
           rt_plan->is_builtin_cpu() ? 0U : rt_plan->reservation_slots());
   if (!reservations.has_value()) {
     throw GraphError(GraphErrc::ComputeError,
-                     "process scheduler worker budget cannot admit the "
-                     "configured HP and RT scheduler pair");
+                     "Host resource ledger cannot admit the configured HP "
+                     "and RT scheduler pair");
   }
 
   std::unique_ptr<IScheduler> hp_scheduler;
   if (!hp_plan->is_builtin_cpu()) {
-    hp_scheduler = SchedulerFactory::create(
-        *hp_plan, std::move(reservations->high_precision));
+    hp_scheduler =
+        SchedulerFactory::create(*hp_plan, std::move(reservations->first));
     if (hp_scheduler == nullptr) {
       throw GraphError(GraphErrc::InvalidParameter,
                        "HP scheduler type '" + scheduler_config_.hp_type +
@@ -352,7 +351,7 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
   std::unique_ptr<IScheduler> rt_scheduler;
   if (!rt_plan->is_builtin_cpu()) {
     rt_scheduler =
-        SchedulerFactory::create(*rt_plan, std::move(reservations->real_time));
+        SchedulerFactory::create(*rt_plan, std::move(reservations->second));
     if (rt_scheduler == nullptr) {
       throw GraphError(GraphErrc::InvalidParameter,
                        "RT scheduler type '" + scheduler_config_.rt_type +

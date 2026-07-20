@@ -42,8 +42,8 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_core_internal` | Build-only core values, private conversion, and registry helper. | Role-owned sources are also folded into the static product. |
 | `photospider_graph_internal` | Build-only `GraphModel` and graph-service helper. | `GraphModel` remains private under `src/lib/graph`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation v2 loader, adapter, and lifetime helper. | It is not exported. |
-| `photospider_scheduler_internal` | Build-only scheduler planning/factory, ABI-v2 loader, built-in implementation, reservation owner, and process-budget helper. | Its fixed 32-slot process ledger counts the shared service pool and legacy scheduler owners but is not the target Host-authoritative resource ledger. |
-| `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, runtime, dirty-region, and interaction helper. | Runs remain private; built-in CPU work uses the fixed multi-Run `ExecutionService`, while legacy scheduler routes retain their own workers. |
+| `photospider_scheduler_internal` | Build-only scheduler planning/factory, ABI-v2 loader, built-in implementation, pure worker-limit planning, scheduler reservation owner, and shared ledger primitive. | The `ResourceLedger` implementation is compiled here, but each composition-root `ExecutionService` owns its sole Host-authoritative instance. |
+| `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, runtime, dirty-region, and interaction helper. | Runs remain private; built-in CPU work and legacy scheduler owners share the fixed multi-Run service ledger. |
 | `photospider_operation_runtime` | Installable static image-buffer factory implementation. | It has no external package or back-link to the operation SDK. |
 | `photospider_operation_sdk` | Installable operation v2 interface SDK. | It transitively carries `operation_runtime`, so it is the sole ordinary plugin link target. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
@@ -97,8 +97,10 @@ Resolved seam tightening in the current branch:
   `src/lib/**` directories. Internal targets compile with the private
   `src/lib/` root, while the installable public header inventory remains
   limited to `include/photospider/**`.
-- The current issue #69 Run/service implementation lives under
-  `src/lib/compute/{compute_run,execution_service}.*`. `Kernel` supplies
+- The current issue #70 Run/service implementation lives under
+  `src/lib/compute/{compute_run,execution_service}.*`, while the shared
+  accounting primitive lives under `src/lib/runtime/resource_ledger.*`.
+  `Kernel` supplies
   session identity and explicit default QoS to the private request and injects
   the composition-root CPU service. `ComputeService` creates one Run for each
   non-realtime HP call and separate HP `Full` plus RT `Interactive` child Runs
@@ -106,7 +108,11 @@ Resolved seam tightening in the current branch:
   temporary or standalone dirty staging storage through exact terminal
   publication. Built-in CPU HP/RT full, dirty, and preflight work transfers
   move-only, lease-backed submissions with owned callback context to the fixed
-  multi-Run service; legacy scheduler routes retain owned callbacks. No
+  multi-Run service. Each Run is admitted with one checked complete vector;
+  initial and dependent work enters the same entry/byte-bounded ready store
+  under child grants, which workers exchange for execution grants. Legacy
+  scheduler routes retain owned callbacks and obtain CPU reservations from the
+  same service ledger. No
   installed header, Host value, operation ABI, or scheduler ABI names these
   private objects.
 - Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
@@ -287,10 +293,11 @@ this layout. Issue #36 created `src/lib/ipc/`, `include/photospider/ipc/`, and
 `apps/photospiderd/` together with real daemon behavior. Issue #38 completed the
 final `include/photospider/{plugin,scheduler}/` contracts, moved full private
 types to role-owned homes, and removed all eight transitional extension headers
-without shims or duplicates. Issue #43 keeps scheduler resolution, concrete
-instance planning, the process ledger, and reservation ownership private under
-`src/lib/scheduler/`; none of those implementation owners becomes a public
-Host, SDK, or IPC type.
+without shims or duplicates. Issue #70 keeps pure worker-request resolution and
+concrete instance planning under `src/lib/scheduler/`, but places the sole
+Host-authoritative ledger and move-only reservation/grant implementation under
+`src/lib/runtime/`. None of those implementation owners becomes a public Host,
+SDK, or IPC type.
 
 Naming rules:
 
@@ -313,7 +320,7 @@ Current target shape:
 | `photospider_graph_internal` | Static | No | `GraphModel`, graph IO, traversal, cache, inspection implementation. |
 | `photospider_compute_internal` | Static | No | Compute planning, dirty-region state, dispatcher, scheduler interaction. |
 | `photospider_plugin_host_internal` | Static | No | Host-side dynamic plugin loading and lifetime ownership. |
-| `photospider_scheduler_internal` | Static | No | Built-in schedulers, ABI-v2 loader, factory planning, reservation ownership, and the transitional fixed process ledger. |
+| `photospider_scheduler_internal` | Static | No | Built-in schedulers, ABI-v2 loader, factory/worker-limit planning, scheduler reservation ownership, and the shared `ResourceLedger` primitive. |
 | `photospider_operation_runtime` | Static | Yes | Public image-buffer factories with no external-package dependency or SDK back-link. |
 | `photospider_operation_sdk` | Interface | Yes | Operation v2 headers and transitive `operation_runtime` link. |
 | `photospider_operation_opencv` | Static | Yes | Opt-in public OpenCV adapter with only OpenCV `core`. |
@@ -455,12 +462,12 @@ In that target:
 - request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
-- the current `ExecutionService` owns one fixed built-in CPU worker pool,
-  idempotent one-time grant configuration, direct high/normal ready queues,
-  concurrent multi-Graph Runs, and per-Run completion, first-failure, trace,
-  and Host-context routing; the target extends it with bounded ready storage,
-  production admission, trusted policy validation, and general resource
-  execution;
+- the current `ExecutionService` owns one fixed built-in CPU worker pool, one
+  Host-authoritative ledger, an entry/byte-bounded high/normal ready store,
+  checked full-vector Run admission, concurrent multi-Graph Runs, exact
+  reservation/grant release, and per-Run completion, first-failure, trace, and
+  Host-context routing; the target extends it with trusted policy validation
+  and general resource execution;
 - its private `RunLifecycleRegistry` supplies the single process admission/
   graph-close/process-shutdown fence, pending-candidate tracking,
   graph-indexed registry-held `RunLease` entries, and process enumeration without
@@ -470,11 +477,12 @@ In that target:
 - `SchedulerPolicy` ranks work or suggests a bounded quantum but owns no worker,
   queue, token, native resource, Run, or Graph state.
 
-This ownership target does not select a new source directory, build target,
-queue implementation, or plugin ABI shape. Those choices belong to the
-corresponding implementation slices. The current worker-owning scheduler SDK and
-`SchedulerWorkerBudget` are removed as complete migrations; neither remains
-behind a permanent compatibility wrapper.
+This ownership target does not select a new source directory, build target, or
+plugin ABI shape for future policy/general-resource slices. Those choices
+belong to their corresponding implementation work. The former worker-only
+budget has already been removed as a complete migration without a wrapper,
+alias, or duplicate authority. The current worker-owning scheduler SDK remains
+until its separately scheduled ABI replacement.
 
 ## Daemon Shape
 
@@ -589,7 +597,7 @@ Method groups and current wire availability:
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
 | compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values; states are exactly `queued`, `running`, `succeeded`, and `failed`, and every job reports `cancellable:false`. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
-| scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Defaults accept only exact `worker_count` values in `[0,8]`; the router rejects malformed or larger values before Host access, while the connected typed Client rejects larger values before writing a frame. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. The fixed 32-slot scheduler ledger spans all Hosts/Kernels in the process and is not remotely configurable. The installed typed Client exposes every route, aggregates type/plugin snapshots, and validates bounded non-destructive trace pages without retaining scheduler/plugin ownership. |
+| scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Defaults accept only exact `worker_count` values in `[0,8]`; the router rejects malformed or larger values before Host access, while the connected typed Client rejects larger values before writing a frame. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. The embedded Host composes one non-remotely-configurable `ExecutionService` whose default ledger has 32 CPU slots; Run callbacks and legacy scheduler owners share that authority. The installed typed Client exposes every route, aggregates type/plugin snapshots, and validates bounded non-destructive trace pages without retaining scheduler/plugin ownership. |
 | plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. The installed typed Client exposes every route, decodes exact reports, and aggregates key-sorted stable views; disconnecting a Client does not unload a successful process-owned DSO. |
 | events | `events.drain` | Bounded destructive event draining is routed through Host and exposed by the installed typed Client as one strictly validated, non-retried Host event batch. |
 
@@ -690,22 +698,21 @@ Frontend-boundary, physical-layout, daemon, typed Client, and complete IPC Host
 steps 1-8 are present in the current repository without changing `ps::Host` as
 the sole public seam.
 
-Issue #43 added a bounded migration gate around the per-Graph scheduler model:
-requests resolve to at most eight CPU/plugin workers, built-in GPU plans
-conservatively add one possible device worker, and one private 32-slot ledger
-coordinates every Host and Kernel in the process. Graph load reserves legacy
-HP/RT scheduler pairs atomically; replacement holds the old grant until the
-candidate is published; scheduler destruction precedes exact reservation
-release. Issue #69 now adds one fixed `ExecutionService` pool for built-in CPU
-HP/RT full, dirty, and preflight work from multiple Graphs. Those CPU bindings
-are ownerless, while legacy serial/GPU/plugin scheduler routes remain. The
-transitional process function-static `SchedulerWorkerBudget::process()` owner
-counts each Kernel's service pool once alongside legacy scheduler owners; it is
-current oversubscription containment, not the final service ledger. Issues
-#70/#71 next add the Host-authoritative ledger, bounded ready store, production
-admission, and built-in policies; #72–#74 add revision, cancellation, and
-supersession; #75 replaces the worker-owning ABI; and #76 closes lifecycle and
-telemetry invariants. The authoritative acyclic dependency table is in the
+Issue #43 added a bounded migration gate around the per-Graph scheduler model,
+and Issue #69 added one fixed `ExecutionService` pool for built-in CPU HP/RT
+full, dirty, and preflight work from multiple Graphs. Issue #70 now replaces
+the former process-static worker counter completely. Each embedded Host
+composes one service-owned ledger with explicit limits; its built-in CPU Runs
+and legacy serial/GPU/plugin scheduler owners share atomic CPU admission.
+Graph load reserves legacy HP/RT scheduler pairs atomically, replacement holds
+old reservations until candidate publication, and scheduler destruction
+precedes exact release. Built-in CPU Runs reserve complete checked CPU,
+retained-memory, scratch, ready-entry, and ready-byte vectors before
+publication; their initial and dependent work share one entry/byte-bounded
+ready store. Issue #71 next adds built-in policies; #72–#74 add revision,
+cancellation, and supersession; #75 replaces the worker-owning ABI; and #76
+closes lifecycle and telemetry invariants. The authoritative acyclic dependency
+table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 
 1. **Completed:** Establish public-header installation and self-containment

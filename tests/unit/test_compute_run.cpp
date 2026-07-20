@@ -20,6 +20,7 @@
 #include "compute/execution_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
+#include "photospider/core/graph_error.hpp"
 #include "photospider/scheduler/scheduler.hpp"
 #include "photospider/scheduler/scheduler_task_runtime.hpp"
 
@@ -626,15 +627,19 @@ RetainedSubmissionObservation observe_retained_submission(
  * @param local_task_id Run-local identity value.
  * @param trace_node_id Diagnostic node id.
  * @param entered Counter incremented when the service executes the value.
+ * @param priority Ready-store ordering hint.
+ * @param resource_demand Exact trusted-host task demand.
  * @return Move-owned ready task.
  * @throws std::bad_alloc from metadata or executable ownership.
  * @note The helper is intentionally independent from TaskSubmissionPlan so
  * service boundary validation can be tested in isolation.
  */
-ReadyTaskSubmission make_counted_ready_submission(ComputeRunLease lease,
-                                                  uint64_t local_task_id,
-                                                  int trace_node_id,
-                                                  std::atomic_int& entered) {
+ReadyTaskSubmission make_counted_ready_submission(
+    ComputeRunLease lease, uint64_t local_task_id, int trace_node_id,
+    std::atomic_int& entered,
+    SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+    ReadyTaskResourceDemand resource_demand =
+        ReadyTaskSubmission::default_resource_demand()) {
   const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
   return ReadyTaskSubmission(
       std::move(lease), identity, trace_node_id, true,
@@ -647,7 +652,64 @@ ReadyTaskSubmission make_counted_ready_submission(ComputeRunLease lease,
         }
         entered.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
-      });
+      },
+      priority, resource_demand);
+}
+
+/**
+ * @brief Verifies one non-CPU Run dimension rejects atomically and recovers.
+ *
+ * @param label Stable graph identity prefix for rejected/recovery Runs.
+ * @param resource_limits Complete isolated service limits.
+ * @param rejected_demand Uniform demand that exceeds exactly one tested
+ * dimension after whole-Run aggregation.
+ * @param rejected_task_count Positive logical count used for aggregation.
+ * @return Nothing.
+ * @throws std::bad_alloc or std::system_error from test/service setup.
+ * @note GoogleTest failures retain unexpected exception or accounting
+ * evidence. The recovery Run uses a one-unit demand in every task dimension.
+ */
+void expect_resource_dimension_rejection_and_recovery(
+    const std::string& label, const ResourceVector& resource_limits,
+    ReadyTaskResourceDemand rejected_demand, int rejected_task_count) {
+  ExecutionService service(1U, resource_limits);
+  ExecutionServiceHost host;
+  std::atomic_int entered{0};
+  ComputeRun rejected_run(make_test_submission(label + "-rejected", 1U, 1));
+  std::vector<ReadyTaskSubmission> rejected_ready;
+  for (int task_index = 0; task_index < rejected_task_count; ++task_index) {
+    rejected_ready.push_back(make_counted_ready_submission(
+        rejected_run.acquire_lease(), static_cast<std::uint64_t>(task_index),
+        task_index + 1, entered, SchedulerTaskPriority::Normal,
+        rejected_demand));
+  }
+
+  bool rejected = false;
+  try {
+    service.execute_cpu_run(host, std::move(rejected_ready),
+                            rejected_task_count, rejected_demand);
+  } catch (const GraphError& error) {
+    rejected = true;
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << "Unexpected admission exception: " << error.what();
+  } catch (...) {
+    ADD_FAILURE() << "Unexpected non-standard admission exception.";
+  }
+  EXPECT_TRUE(rejected);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  constexpr ReadyTaskResourceDemand kRecoveryDemand{1U, 1U, 1U};
+  ComputeRun recovery_run(make_test_submission(label + "-recovery", 2U, 2));
+  std::vector<ReadyTaskSubmission> recovery_ready;
+  recovery_ready.push_back(make_counted_ready_submission(
+      recovery_run.acquire_lease(), 0U, 2, entered,
+      SchedulerTaskPriority::Normal, kRecoveryDemand));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(recovery_ready), 1,
+                                          kRecoveryDemand));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -1056,6 +1118,267 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
   EXPECT_EQ(host.context_exits(), 2);
   EXPECT_FALSE(host.trace_recording_failed());
   EXPECT_EQ(host.trace_events().size(), 2U);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies every non-CPU Run dimension is admitted all-or-none.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc or std::system_error from isolated service setup.
+ * @note Each case exceeds exactly retained bytes, scratch bytes, ready
+ * entries, or ready bytes. A smaller Run then succeeds on the same service,
+ * proving rejection did not retain a partial vector.
+ */
+TEST(ExecutionService, RejectsEveryNonCpuRunDimensionAndRecoversExactly) {
+  ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
+      "retained-memory", ResourceVector{1U, 4U, 8U, 2U, 16U},
+      ReadyTaskResourceDemand{5U, 1U, 1U}, 1));
+  ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
+      "scratch", ResourceVector{1U, 8U, 4U, 2U, 16U},
+      ReadyTaskResourceDemand{1U, 5U, 1U}, 1));
+  ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
+      "ready-entries", ResourceVector{1U, 8U, 8U, 1U, 16U},
+      ReadyTaskResourceDemand{1U, 1U, 1U}, 2));
+  ASSERT_NO_FATAL_FAILURE(expect_resource_dimension_rejection_and_recovery(
+      "ready-bytes", ResourceVector{1U, 8U, 8U, 2U, 4U},
+      ReadyTaskResourceDemand{1U, 1U, 5U}, 1));
+}
+
+/**
+ * @brief Verifies scheduler-owner CPU reservations block Runs atomically.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc or std::system_error from isolated service setup.
+ * @note Releasing the sole legacy reservation restores the exact CPU slot and
+ * permits an otherwise identical Run without changing fixed worker
+ * infrastructure.
+ */
+TEST(ExecutionService, SharesCpuAdmissionWithLegacyOwnerAndRecoversExactly) {
+  constexpr ResourceVector kLimits{1U, 8U, 8U, 2U, 16U};
+  constexpr ReadyTaskResourceDemand kDemand{1U, 1U, 1U};
+  ExecutionService service(1U, kLimits);
+  ExecutionServiceHost host;
+  auto legacy = service.try_reserve_legacy_scheduler_workers(1U);
+  ASSERT_TRUE(legacy.has_value());
+
+  std::atomic_int entered{0};
+  ComputeRun rejected_run(make_test_submission("cpu-owner-rejected", 1U, 1));
+  std::vector<ReadyTaskSubmission> rejected_ready;
+  rejected_ready.push_back(make_counted_ready_submission(
+      rejected_run.acquire_lease(), 0U, 1, entered,
+      SchedulerTaskPriority::Normal, kDemand));
+  try {
+    service.execute_cpu_run(host, std::move(rejected_ready), 1, kDemand);
+    FAIL() << "Expected shared CPU admission rejection.";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+  }
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{1U});
+
+  legacy.reset();
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  ComputeRun recovery_run(make_test_submission("cpu-owner-recovery", 2U, 2));
+  std::vector<ReadyTaskSubmission> recovery_ready;
+  recovery_ready.push_back(make_counted_ready_submission(
+      recovery_run.acquire_lease(), 0U, 2, entered,
+      SchedulerTaskPriority::Normal, kDemand));
+  EXPECT_NO_THROW(
+      service.execute_cpu_run(host, std::move(recovery_ready), 1, kDemand));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies checked whole-Run multiplication rejects overflow.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc or std::system_error from isolated service setup.
+ * @note No root capacity is committed when one resource product cannot be
+ * represented, and the same service remains usable afterward.
+ */
+TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
+  constexpr std::uint64_t kMaximum = std::numeric_limits<std::uint64_t>::max();
+  const ResourceVector limits{1U, kMaximum, kMaximum, kMaximum, kMaximum};
+  constexpr ReadyTaskResourceDemand kOverflowDemand{1U, 1U, kMaximum};
+  ExecutionService service(1U, limits);
+  ExecutionServiceHost host;
+  std::atomic_int entered{0};
+  ComputeRun overflow_run(make_test_submission("resource-overflow", 1U, 1));
+  std::vector<ReadyTaskSubmission> overflow_ready;
+  overflow_ready.push_back(make_counted_ready_submission(
+      overflow_run.acquire_lease(), 0U, 1, entered,
+      SchedulerTaskPriority::Normal, kOverflowDemand));
+  overflow_ready.push_back(make_counted_ready_submission(
+      overflow_run.acquire_lease(), 1U, 2, entered,
+      SchedulerTaskPriority::Normal, kOverflowDemand));
+  try {
+    service.execute_cpu_run(host, std::move(overflow_ready), 2,
+                            kOverflowDemand);
+    FAIL() << "Expected checked Run resource overflow.";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+  }
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  constexpr ReadyTaskResourceDemand kRecoveryDemand{1U, 1U, 1U};
+  ComputeRun recovery_run(
+      make_test_submission("resource-overflow-recovery", 2U, 2));
+  std::vector<ReadyTaskSubmission> recovery_ready;
+  recovery_ready.push_back(make_counted_ready_submission(
+      recovery_run.acquire_lease(), 0U, 2, entered,
+      SchedulerTaskPriority::Normal, kRecoveryDemand));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(recovery_ready), 1,
+                                          kRecoveryDemand));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies initial work uses bounded lanes and high precedes normal.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc, std::future_error, or std::system_error from test
+ * setup and synchronization.
+ * @note The normal entry is submitted first. The later high entry blocks while
+ * executing, leaving exactly one normal entry and its bytes in the bounded
+ * store until release.
+ */
+TEST(ExecutionService, BoundsInitialReadyStoreAndPreservesPriorityOrdering) {
+  constexpr ReadyTaskResourceDemand kDemand{3U, 4U, 5U};
+  constexpr ResourceVector kLimits{1U, 6U, 8U, 2U, 10U};
+  ExecutionService service(1U, kLimits);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("bounded-initial-ready", 1U, 1));
+  std::vector<int> execution_order;
+  std::promise<void> high_entered;
+  std::future<void> high_entered_future = high_entered.get_future();
+  std::promise<void> release_high;
+  const std::shared_future<void> high_release =
+      release_high.get_future().share();
+
+  ComputeRunLease normal_lease = run.acquire_lease();
+  const ComputeRunTaskIdentity normal_identity = normal_lease.task_identity(0U);
+  ComputeRunLease high_lease = run.acquire_lease();
+  const ComputeRunTaskIdentity high_identity = high_lease.task_identity(1U);
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(
+      std::move(normal_lease), normal_identity, 1, true,
+      [&execution_order](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                         SchedulerTaskRuntime& runtime) {
+        execution_order.push_back(1);
+        runtime.dec_tasks_to_complete();
+      },
+      SchedulerTaskPriority::Normal, kDemand);
+  ready.emplace_back(
+      std::move(high_lease), high_identity, 2, true,
+      [&execution_order, &high_entered, high_release](
+          ComputeRunLease&, const ComputeRunTaskIdentity&,
+          SchedulerTaskRuntime& runtime) {
+        execution_order.push_back(2);
+        high_entered.set_value();
+        high_release.wait();
+        runtime.dec_tasks_to_complete();
+      },
+      SchedulerTaskPriority::High, kDemand);
+
+  std::future<void> run_future;
+  ScopedPromiseRelease release_guard(release_high);
+  run_future = std::async(
+      std::launch::async,
+      [&service, &host, ready = std::move(ready), kDemand]() mutable {
+        service.execute_cpu_run(host, std::move(ready), 2, kDemand);
+      });
+  ASSERT_EQ(high_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const std::string stats = service.get_stats();
+  EXPECT_NE(stats.find("Ready tasks: 1"), std::string::npos);
+  EXPECT_NE(stats.find("Ready bytes: 5"), std::string::npos);
+  EXPECT_EQ(service.resource_snapshot().reserved,
+            (ResourceVector{1U, 6U, 8U, 2U, 10U}));
+
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  EXPECT_EQ(execution_order, (std::vector<int>{2, 1}));
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies dependency-released work re-enters the same bounded store.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc, std::future_error, or std::system_error from test
+ * setup and synchronization.
+ * @note One executing initial callback publishes a matching dependent then
+ * blocks. With one worker, diagnostics must expose exactly that dependent's
+ * entry and bytes before both logical units complete and release the root.
+ */
+TEST(ExecutionService, BoundsDependentReentryAndReleasesRootExactly) {
+  constexpr ReadyTaskResourceDemand kDemand{3U, 4U, 5U};
+  constexpr ResourceVector kLimits{1U, 6U, 8U, 2U, 10U};
+  ExecutionService service(1U, kLimits);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("bounded-dependent-ready", 1U, 1));
+  std::atomic_int entered{0};
+  std::promise<void> dependent_queued;
+  std::future<void> dependent_queued_future = dependent_queued.get_future();
+  std::promise<void> release_initial;
+  const std::shared_future<void> initial_release =
+      release_initial.get_future().share();
+
+  ComputeRunLease initial_lease = run.acquire_lease();
+  const ComputeRunTaskIdentity initial_identity =
+      initial_lease.task_identity(0U);
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(
+      std::move(initial_lease), initial_identity, 1, true,
+      [&entered, &dependent_queued, initial_release, kDemand](
+          ComputeRunLease& retained_lease, const ComputeRunTaskIdentity&,
+          SchedulerTaskRuntime& runtime) {
+        auto& ready_runtime =
+            dynamic_cast<ReadyTaskSubmissionRuntime&>(runtime);
+        const ComputeRunTaskIdentity dependent_identity =
+            retained_lease.task_identity(1U);
+        ready_runtime.submit_ready_submission(ReadyTaskSubmission(
+            retained_lease, dependent_identity, 2, false,
+            [&entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                       SchedulerTaskRuntime& dependent_runtime) {
+              entered.fetch_add(1, std::memory_order_relaxed);
+              dependent_runtime.dec_tasks_to_complete();
+            },
+            SchedulerTaskPriority::Normal, kDemand));
+        dependent_queued.set_value();
+        initial_release.wait();
+        entered.fetch_add(1, std::memory_order_relaxed);
+        runtime.dec_tasks_to_complete();
+      },
+      SchedulerTaskPriority::Normal, kDemand);
+
+  std::future<void> run_future;
+  ScopedPromiseRelease release_guard(release_initial);
+  run_future = std::async(
+      std::launch::async,
+      [&service, &host, ready = std::move(ready), kDemand]() mutable {
+        service.execute_cpu_run(host, std::move(ready), 2, kDemand);
+      });
+  ASSERT_EQ(dependent_queued_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const std::string stats = service.get_stats();
+  EXPECT_NE(stats.find("Ready tasks: 1"), std::string::npos);
+  EXPECT_NE(stats.find("Ready bytes: 5"), std::string::npos);
+  EXPECT_EQ(service.resource_snapshot().reserved,
+            (ResourceVector{1U, 6U, 8U, 2U, 10U}));
+
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -1525,6 +1848,7 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   }
   EXPECT_EQ(failing_host.context_entries(), failing_host.context_exits());
   EXPECT_EQ(peer_host.context_entries(), peer_host.context_exits());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -1549,6 +1873,7 @@ TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
                std::invalid_argument);
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(host.context_entries(), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -1598,6 +1923,7 @@ TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
   EXPECT_EQ(terminal->kind, ComputeRunTerminalKind::Failed);
   EXPECT_TRUE(terminal->failure == failure);
   EXPECT_EQ(host.context_entries(), host.context_exits());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**

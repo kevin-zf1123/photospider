@@ -536,7 +536,8 @@ set(PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES
     src/lib/scheduler/scheduler_factory.cpp
     src/lib/scheduler/scheduler_plugin_loader.cpp
     src/lib/scheduler/scheduler_reservation_owner.cpp
-    src/lib/scheduler/scheduler_worker_budget.cpp
+    src/lib/scheduler/scheduler_worker_limits.cpp
+    src/lib/runtime/resource_ledger.cpp
 )
 
 add_library(photospider_scheduler_internal STATIC
@@ -1515,9 +1516,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     add_ps_test(test_graph_document_injection
         tests/integration/test_graph_document_injection.cpp)
-    add_ps_test(test_scheduler_worker_budget
-        tests/integration/test_scheduler_worker_budget.cpp)
-    target_compile_definitions(test_scheduler_worker_budget PRIVATE
+    add_ps_test(test_resource_admission
+        tests/integration/test_resource_admission.cpp)
+    target_compile_definitions(test_resource_admission PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         add_ps_test(test_opencv_operation_concurrency
@@ -1548,8 +1549,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
     endif()
-    add_ps_test(test_scheduler_worker_budget_unit
-        tests/unit/test_scheduler_worker_budget.cpp)
+    add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
     add_ps_test(test_scheduler_factory_plan
         tests/unit/test_scheduler_factory_plan.cpp)
     add_ps_test(test_scheduler_reservation_owner
@@ -1880,7 +1880,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_graph_document_injection
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_scheduler_worker_budget
+    gtest_discover_tests(test_resource_admission
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
@@ -1891,7 +1891,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
     endif()
-    gtest_discover_tests(test_scheduler_worker_budget_unit
+    gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_scheduler_factory_plan

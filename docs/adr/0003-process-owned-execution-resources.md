@@ -2,18 +2,19 @@
 
 ## Status
 
-Accepted as a target architecture. Issue #69 implements the current CPU
-process-execution slice: the embedded composition root explicitly creates and
+Accepted as a target architecture. Issue #70 implements the current CPU
+execution/resource slice: each embedded composition root explicitly creates and
 injects one fixed `ExecutionService`; built-in CPU HP and RT work, including
 connected-parameter preflight and dirty source/downstream phases, enters it
 only as ready, lease-backed submissions. Independent Runs from multiple Graphs
 may overlap on that pool, and built-in CPU intent bindings no longer allocate
-per-Graph scheduler owners. Serial, GPU, and plugin routes remain transitional
-per-Graph schedulers. The process-wide scheduler-worker budget now counts each
-fixed service pool as well as legacy scheduler workers, but remains a
-containment step rather than the target resource owner. Final resource
-accounting, fairness policy, `RunGroup`, cancellation, and revision-safe commit
-remain target behavior. ADR 0007 supersedes this ADR only as the detailed
+per-Graph scheduler owners. Serial, GPU, and plugin routes remain per-Graph
+schedulers. The service exclusively owns a Host-authoritative ledger and
+entry/byte-bounded ready store; complete CPU/retained/scratch/ready Run vectors
+and conservative legacy scheduler CPU slots share that authority. Device,
+I/O, and plugin-specific accounting, fairness policy, `RunGroup`,
+cancellation, and revision-safe commit remain target behavior. ADR 0007
+supersedes this ADR only as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
 and its historical context remain in force.
 
@@ -28,12 +29,12 @@ CPU worker count before first use, keeps isolated completion/failure/trace
 state per Run, and permits independent HP and RT Runs from multiple Graphs to
 overlap.
 
-Current software limits transitional worker multiplication with resolved
-grants and one conservative 32-slot process budget shared across embedded
-Hosts. The budget charges each Kernel's fixed CPU service pool once and charges
-legacy scheduler-owned workers per Graph. Neither that budget nor the current
-two-priority service expresses final cross-Run fairness, process memory limits,
-cancellation, or resource admission beyond worker slots.
+Current software limits legacy worker multiplication with resolved grants and
+each Host ledger's default 32-slot CPU dimension. Fixed service workers are
+infrastructure, while active Runs and legacy scheduler owners compete for the
+same CPU authority. Retained Host memory, scratch, ready entries, and ready
+bytes are admitted too. The current service does not yet express final
+cross-Run fairness, cancellation, or new device/I/O/plugin dimensions.
 
 Moving those schedulers to a global object without introducing a stable Run
 lifetime and host-owned resource accounting would only relocate the problem.
@@ -86,30 +87,23 @@ breaking migration after built-in policies prove the new seam.
 
 ## Relationship to Current Documentation
 
-ADR 0001 remains fully in force. Issue #69 supersedes the built-in CPU physical
+ADR 0001 remains fully in force. Issues #69 and #70 supersede the built-in CPU physical
 ownership described by the per-graph scheduler sections of
 `docs/kernel-architecture/Scheduler-Architecture.md`: HP, RT, preflight, and
 dirty ready work all execute on the injected fixed service. Built-in CPU
 bindings are ownerless at `GraphRuntime`; serial, GPU, and plugin routes retain
-transitional scheduler owners. The ready-task-only boundary remains fully in
+legacy scheduler owners. The ready-task-only boundary remains fully in
 force.
 
-The current containment contract accepts worker requests from zero through
-eight, resolves zero to a nonzero grant capped at eight, freezes the service
-count once, and reserves at most 32 conservative worker slots across all
-embedded Hosts. One pool-lifetime RAII reservation covers each fixed CPU
-service. Graph load reserves only legacy HP/RT owners, and legacy replacement
-still requires transient candidate headroom; built-in CPU load or replacement
-publishes an ownerless service route and never resizes the pool. This prevents
-unbounded worker multiplication while legacy workers, queues, epochs, and
-policies remain inside their `IScheduler` instances.
-
-`SchedulerWorkerBudget` is therefore neither the current `ExecutionService` nor
-the target `ResourceLedger`: it owns no executor, Run identity, cancellation,
-fairness, memory/device/I/O quota, or ready-store capacity. Its slots count the
-fixed service pool and legacy scheduler workers, not every process thread.
-Later migration replaces this transitional ownership and ABI boundary
-completely rather than retaining a compatibility wrapper.
+The current contract accepts worker requests from zero through eight, resolves
+zero to a nonzero grant capped at eight, and freezes the service count once.
+Every Host ledger has immutable composition limits. Run admission commits one
+complete vector before queue publication; initial and dependent submissions
+enter the same bounded store. Graph load reserves only legacy HP/RT owners, and
+legacy replacement still requires transient candidate headroom; built-in CPU
+load or replacement publishes an ownerless service route and never resizes the
+pool. The former worker-only budget is completely removed without a wrapper,
+alias, or second authority.
 
 ## Relationship to ADR 0007
 

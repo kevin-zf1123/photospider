@@ -9,12 +9,58 @@
 
 #include "compute/compute_run.hpp"
 #include "photospider/scheduler/scheduler_task_runtime.hpp"
+#include "runtime/resource_ledger.hpp"
 
 namespace ps {
 class SchedulerHostContext;
 }  // namespace ps
 
 namespace ps::compute {
+
+/**
+ * @brief Immutable trusted-host resource demand for one ready submission.
+ *
+ * Retained memory and scratch are held while the callback executes. Ready
+ * bytes are held while the owned submission resides in the bounded service
+ * store. One ready entry and one CPU slot are added by `ExecutionService`;
+ * callers cannot omit those structural charges.
+ *
+ * @throws Nothing for value construction and comparison.
+ * @note Zero scratch means the current host contract declares no separately
+ * metered scratch. It does not claim that backend, plugin, or runtime
+ * allocation was measured as zero.
+ */
+struct ReadyTaskResourceDemand final {
+  /** @brief Host bytes retained while this callback may execute. */
+  std::uint64_t retained_memory_bytes = 0U;
+
+  /** @brief Host-declared temporary bytes required during callback execution.
+   */
+  std::uint64_t scratch_bytes = 0U;
+
+  /** @brief Accounted bytes occupied while the submission is ready. */
+  std::uint64_t ready_bytes = 0U;
+};
+
+/**
+ * @brief Compares every per-submission resource declaration.
+ * @param lhs First trusted demand.
+ * @param rhs Second trusted demand.
+ * @return True only when every declared dimension is equal.
+ * @throws Nothing.
+ */
+bool operator==(const ReadyTaskResourceDemand& lhs,
+                const ReadyTaskResourceDemand& rhs) noexcept;
+
+/**
+ * @brief Reports whether any per-submission declaration differs.
+ * @param lhs First trusted demand.
+ * @param rhs Second trusted demand.
+ * @return True when at least one dimension differs.
+ * @throws Nothing.
+ */
+bool operator!=(const ReadyTaskResourceDemand& lhs,
+                const ReadyTaskResourceDemand& rhs) noexcept;
 
 /**
  * @brief Immutable execution metadata copied into one ready submission.
@@ -143,8 +189,9 @@ class ReadyTaskMetadata final {
  * @brief Move-owned ready-only work accepted by `ExecutionService`.
  *
  * A submission owns immutable metadata, a composite Run/local identity, one
- * matching non-forgeable Run lease, and an executable. It contains no borrowed
- * Graph, plan, task executor, dependency map, result slot, or commit callback.
+ * matching non-forgeable Run lease, trusted resource demand, and an
+ * executable. It contains no borrowed Graph, plan, task executor, dependency
+ * map, result slot, or commit callback.
  *
  * @throws std::invalid_argument when the executable is empty or identity and
  * lease name different Runs.
@@ -177,6 +224,9 @@ class ReadyTaskSubmission final {
    * @param trace_node_id Planned node used for execution diagnostics.
    * @param is_initial_ready Whether the dispatcher selected initial readiness.
    * @param executable Owned operation invoked only after service admission.
+   * @param priority Private high/normal ready-store ordering hint.
+   * @param resource_demand Trusted immutable retained, scratch, and ready-byte
+   * declaration.
    * @throws std::invalid_argument when executable is empty or the identity Run
    * differs from the lease Run.
    * @throws std::bad_alloc when metadata or executable storage allocates.
@@ -186,9 +236,26 @@ class ReadyTaskSubmission final {
   ReadyTaskSubmission(
       ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
       bool is_initial_ready, Executable executable,
-      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal);
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+      ReadyTaskResourceDemand resource_demand = default_resource_demand());
 
-  /** @brief Transfers complete submission ownership. @throws Nothing. */
+  /**
+   * @brief Returns the audited current host envelope demand.
+   * @return Retained and ready bytes for one owned service submission, with no
+   * separately declared scratch.
+   * @throws Nothing.
+   * @note This accounts the private submission envelope, not arbitrary
+   * operation, device, plugin, or runtime allocations.
+   */
+  static ReadyTaskResourceDemand default_resource_demand() noexcept;
+
+  /**
+   * @brief Transfers complete submission ownership without duplicating it.
+   * @param other Submission whose lease, executable, and demand are moved.
+   * @throws Nothing.
+   * @note The moved-from value remains destructible but carries no admission
+   * authority that may be submitted again.
+   */
   ReadyTaskSubmission(ReadyTaskSubmission&& other) noexcept = default;
 
   /**
@@ -200,10 +267,19 @@ class ReadyTaskSubmission final {
   ReadyTaskSubmission& operator=(ReadyTaskSubmission&& other) noexcept =
       default;
 
-  /** @brief Prevents duplicating one service admission value. */
+  /**
+   * @brief Prevents duplicating one service admission value.
+   * @param other Submission whose lease and executable cannot be copied.
+   * @throws Nothing because this operation is unavailable.
+   */
   ReadyTaskSubmission(const ReadyTaskSubmission& other) = delete;
 
-  /** @brief Prevents duplicate lease/executable assignment. */
+  /**
+   * @brief Prevents assigning duplicate lease and executable ownership.
+   * @param other Submission whose ownership cannot be copied.
+   * @return No value because this operation is unavailable.
+   * @throws Nothing because this operation is unavailable.
+   */
   ReadyTaskSubmission& operator=(const ReadyTaskSubmission& other) = delete;
 
   /**
@@ -221,13 +297,22 @@ class ReadyTaskSubmission final {
   ComputeRunTaskIdentity identity() const noexcept { return identity_; }
 
   /**
-   * @brief Returns the private process-ready queue hint for this submission.
+   * @brief Returns the private service-ready queue hint for this submission.
    * @return High for latency-sensitive work, otherwise Normal.
    * @throws Nothing.
    * @note Priority does not establish dependency correctness or global
    * fairness. The dispatcher must already have established readiness.
    */
   SchedulerTaskPriority priority() const noexcept { return priority_; }
+
+  /**
+   * @brief Returns the immutable trusted-host resource declaration.
+   * @return Per-submission retained, scratch, and ready bytes.
+   * @throws Nothing.
+   */
+  ReadyTaskResourceDemand resource_demand() const noexcept {
+    return resource_demand_;
+  }
 
   /**
    * @brief Executes this accepted ready task through its matching lease.
@@ -255,6 +340,9 @@ class ReadyTaskSubmission final {
 
   /** @brief Private ready-queue hint that carries no dependency authority. */
   SchedulerTaskPriority priority_ = SchedulerTaskPriority::Normal;
+
+  /** @brief Immutable host-authored resources checked at Run admission. */
+  ReadyTaskResourceDemand resource_demand_;
 };
 
 /**
@@ -291,13 +379,15 @@ class ReadyTaskSubmissionRuntime : public SchedulerTaskRuntime {
 };
 
 /**
- * @brief Owns one fixed process CPU execution domain for concurrent Runs.
+ * @brief Owns one fixed Host CPU execution domain for concurrent Runs.
  *
  * The service owns a fixed worker pool and accepts only
  * `ReadyTaskSubmission`. Each active Run has isolated completion, exception,
  * trace-target, and settlement state while independent Runs may overlap. The
- * service owns no planning, dependency, Graph/cache, dirty propagation,
- * visible commit, final admission-ledger, or fairness policy state.
+ * service also exclusively owns the host-authoritative resource ledger and
+ * entry/byte-bounded ready store. It owns no planning, dependency,
+ * Graph/cache, dirty propagation, visible commit, final lifecycle registry, or
+ * fairness policy state.
  *
  * @throws std::bad_alloc or std::system_error from explicit execution setup.
  * @note This private source-tree service is explicitly composed and injected;
@@ -306,24 +396,48 @@ class ReadyTaskSubmissionRuntime : public SchedulerTaskRuntime {
 class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
   /**
+   * @brief Returns bounded product defaults supplied by the composition root.
+   * @return CPU, retained-memory, scratch, ready-entry, and ready-byte limits.
+   * @throws Nothing.
+   * @note Tests and alternate products may inject smaller isolated limits.
+   */
+  static ResourceVector default_resource_limits() noexcept;
+
+  /**
    * @brief Creates an unconfigured execution domain with no worker threads.
    * @throws std::bad_alloc if private pool-state ownership cannot allocate.
-   * @note `configure_worker_count()` must freeze the process grant before the
+   * @note `configure_worker_count()` must freeze the worker count before the
    * first Run is submitted.
    */
   ExecutionService();
 
   /**
+   * @brief Creates an unconfigured domain with explicit immutable limits.
+   * @param resource_limits Complete Host-composed ledger limits.
+   * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
+   * @note The composition root must freeze workers before first Run admission.
+   */
+  explicit ExecutionService(ResourceVector resource_limits);
+
+  /**
    * @brief Creates and configures one fixed execution domain.
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
    * @throws std::invalid_argument if the request exceeds eight.
-   * @throws GraphError if the transitional process budget cannot admit the
-   * fixed pool.
    * @throws std::bad_alloc or std::system_error if pool construction fails.
-   * @note Construction acquires one pool-lifetime transitional reservation;
-   * it does not create a `ResourceLedger`.
+   * @note The fixed pool is infrastructure. Individual Runs reserve CPU
+   * execution rights and legacy scheduler owners reserve their own slots.
    */
   explicit ExecutionService(unsigned int worker_count);
+
+  /**
+   * @brief Creates a configured domain with explicit immutable limits.
+   * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
+   * @param resource_limits Complete Host-composed ledger limits.
+   * @throws std::invalid_argument if the worker request exceeds eight or the
+   * configured CPU limit cannot permit the resolved fixed pool.
+   * @throws std::bad_alloc or std::system_error if setup fails.
+   */
+  ExecutionService(unsigned int worker_count, ResourceVector resource_limits);
 
   /**
    * @brief Joins and releases service-owned CPU workers.
@@ -332,21 +446,30 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   ~ExecutionService() noexcept override;
 
-  /** @brief Prevents copying physical worker and Run-registry ownership. */
+  /**
+   * @brief Prevents copying physical worker, ledger, and Run ownership.
+   * @param other Service whose execution authority cannot be copied.
+   * @throws Nothing because this operation is unavailable.
+   */
   ExecutionService(const ExecutionService& other) = delete;
 
-  /** @brief Prevents assigning physical worker and Run-registry ownership. */
+  /**
+   * @brief Prevents assigning duplicate worker, ledger, and Run ownership.
+   * @param other Service whose execution authority cannot be copied.
+   * @return No value because this operation is unavailable.
+   * @throws Nothing because this operation is unavailable.
+   */
   ExecutionService& operator=(const ExecutionService& other) = delete;
 
   /**
-   * @brief Resolves and freezes the process worker count exactly once.
+   * @brief Resolves and freezes the service worker count exactly once.
    *
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
    * @return Nothing.
    * @throws std::invalid_argument for an out-of-range request or a positive
    * request that conflicts with the already fixed count.
-   * @throws GraphError if the transitional process budget cannot admit the
-   * first fixed pool.
+   * @throws std::invalid_argument if the resolved pool exceeds configured CPU
+   * capacity.
    * @throws std::bad_alloc or std::system_error if worker construction fails.
    * @note A later zero request preserves an existing fixed value and an equal
    * positive request is idempotent. Graph load, replacement, Run execution,
@@ -355,7 +478,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   void configure_worker_count(unsigned int worker_count);
 
   /**
-   * @brief Returns the fixed process worker count.
+   * @brief Returns the fixed service worker count.
    * @return Zero before configuration, otherwise a value in `[1,8]`.
    * @throws std::system_error if private state locking fails.
    */
@@ -369,13 +492,42 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   bool is_configured() const;
 
   /**
-   * @brief Copies process CPU execution diagnostics.
+   * @brief Copies service CPU execution diagnostics.
    * @return Text containing fixed workers, active Runs, and queued work.
    * @throws std::bad_alloc if formatting storage cannot allocate.
    * @throws std::system_error if private state locking fails.
    * @note The snapshot grants no worker, queue, Run, or lifecycle authority.
    */
   std::string get_stats() const;
+
+  /**
+   * @brief Atomically reserves one legacy scheduler owner CPU vector.
+   * @param worker_slots Conservative scheduler plan charge.
+   * @return Move-only ledger reservation, or `std::nullopt` when capacity is
+   * unavailable.
+   * @throws std::bad_alloc or std::system_error from ledger admission.
+   * @note Serial's zero-slot reservation remains active and move-only.
+   */
+  std::optional<ResourceLedger::Reservation>
+  try_reserve_legacy_scheduler_workers(unsigned int worker_slots);
+
+  /**
+   * @brief Atomically reserves independent HP and RT scheduler owner vectors.
+   * @param hp_worker_slots Conservative HP owner charge.
+   * @param rt_worker_slots Conservative RT owner charge.
+   * @return Two owners committed all-or-none, or `std::nullopt`.
+   * @throws std::bad_alloc or std::system_error from ledger admission.
+   */
+  std::optional<ResourceLedger::ReservationPair>
+  try_reserve_legacy_scheduler_worker_pair(unsigned int hp_worker_slots,
+                                           unsigned int rt_worker_slots);
+
+  /**
+   * @brief Copies non-authoritative resource diagnostics.
+   * @return Immutable limits and current root commitments.
+   * @throws std::system_error from ledger snapshot locking.
+   */
+  ResourceLedger::Snapshot resource_snapshot() const;
 
   /**
    * @brief Executes one complete ready-only CPU Run synchronously.
@@ -385,12 +537,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param initial_submissions Dispatcher-discovered initial ready values from
    * one Run.
    * @param total_task_count Complete logical planned-task count.
+   * @param task_resource_demand Uniform trusted declaration for every logical
+   * task, including dependency-blocked tasks.
    * @return Nothing after every callback in the batch settles.
    * @throws std::invalid_argument for invalid counts, empty active batches,
    * mixed Run ids, or duplicate active Run ids.
    * @throws std::logic_error before fixed pool configuration or for invalid
    * generic runtime use.
-   * @throws std::bad_alloc or std::system_error from pool/queue setup.
+   * @throws GraphError with `GraphErrc::ComputeError` when checked aggregation
+   * overflows or the ledger cannot admit the complete Run vector.
+   * @throws std::bad_alloc or std::system_error from pool/store setup.
    * @throws The exact first worker task exception after settlement.
    * @note Independent calls may overlap. Run-local state is removed only after
    * queued work is retired and every in-flight callback has exited. No Graph,
@@ -398,7 +554,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   void execute_cpu_run(SchedulerHostContext& host,
                        std::vector<ReadyTaskSubmission> initial_submissions,
-                       int total_task_count);
+                       int total_task_count,
+                       ReadyTaskResourceDemand task_resource_demand =
+                           ReadyTaskSubmission::default_resource_demand());
 
   /** @copydoc ReadyTaskSubmissionRuntime::submit_ready_submission */
   void submit_ready_submission(ReadyTaskSubmission submission) override;
@@ -412,6 +570,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Rejects borrowed task-handle initial batches.
+   * @param handles Borrowed-handle batch rejected without inspection.
+   * @param total_task_count Declared batch size rejected without inspection.
+   * @param priority Ordering hint rejected without inspection.
+   * @return Nothing.
    * @throws std::logic_error unconditionally.
    * @note Migrated work must enter as `ReadyTaskSubmission`.
    */
@@ -421,6 +583,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Rejects borrowed task handles released by workers.
+   * @param handles Borrowed-handle batch rejected without inspection.
+   * @param priority Ordering hint rejected without inspection.
+   * @return Nothing.
    * @throws std::logic_error unconditionally.
    * @note Dispatcher dependents re-enter as `ReadyTaskSubmission`.
    */
@@ -430,6 +595,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Rejects anonymous raw callback submission.
+   * @param task Anonymous callback rejected without execution.
+   * @param priority Ordering hint rejected without inspection.
+   * @param epoch Optional epoch rejected without inspection.
+   * @return Nothing.
    * @throws std::logic_error unconditionally.
    * @note Every accepted migrated callback must carry explicit Run identity and
    * lease ownership in `ReadyTaskSubmission`.
@@ -452,6 +621,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param error Non-null worker exception identity.
    * @return Nothing.
    * @throws std::logic_error outside a service worker callback.
+   * @note A null exception is ignored without resolving worker context.
    */
   void set_exception(std::exception_ptr error) override;
 
@@ -459,6 +629,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @brief Adds logical work to the current worker's Run completion count.
    * @param delta Positive work count.
    * @return Nothing.
+   * @throws std::invalid_argument when `delta` is not positive.
    * @throws std::logic_error outside a service worker callback.
    * @throws std::overflow_error when CPU completion accounting overflows.
    */
@@ -467,7 +638,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Retires one logical task from the current worker's Run.
    * @return Nothing.
-   * @throws std::logic_error outside a service worker callback.
+   * @throws std::logic_error outside a service worker callback or when the
+   * completion count would underflow.
    */
   void dec_tasks_to_complete() override;
 
@@ -487,7 +659,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /** @brief One owned ready queue entry paired with matching Run state. */
   struct QueueEntry;
 
-  /** @brief Private worker, queue, registry, and reservation ownership. */
+  /** @brief Entry/byte-bounded owner of high and normal ready lanes. */
+  class BoundedReadyStore;
+
+  /** @brief Private worker, store, registry, and ledger ownership. */
   class PoolState;
 
   /**
@@ -501,11 +676,12 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Enqueues one owned ready submission for a registered Run.
    * @param run Matching active Run state.
-   * @param submission Ready value transferred into process queue ownership.
+   * @param submission Ready value transferred into service queue ownership.
    * @return Nothing.
    * @throws std::invalid_argument when Run identity does not match.
+   * @throws GraphError when declared or reserved ready capacity is invalid.
    * @throws std::logic_error when the Run or service no longer accepts work.
-   * @throws std::bad_alloc if queue ownership cannot allocate.
+   * @throws std::bad_alloc if store ownership cannot allocate.
    */
   void enqueue_submission(const std::shared_ptr<RunState>& run,
                           ReadyTaskSubmission submission);
@@ -536,7 +712,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   static RunState& current_worker_run();
 
-  /** @brief Private fixed-pool implementation and reservation owner. */
+  /** @brief Private fixed-pool, ready-store, registry, and ledger owner. */
   std::unique_ptr<PoolState> pool_;
 
   /** @brief Current service-worker Run context, null outside callbacks. */

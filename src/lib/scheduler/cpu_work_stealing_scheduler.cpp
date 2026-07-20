@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-#include "scheduler/scheduler_worker_budget.hpp"
+#include "scheduler/scheduler_worker_limits.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "scheduler/scheduler_exception_test_hooks.hpp"

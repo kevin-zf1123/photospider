@@ -25,7 +25,9 @@ per-graph `GraphStateExecutor`, event service, platform context, and one
 execution binding per intent. Legacy bindings own scheduler instances;
 built-in CPU bindings select an ownerless process-service route. The embedded
 composition root also creates one private fixed CPU `ExecutionService` before
-Kernel; Kernel injects that owner into each request-local `ComputeService`.
+Kernel. The service exclusively owns the Host-authoritative resource ledger
+and bounded ready store; Kernel injects that owner into each request-local
+`ComputeService`.
 
 `ps::Host` is the public frontend-facing interface. The embedded Host adapter
 copies public request/result values and uses the internal `InteractionService`
@@ -61,17 +63,19 @@ as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
 kernel/test callers, but the CLI does not expose them and must not be treated as
 a production realtime control surface.
 
-Compute does not acquire worker capacity per request. The first configuration,
-load, or replacement that selects built-in CPU resolves `0` to
+Fixed service threads are infrastructure rather than per-Run reservations. The
+first configuration, load, or replacement that selects built-in CPU resolves `0` to
 `min(max(1, hardware_concurrency()), 8)` or preserves an explicit `1..8`,
-freezes that count, starts one fixed service pool, and retains one pool-lifetime
-reservation from the process-wide 32-slot budget. Later zero/equal requests are
-idempotent; a conflicting positive request is rejected. Graph load reserves
-only the combined demand of legacy HP/RT scheduler owners. Built-in
-`serial_debug` charges zero; ABI v2 plugin schedulers charge the resolved grant,
-and built-in GPU/heterogeneous also charges its potential device worker.
-This containment bounds fixed service workers and legacy Graph-owned scheduler
-workers, not callback count or all threads used by compute and operations.
+freezes that count, and starts one fixed service pool. Later zero/equal requests
+are idempotent; a conflicting positive request is rejected. Before publishing
+work, each built-in CPU Run atomically reserves its complete CPU,
+retained-memory, scratch, ready-entry, and ready-byte vector from the
+service-owned Host ledger. Graph load uses the same ledger for only the
+combined CPU demand of legacy HP/RT scheduler owners. Built-in `serial_debug`
+and ownerless built-in CPU Graph bindings charge zero at load; ABI v2 plugin
+schedulers charge the resolved CPU grant, and built-in GPU/heterogeneous
+schedulers also charge their potential device worker as CPU capacity. This
+contract does not claim all threads used by compute and operations.
 
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.
@@ -212,15 +216,18 @@ plan's `ComputeTaskGraph` into dependency counters, ready values, operation
 variants, and temporary result slots. For a built-in CPU route the dispatcher
 creates immutable, lease-backed `ReadyTaskSubmission` values and submits one
 initial ready batch to the injected `ExecutionService`; dependent completion
-creates further submissions through the same active Run. Legacy full-HP routes
-retain owned scheduler callbacks. Tiled operations may spawn micro-tasks and
-retire the selected runtime's logical completion count.
+creates further submissions through the same active Run and bounded store.
+Legacy full-HP routes retain owned scheduler callbacks. Tiled operations may
+spawn micro-tasks and retire the selected runtime's logical completion count.
 
-The selected legacy scheduler or fixed service pool has already retained its
-transitional worker reservation before ready work is submitted. A running
-compute therefore consumes no new budget slots. The service never resizes per
-Run; it registers isolated Run settlement state and submits owned values to the
-shared queues. Scheduler inspection and replacement share the per-graph
+Before a built-in CPU Run is published, the service atomically reserves its
+complete checked CPU, retained-memory, scratch, ready-entry, and ready-byte
+vector. Initial and dependent entries hold child ready grants; a worker
+exchanges that authority for CPU/memory/scratch while executing. Failure,
+queue purge, and successful settlement release exact capacity. The fixed pool
+never resizes per Run. Legacy scheduler owners instead retain conservative
+CPU-slot reservations from the same ledger. Scheduler inspection and
+replacement share the per-graph
 `GraphStateExecutor` boundary with compute. Replacement publishes either a
 legacy scheduler owner or an ownerless service route in one transaction.
 Failed legacy candidate planning, attach, or start leaves the old binding and
@@ -454,12 +461,13 @@ mutable mirror. The embedded adapter maps these values to public
 observe only the public Host surface and never inspect Kernel or
 `InteractionService` directly.
 
-Worker-containment failures occur during first service configuration or legacy
-graph load/replacement rather than in the ready-task loop. An invalid
-above-eight request, conflicting positive fixed-pool request, or unknown type
-maps to `InvalidParameter`; exhaustion of the transitional process worker
-budget preserves `GraphErrc::ComputeError` through embedded Host and IPC status
-boundaries.
+Configuration and legacy graph load/replacement admission failures occur before
+publishing a candidate. An invalid above-eight request, conflicting positive
+fixed-pool request, or unknown type maps to `InvalidParameter`; exhaustion of
+the Host ledger preserves `GraphErrc::ComputeError` through embedded Host and
+IPC status boundaries. Built-in CPU Run aggregation overflow or full-vector
+exhaustion likewise returns `ComputeError` before any initial ready entry is
+published.
 
 ## Boundaries and Rationale
 

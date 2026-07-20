@@ -18,9 +18,25 @@
 
 #include "photospider/core/graph_error.hpp"
 #include "photospider/scheduler/scheduler.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
+#include "scheduler/scheduler_worker_limits.hpp"
 
 namespace ps::compute {
+
+/** @copydoc operator==(const ReadyTaskResourceDemand&, const
+ * ReadyTaskResourceDemand&) */
+bool operator==(const ReadyTaskResourceDemand& lhs,
+                const ReadyTaskResourceDemand& rhs) noexcept {
+  return lhs.retained_memory_bytes == rhs.retained_memory_bytes &&
+         lhs.scratch_bytes == rhs.scratch_bytes &&
+         lhs.ready_bytes == rhs.ready_bytes;
+}
+
+/** @copydoc operator!=(const ReadyTaskResourceDemand&, const
+ * ReadyTaskResourceDemand&) */
+bool operator!=(const ReadyTaskResourceDemand& lhs,
+                const ReadyTaskResourceDemand& rhs) noexcept {
+  return !(lhs == rhs);
+}
 
 /** @copydoc ReadyTaskMetadata::ReadyTaskMetadata */
 ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
@@ -37,17 +53,16 @@ ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
 }  // NOLINT(whitespace/indent_namespace)
 
 /** @copydoc ReadyTaskSubmission::ReadyTaskSubmission */
-ReadyTaskSubmission::ReadyTaskSubmission(ComputeRunLease lease,
-                                         ComputeRunTaskIdentity identity,
-                                         int trace_node_id,
-                                         bool is_initial_ready,
-                                         Executable executable,
-                                         SchedulerTaskPriority priority)
+ReadyTaskSubmission::ReadyTaskSubmission(
+    ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
+    bool is_initial_ready, Executable executable,
+    SchedulerTaskPriority priority, ReadyTaskResourceDemand resource_demand)
     : metadata_(lease.descriptor(), trace_node_id, is_initial_ready),
       identity_(identity),
       lease_(std::move(lease)),
       executable_(std::move(executable)),
-      priority_(priority) {
+      priority_(priority),
+      resource_demand_(resource_demand) {
   if (identity_.run_id() != metadata_.run_id()) {
     throw std::invalid_argument(
         "ReadyTaskSubmission identity does not match its Run lease.");
@@ -56,6 +71,24 @@ ReadyTaskSubmission::ReadyTaskSubmission(ComputeRunLease lease,
     throw std::invalid_argument(
         "ReadyTaskSubmission requires an owned executable.");
   }
+  if (resource_demand_.ready_bytes == 0U) {
+    throw std::invalid_argument(
+        "ReadyTaskSubmission requires a positive ready-byte charge.");
+  }
+}
+
+/** @copydoc ReadyTaskSubmission::default_resource_demand */
+ReadyTaskResourceDemand
+ReadyTaskSubmission::default_resource_demand() noexcept {
+  constexpr std::uint64_t kSharedOwnerBytes =
+      2U * static_cast<std::uint64_t>(sizeof(std::shared_ptr<void>));
+  const std::uint64_t submission_bytes =
+      static_cast<std::uint64_t>(sizeof(ReadyTaskSubmission));
+  return ReadyTaskResourceDemand{
+      submission_bytes,
+      0U,
+      submission_bytes + kSharedOwnerBytes,
+  };
 }
 
 /** @copydoc ReadyTaskSubmission::execute */
@@ -86,11 +119,18 @@ struct ExecutionService::RunState final
    * @param run_id Opaque Run namespace shared by every initial submission.
    * @param host_context Borrowed Graph observation target.
    * @param total_task_count Positive logical completion count.
+   * @param task_resources Uniform declaration validated for every submission.
+   * @param run_reservation Complete admitted vector transferred into this Run.
    * @throws Nothing.
    */
   RunState(ComputeRunId run_id, SchedulerHostContext& host_context,
-           int total_task_count) noexcept
-      : id(run_id), host(&host_context), tasks_to_complete(total_task_count) {}
+           int total_task_count, ReadyTaskResourceDemand task_resources,
+           ResourceLedger::Reservation run_reservation) noexcept
+      : id(run_id),
+        host(&host_context),
+        resource_demand(task_resources),
+        reservation(std::move(run_reservation)),
+        tasks_to_complete(total_task_count) {}
 
   /**
    * @brief Tests whether the caller-side Run wait may finish.
@@ -112,6 +152,14 @@ struct ExecutionService::RunState final
    */
   SchedulerHostContext* const host;
 
+  /** @brief Uniform trusted resources required by every logical task. */
+  const ReadyTaskResourceDemand resource_demand;
+
+  /**
+   * @brief Complete Run vector retained until all queued/executing grants end.
+   */
+  ResourceLedger::Reservation reservation;
+
   /** @brief Guards completion, failure, admission, and in-flight state. */
   mutable std::mutex mutex;
 
@@ -121,7 +169,7 @@ struct ExecutionService::RunState final
   /** @brief Remaining logical tasks for a successful Run. */
   int tasks_to_complete = 0;
 
-  /** @brief Worker callbacks that have left the process queue but not exited.
+  /** @brief Worker callbacks that have left the service queue but not exited.
    */
   int in_flight = 0;
 
@@ -133,23 +181,26 @@ struct ExecutionService::RunState final
 };
 
 /**
- * @brief Move-owned process queue entry paired with matching Run state.
+ * @brief Move-owned service queue entry paired with matching Run state.
  *
  * @throws Nothing while moved after caller allocation succeeds.
  * @note Queue storage owns the complete submission and therefore its Run lease.
  */
 struct ExecutionService::QueueEntry final {
   /**
-   * @brief Transfers one ready submission into process queue ownership.
+   * @brief Transfers one ready submission into service queue ownership.
    * @param run_state Matching active Run retained through callback exit.
    * @param ready_submission Dependency-ready owned work.
+   * @param grant Exact ready-entry/byte authority for this store value.
    * @throws Nothing after argument evaluation.
    */
   QueueEntry(std::shared_ptr<RunState> run_state,
-             ReadyTaskSubmission ready_submission) noexcept
+             ReadyTaskSubmission ready_submission,
+             ResourceLedger::Grant grant) noexcept
       : run(std::move(run_state)),
         priority(ready_submission.priority()),
-        submission(std::move(ready_submission)) {}
+        submission(std::move(ready_submission)),
+        ready_grant(std::move(grant)) {}
 
   /** @brief Matching active Run state. */
   std::shared_ptr<RunState> run;
@@ -159,10 +210,197 @@ struct ExecutionService::QueueEntry final {
 
   /** @brief Complete owned callback, identity, metadata, and lease. */
   ReadyTaskSubmission submission;
+
+  /** @brief Ready-store authority released after worker removal or purge. */
+  std::optional<ResourceLedger::Grant> ready_grant;
+
+  /** @brief CPU/memory/scratch authority held across callback execution. */
+  std::optional<ResourceLedger::Grant> execution_grant;
 };
 
 /**
- * @brief Owns all fixed-pool implementation details and reservation state.
+ * @brief Owns one entry/byte-bounded high/normal service ready store.
+ *
+ * @throws std::bad_alloc when lane storage grows.
+ * @note Every method is called with `PoolState::mutex` held. The store owns no
+ * synchronization, Run admission, dependency, or fairness authority.
+ */
+class ExecutionService::BoundedReadyStore final {
+ public:
+  /**
+   * @brief Fixes the two ready-store limits for the service lifetime.
+   * @param entry_limit Maximum stored entries across both lanes.
+   * @param byte_limit Maximum accounted bytes across both lanes.
+   * @throws Nothing.
+   */
+  BoundedReadyStore(std::uint64_t entry_limit,
+                    std::uint64_t byte_limit) noexcept
+      : entry_limit_(entry_limit), byte_limit_(byte_limit) {}
+
+  /**
+   * @brief Publishes one fully granted ready entry.
+   * @param entry Owned entry with exactly one active ready grant.
+   * @return True after publication, false without mutation on a local limit
+   * or checked-counter violation.
+   * @throws std::invalid_argument when the grant vector is structurally
+   * invalid.
+   * @throws std::bad_alloc when lane storage cannot grow.
+   */
+  bool try_push(const std::shared_ptr<QueueEntry>& entry) {
+    if (!entry || !entry->ready_grant.has_value() ||
+        !entry->ready_grant->active()) {
+      throw std::invalid_argument(
+          "Bounded ready store requires an active ready grant.");
+    }
+    const ResourceVector charge = entry->ready_grant->resources();
+    if (charge.cpu_slots != 0U || charge.retained_memory_bytes != 0U ||
+        charge.scratch_bytes != 0U || charge.ready_entries != 1U ||
+        charge.ready_bytes == 0U) {
+      throw std::invalid_argument(
+          "Bounded ready store received an invalid ready grant.");
+    }
+    const std::optional<ResourceVector> next = checked_add_resources(
+        ResourceVector{0U, 0U, 0U, entry_count_, byte_count_}, charge);
+    if (!next.has_value() || next->ready_entries > entry_limit_ ||
+        next->ready_bytes > byte_limit_) {
+      return false;
+    }
+
+    const bool high =
+        entry->priority == SchedulerTaskPriority::High ||
+        entry->submission.metadata().intent() == ComputeIntent::RealTimeUpdate;
+    if (high) {
+      high_ready_.push_back(entry);
+    } else {
+      normal_ready_.push_back(entry);
+    }
+    entry_count_ = next->ready_entries;
+    byte_count_ = next->ready_bytes;
+    return true;
+  }
+
+  /**
+   * @brief Removes the next high-before-normal ready entry.
+   * @return Owned entry, or null when both lanes are empty.
+   * @throws Nothing; an accounting invariant violation terminates.
+   * @note Removal decrements store counters but the returned entry keeps its
+   * grant until the worker acquires execution capacity or drops the entry.
+   */
+  std::shared_ptr<QueueEntry> pop() noexcept {
+    std::shared_ptr<QueueEntry> entry;
+    if (!high_ready_.empty()) {
+      entry = std::move(high_ready_.front());
+      high_ready_.pop_front();
+    } else if (!normal_ready_.empty()) {
+      entry = std::move(normal_ready_.front());
+      normal_ready_.pop_front();
+    } else {
+      return nullptr;
+    }
+    remove_charge(*entry);
+    return entry;
+  }
+
+  /**
+   * @brief Purges every queued entry belonging to one Run.
+   * @param run Matching retained Run state.
+   * @return Number of removed entries.
+   * @throws Nothing; an accounting invariant violation terminates.
+   */
+  std::size_t erase_run(const std::shared_ptr<RunState>& run) noexcept {
+    std::size_t removed = 0U;
+    const auto erase_lane =
+        [this, &run,
+         &removed](std::deque<std::shared_ptr<QueueEntry>>* lane) noexcept {
+          for (auto it = lane->begin(); it != lane->end();) {
+            if (*it && (*it)->run.get() == run.get()) {
+              remove_charge(**it);
+              it = lane->erase(it);
+              ++removed;
+            } else {
+              ++it;
+            }
+          }
+        };
+    erase_lane(&high_ready_);
+    erase_lane(&normal_ready_);
+    return removed;
+  }
+
+  /**
+   * @brief Drops all queued entries during final service teardown.
+   * @return Nothing.
+   * @throws Nothing; owner destruction is noexcept.
+   */
+  void clear() noexcept {
+    high_ready_.clear();
+    normal_ready_.clear();
+    entry_count_ = 0U;
+    byte_count_ = 0U;
+  }
+
+  /**
+   * @brief Reports whether both ready lanes are empty.
+   * @return True when no entry is stored.
+   * @throws Nothing.
+   */
+  bool empty() const noexcept { return entry_count_ == 0U; }
+
+  /**
+   * @brief Returns current entries across both lanes.
+   * @return Exact stored entry count.
+   * @throws Nothing.
+   */
+  std::uint64_t entry_count() const noexcept { return entry_count_; }
+
+  /**
+   * @brief Returns current accounted bytes across both lanes.
+   * @return Exact stored byte count.
+   * @throws Nothing.
+   */
+  std::uint64_t byte_count() const noexcept { return byte_count_; }
+
+ private:
+  /**
+   * @brief Removes one entry's exact ready grant charge from local counters.
+   * @param entry Entry being popped or purged.
+   * @return Nothing.
+   * @throws Nothing; an invalid stored grant terminates.
+   */
+  void remove_charge(const QueueEntry& entry) noexcept {
+    if (!entry.ready_grant.has_value() || !entry.ready_grant->active()) {
+      std::terminate();
+    }
+    const ResourceVector charge = entry.ready_grant->resources();
+    if (charge.ready_entries != 1U || charge.ready_entries > entry_count_ ||
+        charge.ready_bytes > byte_count_) {
+      std::terminate();
+    }
+    entry_count_ -= charge.ready_entries;
+    byte_count_ -= charge.ready_bytes;
+  }
+
+  /** @brief Immutable maximum entries across both priority lanes. */
+  const std::uint64_t entry_limit_;
+
+  /** @brief Immutable maximum accounted bytes across both lanes. */
+  const std::uint64_t byte_limit_;
+
+  /** @brief Latency-hint FIFO used by high-priority and RT work. */
+  std::deque<std::shared_ptr<QueueEntry>> high_ready_;
+
+  /** @brief Throughput FIFO used by normal HP work. */
+  std::deque<std::shared_ptr<QueueEntry>> normal_ready_;
+
+  /** @brief Current entries across both deques. */
+  std::uint64_t entry_count_ = 0U;
+
+  /** @brief Current accounted bytes across both deques. */
+  std::uint64_t byte_count_ = 0U;
+};
+
+/**
+ * @brief Owns all fixed-pool, bounded-store, registry, and ledger state.
  *
  * @throws std::bad_alloc from container growth and worker creation staging.
  * @note One mutex defines queue-to-Run lock order: pool mutex is acquired
@@ -170,26 +408,33 @@ struct ExecutionService::QueueEntry final {
  */
 class ExecutionService::PoolState final {
  public:
+  /**
+   * @brief Creates one unconfigured execution domain with immutable limits.
+   * @param resource_limits Complete ledger and ready-store limits.
+   * @throws std::bad_alloc when ledger state cannot allocate.
+   */
+  explicit PoolState(ResourceVector resource_limits)
+      : ledger(resource_limits),
+        ready_store(resource_limits.ready_entries,
+                    resource_limits.ready_bytes) {}
+
   /** @brief Serializes fixed configuration, queues, and active Run registry. */
   mutable std::mutex mutex;
 
   /** @brief Wakes fixed workers when ready work or shutdown is published. */
   std::condition_variable ready_cv;
 
-  /** @brief Latency-hint FIFO used by RT and explicit high-priority work. */
-  std::deque<std::shared_ptr<QueueEntry>> high_ready;
+  /** @brief Sole host-authoritative resource mint for this service. */
+  ResourceLedger ledger;
 
-  /** @brief Throughput FIFO used by normal HP work. */
-  std::deque<std::shared_ptr<QueueEntry>> normal_ready;
+  /** @brief Sole entry/byte-bounded ready-store owner. */
+  BoundedReadyStore ready_store;
 
   /** @brief Active Run states keyed by non-reused numeric Run id. */
   std::unordered_map<uint64_t, std::weak_ptr<RunState>> active_runs;
 
   /** @brief Fixed service-owned worker threads. */
   std::vector<std::thread> workers;
-
-  /** @brief One transitional process-budget share for the complete pool. */
-  std::optional<SchedulerWorkerBudget::Reservation> reservation;
 
   /** @brief Frozen worker count, or zero before complete configuration. */
   unsigned int configured_workers = 0U;
@@ -205,12 +450,31 @@ thread_local ExecutionService::RunState* ExecutionService::tls_run_state_ =
 /** @brief Current service worker id, or -1 outside callbacks. */
 thread_local int ExecutionService::tls_worker_id_ = -1;
 
+/** @copydoc ExecutionService::default_resource_limits */
+ResourceVector ExecutionService::default_resource_limits() noexcept {
+  constexpr std::uint64_t kOneMebibyte = 1024U * 1024U;
+  return ResourceVector{
+      32U,    1024U * kOneMebibyte, 512U * kOneMebibyte,
+      65536U, 256U * kOneMebibyte,
+  };
+}
+
 /** @copydoc ExecutionService::ExecutionService */
-ExecutionService::ExecutionService() : pool_(std::make_unique<PoolState>()) {}
+ExecutionService::ExecutionService()
+    : ExecutionService(default_resource_limits()) {}
+
+/** @copydoc ExecutionService::ExecutionService */
+ExecutionService::ExecutionService(ResourceVector resource_limits)
+    : pool_(std::make_unique<PoolState>(resource_limits)) {}
 
 /** @copydoc ExecutionService::ExecutionService */
 ExecutionService::ExecutionService(unsigned int worker_count)
-    : ExecutionService() {
+    : ExecutionService(worker_count, default_resource_limits()) {}
+
+/** @copydoc ExecutionService::ExecutionService */
+ExecutionService::ExecutionService(unsigned int worker_count,
+                                   ResourceVector resource_limits)
+    : ExecutionService(resource_limits) {
   configure_worker_count(worker_count);
 }
 
@@ -225,8 +489,7 @@ ExecutionService::~ExecutionService() noexcept {
     {
       std::lock_guard<std::mutex> lock(pool_->mutex);
       pool_->stopping = true;
-      pool_->high_ready.clear();
-      pool_->normal_ready.clear();
+      pool_->ready_store.clear();
       workers.swap(pool_->workers);
     }
     pool_->ready_cv.notify_all();
@@ -239,7 +502,6 @@ ExecutionService::~ExecutionService() noexcept {
       std::lock_guard<std::mutex> lock(pool_->mutex);
       pool_->active_runs.clear();
       pool_->configured_workers = 0U;
-      pool_->reservation.reset();
     }
   } catch (...) {
     std::terminate();
@@ -267,12 +529,11 @@ void ExecutionService::configure_worker_count(unsigned int worker_count) {
 
   const unsigned int resolved_workers = resolve_scheduler_worker_count(
       worker_count, std::thread::hardware_concurrency());
-  std::optional<SchedulerWorkerBudget::Reservation> reservation =
-      SchedulerWorkerBudget::process().try_reserve(resolved_workers);
-  if (!reservation.has_value()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "process scheduler worker budget cannot admit the fixed "
-                     "ExecutionService CPU pool");
+  const ResourceLedger::Snapshot resources = pool_->ledger.snapshot();
+  if (static_cast<std::uint64_t>(resolved_workers) >
+      resources.limits.cpu_slots) {
+    throw std::invalid_argument(
+        "ExecutionService worker count exceeds configured CPU capacity.");
   }
 
   std::vector<std::thread> staged_workers;
@@ -301,7 +562,6 @@ void ExecutionService::configure_worker_count(unsigned int worker_count) {
   }
 
   pool_->workers.swap(staged_workers);
-  pool_->reservation.emplace(std::move(*reservation));
 }
 
 /** @copydoc ExecutionService::worker_count */
@@ -320,18 +580,43 @@ bool ExecutionService::is_configured() const {
 /** @copydoc ExecutionService::get_stats */
 std::string ExecutionService::get_stats() const {
   std::lock_guard<std::mutex> lock(pool_->mutex);
+  const ResourceLedger::Snapshot resources = pool_->ledger.snapshot();
   std::ostringstream stream;
   stream << "Workers: " << pool_->configured_workers
-         << ", Active runs: " << pool_->active_runs.size() << ", Ready tasks: "
-         << (pool_->high_ready.size() + pool_->normal_ready.size());
+         << ", Active runs: " << pool_->active_runs.size()
+         << ", Ready tasks: " << pool_->ready_store.entry_count()
+         << ", Ready bytes: " << pool_->ready_store.byte_count()
+         << ", Reserved CPU: " << resources.reserved.cpu_slots;
   return stream.str();
+}
+
+/** @copydoc ExecutionService::try_reserve_legacy_scheduler_workers */
+std::optional<ResourceLedger::Reservation>
+ExecutionService::try_reserve_legacy_scheduler_workers(
+    unsigned int worker_slots) {
+  return pool_->ledger.try_reserve(
+      ResourceVector{static_cast<std::uint64_t>(worker_slots)});
+}
+
+/** @copydoc ExecutionService::try_reserve_legacy_scheduler_worker_pair */
+std::optional<ResourceLedger::ReservationPair>
+ExecutionService::try_reserve_legacy_scheduler_worker_pair(
+    unsigned int hp_worker_slots, unsigned int rt_worker_slots) {
+  return pool_->ledger.try_reserve_pair(
+      ResourceVector{static_cast<std::uint64_t>(hp_worker_slots)},
+      ResourceVector{static_cast<std::uint64_t>(rt_worker_slots)});
+}
+
+/** @copydoc ExecutionService::resource_snapshot */
+ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
+  return pool_->ledger.snapshot();
 }
 
 /** @copydoc ExecutionService::execute_cpu_run */
 void ExecutionService::execute_cpu_run(
     SchedulerHostContext& host,
-    std::vector<ReadyTaskSubmission> initial_submissions,
-    int total_task_count) {
+    std::vector<ReadyTaskSubmission> initial_submissions, int total_task_count,
+    ReadyTaskResourceDemand task_resource_demand) {
   if (total_task_count <= 0 || initial_submissions.empty()) {
     throw std::invalid_argument(
         "ExecutionService requires a nonempty active Run batch.");
@@ -340,6 +625,10 @@ void ExecutionService::execute_cpu_run(
     throw std::invalid_argument(
         "ExecutionService initial ready count exceeds total task count.");
   }
+  if (task_resource_demand.ready_bytes == 0U) {
+    throw std::invalid_argument(
+        "ExecutionService requires a positive per-task ready-byte charge.");
+  }
 
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
   for (const ReadyTaskSubmission& submission : initial_submissions) {
@@ -347,14 +636,66 @@ void ExecutionService::execute_cpu_run(
       throw std::invalid_argument(
           "ExecutionService initial batch mixes multiple Runs.");
     }
+    if (submission.resource_demand() != task_resource_demand) {
+      throw std::invalid_argument(
+          "ExecutionService initial batch resource declaration mismatch.");
+    }
   }
 
-  auto run = std::make_shared<RunState>(run_id, host, total_task_count);
+  unsigned int configured_workers = 0U;
+  {
+    std::lock_guard<std::mutex> lock(pool_->mutex);
+    if (pool_->configured_workers == 0U || pool_->workers.empty()) {
+      throw std::logic_error(
+          "ExecutionService worker count is not configured.");
+    }
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+    configured_workers = pool_->configured_workers;
+  }
+
+  const ResourceVector per_task_resources{
+      0U,
+      task_resource_demand.retained_memory_bytes,
+      task_resource_demand.scratch_bytes,
+      1U,
+      task_resource_demand.ready_bytes,
+  };
+  std::optional<ResourceVector> run_resources = checked_multiply_resources(
+      per_task_resources, static_cast<std::uint64_t>(total_task_count));
+  if (!run_resources.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "ExecutionService Run resource aggregation overflow.");
+  }
+  run_resources->cpu_slots =
+      std::min(static_cast<std::uint64_t>(configured_workers),
+               static_cast<std::uint64_t>(total_task_count));
+  std::optional<ResourceLedger::Reservation> reservation =
+      pool_->ledger.try_reserve(*run_resources);
+  if (!reservation.has_value()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ExecutionService resource ledger cannot admit the complete Run.");
+  }
+
+  auto run =
+      std::make_shared<RunState>(run_id, host, total_task_count,
+                                 task_resource_demand, std::move(*reservation));
   std::vector<std::shared_ptr<QueueEntry>> staged_entries;
   staged_entries.reserve(initial_submissions.size());
   for (ReadyTaskSubmission& submission : initial_submissions) {
-    staged_entries.push_back(
-        std::make_shared<QueueEntry>(run, std::move(submission)));
+    const ResourceVector ready_resources{0U, 0U, 0U, 1U,
+                                         task_resource_demand.ready_bytes};
+    std::optional<ResourceLedger::Grant> ready_grant =
+        run->reservation.try_grant(ready_resources);
+    if (!ready_grant.has_value()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "ExecutionService Run reservation cannot grant initial ready work.");
+    }
+    staged_entries.push_back(std::make_shared<QueueEntry>(
+        run, std::move(submission), std::move(*ready_grant)));
   }
 
   {
@@ -373,28 +714,16 @@ void ExecutionService::execute_cpu_run(
     }
 
     pool_->active_runs.insert_or_assign(key, run);
-    std::size_t high_insertions = 0;
-    std::size_t normal_insertions = 0;
     try {
       for (const std::shared_ptr<QueueEntry>& entry : staged_entries) {
-        const bool high = entry->priority == SchedulerTaskPriority::High ||
-                          entry->submission.metadata().intent() ==
-                              ComputeIntent::RealTimeUpdate;
-        if (high) {
-          pool_->high_ready.push_back(entry);
-          ++high_insertions;
-        } else {
-          pool_->normal_ready.push_back(entry);
-          ++normal_insertions;
+        if (!pool_->ready_store.try_push(entry)) {
+          throw GraphError(
+              GraphErrc::ComputeError,
+              "ExecutionService bounded ready store rejected initial work.");
         }
       }
     } catch (...) {
-      while (high_insertions-- > 0U) {
-        pool_->high_ready.pop_back();
-      }
-      while (normal_insertions-- > 0U) {
-        pool_->normal_ready.pop_back();
-      }
+      (void)pool_->ready_store.erase_run(run);
       pool_->active_runs.erase(key);
       throw;
     }
@@ -432,7 +761,22 @@ void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
     throw std::invalid_argument(
         "ReadyTaskSubmission does not belong to its routed Run.");
   }
-  auto entry = std::make_shared<QueueEntry>(run, std::move(submission));
+  if (submission.resource_demand() != run->resource_demand) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ReadyTaskSubmission resource declaration differs from Run admission.");
+  }
+  const ResourceVector ready_resources{0U, 0U, 0U, 1U,
+                                       run->resource_demand.ready_bytes};
+  std::optional<ResourceLedger::Grant> ready_grant =
+      run->reservation.try_grant(ready_resources);
+  if (!ready_grant.has_value()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Run reservation cannot grant dependency-released ready work.");
+  }
+  auto entry = std::make_shared<QueueEntry>(run, std::move(submission),
+                                            std::move(*ready_grant));
 
   {
     std::lock_guard<std::mutex> pool_lock(pool_->mutex);
@@ -451,13 +795,10 @@ void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
           "ExecutionService Run no longer accepts ready work.");
     }
 
-    const bool high =
-        entry->priority == SchedulerTaskPriority::High ||
-        entry->submission.metadata().intent() == ComputeIntent::RealTimeUpdate;
-    if (high) {
-      pool_->high_ready.push_back(std::move(entry));
-    } else {
-      pool_->normal_ready.push_back(std::move(entry));
+    if (!pool_->ready_store.try_push(entry)) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "ExecutionService bounded ready store rejected dependent work.");
     }
   }
   pool_->ready_cv.notify_one();
@@ -602,18 +943,7 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
         run->first_exception = std::move(failure);
       }
       run->accepting = false;
-      const auto belongs_to_run =
-          [&run](const std::shared_ptr<QueueEntry>& entry) {
-            return entry && entry->run.get() == run.get();
-          };
-      pool_->high_ready.erase(
-          std::remove_if(pool_->high_ready.begin(), pool_->high_ready.end(),
-                         belongs_to_run),
-          pool_->high_ready.end());
-      pool_->normal_ready.erase(
-          std::remove_if(pool_->normal_ready.begin(), pool_->normal_ready.end(),
-                         belongs_to_run),
-          pool_->normal_ready.end());
+      (void)pool_->ready_store.erase_run(run);
     }
     run->settled_cv.notify_all();
   } catch (...) {
@@ -624,28 +954,50 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
 void ExecutionService::worker_loop(int worker_id) noexcept {
   for (;;) {
     std::shared_ptr<QueueEntry> entry;
+    std::exception_ptr grant_failure;
     {
       std::unique_lock<std::mutex> lock(pool_->mutex);
       pool_->ready_cv.wait(lock, [this]() {
-        return pool_->stopping || !pool_->high_ready.empty() ||
-               !pool_->normal_ready.empty();
+        return pool_->stopping || !pool_->ready_store.empty();
       });
       if (pool_->stopping) {
         return;
       }
-      if (!pool_->high_ready.empty()) {
-        entry = std::move(pool_->high_ready.front());
-        pool_->high_ready.pop_front();
-      } else {
-        entry = std::move(pool_->normal_ready.front());
-        pool_->normal_ready.pop_front();
+      entry = pool_->ready_store.pop();
+      if (!entry) {
+        std::terminate();
       }
       std::lock_guard<std::mutex> run_lock(entry->run->mutex);
       if (!entry->run->accepting || entry->run->first_exception) {
         entry.reset();
       } else {
-        ++entry->run->in_flight;
+        try {
+          const ResourceVector execution_resources{
+              1U,
+              entry->run->resource_demand.retained_memory_bytes,
+              entry->run->resource_demand.scratch_bytes,
+              0U,
+              0U,
+          };
+          std::optional<ResourceLedger::Grant> execution_grant =
+              entry->run->reservation.try_grant(execution_resources);
+          if (!execution_grant.has_value()) {
+            throw GraphError(
+                GraphErrc::ComputeError,
+                "Run reservation cannot grant worker execution resources.");
+          }
+          entry->execution_grant.emplace(std::move(*execution_grant));
+          entry->ready_grant.reset();
+          ++entry->run->in_flight;
+        } catch (...) {
+          grant_failure = std::current_exception();
+        }
       }
+    }
+    if (grant_failure) {
+      fail_run(entry->run, grant_failure);
+      entry.reset();
+      continue;
     }
     if (!entry) {
       continue;
@@ -667,6 +1019,7 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
     run->host->clear_task_context();
     tls_worker_id_ = -1;
     tls_run_state_ = nullptr;
+    entry->execution_grant.reset();
 
     {
       std::lock_guard<std::mutex> lock(run->mutex);

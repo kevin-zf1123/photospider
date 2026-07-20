@@ -21,8 +21,9 @@ transport 或进程级 operation plugin
 flowchart TD
   HOST["ps::Host"] --> ADAPTER["embedded Host adapter"]
   ADAPTER --> KERNEL["Kernel"]
-  KERNEL --> BUDGET["进程级 SchedulerWorkerBudget"]
   KERNEL --> EXEC["注入的 CPU ExecutionService"]
+  EXEC --> LEDGER["Host 权威 ResourceLedger"]
+  EXEC --> STORE["有界 ready store"]
   KERNEL --> GSE["GraphStateExecutor"]
   GSE --> SERVICE["ComputeService"]
   SERVICE --> RUN["request-owned HP 或 HP/RT child ComputeRun"]
@@ -61,8 +62,9 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 重新开放后续 accepting generation，但不会困住该 caller，也不会创建第二个 worker。
 `GraphRuntime` 会在 scheduler teardown 前完成该 join。如果显式 close 随后在 scheduler shutdown
 中失败，Kernel 会先启动一个 replacement lane worker 再返回失败，使保留的 session 仍可重试。
-不同 graph 具有独立的 worker 和队列。过渡期 worker budget 不计这些 lane worker；其 32-slot
-上限覆盖固定 CPU service pool，以及向 legacy scheduler plan 计费的 worker。
+不同 graph 具有独立的 worker 和队列。Host composition 的 resource ledger 不把这些 lane
+worker 或固定 service thread 作为基础设施计费；它准入每个 Run 的 CPU 执行权，以及 legacy
+scheduler owner 的保守 slot。
 
 ## 当前协作者
 
@@ -81,15 +83,15 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit 或 scheduler policy |
 | `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、variant、结果槽与 callback owner | Scheduler worker、Run terminal state 或 dirty-path execution |
 | `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
-| `ExecutionService` | 一个注入的固定内建 CPU worker domain、并发 Run registry、high/normal ready queue、按 Run 隔离的 completion/failure/trace settlement，以及 HP/RT dirty/preflight 执行 | Planning、dependency、Graph/cache state、最终 admission ledger、公平性 policy、GPU/plugin 执行或 visible commit |
+| `ExecutionService` | 一个注入的固定内建 CPU worker domain、一个 Host 权威 `ResourceLedger`、按 entry/byte 有界的 high/normal ready storage、完整 Run resource vector 的原子准入、按 Run 隔离的 completion/failure/trace settlement，以及 HP/RT dirty/preflight 执行 | Planning、dependency、Graph/cache state、公平性 policy、GPU/plugin 执行、lifecycle admission registry 或 visible commit |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | scheduler trace 所有权 |
 | `SchedulerFactory` | 在构造前解析 `0..8` worker 请求，并规划每个 scheduler 的保守 slot 计费 | 进程容量所有权或 graph-state access |
-| `SchedulerWorkerBudget` | 在所有 embedded Host/Kernel 间串行化固定 32-slot 过渡期进程 budget，覆盖固定 CPU service pool 与 legacy scheduler worker | worker 构造、scheduling policy、fairness 或整个进程 thread 计数 |
+| `ResourceLedger` | 原子预留经过检查的 CPU、retained-memory、scratch、ready-entry 与 ready-byte vector；签发有界 child grant；在 parent/child ownership 结束后精确释放 vector | worker 构造、ordering policy、task dependency、对 device/I/O/plugin resource 的猜测或 lifecycle admission |
 | `ReservationOwnedScheduler` | 让 move-only reservation 保持到 concrete scheduler shutdown 与销毁完成 | 容量 planning 或 task-graph correctness |
 
-Compute collaborator 位于 `src/lib/compute/`；三个 admission/ownership collaborator 位于
-`src/lib/scheduler/`。这些类都是私有实现模块，不构成可安装 API。
+Compute collaborator 位于 `src/lib/compute/`；ledger 位于 `src/lib/runtime/`，legacy
+scheduler planning/ownership 位于 `src/lib/scheduler/`。这些类都是私有实现模块，不构成可安装 API。
 
 ## 请求行为
 
@@ -155,19 +157,21 @@ Dispatcher 拥有请求正确性，而 `ComputeRun` 拥有当前 full HP storage
 authority。新就绪的 dependent work 由 `TaskSubmissionPlan` 释放：迁移 route 会创建另一个
 `ReadyTaskSubmission`，legacy route 则推送另一条 lease-backed callback 或 dirty handle。
 
-Issue #69 的 CPU service 在 Kernel 之前显式组合，并直接拥有一个固定 worker pool。配置只会
-解析并冻结一次 `[1,8]` worker；Graph load、replacement、Run execution 与 dirty 阶段都不会
-调整其大小。来自多个 Graph 的独立 Run 共享 high/normal ready queue，而 completion count、
-first exception、in-flight drainage、Host trace target 与 settlement 都按 Run 隔离。这只是
-priority separation，不是最终 cross-Run fairness、有界 admission、cancellation 或 policy
-authority。
+Issue #70 的 CPU service 在 Kernel 之前显式组合，并直接拥有一个固定 worker pool、一个 Host
+权威 ledger 和一个有界 ready store。配置只会解析并冻结一次 `[1,8]` 个基础设施 worker；Graph
+load、replacement、Run execution 与 dirty 阶段都不会调整其大小。每个 Run 在发布前原子预留
+完整且经过检查的 CPU/retained/scratch/ready vector。Initial 与 dependency-released work 都
+必须持有匹配的 ready-entry/byte grant，并进入同一个 high/normal store；从队列移除时会把该 grant
+交换为 CPU/memory/scratch 执行权。Completion、failure 与所有异常路径都恰好释放一次精确 vector。
+独立 Run 仍相互隔离。High-before-normal 只是 priority separation，不是最终 cross-Run fairness、
+cancellation 或 policy authority。
 
-两个 intent 的内建 CPU binding 在 `GraphRuntime` 中都不拥有 owner。过渡期 serial、GPU 与
-plugin scheduler resource 仍按 Graph 和 intent 拥有。进程 `SchedulerWorkerBudget` 为每个固定
-service 计入一项 pool-lifetime reservation，并只在 Graph load/replacement 时对 legacy
-scheduler plan 计费。Legacy replacement 会在旧 owner 保持存活时预留 candidate headroom。
-内建 serial 计费为零；已注册 ABI v2 plugin 按解析后的 grant 计费；内建 GPU/heterogeneous
-还要计入潜在 device worker。
+两个 intent 的内建 CPU binding 在 `GraphRuntime` 中都不拥有 owner。Serial、GPU 与 plugin
+scheduler resource 仍按 Graph 和 intent 拥有，但其保守 CPU-slot reservation 来自 Run 共用的
+同一个 `ExecutionService` ledger。Legacy replacement 会在旧 owner 保持存活时预留 candidate
+headroom。内建 serial 计费为零；已注册 ABI v2 plugin 按解析后的 grant 计费；内建
+GPU/heterogeneous 还要计入潜在 device worker。Ledger 不会虚构 device、I/O 或 plugin-specific
+dimension。
 
 ## OpenCV Operation 并发
 
@@ -264,10 +268,10 @@ metadata 推导该关系。
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受替代方向和详细
-所有权契约。本文是当前 issue #69 固定多 Graph HP/RT CPU service、ownerless 内建 CPU binding、
-不同的 realtime child Run、owned dirty/preflight submission、保留的 legacy per-Graph
-scheduler，以及有界过渡期 worker containment 的权威说明。权威 revision、`RunGroup`、
-production resource admission、有界 ready storage、cancellation、supersession 与最终 policy
+所有权契约。本文是截至 issue #70 的权威说明：固定多 Graph HP/RT CPU service、ownerless 内建
+CPU binding、不同的 realtime child Run、owned dirty/preflight submission、原子 resource
+vector admission、有界 ready storage，以及共用一个 Host ledger 的 legacy per-Graph scheduler。
+权威 revision、`RunGroup`、lifecycle admission、cancellation、supersession 与最终 policy
 仍是未来行为。
 
 ## 实现与验证入口
@@ -285,14 +289,15 @@ production resource admission、有界 ready storage、cancellation、supersessi
 - `src/lib/core/ops.cpp`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`
+- `src/lib/runtime/resource_ledger.*`
 - `src/lib/scheduler/scheduler_factory.*`
-- `src/lib/scheduler/scheduler_worker_budget.*`
+- `src/lib/scheduler/scheduler_worker_limits.*`
 - `src/lib/scheduler/scheduler_reservation_owner.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_scheduler.cpp`
-- `tests/integration/test_scheduler_worker_budget.cpp`
+- `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_scheduler_factory_plan.cpp`
 - `tests/unit/test_scheduler_reservation_owner.cpp`
-- `tests/unit/test_scheduler_worker_budget.cpp`
+- `tests/unit/test_resource_ledger.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

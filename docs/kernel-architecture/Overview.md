@@ -181,7 +181,9 @@ graph TD
     Kernel --> GraphInspectService
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
-    Kernel --> SchedulerWorkerBudget["process SchedulerWorkerBudget"]
+    EmbeddedHost --> ExecutionService["host ExecutionService"]
+    Kernel --> ExecutionService
+    ExecutionService --> ResourceLedger["ResourceLedger"]
     Kernel --> ComputeService
 
     GraphRuntime --> GraphModel
@@ -197,6 +199,7 @@ graph TD
     ComputeService --> GraphEventService
     ComputeService --> OpRegistry
     ComputeService --> IScheduler
+    ComputeService --> ExecutionService
     ComputeService --> ComputeRun["request-owned HP ComputeRun"]
     ComputeService --> ComputeTaskDispatcher
     ComputeRun --> TaskSubmissionPlan
@@ -228,14 +231,15 @@ the process-global operation view seen by all Hosts; callback and returned-value
 leases keep plugin code mapped after registry removal until in-flight state is
 destroyed.
 
-Scheduler instances remain graph- and intent-owned, but their physical worker
-admission is process-owned. Every embedded Host/Kernel reaches the same
-32-slot `SchedulerWorkerBudget`. A graph retains one combined HP+RT reservation
-pair, atomically admitted then divided between its two scheduler owners, for
-their lifetimes. A scheduler replacement retains a separate candidate
-reservation until publication succeeds or rollback completes. Reservations
-are move-only RAII owners; concrete scheduler destruction happens before
-capacity is returned.
+Built-in CPU bindings are ownerless and share the fixed workers of their
+Host-composed `ExecutionService`. Legacy serial, GPU, and plugin scheduler
+instances remain graph- and intent-owned. Each embedded Host owns an independent
+ledger whose default CPU dimension is 32; Graph HP/RT legacy charges are
+atomically admitted as a pair, while every CPU Run reserves a full
+CPU/memory/scratch/ready vector. A legacy replacement retains candidate
+headroom until publication succeeds or rollback completes. Reservations and
+child grants are move-only RAII owners; concrete scheduler destruction and
+queued/executing work release exact capacity once.
 
 The IPC Host owns only client-side connections, interruptible polling workers,
 and mapped image lifetimes. Daemon sessions, accepted jobs, snapshots, output
@@ -423,19 +427,21 @@ worker/epoch TLS attribution, and trace publication without exposing
 before discovery or creation. `GraphStateExecutor` remains the separate access
 boundary for graph-state operations and compute requests that read or mutate
 the visible `GraphModel`. Its one worker and 64-slot waiting FIFO are owned per
-Graph and are not charged to the scheduler worker budget.
+Graph and are not charged to the `ExecutionService` ledger.
 
 The public worker request range is zero through eight. Zero resolves before
 construction to `min(max(1, hardware_concurrency()), 8)`; explicit one through
 eight remain exact, while larger values are rejected transactionally. Built-in
-CPU schedulers and registered ABI v2 plugins are charged the resolved grant;
-the built-in GPU/heterogeneous scheduler is charged that grant plus one
-potential device worker; only built-in `serial_debug` consumes zero slots. The
-Host plans HP and RT together and reserves their combined charge atomically
-against the fixed 32-slot process ceiling. Capacity exhaustion is a graph
-`ComputeError`; invalid requests and unknown scheduler types are
-`InvalidParameter`. This is admission containment, not a shared executor or a
-limit on every process thread.
+CPU Graph bindings and `serial_debug` consume zero owner slots; registered ABI
+v2 plugins consume the resolved CPU grant, and built-in GPU/heterogeneous
+bindings conservatively add one potential device worker to that CPU charge.
+The Host plans HP and RT together and reserves only their aggregate legacy
+owner charge from the service ledger, whose default CPU limit is 32. Built-in
+CPU Runs separately reserve a complete checked CPU, retained-memory, scratch,
+ready-entry, and ready-byte vector before ready publication. Capacity
+exhaustion is a graph `ComputeError`; invalid requests and unknown scheduler
+types are `InvalidParameter`. This ledger is not a limit on every process
+thread.
 
 ### Operation Registry
 
@@ -542,11 +548,12 @@ Important current behavior:
   A v2 operation plugin may then supply the absent key. With the provider
   enabled, the same registration transaction can replace an active key and
   unload restores the built-in predecessor.
-- Current schedulers own physical workers per graph and intent, subject to
-  bounded per-instance grants and the shared 32-slot admission ledger. The
-  accepted replacement direction is recorded in ADR 0003 and its detailed
-  ownership/lifetime contract in ADR 0007, but the shared `ExecutionService`
-  is not current behavior.
+- Built-in CPU work from multiple graphs/intents shares one fixed
+  `ExecutionService` per embedded Host. Its ledger atomically admits complete
+  Run vectors and legacy scheduler-owner CPU grants; its high/normal ready
+  store is bounded by entries and bytes. Legacy schedulers retain
+  per-graph/intent physical ownership and bounded constructor grants. ADR 0003
+  and ADR 0007 record the accepted ownership/lifetime contract.
 
 - [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
   separates graph-state access from scheduler dispatch.

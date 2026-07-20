@@ -340,12 +340,15 @@ Focused companion regressions own the remaining boundaries:
   post-write, post-flush, and post-close failure states. Each phase must return
   `GraphErrc::Io`, and the created destination demonstrates the documented
   non-atomic post-open behavior.
-- `test_scheduler_worker_budget` proves a fresh invalid CPU-selecting load does
-  not publish a session or create a per-Graph CPU owner. Before any equal
-  request, it derives the authoritative automatic worker count and requires a
-  deterministic unequal positive request to fail; zero and the explicit
-  resolved count then reuse the first fixed service pool, and a later valid
-  Graph still loads.
+- `test_resource_ledger` proves checked vector arithmetic, independent
+  saturation and exact recovery for all five current dimensions, atomic
+  mixed-vector and pair admission, bounded child grants, deferred parent
+  release, move-only token contracts, and concurrent no-overcommit behavior.
+- `test_resource_admission` proves load/replacement pair transactions, exact
+  saturation recovery, candidate-headroom rollback, ownerless built-in CPU
+  bindings, independent Host composition ledgers, and shared multi-Graph
+  execution. A fresh invalid CPU-selecting load still cannot publish a session
+  or create a per-Graph CPU owner.
 - `test_compute_run` records complete action/node/worker/epoch tuples. It proves
   two concurrent Runs that reuse local task id zero deliver only matching
   Run/node epochs to their separate Hosts; cleanup releases a blocked first Run
@@ -355,7 +358,12 @@ Focused companion regressions own the remaining boundaries:
   to the matching epoch and callback-retained descriptor/task identity.
   This realtime case intentionally exercises `ExecutionService` directly:
   worker-loop Host/epoch selection and retained callback identity are observable
-  at that boundary without adding a test-only GraphRuntime hook.
+  at that boundary without adding a test-only GraphRuntime hook. Direct service
+  cases also cover whole-vector rejection and recovery for retained Host
+  memory, scratch, ready entries, and ready bytes; checked-overflow rejection;
+  shared CPU admission with legacy owners; initial ready-store backpressure and
+  priority ordering; dependent re-entry backpressure; and exact root release
+  after success or failure.
 - `test_ipc_protocol` proves exact Graph status propagation, one-call mutation
   behavior, and daemon session-name rollback after failed load.
 - `test_ipc_daemon` proves the real transport returns save `NotFound` and `Io`
@@ -366,17 +374,18 @@ Run the focused validation with:
 
 ```bash
 cmake --build build --target test_graph_document_errors test_host_adapter \
-  test_kernel_contracts test_scheduler_worker_budget test_compute_run \
-  test_ipc_protocol test_ipc_daemon -j
+  test_kernel_contracts test_resource_ledger test_resource_admission \
+  test_compute_run test_ipc_protocol test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.*Reload*'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='GraphIoContract.Save*'
-./build/tests/test_scheduler_worker_budget \
-  --gtest_filter=EmbeddedHostSchedulerBudget.FreshInvalidYamlLoadRetainsFirstFixedPoolWithoutPerGraphOwner
+./build/tests/test_resource_ledger
+./build/tests/test_resource_admission \
+  --gtest_filter='EmbeddedHostResourceAdmission.*'
 ./build/tests/test_compute_run \
-  --gtest_filter='ExecutionService.OverlapsIndependentConcurrentRunIntervals:ExecutionService.DistinguishesRealtimeHpAndRtChildEpochsOnOneHost'
+  --gtest_filter='ExecutionService.*'
 ./build/tests/test_ipc_protocol \
   --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
 ./build/tests/test_ipc_daemon \

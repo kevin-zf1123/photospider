@@ -41,11 +41,12 @@ Before constructing that runtime, Kernel plans both configured intent
 schedulers. Worker requests are valid from zero through eight; zero resolves to
 `min(max(1, hardware_concurrency()), 8)` and explicit positive values remain
 exact. Kernel then atomically reserves the combined HP+RT charge from the
-process-wide 32-slot `SchedulerWorkerBudget`. Built-in `serial_debug` charges
-zero, built-in CPU and ABI v2 plugin schedulers charge the resolved grant, and
-built-in GPU/heterogeneous schedulers also charge their configured potential
-GPU worker. If planning or combined admission fails, neither scheduler is
-constructed and no session is published.
+Host-composed `ExecutionService` ledger. Built-in CPU is an ownerless route and
+charges zero at Graph load; its Runs are admitted later with complete resource
+vectors. Built-in `serial_debug` also charges zero, ABI v2 plugin schedulers
+charge the resolved CPU grant, and built-in GPU/heterogeneous schedulers also
+charge their configured potential GPU worker. If planning or combined legacy
+admission fails, neither scheduler is constructed and no session is published.
 
 Graph document loading is a prepare-then-publish transaction:
 

@@ -19,7 +19,7 @@ namespace ps {
 namespace {
 
 /**
- * @brief Transparently owns one concrete scheduler and its process admission.
+ * @brief Transparently owns one concrete scheduler and its ledger admission.
  *
  * Every lifecycle and task-runtime call delegates directly to `scheduler_`.
  * The destructor explicitly destroys that inner owner first; only after the
@@ -37,7 +37,7 @@ class ReservationOwnedScheduler final : public IScheduler {
    * @param scheduler Concrete scheduler delegated until destruction.
    * @throws Nothing; both owners move without allocation.
    */
-  ReservationOwnedScheduler(SchedulerWorkerBudget::Reservation reservation,
+  ReservationOwnedScheduler(ResourceLedger::Reservation reservation,
                             std::unique_ptr<IScheduler> scheduler) noexcept
       : reservation_(std::move(reservation)), scheduler_(std::move(scheduler)) {
     assert(reservation_.active());
@@ -145,7 +145,7 @@ class ReservationOwnedScheduler final : public IScheduler {
    * @note Declared first so reverse member destruction reinforces the explicit
    * scheduler reset in the destructor body.
    */
-  SchedulerWorkerBudget::Reservation reservation_;
+  ResourceLedger::Reservation reservation_;
 
   /** @brief Concrete scheduler destroyed before `reservation_` releases. */
   std::unique_ptr<IScheduler> scheduler_;
@@ -156,7 +156,7 @@ class ReservationOwnedScheduler final : public IScheduler {
 /** @copydoc make_reservation_owned_scheduler */
 std::unique_ptr<IScheduler> make_reservation_owned_scheduler(
     std::unique_ptr<IScheduler> scheduler,
-    SchedulerWorkerBudget::Reservation reservation) {
+    ResourceLedger::Reservation reservation) {
   if (scheduler == nullptr) {
     return nullptr;
   }

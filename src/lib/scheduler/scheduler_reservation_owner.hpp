@@ -3,7 +3,7 @@
 #include <memory>
 
 #include "photospider/scheduler/scheduler.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
+#include "runtime/resource_ledger.hpp"
 
 /**
  * @file scheduler_reservation_owner.hpp
@@ -33,6 +33,6 @@ namespace ps {
  */
 std::unique_ptr<IScheduler> make_reservation_owned_scheduler(
     std::unique_ptr<IScheduler> scheduler,
-    SchedulerWorkerBudget::Reservation reservation);
+    ResourceLedger::Reservation reservation);
 
 }  // namespace ps

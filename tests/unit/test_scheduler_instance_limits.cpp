@@ -9,11 +9,11 @@
 #include <utility>
 
 #include "photospider/scheduler/scheduler.hpp"
+#include "runtime/resource_ledger.hpp"
 #include "scheduler/cpu_work_stealing_scheduler.hpp"
 #include "scheduler/gpu_pipeline_scheduler.hpp"
 #include "scheduler/scheduler_exception_test_hooks.hpp"
 #include "scheduler/scheduler_factory.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
 
 namespace ps::testing {
 namespace {
@@ -390,8 +390,9 @@ TEST(SchedulerInstanceLimits,
   const auto plan = SchedulerFactory::plan_for_hardware("gpu_pipeline", 1U, 1U);
   ASSERT_TRUE(plan.has_value());
   ASSERT_EQ(plan->reservation_slots(), 2U);
-  SchedulerWorkerBudget budget(2U);
-  auto reservation = budget.try_reserve(plan->reservation_slots());
+  ResourceLedger ledger(ResourceVector{2U});
+  auto reservation =
+      ledger.try_reserve(ResourceVector{plan->reservation_slots()});
   ASSERT_TRUE(reservation.has_value());
   auto scheduler = SchedulerFactory::create(*plan, std::move(*reservation));
   ASSERT_NE(scheduler, nullptr);
@@ -411,15 +412,15 @@ TEST(SchedulerInstanceLimits,
     EXPECT_THROW(scheduler->attach(host), std::system_error);
   }
   EXPECT_FALSE(scheduler->is_running());
-  EXPECT_FALSE(budget.try_reserve(1U).has_value());
-  EXPECT_FALSE(budget.try_reserve(2U).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{2U}).has_value());
 
   scheduler->start();
   EXPECT_TRUE(scheduler->is_running());
   scheduler->shutdown();
   scheduler->detach();
   scheduler.reset();
-  EXPECT_TRUE(budget.try_reserve(2U).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{2U}).has_value());
 }
 
 /**
@@ -435,8 +436,9 @@ TEST(SchedulerInstanceLimits,
       SchedulerFactory::plan_for_hardware("cpu_work_stealing", 2U, 2U);
   ASSERT_TRUE(plan.has_value());
   ASSERT_EQ(plan->reservation_slots(), 2U);
-  SchedulerWorkerBudget budget(2U);
-  auto reservation = budget.try_reserve(plan->reservation_slots());
+  ResourceLedger ledger(ResourceVector{2U});
+  auto reservation =
+      ledger.try_reserve(ResourceVector{plan->reservation_slots()});
   ASSERT_TRUE(reservation.has_value());
   auto scheduler = SchedulerFactory::create(*plan, std::move(*reservation));
   ASSERT_NE(scheduler, nullptr);
@@ -452,15 +454,15 @@ TEST(SchedulerInstanceLimits,
     EXPECT_THROW(scheduler->start(), std::system_error);
   }
   EXPECT_FALSE(scheduler->is_running());
-  EXPECT_FALSE(budget.try_reserve(1U).has_value());
-  EXPECT_FALSE(budget.try_reserve(2U).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{2U}).has_value());
 
   scheduler->start();
   EXPECT_TRUE(scheduler->is_running());
   scheduler->shutdown();
   scheduler->detach();
   scheduler.reset();
-  EXPECT_TRUE(budget.try_reserve(2U).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{2U}).has_value());
 }
 
 }  // namespace

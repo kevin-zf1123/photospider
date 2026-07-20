@@ -307,12 +307,12 @@ direct `ExecutionService` pool. Later zero/equal requests are idempotent; a
 conflicting positive request is rejected. Graph load, replacement, Run
 execution, and dirty phases never resize that pool.
 
-Issue #69 routes built-in CPU HP and RT work, including dirty and preflight
-phases, to the service. Independent Runs from multiple Graphs share its fixed
-workers. The service registry isolates completion count, first exception,
-in-flight drainage, trace Host, and settlement per Run. High and normal FIFOs
-provide the current priority hint, but not final fairness, bounded admission,
-or policy authority. Built-in CPU `GraphRuntime` bindings own no scheduler.
+Issue #70 routes built-in CPU HP and RT work, including dirty and preflight
+phases, through the service's fixed workers, atomic resource admission, and
+entry/byte-bounded ready store. The service isolates completion count, first
+exception, in-flight drainage, trace Host, and settlement per Run. High and
+normal FIFOs provide a priority hint, but not final fairness or policy
+authority. Built-in CPU `GraphRuntime` bindings own no scheduler.
 
 A registered plugin is charged the full resolved grant and may own fewer
 workers but not more. `gpu_pipeline` and `heterogeneous` are charged the
@@ -321,18 +321,18 @@ the device is unavailable at admission time. Their absolute current instance
 charge is therefore nine. `serial_debug` is the sole zero-slot exception and
 executes synchronously on the calling thread.
 
-The current containment layer uses one process-lifetime
-`SchedulerWorkerBudget` with a fixed 32-slot ceiling shared by every embedded
-`Host` and `Kernel`. Each fixed service pool holds one reservation for its
-complete lifetime. Graph load atomically reserves only the combined charge of
-legacy HP/RT bindings before constructing either owner. Each returned
-reservation moves into its `ReservationOwnedScheduler`. `GraphRuntime` remains
-responsible for legacy scheduler shutdown and detach; the reservation owner
-guarantees only that concrete scheduler destruction precedes slot release.
-Failed attach/start/YAML publication, successful graph close, and Host
-destruction therefore return legacy slots exactly once. A failed close instead
-retains the runtime and legacy reservations for retry. Closing all Graphs does
-not release a configured service pool; Kernel/service destruction does.
+Each embedded Host composition gives its `ExecutionService` one immutable
+five-dimensional `ResourceLedger` limit. Fixed service threads are
+infrastructure; active Runs reserve CPU execution rights plus declared
+retained-memory, scratch, ready-entry, and ready-byte capacity. Graph load
+atomically reserves the combined conservative CPU-slot charge of legacy HP/RT
+bindings before constructing either owner. Each returned reservation moves
+into its `ReservationOwnedScheduler`. `GraphRuntime` remains responsible for
+legacy scheduler shutdown and detach; the reservation owner guarantees only
+that concrete scheduler destruction precedes exact release. Failed
+attach/start/YAML publication, successful graph close, and Host destruction
+therefore return legacy slots once. A failed close retains the runtime and
+reservation for retry.
 
 Legacy scheduler replacement is a strong transaction: it plans and reserves
 the candidate while the old binding and reservation remain live, then
@@ -345,10 +345,11 @@ and unknown types remain `InvalidParameter`. After legacy publication,
 old-owner shutdown and detach remain a best-effort sweep; destruction returns
 the displaced reservation exactly once.
 
-This 32-slot budget bounds fixed service workers and workers represented by
-legacy built-in/plugin planning. It does not bound graph-state executors,
-daemon threads, frontend helpers, operation-internal threads, or all
-operating-system threads in the process. `GraphStateExecutor` has a separate
+The default ledger's 32 CPU slots bound simultaneous admitted service
+callbacks and workers represented by legacy built-in/plugin planning. Other
+dimensions default to 1 GiB retained memory, 512 MiB scratch, 65,536 ready
+entries, and 256 MiB ready bytes. These are Host-composition limits, not
+whole-process thread or allocation claims. `GraphStateExecutor` has a separate
 structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
 
 ## Plugin Discovery vs Graph Selection
@@ -562,25 +563,26 @@ whole-process operating-system thread snapshot.
   accepted scheduler object remains part of a provisional C++ ABI.
 - Scheduler attachment is limited to `SchedulerHostContext`; the context does
   not expose graph/runtime ownership or native backend handles.
-- The shared 32-slot transitional budget counts each fixed CPU service pool
-  once and legacy per-instance grants; it is not production Run admission and
-  does not claim a whole-process OS-thread limit.
+- The Host ledger accounts admitted Run vectors and legacy per-instance CPU
+  grants; fixed service threads remain infrastructure, and the limits do not
+  claim a whole-process OS-thread or allocation bound.
 - The current `IScheduler` interface still combines policy and physical worker
-  ownership for legacy routes. The issue #69 service owns a direct fixed
-  multi-Run CPU pool behind a private ready-submission boundary; it is not yet
-  the final ledger, admission, fairness, or policy architecture.
+  ownership for legacy routes. The issue #70 service owns a direct fixed
+  multi-Run CPU pool, atomic ledger admission, and bounded ready storage behind
+  a private ready-submission boundary; fairness/policy remains future work.
 
 The ready-task-only boundary lets scheduler ordering, worker lifecycle, and
 failure publication be tested without graph topology or cache ownership. The
-process budget contains current fixed-service and legacy physical ownership
-without reinterpreting a reservation as one currently running thread.
+ledger preserves exact admitted authority without reinterpreting a
+reservation as one currently running thread.
 [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-execution-resources.md)
 records the high-level replacement direction;
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 fixes its detailed Run, ready-task, completion, resource, and lifecycle
-ownership; the bounded issue #69 fixed multi-Graph HP/RT service, ownerless CPU
-bindings, child Runs, and owned dirty/preflight submission slice is current.
+ownership; issue #70's fixed multi-Graph HP/RT service, ownerless CPU bindings,
+child Runs, owned dirty/preflight submission, atomic resource vectors, and
+bounded ready store are current.
 The exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 summarizes the accepted target without changing this current contract.
@@ -593,17 +595,19 @@ summarizes the accepted target without changing this current contract.
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/compute/compute_run.*`
 - `src/lib/compute/execution_service.*`
+- `src/lib/runtime/resource_ledger.*`
 - `src/lib/scheduler/cpu_work_stealing_scheduler.*`
 - `src/lib/scheduler/gpu_pipeline_scheduler.*`
 - `src/lib/scheduler/scheduler_factory.*`
-- `src/lib/scheduler/scheduler_worker_budget.*`
+- `src/lib/scheduler/scheduler_worker_limits.*`
 - `src/lib/scheduler/scheduler_reservation_owner.*`
 - `src/lib/scheduler/scheduler_plugin_loader.*`
 - `tests/integration/test_scheduler.cpp`
 - `tests/integration/test_gpu_pipeline_scheduler.cpp`
-- `tests/integration/test_scheduler_worker_budget.cpp`
+- `tests/integration/test_resource_admission.cpp`
 - `tests/integration/test_scheduler_plugin_loader.cpp`
 - `tests/unit/test_scheduler_factory_plan.cpp`
 - `tests/unit/test_scheduler_reservation_owner.cpp`
 - `tests/unit/test_scheduler_exception_publication.cpp`
+- `tests/unit/test_resource_ledger.cpp`
 - `tests/unit/test_compute_run.cpp`

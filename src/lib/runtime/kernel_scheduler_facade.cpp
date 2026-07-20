@@ -12,7 +12,6 @@
 #include "photospider/core/graph_error.hpp"
 #include "runtime/kernel.hpp"
 #include "scheduler/scheduler_factory.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
 
 namespace ps {
 namespace {
@@ -21,8 +20,8 @@ namespace {
  * @brief Internal result of one serialized scheduler replacement attempt.
  *
  * @throws Nothing for value construction and comparison.
- * @note The outcome distinguishes legacy-owner or first process-service pool
- * budget exhaustion from handled rejection. Candidate/plugin GraphError and
+ * @note The outcome distinguishes legacy-owner resource exhaustion from
+ * handled rejection. Candidate/plugin GraphError and
  * ordinary lifecycle failures remain folded into `Rejected` by the outer
  * Kernel boundary.
  */
@@ -32,7 +31,7 @@ enum class SchedulerReplacementOutcome {
   /** @brief Type, factory, or handled candidate lifecycle rejected the call. */
   Rejected,
   /** @brief A valid candidate plan could not reserve transient capacity. */
-  BudgetExhausted,
+  ResourceExhausted,
 };
 
 }  // namespace
@@ -65,7 +64,7 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
                       scheduler_config_.worker_count);
                 } catch (const GraphError& error) {
                   if (error.code() == GraphErrc::ComputeError) {
-                    return SchedulerReplacementOutcome::BudgetExhausted;
+                    return SchedulerReplacementOutcome::ResourceExhausted;
                   }
                   throw;
                 }
@@ -75,10 +74,11 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
                 return SchedulerReplacementOutcome::Success;
               }
 
-              auto reservation = SchedulerWorkerBudget::process().try_reserve(
-                  plan->reservation_slots());
+              auto reservation =
+                  execution_service_->try_reserve_legacy_scheduler_workers(
+                      plan->reservation_slots());
               if (!reservation.has_value()) {
-                return SchedulerReplacementOutcome::BudgetExhausted;
+                return SchedulerReplacementOutcome::ResourceExhausted;
               }
 
               auto scheduler =
@@ -97,10 +97,9 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
     return false;
   }
 
-  if (outcome == SchedulerReplacementOutcome::BudgetExhausted) {
-    throw GraphError(
-        GraphErrc::ComputeError,
-        "process scheduler worker budget cannot admit replacement");
+  if (outcome == SchedulerReplacementOutcome::ResourceExhausted) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Host resource ledger cannot admit scheduler replacement");
   }
   return outcome == SchedulerReplacementOutcome::Success;
 }

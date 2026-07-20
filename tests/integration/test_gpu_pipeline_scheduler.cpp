@@ -33,6 +33,7 @@
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
+#include "runtime/resource_ledger.hpp"
 #include "scheduler/cpu_work_stealing_scheduler.hpp"
 #include "scheduler/gpu_pipeline_scheduler.hpp"
 #include "scheduler/scheduler_factory.hpp"
@@ -429,14 +430,26 @@ class GpuPipelineSchedulerTest : public ::testing::Test {
 
 // 测试：调度器工厂可以创建 GPU Pipeline 调度器
 TEST_F(GpuPipelineSchedulerTest, FactoryCanCreateScheduler) {
-  auto scheduler = SchedulerFactory::create("gpu_pipeline");
+  const auto plan = SchedulerFactory::plan("gpu_pipeline");
+  ASSERT_TRUE(plan.has_value());
+  ResourceLedger ledger(ResourceVector{plan->reservation_slots()});
+  auto reservation =
+      ledger.try_reserve(ResourceVector{plan->reservation_slots()});
+  ASSERT_TRUE(reservation.has_value());
+  auto scheduler = SchedulerFactory::create(*plan, std::move(*reservation));
   ASSERT_NE(scheduler, nullptr);
   EXPECT_EQ(scheduler->name(), "GpuPipelineScheduler");
 }
 
 // 测试：调度器工厂支持 "heterogeneous" 别名
 TEST_F(GpuPipelineSchedulerTest, FactorySupportsHeterogeneousAlias) {
-  auto scheduler = SchedulerFactory::create("heterogeneous");
+  const auto plan = SchedulerFactory::plan("heterogeneous");
+  ASSERT_TRUE(plan.has_value());
+  ResourceLedger ledger(ResourceVector{plan->reservation_slots()});
+  auto reservation =
+      ledger.try_reserve(ResourceVector{plan->reservation_slots()});
+  ASSERT_TRUE(reservation.has_value());
+  auto scheduler = SchedulerFactory::create(*plan, std::move(*reservation));
   ASSERT_NE(scheduler, nullptr);
   EXPECT_EQ(scheduler->name(), "GpuPipelineScheduler");
 }

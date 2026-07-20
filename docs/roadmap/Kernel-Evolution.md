@@ -37,24 +37,29 @@ by [issue #42](https://github.com/kevin-zf1123/photospider/issues/42).
 
 ### Current containment baseline
 
-[Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) establishes
-the scheduler-worker budget and [Issue #44](https://github.com/kevin-zf1123/photospider/issues/44)
-establishes the bounded graph-state lane from which the execution-domain
-migration proceeds. They do not implement the target architecture: HP and RT
-schedulers still own per-graph worker threads, queues, epochs, and policy, while
-visible compute still retains the graph-state lane for its whole callback. The
-containment contract instead:
+[Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) established
+the initial scheduler-worker containment and
+[Issue #44](https://github.com/kevin-zf1123/photospider/issues/44) established
+the bounded graph-state lane. Issues #69 and #70 have since replaced the
+worker-only containment for built-in CPU execution with one Host-composed
+service, atomic resource vectors, and bounded ready storage. Visible compute
+still retains the graph-state lane for its whole callback, and legacy
+serial/GPU/plugin schedulers still own per-graph workers, queues, epochs, and
+policy. The current bounded contract:
 
 - accepts worker requests from zero through eight and resolves zero to
   `min(max(1, hardware_concurrency()), 8)` before construction;
 - treats the resolved one-through-eight ABI v2 plugin value as a trusted hard
   grant, rejects ABI v1, and provides no compatibility shim;
-- charges built-in serial as zero, built-in CPU and registered plugins as the
-  resolved grant, and built-in GPU/heterogeneous as that grant plus its
-  potential device worker;
-- atomically reserves combined HP+RT demand from one 32-slot process ledger
-  shared by every embedded Host, while replacement reserves transient
-  candidate headroom and preserves the old scheduler on failure; and
+- charges built-in serial and ownerless built-in CPU Graph bindings as zero,
+  registered plugins as the resolved CPU grant, and built-in
+  GPU/heterogeneous as that grant plus its potential device worker;
+- gives every embedded Host one ledger whose default CPU dimension is 32;
+  atomically admits legacy HP+RT CPU-slot demand and preserves old schedulers
+  when replacement cannot reserve candidate headroom;
+- admits each built-in CPU Run with a complete checked CPU,
+  retained-memory, scratch, ready-entry, and ready-byte vector, and sends
+  initial/dependent work through the same entry/byte-bounded store;
 - releases move-only reservations exactly once after concrete scheduler
   destruction, including load rollback, successful graph close, and Host
   destruction; failed close retains the runtime and reservations for retry;
@@ -68,19 +73,16 @@ containment contract instead:
   durable close generations let old waiters finish if a failed scheduler stop
   creates one replacement lane worker and reopens admission for retry.
 
-The 32 slots cover only accounted CPU worker owners. They count each Kernel's
-fixed `ExecutionService` pool once and any still-present legacy Graph-owned
-scheduler workers. They do not count graph-state executors, which have their
-separate one-worker-per-Graph bound; nor do they count operation-internal
-threads, daemon/frontend workers, or all OS threads. They provide shared
-built-in CPU execution but neither production admission nor fairness. The
-current issue #69 slice directly executes built-in HP and RT work from multiple
-Graphs in that one fixed pool, routes those CPU bindings without a per-Graph
-scheduler owner, and retains the transitional ledger only to prevent the
-service pool plus legacy scheduler owners from oversubscribing the process.
-The production admission, bounded ready-store, and `ResourceLedger` slice
-tracked by [#70](https://github.com/kevin-zf1123/photospider/issues/70)
-replaces this containment rather than treating it as the final resource model.
+The default 32 CPU slots cover admitted Run callbacks and accounted legacy
+scheduler-worker owners. Fixed `ExecutionService` threads are infrastructure.
+The ledger does not count graph-state executors, which have their separate
+one-worker-per-Graph bound; nor does it claim operation-internal threads,
+daemon/frontend workers, all OS threads, or undeclared device/I/O/plugin
+resources. Issue #70 replaces the former worker-only counter completely:
+`ExecutionService` now owns the sole Host-authoritative ledger, admits each
+built-in CPU Run with one checked full-vector reservation before publication,
+and requires initial and dependent work to hold entry/byte grants while stored
+in its bounded ready queue. Fairness and policy selection remain future work.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 is authoritative for the detailed target Run lifetime, owner boundaries,
 resource mint, close/shutdown scope, and delivery dependencies; it does not make
@@ -161,7 +163,7 @@ detail.
 
 ### `ComputeRun`
 
-The current issue #69 slice implements exactly one private Run around every
+The current issue #70 baseline implements exactly one private Run around every
 non-realtime HP service call. A realtime call instead creates separate HP
 `Full` and RT `Interactive` child Runs; it does not yet create the target
 `RunGroup`. Each Run captures a process-lifetime opaque id, session identity,
@@ -173,9 +175,12 @@ leases, owns its runner, and routes task failure only through matching
 `(RunId, RunLocalTaskId)`. Built-in HP and RT CPU ready work, including dirty
 and preflight work, now crosses the injected multi-Run `ExecutionService`
 boundary as move-only submissions with heap-owned callback context. The
-captured topology generation is not the target authoritative `GraphRevision`
-or commit predicate. `RunGroup`, production resources, revision-safe commit,
-cancellation, and supersession remain subsequent slices.
+service obtains one checked full-vector reservation for each Run before
+publication. Initial and dependent ready work must hold bounded-store grants,
+which workers exchange for execution grants. The captured topology generation
+is not the target authoritative `GraphRevision` or commit predicate.
+`RunGroup`, policy selection, revision-safe commit, cancellation, and
+supersession remain subsequent slices.
 
 The remainder of this section describes the complete accepted target.
 
@@ -293,18 +298,20 @@ it before participating Kernels/Hosts and retains it until they stop Run
 admission and drain their Runs. Graph close does not stop the service; only
 process execution-domain shutdown does.
 
-The current issue #69 vertical slice realizes that shared CPU boundary:
-`EmbeddedHostState` creates one fixed-pool CPU service before Kernel and Kernel
-injects it into request-local `ComputeService` instances. Built-in CPU full HP,
-full RT, standalone dirty HP/RT, and preflight dispatch transfer immutable,
-lease-backed `ReadyTaskSubmission` values with owned callback context. The
-service executes multiple Runs concurrently and keeps each Run's completion,
-first failure, trace routing, and Host context isolated. Built-in CPU bindings
-are ownerless, while legacy scheduler routes remain available for serial, GPU,
-and plugin execution. `SchedulerWorkerBudget` charges the service pool once
-alongside any legacy scheduler owners. The service does not yet own production
-admission, bounded ready storage, policy, revision validation, cancellation, or
-a lifecycle registry.
+The current issue #70 baseline realizes the shared CPU/resource boundary:
+`EmbeddedHostState` creates one fixed-pool CPU service with explicit limits
+before Kernel, and Kernel injects it into request-local `ComputeService`
+instances. Built-in CPU full HP, full RT, standalone dirty HP/RT, and preflight
+dispatch transfer immutable, lease-backed `ReadyTaskSubmission` values with
+owned callback context. The service executes multiple Runs concurrently and
+keeps each Run's completion, first failure, trace routing, and Host context
+isolated. Built-in CPU bindings are ownerless, while legacy scheduler routes
+remain available for serial, GPU, and plugin execution. The service exclusively
+owns one Host-authoritative ledger, atomically admits each complete Run vector
+before publication, requires initial and dependent ready work to enter the same
+bounded store with child grants, and releases every reservation/grant exactly
+once. Policy selection, revision validation, cancellation, and the lifecycle
+registry remain future work.
 
 The final service owns physical CPU workers and later resource executors,
 bounded ready storage, Run/resource admission, policy-result validation,
@@ -341,13 +348,15 @@ move-only, non-forgeable reservations and grants. A policy or plugin may request
 or suggest resources but cannot construct, duplicate, enlarge, or directly
 release a token.
 
-The ledger validates transactional resource vectors and owns CPU, ready-store
-entry/byte, retained/in-flight memory, scratch, device queue/memory/in-flight,
-compute-I/O operation/byte, and plugin-process/invocation/IPC budgets. Every Run
-reservation and child grant releases exactly once after success, error,
-cancellation, rollback, close, shutdown, or worker failure. Capacity exhaustion
-and checked overflow fail without partial reservation, overcommit, or silent
-clamping.
+The current ledger validates transactional vectors for CPU slots, ready-store
+entries and bytes, retained/in-flight Host memory, and scratch memory. Device
+queues/memory/in-flight work, compute-I/O operations/bytes, and
+plugin-process/invocation/IPC remain future dimensions and are not represented
+by fake zero-valued authority. Current success, failure, rejection, rollback,
+replacement, and worker-exception paths release every reservation and grant
+exactly once. Later cancellation, close, and shutdown slices must preserve that
+contract. Capacity exhaustion and checked overflow fail without partial
+reservation, overcommit, or silent clamping.
 
 `SchedulerPolicy` is an internal strategy seam, not a physical executor or
 resource authority. It may rank immutable ready work or suggest a bounded
@@ -367,9 +376,10 @@ is stabilized:
 The current worker-owning scheduler ABI is transitional. The future policy ABI
 is a breaking replacement, not a permanent forwarding layer.
 
-`SchedulerWorkerBudget` is also transitional. It currently counts the fixed
-service pool once alongside legacy Graph-owned scheduler workers. It is removed
-rather than wrapped, renamed, or aliased into the target `ResourceLedger`.
+The former worker-only budget has been removed completely rather than wrapped,
+renamed, or aliased. Worker-request resolution is now pure planning; all CPU
+admission authority for Runs and legacy scheduler owners comes from the one
+service-owned ledger.
 
 ### Revision, cancellation, and visible commit
 
@@ -423,8 +433,8 @@ lease; late completion performs cleanup only.
 | [#66](https://github.com/kevin-zf1123/photospider/issues/66) | Current HP `ComputeRun` descriptor, state, storage, and one terminal outcome | #63, #65 |
 | [#67](https://github.com/kevin-zf1123/photospider/issues/67) | Current stable Run leases and `(RunId, RunLocalTaskId)` full-HP completion isolation | #66 |
 | [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Injected CPU-only service foundation, one Run, ready-only input | #67 |
-| [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Current shared multi-Graph/HP/RT CPU domain and no per-Graph CPU workers | #68 |
-| [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Production admission, bounded ready store, and ledger | #69 |
+| [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain and no per-Graph CPU workers | #68 |
+| [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Current production admission, bounded ready store, and ledger | #69 |
 | [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Interactive and throughput built-in policies | #70 |
 | [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Revision capture and staged commit predicate | #67 |
 | [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Queued/running/commit cancellation | #70, #72 |
@@ -612,6 +622,7 @@ behavior and add durable tests before broader migration. Interface renames and
 ownership transfers are completed without permanent compatibility wrappers,
 in accordance with repository migration discipline. In particular, the
 process execution domain must preserve the current bounded-admission error and
-rollback guarantees while replacing per-graph physical worker ownership; it
-must not reinterpret the transitional 32-slot counter as the target resource
-model.
+rollback guarantees while replacing per-graph physical worker ownership.
+Issue #70 satisfied that rule by deleting the former counter and introducing a
+checked multi-dimensional ledger; subsequent slices must extend that ledger
+without restoring a second resource authority.

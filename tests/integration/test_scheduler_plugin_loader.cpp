@@ -24,9 +24,9 @@
 #include "photospider/scheduler/scheduler_plugin_api.hpp"
 #include "photospider/scheduler/scheduler_task_runtime.hpp"
 #include "runtime/graph_runtime.hpp"
+#include "runtime/resource_ledger.hpp"
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1034,7 +1034,7 @@ TEST_F(SchedulerPluginLoaderTest,
                 kSchedulerWorkerRequestMax},
       GrantCase{1U, kSchedulerWorkerRequestMax, 1U},
       GrantCase{kSchedulerWorkerRequestMax, 1U, kSchedulerWorkerRequestMax}};
-  SchedulerWorkerBudget budget(kSchedulerWorkerRequestMax);
+  ResourceLedger ledger(ResourceVector{kSchedulerWorkerRequestMax});
 
   for (const GrantCase& grant_case : cases) {
     reset_counts();
@@ -1045,8 +1045,8 @@ TEST_F(SchedulerPluginLoaderTest,
     ASSERT_TRUE(plan.has_value());
     EXPECT_EQ(plan->worker_grant(), grant_case.expected);
     EXPECT_EQ(plan->reservation_slots(), grant_case.expected);
-    std::optional<SchedulerWorkerBudget::Reservation> reservation =
-        budget.try_reserve(plan->reservation_slots());
+    std::optional<ResourceLedger::Reservation> reservation =
+        ledger.try_reserve(ResourceVector{plan->reservation_slots()});
     ASSERT_TRUE(reservation.has_value());
     std::unique_ptr<IScheduler> scheduler =
         SchedulerFactory::create(*plan, std::move(*reservation));
@@ -1076,7 +1076,7 @@ TEST_F(SchedulerPluginLoaderTest,
  * @return Nothing; GoogleTest records capacity, grant, or lifecycle mismatch.
  * @throws std::bad_alloc or std::system_error if fixture loading, planning,
  *         reservation, construction, or synchronization fails.
- * @note An isolated eight-slot budget avoids global process-state coupling.
+ * @note An isolated eight-slot ledger avoids product composition coupling.
  *       Capacity must remain unavailable while the plugin owner is alive and
  *       become exactly reusable only after its instance destroy export has
  *       completed; loader and probe handles may keep the DSO mapped.
@@ -1111,9 +1111,9 @@ TEST_F(SchedulerPluginLoaderTest,
   const std::optional<SchedulerPlan> plan = SchedulerFactory::plan_for_hardware(
       kDestroyCountSchedulerType, kSchedulerWorkerRequestMax, 1U);
   ASSERT_TRUE(plan.has_value());
-  SchedulerWorkerBudget budget(kSchedulerWorkerRequestMax);
-  std::optional<SchedulerWorkerBudget::Reservation> reservation =
-      budget.try_reserve(plan->reservation_slots());
+  ResourceLedger ledger(ResourceVector{kSchedulerWorkerRequestMax});
+  std::optional<ResourceLedger::Reservation> reservation =
+      ledger.try_reserve(ResourceVector{plan->reservation_slots()});
   ASSERT_TRUE(reservation.has_value());
   std::unique_ptr<IScheduler> scheduler =
       SchedulerFactory::create(*plan, std::move(*reservation));
@@ -1122,17 +1122,18 @@ TEST_F(SchedulerPluginLoaderTest,
   EXPECT_EQ(last_worker_grant(), kSchedulerWorkerRequestMax);
   EXPECT_EQ(active_count(), 1);
   EXPECT_EQ(destroy_count(), 0);
-  EXPECT_FALSE(budget.try_reserve(1U).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
 
   scheduler.reset();
   EXPECT_EQ(active_count(), 0);
   EXPECT_EQ(destroy_count(), 1);
-  std::optional<SchedulerWorkerBudget::Reservation> recovered =
-      budget.try_reserve(kSchedulerWorkerRequestMax);
+  std::optional<ResourceLedger::Reservation> recovered =
+      ledger.try_reserve(ResourceVector{kSchedulerWorkerRequestMax});
   ASSERT_TRUE(recovered.has_value());
-  EXPECT_FALSE(budget.try_reserve(1U).has_value());
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
   recovered.reset();
-  EXPECT_TRUE(budget.try_reserve(kSchedulerWorkerRequestMax).has_value());
+  EXPECT_TRUE(ledger.try_reserve(ResourceVector{kSchedulerWorkerRequestMax})
+                  .has_value());
 }
 
 /**
@@ -1445,8 +1446,13 @@ TEST_F(SchedulerPluginLoaderTest, FactoryIntegration) {
   // 通过 SchedulerFactory 创建插件调度器
   auto types = loader.get_registered_types();
   for (const auto& type : types) {
-    // Factory 应该能够创建插件类型
-    auto scheduler = SchedulerFactory::create(type, 2);
+    const std::optional<SchedulerPlan> plan = SchedulerFactory::plan(type, 2U);
+    ASSERT_TRUE(plan.has_value()) << type;
+    ResourceLedger ledger(ResourceVector{plan->reservation_slots()});
+    auto reservation =
+        ledger.try_reserve(ResourceVector{plan->reservation_slots()});
+    ASSERT_TRUE(reservation.has_value()) << type;
+    auto scheduler = SchedulerFactory::create(*plan, std::move(*reservation));
     EXPECT_NE(scheduler, nullptr) << "Factory failed to create: " << type;
   }
 }

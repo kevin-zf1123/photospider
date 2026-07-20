@@ -10,12 +10,12 @@
 #include <vector>
 
 #include "photospider/scheduler/scheduler.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
+#include "runtime/resource_ledger.hpp"
 
 namespace ps {
 
 /**
- * @brief Immutable scheduler construction and process-admission plan.
+ * @brief Immutable scheduler construction and Host-ledger admission plan.
  *
  * @throws std::bad_alloc If copied scheduler type storage cannot allocate.
  * @note Only `SchedulerFactory` can construct a plan, so callers cannot forge
@@ -39,7 +39,7 @@ class SchedulerPlan final {
   unsigned int worker_grant() const noexcept;
 
   /**
-   * @brief Returns the conservative process slots charged before construction.
+   * @brief Returns the conservative CPU slots charged before construction.
    * @return Zero for built-in serial, the grant for CPU/plugin, or grant plus
    * one potential GPU worker for GPU/heterogeneous plans.
    * @throws Nothing.
@@ -50,9 +50,9 @@ class SchedulerPlan final {
    * @brief Reports whether planning froze the built-in CPU branch.
    * @return True only for built-in CPU aliases resolved without plugin lookup.
    * @throws Nothing.
-   * @note Kernel uses this private planning fact to publish issue #69 ownerless
-   * process-service routes for both intents. Scheduler display names are not a
-   * route authority.
+   * @note Kernel uses this private planning fact to publish ownerless
+   * service routes for both intents. Scheduler display names are not route
+   * authority.
    */
   bool is_builtin_cpu() const noexcept;
 
@@ -76,7 +76,7 @@ class SchedulerPlan final {
    * @param type_name Exact type/alias used for later construction.
    * @param kind Frozen built-in or registered construction branch.
    * @param worker_grant Resolved constructor grant.
-   * @param reservation_slots Conservative process admission charge.
+   * @param reservation_slots Conservative Host-ledger CPU charge.
    * @throws Nothing after argument construction; strings move into ownership.
    */
   SchedulerPlan(std::string type_name, Kind kind, unsigned int worker_grant,
@@ -88,7 +88,7 @@ class SchedulerPlan final {
   Kind kind_ = Kind::Serial;
   /** @brief Nonzero resolved grant except for built-in serial. */
   unsigned int worker_grant_ = 0U;
-  /** @brief Exact process capacity required before construction. */
+  /** @brief Exact Host-ledger CPU capacity required before construction. */
   unsigned int reservation_slots_ = 0U;
 };
 
@@ -98,8 +98,8 @@ class SchedulerPlan final {
  * @throws Scheduler construction and plugin-boundary failures as documented by
  * the selected operation.
  * @note Planning is side-effect free: it creates no scheduler, worker, plugin
- * instance, or reservation. Reserved construction transfers process capacity
- * into the returned scheduler lifetime owner.
+ * instance, or reservation. Reserved construction transfers Host-ledger CPU
+ * capacity into the returned scheduler lifetime owner.
  */
 class SchedulerFactory final {
  public:
@@ -154,26 +154,7 @@ class SchedulerFactory final {
    * releases capacity only after concrete scheduler destruction.
    */
   static std::unique_ptr<IScheduler> create(
-      const SchedulerPlan& plan,
-      SchedulerWorkerBudget::Reservation reservation);
-
-  /**
-   * @brief Plans and constructs one scheduler for legacy internal call sites.
-   * @param type_name Built-in alias or registered scheduler type.
-   * @param num_workers Zero for bounded automatic resolution or exact `[1,8]`.
-   * @return Owning scheduler, or nullptr for an unknown/unavailable type.
-   * @throws std::invalid_argument If a known type receives more than eight.
-   * @throws std::overflow_error If planning slot arithmetic overflows.
-   * @throws std::system_error If registered scheduler lookup locking fails.
-   * @throws std::bad_alloc If planning or construction allocation fails.
-   * @throws GraphError With `GraphErrc::ComputeError` if the process budget
-   * cannot admit the planned worker slots.
-   * @throws GraphError After normalizing a plugin creation failure.
-   * @note This convenience path performs one single-plan process reservation.
-   * Graph load migrates separately to atomic HP+RT pair admission.
-   */
-  static std::unique_ptr<IScheduler> create(const std::string& type_name,
-                                            unsigned int num_workers = 0U);
+      const SchedulerPlan& plan, ResourceLedger::Reservation reservation);
 
   /**
    * @brief Returns hard-coded built-in scheduler types and aliases.

@@ -6,9 +6,11 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
+#include "runtime/resource_ledger.hpp"
 #include "scheduler/cpu_work_stealing_scheduler.hpp"
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
@@ -20,21 +22,31 @@
 // =============================================================================
 
 TEST(M34_SchedulerFactory, CreateCpuWorkStealing) {
-  auto scheduler = ps::SchedulerFactory::create("cpu_work_stealing");
+  const auto plan = ps::SchedulerFactory::plan("cpu_work_stealing");
+  ASSERT_TRUE(plan.has_value());
+  ps::ResourceLedger ledger(ps::ResourceVector{plan->reservation_slots()});
+  auto reservation =
+      ledger.try_reserve(ps::ResourceVector{plan->reservation_slots()});
+  ASSERT_TRUE(reservation.has_value());
+  auto scheduler = ps::SchedulerFactory::create(*plan, std::move(*reservation));
   ASSERT_NE(scheduler, nullptr);
   // Note: CpuWorkStealingScheduler::name() returns "CpuWorkStealingScheduler"
   EXPECT_EQ(scheduler->name(), "CpuWorkStealingScheduler");
 }
 
 TEST(M34_SchedulerFactory, CreateSerialDebug) {
-  auto scheduler = ps::SchedulerFactory::create("serial_debug");
+  const auto plan = ps::SchedulerFactory::plan("serial_debug");
+  ASSERT_TRUE(plan.has_value());
+  ps::ResourceLedger ledger(ps::ResourceVector{});
+  auto reservation = ledger.try_reserve(ps::ResourceVector{});
+  ASSERT_TRUE(reservation.has_value());
+  auto scheduler = ps::SchedulerFactory::create(*plan, std::move(*reservation));
   ASSERT_NE(scheduler, nullptr);
   EXPECT_EQ(scheduler->name(), "serial_debug");
 }
 
-TEST(M34_SchedulerFactory, CreateUnsupportedReturnsNull) {
-  auto scheduler = ps::SchedulerFactory::create("unknown_type");
-  EXPECT_EQ(scheduler, nullptr);
+TEST(M34_SchedulerFactory, PlanUnsupportedReturnsNullopt) {
+  EXPECT_FALSE(ps::SchedulerFactory::plan("unknown_type").has_value());
 }
 
 TEST(M34_SchedulerFactory, SupportedTypes) {

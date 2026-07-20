@@ -17,7 +17,7 @@
 #include "scheduler/gpu_pipeline_scheduler.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"
 #include "scheduler/scheduler_reservation_owner.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
+#include "scheduler/scheduler_worker_limits.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
 
 namespace ps {
@@ -99,8 +99,10 @@ std::optional<SchedulerPlan> SchedulerFactory::plan_for_hardware(
 
 /** @copydoc SchedulerFactory::create */
 std::unique_ptr<IScheduler> SchedulerFactory::create(
-    const SchedulerPlan& plan, SchedulerWorkerBudget::Reservation reservation) {
-  if (!reservation.active() || reservation.slots() != plan.reservation_slots_) {
+    const SchedulerPlan& plan, ResourceLedger::Reservation reservation) {
+  const ResourceVector expected{
+      static_cast<std::uint64_t>(plan.reservation_slots_)};
+  if (!reservation.active() || reservation.resources() != expected) {
     throw std::invalid_argument(
         "scheduler construction requires an exact active reservation");
   }
@@ -129,22 +131,6 @@ std::unique_ptr<IScheduler> SchedulerFactory::create(
   }
   return make_reservation_owned_scheduler(std::move(scheduler),
                                           std::move(reservation));
-}
-
-/** @copydoc SchedulerFactory::create */
-std::unique_ptr<IScheduler> SchedulerFactory::create(
-    const std::string& type_name, unsigned int num_workers) {
-  std::optional<SchedulerPlan> scheduler_plan = plan(type_name, num_workers);
-  if (!scheduler_plan.has_value()) {
-    return nullptr;
-  }
-  auto reservation = SchedulerWorkerBudget::process().try_reserve(
-      scheduler_plan->reservation_slots());
-  if (!reservation.has_value()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "process scheduler worker budget is exhausted");
-  }
-  return create(*scheduler_plan, std::move(*reservation));
 }
 
 /** @copydoc SchedulerFactory::supported_types */

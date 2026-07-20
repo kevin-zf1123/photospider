@@ -25,8 +25,9 @@ that consumes it.
 flowchart TD
   HOST["ps::Host"] --> ADAPTER["embedded Host adapter"]
   ADAPTER --> KERNEL["Kernel"]
-  KERNEL --> BUDGET["process SchedulerWorkerBudget"]
   KERNEL --> EXEC["injected CPU ExecutionService"]
+  EXEC --> LEDGER["host-authoritative ResourceLedger"]
+  EXEC --> STORE["bounded ready store"]
   KERNEL --> GSE["GraphStateExecutor"]
   GSE --> SERVICE["ComputeService"]
   SERVICE --> RUN["request-owned HP or HP/RT child ComputeRun"]
@@ -72,9 +73,9 @@ caller or creating a second worker. `GraphRuntime` performs the join before
 scheduler teardown. If explicit close later fails in scheduler shutdown,
 Kernel starts one replacement lane worker before returning the failure so the
 retained session remains retryable. Different graphs have independent workers
-and queues. The transitional worker budget does not count these lane workers;
-its 32-slot ceiling covers fixed CPU service pools and workers charged to
-legacy scheduler plans.
+and queues. The Host-composition resource ledger does not count these lane
+workers or fixed service threads as infrastructure. It admits per-Run CPU
+execution rights and conservative legacy scheduler-owner slots.
 
 ## Current Collaborators
 
@@ -93,16 +94,17 @@ legacy scheduler plans.
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, or scheduler policy |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, variants, result slots, and callback owner for one full HP request | Scheduler workers, Run terminal state, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One injected fixed built-in CPU worker domain, concurrent Run registry, high/normal ready queues, Run-local completion/failure/trace settlement, and HP/RT dirty/preflight execution | Planning, dependencies, Graph/cache state, final admission ledger, fairness policy, GPU/plugin execution, or visible commit |
+| `ExecutionService` | One injected fixed built-in CPU worker domain, one host-authoritative `ResourceLedger`, entry/byte-bounded high/normal ready storage, atomic whole-Run resource admission, Run-local completion/failure/trace settlement, and HP/RT dirty/preflight execution | Planning, dependencies, Graph/cache state, fairness policy, GPU/plugin execution, lifecycle admission registry, or visible commit |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Scheduler trace ownership |
 | `SchedulerFactory` | Resolve `0..8` worker requests and plan each scheduler's conservative slot charge before construction | Process capacity ownership or graph-state access |
-| `SchedulerWorkerBudget` | Serialize one fixed 32-slot transitional process budget for fixed CPU service pools and legacy scheduler workers across all embedded Hosts/Kernels | Worker creation, scheduling policy, fairness, or whole-process thread counting |
+| `ResourceLedger` | Atomically reserve checked CPU, retained-memory, scratch, ready-entry, and ready-byte vectors; mint bounded child grants; release exact vectors after parent/child ownership ends | Worker creation, ordering policy, task dependencies, device/I/O/plugin resource guesses, or lifecycle admission |
 | `ReservationOwnedScheduler` | Keep a move-only reservation live through concrete scheduler shutdown and destruction | Capacity planning or task-graph correctness |
 
-Compute collaborators live under `src/lib/compute/`; the three admission and
-ownership collaborators live under `src/lib/scheduler/`. These classes are
-private implementation modules and do not form an installable API.
+Compute collaborators live under `src/lib/compute/`; the ledger lives under
+`src/lib/runtime/`, and legacy scheduler planning/ownership lives under
+`src/lib/scheduler/`. These classes are private implementation modules and do
+not form an installable API.
 
 ## Request Behavior
 
@@ -186,22 +188,26 @@ released by `TaskSubmissionPlan`: the migrated route creates another
 `ReadyTaskSubmission`, while legacy routes push another lease-backed callback
 or dirty handle.
 
-The issue #69 CPU service is explicitly composed before Kernel and owns one
-direct fixed worker pool. Configuration resolves and freezes `[1,8]` workers
-once; Graph load, replacement, Run execution, and dirty phases never resize it.
-Independent Runs from multiple Graphs share the high/normal ready queues while
-completion counts, first exceptions, in-flight drainage, Host trace targets,
-and settlement remain Run-local. This is priority separation, not final
-cross-Run fairness, bounded admission, cancellation, or policy authority.
+The issue #70 CPU service is explicitly composed before Kernel and owns one
+direct fixed worker pool, one host-authoritative ledger, and one bounded ready
+store. Configuration resolves and freezes `[1,8]` infrastructure workers once;
+Graph load, replacement, Run execution, and dirty phases never resize it.
+Every Run reserves its complete checked CPU/retained/scratch/ready vector
+before publication. Initial and dependency-released work both require matching
+ready-entry/byte grants and enter the same high/normal store. Queue removal
+exchanges that grant for CPU/memory/scratch execution authority. Completion,
+failure, and exceptional paths release the exact vector once. Independent Runs
+remain isolated. High-before-normal is priority separation, not final
+cross-Run fairness, cancellation, or policy authority.
 
-Built-in CPU bindings are ownerless at `GraphRuntime` for both intents.
-Transitional serial, GPU, and plugin scheduler resources remain owned per Graph
-and intent. The process `SchedulerWorkerBudget` charges one pool-lifetime
-reservation for each fixed service and charges only legacy scheduler plans at
-Graph load/replacement. Legacy replacement reserves candidate headroom while
-the old owner remains live. Built-in serial charges zero; registered ABI v2
-plugins charge their resolved grant; built-in GPU/heterogeneous also charges
-its potential device worker.
+Built-in CPU bindings are ownerless at `GraphRuntime` for both intents. Serial,
+GPU, and plugin scheduler resources remain owned per Graph and intent, but
+their conservative CPU-slot reservations come from the same
+`ExecutionService` ledger used by Runs. Legacy replacement reserves candidate
+headroom while the old owner remains live. Built-in serial charges zero;
+registered ABI v2 plugins charge their resolved grant; built-in
+GPU/heterogeneous also charges its potential device worker. The ledger does
+not invent device, I/O, or plugin-specific dimensions.
 
 ## OpenCV Operation Concurrency
 
@@ -326,12 +332,12 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted replacement direction and detailed ownership contract.
-This document is authoritative for the current issue #69 fixed multi-Graph
-HP/RT CPU service, ownerless built-in CPU bindings, separate realtime child
-Runs, owned dirty/preflight submissions, retained legacy per-Graph schedulers,
-and bounded transitional worker containment. Authoritative revision,
-`RunGroup`, production resource admission, bounded ready storage,
-cancellation, supersession, and final policy remain future behavior.
+This document is authoritative through issue #70: the fixed multi-Graph HP/RT
+CPU service, ownerless built-in CPU bindings, separate realtime child Runs,
+owned dirty/preflight submissions, atomic vector admission, bounded ready
+storage, and retained legacy per-Graph schedulers sharing one host ledger.
+Authoritative revision, `RunGroup`, lifecycle admission, cancellation,
+supersession, and final policy remain future behavior.
 
 ## Implementation and Validation Entry Points
 
@@ -348,14 +354,15 @@ cancellation, supersession, and final policy remain future behavior.
 - `src/lib/core/ops.cpp`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`
+- `src/lib/runtime/resource_ledger.*`
 - `src/lib/scheduler/scheduler_factory.*`
-- `src/lib/scheduler/scheduler_worker_budget.*`
+- `src/lib/scheduler/scheduler_worker_limits.*`
 - `src/lib/scheduler/scheduler_reservation_owner.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_scheduler.cpp`
-- `tests/integration/test_scheduler_worker_budget.cpp`
+- `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_scheduler_factory_plan.cpp`
 - `tests/unit/test_scheduler_reservation_owner.cpp`
-- `tests/unit/test_scheduler_worker_budget.cpp`
+- `tests/unit/test_resource_ledger.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

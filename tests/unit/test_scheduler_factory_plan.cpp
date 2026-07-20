@@ -9,7 +9,7 @@
 
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
+#include "scheduler/scheduler_worker_limits.hpp"
 
 namespace ps {
 namespace {

@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "benchmark/benchmark_yaml_generator.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
+#include "scheduler/scheduler_worker_limits.hpp"
 
 namespace fs = std::filesystem;
 
