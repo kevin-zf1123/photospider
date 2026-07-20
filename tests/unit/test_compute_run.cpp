@@ -1370,10 +1370,18 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
 /**
  * @brief Verifies one active Run failure does not fail or drain its peer.
  *
- * @note Both callbacks enter the same fixed two-worker pool. The failing Run
- * waits until the peer is executing, then rethrows one exact exception while
- * the peer remains blocked. The peer later completes normally and publishes
- * its independent success outcome.
+ * @return Nothing.
+ * @throws std::bad_alloc when Run, graph, callback, or future storage cannot
+ * allocate.
+ * @throws std::future_error when test synchronization state is invalid.
+ * @throws std::system_error when async launch or synchronization fails.
+ * @note Both callbacks first enter the same fixed two-worker pool and block on
+ * independent promise gates. Only after both entries are observed does the
+ * test release the failing Run, retain the peer gate, and prove that the exact
+ * failure settles without completing the peer. Both idempotent release guards
+ * precede future destruction during every cleanup path; all gates are released
+ * before any future is consumed. The peer then completes normally and
+ * publishes its independent success outcome.
  */
 TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   ExecutionService service(2);
@@ -1397,9 +1405,13 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   peer.emplace_submission_plan(peer_graph, traversal, 66,
                                std::vector<Device>{Device::CPU});
 
+  std::promise<void> failing_entered;
+  std::future<void> failing_entered_future = failing_entered.get_future();
+  std::promise<void> release_failing;
+  const std::shared_future<void> failing_release =
+      release_failing.get_future().share();
   std::promise<void> peer_entered;
-  const std::shared_future<void> peer_entered_future =
-      peer_entered.get_future().share();
+  std::future<void> peer_entered_future = peer_entered.get_future();
   std::promise<void> release_peer;
   const std::shared_future<void> peer_release =
       release_peer.get_future().share();
@@ -1412,10 +1424,11 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   std::vector<ReadyTaskSubmission> failing_ready;
   failing_ready.emplace_back(
       std::move(failing_lease), failing_identity, 65, true,
-      [peer_entered_future, failure](ComputeRunLease&,
-                                     const ComputeRunTaskIdentity&,
-                                     SchedulerTaskRuntime&) {
-        peer_entered_future.wait();
+      [&failing_entered, failing_release, failure](
+          ComputeRunLease&, const ComputeRunTaskIdentity&,
+          SchedulerTaskRuntime&) {
+        failing_entered.set_value();
+        failing_release.wait();
         std::rethrow_exception(failure);
       });
 
@@ -1431,43 +1444,85 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
                             runtime.dec_tasks_to_complete();
                           });
 
-  auto failing_future = std::async(
+  std::future<void> failing_future;
+  std::future<void> peer_future;
+  ScopedPromiseRelease peer_release_guard(release_peer);
+  ScopedPromiseRelease failing_release_guard(release_failing);
+  failing_future = std::async(
       std::launch::async,
       [&service, &failing_host, ready = std::move(failing_ready)]() mutable {
         service.execute_cpu_run(failing_host, std::move(ready), 1);
       });
-  auto peer_future = std::async(
+  peer_future = std::async(
       std::launch::async,
       [&service, &peer_host, ready = std::move(peer_ready)]() mutable {
         service.execute_cpu_run(peer_host, std::move(ready), 1);
       });
 
-  ASSERT_EQ(peer_entered_future.wait_for(std::chrono::seconds(2)),
-            std::future_status::ready);
-  ASSERT_EQ(failing_future.wait_for(std::chrono::seconds(2)),
-            std::future_status::ready);
+  const std::future_status failing_entered_status =
+      failing_entered_future.wait_for(std::chrono::seconds(2));
+  const std::future_status peer_entered_status =
+      peer_entered_future.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(failing_entered_status, std::future_status::ready);
+  EXPECT_EQ(peer_entered_status, std::future_status::ready);
+  if (failing_entered_status == std::future_status::ready &&
+      peer_entered_status == std::future_status::ready) {
+    EXPECT_TRUE(failing_release_guard.release());
+    const std::future_status failing_completion_status =
+        failing_future.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(failing_completion_status, std::future_status::ready);
+    const std::future_status peer_blocked_status =
+        peer_future.wait_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(peer_blocked_status, std::future_status::timeout);
+    EXPECT_FALSE(peer.is_terminal());
+  }
+
+  EXPECT_TRUE(failing_release_guard.release());
+  EXPECT_TRUE(peer_release_guard.release());
+  const std::future_status failing_cleanup_status =
+      failing_future.wait_for(std::chrono::seconds(2));
+  const std::future_status peer_cleanup_status =
+      peer_future.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(failing_cleanup_status, std::future_status::ready);
+  EXPECT_EQ(peer_cleanup_status, std::future_status::ready);
+
   std::exception_ptr observed;
-  try {
-    failing_future.get();
-    FAIL() << "Expected isolated Run failure.";
-  } catch (...) {
-    observed = std::current_exception();
+  if (failing_cleanup_status == std::future_status::ready) {
+    try {
+      failing_future.get();
+      ADD_FAILURE() << "Expected isolated Run failure.";
+    } catch (...) {
+      observed = std::current_exception();
+    }
   }
   EXPECT_TRUE(observed == failure);
-  EXPECT_EQ(peer_future.wait_for(std::chrono::milliseconds(100)),
-            std::future_status::timeout);
-  EXPECT_FALSE(peer.is_terminal());
 
-  release_peer.set_value();
-  EXPECT_NO_THROW(peer_future.get());
-  EXPECT_TRUE(peer.publish_succeeded());
+  bool peer_completed_normally = false;
+  if (peer_cleanup_status == std::future_status::ready) {
+    try {
+      peer_future.get();
+      peer_completed_normally = true;
+    } catch (const std::exception& error) {
+      ADD_FAILURE() << "Peer Run threw unexpectedly: " << error.what();
+    } catch (...) {
+      ADD_FAILURE() << "Peer Run threw an unexpected non-standard exception.";
+    }
+  }
+  EXPECT_TRUE(peer_completed_normally);
+  if (peer_completed_normally) {
+    EXPECT_TRUE(peer.publish_succeeded());
+  }
   const auto failing_outcome = failing.terminal_outcome();
-  ASSERT_TRUE(failing_outcome.has_value());
-  EXPECT_EQ(failing_outcome->kind, ComputeRunTerminalKind::Failed);
-  EXPECT_TRUE(failing_outcome->failure == failure);
+  EXPECT_TRUE(failing_outcome.has_value());
+  if (failing_outcome.has_value()) {
+    EXPECT_EQ(failing_outcome->kind, ComputeRunTerminalKind::Failed);
+    EXPECT_TRUE(failing_outcome->failure == failure);
+  }
   const auto peer_outcome = peer.terminal_outcome();
-  ASSERT_TRUE(peer_outcome.has_value());
-  EXPECT_EQ(peer_outcome->kind, ComputeRunTerminalKind::Succeeded);
+  EXPECT_TRUE(peer_outcome.has_value());
+  if (peer_outcome.has_value()) {
+    EXPECT_EQ(peer_outcome->kind, ComputeRunTerminalKind::Succeeded);
+  }
   EXPECT_EQ(failing_host.context_entries(), failing_host.context_exits());
   EXPECT_EQ(peer_host.context_entries(), peer_host.context_exits());
 }
