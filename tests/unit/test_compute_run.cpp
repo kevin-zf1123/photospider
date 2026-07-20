@@ -4476,17 +4476,17 @@ TEST(ExecutionServicePolicy, RetainsPolicyHistoryAcrossDependentReentry) {
 }
 
 /**
- * @brief Verifies policy counters saturate instead of wrapping at UINT64_MAX.
+ * @brief Verifies the Graph policy counter saturates at UINT64_MAX.
  *
  * @return Nothing.
  * @throws Standard Run, estimator, service, future, or synchronization
  * exceptions from the real one-worker execution path.
- * @note A maximum-cost Graph is charged while its sole worker callback blocks.
- * A cheap sibling Run keeps that Graph row alive beside a fresh peer Graph;
- * saturating addition selects the peer first, whereas wrapping addition would
- * incorrectly make the maximum-cost Graph appear cheapest.
+ * @note A maximum-cost Graph is charged while its sole worker callback
+ * blocks. A cheap sibling Run keeps that Graph row alive beside a fresh peer
+ * Graph. Graph-score saturation selects the peer before Run scores can decide;
+ * Graph-score wrapping would make the maximum-cost Graph appear cheapest.
  */
-TEST(ExecutionServicePolicy, SaturatesPolicyCountersWithoutWrapping) {
+TEST(ExecutionServicePolicy, SaturatesGraphCounterWithoutWrapping) {
   constexpr ReadyTaskResourceDemand kBaseDemand{1U, 1U, 0U, 1U};
   constexpr ReadyTaskResourceDemand kCheapDemand{1U, 1U, 0U, 1U};
   constexpr ReadyTaskResourceDemand kPeerDemand{1U, 1U, 0U, 2U};
@@ -4546,6 +4546,131 @@ TEST(ExecutionServicePolicy, SaturatesPolicyCountersWithoutWrapping) {
   ASSERT_EQ(blocker.completion.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_NO_THROW(blocker.completion.get());
+  EXPECT_EQ(execution_order, (std::vector<int>{2, 1}));
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies Run policy saturation across dependent ready re-entry.
+ *
+ * @return Nothing.
+ * @throws Standard Run, estimator, service, callback, future, or
+ * synchronization exceptions from the real one-worker execution path.
+ * @note One Run first consumes the maximum representable policy cost. While
+ * that callback occupies the worker, an equal-cost sibling in the same Graph
+ * is published before the original Run's equal-cost dependent. Their next
+ * Graph scores are therefore identical. Correct Run saturation leaves equal
+ * Run scores and selects the older sibling; Run-score wrapping makes the
+ * re-entering Run appear cheaper and reverses the deterministic order.
+ */
+TEST(ExecutionServicePolicy, SaturatesRunCounterAcrossDependentReentry) {
+  constexpr ReadyTaskResourceDemand kBaseDemand{1U, 1U, 0U, 1U};
+  const std::string graph_identity = "run-saturated-graph";
+  ExecutionService service(1U);
+
+  std::atomic_int representative_entered{0};
+  ComputeRun representative_run(make_policy_submission(
+      graph_identity, 1U, 0, ComputeRunQosClass::Throughput));
+  ReadyTaskSubmission representative = make_counted_ready_submission(
+      representative_run.acquire_lease(), 0U, 0, representative_entered,
+      SchedulerTaskPriority::Normal, kBaseDemand);
+  const ResourceVector base_resources = service.estimate_cpu_run_resources(
+      representative, 1, CpuRunResourceDemand{0U, kBaseDemand});
+  ASSERT_GT(base_resources.ready_bytes, 0U);
+  const std::uint64_t byte_quanta =
+      base_resources.ready_bytes / 4096U +
+      (base_resources.ready_bytes % 4096U == 0U ? 0U : 1U);
+  ASSERT_GT(byte_quanta, 0U);
+  ASSERT_LT(byte_quanta, std::numeric_limits<std::uint64_t>::max());
+  const ReadyTaskResourceDemand maximum_cost_demand{
+      1U, 1U, 0U, std::numeric_limits<std::uint64_t>::max() - byte_quanta};
+
+  std::promise<void> saturated_entered;
+  std::future<void> saturated_entered_future = saturated_entered.get_future();
+  std::promise<void> publish_dependent;
+  const std::shared_future<void> publish_dependent_gate =
+      publish_dependent.get_future().share();
+  std::promise<void> dependent_published;
+  std::future<void> dependent_published_future =
+      dependent_published.get_future();
+  std::promise<void> release_saturated_initial;
+  const std::shared_future<void> saturated_initial_release =
+      release_saturated_initial.get_future().share();
+  AsyncPolicyRun saturated;
+  std::vector<AsyncPolicyRun> targets;
+  ScopedPromiseRelease publish_dependent_guard(publish_dependent);
+  ScopedPromiseRelease release_saturated_guard(release_saturated_initial);
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
+
+  auto saturated_host = std::make_unique<ExecutionServiceHost>();
+  auto saturated_run = std::make_unique<ComputeRun>(make_policy_submission(
+      graph_identity, 2U, 1, ComputeRunQosClass::Throughput));
+  ComputeRunLease initial_lease = saturated_run->acquire_lease();
+  const ComputeRunTaskIdentity initial_identity =
+      initial_lease.task_identity(0U);
+  std::vector<ReadyTaskSubmission> saturated_ready;
+  saturated_ready.emplace_back(
+      std::move(initial_lease), initial_identity, 1, true,
+      [&saturated_entered, publish_dependent_gate, &dependent_published,
+       saturated_initial_release, &execution_order, &execution_order_mutex,
+       maximum_cost_demand](ComputeRunLease& retained_lease,
+                            const ComputeRunTaskIdentity&,
+                            SchedulerTaskRuntime& runtime) {
+        saturated_entered.set_value();
+        publish_dependent_gate.wait();
+        auto& ready_runtime =
+            dynamic_cast<ReadyTaskSubmissionRuntime&>(runtime);
+        const ComputeRunTaskIdentity dependent_identity =
+            retained_lease.task_identity(1U);
+        ready_runtime.submit_ready_submission(ReadyTaskSubmission(
+            retained_lease, dependent_identity, 1, false,
+            [&execution_order, &execution_order_mutex](
+                ComputeRunLease&, const ComputeRunTaskIdentity&,
+                SchedulerTaskRuntime& dependent_runtime) {
+              {
+                std::lock_guard<std::mutex> lock(execution_order_mutex);
+                execution_order.push_back(1);
+              }
+              dependent_runtime.dec_tasks_to_complete();
+            },
+            SchedulerTaskPriority::Normal, maximum_cost_demand));
+        dependent_published.set_value();
+        saturated_initial_release.wait();
+        runtime.dec_tasks_to_complete();
+      },
+      SchedulerTaskPriority::Normal, maximum_cost_demand);
+  ExecutionServiceHost* saturated_host_pointer = saturated_host.get();
+  std::future<void> saturated_completion = std::async(
+      std::launch::async, [&service, saturated_host_pointer,
+                           saturated_ready = std::move(saturated_ready),
+                           maximum_cost_demand]() mutable {
+        service.execute_cpu_run(*saturated_host_pointer,
+                                std::move(saturated_ready), 2,
+                                CpuRunResourceDemand{0U, maximum_cost_demand});
+      });
+  saturated =
+      AsyncPolicyRun{std::move(saturated_host), std::move(saturated_run),
+                     std::move(saturated_completion)};
+  ASSERT_EQ(saturated_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+
+  targets.push_back(launch_ordered_policy_run(
+      service,
+      make_policy_submission(graph_identity, 3U, 2,
+                             ComputeRunQosClass::Throughput),
+      {2}, maximum_cost_demand, execution_order, execution_order_mutex));
+  ASSERT_TRUE(wait_for_ready_task_count(service, 1U));
+  EXPECT_TRUE(publish_dependent_guard.release());
+  ASSERT_EQ(dependent_published_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
+
+  EXPECT_TRUE(release_saturated_guard.release());
+  expect_policy_runs_settle(targets);
+  ASSERT_EQ(saturated.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(saturated.completion.get());
   EXPECT_EQ(execution_order, (std::vector<int>{2, 1}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
