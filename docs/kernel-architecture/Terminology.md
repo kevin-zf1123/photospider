@@ -198,9 +198,10 @@ The `ExecutionService`-owned policy-aware store whose aggregate entry and
 accounted-byte counts cannot exceed immutable ledger limits. It bills one
 dispatch as `work_units + ceil(complete_ready_grant_bytes / 4096)`, accumulates
 raw Graph service and weight-normalized Run service, honors interactive
-deadline ordering, ages ready entries after eight successful dispatches, and
-forces throughput progress after at most three consecutive interactive
-dispatches while throughput is ready. Initial and dependency-released
+deadline ordering, and first selects a service class using fixed three-to-one
+Interactive/Throughput arbitration. Within that selected class, ready entries
+age after eight successful dispatches before ordinary policy comparison;
+aging never changes the selected class. Initial and dependency-released
 submissions cross the same boundary, and Run rows persist across temporary
 emptiness. Removing an entry releases its ready grant only after execution
 authority is acquired or the entry is purged.
@@ -224,8 +225,9 @@ inspect graph topology, or commit graph state.
 The current independent `Normal` or `High` ready hint. It is orthogonal to
 `ComputeIntent`: HP and RT dirty source batches both use `High`, while their
 downstream groups use `Normal`. In the service policy store it is not an
-absolute priority: aging can select an older normal-hint entry through a
-continuing high-hint stream.
+absolute priority: within the service class already selected by inter-class
+arbitration, aging can select an older normal-hint entry through a continuing
+high-hint stream.
 
 **Scheduler epoch**
 A scheduler-local nonzero batch identity used to reject stale queued work and

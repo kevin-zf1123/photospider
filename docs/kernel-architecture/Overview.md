@@ -558,14 +558,16 @@ Important current behavior:
   Run vectors and legacy scheduler-owner CPU grants; its policy-aware ready
   store is bounded by entries and bytes. Ready work pays checked work-unit plus
   4-KiB byte-quanta cost, Graph and weight-normalized Run scores preserve
-  multi-tenant fairness, eight successful dispatches trigger stable aging, and
-  at most three Interactive tasks run consecutively while Throughput work is
-  ready. Only explicit Interactive Runs may consume the configured protected
-  headroom within the Run-policy classes, while the ledger remains the final
-  resource authority. Transitional legacy schedulers retain Issue #70
-  full-ledger admission rather than being classified as Throughput, as well as
-  per-graph/intent physical ownership and bounded constructor grants. ADR 0003
-  and ADR 0007 record the accepted ownership/lifetime contract.
+  multi-tenant fairness, and class arbitration forces Throughput after at most
+  three consecutive Interactive dispatches while both classes are ready.
+  Eight-dispatch aging applies only within the class that arbitration selected
+  and cannot replace that decision. Only explicit Interactive Runs may consume
+  the configured protected headroom within the Run-policy classes, while the
+  ledger remains the final resource authority. Transitional legacy schedulers
+  retain Issue #70 full-ledger admission rather than being classified as
+  Throughput, as well as per-graph/intent physical ownership and bounded
+  constructor grants. ADR 0003 and ADR 0007 record the accepted
+  ownership/lifetime contract.
 
 - [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
   separates graph-state access from scheduler dispatch.

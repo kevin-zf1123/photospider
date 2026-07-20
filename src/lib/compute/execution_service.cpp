@@ -460,7 +460,13 @@ class ExecutionService::SchedulerPolicy {
     std::uint64_t enqueue_sequence = 0U;
   };
 
-  /** @brief Releases one stateless built-in strategy. */
+  /**
+   * @brief Releases one stateless built-in strategy through the private base.
+   * @throws Nothing.
+   * @note The virtual lifetime ends with the owning ready store. Policies
+   * retain no entries, Runs, workers, synchronization, or resource authority,
+   * so destruction performs no cleanup beyond ordinary object teardown.
+   */
   virtual ~SchedulerPolicy() noexcept = default;
 
   /**
@@ -719,6 +725,8 @@ class ExecutionService::BoundedReadyStore final {
    * @throws Nothing; an accounting or policy invariant violation terminates.
    * @note Removal decrements store counters but the returned entry keeps its
    * ready grant until the worker acquires execution capacity or drops it.
+   * Inter-class three-to-one arbitration completes before the selected
+   * policy applies class-local aging, deadline, and fair-score ordering.
    */
   std::shared_ptr<QueueEntry> pop() noexcept {
     if (entry_count_ == 0U) {
@@ -734,9 +742,7 @@ class ExecutionService::BoundedReadyStore final {
     ComputeRunQosClass selected_class = ComputeRunQosClass::Throughput;
     if (interactive_ready && throughput_ready) {
       if (consecutive_interactive_ < kInteractiveBurstLimit) {
-        const std::optional<ComputeRunQosClass> aged_class =
-            oldest_aged_class();
-        selected_class = aged_class.value_or(ComputeRunQosClass::Interactive);
+        selected_class = ComputeRunQosClass::Interactive;
       }
     } else if (interactive_ready) {
       selected_class = ComputeRunQosClass::Interactive;
@@ -1058,32 +1064,12 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
-   * @brief Finds the service class of the globally oldest aged candidate.
-   * @return Explicit class, or null when no candidate has aged.
-   * @throws Nothing.
-   */
-  std::optional<ComputeRunQosClass> oldest_aged_class() noexcept {
-    QueueEntry* oldest = nullptr;
-    for (auto& row : run_states_) {
-      QueueEntry* candidate = candidate_entry(row.second);
-      if (candidate != nullptr && is_aged(*candidate) &&
-          (oldest == nullptr ||
-           candidate->enqueue_sequence < oldest->enqueue_sequence)) {
-        oldest = candidate;
-      }
-    }
-    if (oldest == nullptr) {
-      return std::nullopt;
-    }
-    return oldest->run->policy_qos.service_class;
-  }
-
-  /**
    * @brief Selects one entry within a policy's explicit service class.
    * @param policy Stateless built-in ranking strategy.
    * @return Complete chosen row/entry and next accounting scores.
    * @throws Nothing.
-   * @note Aged candidates precede the policy's ordinary comparison.
+   * @note Aged candidates precede ordinary comparison only within the class
+   * already selected by inter-class arbitration.
    */
   SelectedEntry select_from_class(const SchedulerPolicy& policy) noexcept {
     SelectedEntry best;

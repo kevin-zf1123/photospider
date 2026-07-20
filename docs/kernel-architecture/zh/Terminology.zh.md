@@ -160,11 +160,11 @@ device/I/O/plugin 估算或 fairness authority。
 由 `ExecutionService` 拥有的 policy-aware store，其聚合 entry 与 accounted-byte 计数不得超过
 不可变 ledger 上限。每次 dispatch 按
 `work_units + ceil(complete_ready_grant_bytes / 4096)` 计费，累加原始 Graph service 与按 weight
-归一化的 Run service，遵守 interactive deadline ordering，在八次成功 dispatch 后让 ready entry
-aging，并在 throughput 持续 ready 时，至多三次连续 interactive dispatch 后强制保证 throughput
-进展。Initial 与 dependency-released submission 会跨越同一边界，Run row 也会跨越临时为空的阶段
-继续存在。从 store 移除 entry 时，只会在取得 execution authority 或清除该 entry 后释放其 ready
-grant。
+归一化的 Run service，并遵守 interactive deadline ordering。它先通过固定的 Interactive/Throughput
+三比一仲裁选择 service class；在已选 class 内，ready entry 会在八次成功 dispatch 后先于普通
+policy comparison aging，且 aging 绝不会改变已选 class。Initial 与 dependency-released
+submission 会跨越同一边界，Run row 也会跨越临时为空的阶段继续存在。从 store 移除 entry 时，
+只会在取得 execution authority 或清除该 entry 后释放其 ready grant。
 
 **Resource reservation 与 grant**
 Reservation 是一个原子准入 root vector 的 move-only RAII owner；grant 是在该 vector 内签发的
@@ -180,7 +180,8 @@ ready batch；不会从 plan 拉取、派生 task、检查 graph topology 或提
 **`SchedulerTaskPriority`**
 当前独立的 `Normal`/`High` ready hint，与 `ComputeIntent` 正交。HP 与 RT dirty source batch 都使用
 `High`，二者的 downstream group 都使用 `Normal`。在 service policy store 中，它不是绝对 priority：
-aging 可以让较旧的 normal-hint entry 穿过持续的 high-hint stream 被选中。
+在跨 class 仲裁已经选定的 service class 内，aging 可以让较旧的 normal-hint entry 穿过持续的
+high-hint stream 被选中。
 
 **Scheduler epoch**
 Scheduler-local 的非零 batch identity，用于拒绝 stale queued work 和忽略 stale completion

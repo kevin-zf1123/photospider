@@ -445,12 +445,13 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - 多 graph/intent 的内建 CPU work 会共享每个 embedded Host 的一个固定 `ExecutionService`。
   其 ledger 会原子准入完整 Run vector 与 legacy scheduler-owner CPU grant；其 policy-aware
   ready store 按 entry 和 byte 有界。Ready work 使用经过 checked arithmetic 的 work-unit 加
-  4-KiB byte-quanta cost；Graph score 与按 weight 归一化的 Run score 保持多租户公平；八次成功
-  dispatch 后触发稳定 aging；Throughput work ready 时最多连续执行三个 Interactive task。只有
-  显式 Interactive Run 可以在 Run policy class 内使用配置的受保护 headroom，ledger 仍是最终
-  资源权威。过渡期 legacy scheduler 保留 Issue #70 的 full-ledger admission，不会被分类为
-  Throughput，同时保留按 graph/intent 的物理所有权与有界 constructor grant。ADR 0003 与
-  ADR 0007 记录已接受的所有权/生命周期契约。
+  4-KiB byte-quanta cost；Graph score 与按 weight 归一化的 Run score 保持多租户公平；两个 class
+  都 ready 时，class 仲裁会在至多三次连续 Interactive dispatch 后强制选择 Throughput。八次
+  dispatch aging 只在仲裁已选定的 class 内生效，不能替换该决策。只有显式 Interactive Run 可以
+  在 Run policy class 内使用配置的受保护 headroom，ledger 仍是最终资源权威。过渡期 legacy
+  scheduler 保留 Issue #70 的 full-ledger admission，不会被分类为 Throughput，同时保留按
+  graph/intent 的物理所有权与有界 constructor grant。ADR 0003 与 ADR 0007 记录已接受的
+  所有权/生命周期契约。
 
 - [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)
   分开 graph-state access 与 scheduler dispatch。

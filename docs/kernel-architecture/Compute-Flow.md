@@ -239,12 +239,13 @@ The ready-store policy charges each dispatch
 `work_units + ceil(complete_ready_grant_bytes / 4096)`: Graph fairness uses raw
 cost and Run fairness uses `ceil(cost / weight)`. Interactive work prefers an
 earlier present monotonic deadline; throughput ordering is weighted and
-deterministic. A ready item ages after eight successful dispatches, but a
-continuously ready throughput class is forced to progress after at most three
-interactive dispatches. Configured interactive headroom is excluded from the
-general Run admission ceiling. Transitional legacy scheduler owners retain
-Issue #70 full-ledger admission and are not reclassified as Throughput. Initial
-and dependent submissions use the same route, and the service retains each Run
+deterministic. The store first selects the service class, forcing Throughput
+after at most three Interactive dispatches while both classes remain ready.
+Eight-dispatch aging then applies only within that selected class and cannot
+change it. Configured interactive headroom is excluded from the general Run
+admission ceiling. Transitional legacy scheduler owners retain Issue #70
+full-ledger admission and are not reclassified as Throughput. Initial and
+dependent submissions use the same route, and the service retains each Run
 fairness row across temporary emptiness. Policy strategies own no worker,
 token, budget, Run, or Graph; the service and ledger remain the physical and
 resource authorities.

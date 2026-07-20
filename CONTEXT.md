@@ -35,15 +35,17 @@ staging, stable `ComputeRunLease` values, and
 
 Issue #70 makes the same service the current owner of one Host-authoritative
 `ResourceLedger`, complete checked Run admission, and the entry/byte-bounded
-ready store used by initial and dependency-released work. Do not describe the
-remaining accepted targets as current: request-owned `RunGroup`, the final
-`ExecutionService::RunLifecycleRegistry` and graph-close/process-shutdown
-fence, issue #71 fairness policy, issue #72 authoritative `GraphRevision`
-commit validation, issue #73 cancellation, issue #74 supersession, issue #75
-policy-only scheduler ABI generation, and issue #76 final lifecycle/telemetry
-invariants remain future. The general `Value` model, heterogeneous executors,
-server control plane, and isolated plugin workers also remain later target
-work.
+ready store used by initial and dependency-released work. Issue #71 makes the
+private Interactive/Throughput policy seam current: the store performs fixed
+three-to-one class arbitration first, then applies dispatch-count aging,
+deadline, and fair-score ordering only within the selected class. Do not
+describe the remaining accepted targets as current: issue #72 authoritative
+`GraphRevision` commit validation, issue #73 cancellation, issue #74
+supersession, issue #75 policy-only scheduler ABI generation, and issue #76
+request-owned `RunGroup`, final `ExecutionService::RunLifecycleRegistry`,
+graph-close/process-shutdown fence, and final lifecycle/telemetry invariants
+remain future. The general `Value` model, heterogeneous executors, server
+control plane, and isolated plugin workers also remain later target work.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains

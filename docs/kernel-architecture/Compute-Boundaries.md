@@ -261,17 +261,18 @@ The ready store charges each dispatch
 `work_units + ceil(complete_ready_grant_bytes / 4096)`. Graph rows accrue raw
 cost; Run rows accrue `ceil(cost / weight)`. Explicit interactive QoS prefers an
 earlier present monotonic deadline, while throughput ordering is weighted and
-deterministic. A ready item ages after eight successful dispatches. When
-throughput remains ready, the service forces its progress after at most three
-consecutive interactive dispatches, even across the aging boundary. Run rows
-remain installed across temporary emptiness so dependent re-entry cannot reset
-fairness history. Configured interactive headroom is unavailable to throughput
-Run admission; Interactive Runs may use it, and every reservation still
-requires final ledger authorization. Transitional legacy scheduler owners keep
-Issue #70 full-ledger admission instead of being classified as Throughput. The
-private policy strategies own no worker, ready entry, resource token, budget,
-Run, or Graph. Revision preference, cancellation, and supersession are not part
-of this scheduling slice.
+deterministic. The store first chooses the service class, forcing Throughput
+after at most three consecutive Interactive dispatches while both remain
+ready. It then applies eight-dispatch aging only within the chosen class;
+aging cannot replace that class decision. Run rows remain installed across
+temporary emptiness so dependent re-entry cannot reset fairness history.
+Configured interactive headroom is unavailable to throughput Run admission;
+Interactive Runs may use it, and every reservation still requires final
+ledger authorization. Transitional legacy scheduler owners keep Issue #70
+full-ledger admission instead of being classified as Throughput. The private
+policy strategies own no worker, ready entry, resource token, budget, Run, or
+Graph. Revision preference, cancellation, and supersession are not part of
+this scheduling slice.
 
 Built-in CPU bindings are ownerless at `GraphRuntime` for both intents. Serial,
 GPU, and plugin scheduler resources remain owned per Graph and intent, but

@@ -320,12 +320,14 @@ the store owns the fairness rows and physical entries. Built-in CPU
 Dispatch cost is `work_units + ceil(complete_ready_grant_bytes / 4096)`.
 Graph rows receive raw cost and Run rows receive `ceil(cost / weight)`.
 Interactive ordering prefers an earlier present monotonic deadline;
-throughput ordering is weighted and deterministic. A ready item ages after
-eight successful dispatches. While throughput remains ready, the service
-requires progress after at most three consecutive interactive dispatches,
-including across the aging threshold. Initial and dependent work share the
-same route, and Run fairness rows persist across temporary emptiness. The
-strategies own no worker, physical ready store, token, budget, Run, or Graph.
+throughput ordering is weighted and deterministic. Class arbitration runs
+first: while both classes remain ready, the service chooses Throughput after
+at most three consecutive Interactive dispatches. Only then does selection
+within that class allow a ready item to age after eight successful dispatches;
+aging cannot cross or replace the chosen class. Initial and dependent work
+share the same route, and Run fairness rows persist across temporary emptiness.
+The strategies own no worker, physical ready store, token, budget, Run, or
+Graph.
 
 A registered plugin is charged the full resolved grant and may own fewer
 workers but not more. `gpu_pipeline` and `heterogeneous` are charged the
