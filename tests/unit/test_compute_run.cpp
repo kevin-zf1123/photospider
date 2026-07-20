@@ -6,6 +6,7 @@
 #include <exception>
 #include <future>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -343,12 +344,34 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
 /**
  * @brief Minimal CPU-only observation target for ExecutionService unit tests.
  *
- * @throws Nothing through worker-facing SchedulerHostContext callbacks.
- * @note The fixture owns no Graph or cache state and records only balanced task
- * context and trace counts.
+ * @throws std::bad_alloc when a copied trace snapshot cannot allocate.
+ * @throws std::system_error when trace snapshot locking fails.
+ * @note The fixture owns no Graph or cache state. Worker-facing callbacks
+ * remain noexcept; trace recording failures are retained as an explicit test
+ * signal.
  */
 class ExecutionServiceHost final : public SchedulerHostContext {
  public:
+  /**
+   * @brief Complete immutable scheduler trace tuple observed by one Host.
+   *
+   * @throws Nothing for scalar value construction and movement.
+   * @note Epoch is the opaque ComputeRunId value forwarded by ExecutionService.
+   */
+  struct TraceEvent final {
+    /** @brief Scheduler action forwarded by the active service worker. */
+    SchedulerTraceAction action = SchedulerTraceAction::AssignInitial;
+
+    /** @brief Graph-local diagnostic node id supplied by the ready task. */
+    int node_id = -1;
+
+    /** @brief Fixed-pool worker id that emitted this event. */
+    int worker_id = -1;
+
+    /** @brief Opaque Run epoch active on that worker. */
+    std::uint64_t epoch = 0;
+  };
+
   /**
    * @brief Reports the fixture's only physical capability.
    * @param device Capability requested by the CPU scheduler.
@@ -392,11 +415,12 @@ class ExecutionServiceHost final : public SchedulerHostContext {
    */
   void log_event(SchedulerTraceAction action, int node_id, int worker_id,
                  std::uint64_t epoch) noexcept override {
-    (void)action;
-    (void)node_id;
-    (void)worker_id;
-    (void)epoch;
-    trace_events_.fetch_add(1, std::memory_order_relaxed);
+    try {
+      std::lock_guard<std::mutex> lock(trace_mutex_);
+      trace_events_.push_back(TraceEvent{action, node_id, worker_id, epoch});
+    } catch (...) {
+      trace_recording_failed_.store(true, std::memory_order_relaxed);
+    }
   }
 
   /**
@@ -418,12 +442,23 @@ class ExecutionServiceHost final : public SchedulerHostContext {
   }
 
   /**
-   * @brief Returns forwarded trace events.
-   * @return Total trace publications.
+   * @brief Returns a thread-safe snapshot of every forwarded trace tuple.
+   * @return Complete trace events in Host observation order.
+   * @throws std::bad_alloc when snapshot storage cannot allocate.
+   * @throws std::system_error when mutex locking fails.
+   */
+  std::vector<TraceEvent> trace_events() const {
+    std::lock_guard<std::mutex> lock(trace_mutex_);
+    return trace_events_;
+  }
+
+  /**
+   * @brief Reports whether a noexcept callback failed to retain a trace.
+   * @return True after any trace allocation or mutex failure.
    * @throws Nothing.
    */
-  int trace_events() const noexcept {
-    return trace_events_.load(std::memory_order_relaxed);
+  bool trace_recording_failed() const noexcept {
+    return trace_recording_failed_.load(std::memory_order_relaxed);
   }
 
  private:
@@ -433,8 +468,14 @@ class ExecutionServiceHost final : public SchedulerHostContext {
   /** @brief Balanced top-level CPU callback context exits. */
   std::atomic_int context_exits_{0};
 
-  /** @brief Scheduler traces forwarded while one Run is active. */
-  std::atomic_int trace_events_{0};
+  /** @brief Serializes concurrent trace publication and snapshot copying. */
+  mutable std::mutex trace_mutex_;
+
+  /** @brief Complete scheduler traces forwarded to this Host proxy. */
+  std::vector<TraceEvent> trace_events_;
+
+  /** @brief Whether noexcept trace observation lost any event. */
+  std::atomic_bool trace_recording_failed_{false};
 };
 
 /**
@@ -872,16 +913,23 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 2);
   EXPECT_EQ(host.context_entries(), 2);
   EXPECT_EQ(host.context_exits(), 2);
-  EXPECT_GE(host.trace_events(), 2);
+  EXPECT_FALSE(host.trace_recording_failed());
+  EXPECT_EQ(host.trace_events().size(), 2U);
 }
 
 /**
  * @brief Verifies independent Run batches overlap on one fixed service pool.
  *
+ * @return Nothing.
+ * @throws std::bad_alloc when Run, callback, future, or trace storage cannot
+ * allocate.
+ * @throws std::future_error when test synchronization state is invalid.
+ * @throws std::system_error when async launch or synchronization fails.
  * @note The first callback blocks after entering its worker. The second caller
  * signals immediately before calling `execute_cpu_run()`. With two fixed
  * service workers, the second Run must enter and settle while the first Run
- * remains blocked, proving there is no whole-service Run gate.
+ * remains blocked, proving there is no whole-service Run gate. Both Runs reuse
+ * local task id zero; each Host must observe only its matching Run/node/epoch.
  */
 TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   ExecutionService service(2);
@@ -910,6 +958,9 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   std::vector<ReadyTaskSubmission> second_ready;
   ComputeRunLease second_lease = second.acquire_lease();
   const ComputeRunTaskIdentity second_identity = second_lease.task_identity(0);
+  EXPECT_EQ(first_identity.local_task_id().value(),
+            second_identity.local_task_id().value());
+  EXPECT_NE(first_identity.run_id(), second_identity.run_id());
   second_ready.emplace_back(
       std::move(second_lease), second_identity, 64, true,
       [&second_entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
@@ -946,6 +997,138 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   EXPECT_NO_THROW(first_future.get());
   EXPECT_EQ(first_host.context_entries(), first_host.context_exits());
   EXPECT_EQ(second_host.context_entries(), second_host.context_exits());
+  EXPECT_FALSE(first_host.trace_recording_failed());
+  EXPECT_FALSE(second_host.trace_recording_failed());
+  const std::vector<ExecutionServiceHost::TraceEvent> first_traces =
+      first_host.trace_events();
+  const std::vector<ExecutionServiceHost::TraceEvent> second_traces =
+      second_host.trace_events();
+  ASSERT_EQ(first_traces.size(), 1U);
+  ASSERT_EQ(second_traces.size(), 1U);
+  EXPECT_EQ(first_traces.front().action, SchedulerTraceAction::AssignInitial);
+  EXPECT_EQ(first_traces.front().node_id, 63);
+  EXPECT_GE(first_traces.front().worker_id, 0);
+  EXPECT_LT(first_traces.front().worker_id, 2);
+  EXPECT_EQ(first_traces.front().epoch, first.descriptor().id().value());
+  EXPECT_NE(first_traces.front().epoch, second.descriptor().id().value());
+  EXPECT_EQ(second_traces.front().action, SchedulerTraceAction::AssignInitial);
+  EXPECT_EQ(second_traces.front().node_id, 64);
+  EXPECT_GE(second_traces.front().worker_id, 0);
+  EXPECT_LT(second_traces.front().worker_id, 2);
+  EXPECT_EQ(second_traces.front().epoch, second.descriptor().id().value());
+  EXPECT_NE(second_traces.front().epoch, first.descriptor().id().value());
+}
+
+/**
+ * @brief Verifies realtime HP and RT children retain distinct epochs on one
+ * Host.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc when Run, callback, future, or trace storage cannot
+ * allocate.
+ * @throws std::future_error when test synchronization state is invalid.
+ * @throws std::system_error when async launch or synchronization fails.
+ * @note Both children share graph identity, revision, target, Host, and local
+ * task id zero. They overlap in the two-worker service, but Full HP and
+ * Interactive RT descriptors must emit distinct Run epochs.
+ */
+TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
+  ExecutionService service(2);
+  ExecutionServiceHost host;
+  ComputeRunSubmission hp_submission =
+      make_test_submission("realtime-siblings", 55, 65);
+  ComputeRunSubmission rt_submission = hp_submission;
+  rt_submission.intent = ComputeIntent::RealTimeUpdate;
+  rt_submission.quality = ComputeRunQuality::Interactive;
+  ComputeRun hp_child(std::move(hp_submission));
+  ComputeRun rt_child(std::move(rt_submission));
+  EXPECT_EQ(hp_child.descriptor().graph_identity(),
+            rt_child.descriptor().graph_identity());
+  EXPECT_EQ(hp_child.descriptor().revision().topology_generation,
+            rt_child.descriptor().revision().topology_generation);
+  EXPECT_EQ(hp_child.descriptor().target_node_id(),
+            rt_child.descriptor().target_node_id());
+  EXPECT_EQ(hp_child.descriptor().intent(), ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(hp_child.descriptor().quality(), ComputeRunQuality::Full);
+  EXPECT_EQ(rt_child.descriptor().intent(), ComputeIntent::RealTimeUpdate);
+  EXPECT_EQ(rt_child.descriptor().quality(), ComputeRunQuality::Interactive);
+  EXPECT_NE(hp_child.descriptor().id(), rt_child.descriptor().id());
+
+  std::promise<void> release_children;
+  const std::shared_future<void> release =
+      release_children.get_future().share();
+  std::promise<void> both_entered;
+  std::future<void> both_entered_future = both_entered.get_future();
+  std::atomic_int active_children{0};
+  const auto make_child_callback = [&active_children, &both_entered, release](
+                                       ComputeRunLease&,
+                                       const ComputeRunTaskIdentity&,
+                                       SchedulerTaskRuntime& runtime) {
+    const int active =
+        active_children.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (active == 2) {
+      both_entered.set_value();
+    }
+    release.wait();
+    active_children.fetch_sub(1, std::memory_order_acq_rel);
+    runtime.dec_tasks_to_complete();
+  };
+
+  ComputeRunLease hp_lease = hp_child.acquire_lease();
+  const ComputeRunTaskIdentity hp_identity = hp_lease.task_identity(0);
+  std::vector<ReadyTaskSubmission> hp_ready;
+  hp_ready.emplace_back(std::move(hp_lease), hp_identity, 65, true,
+                        make_child_callback);
+  ComputeRunLease rt_lease = rt_child.acquire_lease();
+  const ComputeRunTaskIdentity rt_identity = rt_lease.task_identity(0);
+  EXPECT_EQ(hp_identity.local_task_id().value(),
+            rt_identity.local_task_id().value());
+  EXPECT_NE(hp_identity.run_id(), rt_identity.run_id());
+  std::vector<ReadyTaskSubmission> rt_ready;
+  rt_ready.emplace_back(std::move(rt_lease), rt_identity, 65, true,
+                        make_child_callback);
+
+  auto hp_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(hp_ready)]() mutable {
+                   service.execute_cpu_run(host, std::move(ready), 1);
+                 });
+  auto rt_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(rt_ready)]() mutable {
+                   service.execute_cpu_run(host, std::move(ready), 1);
+                 });
+
+  EXPECT_EQ(both_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  release_children.set_value();
+  EXPECT_NO_THROW(hp_future.get());
+  EXPECT_NO_THROW(rt_future.get());
+  EXPECT_EQ(active_children.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(host.context_entries(), 2);
+  EXPECT_EQ(host.context_exits(), 2);
+  EXPECT_FALSE(host.trace_recording_failed());
+
+  const std::vector<ExecutionServiceHost::TraceEvent> traces =
+      host.trace_events();
+  ASSERT_EQ(traces.size(), 2U);
+  std::size_t hp_epoch_count = 0U;
+  std::size_t rt_epoch_count = 0U;
+  for (const ExecutionServiceHost::TraceEvent& trace : traces) {
+    EXPECT_EQ(trace.action, SchedulerTraceAction::AssignInitial);
+    EXPECT_EQ(trace.node_id, 65);
+    EXPECT_GE(trace.worker_id, 0);
+    EXPECT_LT(trace.worker_id, 2);
+    if (trace.epoch == hp_child.descriptor().id().value()) {
+      ++hp_epoch_count;
+    } else if (trace.epoch == rt_child.descriptor().id().value()) {
+      ++rt_epoch_count;
+    } else {
+      ADD_FAILURE() << "Observed an epoch outside the realtime child pair.";
+    }
+  }
+  EXPECT_EQ(hp_epoch_count, 1U);
+  EXPECT_EQ(rt_epoch_count, 1U);
 }
 
 /**

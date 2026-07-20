@@ -240,6 +240,9 @@ metadata 推导该关系。
   释放。Legacy scheduler reservation 在 teardown 期间比 concrete worker 活得更久：candidate
   rollback 只归还 candidate 容量，成功的 graph close 或 Host 销毁恰好一次归还 retained
   capacity，legacy replacement 需要 transient headroom。
+- 一旦内建 CPU 选择成功配置固定 pool，即使发起该选择的 load 随后在 document ingestion
+  阶段失败，未发布的 Graph runtime 与 legacy candidate owner/reservation 仍会回滚，而
+  Kernel-lifetime service 配置及其唯一 reservation 会继续保留。
 - 已 admission 的 scheduler batch 会在异常离开当前请求前 settle。
 - Operation callback 可能已经产生外部副作用；staged graph output 不会回滚这些副作用。
 - Scheduler-backed full HP work 不再借用 raw `TaskExecutor`。`TaskSubmissionPlan` 拥有其

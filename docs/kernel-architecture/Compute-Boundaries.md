@@ -294,6 +294,10 @@ It is not yet a general cancellation or graph-revision policy.
   concrete workers during teardown: candidate rollback returns only candidate
   capacity, successful graph close or Host destruction returns retained
   capacity exactly once, and legacy replacement requires transient headroom.
+- Once built-in CPU selection successfully configures the fixed pool, even if
+  that selecting load later fails during document ingestion, the unpublished
+  Graph runtime and legacy candidate owners/reservations roll back while the
+  Kernel-lifetime service configuration and its single reservation remain.
 - An admitted scheduler batch is settled before its exception escapes the
   current request.
 - Operation callbacks may already have external side effects; staged graph

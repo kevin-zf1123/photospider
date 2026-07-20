@@ -28,13 +28,13 @@ class TaskSubmissionPlan;
  *
  * ComputeRunId values are minted by the private ComputeRun implementation from
  * one process-lifetime monotonic sequence. Numeric access exists for logging,
- * tests, and later execution-service transport; callers must not derive
- * ordering, task identity, or policy from it.
+ * tests, and execution-service transport; callers must not derive ordering,
+ * task identity, or policy from it.
  *
  * @throws Nothing for copy, comparison, and value access.
- * @note Value zero is reserved as invalid and is never minted. Issue #68 may
- * move the sequence owner into ExecutionService without changing this value
- * contract.
+ * @note Value zero is reserved as invalid and is never minted. The current
+ * process-lifetime sequence is ownership-neutral: it owns no worker, scheduler,
+ * Graph, Run lifecycle, or resource policy.
  */
 class ComputeRunId {
  public:
@@ -229,7 +229,7 @@ class ComputeRunTaskIdentity {
  */
 struct ComputeRunSubmissionRevision {
   /**
-   * @brief GraphModel topology generation observed before HP planning.
+   * @brief GraphModel topology generation observed before domain planning.
    *
    * @note Parameter, cache, and runtime-state changes do not advance this
    * value under the current GraphModel contract.
@@ -241,8 +241,9 @@ struct ComputeRunSubmissionRevision {
  * @brief Quality carried independently from compute intent and QoS.
  *
  * @throws Nothing for value operations.
- * @note Current non-realtime HP Runs use full quality; issue #69 RT child Runs
- * use interactive quality without merging intent and quality.
+ * @note GlobalHighPrecision Runs, including the HP child of a realtime update,
+ * use full quality. The sibling RealTimeUpdate child uses interactive quality
+ * without merging intent and quality.
  */
 enum class ComputeRunQuality {
   /** @brief Full high-precision product output. */
@@ -303,7 +304,7 @@ struct ComputeRunSubmission {
   /** @brief Stable graph/session label supplied by the request boundary. */
   std::string graph_identity;
 
-  /** @brief Topology-only revision captured before HP planning. */
+  /** @brief Topology-only revision captured before single-domain planning. */
   ComputeRunSubmissionRevision revision;
 
   /** @brief Target graph node id requested by the caller. */
@@ -377,7 +378,8 @@ class ComputeRunDescriptor {
   /**
    * @brief Returns the captured quality marker.
    *
-   * @return Full for current Runs.
+   * @return Full for a GlobalHighPrecision Run or Interactive for a
+   * RealTimeUpdate child.
    * @throws Nothing.
    */
   ComputeRunQuality quality() const noexcept { return quality_; }
@@ -440,7 +442,7 @@ enum class ComputeRunPhase {
   /** @brief Descriptor exists but admission has not been recorded. */
   Created,
 
-  /** @brief ComputeService accepted the request for local HP execution. */
+  /** @brief ComputeService accepted this single-domain HP or RT child. */
   Admitted,
 
   /** @brief Scheduler-backed ready work is about to be submitted. */
@@ -704,31 +706,32 @@ class ComputeRunLease {
 };
 
 /**
- * @brief Request observer for HP execution descriptor, state, storage, and
- * arbiter.
+ * @brief Request observer for one single-domain HP or RT execution Run.
  *
  * ComputeRun creates the shared control block established by issues #66 and
  * #67. The observer settles service-level lifecycle, while non-forgeable
- * leases keep full-HP dispatcher state, owned callbacks, temporary results,
- * exception state, and standalone dirty HP staging alive independently from
- * the original observer.
+ * leases keep dispatcher state, owned callbacks, temporary results, exception
+ * state, and dirty HP staging alive independently from the original observer.
  *
- * @throws std::invalid_argument when constructed with non-HP intent,
- * nonpositive QoS weight, or zero maximum parallelism.
+ * @throws std::invalid_argument when constructed with unsupported intent,
+ * intent/quality mismatch, nonpositive QoS weight, or zero maximum parallelism.
  * @throws std::overflow_error when process-lifetime Run identities are
  * exhausted.
  * @throws std::bad_alloc when descriptor or storage ownership cannot allocate.
- * @note Full scheduler-backed HP work uses stable leases and composite task
- * identity. The separate dirty source-first executor family remains
- * synchronously drained until RT child Runs land.
+ * @note Built-in CPU full/dirty HP and RT work uses stable leases and composite
+ * task identity through ExecutionService. Legacy dirty schedulers retain the
+ * synchronously drained borrowed-handle path. Realtime transactions own
+ * separate current HP and RT child Runs.
  */
 class ComputeRun {
  public:
   /**
    * @brief Constructs one Run and mints a fresh identity.
    *
-   * @param submission Immutable request values captured before HP planning.
-   * @throws std::invalid_argument for unsupported intent or invalid QoS.
+   * @param submission Immutable request values captured before this domain's
+   * planning and preflight.
+   * @throws std::invalid_argument for unsupported intent, intent/quality
+   * mismatch, or invalid QoS.
    * @throws std::overflow_error when no non-reused Run id remains.
    * @throws std::bad_alloc when descriptor ownership cannot allocate.
    * @note Construction leaves the Run in Created with no terminal outcome or
@@ -922,7 +925,8 @@ class ComputeRun {
    * @return Mutable Run-owned write buffer.
    * @throws std::logic_error when a buffer already exists or Run is terminal.
    * @throws std::bad_alloc when buffer allocation fails.
-   * @note Paired realtime sibling staging remains outside the current Run.
+   * @note A realtime HP child may own this buffer; its RT sibling uses separate
+   * proxy staging outside the HP Run.
    */
   HighPrecisionDirtyWriteBuffer& emplace_dirty_hp_write_buffer(
       bool seed_existing_outputs);

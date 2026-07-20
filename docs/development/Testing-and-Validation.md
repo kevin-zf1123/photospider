@@ -340,8 +340,14 @@ Focused companion regressions own the remaining boundaries:
   post-write, post-flush, and post-close failure states. Each phase must return
   `GraphErrc::Io`, and the created destination demonstrates the documented
   non-atomic post-open behavior.
-- `test_scheduler_worker_budget` proves an invalid input document releases both
-  already-started scheduler reservations without publishing a session.
+- `test_scheduler_worker_budget` proves a fresh invalid CPU-selecting load does
+  not publish a session or create a per-Graph CPU owner, while preserving the
+  first fixed service pool for equal reconfiguration and a later valid Graph;
+  an unequal positive worker request remains rejected.
+- `test_compute_run` records complete action/node/worker/epoch tuples. It proves
+  two concurrent Runs that reuse local task id zero deliver only matching
+  Run/node epochs to their separate Hosts, and that realtime Full HP and
+  Interactive RT children retain distinct epochs while sharing one Host.
 - `test_ipc_protocol` proves exact Graph status propagation, one-call mutation
   behavior, and daemon session-name rollback after failed load.
 - `test_ipc_daemon` proves the real transport returns save `NotFound` and `Io`
@@ -352,15 +358,17 @@ Run the focused validation with:
 
 ```bash
 cmake --build build --target test_graph_document_errors test_host_adapter \
-  test_kernel_contracts test_scheduler_worker_budget test_ipc_protocol \
-  test_ipc_daemon -j
+  test_kernel_contracts test_scheduler_worker_budget test_compute_run \
+  test_ipc_protocol test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.*Reload*'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='GraphIoContract.Save*'
 ./build/tests/test_scheduler_worker_budget \
-  --gtest_filter=EmbeddedHostSchedulerBudget.InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce
+  --gtest_filter=EmbeddedHostSchedulerBudget.FreshInvalidYamlLoadRetainsFirstFixedPoolWithoutPerGraphOwner
+./build/tests/test_compute_run \
+  --gtest_filter='ExecutionService.OverlapsIndependentConcurrentRunIntervals:ExecutionService.DistinguishesRealtimeHpAndRtChildEpochsOnOneHost'
 ./build/tests/test_ipc_protocol \
   --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
 ./build/tests/test_ipc_daemon \

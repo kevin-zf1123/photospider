@@ -910,7 +910,7 @@ void expect_graph_absent(Host& host, const GraphSessionId& session) {
  * @throws std::bad_alloc If path or stream state allocation fails.
  * @throws std::runtime_error If the destination cannot be written completely.
  * @note A mapping root deterministically reaches GraphIO validation and raises
- * GraphErrc::InvalidYaml after schedulers have started.
+ * GraphErrc::InvalidYaml after execution ownership has been configured.
  */
 void write_invalid_graph_yaml(const std::filesystem::path& path) {
   std::filesystem::create_directories(path.parent_path());
@@ -1269,24 +1269,27 @@ TEST(EmbeddedHostSchedulerBudget,
 }
 
 /**
- * @brief Proves invalid YAML does not destroy or recreate the shared CPU pool.
+ * @brief Proves a fresh invalid load retains only the first fixed CPU pool.
  * @return Nothing.
- * @throws Nothing when load classification, fixed configuration, and a later
- * valid Graph agree; GoogleTest records mismatches.
- * @note A conflicting positive worker request must be rejected after the
- * initial CPU configuration, while the original one-worker service remains
- * usable by a later Graph.
+ * @throws std::bad_alloc If fixture, Host, path, scheduler, or result storage
+ * allocation fails.
+ * @throws std::filesystem::filesystem_error If fixture directory creation
+ * fails.
+ * @throws std::runtime_error If the deterministic YAML fixture cannot be
+ * written completely.
+ * @note The invalid document is the first CPU-selecting load on a default Host.
+ * Zero reconfiguration must remain reusable, while at least one unequal
+ * positive request must conflict with the resolved fixed count. A legacy CPU
+ * construction hook guards both failed and valid loads, proving neither owns a
+ * per-Graph built-in CPU scheduler.
  */
 TEST(EmbeddedHostSchedulerBudget,
-     InvalidYamlPreservesFixedSharedPoolForLaterGraph) {
+     FreshInvalidYamlLoadRetainsFirstFixedPoolWithoutPerGraphOwner) {
   ScopedSchedulerBudgetTempDir temp(
       "photospider_invalid_yaml_shared_pool_test");
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
 
-  const VoidResult configured =
-      configure_budget_scheduler(*host, "cpu_work_stealing", 1U);
-  ASSERT_TRUE(configured.status.ok) << configured.status.message;
   const GraphSessionId rejected_id{"invalid_yaml_rejected"};
   GraphLoadRequest request =
       make_budget_load_request(temp.root(), rejected_id.value);
@@ -1295,26 +1298,55 @@ TEST(EmbeddedHostSchedulerBudget,
   write_invalid_graph_yaml(yaml_path);
   request.yaml_path = yaml_path.string();
 
-  const Result<GraphSessionId> rejected = host->load_graph(request);
+  CpuWorkerCreationFailureProbe worker_probe;
+  const testing::SchedulerFailureInjectionHook worker_hook{
+      &worker_probe, fail_first_cpu_worker_creation};
+  {
+    ScopedBorrowedSchedulerHook<testing::SchedulerFailureInjectionHook> guard(
+        testing::set_cpu_scheduler_failure_injection_hook, &worker_hook);
+    const Result<GraphSessionId> rejected = host->load_graph(request);
 
-  EXPECT_FALSE(rejected.status.ok);
-  EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Graph);
-  EXPECT_EQ(checked_graph_error_code(rejected.status), GraphErrc::InvalidYaml);
-  EXPECT_EQ(rejected.status.name, "invalid_yaml");
-  expect_graph_absent(*host, rejected_id);
+    EXPECT_FALSE(rejected.status.ok);
+    EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Graph);
+    EXPECT_EQ(checked_graph_error_code(rejected.status),
+              GraphErrc::InvalidYaml);
+    EXPECT_EQ(rejected.status.name, "invalid_yaml");
+    expect_graph_absent(*host, rejected_id);
 
-  const VoidResult conflicting =
-      configure_budget_scheduler(*host, "cpu_work_stealing", 2U);
-  EXPECT_FALSE(conflicting.status.ok);
-  EXPECT_EQ(conflicting.status.domain, OperationErrorDomain::Graph);
-  EXPECT_EQ(checked_graph_error_code(conflicting.status),
-            GraphErrc::InvalidParameter);
+    const VoidResult first_same =
+        configure_budget_scheduler(*host, "cpu_work_stealing", 0U);
+    ASSERT_TRUE(first_same.status.ok) << first_same.status.message;
+    const VoidResult second_same =
+        configure_budget_scheduler(*host, "cpu_work_stealing", 0U);
+    ASSERT_TRUE(second_same.status.ok) << second_same.status.message;
 
-  const GraphSessionId valid_id{"valid_after_invalid_yaml"};
-  const Result<GraphSessionId> valid =
-      host->load_graph(make_budget_load_request(temp.root(), valid_id.value));
-  ASSERT_TRUE(valid.status.ok) << valid.status.message;
-  EXPECT_TRUE(host->close_graph(valid_id).status.ok);
+    const VoidResult positive_one =
+        configure_budget_scheduler(*host, "cpu_work_stealing", 1U);
+    if (positive_one.status.ok) {
+      const VoidResult repeated_one =
+          configure_budget_scheduler(*host, "cpu_work_stealing", 1U);
+      ASSERT_TRUE(repeated_one.status.ok) << repeated_one.status.message;
+      const VoidResult conflicting_two =
+          configure_budget_scheduler(*host, "cpu_work_stealing", 2U);
+      EXPECT_FALSE(conflicting_two.status.ok);
+      EXPECT_EQ(conflicting_two.status.domain, OperationErrorDomain::Graph);
+      EXPECT_EQ(checked_graph_error_code(conflicting_two.status),
+                GraphErrc::InvalidParameter);
+      EXPECT_EQ(conflicting_two.status.name, "invalid_parameter");
+    } else {
+      EXPECT_EQ(positive_one.status.domain, OperationErrorDomain::Graph);
+      EXPECT_EQ(checked_graph_error_code(positive_one.status),
+                GraphErrc::InvalidParameter);
+      EXPECT_EQ(positive_one.status.name, "invalid_parameter");
+    }
+
+    const GraphSessionId valid_id{"valid_after_invalid_yaml"};
+    const Result<GraphSessionId> valid =
+        host->load_graph(make_budget_load_request(temp.root(), valid_id.value));
+    ASSERT_TRUE(valid.status.ok) << valid.status.message;
+    EXPECT_TRUE(host->close_graph(valid_id).status.ok);
+  }
+  EXPECT_EQ(worker_probe.entrances.load(std::memory_order_relaxed), 0U);
 }
 
 /**

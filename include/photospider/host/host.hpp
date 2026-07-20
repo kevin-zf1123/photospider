@@ -258,27 +258,29 @@ class PHOTOSPIDER_API Host {
    * @param request Session name, root, YAML, config, and cache-root values.
    * @return Loaded session id on success; `GraphErrc::InvalidParameter` for a
    *         duplicate session or scheduler-request validation;
-   *         `GraphErrc::ComputeError` when the complete HP+RT scheduler pair
-   *         cannot fit the process worker budget; `GraphErrc::Io` for an
-   *         explicit missing/unreadable/uncopyable source or session-path
-   *         failure; `GraphErrc::InvalidYaml` for syntax, root-shape,
-   *         duplicate-id, or node-schema rejection;
+   *         `GraphErrc::ComputeError` when the first fixed CPU pool or a
+   *         complete legacy HP+RT scheduler pair cannot fit the process worker
+   *         budget; `GraphErrc::Io` for an explicit
+   *         missing/unreadable/uncopyable source or session-path failure;
+   *         `GraphErrc::InvalidYaml` for syntax, root-shape, duplicate-id, or
+   *         node-schema rejection;
    *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
    *         rejection; or `GraphErrc::Unknown` for an unexpected internal
    *         failure.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The returned session is a value label, never a runtime pointer. The
-   *       embedded implementation plans both scheduler intents and reserves
-   *       their aggregate capacity before constructing either candidate. A
-   *       conforming implementation must not leave a scheduler candidate,
-   *       worker reservation, or newly published session when load returns
-   *       failure or an exception propagates. Empty `yaml_path` loads existing
-   *       session-local content or intentionally creates an empty graph;
-   *       nonempty `yaml_path` is explicit and never falls back. Nonempty
-   *       relative request paths use the caller process working directory; an
-   *       IPC implementation resolves them in its client process before
-   *       sending the typed request.
+   *       embedded implementation plans both scheduler intents before document
+   *       ingestion. The first built-in CPU selection may configure the
+   *       Host-lifetime ExecutionService and retain its single pool reservation
+   *       even if this Graph load later fails. Graph candidates, legacy
+   *       scheduler candidates and reservations, and session publication still
+   *       roll back transactionally; built-in CPU routes create no per-Graph
+   *       scheduler owner. Empty `yaml_path` loads existing session-local
+   *       content or intentionally creates an empty graph; nonempty `yaml_path`
+   *       is explicit and never falls back. Nonempty relative request paths use
+   *       the caller process working directory; an IPC implementation resolves
+   *       them in its client process before sending the typed request.
    */
   virtual Result<GraphSessionId> load_graph(
       const GraphLoadRequest& request) = 0;

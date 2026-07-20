@@ -100,10 +100,10 @@ class ComputeService {
    * IntentUpdateCoordinator with dirty_roi forwarded unchanged.
    *
    * @note The request does not own GraphModel, GraphRuntime, schedulers, or
-   * cache entries. Non-realtime HP entry points copy graph_identity and qos
-   * into one request-owned ComputeRun before planning. All graph mutation
-   * happens inside the compute call selected by compute() or
-   * compute_parallel().
+   * cache entries. Every created Run snapshots graph_identity and qos before
+   * planning: one Run for a standalone HP request and one immutable copy in
+   * each HP/RT child of a realtime request. All graph mutation happens inside
+   * the compute call selected by compute() or compute_parallel().
    */
   struct Request {
     /** @brief Target graph node id requested by the caller. */
@@ -122,7 +122,7 @@ class ComputeService {
     std::optional<PixelRect> dirty_roi;
 
     /**
-     * @brief Stable graph/session identity captured in non-realtime HP Runs.
+     * @brief Stable graph/session identity captured in every created Run.
      *
      * @note Kernel supplies its session label. Direct private service callers
      * may leave this empty without manufacturing address-based identity.
@@ -142,16 +142,23 @@ class ComputeService {
   /**
    * @brief Runtime policy for one ComputeService execution path.
    *
-   * ExecutionStrategy captures whether the caller has selected a
-   * scheduler-backed path and, when so, which runtime owns the scheduler task
-   * pools. It keeps execution policy separate from the semantic request so the
-   * same Request can be used by both compute() and compute_parallel().
+   * ExecutionStrategy captures whether the caller selected a scheduler-backed
+   * path and, when so, which runtime supplies Graph lifecycle, binding lookup,
+   * and worker-facing observation. It keeps execution policy separate from the
+   * semantic request so the same Request can be used by both compute() and
+   * compute_parallel().
    *
    * @note A null runtime is valid only when use_parallel_executor is false.
    * Parallel HP or RT scheduling validates the runtime before dispatching work.
    */
   struct ExecutionStrategy {
-    /** @brief Runtime that owns scheduler task pools, or null for inline work.
+    /**
+     * @brief Runtime providing bindings and observation, or null for inline
+     * work.
+     *
+     * @note Legacy routes borrow Graph-owned scheduler pools through this
+     * runtime. An ownerless built-in CPU binding instead dispatches through the
+     * injected process ExecutionService.
      */
     GraphRuntime* runtime = nullptr;
 
@@ -169,8 +176,9 @@ class ComputeService {
    * @param execution_service Explicit process CPU execution owner.
    * @throws Nothing directly; referenced services must already be valid.
    * @note ComputeService does not own the supplied services and must not
-   * outlive them. The execution service is injected even when a request uses
-   * an unmigrated inline, plugin, GPU, dirty, or RT path.
+   * outlive them. Built-in CPU full, dirty, and RT paths share the injected
+   * execution service; inline work and legacy plugin/GPU/serial routes may
+   * execute without it.
    */
   ComputeService(GraphTraversalService& traversal, GraphCacheService& cache,
                  GraphEventService& events,
@@ -210,7 +218,9 @@ class ComputeService {
    *
    * @param graph Graph whose node caches, timing, and inspection state are
    * read and mutated.
-   * @param runtime Runtime that owns intent-specific scheduler task pools.
+   * @param runtime Runtime providing Graph lifecycle, intent bindings, and
+   * worker-facing observation. Legacy bindings expose Graph-owned schedulers;
+   * ownerless built-in CPU bindings use the injected ExecutionService.
    * @param request Target, cache, telemetry, intent, and dirty ROI options.
    * @return Mutable output selected by the request. HP outputs are owned by
    * graph node state; RT dirty outputs are owned by the runtime proxy graph.
@@ -386,7 +396,9 @@ class ComputeService {
    * @brief Executes one full scheduler-backed HP request through its Run.
    *
    * @param graph Graph whose target HP output is computed.
-   * @param runtime Runtime owning the borrowed GlobalHighPrecision scheduler.
+   * @param runtime Runtime providing the GlobalHighPrecision binding and
+   * worker-facing observation. The binding may be ownerless for built-in CPU
+   * service execution or expose a borrowed legacy scheduler.
    * @param request Full HP target, cache, and telemetry options.
    * @param run Request observer for leased plan, runner, callback, temporary
    * output, exception, and lifecycle state.

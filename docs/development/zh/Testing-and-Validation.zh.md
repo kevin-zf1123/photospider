@@ -253,8 +253,12 @@ non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯
 - `test_kernel_contracts` 驱动真实 `GraphIOService` stream 进入 post-write、post-flush 与
   post-close failure state。每个 phase 都必须返回 `GraphErrc::Io`；已创建的 destination 证明
   文档所述 non-atomic post-open 行为。
-- `test_scheduler_worker_budget` 证明无效 input document 会释放两个已启动的 scheduler
-  reservation，且不发布 session。
+- `test_scheduler_worker_budget` 证明 fresh invalid CPU-selecting load 不会发布 session，也不会
+  创建 per-Graph CPU owner；同时，它会保留首次固定 service pool，允许相同配置复用及后续有效
+  Graph load，并继续拒绝不相等的正 worker 请求。
+- `test_compute_run` 会记录完整的 action/node/worker/epoch tuple。它证明两个复用 local task id
+  zero 的并发 Run 只会向各自 Host 交付匹配的 Run/node epoch；还证明 realtime Full HP 与
+  Interactive RT child 在共享同一 Host 时仍保留不同 epoch。
 - `test_ipc_protocol` 证明精确 Graph status 传递、mutation 只调用一次，以及 failed load 后
   daemon session-name rollback。
 - `test_ipc_daemon` 证明真实 transport 精确返回 save `NotFound` 与 `Io`，destination failure 后
@@ -264,15 +268,17 @@ non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯
 
 ```bash
 cmake --build build --target test_graph_document_errors test_host_adapter \
-  test_kernel_contracts test_scheduler_worker_budget test_ipc_protocol \
-  test_ipc_daemon -j
+  test_kernel_contracts test_scheduler_worker_budget test_compute_run \
+  test_ipc_protocol test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.*Reload*'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='GraphIoContract.Save*'
 ./build/tests/test_scheduler_worker_budget \
-  --gtest_filter=EmbeddedHostSchedulerBudget.InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce
+  --gtest_filter=EmbeddedHostSchedulerBudget.FreshInvalidYamlLoadRetainsFirstFixedPoolWithoutPerGraphOwner
+./build/tests/test_compute_run \
+  --gtest_filter='ExecutionService.OverlapsIndependentConcurrentRunIntervals:ExecutionService.DistinguishesRealtimeHpAndRtChildEpochsOnOneHost'
 ./build/tests/test_ipc_protocol \
   --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
 ./build/tests/test_ipc_daemon \

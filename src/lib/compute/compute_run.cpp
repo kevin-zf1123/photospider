@@ -25,8 +25,8 @@ namespace {
  * @return Fresh non-zero opaque id value.
  * @throws std::overflow_error before the atomic sequence would wrap or reuse a
  * value.
- * @note This atomic owns no scheduler, worker, graph, Run, or resource. Issue
- * #68 may relocate value minting into ExecutionService.
+ * @note This ownership-neutral atomic owns no scheduler, worker, Graph, Run
+ * lifecycle, or resource policy.
  */
 uint64_t mint_compute_run_id_value() {
   static std::atomic<uint64_t> next_id{1};
@@ -46,7 +46,7 @@ uint64_t mint_compute_run_id_value() {
 /**
  * @brief Validates current single-domain Run values before descriptor creation.
  *
- * @param submission Candidate HP Run inputs.
+ * @param submission Candidate single-domain HP or RT child inputs.
  * @return Nothing.
  * @throws std::invalid_argument for unsupported intent, mismatched quality,
  * zero QoS weight, or zero maximum parallelism.
@@ -208,8 +208,10 @@ ComputeRunControl::~ComputeRunControl() noexcept = default;
 /**
  * @brief Constructs one request observer and shared domain Run control block.
  *
- * @param submission Descriptor inputs captured before HP planning.
- * @throws std::invalid_argument for unsupported intent or invalid QoS.
+ * @param submission Descriptor inputs captured before single-domain planning
+ * and preflight.
+ * @throws std::invalid_argument for unsupported intent, intent/quality
+ * mismatch, or invalid QoS.
  * @throws std::overflow_error if Run identity allocation is exhausted.
  * @throws std::bad_alloc if descriptor ownership cannot allocate.
  * @note The fresh id is minted only after semantic validation succeeds; no

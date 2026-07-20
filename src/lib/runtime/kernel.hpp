@@ -251,26 +251,30 @@ class Kernel {
    * @throws std::bad_alloc if path, runtime, scheduler, graph, or diagnostic
    *         allocation exhausts memory.
    * @throws GraphError with `GraphErrc::InvalidParameter` when either complete
-   *         scheduler intent cannot be planned, becomes unavailable, or
-   *         returns no scheduler instance before installation;
+   *         scheduler intent cannot be planned, becomes unavailable, or a
+   *         legacy plan returns no scheduler instance before installation;
    *         `GraphErrc::ComputeError` when the worker budget cannot admit the
-   *         scheduler pair; `GraphErrc::Io` for explicit-source or session
-   *         filesystem failure; `GraphErrc::InvalidYaml` for syntax/schema
-   *         rejection; `GraphErrc::MissingDependency` or `GraphErrc::Cycle`
-   *         for topology rejection; and `GraphErrc::Unknown` for unexpected
+   *         first fixed CPU pool or aggregate legacy scheduler pair;
+   *         `GraphErrc::Io` for explicit-source or session filesystem failure;
+   *         `GraphErrc::InvalidYaml` for syntax/schema rejection;
+   *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
+   *         rejection; and `GraphErrc::Unknown` for unexpected
    *         document-ingestion failures.
    * @throws std::exception for scheduler/runtime startup failures not
    *         classified by Kernel; InteractionService normalizes them before
    *         the embedded Host boundary.
-   * @note Scheduler planning and pair reservation complete before either
-   *       scheduler is constructed, attached, or started. An empty yaml_path
-   *       loads existing `<root_dir>/<name>/content.yaml` or intentionally
-   *       publishes an empty graph; a nonempty source is explicit and never
-   *       falls back. Complete document validation precedes map insertion. The
-   *       return label is allocated before the runtime enters the owned graph
-   *       map, and returning it after insertion uses only noexcept moves, so a
-   *       failure or propagated exception never leaves a newly published
-   *       session or scheduler reservation.
+   * @note Scheduler planning completes before document ingestion. The first
+   *       built-in CPU selection may configure the Kernel-lifetime
+   *       ExecutionService and retain its single pool reservation even if this
+   *       Graph load later fails. An unpublished runtime, every legacy
+   *       scheduler candidate and reservation, and session publication still
+   *       roll back transactionally; built-in CPU routes create no per-Graph
+   *       scheduler owner. An empty yaml_path loads existing
+   *       `<root_dir>/<name>/content.yaml` or intentionally publishes an empty
+   *       graph; a nonempty source is explicit and never falls back. Complete
+   *       document validation precedes map insertion. The return label is
+   *       allocated before the runtime enters the owned graph map, and
+   *       returning it after insertion uses only noexcept moves.
    */
   std::optional<std::string> load_graph(const std::string& name,
                                         const std::string& root_dir,
