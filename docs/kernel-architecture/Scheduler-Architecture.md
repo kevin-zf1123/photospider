@@ -20,8 +20,11 @@ create -> attach(host_context) -> start -> submit ready callbacks -> shutdown ->
 ```
 
 `GraphRuntime` implements and owns the host context plus this lifecycle ordering
-for registered schedulers. A
-scheduler is attached before it starts; `GraphRuntime::start()` starts
+for registered per-Graph schedulers. The issue #68 `ExecutionService` owns one
+additional concrete CPU scheduler attached to a stable service host proxy; the
+proxy delegates trace/TLS observations to the active Graph only while one
+synchronous service Run is executing. A per-Graph scheduler is attached before
+it starts; `GraphRuntime::start()` starts
 previously registered schedulers, `GraphRuntime::set_scheduler()` starts a new
 scheduler only after attach when the runtime is already running, and
 `GraphRuntime::stop()` shuts registered schedulers down. `Kernel` bootstrap code
@@ -111,12 +114,19 @@ either wholly committed or wholly absent. The executor's virtual destructor is
 protected: scheduler code may run the borrowed object but cannot delete
 compute-owned storage through its base pointer.
 
-Non-realtime scheduler-backed full HP work uses a different current path.
+Non-realtime scheduler-backed full HP work uses different current paths.
 `ComputeRun` shared control owns the `TaskSubmissionPlan`, dependency state,
-runner, and temporary slots. The dispatcher starts an empty borrowed-handle
-batch only to establish the scheduler epoch, then submits every real ready task
-as an owned callback retaining a non-forgeable `ComputeRunLease` and
-`(RunId, RunLocalTaskId)`. No raw `TaskExecutor` is borrowed by full HP work,
+runner, and temporary slots. For built-in CPU planning, the dispatcher creates
+one move-only `ReadyTaskSubmission` per dependency-ready task. Each value owns
+immutable request/trace metadata, a matching non-forgeable `ComputeRunLease`,
+`(RunId, RunLocalTaskId)`, and an executable. The injected
+`ExecutionService` accepts only those values for its active Run and rejects
+borrowed handles or anonymous callbacks.
+
+Serial, GPU, and plugin full HP retain the legacy owned-callback path. That path
+starts an empty borrowed-handle batch only to establish the scheduler epoch,
+then submits every real ready task as an owned callback retaining the same
+lease and identity. No raw `TaskExecutor` is borrowed by either full-HP path,
 and matching task identity gates failure publication.
 
 Every accepted full-HP bootstrap or planned-task callback retires exactly the
@@ -187,12 +197,14 @@ Shutdown remains a separate lifecycle transition; the GPU pipeline publishes
 its stop state while holding the CPU idle-queue, GPU idle-queue, and
 completion-wait mutexes before notifying and joining workers.
 
-`GraphRuntime` stores a scheduler map keyed by `ComputeIntent` and current
-compute selects either the `GlobalHighPrecision` or `RealTimeUpdate` entry.
-The key selects a per-graph scheduler object; it does not itself define QoS,
+`GraphRuntime` stores a scheduler map keyed by `ComputeIntent`. Each private map
+binding atomically pairs the transitional scheduler owner with either the
+per-Graph execution route or the built-in process CPU route and exact grant.
+Kernel load and replacement derive that route from the frozen
+`SchedulerPlan` construction branch, never from a display name. Direct runtime
+installation defaults to the legacy route. The key and route do not define QoS,
 deadline, fairness, cancellation, resource reservation, or a process-wide
-priority class. Those concepts are not inferred from `ComputeIntent` in the
-current contract.
+priority class. Those concepts are not inferred from `ComputeIntent`.
 
 Schedulers do not pull plans. `ComputeTaskDispatcher` discovers readiness and
 pushes concrete callbacks or borrowed task handles through
@@ -219,11 +231,12 @@ collaborators: `FullTaskGraphExpander`, `NodeCacheTaskGraphPruner`,
 `DirtyRegionPlanner`, `DirtySnapshotTaskGraphPruner`,
 `IntentUpdateCoordinator`, and `ComputeTaskDispatcher`. After pruning,
 `ComputeTaskDispatcher` materializes either the node/cache-pruned task graph or
-the dirty-clipped update work set into concrete tasks and submits ready work
-through the configured `IScheduler` instance for the relevant `ComputeIntent`
-via `SchedulerTaskRuntime`. For current non-realtime full HP work, the request
-Run owns the materialized plan and temporary slots while the dispatcher retains
-dependency/ready/completion semantics.
+the dirty-clipped update work set into concrete tasks. For current built-in CPU
+non-realtime full HP it submits ready values through `ExecutionService`; for
+serial, GPU, plugin, dirty, and realtime routes it uses the configured
+per-Graph `IScheduler` via `SchedulerTaskRuntime`. The request Run owns the
+materialized full-HP plan and temporary slots while the dispatcher retains
+dependency/ready/completion semantics on both physical routes.
 
 `GraphRuntime` owns graph state, the `GraphStateExecutor`, scheduler
 registration, events, and platform resources. It does not expose a general
@@ -263,7 +276,7 @@ named for RT work; normal-priority work may enter the GPU queue when
 source batches currently use high priority, and both downstream groups use
 normal priority, so queue naming must not be interpreted as an intent contract.
 
-### Per-graph physical resource ownership
+### Transitional per-graph ownership and the CPU service slice
 
 Each `GraphRuntime` owns a scheduler object for HP and another for RT. Graph
 load creates both objects and runtime start starts both. A configured worker
@@ -284,10 +297,20 @@ at admission time. Their absolute current instance charge is therefore nine.
 `serial_debug` is the sole zero-slot exception and executes synchronously on
 the calling thread.
 
-These schedulers still own physical resources per graph and intent; there is no
-shared worker pool or cross-graph fairness mechanism. The current containment
-layer instead uses one process-lifetime `SchedulerWorkerBudget` with a fixed
-32-slot ceiling shared by every embedded `Host` and `Kernel`. Graph load plans
+These schedulers still own physical resources per graph and intent. In
+addition, issue #68 explicitly composes one private `ExecutionService` and
+routes only built-in CPU non-realtime, non-dirty full HP to its concrete CPU
+runtime. The service holds a mutex across complete Run setup, initial and
+dependent ready submission, exception-fenced wait, and host-proxy unbind, so
+there is at most one active Run. It lazily recreates its pool when the trusted
+resolved grant changes. It provides neither concurrent multi-Graph sharing nor
+fairness.
+
+The Graph-owned built-in CPU scheduler remains allocated and charged during
+this transitional slice even though migrated full-HP work executes on the
+service. The current containment layer uses one process-lifetime
+`SchedulerWorkerBudget` with a fixed 32-slot ceiling shared by every embedded
+`Host` and `Kernel`. Graph load plans
 both intent schedulers and reserves their combined charge atomically before
 constructing either. The returned pair contains one move-only reservation per
 intent; each remains outside the concrete scheduler during construction, then
@@ -309,9 +332,11 @@ remain a best-effort sweep; their failures do not turn the committed
 replacement into a reported failure, and destruction returns the displaced
 reservation exactly once. This 32-slot ledger bounds only workers represented
 by built-in planning or the trusted plugin grant. It does not bound graph-state
-executors, daemon threads, frontend helpers, operation-internal threads, or all
-operating-system threads in the process. `GraphStateExecutor` has a separate
-structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
+executors, the new service pool, daemon threads, frontend helpers,
+operation-internal threads, or all operating-system threads in the process.
+`GraphStateExecutor` has a separate structural bound: one worker and at most 64
+waiting callbacks per loaded Graph. Issue #69 owns removal of the duplicate
+per-Graph CPU workers and true multi-Graph CPU sharing.
 
 ## Plugin Discovery vs Graph Selection
 
@@ -512,8 +537,8 @@ whole-process operating-system thread snapshot.
 ## Boundaries and Rationale
 
 - `IScheduler` is the current formal public scheduler interface.
-- Concrete ready parallel work is routed through scheduler-owned task runtimes;
-  plans are not pulled by schedulers.
+- Concrete ready parallel work is routed through the injected service or
+  per-Graph scheduler task runtimes; plans are not pulled by either.
 - Graph-state commands and visible graph compute requests remain behind
   a one-worker, 64-waiting-task `GraphStateExecutor` FIFO lane.
 - Scheduler runtimes are ready-task-only: they receive concrete callbacks with
@@ -525,11 +550,12 @@ whole-process operating-system thread snapshot.
 - Scheduler attachment is limited to `SchedulerHostContext`; the context does
   not expose graph/runtime ownership or native backend handles.
 - Per-instance worker grants and the shared 32-slot admission ledger contain
-  current per-graph ownership; they do not create a shared executor or claim a
-  whole-process OS-thread limit.
-- The current interface combines policy and physical worker ownership. This
-  document describes that executable contract; it does not present a shared
-  executor as current behavior.
+  transitional per-graph ownership; they do not admit or count the service
+  pool and do not claim a whole-process OS-thread limit.
+- The current `IScheduler` interface still combines policy and physical worker
+  ownership. The issue #68 service reuses one concrete built-in CPU scheduler
+  behind a private ready-submission boundary; it is not yet the multi-Run
+  executor, ledger, or policy architecture.
 
 The ready-task-only boundary lets scheduler ordering, worker lifecycle, and
 failure publication be tested without graph topology or cache ownership. The
@@ -540,8 +566,8 @@ governs the current dispatch separation. [ADR 0003](../adr/0003-process-owned-ex
 records the high-level replacement direction;
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 fixes its detailed Run, ready-task, completion, resource, and lifecycle
-ownership; the bounded issue #67 HP Run lease and full-HP
-completion-isolation slice is current.
+ownership; the bounded issue #68 single-Run CPU service and ready-submission
+slice is current.
 The exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 summarizes the accepted target without changing this current contract.
@@ -553,6 +579,7 @@ summarizes the accepted target without changing this current contract.
 - `include/photospider/scheduler/scheduler_plugin_api.hpp`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/compute/execution_service.*`
 - `src/lib/scheduler/cpu_work_stealing_scheduler.*`
 - `src/lib/scheduler/gpu_pipeline_scheduler.*`
 - `src/lib/scheduler/scheduler_factory.*`

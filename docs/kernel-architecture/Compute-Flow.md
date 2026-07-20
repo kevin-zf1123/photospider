@@ -22,7 +22,9 @@ CLI / TUI
 
 `Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, the
 per-graph `GraphStateExecutor`, event service, platform context, and scheduler
-instances.
+instances. The embedded composition root also creates one private CPU
+`ExecutionService` before Kernel; Kernel injects that owner into each
+request-local `ComputeService`.
 
 `ps::Host` is the public frontend-facing interface. The embedded Host adapter
 copies public request/result values and uses the internal `InteractionService`
@@ -68,8 +70,11 @@ asynchronous compute request. Only built-in `serial_debug` is a zero-slot
 scheduler; built-in CPU and ABI v2 plugin schedulers charge the resolved grant,
 while the built-in GPU/heterogeneous scheduler also charges its potential
 device worker.
-This admission step bounds current scheduler-owned workers, not callback count
-or all threads used by compute and its operations.
+This admission step bounds current Graph-owned scheduler workers, not callback
+count or all threads used by compute and its operations. In particular, issue
+#68's injected CPU service pool is not charged by this transitional ledger;
+the still-allocated per-Graph CPU scheduler retains the existing charge until
+issue #69 removes duplicate owners.
 
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.
@@ -91,7 +96,7 @@ ComputeService facade
   -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
   -> Run-owned TaskSubmissionPlan / ComputeTaskDispatcher
-  -> ready-task scheduler dispatch
+  -> ready-task ExecutionService or legacy scheduler dispatch
 ```
 
 Before any of those planning steps, each non-realtime HP service call creates
@@ -101,11 +106,14 @@ the current topology generation as a submission revision. That topology value
 is provenance only, not the authoritative graph-wide `GraphRevision` or a
 commit predicate. Sequential, scheduler-backed, and explicit dirty HP variants
 share this boundary. On the scheduler-backed full HP path, shared Run control
-owns the materialized plan and runner; every real ready callback retains a
+owns the materialized plan and runner; every real ready task retains a
 non-forgeable Run lease and `(RunId, RunLocalTaskId)` identity through
-execution, dependency release, validation, and commit. Explicit dirty HP keeps
-its separate synchronous borrowed-handle path. `RealTimeUpdate` creates no
-mixed Run or child Runs; paired Run/`RunGroup` settlement remains future work.
+execution, dependency release, validation, and commit. Built-in CPU full HP
+packages each dependency-ready task as a move-only `ReadyTaskSubmission` and
+uses the injected service's single-Run CPU batch. Serial, GPU, and plugin full
+HP retain the lease-backed callback path. Explicit dirty HP keeps its separate
+synchronous borrowed-handle path. `RealTimeUpdate` creates no mixed Run or child
+Runs; paired Run/`RunGroup` settlement remains future work.
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
@@ -162,8 +170,10 @@ The kernel recognizes two formal compute intents:
 | `RealTimeUpdate` | Interactive realtime update. Requires a dirty ROI and enables the HP/RT dual path. |
 
 The intent model is formal. `ComputeService` remains the compute facade and
-planning boundary, while parallel planned work is dispatched through the
-configured `IScheduler` task runtime for each intent.
+planning boundary. Private scheduler-route metadata pairs the configured
+scheduler owner with its physical path: built-in CPU non-dirty full HP uses the
+injected service, while other full-HP, dirty, and realtime routes use the
+configured per-Graph `IScheduler` task runtime.
 
 HP/RT dual path semantics belong to realtime intent, not to the parallel
 execution mode. In realtime mode, HP computes the full-size authoritative node
@@ -199,20 +209,24 @@ Parallel compute derives a `ComputePlan` by expanding the full task graph and
 then pruning it with `NodeCacheTaskGraphPruner` from `topo_postorder_from`.
 `ComputeDispatchPlanBuilder` records that cache-pruned plan for inspection.
 The request `ComputeRun` owns the `TaskSubmissionPlan` that materializes the
-plan's `ComputeTaskGraph` into scheduler closures, dependency counters, ready
-handles, operation variants, and temporary result slots. The dispatcher then
-submits ready node tasks through the configured scheduler's
-`SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and increment
-scheduler-owned completion counters.
+plan's `ComputeTaskGraph` into dependency counters, ready values, operation
+variants, and temporary result slots. For a built-in CPU route the dispatcher
+creates immutable, lease-backed `ReadyTaskSubmission` values and submits one
+initial ready batch to the injected `ExecutionService`; dependent completion
+creates further submissions through the same active Run. Legacy full-HP routes
+retain owned scheduler callbacks. Tiled operations may spawn micro-tasks and
+retire the selected runtime's logical completion count.
 
-The selected scheduler has already been admitted for its full lifetime before
-these callbacks are submitted. A running compute therefore consumes no new
-ledger slots. Scheduler inspection and replacement share the per-graph
-`GraphStateExecutor` boundary with compute; replacement cannot overlap a
-compute callback sequence, and it must reserve candidate transient headroom
-while the old scheduler remains live. Failed candidate planning, attach, or
-start leaves the old scheduler and its compute behavior unchanged and returns
-only candidate capacity.
+The selected transitional scheduler has already been admitted for its full
+lifetime before ready work is submitted. A running compute therefore consumes
+no new ledger slots. The current service likewise performs no ledger
+admission; it serializes one Run and reconfigures its concrete CPU runtime to
+the exact trusted built-in grant. Scheduler inspection and replacement share
+the per-graph `GraphStateExecutor` boundary with compute; replacement cannot
+overlap a compute callback sequence, and it publishes scheduler ownership plus
+private route metadata in one transaction. Failed candidate planning, attach,
+or start leaves the old scheduler, route, and compute behavior unchanged and
+returns only candidate capacity.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
 node-id mapping, temporary-result indexing, event logging, exception

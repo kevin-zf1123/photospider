@@ -72,14 +72,15 @@ The 32 slots cover only accounted scheduler-owned workers. They do not count
 graph-state executors, which have their separate one-worker-per-Graph bound;
 nor do they count operation-internal threads, daemon/frontend workers, or all
 OS threads. They provide neither shared execution nor fairness. The current
-issue #67 `ComputeRun` slice adds stable lifetime and full-HP composite
-completion isolation to the earlier request-owned HP identity/state/storage,
-but does not replace this transitional ledger or worker-owning ABI. The later
-`ExecutionService` work must replace those owners as complete migrations, not
-layer permanent adapters over them. In particular, the shared executor slices
-tracked by [#68](https://github.com/kevin-zf1123/photospider/issues/68)
-and [#69](https://github.com/kevin-zf1123/photospider/issues/69) remove
-per-Graph workers rather than treating the current ledger as the final pool.
+issue #68 slice adds an explicitly injected CPU `ExecutionService`, move-only
+ready submissions, and one complete Run at a time to the earlier Run lifetime
+and completion isolation. It deliberately does not replace this transitional
+ledger or remove per-Graph scheduler owners: the migrated service pool and the
+still-charged Graph-owned CPU pool coexist temporarily. The shared-executor
+slice tracked by
+[#69](https://github.com/kevin-zf1123/photospider/issues/69) removes that
+duplication and introduces multi-Graph/HP/RT CPU sharing rather than treating
+the current ledger as the final pool.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 is authoritative for the detailed target Run lifetime, owner boundaries,
 resource mint, close/shutdown scope, and delivery dependencies; it does not make
@@ -160,18 +161,20 @@ detail.
 
 ### `ComputeRun`
 
-The current issue #67 slice implements exactly one private Run around every
+The current issue #68 slice implements exactly one private Run around every
 non-realtime HP service call. It captures a process-lifetime opaque id, session
 identity, topology-only submission revision, target, HP intent, full quality,
 and explicit QoS; owns monotonic phase and exact-once terminal state; and owns
 the full scheduler submission plan/temporary results or standalone dirty HP
 staging through shared control. Scheduler-backed full HP work retains stable
-non-forgeable leases, owns its runner and callbacks, and routes task failure
-only through matching `(RunId, RunLocalTaskId)`. The separate dirty executor
-path still drains borrowed handles synchronously. The captured topology
-generation is not the target authoritative `GraphRevision` or commit predicate.
-Paired realtime Runs/`RunGroup`, process execution ownership, resources,
-revision-safe commit, cancellation, and supersession remain subsequent slices.
+non-forgeable leases, owns its runner, and routes task failure only through
+matching `(RunId, RunLocalTaskId)`. Built-in CPU ready work now crosses the
+injected single-Run `ExecutionService` boundary as move-only submissions;
+legacy full HP keeps owned callbacks and the separate dirty executor path still
+drains borrowed handles synchronously. The captured topology generation is not
+the target authoritative `GraphRevision` or commit predicate. Paired realtime
+Runs/`RunGroup`, multi-Graph process execution, resources, revision-safe
+commit, cancellation, and supersession remain subsequent slices.
 
 The remainder of this section describes the complete accepted target.
 
@@ -289,6 +292,16 @@ it before participating Kernels/Hosts and retains it until they stop Run
 admission and drain their Runs. Graph close does not stop the service; only
 process execution-domain shutdown does.
 
+The current issue #68 vertical slice realizes the first part of that boundary:
+`EmbeddedHostState` creates one private CPU service before Kernel and Kernel
+injects it into request-local `ComputeService` instances. Built-in CPU
+non-dirty full-HP dispatch transfers only immutable, lease-backed
+`ReadyTaskSubmission` values and the service serializes one complete Run with
+the exact planned grant. Transitional per-Graph schedulers, the fixed worker
+budget, serial/GPU/plugin/dirty/RT execution, and graph-state serialization all
+remain. The service does not yet own admission, bounded ready storage, policy,
+revision validation, cancellation, or a lifecycle registry.
+
 The final service owns physical CPU workers and later resource executors,
 bounded ready storage, Run/resource admission, policy-result validation,
 execution exception fences, and completion routing. It does not own planning,
@@ -404,7 +417,7 @@ lease; late completion performs cleanup only.
 | --- | --- | --- |
 | [#66](https://github.com/kevin-zf1123/photospider/issues/66) | Current HP `ComputeRun` descriptor, state, storage, and one terminal outcome | #63, #65 |
 | [#67](https://github.com/kevin-zf1123/photospider/issues/67) | Current stable Run leases and `(RunId, RunLocalTaskId)` full-HP completion isolation | #66 |
-| [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Injected CPU-only service, one Run, ready-only input | #67 |
+| [#68](https://github.com/kevin-zf1123/photospider/issues/68) | Current injected CPU-only service, one Run, ready-only input | #67 |
 | [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain and no per-Graph workers | #68 |
 | [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Production admission, bounded ready store, and ledger | #69 |
 | [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Interactive and throughput built-in policies | #70 |

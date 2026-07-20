@@ -97,15 +97,16 @@ Resolved seam tightening in the current branch:
   `src/lib/**` directories. Internal targets compile with the private
   `src/lib/` root, while the installable public header inventory remains
   limited to `include/photospider/**`.
-- The current issue #67 Run implementation lives only in
-  `src/lib/compute/compute_run.*`. `Kernel` supplies session identity and
-  explicit default QoS to the private service request; `ComputeService` creates
-  one Run for each non-realtime HP call. Shared Run control owns
-  full-plan/temporary or standalone dirty-HP staging storage through exact
-  terminal publication. Scheduler-backed full HP work retains non-forgeable
-  leases and routes owned-callback failure by `(RunId, RunLocalTaskId)`. No
-  installed header, Host value, operation ABI, or scheduler ABI names this
-  private object.
+- The current issue #68 Run/service implementation lives under
+  `src/lib/compute/{compute_run,execution_service}.*`. `Kernel` supplies
+  session identity and explicit default QoS to the private request and injects
+  the composition-root CPU service; `ComputeService` creates one Run for each
+  non-realtime HP call. Shared Run control owns full-plan/temporary or
+  standalone dirty-HP staging storage through exact terminal publication.
+  Built-in CPU full HP transfers move-only, lease-backed submissions to the
+  single-Run service; legacy full HP retains owned callbacks. No installed
+  header, Host value, operation ABI, or scheduler ABI names these private
+  objects.
 - Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
   diagnostics are available through copied Host value snapshots. Public headers
   no longer need to name the backend graph/runtime/service/planning types or
@@ -430,13 +431,13 @@ CMake rules:
 ## Target Process-Execution Composition Boundary
 
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-fixes the complete process-execution ownership. Its issue #67 private HP Run
-source, stable lease, and full-HP completion-isolation slice is now current
-under `src/lib/compute/`; paired Runs, process service composition, resource
-ownership, and revision-safe commit remain target layout. The product
-composition root will later construct one
-explicit `ExecutionService` from process configuration and inject it into
-participating backend owners. It will not use a static singleton.
+fixes the complete process-execution ownership. Its issue #68 private HP Run,
+stable lease/composite identity, ready-submission, and injected single-Run CPU
+service slice is now current under `src/lib/compute/`. `EmbeddedHostState`
+constructs that owner before Kernel, and Kernel injects it into request-local
+`ComputeService` instances without a static singleton. Paired Runs,
+multi-Graph execution, complete resource ownership, and revision-safe commit
+remain target layout.
 
 In that target:
 
@@ -452,9 +453,11 @@ In that target:
 - request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
-- `ExecutionService` owns physical workers, bounded ready storage, admission,
-  trusted policy validation, and completion routing, while accepting only
-  dispatcher-ready submissions;
+- the current `ExecutionService` owns one built-in CPU runtime, exact grant
+  reconfiguration, single-Run exclusion, ready-only admission, settled failure
+  transport, and active-Graph trace forwarding; the target extends it with
+  multi-Graph physical workers, bounded ready storage, admission, trusted
+  policy validation, and completion routing;
 - its private `RunLifecycleRegistry` supplies the single process admission/
   graph-close/process-shutdown fence, pending-candidate tracking,
   graph-indexed registry-held `RunLease` entries, and process enumeration without
@@ -690,11 +693,14 @@ conservatively add one possible device worker, and one private 32-slot ledger
 coordinates every Host and Kernel in the process. Graph load reserves the HP/RT
 pair atomically; replacement holds the old grant until the candidate is
 published; scheduler destruction precedes exact reservation release. This is
-current containment only. Per-Graph workers and the transitional process
-function-static `SchedulerWorkerBudget::process()` owner remain until
+current containment only. Issue #68 now adds an injected, single-Run CPU
+`ExecutionService` for built-in non-dirty full HP, but intentionally leaves
+the charged per-Graph CPU owner in place and does not make the fixed budget a
+service ledger. Per-Graph workers and the transitional process function-static
+`SchedulerWorkerBudget::process()` owner remain until
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-and issues #68/#69 introduce an injected process-owned `ExecutionService` and
-shared executors. Issues #70/#71 then add the final host-authoritative ledger,
+and issue #69 introduce shared multi-Graph executors and remove the duplicate
+owners. Issues #70/#71 then add the final host-authoritative ledger,
 bounded ready store, and built-in policies; #72–#74 add revision, cancellation,
 and supersession; #75 replaces the worker-owning ABI; and #76 closes lifecycle
 and telemetry invariants. The authoritative acyclic dependency table is in the

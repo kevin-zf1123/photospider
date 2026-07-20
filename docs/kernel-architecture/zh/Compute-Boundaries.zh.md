@@ -22,14 +22,18 @@ flowchart TD
   HOST["ps::Host"] --> ADAPTER["embedded Host adapter"]
   ADAPTER --> KERNEL["Kernel"]
   KERNEL --> BUDGET["进程级 SchedulerWorkerBudget"]
+  KERNEL --> EXEC["注入的 CPU ExecutionService"]
   KERNEL --> GSE["GraphStateExecutor"]
   GSE --> SERVICE["ComputeService"]
   SERVICE --> RUN["request-owned HP ComputeRun"]
   SERVICE --> PLAN["planning 与 pruning 协作者"]
   PLAN --> DISPATCH["ComputeTaskDispatcher"]
   DISPATCH --> RUN
-  DISPATCH --> RUNTIME["SchedulerTaskRuntime"]
-  RUNTIME --> CALLBACK["ready TaskHandle 或 callback"]
+  DISPATCH --> READY["dispatcher-ready submission"]
+  READY --> EXEC
+  READY --> RUNTIME["legacy per-Graph SchedulerTaskRuntime"]
+  EXEC --> CALLBACK["service-owned ready callback"]
+  RUNTIME --> CALLBACK
   CALLBACK --> TEMP["Run-owned 临时结果或 dirty HP staging"]
   RUN --> TEMP
   TEMP --> COMMIT["通过验证的结果提交"]
@@ -76,6 +80,8 @@ caller 都等待自己加入的持久 close generation；失败 stop 后的 rest
 | `IntentUpdateCoordinator` | HP-only 或 HP/RT sibling 语义 | 物理优先级或 worker 所有权 |
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit 或 scheduler policy |
 | `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、variant、结果槽与 callback owner | Scheduler worker、Run terminal state 或 dirty-path execution |
+| `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
+| `ExecutionService` | 一个注入的单 Run 内建 CPU worker domain、精确 grant 重配置、ready-only queue admission、settled exception fence 与 active-Graph trace 转发 | Planning、dependency、Graph/cache state、admission ledger、policy、dirty/RT/GPU/plugin 执行或 visible commit |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | scheduler trace 所有权 |
 | `SchedulerFactory` | 在构造前解析 `0..8` worker 请求，并规划每个 scheduler 的保守 slot 计费 | 进程容量所有权或 graph-state access |
@@ -95,9 +101,10 @@ Compute collaborator 位于 `src/lib/compute/`；三个 admission/ownership coll
    request-local HP snapshot。
 5. Planner 展开一个 domain 的完整 task 形态，再裁剪到请求目标和依赖锥。
 6. Dirty request 从该 plan 选择活动 work set；dirty 状态不会创建新的 task 形态。
-7. 顺序执行 inline 遍历同一请求语义；并行 full HP 执行会 materialize 保留 Run lease 与
-   `(RunId, RunLocalTaskId)` identity 的 owned callback，并且只把 ready callback 提交给选定
-   scheduler runtime。Dirty execution 保留独立的 request-local handle 路径。
+7. 顺序执行 inline 遍历同一请求语义。内建 CPU 并行 full HP 会 materialize 保留 Run lease 与
+   `(RunId, RunLocalTaskId)` 的 move-only `ReadyTaskSubmission`，并且只把 ready work 发送到
+   注入的 `ExecutionService`。Serial、GPU 与 plugin full HP 保留通过选定 per-Graph scheduler
+   的 lease-backed callback route。Dirty 与 realtime execution 保留既有 request-local route。
 8. Worker 写入 Run-owned full-plan 临时结果或 standalone dirty HP staging。配对 realtime
    staging 仍由 sibling callback 局部持有；只有相应 commit path 能修改可见图状态。
 9. Run 在输出验证或精确异常捕获后发布唯一 success/failure，随后结果、事件、计时和错误通过
@@ -132,7 +139,7 @@ Dispatcher 拥有请求正确性，而 `ComputeRun` 拥有当前 full HP storage
 - 最终 target 选择与 full HP commit；dirty executor 在复用 source-first submission helper 后拥有
   自己的 staged commit。
 
-Scheduler 拥有当前物理执行机制：
+选定的 execution runtime 拥有当前物理机制：
 
 - worker lifecycle 和 ready queue；
 - batch state 与 scheduler-local epoch filtering；
@@ -140,13 +147,21 @@ Scheduler 拥有当前物理执行机制：
 - scheduler completion 和 exception publication；
 - 通过 Host context 发布有界 trace。
 
-Scheduler 不会收到 `GraphModel`、`ComputeTaskGraph`、`DirtyRegionSnapshot` 或 cache authority。
-新就绪的 dependent work 由 dispatcher 释放，并作为另一条 ready handle 或 callback 推送。Threaded
-scheduler resource 按 `GraphRuntime`、按 intent route 拥有；当前不存在 process-wide worker pool
-或 cross-graph fairness authority，但存在 process-wide admission authority：graph load 原子预留
-HP+RT 合计计费，replacement 则在旧 owner 保持存活时预留一个 candidate 计费。内置 serial
-scheduler 计费为零；内置 CPU 与已注册 ABI v2 plugin 按解析后的一到八授权计费；内置
-GPU/heterogeneous 还要计入潜在 device worker。
+两条 route 都不会收到 `GraphModel`、`ComputeTaskGraph`、`DirtyRegionSnapshot` 或 cache
+authority。新就绪的 dependent work 由 `TaskSubmissionPlan` 释放：迁移 route 会创建另一个
+`ReadyTaskSubmission`，legacy route 则推送另一条 lease-backed callback 或 dirty handle。
+
+Issue #68 的 CPU service 在 Kernel 之前显式组合，拥有一个 concrete CPU scheduler，并且每次
+串行化一个完整 Run。它会按精确解析后的内建 CPU grant 延迟创建或重新配置 scheduler，把 trace
+context 转发到 active `GraphRuntime`，并且只会在 settled wait 后清除该 borrowed host。它不拥有
+cross-Graph fairness、admission、有界 ready store、cancellation 或 policy authority。
+
+过渡期 threaded scheduler resource 仍按 `GraphRuntime` 和 intent route 拥有，其中包括 migrated
+full-HP work 使用 service pool 时仍保持已分配的 CPU owner。进程 `SchedulerWorkerBudget`
+仍只计费这些过渡 owner：graph load 原子预留 HP+RT，replacement 则在旧 owner 保持存活时预留
+candidate headroom。该 ledger 不计费 service pool。内建 serial 计费为零；内建 CPU 与已注册
+ABI v2 plugin 按解析后的一到八 grant 计费；内建 GPU/heterogeneous 还要计入潜在 device
+worker。Issue #69 负责删除重复 per-Graph CPU worker 并实现多 Graph 共享。
 
 ## OpenCV Operation 并发
 
@@ -220,8 +235,9 @@ metadata 推导该关系。
 - 已 admission 的 scheduler batch 会在异常离开当前请求前 settle。
 - Operation callback 可能已经产生外部副作用；staged graph output 不会回滚这些副作用。
 - Scheduler-backed full HP work 不再借用 raw `TaskExecutor`。`TaskSubmissionPlan` 拥有其
-  runner，每个真实 ready task 都是保留 `ComputeRunLease` 的 owned callback，failure publication
-  必须匹配 `(RunId, RunLocalTaskId)`。空 borrowed-handle batch 只用于建立当前 scheduler epoch。
+  runner。内建 CPU ready work 以 `ReadyTaskSubmission` 跨越 service boundary；legacy full HP
+  使用 owned callback。两者都保留 `ComputeRunLease`，failure publication 必须匹配
+  `(RunId, RunLocalTaskId)`。只有 legacy 路径会用空 borrowed-handle batch 建立 scheduler epoch。
   Request-local dirty executor 仍使用独立的同步 borrowed-handle 路径，因此仍不能原样移入
   process-wide asynchronous queue。
 
@@ -237,14 +253,16 @@ metadata 推导该关系。
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受替代方向和详细
-所有权契约。本文是当前 issue #67 HP Run lease/completion-isolation 切片、per-graph scheduler
-ownership 及其有界进程 admission containment 的权威说明；权威 revision、配对 realtime Run、
-通用 dirty-path lease 与 shared `ExecutionService` 仍是未来行为。
+所有权契约。本文是当前 issue #68 单 Run 注入 CPU service 与 ready-submission 切片、保留的
+per-Graph scheduler ownership 及其有界过渡期 admission containment 的权威说明。多 Graph
+service 执行、权威 revision、配对 realtime Run、通用 dirty-path lease、resource admission、
+有界 ready storage 与 policy 仍是未来行为。
 
 ## 实现与验证入口
 
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/compute/execution_service.*`
 - `src/lib/compute/task_graph_planning.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_submission.*`

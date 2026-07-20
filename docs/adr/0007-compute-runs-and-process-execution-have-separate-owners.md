@@ -2,16 +2,17 @@
 
 ## Status
 
-Accepted as the target architecture. The issue #67 non-realtime HP slice of
-`ComputeRun` is current software behavior: it provides request identity,
-topology-only submission revision, intent/quality/QoS, monotonic phase, one
-terminal outcome, shared-control full-plan/temporary or standalone dirty-HP
-staging storage, stable leases, and `(RunId, RunLocalTaskId)` isolation for
-scheduler-backed full HP completion. `RunGroup`, dirty/realtime lease coverage,
-the injected process-owned `ExecutionService` and its
-`RunLifecycleRegistry`, authoritative `GraphRevision` commit validation, the
-target `ResourceLedger`, and the policy-only scheduler generation remain
-target behavior.
+Accepted as the target architecture. The issue #68 non-realtime HP slice is
+current software behavior: in addition to the issue #67 `ComputeRun`
+descriptor, state, storage, lease, and composite task identity, the embedded
+composition root now explicitly injects one CPU `ExecutionService`.
+Built-in CPU non-dirty full-HP dispatch crosses a move-only
+`ReadyTaskSubmission` boundary and the service executes at most one complete
+Run at a time with the exact planned worker grant. `RunGroup`, dirty/realtime
+lease coverage, multi-Graph service execution, `RunLifecycleRegistry`,
+authoritative `GraphRevision` commit validation, the target `ResourceLedger`,
+bounded ready storage, and the policy-only scheduler generation remain target
+behavior.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -20,21 +21,32 @@ force.
 
 ## Context
 
-The current implementation has one HP and one RT `IScheduler` per
-`GraphRuntime`. Each scheduler owns workers, ready queues, epochs, completion
-counters, exception publication, and ordering policy. The function-static
-`SchedulerWorkerBudget::process()` limits conservative scheduler worker charges
-to 32 across embedded Hosts, but it owns no worker, ready-store capacity, Run,
-memory, scratch, device, I/O, or plugin-process budget.
+The current implementation retains one HP and one RT `IScheduler` per
+`GraphRuntime`. Each transitional scheduler owns workers, ready queues, epochs,
+completion counters, exception publication, and ordering policy. Private route
+metadata now pairs the HP scheduler owner with either that legacy execution
+domain or the issue #68 process CPU route and its exact worker grant.
+Built-in CPU full-HP work selects the latter; serial, GPU, plugin, dirty, and
+realtime work retains the former.
+
+The explicitly injected service owns a concrete CPU scheduler and serializes
+the complete setup-through-settlement interval for one Run. Its host-context
+proxy forwards worker/epoch trace state only while that Run is active. The
+function-static `SchedulerWorkerBudget::process()` still limits conservative
+charges for the transitional Graph-owned schedulers to 32 across embedded
+Hosts, but it neither charges nor owns the service pool and owns no
+ready-store, Run, memory, scratch, device, I/O, or plugin-process budget.
 
 Current `TaskHandle` values borrow a `TaskExecutor*` on request-local dirty
 paths. For non-realtime scheduler-backed full HP work, `ComputeRun` shared
 control owns `TaskSubmissionPlan`, temporary results, dependency state, and the
-runner. Every real ready task is an owned callback retaining a non-forgeable
-Run lease and `(RunId, RunLocalTaskId)`; a matching identity gates failure
-publication. The empty borrowed-handle batch only establishes a scheduler
-epoch. Moving the remaining dirty handles into a process queue without their
-own stable lease would still create use-after-free risk.
+runner. Every real ready task retains a non-forgeable Run lease and
+`(RunId, RunLocalTaskId)`; a matching identity gates failure publication.
+Built-in CPU planning materializes those values as move-only
+`ReadyTaskSubmission` objects for the injected service. Legacy full-HP routes
+retain the owned callback path and use the empty borrowed-handle batch only to
+establish a scheduler epoch. Moving the remaining dirty handles into a process
+queue without their own stable lease would still create use-after-free risk.
 
 ADR 0003 chose the direction—request-owned `ComputeRun`, process-owned
 `ExecutionService`, host-owned `ResourceLedger`, and policy-only
@@ -215,6 +227,14 @@ metadata, `(RunId, RunLocalTaskId)`, an owned or otherwise stable executable
 handle, resource estimates/requirements, and a `RunLease` bound to the matching
 completion endpoint.
 
+The current issue #68 value implements the immutable metadata, composite
+identity, owned executable, and matching `ComputeRunLease` subset. The current
+service rejects borrowed handles, anonymous raw callbacks, and any initial or
+dependent submission outside its active Run. `TaskSubmissionPlan` still
+discovers initial readiness, releases dependencies, owns result indexes, and
+retires the logical completion count. Multi-Run admission, bounded ready
+storage, resource estimates/grants, and policy re-entry remain target behavior.
+
 The service never receives or derives `GraphModel`, `ComputePlan`,
 `ComputeTaskGraph`, dirty snapshot/state, dependency maps, cache authority, or
 visible commit authority. `TaskCompletion` returns through the Run lease to the
@@ -235,10 +255,11 @@ path may not bypass fairness, cancellation, or Run isolation.
 | `ResourceLedger` | checked process limits, transactional reservations, validated child grants, exact-once release accounting | ordering policy, task dependencies, Graph state, third-party token delegation |
 | `SchedulerPolicy` | ranking immutable ready descriptors and suggesting a bounded quantum | workers, ready store, Runs, Graph state, reservations/grants/tokens, native device handles, executors, completion or lifecycle authority |
 
-The product composition root constructs one `ExecutionService` from explicit
-process configuration and injects it. It is not a static singleton. Tests and
-worker products can create and destroy isolated domains. Embedded Hosts that
-belong to one product composition share the explicitly supplied service.
+The product composition root now constructs and injects the current CPU-only
+`ExecutionService`; it is not a static singleton. Tests create and destroy
+isolated domains. The current service has no external process configuration
+object or lifecycle registry; it lazily configures its CPU pool from the trusted
+built-in scheduler plan's exact worker grant.
 
 The root constructs the service before injected Kernels/Hosts and keeps it
 alive until they have stopped Run admission and drained their Runs. Planning,
@@ -432,15 +453,15 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract. Issues #66 and #67 are now
+This decision fixes the dependency contract. Issues #66, #67, and #68 are now
 implemented as the current non-realtime HP slices; the following slices remain
 ordered target work:
 
 | Issue | Consumes this decision | Explicit non-goal of the slice |
 | --- | --- | --- |
 | #66 (current) | HP `ComputeRun` descriptor, state, storage, and one terminal outcome | Process worker migration |
-| #67 (current) | Stable Run leases and `(RunId, RunLocalTaskId)` full-HP completion isolation | Shared CPU service |
-| #68 | Injected CPU-only `ExecutionService` for one Run, ready-only input | Multi-Graph migration and final ledger |
+| #67 (completed foundation) | Stable Run leases and `(RunId, RunLocalTaskId)` full-HP completion isolation | Shared CPU service |
+| #68 (current) | Injected CPU-only `ExecutionService` for one Run, ready-only input | Multi-Graph migration and final ledger |
 | #69 | Shared multi-Graph and HP/RT CPU domain; removal of per-Graph workers | Full admission/policy model |
 | #70 | Production admission, bounded ready store, and `ResourceLedger` | Fairness algorithms |
 | #71 | Interactive and throughput built-in policies | Plugin ABI migration |

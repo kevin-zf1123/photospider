@@ -2,20 +2,28 @@
 
 ## 状态
 
-作为目标架构已接受；在迁移完成前，当前每图 scheduler 所有权仍是现行软件行为。当前进程级
-scheduler-worker admission ledger 是 containment 步骤，并不是进程执行所有权的实现。Issue #66
-现在已经实现有界的非 realtime HP `ComputeRun` identity/state/storage 子集，issue #67 则增加
-稳定 lease 与 full-HP 复合 completion 隔离。进程 worker、通用 dirty/realtime lease 覆盖、
-resource accounting 与 revision-safe commit 仍是目标行为。ADR 0007 只在详细所有权与生命周期
-契约上取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
+作为目标架构已接受。Issue #68 已实现第一个现行进程执行切片：embedded composition root
+显式创建并注入一个 CPU `ExecutionService`，内建 CPU 的非 realtime、非 dirty full-HP Run
+只把已 ready 且由 lease 支撑的工作提交到它的单 Run 物理 worker domain。所有路由仍保留已分配
+的过渡期 per-Graph scheduler owner，serial、GPU、plugin、dirty 与 realtime 执行仍直接使用
+这些 owner。进程级 scheduler-worker admission ledger 仍是 containment 步骤，而不是目标资源
+owner。多 Graph 共享、通用 dirty/realtime lease 覆盖、resource accounting、policy 与
+revision-safe commit 仍是目标行为。ADR 0007 只在详细所有权与生命周期契约上取代本 ADR；
+进程级所有权的高层决策及其历史背景继续有效。
 
 ## 背景
 
-当前每个 `GraphRuntime` 拥有 HP 和 RT scheduler 实例，而 scheduler interface 同时包含 policy、
-worker lifecycle、queue、batch、device routing、completion 和 exception。多个 Graph 会乘法增加
-物理 thread 和 device context。当前软件已通过解析后的单实例 worker grant，以及所有 embedded
-Host 共享的一个保守 32-slot 进程 ledger，限制这种乘法增长。但 scheduler 仍无法表达跨 Run
-公平性、进程内存上限、取消、shared execution，也无法准入 scheduler-owned worker slot 之外的资源。
+当前每个 `GraphRuntime` 仍拥有 HP 和 RT scheduler 实例，而 scheduler interface 同时包含
+policy、worker lifecycle、queue、batch、device routing、completion 和 exception。对于
+issue #68 的内建 CPU full-HP 切片，私有 route metadata 会选择注入的 `ExecutionService`；
+其 concrete CPU runtime 会按精确 planning grant 重新配置，并且每次执行一个完整 Run。
+该 service route 运行时，过渡期 Graph-owned CPU scheduler 仍保持存活且被计费，因此在
+issue #69 删除 per-Graph worker 前，这个切片有意保留重复 worker 所有权。
+
+当前软件通过解析后的单实例 worker grant，以及所有 embedded Host 共享的一个保守 32-slot
+进程 ledger，限制过渡期资源的乘法增长。但这个 ledger 与当前单 Run service 都无法表达跨 Run
+公平性、进程内存上限、取消、多 Graph shared execution，也无法准入 scheduler-owned worker
+slot 之外的资源。
 
 如果没有稳定 Run 生命周期和 Host-owned 资源账本，只把这些 scheduler 移入全局对象仅仅是搬移问题。
 
@@ -56,9 +64,10 @@ resource reservation 和 commit policy 单元。
 
 ## 与当前文档的关系
 
-ADR 0001 完全有效。实施后，本决策会取代
-`docs/kernel-architecture/Scheduler-Architecture.md` 当前每图 scheduler 章节描述的物理资源所有权，
-但不会取代 ready-task-only scheduler 边界。
+ADR 0001 完全有效。Issue #68 已部分取代
+`docs/kernel-architecture/Scheduler-Architecture.md` per-Graph scheduler 章节描述的物理
+所有权：只有内建 CPU 的非 realtime、非 dirty full-HP ready work 会在注入 service 上执行。
+其余路由和过渡期 scheduler owner 仍是现行行为，ready-task-only 边界继续完全有效。
 
 当前 containment contract 接受零到八的 worker 请求，把零解析为上限八的非零 grant，并在所有
 embedded Host 之间最多预留 32 个保守 scheduler-worker slot。Graph load 会共同预留 HP+RT，
@@ -66,9 +75,10 @@ replacement 需要 transient candidate headroom，move-only RAII owner 只有在
 销毁后才释放 slot。这能阻止无界的 per-graph 乘法增长，但 worker、queue、epoch 与 policy 仍位于
 每个 `IScheduler` 内。
 
-因此，`SchedulerWorkerBudget` 不是目标 `ExecutionService` 或 `ResourceLedger`：它不拥有 executor、
-Run identity、cancellation、fairness、memory/device/I/O quota 或 ready-store capacity，其 slot 也不
-计算所有进程 thread。未来迁移会完整替换这个过渡 ownership 与 ABI boundary，而不会保留兼容 wrapper。
+因此，`SchedulerWorkerBudget` 既不是当前 `ExecutionService`，也不是目标
+`ResourceLedger`：它不拥有 executor、Run identity、cancellation、fairness、
+memory/device/I/O quota 或 ready-store capacity，其 slot 既不计算 service pool，也不计算所有
+进程 thread。后续迁移会完整替换这个过渡 ownership 与 ABI boundary，而不会保留兼容 wrapper。
 
 ## 与 ADR 0007 的关系
 
