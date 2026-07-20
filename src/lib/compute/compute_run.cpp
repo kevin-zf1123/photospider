@@ -365,12 +365,13 @@ bool ComputeRun::is_terminal() const {
 }
 
 /**
- * @brief Constructs the Run-owned full HP scheduler submission plan.
+ * @brief Constructs the Run-owned full HP task submission plan.
  *
  * @param graph Graph used for plan construction and operation resolution.
  * @param traversal Traversal service used by the dispatch-plan builder.
  * @param node_id Requested target node.
- * @param available_devices Scheduler-exposed devices transferred into plan.
+ * @param available_devices Active-route devices transferred into plan
+ * ownership.
  * @return Mutable Run-owned submission plan.
  * @throws std::logic_error for duplicate storage or terminal Run.
  * @throws GraphError or standard exceptions from TaskSubmissionPlan.

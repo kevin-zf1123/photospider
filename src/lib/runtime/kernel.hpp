@@ -172,7 +172,7 @@ class Kernel {
    * embedded adapter and backend callers should treat it as immutable once the
    * request is submitted.
    *
-   * @note parallel selects scheduler-backed compute where supported. quiet is
+   * @note parallel selects execution-bound compute where supported. quiet is
    * applied to the graph model around the compute call.
    */
   struct ComputeExecutionOptions {
@@ -1211,7 +1211,8 @@ class Kernel {
    * @brief Dispatches one request through the correct ComputeService path.
    *
    * @param compute_service Request-scoped ComputeService collaborator.
-   * @param runtime Runtime that owns scheduler/event services for the graph.
+   * @param runtime Runtime that owns graph/event state and publishes ownerless
+   * process-service or owned legacy scheduler execution bindings.
    * @param graph Visible graph model to compute against.
    * @param request Kernel compute request to translate into service options.
    * @return Mutable output owned by the graph node cache.
@@ -1242,7 +1243,8 @@ class Kernel {
    *
    * @param name Graph/session label whose stale LastError is cleared only
    *             after both candidates are installed.
-   * @param runtime Unpublished runtime that receives both scheduler owners.
+   * @param runtime Unpublished runtime that receives both execution bindings
+   * and only the legacy scheduler owners selected by planning.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::InvalidParameter` when either type is
    *         unsupported, a planned plugin becomes unavailable, or its factory

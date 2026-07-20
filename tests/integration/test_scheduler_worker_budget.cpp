@@ -23,6 +23,7 @@
 #include "photospider/host/host.hpp"
 #include "scheduler/scheduler_exception_test_hooks.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"
+#include "scheduler/scheduler_worker_budget.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
 
 namespace ps {
@@ -1278,10 +1279,11 @@ TEST(EmbeddedHostSchedulerBudget,
  * @throws std::runtime_error If the deterministic YAML fixture cannot be
  * written completely.
  * @note The invalid document is the first CPU-selecting load on a default Host.
- * Zero reconfiguration must remain reusable, while at least one unequal
- * positive request must conflict with the resolved fixed count. A legacy CPU
- * construction hook guards both failed and valid loads, proving neither owns a
- * per-Graph built-in CPU scheduler.
+ * Before any equal request, a deterministic positive count unequal to the
+ * authoritative automatic resolution must conflict. Automatic zero and the
+ * explicit resolved count must then remain reusable. A legacy CPU construction
+ * hook guards both failed and valid loads, proving neither owns a per-Graph
+ * built-in CPU scheduler.
  */
 TEST(EmbeddedHostSchedulerBudget,
      FreshInvalidYamlLoadRetainsFirstFixedPoolWithoutPerGraphOwner) {
@@ -1313,32 +1315,28 @@ TEST(EmbeddedHostSchedulerBudget,
     EXPECT_EQ(rejected.status.name, "invalid_yaml");
     expect_graph_absent(*host, rejected_id);
 
-    const VoidResult first_same =
-        configure_budget_scheduler(*host, "cpu_work_stealing", 0U);
-    ASSERT_TRUE(first_same.status.ok) << first_same.status.message;
-    const VoidResult second_same =
-        configure_budget_scheduler(*host, "cpu_work_stealing", 0U);
-    ASSERT_TRUE(second_same.status.ok) << second_same.status.message;
+    const unsigned int resolved_worker_count =
+        resolve_scheduler_worker_count(0U, std::thread::hardware_concurrency());
+    ASSERT_GE(resolved_worker_count, 1U);
+    ASSERT_LE(resolved_worker_count, kSchedulerWorkerRequestMax);
+    const unsigned int conflicting_worker_count =
+        resolved_worker_count == 1U ? 2U : 1U;
+    ASSERT_LE(conflicting_worker_count, kSchedulerWorkerRequestMax);
 
-    const VoidResult positive_one =
-        configure_budget_scheduler(*host, "cpu_work_stealing", 1U);
-    if (positive_one.status.ok) {
-      const VoidResult repeated_one =
-          configure_budget_scheduler(*host, "cpu_work_stealing", 1U);
-      ASSERT_TRUE(repeated_one.status.ok) << repeated_one.status.message;
-      const VoidResult conflicting_two =
-          configure_budget_scheduler(*host, "cpu_work_stealing", 2U);
-      EXPECT_FALSE(conflicting_two.status.ok);
-      EXPECT_EQ(conflicting_two.status.domain, OperationErrorDomain::Graph);
-      EXPECT_EQ(checked_graph_error_code(conflicting_two.status),
-                GraphErrc::InvalidParameter);
-      EXPECT_EQ(conflicting_two.status.name, "invalid_parameter");
-    } else {
-      EXPECT_EQ(positive_one.status.domain, OperationErrorDomain::Graph);
-      EXPECT_EQ(checked_graph_error_code(positive_one.status),
-                GraphErrc::InvalidParameter);
-      EXPECT_EQ(positive_one.status.name, "invalid_parameter");
-    }
+    const VoidResult conflicting = configure_budget_scheduler(
+        *host, "cpu_work_stealing", conflicting_worker_count);
+    EXPECT_FALSE(conflicting.status.ok);
+    EXPECT_EQ(conflicting.status.domain, OperationErrorDomain::Graph);
+    EXPECT_EQ(checked_graph_error_code(conflicting.status),
+              GraphErrc::InvalidParameter);
+    EXPECT_EQ(conflicting.status.name, "invalid_parameter");
+
+    const VoidResult automatic_same =
+        configure_budget_scheduler(*host, "cpu_work_stealing", 0U);
+    ASSERT_TRUE(automatic_same.status.ok) << automatic_same.status.message;
+    const VoidResult explicit_same = configure_budget_scheduler(
+        *host, "cpu_work_stealing", resolved_worker_count);
+    ASSERT_TRUE(explicit_same.status.ok) << explicit_same.status.message;
 
     const GraphSessionId valid_id{"valid_after_invalid_yaml"};
     const Result<GraphSessionId> valid =

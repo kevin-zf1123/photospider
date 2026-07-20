@@ -254,11 +254,16 @@ non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯
   post-close failure state。每个 phase 都必须返回 `GraphErrc::Io`；已创建的 destination 证明
   文档所述 non-atomic post-open 行为。
 - `test_scheduler_worker_budget` 证明 fresh invalid CPU-selecting load 不会发布 session，也不会
-  创建 per-Graph CPU owner；同时，它会保留首次固定 service pool，允许相同配置复用及后续有效
-  Graph load，并继续拒绝不相等的正 worker 请求。
+  创建 per-Graph CPU owner。测试会在任何相等请求之前推导权威的 automatic worker count，并
+  要求一个确定的不相等正数请求失败；随后，zero 与显式 resolved count 都必须复用首次固定
+  service pool，且后续有效 Graph 仍能成功 load。
 - `test_compute_run` 会记录完整的 action/node/worker/epoch tuple。它证明两个复用 local task id
-  zero 的并发 Run 只会向各自 Host 交付匹配的 Run/node epoch；还证明 realtime Full HP 与
-  Interactive RT child 在共享同一 Host 时仍保留不同 epoch。
+  zero 的并发 Run 只会向各自 Host 交付匹配的 Run/node epoch；cleanup 会在每条 assertion
+  路径释放被阻塞的第一个 Run，使序列化回归以测试失败终止而不是挂起。Realtime Full HP 与
+  Interactive RT child 共享同一个物理 Host 和 local task id zero，但不同的 trace-node marker
+  会把每个 Host event 映射到对应 epoch，以及 callback 保留的 descriptor/task identity。
+  该 realtime case 有意直接测试 `ExecutionService`：worker loop 的 Host/epoch 选择和 callback
+  保留的 identity 可在这一边界观察，无需增加仅供测试的 GraphRuntime hook。
 - `test_ipc_protocol` 证明精确 Graph status 传递、mutation 只调用一次，以及 failed load 后
   daemon session-name rollback。
 - `test_ipc_daemon` 证明真实 transport 精确返回 save `NotFound` 与 `Io`，destination failure 后

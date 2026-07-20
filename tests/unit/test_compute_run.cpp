@@ -479,6 +479,147 @@ class ExecutionServiceHost final : public SchedulerHostContext {
 };
 
 /**
+ * @brief Releases one promise-backed test gate exactly once during cleanup.
+ *
+ * The guard is declared after every async future it protects so stack
+ * unwinding releases blocked callbacks before `std::future` destruction can
+ * wait for them. Tests may call release() early; destruction then becomes a
+ * no-op.
+ *
+ * @throws Nothing from release or destruction.
+ * @note A failed explicit release is observable through the boolean result.
+ * Destruction suppresses the same exception because cleanup must not throw.
+ */
+class ScopedPromiseRelease final {
+ public:
+  /**
+   * @brief Borrows the promise whose shared future guards callback progress.
+   *
+   * @param promise Promise that remains alive longer than this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedPromiseRelease(std::promise<void>& promise) noexcept
+      : promise_(&promise) {}
+
+  /**
+   * @brief Releases the gate if explicit test flow did not already release it.
+   *
+   * @throws Nothing; promise publication failures are suppressed during
+   * cleanup.
+   */
+  ~ScopedPromiseRelease() noexcept { (void)release(); }
+
+  /**
+   * @brief Prevents duplicate ownership of one promise release.
+   *
+   * @param other Guard that retains sole release responsibility.
+   * @throws Nothing because copying is unavailable.
+   */
+  ScopedPromiseRelease(const ScopedPromiseRelease& other) = delete;
+
+  /**
+   * @brief Prevents replacing one guard's release responsibility.
+   *
+   * @param other Guard that remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedPromiseRelease& operator=(const ScopedPromiseRelease& other) = delete;
+
+  /**
+   * @brief Publishes the gate value once and disarms this guard.
+   *
+   * @return True when the gate was already released or publication succeeds;
+   * false when `std::promise::set_value()` throws.
+   * @throws Nothing.
+   * @note The guard remains disarmed after a failed publication because a
+   * second attempt cannot repair an invalid promise state.
+   */
+  bool release() noexcept {
+    if (promise_ == nullptr) {
+      return true;
+    }
+    std::promise<void>* promise = promise_;
+    promise_ = nullptr;
+    try {
+      promise->set_value();
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+ private:
+  /** @brief Borrowed promise, or null after the first release attempt. */
+  std::promise<void>* promise_ = nullptr;
+};
+
+/**
+ * @brief Complete callback-side identity retained for one service submission.
+ *
+ * @throws std::bad_alloc when graph_identity is copied.
+ * @note Numeric Run/local components preserve the complete non-forgeable task
+ * identity in a promise-friendly value while descriptor fields prove the
+ * callback retained the intended HP or RT child lease.
+ */
+struct RetainedSubmissionObservation final {
+  /** @brief Diagnostic node marker paired with the submission callback. */
+  int trace_node_id = -1;
+
+  /** @brief Run id exposed by the callback's retained lease descriptor. */
+  uint64_t descriptor_run_id = 0;
+
+  /** @brief Graph/session identity exposed by the retained descriptor. */
+  std::string graph_identity;
+
+  /** @brief Topology generation exposed by the retained descriptor. */
+  uint64_t topology_generation = 0;
+
+  /** @brief Target node exposed by the retained descriptor. */
+  int target_node_id = -1;
+
+  /** @brief Single-domain intent exposed by the retained descriptor. */
+  ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+
+  /** @brief Output quality exposed by the retained descriptor. */
+  ComputeRunQuality quality = ComputeRunQuality::Full;
+
+  /** @brief Run component of the callback's retained task identity. */
+  uint64_t identity_run_id = 0;
+
+  /** @brief Local component of the callback's retained task identity. */
+  uint64_t local_task_id = 0;
+};
+
+/**
+ * @brief Snapshots one callback's retained lease and complete task identity.
+ *
+ * @param trace_node_id Diagnostic marker captured by the callback.
+ * @param lease Service-retained lease delivered to the callback.
+ * @param identity Service-retained composite task identity.
+ * @return Owned observation suitable for cross-thread promise publication.
+ * @throws std::bad_alloc when graph identity ownership cannot allocate.
+ * @note The helper intentionally records rather than validates the values so
+ * final test assertions can distinguish descriptor, identity, and trace-route
+ * failures.
+ */
+RetainedSubmissionObservation observe_retained_submission(
+    int trace_node_id, const ComputeRunLease& lease,
+    const ComputeRunTaskIdentity& identity) {
+  const ComputeRunDescriptor& descriptor = lease.descriptor();
+  return RetainedSubmissionObservation{
+      trace_node_id,
+      descriptor.id().value(),
+      descriptor.graph_identity(),
+      descriptor.revision().topology_generation,
+      descriptor.target_node_id(),
+      descriptor.intent(),
+      descriptor.quality(),
+      identity.run_id().value(),
+      identity.local_task_id().value()};
+}
+
+/**
  * @brief Builds one test submission that explicitly retires its logical unit.
  *
  * @param lease Matching Run lease transferred into the submission.
@@ -930,6 +1071,9 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
  * service workers, the second Run must enter and settle while the first Run
  * remains blocked, proving there is no whole-service Run gate. Both Runs reuse
  * local task id zero; each Host must observe only its matching Run/node/epoch.
+ * A scope guard releases the first callback before async-future destruction on
+ * every assertion path, so a serialization regression fails instead of
+ * hanging this test process.
  */
 TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   ExecutionService service(2);
@@ -969,7 +1113,10 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
         runtime.dec_tasks_to_complete();
       });
 
-  auto first_future = std::async(
+  std::future<void> first_future;
+  std::future<void> second_future;
+  ScopedPromiseRelease release_guard(release_first);
+  first_future = std::async(
       std::launch::async,
       [&service, &first_host, ready = std::move(first_ready)]() mutable {
         service.execute_cpu_run(first_host, std::move(ready), 1);
@@ -979,22 +1126,39 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   std::promise<void> second_call_started;
   std::future<void> second_call_started_future =
       second_call_started.get_future();
-  auto second_future = std::async(
+  second_future = std::async(
       std::launch::async, [&service, &second_host, &second_call_started,
                            ready = std::move(second_ready)]() mutable {
         second_call_started.set_value();
         service.execute_cpu_run(second_host, std::move(ready), 1);
       });
 
-  EXPECT_EQ(second_call_started_future.wait_for(std::chrono::seconds(2)),
-            std::future_status::ready);
-  EXPECT_EQ(second_future.wait_for(std::chrono::seconds(2)),
-            std::future_status::ready);
-  EXPECT_NO_THROW(second_future.get());
+  const std::future_status second_call_status =
+      second_call_started_future.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(second_call_status, std::future_status::ready);
+  const std::future_status overlapping_completion_status =
+      second_future.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(overlapping_completion_status, std::future_status::ready);
+  if (overlapping_completion_status == std::future_status::ready) {
+    EXPECT_NO_THROW(second_future.get());
+  }
   EXPECT_TRUE(second_entered.load(std::memory_order_acquire));
 
-  release_first.set_value();
-  EXPECT_NO_THROW(first_future.get());
+  EXPECT_TRUE(release_guard.release());
+  if (second_future.valid()) {
+    const std::future_status cleanup_status =
+        second_future.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(cleanup_status, std::future_status::ready);
+    if (cleanup_status == std::future_status::ready) {
+      EXPECT_NO_THROW(second_future.get());
+    }
+  }
+  const std::future_status first_cleanup_status =
+      first_future.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(first_cleanup_status, std::future_status::ready);
+  if (first_cleanup_status == std::future_status::ready) {
+    EXPECT_NO_THROW(first_future.get());
+  }
   EXPECT_EQ(first_host.context_entries(), first_host.context_exits());
   EXPECT_EQ(second_host.context_entries(), second_host.context_exits());
   EXPECT_FALSE(first_host.trace_recording_failed());
@@ -1020,23 +1184,28 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
 }
 
 /**
- * @brief Verifies realtime HP and RT children retain distinct epochs on one
- * Host.
+ * @brief Maps realtime HP and RT child identity to distinct epochs on one Host.
  *
  * @return Nothing.
- * @throws std::bad_alloc when Run, callback, future, or trace storage cannot
- * allocate.
+ * @throws std::bad_alloc when Run, callback, future, observation, or trace
+ * storage cannot allocate.
  * @throws std::future_error when test synchronization state is invalid.
  * @throws std::system_error when async launch or synchronization fails.
  * @note Both children share graph identity, revision, target, Host, and local
- * task id zero. They overlap in the two-worker service, but Full HP and
- * Interactive RT descriptors must emit distinct Run epochs.
+ * task id zero. Distinct trace-node markers correlate each Host event with the
+ * callback's retained lease and complete task identity, so swapping HP/RT
+ * epochs cannot pass as an unordered multiset. This direct service seam
+ * observes the RunState host/epoch selected by the worker loop; the
+ * GraphRuntime realtime coordinator does not expose retained callback identity
+ * without adding a test-only product hook.
  */
 TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
+  constexpr int kHpTraceNodeId = 65;
+  constexpr int kRtTraceNodeId = 66;
   ExecutionService service(2);
   ExecutionServiceHost host;
   ComputeRunSubmission hp_submission =
-      make_test_submission("realtime-siblings", 55, 65);
+      make_test_submission("realtime-siblings", 55, kHpTraceNodeId);
   ComputeRunSubmission rt_submission = hp_submission;
   rt_submission.intent = ComputeIntent::RealTimeUpdate;
   rt_submission.quality = ComputeRunQuality::Interactive;
@@ -1060,48 +1229,75 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
   std::promise<void> both_entered;
   std::future<void> both_entered_future = both_entered.get_future();
   std::atomic_int active_children{0};
-  const auto make_child_callback = [&active_children, &both_entered, release](
-                                       ComputeRunLease&,
-                                       const ComputeRunTaskIdentity&,
-                                       SchedulerTaskRuntime& runtime) {
-    const int active =
-        active_children.fetch_add(1, std::memory_order_acq_rel) + 1;
-    if (active == 2) {
-      both_entered.set_value();
-    }
-    release.wait();
-    active_children.fetch_sub(1, std::memory_order_acq_rel);
-    runtime.dec_tasks_to_complete();
-  };
+  std::promise<RetainedSubmissionObservation> hp_observation_promise;
+  std::future<RetainedSubmissionObservation> hp_observation_future =
+      hp_observation_promise.get_future();
+  std::promise<RetainedSubmissionObservation> rt_observation_promise;
+  std::future<RetainedSubmissionObservation> rt_observation_future =
+      rt_observation_promise.get_future();
 
   ComputeRunLease hp_lease = hp_child.acquire_lease();
   const ComputeRunTaskIdentity hp_identity = hp_lease.task_identity(0);
   std::vector<ReadyTaskSubmission> hp_ready;
-  hp_ready.emplace_back(std::move(hp_lease), hp_identity, 65, true,
-                        make_child_callback);
+  hp_ready.emplace_back(
+      std::move(hp_lease), hp_identity, kHpTraceNodeId, true,
+      [&active_children, &both_entered, release, &hp_observation_promise](
+          ComputeRunLease& retained_lease,
+          const ComputeRunTaskIdentity& retained_identity,
+          SchedulerTaskRuntime& runtime) {
+        hp_observation_promise.set_value(observe_retained_submission(
+            kHpTraceNodeId, retained_lease, retained_identity));
+        const int active =
+            active_children.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (active == 2) {
+          both_entered.set_value();
+        }
+        release.wait();
+        active_children.fetch_sub(1, std::memory_order_acq_rel);
+        runtime.dec_tasks_to_complete();
+      });
   ComputeRunLease rt_lease = rt_child.acquire_lease();
   const ComputeRunTaskIdentity rt_identity = rt_lease.task_identity(0);
   EXPECT_EQ(hp_identity.local_task_id().value(),
             rt_identity.local_task_id().value());
   EXPECT_NE(hp_identity.run_id(), rt_identity.run_id());
   std::vector<ReadyTaskSubmission> rt_ready;
-  rt_ready.emplace_back(std::move(rt_lease), rt_identity, 65, true,
-                        make_child_callback);
+  rt_ready.emplace_back(
+      std::move(rt_lease), rt_identity, kRtTraceNodeId, true,
+      [&active_children, &both_entered, release, &rt_observation_promise](
+          ComputeRunLease& retained_lease,
+          const ComputeRunTaskIdentity& retained_identity,
+          SchedulerTaskRuntime& runtime) {
+        rt_observation_promise.set_value(observe_retained_submission(
+            kRtTraceNodeId, retained_lease, retained_identity));
+        const int active =
+            active_children.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (active == 2) {
+          both_entered.set_value();
+        }
+        release.wait();
+        active_children.fetch_sub(1, std::memory_order_acq_rel);
+        runtime.dec_tasks_to_complete();
+      });
 
-  auto hp_future =
+  std::future<void> hp_future;
+  std::future<void> rt_future;
+  ScopedPromiseRelease release_guard(release_children);
+  hp_future =
       std::async(std::launch::async,
                  [&service, &host, ready = std::move(hp_ready)]() mutable {
                    service.execute_cpu_run(host, std::move(ready), 1);
                  });
-  auto rt_future =
+  rt_future =
       std::async(std::launch::async,
                  [&service, &host, ready = std::move(rt_ready)]() mutable {
                    service.execute_cpu_run(host, std::move(ready), 1);
                  });
 
-  EXPECT_EQ(both_entered_future.wait_for(std::chrono::seconds(2)),
-            std::future_status::ready);
-  release_children.set_value();
+  const std::future_status both_entered_status =
+      both_entered_future.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(both_entered_status, std::future_status::ready);
+  EXPECT_TRUE(release_guard.release());
   EXPECT_NO_THROW(hp_future.get());
   EXPECT_NO_THROW(rt_future.get());
   EXPECT_EQ(active_children.load(std::memory_order_acquire), 0);
@@ -1109,26 +1305,66 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
   EXPECT_EQ(host.context_exits(), 2);
   EXPECT_FALSE(host.trace_recording_failed());
 
+  ASSERT_EQ(hp_observation_future.wait_for(std::chrono::seconds(0)),
+            std::future_status::ready);
+  ASSERT_EQ(rt_observation_future.wait_for(std::chrono::seconds(0)),
+            std::future_status::ready);
+  const RetainedSubmissionObservation hp_observation =
+      hp_observation_future.get();
+  const RetainedSubmissionObservation rt_observation =
+      rt_observation_future.get();
+
+  EXPECT_EQ(hp_observation.trace_node_id, kHpTraceNodeId);
+  EXPECT_EQ(hp_observation.descriptor_run_id,
+            hp_child.descriptor().id().value());
+  EXPECT_EQ(hp_observation.graph_identity,
+            hp_child.descriptor().graph_identity());
+  EXPECT_EQ(hp_observation.topology_generation,
+            hp_child.descriptor().revision().topology_generation);
+  EXPECT_EQ(hp_observation.target_node_id,
+            hp_child.descriptor().target_node_id());
+  EXPECT_EQ(hp_observation.intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(hp_observation.quality, ComputeRunQuality::Full);
+  EXPECT_EQ(hp_observation.identity_run_id, hp_identity.run_id().value());
+  EXPECT_EQ(hp_observation.local_task_id, hp_identity.local_task_id().value());
+
+  EXPECT_EQ(rt_observation.trace_node_id, kRtTraceNodeId);
+  EXPECT_EQ(rt_observation.descriptor_run_id,
+            rt_child.descriptor().id().value());
+  EXPECT_EQ(rt_observation.graph_identity,
+            rt_child.descriptor().graph_identity());
+  EXPECT_EQ(rt_observation.topology_generation,
+            rt_child.descriptor().revision().topology_generation);
+  EXPECT_EQ(rt_observation.target_node_id,
+            rt_child.descriptor().target_node_id());
+  EXPECT_EQ(rt_observation.intent, ComputeIntent::RealTimeUpdate);
+  EXPECT_EQ(rt_observation.quality, ComputeRunQuality::Interactive);
+  EXPECT_EQ(rt_observation.identity_run_id, rt_identity.run_id().value());
+  EXPECT_EQ(rt_observation.local_task_id, rt_identity.local_task_id().value());
+
   const std::vector<ExecutionServiceHost::TraceEvent> traces =
       host.trace_events();
   ASSERT_EQ(traces.size(), 2U);
-  std::size_t hp_epoch_count = 0U;
-  std::size_t rt_epoch_count = 0U;
+  std::size_t hp_marker_count = 0U;
+  std::size_t rt_marker_count = 0U;
   for (const ExecutionServiceHost::TraceEvent& trace : traces) {
     EXPECT_EQ(trace.action, SchedulerTraceAction::AssignInitial);
-    EXPECT_EQ(trace.node_id, 65);
     EXPECT_GE(trace.worker_id, 0);
     EXPECT_LT(trace.worker_id, 2);
-    if (trace.epoch == hp_child.descriptor().id().value()) {
-      ++hp_epoch_count;
-    } else if (trace.epoch == rt_child.descriptor().id().value()) {
-      ++rt_epoch_count;
+    if (trace.node_id == kHpTraceNodeId) {
+      ++hp_marker_count;
+      EXPECT_EQ(trace.epoch, hp_child.descriptor().id().value());
+      EXPECT_NE(trace.epoch, rt_child.descriptor().id().value());
+    } else if (trace.node_id == kRtTraceNodeId) {
+      ++rt_marker_count;
+      EXPECT_EQ(trace.epoch, rt_child.descriptor().id().value());
+      EXPECT_NE(trace.epoch, hp_child.descriptor().id().value());
     } else {
-      ADD_FAILURE() << "Observed an epoch outside the realtime child pair.";
+      ADD_FAILURE() << "Observed a trace marker outside the realtime siblings.";
     }
   }
-  EXPECT_EQ(hp_epoch_count, 1U);
-  EXPECT_EQ(rt_epoch_count, 1U);
+  EXPECT_EQ(hp_marker_count, 1U);
+  EXPECT_EQ(rt_marker_count, 1U);
 }
 
 /**

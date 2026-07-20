@@ -341,13 +341,21 @@ Focused companion regressions own the remaining boundaries:
   `GraphErrc::Io`, and the created destination demonstrates the documented
   non-atomic post-open behavior.
 - `test_scheduler_worker_budget` proves a fresh invalid CPU-selecting load does
-  not publish a session or create a per-Graph CPU owner, while preserving the
-  first fixed service pool for equal reconfiguration and a later valid Graph;
-  an unequal positive worker request remains rejected.
+  not publish a session or create a per-Graph CPU owner. Before any equal
+  request, it derives the authoritative automatic worker count and requires a
+  deterministic unequal positive request to fail; zero and the explicit
+  resolved count then reuse the first fixed service pool, and a later valid
+  Graph still loads.
 - `test_compute_run` records complete action/node/worker/epoch tuples. It proves
   two concurrent Runs that reuse local task id zero deliver only matching
-  Run/node epochs to their separate Hosts, and that realtime Full HP and
-  Interactive RT children retain distinct epochs while sharing one Host.
+  Run/node epochs to their separate Hosts; cleanup releases a blocked first Run
+  on every assertion path so a serialization regression terminates as a test
+  failure. Realtime Full HP and Interactive RT children share one physical Host
+  and local task id zero, but distinct trace-node markers map each Host event
+  to the matching epoch and callback-retained descriptor/task identity.
+  This realtime case intentionally exercises `ExecutionService` directly:
+  worker-loop Host/epoch selection and retained callback identity are observable
+  at that boundary without adding a test-only GraphRuntime hook.
 - `test_ipc_protocol` proves exact Graph status propagation, one-call mutation
   behavior, and daemon session-name rollback after failed load.
 - `test_ipc_daemon` proves the real transport returns save `NotFound` and `Io`

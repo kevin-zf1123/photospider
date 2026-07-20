@@ -142,10 +142,10 @@ class ComputeService {
   /**
    * @brief Runtime policy for one ComputeService execution path.
    *
-   * ExecutionStrategy captures whether the caller selected a scheduler-backed
+   * ExecutionStrategy captures whether the caller selected an execution-bound
    * path and, when so, which runtime supplies Graph lifecycle, binding lookup,
-   * and worker-facing observation. It keeps execution policy separate from the
-   * semantic request so the same Request can be used by both compute() and
+   * and worker-facing observation. It keeps execution policy separate from
+   * the semantic request so the same Request can be used by both compute() and
    * compute_parallel().
    *
    * @note A null runtime is valid only when use_parallel_executor is false.
@@ -214,7 +214,7 @@ class ComputeService {
   NodeOutput& compute(GraphModel& graph, const Request& request);
 
   /**
-   * @brief Executes a scheduler-backed compute request against one graph.
+   * @brief Executes an execution-bound compute request against one graph.
    *
    * @param graph Graph whose node caches, timing, and inspection state are
    * read and mutated.
@@ -233,7 +233,7 @@ class ComputeService {
    * plugin, GPU, and serial routes retain their Graph-owned schedulers. The
    * staged dirty commit path starts RT before HP, waits for RT proxy commit
    * before HP graph commit, and returns the RT proxy output. Kernel callers
-   * must enter this method from GraphStateExecutor so scheduler-backed work
+   * must enter this method from GraphStateExecutor so execution-bound work
    * remains serialized with graph-state operations.
    */
   NodeOutput& compute_parallel(GraphModel& graph, GraphRuntime& runtime,
@@ -294,7 +294,7 @@ class ComputeService {
    *
    * @param graph Graph whose HP state and cache are updated.
    * @param proxy_graph RT proxy graph receiving optional HP downsample output.
-   * @param strategy Inline or scheduler-backed execution policy.
+   * @param strategy Inline or execution-bound execution policy.
    * @param request Validated dirty request and telemetry/cache options.
    * @param sibling_commit_gate Optional RT sibling gate protecting HP commit.
    * @param stabilized_parameters Optional immutable connected-parameter
@@ -323,7 +323,7 @@ class ComputeService {
    *
    * @param graph Graph supplying topology, parameters, and HP fallback data.
    * @param proxy_graph RT proxy graph receiving the committed result.
-   * @param strategy Inline or scheduler-backed execution policy.
+   * @param strategy Inline or execution-bound execution policy.
    * @param request Validated dirty request and telemetry/cache options.
    * @param stabilized_parameters Optional immutable parameter preflight output.
    * @param node_synchronization Optional per-node critical sections shared with
@@ -393,7 +393,7 @@ class ComputeService {
                                       compute::ComputeRun& run);
 
   /**
-   * @brief Executes one full scheduler-backed HP request through its Run.
+   * @brief Executes one full execution-bound HP request through its Run.
    *
    * @param graph Graph whose target HP output is computed.
    * @param runtime Runtime providing the GlobalHighPrecision binding and
@@ -443,7 +443,7 @@ class ComputeService {
    * @brief Binds intent coordinator callbacks to concrete compute executors.
    *
    * @param graph Graph supplying HP state and topology.
-   * @param strategy Inline or scheduler-backed execution policy.
+   * @param strategy Inline or execution-bound execution policy.
    * @param request Intent-aware request including any dirty ROI.
    * @param hp_run Request-owned HP Run. Realtime requests supply their HP
    * child.

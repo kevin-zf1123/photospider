@@ -894,12 +894,13 @@ class ComputeRun {
   bool is_terminal() const;
 
   /**
-   * @brief Constructs and owns the scheduler submission plan for this Run.
+   * @brief Constructs and owns the task submission plan for this Run.
    *
    * @param graph Graph used for HP planning and operation resolution.
    * @param traversal Traversal service used to build the cache-pruned plan.
    * @param node_id Target node id.
-   * @param available_devices Devices exposed by the borrowed scheduler.
+   * @param available_devices Devices exposed by the active execution route,
+   * copied into the Run-owned plan.
    * @return Mutable Run-owned plan retained by the shared control block.
    * @throws std::logic_error when a plan already exists or the Run is terminal.
    * @throws GraphError or standard exceptions from plan construction.

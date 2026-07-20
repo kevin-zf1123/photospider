@@ -703,10 +703,11 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
 }
 
 /**
- * @brief Executes one full scheduler-backed HP request through its Run.
+ * @brief Executes one full execution-bound HP request through its Run.
  *
  * @param graph Graph being computed.
- * @param runtime Graph runtime that owns the HP scheduler.
+ * @param runtime Graph runtime that publishes the HP execution binding:
+ * ownerless process CPU service or an owned legacy scheduler.
  * @param request Full HP target, cache, and telemetry options.
  * @param run Request observer for leased plan, runner, callback, temporary
  * result, exception, and lifecycle state.
@@ -739,11 +740,12 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(GraphModel& graph,
 }
 
 /**
- * @brief Executes a scheduler-backed compute request through the selected
+ * @brief Executes an execution-bound compute request through the selected
  * domain boundary.
  *
  * @param graph Graph being computed.
- * @param runtime Graph runtime that owns current intent schedulers.
+ * @param runtime Graph runtime that publishes each intent's execution binding:
+ * ownerless process CPU service or an owned legacy scheduler.
  * @param request Service request carrying target, cache, telemetry, intent,
  * dirty ROI, graph identity, and QoS.
  * @return Mutable target output selected by the request.

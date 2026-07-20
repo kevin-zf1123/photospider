@@ -71,19 +71,21 @@ class DirtyNodeSynchronization final {
 };
 
 /**
- * @brief Returns the running scheduler registered for one compute intent.
+ * @brief Returns the running legacy scheduler registered for one intent.
  *
- * This helper preserves the ComputeService scheduler contract used by full
- * graph dispatch and dirty ROI dispatch. It looks up the complete `IScheduler`
- * registered on the supplied GraphRuntime and starts it when necessary.
+ * This helper preserves the transitional scheduler route used by full graph
+ * dispatch and dirty ROI dispatch. It looks up the complete legacy
+ * `IScheduler` registered on the supplied GraphRuntime and starts it when
+ * necessary. Ownerless built-in CPU routes use ExecutionService instead.
  *
- * @param runtime Per-graph runtime that owns intent-specific schedulers.
+ * @param runtime Per-graph runtime that owns the requested legacy scheduler.
  * @param intent Compute intent whose scheduler should receive work.
  * @return Running scheduler for the requested intent.
  * @throws GraphError when no scheduler is registered.
  * @throws Any scheduler start exception unchanged.
  * @note The returned reference remains owned by GraphRuntime. Callers must not
- * store it beyond the active compute request.
+ * invoke this helper for a process-service binding or store the reference
+ * beyond the active compute request.
  */
 IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
                                      ComputeIntent intent);
@@ -132,7 +134,7 @@ struct PreparedDirtyPlan {
  * source-commit provenance.
  */
 struct DirtySourceFirstRunRequest {
-  /** @brief Optional runtime that owns intent schedulers and trace events. */
+  /** @brief Optional runtime owning the active legacy scheduler and traces. */
   GraphRuntime* runtime = nullptr;
 
   /** @brief Intent whose physical execution domain receives the work. */
