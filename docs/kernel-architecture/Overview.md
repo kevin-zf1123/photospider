@@ -10,13 +10,14 @@ domain terms are defined in `Terminology.md`.
 
 Photospider is built around a graph runtime with a service split, operation
 registry, cache layer, scheduler abstraction, and a frontend-facing Host seam.
-Parallel planned work dispatches through scheduler-owned task runtimes.
-Graph-state commands and compute requests that mutate visible graph state enter
-an explicit per-graph `GraphStateExecutor` boundary instead of the scheduler
-dispatch path. That boundary is a bounded FIFO lane with one graph-owned worker
-and at most 64 waiting callbacks plus one active callback. Scheduler-backed
-parallel compute uses the scheduler runtime for ready task callbacks inside the
-graph-state boundary.
+Built-in CPU planned work dispatches through one fixed Host-composed
+`ExecutionService`; legacy serial, GPU, and plugin work dispatches through
+graph-owned scheduler runtimes. Graph-state commands and compute requests that
+mutate visible graph state enter an explicit per-graph `GraphStateExecutor`
+boundary instead of either ready-dispatch path. That boundary is a bounded FIFO
+lane with one graph-owned worker and at most 64 waiting callbacks plus one
+active callback. Parallel compute uses its selected service or legacy scheduler
+runtime for ready callbacks inside the graph-state boundary.
 
 On macOS/Linux the same public Host seam also has a complete installed IPC
 adapter. `create_ipc_host(socket_path)` implements all 53 current
@@ -200,7 +201,7 @@ graph TD
     ComputeService --> OpRegistry
     ComputeService --> IScheduler
     ComputeService --> ExecutionService
-    ComputeService --> ComputeRun["request-owned HP ComputeRun"]
+    ComputeService --> ComputeRun["request-owned ComputeRun"]
     ComputeService --> ComputeTaskDispatcher
     ComputeRun --> TaskSubmissionPlan
     ComputeTaskDispatcher --> TaskSubmissionPlan
@@ -263,7 +264,7 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
-| `ComputeRun` | Private request owner for one non-realtime HP descriptor, monotonic phase, exact terminal outcome, and shared-control full-plan/temporary or standalone dirty-HP staging storage. Scheduler-backed full HP work retains stable leases and composite task identity; realtime Run grouping and process execution ownership remain future. |
+| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns its descriptor, monotonic phase, exact terminal outcome, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. A request-owned `RunGroup` and the final lifecycle registry remain future. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -284,17 +285,20 @@ Typical REPL compute flow:
    `InteractionService` / `Kernel` requests.
 3. `Kernel` resolves the active `GraphRuntime`.
 4. `Kernel` creates or uses services needed by `ComputeService`.
-5. For non-realtime HP, `ComputeService` creates one `ComputeRun` before
-   planning and captures session identity, topology-only submission revision,
-   target, intent, quality, and explicit QoS.
+5. For non-realtime HP, `ComputeService` creates one `ComputeRun`; a realtime
+   request creates independent HP `Full` and RT `Interactive` child Runs
+   without a `RunGroup`. Each captures session identity, topology-only
+   submission revision, target, intent, quality, and explicit QoS.
 6. `ComputeService` resolves topology order with `GraphTraversalService`.
 7. `ComputeService` checks memory and disk cache with `GraphCacheService`.
 8. Dirty-region paths use `RoiPropagationService` and `GraphExtentResolver`
    for ROI demand and HP-authoritative extents.
 9. `ComputeService` selects operation implementations from `OpRegistry`.
-10. Work executes recursively or through the configured scheduler path; full
-    scheduler plans/temporary results and standalone dirty HP staging remain
-    owned by that Run until exact terminal publication.
+10. Built-in CPU full, dirty, and preflight ready work crosses the fixed
+    multi-Graph `ExecutionService` after complete ledger admission; legacy
+    serial, GPU, and plugin work uses its graph-owned scheduler. Full
+    plans/temporary results and dirty staging remain owned by the matching Run
+    until exact terminal publication.
 11. `GraphEventService` records per-node events and timing data.
 12. The embedded Host adapter copies results into public Host value snapshots,
     and the CLI renders those values.
@@ -524,12 +528,13 @@ Important current behavior:
 - `Kernel` composes graph-scoped services and exposes no installable API.
 - `ComputeService` coordinates private collaborators; its module boundaries are
   implementation details behind `ps::Host`.
-- The current `ComputeRun` is a bounded non-realtime HP request owner. Its
-  topology generation is submission provenance, not authoritative
-  `GraphRevision`. Scheduler-backed full HP work executes owned callbacks under
-  stable Run leases and routes failure by `(RunId, RunLocalTaskId)`;
-  request-local dirty executors retain their separate synchronous
-  borrowed-handle path.
+- The current `ComputeRun` owns one non-realtime HP domain or one realtime
+  HP/RT child domain. Its topology generation is submission provenance, not
+  authoritative `GraphRevision`. Built-in CPU full, dirty, and preflight work
+  executes owned callbacks under stable Run leases and routes failure by
+  `(RunId, RunLocalTaskId)`; only legacy dirty scheduler routes retain their
+  synchronous borrowed-handle path. Realtime children are not yet coordinated
+  by a request-owned `RunGroup`.
 - `GraphTraversalService` owns topology queries only.
 - `RoiPropagationService` and `GraphExtentResolver` own spatial propagation and
   HP-authoritative extent resolution.
@@ -570,8 +575,10 @@ Important current behavior:
   remain distinct.
 - [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
   fixes the complete target Run, completion, execution-service, ledger, and
-  lifecycle ownership. Its issue #67 non-realtime HP Run lease and
-  completion-isolation slice is current.
+  lifecycle ownership. Its issue #67 Run-lease foundation, issue #69 fixed
+  multi-Graph HP/RT service and child Runs, and issue #70 ledger admission and
+  bounded ready store are current; the final `RunGroup`, lifecycle registry,
+  close/shutdown fence, and policy generation remain future.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

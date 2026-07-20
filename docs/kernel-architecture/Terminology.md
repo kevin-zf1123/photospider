@@ -76,17 +76,17 @@ and output commit through narrower collaborators.
 
 **`ComputeRun`**
 The current private, request-owned execution record for one non-realtime HP
-service call. Its immutable descriptor contains an opaque non-reused id,
-session identity, topology-only submission revision, target,
-`GlobalHighPrecision` intent, full quality, and explicit QoS. It owns monotonic
-phase and exact-once terminal state plus the full scheduler submission
-plan/temporary results or standalone dirty HP staging buffer through shared
-control state. Scheduler-backed full HP tasks retain non-forgeable
-`ComputeRunLease` values, execute owned callbacks, and publish failure only
-through a matching `(RunId, RunLocalTaskId)`. Request-local dirty executors
-still use a separate synchronous borrowed-handle path. Paired realtime child
-Runs/`RunGroup`, authoritative `GraphRevision`, and process execution
-ownership remain future work.
+domain or one realtime HP/RT child domain. Its immutable descriptor contains
+an opaque non-reused id, session identity, topology-only submission revision,
+target, single-domain intent, matching full/interactive quality, and explicit
+QoS. It owns monotonic phase and exact-once terminal state plus the full
+submission plan/temporary results or dirty HP staging required by its path
+through shared control state. Built-in CPU full, dirty, and preflight tasks
+retain non-forgeable `ComputeRunLease` values, execute owned callbacks through
+the fixed multi-Graph `ExecutionService`, and publish failure only through a
+matching `(RunId, RunLocalTaskId)`. Realtime requests currently create paired
+child Runs without a `RunGroup`. Authoritative `GraphRevision`, the final
+lifecycle registry, and request-owned `RunGroup` remain future work.
 
 **`FullTaskGraph`**
 The complete node/tile task shape for one graph generation, compute intent, and
@@ -118,9 +118,9 @@ temporary-result indexing semantics, and completion aggregation. For current
 full HP work, the request `ComputeRun` owns the `TaskSubmissionPlan` storage and
 temporary result slots while the dispatcher owns their dependency transitions
 and final result commit. Dirty executors reuse its source-first submission
-helper and own their staged commit through dirty write buffers. The full HP
-path pushes lease-backed owned callbacks; dirty paths may still push borrowed
-task handles.
+helper and own their staged commit through dirty write buffers. Built-in CPU
+full, dirty, and preflight paths push lease-backed owned submissions; only
+legacy dirty scheduler routes may still push borrowed task handles.
 
 **`ReadyTaskSubmission`**
 A move-only service submission whose compute dependencies are already
@@ -132,11 +132,14 @@ route receives `GraphModel`, a task graph, or dirty-propagation ownership.
 ## Scheduling, Cache, and Data
 
 **`IScheduler`**
-The current scheduler interface. A scheduler instance owns worker lifecycle,
-ready queues, batch/epoch state, and completion/exception publication for one
-per-graph intent route. Threaded implementations combine policy and physical
-resource ownership; `serial_debug` executes synchronously. This is current
-behavior, not the accepted long-term resource ownership model.
+The current legacy scheduler interface. A serial, GPU, or plugin scheduler
+instance owns worker lifecycle, ready queues, batch/epoch state, and
+completion/exception publication for one per-graph intent route. Threaded
+implementations combine policy and physical resource ownership;
+`serial_debug` executes synchronously. Built-in CPU Graph bindings instead use
+the fixed Host-composed `ExecutionService` and own no `IScheduler`. The legacy
+interface remains current for those routes, but it is not the accepted final
+policy-only scheduler generation.
 
 **Scheduler worker request**
 The configured pre-planning value. Zero means automatic and one through eight
@@ -257,9 +260,11 @@ planning, cache, or scheduling semantics.
   license to guess undeclared device/I/O/plugin dimensions.
 - A root reservation is not an executing callback; a child grant is not
   transferable outside its ledger-created ownership path.
-- The current per-graph `IScheduler` is not the
-  [target process execution domain](../roadmap/Kernel-Evolution.md#process-execution-domain);
-  its detailed future owner and Run-lifetime constraints are fixed by
+- A legacy per-graph `IScheduler` is neither the current Host-composed built-in
+  CPU `ExecutionService` nor the
+  [target policy-only scheduler generation](../roadmap/Kernel-Evolution.md#process-execution-domain);
+  the current service boundary and remaining lifecycle constraints are fixed
+  by
   [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md).
 
 ## Implementation and Validation Entry Points

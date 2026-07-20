@@ -62,14 +62,16 @@ mode 或 commit policy。
 解析、派发、指标和输出提交。
 
 **`ComputeRun`**
-当前用于一次非 realtime HP service call 的私有、request-owned 执行记录。其不可变 descriptor
-包含不透明且不复用的 id、session identity、只表示提交时拓扑的 revision、target、
-`GlobalHighPrecision` intent、full quality 与显式 QoS。它拥有单调 phase、exact-once terminal
-state，并通过共享 control state 拥有 full scheduler submission plan/temporary result 或
-standalone dirty HP staging buffer。Scheduler-backed full HP task 会保留不可伪造的
-`ComputeRunLease`，执行 owned callback，并且只通过匹配的
-`(RunId, RunLocalTaskId)` 发布失败。Request-local dirty executor 仍使用独立的同步借用 handle
-路径。配对 realtime child Run/`RunGroup`、权威 `GraphRevision` 与进程执行所有权仍是后续工作。
+当前用于一个非 realtime HP domain 或一个 realtime HP/RT child domain 的私有、
+request-owned 执行记录。其不可变 descriptor 包含不透明且不复用的 id、session identity、
+只表示提交时拓扑的 revision、target、单 domain intent、匹配的 full/interactive quality
+与显式 QoS。它拥有单调 phase、exact-once terminal state，并通过共享 control state
+拥有相应路径所需的 full submission plan/temporary result 或 dirty HP staging。内建 CPU
+full、dirty 与 preflight task 会保留不可伪造的 `ComputeRunLease`，通过固定的多 Graph
+`ExecutionService` 执行 owned callback，并且只通过匹配的
+`(RunId, RunLocalTaskId)` 发布失败。Realtime request 当前会创建成对的 child Run，
+但不创建 `RunGroup`。权威 `GraphRevision`、最终 lifecycle registry 与 request-owned
+`RunGroup` 仍是后续工作。
 
 **`FullTaskGraph`**
 一个 graph generation、compute intent 和 task-shape 配置下完整的 node/tile task 形态。
@@ -95,8 +97,8 @@ scheduler-visible task 可能执行，它就保持不可变。
 的执行协调器。对于当前 full HP 工作，request `ComputeRun` 拥有 `TaskSubmissionPlan` storage 和
 temporary result slot，而 dispatcher 拥有其中的 dependency transition 与 final result commit。
 Dirty executor 复用它的 source-first submission helper，并通过 dirty write buffer 拥有自己的
-staged commit。Full HP 路径会推送由 lease 支撑的 owned callback；dirty 路径仍可推送借用
-task handle。
+staged commit。内建 CPU full、dirty 与 preflight 路径会推送由 lease 支撑的 owned
+submission；只有旧式 dirty scheduler route 仍可推送借用 task handle。
 
 **`ReadyTaskSubmission`**
 一个计算依赖已经满足的 move-only service submission。它拥有不可变 Run/task identity、匹配 lease、
@@ -107,10 +109,12 @@ propagation ownership。
 ## 调度、缓存与数据
 
 **`IScheduler`**
-当前 scheduler 接口。一个 scheduler instance 为一条 per-graph intent route 拥有 worker
-lifecycle、ready queue、batch/epoch state 与 completion/exception publication。Threaded
-implementation 同时拥有 policy 与 physical resource；`serial_debug` 同步执行。这是当前行为，
-不是已接受的长期资源所有权模型。
+当前旧式 scheduler 接口。一个 serial、GPU 或 plugin scheduler instance 会为一条
+per-graph intent route 拥有 worker lifecycle、ready queue、batch/epoch state 与
+completion/exception publication。Threaded implementation 同时拥有 policy 与 physical
+resource；`serial_debug` 同步执行。内建 CPU Graph binding 改用固定的、由 Host 组合的
+`ExecutionService`，不拥有 `IScheduler`。该旧式接口对这些 route 仍是当前行为，但不是
+已接受的最终 policy-only scheduler generation。
 
 **Scheduler worker request**
 配置中、planning 前的值。零表示 automatic，一到八保持精确；更大的值无效。Automatic resolution
@@ -205,8 +209,9 @@ cache 或 scheduling 语义的所有者。
 - `ResourceVector` 不是 worker pool、观测到的 allocation 总量，也不是猜测未声明
   device/I/O/plugin 维度的许可。
 - Root reservation 不是正在执行的 callback；child grant 不能移出 ledger 创建的 ownership path。
-- 当前每图 `IScheduler` 不是[目标进程执行域](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)；
-  它未来的详细 owner 与 Run 生命周期约束由
+- 旧式每图 `IScheduler` 既不是当前由 Host 组合的内建 CPU `ExecutionService`，也不是
+  [目标 policy-only scheduler generation](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)；
+  当前 service 边界与剩余 lifecycle 约束由
   [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)固定。
 
 ## 实现与验证入口

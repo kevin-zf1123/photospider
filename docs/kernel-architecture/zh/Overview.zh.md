@@ -7,11 +7,13 @@
 ## 架构概述
 
 Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层、调度器抽象，以及面向前端的
-Host seam。Parallel planned work 会通过 scheduler-owned task runtime dispatch。Graph-state
-命令和会修改可见图状态的 compute request 会进入显式的每图 `GraphStateExecutor` 边界，而不是
-scheduler dispatch 路径。该边界是有界 FIFO lane：每个 graph 拥有一个 worker，最多容纳 64 个
-等待 callback 和一个正在执行的 callback。Scheduler-backed parallel compute 会在该 graph-state
-边界内使用 scheduler runtime 执行 ready task callback。
+Host seam。内建 CPU planned work 通过一个固定的、由 Host 组合的 `ExecutionService`
+dispatch；旧式 serial、GPU 与 plugin work 则通过 graph-owned scheduler runtime dispatch。
+Graph-state 命令和会修改可见图状态的 compute request 会进入显式的每图
+`GraphStateExecutor` 边界，而不是任一 ready-dispatch 路径。该边界是有界 FIFO lane：
+每个 graph 拥有一个 worker，最多容纳 64 个等待 callback 和一个正在执行的 callback。
+Parallel compute 会在 graph-state 边界内，通过所选 service 或旧式 scheduler runtime
+执行 ready callback。
 
 在 macOS/Linux 上，同一个 public Host seam 也具有完整的 installed IPC adapter。
 `create_ipc_host(socket_path)` 通过精确的 typed 55-method 本地协议实现当前全部 53 个非析构
@@ -170,7 +172,7 @@ graph TD
     ComputeService --> OpRegistry
     ComputeService --> IScheduler
     ComputeService --> ExecutionService
-    ComputeService --> ComputeRun["request-owned HP ComputeRun"]
+    ComputeService --> ComputeRun["request-owned ComputeRun"]
     ComputeService --> ComputeTaskDispatcher
     ComputeRun --> TaskSubmissionPlan
     ComputeTaskDispatcher --> TaskSubmissionPlan
@@ -222,7 +224,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
-| `ComputeRun` | 私有 request owner，拥有一次非 realtime HP descriptor、单调 phase、唯一 terminal outcome，以及由共享 control 持有的 full-plan/temporary storage 或 standalone dirty-HP staging storage；scheduler-backed full HP work 会保留稳定 lease 与复合 task identity，realtime Run grouping 和进程执行所有权仍是后续工作。 |
+| `ComputeRun` | 一个非 realtime HP domain 或一个 realtime HP/RT child domain 的私有 request owner。每个 Run 都拥有自身 descriptor、单调 phase、唯一 terminal outcome，以及由共享 control 持有的 full-plan/temporary storage 或 dirty staging storage。内建 CPU full、dirty 与 preflight work 会通过固定的多 Graph service 保留稳定 lease 与复合 task identity。Request-owned `RunGroup` 和最终 lifecycle registry 仍是后续工作。 |
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
 | `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
@@ -242,14 +244,16 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 2. embedded Host adapter 将 public value 转换为内部 `InteractionService` / `Kernel` request。
 3. `Kernel` 解析活跃的 `GraphRuntime`。
 4. `Kernel` 创建或使用 `ComputeService` 所需服务。
-5. 对于非 realtime HP，`ComputeService` 会在 planning 前创建一个 `ComputeRun`，捕获 session
-   identity、只表示提交时拓扑的 revision、target、intent、quality 与显式 QoS。
+5. 对于非 realtime HP，`ComputeService` 创建一个 `ComputeRun`；realtime request 则创建
+   独立的 HP `Full` 与 RT `Interactive` child Run，而不创建 `RunGroup`。每个 Run 都捕获
+   session identity、只表示提交时拓扑的 revision、target、intent、quality 与显式 QoS。
 6. `ComputeService` 通过 `GraphTraversalService` 解析拓扑顺序。
 7. `ComputeService` 通过 `GraphCacheService` 检查内存和磁盘缓存。
 8. 脏区路径通过 `RoiPropagationService` 和 `GraphExtentResolver` 计算 ROI 需求和 HP 权威范围。
 9. `ComputeService` 从 `OpRegistry` 选择操作实现。
-10. 工作通过递归或配置的调度器路径执行；full scheduler plan/temporary result 与 standalone
-    dirty HP staging 会由该 Run 持有到唯一 terminal publication。
+10. 内建 CPU full、dirty 与 preflight ready work 会在完整 ledger 准入后跨越固定的多 Graph
+    `ExecutionService`；旧式 serial、GPU 与 plugin work 使用其 graph-owned scheduler。
+    Full plan/temporary result 与 dirty staging 会由匹配 Run 持有到唯一 terminal publication。
 11. `GraphEventService` 记录每节点事件和计时数据。
 12. embedded Host adapter 将结果复制为 public Host value snapshot，CLI 再渲染这些 value。
 
@@ -421,10 +425,11 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 
 - `Kernel` 组合图级 service，不暴露可安装 API。
 - `ComputeService` 协调私有协作者，其模块边界是 `ps::Host` 后方的实现细节。
-- 当前 `ComputeRun` 是有界的非 realtime HP request owner。其 topology generation 只是
-  submission provenance，不是权威 `GraphRevision`。Scheduler-backed full HP work 会在稳定
-  Run lease 下执行 owned callback，并按 `(RunId, RunLocalTaskId)` 路由 failure；request-local
-  dirty executor 保留独立的同步 borrowed-handle 路径。
+- 当前 `ComputeRun` 拥有一个非 realtime HP domain 或一个 realtime HP/RT child domain。
+  其 topology generation 只是 submission provenance，不是权威 `GraphRevision`。内建 CPU
+  full、dirty 与 preflight work 会在稳定 Run lease 下执行 owned callback，并按
+  `(RunId, RunLocalTaskId)` 路由 failure；只有旧式 dirty scheduler route 仍保留同步
+  borrowed-handle 路径。Realtime child 尚未由 request-owned `RunGroup` 协调。
 - `GraphTraversalService` 只拥有 topology query。
 - `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
@@ -454,8 +459,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - [ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
   定义当前事实、决策、目标与实施状态如何保持分离。
 - [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-  固定完整的目标 Run、completion、execution-service、ledger 与 lifecycle 所有权；其 issue #67
-  非 realtime HP Run lease 与 completion-isolation 切片已经是当前行为。
+  固定完整的目标 Run、completion、execution-service、ledger 与 lifecycle 所有权；其中 issue
+  #67 的 Run-lease 基础、issue #69 的固定多 Graph HP/RT service 与 child Run，以及 issue #70
+  的 ledger 准入与 bounded ready store 已经是当前行为；最终 `RunGroup`、lifecycle registry、
+  close/shutdown fence 与 policy generation 仍是未来行为。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。
