@@ -48,9 +48,9 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
   SchedulerReplacementOutcome outcome = SchedulerReplacementOutcome::Rejected;
   try {
     outcome =
-        runtime.graph_state()
-            .submit([this, &runtime, intent,
-                     type](GraphModel&) -> SchedulerReplacementOutcome {
+        runtime
+            .submit_compute_request([this, &runtime, intent,
+                                     type]() -> SchedulerReplacementOutcome {
               const std::optional<SchedulerPlan> plan =
                   SchedulerFactory::plan(type, scheduler_config_.worker_count);
               if (!plan.has_value()) {
@@ -114,22 +114,23 @@ std::optional<std::pair<std::string, std::string>> Kernel::get_scheduler_info(
 
   auto& runtime = *runtime_it->second;
   try {
-    return runtime.graph_state()
-        .submit([this, &runtime, intent](GraphModel&)
-                    -> std::optional<std::pair<std::string, std::string>> {
-          const GraphRuntime::SchedulerExecutionRoute route =
-              runtime.get_scheduler_execution_route(intent);
-          if (route.domain == GraphRuntime::SchedulerExecutionRoute::Domain::
-                                  ProcessCpuService) {
-            return std::make_pair(std::string("CpuWorkStealingScheduler"),
-                                  execution_service_->get_stats());
-          }
-          const IScheduler* scheduler = runtime.get_scheduler(intent);
-          if (!scheduler) {
-            return std::nullopt;
-          }
-          return std::make_pair(scheduler->name(), scheduler->get_stats());
-        })
+    return runtime
+        .submit_compute_request(
+            [this, &runtime,
+             intent]() -> std::optional<std::pair<std::string, std::string>> {
+              const GraphRuntime::SchedulerExecutionRoute route =
+                  runtime.get_scheduler_execution_route(intent);
+              if (route.domain == GraphRuntime::SchedulerExecutionRoute::
+                                      Domain::ProcessCpuService) {
+                return std::make_pair(std::string("CpuWorkStealingScheduler"),
+                                      execution_service_->get_stats());
+              }
+              const IScheduler* scheduler = runtime.get_scheduler(intent);
+              if (!scheduler) {
+                return std::nullopt;
+              }
+              return std::make_pair(scheduler->name(), scheduler->get_stats());
+            })
         .get();
   } catch (const std::bad_alloc&) {
     throw;

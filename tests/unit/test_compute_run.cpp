@@ -49,7 +49,8 @@ namespace {
  * @brief Builds deterministic descriptor input for ComputeRun unit tests.
  *
  * @param graph_identity Graph/session label to capture.
- * @param topology_generation Topology-only submission revision.
+ * @param graph_revision Nonzero authoritative Graph revision and deterministic
+ * strong Graph identity representation.
  * @param target_node_id Requested graph-local target.
  * @return Valid full-quality HP submission with explicit throughput QoS.
  * @throws std::bad_alloc if graph identity ownership cannot allocate.
@@ -57,11 +58,12 @@ namespace {
  * wall-clock timing.
  */
 ComputeRunSubmission make_test_submission(std::string graph_identity,
-                                          uint64_t topology_generation,
+                                          uint64_t graph_revision,
                                           int target_node_id) {
   return ComputeRunSubmission{
       std::move(graph_identity),
-      ComputeRunSubmissionRevision{topology_generation},
+      GraphInstanceId{graph_revision},
+      GraphRevision{graph_revision},
       target_node_id,
       ComputeIntent::GlobalHighPrecision,
       ComputeRunQuality::Full,
@@ -72,7 +74,8 @@ ComputeRunSubmission make_test_submission(std::string graph_identity,
  * @brief Builds deterministic descriptor input for built-in policy tests.
  *
  * @param graph_identity Stable Graph/session fairness identity.
- * @param topology_generation Topology-only submission revision.
+ * @param graph_revision Nonzero authoritative Graph revision and deterministic
+ * strong Graph identity representation.
  * @param target_node_id Diagnostic graph-local target.
  * @param service_class Explicit built-in policy selector.
  * @param weight Positive immutable weighted-fairness input.
@@ -83,13 +86,12 @@ ComputeRunSubmission make_test_submission(std::string graph_identity,
  * policy selection does not infer QoS from either field.
  */
 ComputeRunSubmission make_policy_submission(
-    std::string graph_identity, uint64_t topology_generation,
-    int target_node_id, ComputeRunQosClass service_class,
-    std::uint32_t weight = 1U,
+    std::string graph_identity, uint64_t graph_revision, int target_node_id,
+    ComputeRunQosClass service_class, std::uint32_t weight = 1U,
     std::optional<std::chrono::steady_clock::time_point> deadline =
         std::nullopt) {
   ComputeRunSubmission submission = make_test_submission(
-      std::move(graph_identity), topology_generation, target_node_id);
+      std::move(graph_identity), graph_revision, target_node_id);
   submission.qos = ComputeRunQos{service_class, deadline, weight, std::nullopt};
   return submission;
 }
@@ -795,8 +797,8 @@ struct RetainedSubmissionObservation final {
   /** @brief Graph/session identity exposed by the retained descriptor. */
   std::string graph_identity;
 
-  /** @brief Topology generation exposed by the retained descriptor. */
-  uint64_t topology_generation = 0;
+  /** @brief Authoritative Graph revision exposed by the retained descriptor. */
+  uint64_t graph_revision = 0;
 
   /** @brief Target node exposed by the retained descriptor. */
   int target_node_id = -1;
@@ -830,16 +832,15 @@ RetainedSubmissionObservation observe_retained_submission(
     int trace_node_id, const ComputeRunLease& lease,
     const ComputeRunTaskIdentity& identity) {
   const ComputeRunDescriptor& descriptor = lease.descriptor();
-  return RetainedSubmissionObservation{
-      trace_node_id,
-      descriptor.id().value(),
-      descriptor.graph_identity(),
-      descriptor.revision().topology_generation,
-      descriptor.target_node_id(),
-      descriptor.intent(),
-      descriptor.quality(),
-      identity.run_id().value(),
-      identity.local_task_id().value()};
+  return RetainedSubmissionObservation{trace_node_id,
+                                       descriptor.id().value(),
+                                       descriptor.graph_identity(),
+                                       descriptor.revision().value(),
+                                       descriptor.target_node_id(),
+                                       descriptor.intent(),
+                                       descriptor.quality(),
+                                       identity.run_id().value(),
+                                       identity.local_task_id().value()};
 }
 
 /**
@@ -1658,14 +1659,14 @@ struct DirtyProductResourceResult final {
 /**
  * @brief Declares the HP/RT descriptor builder used by product-case setup.
  * @param graph_identity Stable GraphRuntime/session identity.
- * @param topology_generation Current graph topology identity.
+ * @param graph_revision Current authoritative Graph revision.
  * @param node_id Dirty target node.
  * @param intent HP or RT single-domain intent.
  * @return Valid full-HP or interactive-RT submission.
  * @throws std::bad_alloc when graph identity ownership cannot allocate.
  */
 ComputeRunSubmission make_dirty_resource_submission(
-    const std::string& graph_identity, std::uint64_t topology_generation,
+    const std::string& graph_identity, std::uint64_t graph_revision,
     int node_id, ComputeIntent intent);
 
 /**
@@ -1719,7 +1720,7 @@ DirtyProductResourceResult execute_dirty_product_resource_case(
   InitialSubmissionStorageProbe observation;
   ScopedInitialSubmissionStorageObserver observer(service, observation);
   ComputeRun run(make_dirty_resource_submission(
-      graph_identity, graph.topology_generation(), node_id, intent));
+      graph_identity, graph.revision().value(), node_id, intent));
   if (!run.advance_to(ComputeRunPhase::Admitted)) {
     throw std::logic_error("Dirty product Run did not enter admission.");
   }
@@ -1878,17 +1879,17 @@ void expect_pending_entry_interval(const std::string& graph_identity,
 /**
  * @brief Builds one HP or RT descriptor for dirty product paths.
  * @param graph_identity Stable GraphRuntime/session identity.
- * @param topology_generation Current graph topology identity.
+ * @param graph_revision Current authoritative Graph revision.
  * @param node_id Dirty target node.
  * @param intent HP or RT single-domain intent.
  * @return Valid full-HP or interactive-RT submission.
  * @throws std::bad_alloc when graph identity ownership cannot allocate.
  */
 ComputeRunSubmission make_dirty_resource_submission(
-    const std::string& graph_identity, std::uint64_t topology_generation,
+    const std::string& graph_identity, std::uint64_t graph_revision,
     int node_id, ComputeIntent intent) {
   ComputeRunSubmission submission =
-      make_test_submission(graph_identity, topology_generation, node_id);
+      make_test_submission(graph_identity, graph_revision, node_id);
   submission.intent = intent;
   submission.quality = intent == ComputeIntent::RealTimeUpdate
                            ? ComputeRunQuality::Interactive
@@ -2001,7 +2002,8 @@ TEST(ComputeRunDescriptor, CapturesIdRevisionIntentQualityAndQosWithoutReuse) {
   EXPECT_NE(first.descriptor().id().value(), 0U);
   EXPECT_NE(first.descriptor().id(), second.descriptor().id());
   EXPECT_EQ(first.descriptor().graph_identity(), "session-a");
-  EXPECT_EQ(first.descriptor().revision().topology_generation, 17U);
+  EXPECT_EQ(first.descriptor().graph_instance_id().value(), 17U);
+  EXPECT_EQ(first.descriptor().revision().value(), 17U);
   EXPECT_EQ(first.descriptor().target_node_id(), 42);
   EXPECT_EQ(first.descriptor().intent(), ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(first.descriptor().quality(), ComputeRunQuality::Full);
@@ -2011,6 +2013,54 @@ TEST(ComputeRunDescriptor, CapturesIdRevisionIntentQualityAndQosWithoutReuse) {
   EXPECT_EQ(first.descriptor().qos().weight, 3U);
   ASSERT_TRUE(first.descriptor().qos().maximum_parallelism.has_value());
   EXPECT_EQ(*first.descriptor().qos().maximum_parallelism, 2U);
+}
+
+/**
+ * @brief Verifies strong Graph values reject zero and stop before wrap.
+ * @note Maximum identity is a legal comparison value; live mint exhaustion is
+ * process-global and therefore is not consumed by this unit test.
+ */
+TEST(GraphRevision, RejectsIllegalValuesAndChecksMaximumSuccessor) {
+  EXPECT_THROW((void)GraphInstanceId{0U}, std::invalid_argument);
+  EXPECT_THROW((void)GraphRevision{0U}, std::invalid_argument);
+  EXPECT_EQ(GraphRevision::initial().value(), 1U);
+
+  const GraphInstanceId maximum_identity{std::numeric_limits<uint64_t>::max()};
+  EXPECT_EQ(maximum_identity.value(), std::numeric_limits<uint64_t>::max());
+
+  const GraphRevision penultimate{std::numeric_limits<uint64_t>::max() - 1U};
+  EXPECT_EQ(penultimate.next().value(), std::numeric_limits<uint64_t>::max());
+  const GraphRevision maximum_revision{std::numeric_limits<uint64_t>::max()};
+  EXPECT_THROW((void)maximum_revision.next(), std::overflow_error);
+}
+
+/**
+ * @brief Verifies live Graph identity non-reuse and snapshot provenance.
+ * @note Structural success advances revision once; failed validation and
+ * compute-state publication preserve the current authoritative revision.
+ */
+TEST(GraphRevision, GraphMutationAndComputeSnapshotPreserveAuthority) {
+  GraphModel first(std::filesystem::path{});
+  GraphModel second(std::filesystem::path{});
+  EXPECT_NE(first.instance_id(), second.instance_id());
+  EXPECT_EQ(first.revision(), GraphRevision::initial());
+
+  Node node = make_plan_node(1);
+  first.add_node(node);
+  EXPECT_EQ(first.revision().value(), 2U);
+  const GraphRevision after_add = first.revision();
+  EXPECT_THROW(first.add_node(node), GraphError);
+  EXPECT_EQ(first.revision(), after_add);
+
+  std::unique_ptr<GraphModel> snapshot = first.clone_for_compute();
+  EXPECT_TRUE(snapshot->is_compute_snapshot());
+  EXPECT_EQ(snapshot->instance_id(), first.instance_id());
+  EXPECT_EQ(snapshot->revision(), first.revision());
+  snapshot->mutate_node_runtime_state(
+      1, [](GraphModel::NodeRuntimeState& state) { state.hp_version = 7; });
+  first.publish_compute_snapshot(*snapshot);
+  EXPECT_EQ(first.node(1).hp_version, 7);
+  EXPECT_EQ(first.revision(), after_add);
 }
 
 /**
@@ -2161,7 +2211,7 @@ TEST(ComputeRunStorage, OwnsOneFullHpSubmissionPlanAndTemporarySlots) {
   graph.validate_topology();
   GraphTraversalService traversal;
   ComputeRun run(
-      make_test_submission("plan-storage", graph.topology_generation(), 11));
+      make_test_submission("plan-storage", graph.revision().value(), 11));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
 
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
@@ -2294,9 +2344,9 @@ TEST(ComputeRunTaskIdentity,
   second_graph.validate_topology();
   GraphTraversalService traversal;
   ComputeRun first(make_test_submission("identity-first",
-                                        first_graph.topology_generation(), 21));
-  ComputeRun second(make_test_submission(
-      "identity-second", second_graph.topology_generation(), 22));
+                                        first_graph.revision().value(), 21));
+  ComputeRun second(make_test_submission("identity-second",
+                                         second_graph.revision().value(), 22));
   first.advance_to(ComputeRunPhase::Admitted);
   second.advance_to(ComputeRunPhase::Admitted);
   first.emplace_submission_plan(first_graph, traversal, 21,
@@ -2349,7 +2399,8 @@ TEST(ReadyTaskSubmission,
       make_counted_ready_submission(first_lease, 7, 71, entered);
   EXPECT_EQ(submission.metadata().run_id(), first.descriptor().id());
   EXPECT_EQ(submission.metadata().graph_identity(), "ready-first");
-  EXPECT_EQ(submission.metadata().revision().topology_generation, 41U);
+  EXPECT_EQ(submission.metadata().graph_instance_id().value(), 41U);
+  EXPECT_EQ(submission.metadata().revision().value(), 41U);
   EXPECT_EQ(submission.metadata().target_node_id(), 51);
   EXPECT_EQ(submission.metadata().intent(), ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(submission.metadata().quality(), ComputeRunQuality::Full);
@@ -3049,7 +3100,7 @@ TEST(ExecutionServiceProductResources,
   ExecutionService small_service(1U, execution_limits(service_only));
   ExecutionServiceHost small_host;
   ComputeRun small_run(
-      make_test_submission(graph_identity, graph.topology_generation(), 101));
+      make_test_submission(graph_identity, graph.revision().value(), 101));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& small_plan = small_run.emplace_submission_plan(
       graph, traversal, 101, std::vector<Device>{Device::CPU});
@@ -3105,7 +3156,7 @@ TEST(ExecutionServiceProductResources,
   ExecutionService large_service(1U);
   ExecutionServiceHost large_host;
   ComputeRun large_run(
-      make_test_submission(graph_identity, graph.topology_generation(), 101));
+      make_test_submission(graph_identity, graph.revision().value(), 101));
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& large_plan = large_run.emplace_submission_plan(
       graph, traversal, 101, std::vector<Device>{Device::CPU});
@@ -3278,8 +3329,8 @@ TEST(ExecutionServiceProductResources,
   compute_plan.task_graph.tasks[2].task_id = 2;
   compute_plan.task_graph.tasks[2].node_id = kMissingNodeId;
 
-  ComputeRun run(make_test_submission(
-      graph_identity, graph.topology_generation(), kMissingNodeId));
+  ComputeRun run(make_test_submission(graph_identity, graph.revision().value(),
+                                      kMissingNodeId));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   HighPrecisionDirtyWriteBuffer& hp_buffer =
       run.emplace_dirty_hp_write_buffer(false);
@@ -3416,7 +3467,7 @@ TEST(ExecutionServiceProductResources,
   ExecutionService small_service(1U, execution_limits(service_only));
   ExecutionServiceHost small_host;
   ComputeRun small_run(
-      make_test_submission(graph_identity, graph.topology_generation(), 202));
+      make_test_submission(graph_identity, graph.revision().value(), 202));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
   EXPECT_THROW((void)stabilize_connected_dirty_parameters(
                    graph, traversal, 202, 1U, graph.topology_generation(),
@@ -3441,7 +3492,7 @@ TEST(ExecutionServiceProductResources,
   ExecutionService large_service(1U);
   ExecutionServiceHost large_host;
   ComputeRun large_run(
-      make_test_submission(graph_identity, graph.topology_generation(), 202));
+      make_test_submission(graph_identity, graph.revision().value(), 202));
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
   std::shared_ptr<const StabilizedDirtyParameters> stabilized;
   EXPECT_NO_THROW(stabilized = stabilize_connected_dirty_parameters(
@@ -5274,8 +5325,9 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
   ComputeRun rt_child(std::move(rt_submission));
   EXPECT_EQ(hp_child.descriptor().graph_identity(),
             rt_child.descriptor().graph_identity());
-  EXPECT_EQ(hp_child.descriptor().revision().topology_generation,
-            rt_child.descriptor().revision().topology_generation);
+  EXPECT_EQ(hp_child.descriptor().graph_instance_id(),
+            rt_child.descriptor().graph_instance_id());
+  EXPECT_EQ(hp_child.descriptor().revision(), rt_child.descriptor().revision());
   EXPECT_EQ(hp_child.descriptor().target_node_id(),
             rt_child.descriptor().target_node_id());
   EXPECT_EQ(hp_child.descriptor().intent(), ComputeIntent::GlobalHighPrecision);
@@ -5380,8 +5432,8 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
             hp_child.descriptor().id().value());
   EXPECT_EQ(hp_observation.graph_identity,
             hp_child.descriptor().graph_identity());
-  EXPECT_EQ(hp_observation.topology_generation,
-            hp_child.descriptor().revision().topology_generation);
+  EXPECT_EQ(hp_observation.graph_revision,
+            hp_child.descriptor().revision().value());
   EXPECT_EQ(hp_observation.target_node_id,
             hp_child.descriptor().target_node_id());
   EXPECT_EQ(hp_observation.intent, ComputeIntent::GlobalHighPrecision);
@@ -5394,8 +5446,8 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
             rt_child.descriptor().id().value());
   EXPECT_EQ(rt_observation.graph_identity,
             rt_child.descriptor().graph_identity());
-  EXPECT_EQ(rt_observation.topology_generation,
-            rt_child.descriptor().revision().topology_generation);
+  EXPECT_EQ(rt_observation.graph_revision,
+            rt_child.descriptor().revision().value());
   EXPECT_EQ(rt_observation.target_node_id,
             rt_child.descriptor().target_node_id());
   EXPECT_EQ(rt_observation.intent, ComputeIntent::RealTimeUpdate);
@@ -5456,9 +5508,9 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   peer_graph.validate_topology();
   GraphTraversalService traversal;
   ComputeRun failing(make_test_submission(
-      "service-isolated-failure", failing_graph.topology_generation(), 65));
+      "service-isolated-failure", failing_graph.revision().value(), 65));
   ComputeRun peer(make_test_submission("service-isolated-peer",
-                                       peer_graph.topology_generation(), 66));
+                                       peer_graph.revision().value(), 66));
   failing.advance_to(ComputeRunPhase::Admitted);
   peer.advance_to(ComputeRunPhase::Admitted);
   failing.emplace_submission_plan(failing_graph, traversal, 65,
@@ -5629,7 +5681,7 @@ TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
   graph.validate_topology();
   GraphTraversalService traversal;
   ComputeRun run(
-      make_test_submission("service-failure", graph.topology_generation(), 81));
+      make_test_submission("service-failure", graph.revision().value(), 81));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal, 81, std::vector<Device>{Device::CPU});
@@ -5697,7 +5749,7 @@ TEST(ComputeRunCompletion,
   graph.validate_topology();
   GraphTraversalService traversal;
   ComputeRun run(
-      make_test_submission("terminal-task", graph.topology_generation(), 31));
+      make_test_submission("terminal-task", graph.revision().value(), 31));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal, 31, std::vector<Device>{Device::CPU});
@@ -5743,8 +5795,8 @@ TEST(ComputeRunCompletion,
   graph.add_node(make_plan_node(32));
   graph.validate_topology();
   GraphTraversalService traversal;
-  ComputeRun run(make_test_submission("terminal-bootstrap",
-                                      graph.topology_generation(), 32));
+  ComputeRun run(
+      make_test_submission("terminal-bootstrap", graph.revision().value(), 32));
   ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal, 32, std::vector<Device>{Device::CPU});

@@ -287,14 +287,14 @@ bool is_realtime_request(const ComputeService::Request& request) {
 /**
  * @brief Captures immutable single-domain Run inputs before service planning.
  *
- * @param graph Graph supplying the topology-only submission revision.
+ * @param graph Graph supplying authoritative instance identity and revision.
  * @param request Service request supplying graph identity, target, and QoS.
  * @param intent HP or RT domain owned by the new Run.
  * @return Owned descriptor inputs for one single-domain ComputeRun.
  * @throws std::bad_alloc if graph identity copying allocates.
  * @throws std::invalid_argument if intent is not HP or RT.
- * @note topology_generation is an audit snapshot only, not the authoritative
- * GraphRevision or commit predicate introduced by issue #72.
+ * @note Topology generation remains a separate planning-cache key and is not
+ * stored in the Run descriptor.
  */
 compute::ComputeRunSubmission make_run_submission(
     const GraphModel& graph, const ComputeService::Request& request,
@@ -306,7 +306,8 @@ compute::ComputeRunSubmission make_run_submission(
   }
   return compute::ComputeRunSubmission{
       request.graph_identity,
-      compute::ComputeRunSubmissionRevision{graph.topology_generation()},
+      graph.instance_id(),
+      graph.revision(),
       request.node_id,
       intent,
       intent == ComputeIntent::RealTimeUpdate
@@ -316,12 +317,70 @@ compute::ComputeRunSubmission make_run_submission(
 }
 
 /**
+ * @brief Advances a normally executing Run to the visible-commit boundary.
+ * @param run HP or RT Run whose local domain output has been validated.
+ * @return Nothing.
+ * @throws GraphError when the Run is already terminal or cannot reach
+ *         CommitPending on the current success path.
+ * @note Full and dirty dispatchers may already publish CommitPending. The
+ *       helper makes sequential and every product wrapper follow the same
+ *       terminal ordering without treating an idempotent phase as failure.
+ */
+void require_commit_pending(compute::ComputeRun& run) {
+  if (run.phase() == compute::ComputeRunPhase::CommitPending) {
+    return;
+  }
+  if (!run.advance_to(compute::ComputeRunPhase::CommitPending)) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "ComputeRun cannot enter staged commit.");
+  }
+}
+
+/**
+ * @brief Invokes the optional product HP commit policy.
+ * @param run Commit-pending HP Run.
+ * @param graph Exact staged Graph used by execution.
+ * @param proxy Optional staged proxy modified by the HP domain.
+ * @param request Request carrying the private product policy.
+ * @return Nothing after policy publication, or immediately without a policy.
+ * @throws Any exact policy validation or persistence failure unchanged.
+ */
+void commit_high_precision_if_requested(
+    const compute::ComputeRun& run, GraphModel& graph,
+    compute::RealtimeProxyGraph* proxy,
+    const ComputeService::Request& request) {
+  if (request.commit_policy) {
+    request.commit_policy->commit_high_precision(run, graph, proxy);
+  }
+}
+
+/**
+ * @brief Invokes the optional product RT commit policy.
+ * @param run Commit-pending RT child Run.
+ * @param graph Exact staged Graph used for request planning.
+ * @param proxy Exact staged RT proxy used by execution.
+ * @param request Request carrying the private product policy.
+ * @return Nothing after policy publication, or immediately without a policy.
+ * @throws Any exact policy validation failure unchanged.
+ */
+void commit_real_time_if_requested(const compute::ComputeRun& run,
+                                   GraphModel& graph,
+                                   compute::RealtimeProxyGraph& proxy,
+                                   const ComputeService::Request& request) {
+  if (request.commit_policy) {
+    request.commit_policy->commit_real_time(run, graph, proxy);
+  }
+}
+
+/**
  * @brief Settles one request-owned HP Run around an execution callback.
  *
  * @tparam Execute Callable returning the validated target NodeOutput reference.
+ * @tparam Commit Callable publishing the staged HP domain after execution.
  * @param run Run whose admission and exactly-one terminal outcome are owned by
  * this wrapper.
  * @param execute Sequential, full scheduler, or standalone dirty HP callback.
+ * @param commit Commit-policy callback invoked only after CommitPending.
  * @return Mutable target output returned by execute.
  * @throws Rethrows the exact callback exception after publishing Run failure.
  * @throws GraphError if another terminal claimant unexpectedly wins before a
@@ -330,12 +389,14 @@ compute::ComputeRunSubmission make_run_submission(
  * committed or reusable target output. Failure publication retains the
  * original std::exception_ptr before rethrow.
  */
-template <typename Execute>
+template <typename Execute, typename Commit>
 NodeOutput& execute_request_owned_hp_run(compute::ComputeRun& run,
-                                         Execute&& execute) {
+                                         Execute&& execute, Commit&& commit) {
   try {
     run.advance_to(compute::ComputeRunPhase::Admitted);
     NodeOutput& output = std::forward<Execute>(execute)();
+    require_commit_pending(run);
+    std::forward<Commit>(commit)();
     if (!run.publish_succeeded()) {
       throw GraphError(
           GraphErrc::ComputeError,
@@ -353,8 +414,10 @@ NodeOutput& execute_request_owned_hp_run(compute::ComputeRun& run,
  * @brief Settles one realtime child Run around its domain callback.
  *
  * @tparam Execute Callable returning the committed child-domain output.
+ * @tparam Commit Callable publishing the staged child domain after execution.
  * @param run Already admitted HP or RT child Run.
  * @param execute Dirty executor callback for that child's single domain.
+ * @param commit Commit-policy callback invoked only after CommitPending.
  * @return Mutable domain output returned by execute.
  * @throws Rethrows the exact callback exception after publishing child
  * failure.
@@ -362,11 +425,13 @@ NodeOutput& execute_request_owned_hp_run(compute::ComputeRun& run,
  * @note This wrapper does not admit the Run because the paired request wrapper
  * admits both children before any shared preflight or sibling launch.
  */
-template <typename Execute>
+template <typename Execute, typename Commit>
 NodeOutput& execute_realtime_child_run(compute::ComputeRun& run,
-                                       Execute&& execute) {
+                                       Execute&& execute, Commit&& commit) {
   try {
     NodeOutput& output = std::forward<Execute>(execute)();
+    require_commit_pending(run);
+    std::forward<Commit>(commit)();
     if (!run.publish_succeeded()) {
       throw GraphError(
           GraphErrc::ComputeError,
@@ -684,13 +749,18 @@ NodeOutput& ComputeService::compute_real_time_update(
  *
  * @param graph Graph address used as the inline proxy map key.
  * @param strategy Strategy that may provide GraphRuntime ownership.
- * @return Runtime proxy when available, otherwise an inline service proxy.
+ * @param request Request that may provide a staged proxy override.
+ * @return Staged override, runtime proxy, or inline service proxy.
  * @throws std::bad_alloc unchanged if inline proxy map or object allocation
  * exhausts memory.
  * @note Inline map access is serialized by inline_rt_proxy_graphs_mutex_.
  */
 compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
-    GraphModel& graph, const ExecutionStrategy& strategy) {
+    GraphModel& graph, const ExecutionStrategy& strategy,
+    const Request& request) {
+  if (request.staged_realtime_proxy) {
+    return *request.staged_realtime_proxy;
+  }
   if (strategy.runtime) {
     return strategy.runtime->realtime_proxy_graph();
   }
@@ -775,13 +845,19 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
 
   compute::ComputeRun run(
       make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision));
-  return execute_request_owned_hp_run(run, [&]() -> NodeOutput& {
-    if (request.intent) {
-      return compute_intent_update_impl(
-          graph, ExecutionStrategy{&runtime, true}, request, &run, nullptr);
-    }
-    return compute_parallel_hp_impl(graph, runtime, request, run);
-  });
+  return execute_request_owned_hp_run(
+      run,
+      [&]() -> NodeOutput& {
+        if (request.intent) {
+          return compute_intent_update_impl(
+              graph, ExecutionStrategy{&runtime, true}, request, &run, nullptr);
+        }
+        return compute_parallel_hp_impl(graph, runtime, request, run);
+      },
+      [&] {
+        commit_high_precision_if_requested(
+            run, graph, request.staged_realtime_proxy, request);
+      });
 }
 
 /**
@@ -911,7 +987,7 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   }
 
   compute::RealtimeProxyGraph& rt_proxy_graph =
-      realtime_proxy_graph_for(graph, strategy);
+      realtime_proxy_graph_for(graph, strategy, request);
   std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate;
   if (intent == ComputeIntent::RealTimeUpdate) {
     sibling_commit_gate = std::make_shared<compute::DirtySiblingCommitGate>();
@@ -948,30 +1024,42 @@ NodeOutput& ComputeService::compute_intent_update_impl(
                        "Realtime HP callback has no child Run.");
     }
     const Request silent_request = make_silent_dirty_request(request);
-    (void)execute_realtime_child_run(*hp_run, [&]() -> NodeOutput& {
-      compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
-      return executor.execute(
-          graph, rt_proxy_graph, strategy.runtime,
-          make_dirty_update_request(silent_request, true, sibling_commit_gate,
-                                    stabilized_parameters,
-                                    node_synchronization),
-          hp_run, hp_uses_process_service ? &execution_service_ : nullptr);
-    });
+    (void)execute_realtime_child_run(
+        *hp_run,
+        [&]() -> NodeOutput& {
+          compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
+          return executor.execute(
+              graph, rt_proxy_graph, strategy.runtime,
+              make_dirty_update_request(
+                  silent_request, true, sibling_commit_gate,
+                  stabilized_parameters, node_synchronization),
+              hp_run, hp_uses_process_service ? &execution_service_ : nullptr);
+        },
+        [&] {
+          commit_high_precision_if_requested(*hp_run, graph, &rt_proxy_graph,
+                                             request);
+        });
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
     if (!rt_run) {
       throw GraphError(GraphErrc::ComputeError,
                        "Realtime RT callback has no child Run.");
     }
-    return execute_realtime_child_run(*rt_run, [&]() -> NodeOutput& {
-      NodeOutput& output = compute_real_time_update(
-          graph, rt_proxy_graph, strategy, request, stabilized_parameters,
-          node_synchronization, rt_run);
-      if (sibling_commit_gate) {
-        sibling_commit_gate->mark_rt_committed();
-      }
-      return output;
-    });
+    NodeOutput& output = execute_realtime_child_run(
+        *rt_run,
+        [&]() -> NodeOutput& {
+          return compute_real_time_update(graph, rt_proxy_graph, strategy,
+                                          request, stabilized_parameters,
+                                          node_synchronization, rt_run);
+        },
+        [&] {
+          commit_real_time_if_requested(*rt_run, graph, rt_proxy_graph,
+                                        request);
+        });
+    if (sibling_commit_gate) {
+      sibling_commit_gate->mark_rt_committed();
+    }
+    return output;
   };
   callbacks.real_time_output = [&]() -> NodeOutput& {
     return rt_proxy_graph.require_output(request.node_id);
@@ -1038,12 +1126,18 @@ NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
 
   compute::ComputeRun run(
       make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision));
-  return execute_request_owned_hp_run(run, [&]() -> NodeOutput& {
-    if (request.intent) {
-      return compute_with_intent_impl(graph, request, &run, nullptr);
-    }
-    return compute_sequential_impl(graph, request, run);
-  });
+  return execute_request_owned_hp_run(
+      run,
+      [&]() -> NodeOutput& {
+        if (request.intent) {
+          return compute_with_intent_impl(graph, request, &run, nullptr);
+        }
+        return compute_sequential_impl(graph, request, run);
+      },
+      [&] {
+        commit_high_precision_if_requested(
+            run, graph, request.staged_realtime_proxy, request);
+      });
 }
 
 /**

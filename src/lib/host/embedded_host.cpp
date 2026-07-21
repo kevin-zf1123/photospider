@@ -716,12 +716,13 @@ struct EmbeddedHostState {
    * @param session Session whose marker is already owned by this close caller.
    * @return Nothing after no synchronous admission token protects the runtime.
    * @throws std::system_error if lifecycle synchronization fails.
-   * @note The graph-state lane remains accepting during this phase so a save,
+   * @note Graph-state and compute-request lanes remain accepting during this
+   *       phase so a save,
    *       reload, node replacement, ROI projection, or other already-admitted
    *       call can enter Kernel and preserve its result contract. The close
    *       marker prevents any new synchronous admission. After this method
-   *       returns, close stops lane admission before waiting on async
-   *       placeholders.
+   *       returns, close stops compute-request admission before waiting on
+   *       async placeholders.
    */
   void wait_for_session_admissions(const GraphSessionId& session) {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
@@ -2122,15 +2123,17 @@ class EmbeddedHost final : public Host {
    *         non-NotFound failure when runtime shutdown fails before removal.
    * @throws std::bad_alloc on diagnostic allocation failure.
    * @note The adapter first marks the session closing and waits only the
-   *       synchronous operations admitted before that marker, leaving the lane
-   *       open for those accepted calls. It then asks Kernel to stop lane
-   *       admission before waiting for pre-registered async placeholders. This
-   *       ordering wakes a producer blocked by the full FIFO and prevents
+   *       synchronous operations admitted before that marker, leaving both
+   *       lanes open for those accepted calls. It then asks Kernel to stop
+   *       compute-request admission before waiting for pre-registered async
+   *       placeholders. This ordering wakes a producer blocked by the full
+   *       request FIFO and prevents
    *       close-marker starvation without rejecting accepted synchronous work.
    *       Every backend-accepted async promise is made caller-visible and its
-   *       status worker is joined before backend close drains/joins the lane
-   *       and stops schedulers. A shutdown failure recreates one lane worker
-   *       before the adapter clears the marker, so the session may be retried.
+   *       status worker is joined before backend close drains the request lane,
+   *       closes graph-state, and stops schedulers. A shutdown failure
+   * recreates both workers before the adapter clears the marker, so the session
+   * may be retried.
    */
   VoidResult close_graph(const GraphSessionId& session) override {
     return guarded_graph_close([&] {

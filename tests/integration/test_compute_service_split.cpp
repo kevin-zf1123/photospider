@@ -3721,7 +3721,15 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   EXPECT_EQ(*committed_state->dirty_source_generation, 42u);
 }
 
-TEST(RealtimeProxyGraph, PreservesWithinGenerationAndResetsOnGraphReplacement) {
+/**
+ * @brief Verifies isolated proxy cloning, no-throw publication, and reset.
+ * @return Nothing.
+ * @throws Test fixture allocation and Graph mutation exceptions unchanged.
+ * @note Publication swaps the complete prepared proxy state while leaving the
+ * displaced visible state in the request-owned snapshot.
+ */
+TEST(RealtimeProxyGraph,
+     ClonesPublishesAndResetsAcrossGraphTopologyGenerations) {
   GraphModel graph("cache/rt-proxy-generation-reset");
   Node node = make_node(1, "split_plan", "tile");
   graph.add_node(node);
@@ -3742,6 +3750,23 @@ TEST(RealtimeProxyGraph, PreservesWithinGenerationAndResetsOnGraphReplacement) {
   EXPECT_EQ(preserved_state->version, 7);
   ASSERT_TRUE(preserved_state->dirty_source_generation.has_value());
   EXPECT_EQ(*preserved_state->dirty_source_generation, 42u);
+
+  std::unique_ptr<compute::RealtimeProxyGraph> snapshot =
+      proxy_graph.clone_for_compute();
+  const auto* cloned_state = snapshot->find_state(1);
+  ASSERT_NE(cloned_state, nullptr);
+  compute::RealtimeProxyGraph::NodeState prepared_state = *cloned_state;
+  prepared_state.version = 11;
+  prepared_state.dirty_source_generation = 77;
+  snapshot->commit_node_state(1, std::move(prepared_state));
+  ASSERT_NE(proxy_graph.find_state(1), nullptr);
+  EXPECT_EQ(proxy_graph.find_state(1)->version, 7);
+  static_assert(noexcept(proxy_graph.publish_compute_snapshot(*snapshot)));
+  proxy_graph.publish_compute_snapshot(*snapshot);
+  ASSERT_NE(proxy_graph.find_state(1), nullptr);
+  EXPECT_EQ(proxy_graph.find_state(1)->version, 11);
+  ASSERT_NE(snapshot->find_state(1), nullptr);
+  EXPECT_EQ(snapshot->find_state(1)->version, 7);
 
   GraphModel::NodeMap replacement_nodes;
   Node replacement = make_node(1, "split_plan", "domain_tile");

@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/device.hpp"
 
@@ -221,23 +222,6 @@ class ComputeRunTaskIdentity {
 };
 
 /**
- * @brief Topology-only revision captured when the service creates a Run.
- *
- * @throws Nothing for value operations.
- * @note This is not the authoritative graph-wide GraphRevision or a commit
- * predicate. Issue #72 owns that future boundary.
- */
-struct ComputeRunSubmissionRevision {
-  /**
-   * @brief GraphModel topology generation observed before domain planning.
-   *
-   * @note Parameter, cache, and runtime-state changes do not advance this
-   * value under the current GraphModel contract.
-   */
-  uint64_t topology_generation = 0;
-};
-
-/**
  * @brief Quality carried independently from compute intent and QoS.
  *
  * @throws Nothing for value operations.
@@ -307,8 +291,11 @@ struct ComputeRunSubmission {
   /** @brief Stable graph/session label supplied by the request boundary. */
   std::string graph_identity;
 
-  /** @brief Topology-only revision captured before single-domain planning. */
-  ComputeRunSubmissionRevision revision;
+  /** @brief Strong live Graph instance identity captured before planning. */
+  GraphInstanceId graph_instance_id;
+
+  /** @brief Authoritative Graph revision captured before domain planning. */
+  GraphRevision revision;
 
   /** @brief Target graph node id requested by the caller. */
   int target_node_id = -1;
@@ -355,12 +342,21 @@ class ComputeRunDescriptor {
   const std::string& graph_identity() const noexcept { return graph_identity_; }
 
   /**
-   * @brief Returns the topology-only submission revision.
+   * @brief Returns the captured strong Graph instance identity.
+   * @return Identity of the exact live Graph snapshot used for planning.
+   * @throws Nothing.
+   */
+  GraphInstanceId graph_instance_id() const noexcept {
+    return graph_instance_id_;
+  }
+
+  /**
+   * @brief Returns the authoritative Graph submission revision.
    *
    * @return Revision value captured before planning.
    * @throws Nothing.
    */
-  ComputeRunSubmissionRevision revision() const noexcept { return revision_; }
+  GraphRevision revision() const noexcept { return revision_; }
 
   /**
    * @brief Returns the requested target node id.
@@ -418,8 +414,11 @@ class ComputeRunDescriptor {
   /** @brief Owned graph/session label captured before planning. */
   std::string graph_identity_;
 
-  /** @brief Topology-only submission revision captured before planning. */
-  ComputeRunSubmissionRevision revision_;
+  /** @brief Strong Graph instance identity captured before planning. */
+  GraphInstanceId graph_instance_id_;
+
+  /** @brief Authoritative Graph revision captured before planning. */
+  GraphRevision revision_;
 
   /** @brief Graph-local requested target node id. */
   int target_node_id_ = -1;

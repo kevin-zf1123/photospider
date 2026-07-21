@@ -3228,8 +3228,8 @@ TEST(EmbeddedHostAdapter,
  *         specified; GoogleTest records any mismatch.
  * @note The first close throws while the fixture remains running. The plugin
  * owner normalizes that runtime failure to ComputeError; the Host must reopen
- * admission, retain the graph, and invoke shutdown again after injection is
- * removed.
+ * both runtime execution lanes, retain the graph, and invoke shutdown again
+ * after injection is removed.
  */
 TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
   register_host_adapter_ops();
@@ -3278,7 +3278,9 @@ TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
     EXPECT_NE(failed_close.status.message.find("fixture shutdown failure"),
               std::string::npos);
     EXPECT_EQ(fixture.shutdown_count(), 1);
-    EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 1u);
+    EXPECT_EQ(lane_state.worker_stopped_events.load(std::memory_order_acquire),
+              2u);
+    EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 2u);
     EXPECT_LE(lane_state.max_worker_threads.load(std::memory_order_acquire),
               1u);
   }
@@ -3305,9 +3307,9 @@ TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
   const VoidResult retry_close = host->close_graph(session);
   EXPECT_TRUE(retry_close.status.ok) << retry_close.status.message;
   EXPECT_EQ(fixture.shutdown_count(), 2);
-  EXPECT_GE(lane_state.worker_stopped_events.load(std::memory_order_acquire),
-            2u);
-  EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 1u);
+  EXPECT_EQ(lane_state.worker_stopped_events.load(std::memory_order_acquire),
+            4u);
+  EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 2u);
 
   const Result<std::vector<GraphSessionId>> after_retry = host->list_graphs();
   ASSERT_TRUE(after_retry.status.ok) << after_retry.status.message;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -53,6 +54,25 @@ class RealtimeProxyGraph {
   };
 
   /**
+   * @brief Clones complete proxy state for one request-owned compute snapshot.
+   * @return Independently synchronized copy of nodes and topology generation.
+   * @throws std::bad_alloc when copied proxy output storage allocates.
+   * @note The source mutex is held only while copying. Returned state can be
+   *       mutated by HP/RT workers without touching the visible proxy.
+   */
+  std::unique_ptr<RealtimeProxyGraph> clone_for_compute() const;
+
+  /**
+   * @brief Swaps a fully prepared proxy snapshot into visible proxy state.
+   * @param prepared Publication copy that receives the displaced proxy state.
+   * @return Nothing.
+   * @throws Nothing under valid mutex synchronization.
+   * @note Caller validates the matching Graph identity/revision in the same
+   *       graph-state transaction before invoking this no-allocation swap.
+   */
+  void publish_compute_snapshot(RealtimeProxyGraph& prepared) noexcept;
+
+  /**
    * @brief Synchronizes proxy node ids with the current GraphModel topology.
    *
    * @param graph Source graph whose node ids and topology generation are used.
@@ -89,9 +109,9 @@ class RealtimeProxyGraph {
    * @return Pointer to committed proxy output, or nullptr when no proxy output
    * exists for that node.
    * @throws Nothing directly.
-   * @note The returned pointer remains valid until the next proxy mutation for
-   * that node. Current compute requests are serialized by GraphStateExecutor,
-   * so dirty worker reads are not concurrent with other request commits.
+   * @note The returned pointer remains valid until the next mutation of this
+   * exact proxy object. Product compute mutates a request-owned proxy snapshot;
+   * the private compute-request lane serializes same-Graph request commits.
    */
   const NodeOutput* find_output(int node_id) const;
 

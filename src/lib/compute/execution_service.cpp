@@ -54,6 +54,7 @@ ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
                                      int trace_node_id, bool is_initial_ready)
     : run_id_(descriptor.id()),
       graph_identity_(descriptor.graph_identity()),
+      graph_instance_id_(descriptor.graph_instance_id()),
       revision_(descriptor.revision()),
       target_node_id_(descriptor.target_node_id()),
       intent_(descriptor.intent()),

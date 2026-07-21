@@ -297,12 +297,13 @@ class PHOTOSPIDER_API Host {
    *         translation, or copied result construction exhausts memory.
    * @note The embedded implementation first publishes its closing marker and
    *       drains synchronous calls admitted before that marker. It then stops
-   *       graph-state lane admission so full-FIFO producers are awakened and
+   *       compute-request admission so full-FIFO producers are awakened and
    *       rejected before close waits pre-registered async schedulers and every
-   *       backend-accepted caller-visible status future. Only then does it join
-   *       the drained lane and begin scheduler shutdown or backend-resource
-   *       release. A failed scheduler shutdown recreates one lane worker and
-   *       reopens admission for the retained session so callers may retry it.
+   *       backend-accepted caller-visible status future. It then drains that
+   *       lane while graph-state remains available for accepted commits, closes
+   *       graph-state, and begins scheduler shutdown or resource release. A
+   *       failed scheduler shutdown recreates both workers and reopens retained
+   *       session admission so callers may retry it.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 
@@ -1049,8 +1050,9 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The Host returns value text instead of exposing scheduler objects.
-   *       Embedded inspection shares graph-state serialization with compute,
-   *       replacement, and close so no borrowed scheduler outlives its owner.
+   *       Embedded inspection shares compute-request serialization with
+   * compute, replacement, and close so no borrowed scheduler outlives its
+   * owner.
    */
   virtual Result<SchedulerInfoSnapshot> scheduler_info(
       const GraphSessionId& session, ComputeIntent intent) const = 0;
@@ -1067,7 +1069,7 @@ class PHOTOSPIDER_API Host {
    *         process capacity cannot reserve candidate headroom.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Replacement shares graph-state serialization with compute,
+   * @note Replacement shares compute-request serialization with compute,
    *       scheduler inspection, and close. Session lifecycle failures are
    *       reported before scheduler type validation. Planning and reservation
    *       retain the old scheduler in its pre-call state until candidate

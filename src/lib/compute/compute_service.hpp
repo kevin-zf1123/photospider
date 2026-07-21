@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "compute/compute_commit_policy.hpp"
 #include "compute/compute_run.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -139,6 +140,21 @@ class ComputeService {
      * execution behavior.
      */
     compute::ComputeRunQos qos;
+
+    /**
+     * @brief Optional private product policy for visible staged publication.
+     * @note Kernel supplies one policy tied to its exact request-owned Graph
+     * snapshot. Direct ComputeService callers may leave it empty.
+     */
+    std::shared_ptr<compute::ComputeCommitPolicy> commit_policy;
+
+    /**
+     * @brief Optional request-owned RT proxy snapshot used instead of runtime
+     * or service-local visible proxy storage.
+     * @note Kernel owns this object through complete compute and commit. A
+     * non-null pointer is valid only together with that request lifetime.
+     */
+    compute::RealtimeProxyGraph* staged_realtime_proxy = nullptr;
   };
 
   /**
@@ -355,13 +371,16 @@ class ComputeService {
    * @param graph GraphModel used as the inline-store key when no runtime is
    * available.
    * @param strategy Execution strategy that may supply GraphRuntime ownership.
-   * @return Runtime-owned proxy graph, or a service-owned inline proxy graph.
+   * @param request Request that may carry a Kernel-owned staged proxy override.
+   * @return Request-owned staged proxy, runtime-owned proxy graph, or a
+   * service-owned inline proxy graph, in that priority order.
    * @throws std::bad_alloc if inline proxy storage must be created.
    * @note The returned proxy is synchronized by dirty executors before
    * planning. Runtime-backed calls never use the inline store.
    */
   compute::RealtimeProxyGraph& realtime_proxy_graph_for(
-      GraphModel& graph, const ExecutionStrategy& strategy);
+      GraphModel& graph, const ExecutionStrategy& strategy,
+      const Request& request);
 
   /**
    * @brief Clears request-scoped timing records under the graph timing mutex.
@@ -387,9 +406,8 @@ class ComputeService {
    * @throws GraphError for target, topology, planning, operation, or cache
    * failures.
    * @note The method builds request-local recursion state and releases it after
-   * completion; graph-state serialization is owned by the Kernel caller.
-   * Sequential execution currently has no staged temporary output, so the Run
-   * may safely skip CommitPending.
+   * completion. Product Kernel callers supply a request-owned Graph snapshot;
+   * the outer Run wrapper advances to CommitPending before visible commit.
    */
   NodeOutput& compute_sequential_impl(GraphModel& graph, const Request& request,
                                       compute::ComputeRun& run);

@@ -200,11 +200,20 @@ class ReadyTaskMetadata final {
   const std::string& graph_identity() const noexcept { return graph_identity_; }
 
   /**
-   * @brief Returns the topology-only submission revision.
+   * @brief Returns the strong Graph instance identity.
+   * @return Identity copied from the matching Run descriptor.
+   * @throws Nothing.
+   */
+  GraphInstanceId graph_instance_id() const noexcept {
+    return graph_instance_id_;
+  }
+
+  /**
+   * @brief Returns the authoritative submission revision.
    * @return Revision copied from the matching Run descriptor.
    * @throws Nothing.
    */
-  ComputeRunSubmissionRevision revision() const noexcept { return revision_; }
+  GraphRevision revision() const noexcept { return revision_; }
 
   /**
    * @brief Returns the request target node.
@@ -273,8 +282,11 @@ class ReadyTaskMetadata final {
   /** @brief Owned stable graph/session label. */
   std::string graph_identity_;
 
-  /** @brief Topology-only revision copied before execution. */
-  ComputeRunSubmissionRevision revision_;
+  /** @brief Strong Graph instance identity copied before execution. */
+  GraphInstanceId graph_instance_id_;
+
+  /** @brief Authoritative revision copied before execution. */
+  GraphRevision revision_;
 
   /** @brief Request target node retained for immutable diagnostics. */
   int target_node_id_ = -1;

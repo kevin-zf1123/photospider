@@ -1,5 +1,6 @@
 #include "compute/intent_update_coordinator.hpp"
 
+#include <exception>
 #include <future>
 #include <new>
 #include <string>
@@ -142,16 +143,19 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
           record_stage(callbacks, "intent_coordinator_concurrent_hp_done");
           return *rt_output;
         } catch (...) {
+          const std::exception_ptr primary_failure = std::current_exception();
           if (callbacks.sibling_commit_gate) {
             callbacks.sibling_commit_gate->abort_hp_commit();
           }
-          try {
-            hp_future.get();
-          } catch (const std::bad_alloc&) {
-            throw;
-          } catch (...) {
+          if (hp_future.valid()) {
+            try {
+              hp_future.get();
+            } catch (const std::bad_alloc&) {
+              throw;
+            } catch (...) {
+            }
           }
-          throw;
+          std::rethrow_exception(primary_failure);
         }
       }
 

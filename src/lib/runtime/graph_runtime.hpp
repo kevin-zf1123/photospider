@@ -6,11 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -35,7 +39,7 @@ class RealtimeProxyGraph;
 }  // namespace compute
 
 /**
- * @brief Owns one graph model, serialized graph-state lane, execution
+ * @brief Owns one graph model, graph-state and compute-request lanes, execution
  *        bindings, and bounded observation rings.
  *
  * The runtime constructs all graph-scoped resources from `Info`, routes
@@ -52,10 +56,10 @@ class RealtimeProxyGraph;
  *         ownership cannot be allocated.
  * @throws std::filesystem::filesystem_error when runtime/cache directory
  *         preparation fails.
- * @note Graph-state operations are serialized by `graph_state_`; event and
- *       trace rings have independent mutexes. Execution-binding replacement
- *       and inspection must use the graph-state lane whenever active compute
- *       may retain legacy scheduler state. The runtime owns every model,
+ * @note Visible Graph capture, mutation, predicate, and publication are
+ *       serialized by `graph_state_`; same-Graph compute and scheduler-owner
+ *       inspection/replacement are serialized by `compute_requests_`. Event
+ *       and trace rings have independent mutexes. The runtime owns every model,
  *       legacy scheduler, cache-facing resource, and observation slot until
  *       destruction; a process-service route is an ownerless binding.
  */
@@ -233,12 +237,13 @@ class GraphRuntime : public SchedulerHostContext {
   /**
    * @brief Releases every scheduler and graph-owned runtime resource.
    * @throws Nothing.
-   * @note The graph-state lane first stops admission, drains all admitted work,
-   *       and joins its worker. Scheduler shutdown and detach are then
-   * attempted in order under the registry lock before later GPU/trace/model
-   * member teardown. Scheduler lifecycle exceptions are suppressed; an executor
-   *       join invariant failure terminates rather than tearing down borrowed
-   *       state beneath a live graph-state task.
+   * @note The compute-request lane first stops admission, drains accepted work,
+   *       and joins its worker while graph-state remains available for final
+   *       commit. Graph-state is then drained and joined. Scheduler shutdown
+   * and detach run in order under the registry lock before later
+   *       GPU/trace/model teardown. Scheduler lifecycle exceptions are
+   *       suppressed; an executor join invariant failure terminates rather than
+   *       tearing down state beneath a live task.
    */
   ~GraphRuntime() noexcept override;
 
@@ -327,6 +332,70 @@ class GraphRuntime : public SchedulerHostContext {
    * @throws Nothing.
    */
   GraphStateExecutor& graph_state() noexcept { return graph_state_; }
+
+  /**
+   * @brief Admits one same-Graph compute or scheduler-lifetime request.
+   *
+   * @tparam Fn No-argument callable retained by the private bounded serial
+   * request lane.
+   * @param fn Request callback captured by value.
+   * @return Future carrying the callable's exact result or exception.
+   * @throws std::bad_alloc if task/future capture allocation fails.
+   * @throws std::logic_error on request-lane worker reentry.
+   * @throws std::runtime_error after compute-request admission stops.
+   * @throws std::system_error for queue synchronization failures.
+   * @note The wrapper deliberately hides the GraphModel reference required by
+   *       its reused executor mechanism. The callback must enter graph_state()
+   *       separately for capture, mutation, predicate, or publication. Future
+   *       destruction neither cancels nor waits for accepted work.
+   */
+  template <typename Fn>
+  auto submit_compute_request(Fn&& fn)
+      -> std::future<std::invoke_result_t<Fn>> {
+    using Ret = std::invoke_result_t<Fn>;
+    return compute_requests_.submit(
+        [f = std::forward<Fn>(fn)](GraphModel&) mutable -> Ret {
+          if constexpr (std::is_void_v<Ret>) {
+            std::invoke(f);
+          } else {
+            return std::invoke(f);
+          }
+        });
+  }
+
+  /**
+   * @brief Stops new private compute-request admission without draining work.
+   * @return Nothing.
+   * @throws The lifecycle errors documented by
+   * GraphStateExecutor::stop_admission.
+   * @note Host close calls this before waiting accepted async work so a
+   * producer blocked on the bounded request queue is rejected and can retire
+   * its pre-registration.
+   */
+  void stop_compute_request_admission() { compute_requests_.stop_admission(); }
+
+  /**
+   * @brief Stops and drains every accepted private compute request.
+   * @return Nothing after the request worker is joined.
+   * @throws The lifecycle errors documented by
+   *         GraphStateExecutor::close_and_drain.
+   * @note Graph-state admission must remain available until this returns
+   * because accepted requests may still submit their final predicate
+   * transaction.
+   */
+  void close_compute_requests() { compute_requests_.close_and_drain(); }
+
+  /**
+   * @brief Restarts request admission after scheduler shutdown aborts close.
+   * @return Nothing.
+   * @throws The lifecycle errors documented by
+   *         GraphStateExecutor::restart_after_close_failure.
+   * @note Kernel restarts graph-state first, then this lane, so newly admitted
+   *       compute can always capture visible state.
+   */
+  void restart_compute_requests_after_close_failure() {
+    compute_requests_.restart_after_close_failure();
+  }
 
   /**
    * @brief Returns the graph-owned compute-event service.
@@ -626,6 +695,12 @@ class GraphRuntime : public SchedulerHostContext {
   GraphModel model_;
   /** @brief Serial executor governing mutable graph model access. */
   GraphStateExecutor graph_state_;
+  /**
+   * @brief Bounded serial lane for compute/scheduler lifetime requests.
+   * @note Its wrapper never exposes the bound model; member order drains this
+   * lane before graph_state_ during ordinary reverse destruction.
+   */
+  GraphStateExecutor compute_requests_;
   /** @brief Fixed-capacity graph compute-event service. */
   GraphEventService event_service_;
   /** @brief Runtime-owned low-resolution real-time proxy graph. */

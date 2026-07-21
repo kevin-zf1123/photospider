@@ -14,6 +14,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
 #include "compute/execution_service.hpp"
+#include "compute/realtime_proxy_graph.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
@@ -36,6 +38,9 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+#include "runtime/kernel_compute_test_access.hpp"  // NOLINT(build/include_subdir)
+#endif
 #include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
@@ -98,8 +103,8 @@ void reset_blocking_contract_source() {
  * @param timeout Maximum time to wait for the op to start.
  * @return true when the op started before timeout, otherwise false.
  * @throws Nothing directly.
- * @note Tests use this to know the graph-state compute closure has entered
- * scheduler-backed work and is holding the graph-state executor boundary.
+ * @note Tests use this to know staged operation work has begun after graph
+ * snapshot capture; operation execution does not hold the graph-state lane.
  */
 bool wait_for_blocking_contract_source(std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -186,6 +191,31 @@ void register_contract_ops() {
               return output;
             }));
 
+    registry.register_op_hp_monolithic(
+        "kernel_contract_test", "blocking_process",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>& inputs) {
+              if (inputs.empty()) {
+                throw GraphError(GraphErrc::MissingDependency,
+                                 "blocking process requires an input");
+              }
+              std::shared_future<void> release;
+              {
+                std::lock_guard<std::mutex> lock(g_blocking_source_mutex);
+                release = g_blocking_source_release;
+              }
+              g_blocking_source_started.store(true, std::memory_order_release);
+              if (release.valid()) {
+                release.wait();
+              }
+              NodeOutput output;
+              const ImageBuffer& input = inputs.front()->image_buffer;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  input.width, input.height, input.channels, input.type);
+              toCvMat(input).copyTo(toCvMat(output.image_buffer));
+              return output;
+            }));
+
     registry.register_op_rt_tiled(
         "kernel_contract_test", "process",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -197,6 +227,32 @@ void register_contract_ops() {
           cv::Mat src = toCvMat(input_tiles.front());
           cv::Mat dst = toCvMat(output_tile);
           src.copyTo(dst);
+        }),
+        OpMetadata{});
+
+    registry.register_op_rt_tiled(
+        "kernel_contract_test", "blocking_source",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>& input_tiles) {
+          if (!input_tiles.empty()) {
+            throw GraphError(GraphErrc::InvalidParameter,
+                             "blocking source expects no RT inputs");
+          }
+          cv::Mat output = toCvMat(output_tile);
+          output.setTo(5.0f);
+        }),
+        OpMetadata{});
+
+    registry.register_op_rt_tiled(
+        "kernel_contract_test", "blocking_process",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>& input_tiles) {
+          if (input_tiles.empty()) {
+            throw GraphError(GraphErrc::MissingDependency,
+                             "blocking process requires RT input tiles");
+          }
+          cv::Mat output = toCvMat(output_tile);
+          output.setTo(5.0f);
         }),
         OpMetadata{});
 
@@ -340,20 +396,58 @@ void write_missing_op_graph(const std::filesystem::path& path) {
  * @brief Writes a graph that runs the blocking contract source operation.
  *
  * @param path YAML file path to create.
+ * @param width Explicit source width used to distinguish reload state.
+ * @param configure_cache Whether to add one image disk-cache entry.
  * @throws std::filesystem::filesystem_error or std::ios_base::failure from
  * directory creation or file writing.
+ * @throws std::bad_alloc if YAML text construction cannot allocate.
  * @note The source has explicit dimensions so planned parallel dispatch emits
- * a deterministic single monolithic scheduler task.
+ * a deterministic single monolithic scheduler task. The optional cache entry
+ * resolves to `<cache-root>/1/blocking-output.png`.
  */
-void write_blocking_source_graph(const std::filesystem::path& path) {
+void write_blocking_source_graph(const std::filesystem::path& path,
+                                 int width = 8, bool configure_cache = false) {
+  std::string document =
+      "- id: 1\n"
+      "  name: blocking_source\n"
+      "  type: kernel_contract_test\n"
+      "  subtype: blocking_source\n"
+      "  parameters:\n"
+      "    width: " +
+      std::to_string(width) + "\n" + "    height: 8\n";
+  if (configure_cache) {
+    document +=
+        "  caches:\n"
+        "    - cache_type: image\n"
+        "      location: blocking-output.png\n";
+  }
+  write_text(path, document);
+}
+
+/**
+ * @brief Writes a source-to-blocking-process graph for paired HP/RT tests.
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure from
+ * directory creation or file writing.
+ * @note The source provides stable HP input while node two blocks only its HP
+ * operation and exposes a nonblocking tiled RT provider.
+ */
+void write_blocking_process_graph(const std::filesystem::path& path) {
   write_text(path, R"YAML(
 - id: 1
-  name: blocking_source
+  name: source
   type: kernel_contract_test
-  subtype: blocking_source
+  subtype: source
   parameters:
     width: 8
     height: 8
+- id: 2
+  name: blocking_process
+  type: kernel_contract_test
+  subtype: blocking_process
+  image_inputs:
+    - from_node_id: 1
+      from_output_name: image
 )YAML");
 }
 
@@ -479,6 +573,165 @@ bool wait_for_atomic_true(const std::atomic<bool>& value,
   }
   return value.load(std::memory_order_acquire);
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+/**
+ * @brief Blocks one selected product commit checkpoint for a deterministic
+ * race.
+ * @throws std::bad_alloc or std::system_error when promise state construction
+ * fails.
+ * @note One instance observes at most one matching notification. Tests must
+ * release the gate and settle affected requests before destroying the object.
+ */
+class CommitCheckpointGate {
+ public:
+  /**
+   * @brief Creates a closed gate for one exact commit event.
+   * @param target Event whose first notification should block.
+   * @throws std::bad_alloc or std::system_error when shared state allocation
+   * fails.
+   */
+  explicit CommitCheckpointGate(testing::KernelComputeCommitTestEvent target)
+      : target_(target), release_future_(release_.get_future().share()) {}
+
+  /**
+   * @brief Releases a matching callback during assertion-safe cleanup.
+   * @throws Nothing; repeated release and promise failures are contained.
+   */
+  ~CommitCheckpointGate() noexcept { release(); }
+
+  /**
+   * @brief Disables copying of the single-use promise and checkpoint state.
+   * @param other Gate whose synchronization ownership remains unique.
+   * @throws Nothing because construction is unavailable.
+   */
+  CommitCheckpointGate(const CommitCheckpointGate& other) = delete;
+
+  /**
+   * @brief Disables assignment of the single-use synchronization state.
+   * @param other Gate whose synchronization ownership remains unique.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  CommitCheckpointGate& operator=(const CommitCheckpointGate& other) = delete;
+
+  /**
+   * @brief Waits until the selected product checkpoint enters this gate.
+   * @param timeout Maximum bounded interval to wait.
+   * @return True when the callback entered before the deadline.
+   * @throws Nothing.
+   */
+  bool wait_until_entered(std::chrono::milliseconds timeout) const noexcept {
+    return wait_for_atomic_true(entered_, timeout);
+  }
+
+  /**
+   * @brief Opens the gate exactly once.
+   * @return Nothing.
+   * @throws Nothing; promise publication failures are contained for cleanup.
+   */
+  void release() noexcept {
+    bool expected = false;
+    if (!released_.compare_exchange_strong(expected, true,
+                                           std::memory_order_acq_rel)) {
+      return;
+    }
+    try {
+      release_.set_value();
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Handles one test-only product commit notification.
+   * @param context Borrowed CommitCheckpointGate retained by the test.
+   * @param event Exact product checkpoint being published.
+   * @return Nothing.
+   * @throws Nothing; future failures are contained at the test seam.
+   */
+  static void notify(void* context,
+                     testing::KernelComputeCommitTestEvent event) noexcept {
+    auto* gate = static_cast<CommitCheckpointGate*>(context);
+    if (event != gate->target_) {
+      return;
+    }
+    bool expected = false;
+    if (!gate->entered_.compare_exchange_strong(expected, true,
+                                                std::memory_order_acq_rel)) {
+      return;
+    }
+    try {
+      gate->release_future_.wait();
+    } catch (...) {
+    }
+  }
+
+ private:
+  /** @brief Exact checkpoint selected by the owning test. */
+  testing::KernelComputeCommitTestEvent target_;
+
+  /** @brief One-shot publication that opens the callback gate. */
+  std::promise<void> release_;
+
+  /** @brief Shared wait handle borrowed by the callback. */
+  std::shared_future<void> release_future_;
+
+  /** @brief True after the selected callback entered. */
+  std::atomic<bool> entered_{false};
+
+  /** @brief True after release promise publication was attempted. */
+  std::atomic<bool> released_{false};
+};
+
+/**
+ * @brief Installs one staged-commit gate and clears it at scope exit.
+ * @param gate Gate that outlives this scope and all affected compute work.
+ * @throws Nothing.
+ * @note The owning test must release the gate and join compute before this
+ * guard leaves scope; installation is process-local and tests are serialized.
+ */
+class ScopedKernelComputeCommitHook {
+ public:
+  /**
+   * @brief Installs the borrowed deterministic checkpoint gate.
+   * @param gate Gate retained by the calling test.
+   * @throws Nothing.
+   */
+  explicit ScopedKernelComputeCommitHook(CommitCheckpointGate& gate)
+      : hook_{&gate, &CommitCheckpointGate::notify} {
+    testing::set_kernel_compute_commit_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the process-local borrowed hook.
+   * @throws Nothing.
+   */
+  ~ScopedKernelComputeCommitHook() noexcept {
+    testing::set_kernel_compute_commit_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Disables copying of process-local hook ownership.
+   * @param other Guard whose installation remains unique.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedKernelComputeCommitHook(const ScopedKernelComputeCommitHook& other) =
+      delete;
+
+  /**
+   * @brief Disables assignment of process-local hook ownership.
+   * @param other Guard whose installation remains unique.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedKernelComputeCommitHook& operator=(
+      const ScopedKernelComputeCommitHook& other) = delete;
+
+ private:
+  /** @brief Borrowed hook installed for this scope. */
+  testing::KernelComputeCommitTestHook hook_;
+};
+#endif
 
 /**
  * @brief Test-only work item that destroys a caller-retained Kernel owner.
@@ -2152,7 +2405,18 @@ TEST(ComputeContracts, OverlappingAsyncFailuresOwnExactKernelResults) {
   std::filesystem::remove_all(root);
 }
 
-TEST(ComputeContracts, ParallelComputeSerializesGraphStateOperations) {
+/**
+ * @brief Proves parallel stale output cannot overwrite a completed Graph clear.
+ *
+ * @return Nothing; GoogleTest assertions report revision or publication
+ * failures.
+ * @throws Setup, submission, or filesystem exceptions when the fixture cannot
+ * execute.
+ * @note The blocking provider runs only on the request-owned snapshot. Graph
+ * clear therefore completes while operation work is blocked, advances the live
+ * revision, and makes the later product commit fail with ComputeError.
+ */
+TEST(ComputeContracts, ParallelStaleComputeCannotOverwriteGraphClear) {
   register_contract_ops();
   const std::string graph_name = "contract_parallel_graph_state";
   const auto root = clean_temp_path("photospider-contract-parallel-state-root");
@@ -2177,33 +2441,478 @@ TEST(ComputeContracts, ParallelComputeSerializesGraphStateOperations) {
 
   auto compute_future = kernel.compute_async(request);
   ASSERT_TRUE(compute_future.has_value());
-  EXPECT_TRUE(
-      wait_for_blocking_contract_source(std::chrono::milliseconds(2000)));
+  if (!wait_for_blocking_contract_source(std::chrono::milliseconds(2000))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "parallel staged operation did not start";
+  }
 
-  std::atomic<bool> post_ran{false};
-  auto post_future = testing::KernelTestAccess::submit_graph_state(
-      kernel, graph_name, [&post_ran](GraphModel& graph) {
-        post_ran.store(true, std::memory_order_release);
-        return graph.node_count();
+  const uint64_t revision_before_clear =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) { return graph.revision().value(); })
+          .get();
+  EXPECT_TRUE(kernel.clear_graph(graph_name));
+  auto cleared_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, std::size_t>{graph.revision().value(),
+                                                graph.node_count()};
       });
-
-  EXPECT_EQ(post_future.wait_for(std::chrono::milliseconds(100)),
-            std::future_status::timeout);
-  EXPECT_FALSE(post_ran.load(std::memory_order_acquire));
+  ASSERT_EQ(cleared_state.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const auto [cleared_revision, cleared_nodes] = cleared_state.get();
+  EXPECT_EQ(cleared_revision, revision_before_clear + 1);
+  EXPECT_EQ(cleared_nodes, 0u);
 
   release_compute.set_value();
   const Kernel::AsyncComputeResult outcome = compute_future->get();
-  EXPECT_TRUE(outcome.ok);
-  EXPECT_FALSE(outcome.error.has_value());
-  EXPECT_EQ(post_future.wait_for(std::chrono::milliseconds(2000)),
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  auto final_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, std::size_t>{graph.revision().value(),
+                                                graph.node_count()};
+      });
+  ASSERT_EQ(final_state.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
-  EXPECT_EQ(post_future.get(), 1u);
-  EXPECT_TRUE(post_ran.load(std::memory_order_acquire));
+  EXPECT_EQ(final_state.get(),
+            (std::pair<uint64_t, std::size_t>{cleared_revision, 0u}));
 
   reset_blocking_contract_source();
-  kernel.close_graph(graph_name);
+  EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
 }
+
+/**
+ * @brief Proves sequential HP uses the same staged stale-commit predicate.
+ *
+ * @return Nothing; GoogleTest assertions report visible-state overwrite or
+ * error-category failures.
+ * @throws Setup, submission, or filesystem exceptions when the fixture cannot
+ * execute.
+ * @note This guards the formerly in-place recursive path: graph clear completes
+ * while its operation blocks, and no staged node or cache returns afterward.
+ */
+TEST(ComputeContracts, SequentialStaleComputeCannotOverwriteGraphClear) {
+  register_contract_ops();
+  const std::string graph_name = "contract_sequential_stale_clear";
+  const auto root =
+      clean_temp_path("photospider-contract-sequential-stale-root");
+  const auto yaml_path =
+      temp_path("photospider-contract-sequential-stale.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = false;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "sequential staged operation did not start";
+  }
+
+  const uint64_t revision_before_clear =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) { return graph.revision().value(); })
+          .get();
+  EXPECT_TRUE(kernel.clear_graph(graph_name));
+  const uint64_t cleared_revision =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) { return graph.revision().value(); })
+          .get();
+  EXPECT_EQ(cleared_revision, revision_before_clear + 1);
+
+  release_compute.set_value();
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  auto final_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, std::size_t>{graph.revision().value(),
+                                                graph.node_count()};
+      });
+  EXPECT_EQ(final_state.get(),
+            (std::pair<uint64_t, std::size_t>{cleared_revision, 0u}));
+
+  reset_blocking_contract_source();
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves document reload invalidates an older same-label compute.
+ *
+ * @return Nothing; GoogleTest assertions report revision, document, or stale
+ * publication failures.
+ * @throws Setup, document, submission, or filesystem exceptions when the
+ * fixture cannot execute.
+ * @note Reload preserves the caller-visible graph label but replaces the
+ * document state and advances revision before the old staged output commits.
+ */
+TEST(ComputeContracts, ReloadedDocumentRejectsOlderSameLabelCompute) {
+  register_contract_ops();
+  const std::string graph_name = "contract_reload_stale_compute";
+  const auto root = clean_temp_path("photospider-contract-reload-stale-root");
+  const auto yaml_path = temp_path("photospider-contract-reload-stale.yaml");
+  write_blocking_source_graph(yaml_path, 8);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  const uint64_t captured_revision =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) { return graph.revision().value(); })
+          .get();
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "reload stale-operation fixture did not start";
+  }
+
+  write_blocking_source_graph(yaml_path, 13);
+  EXPECT_TRUE(kernel.reload_graph_document(graph_name, yaml_path.string()));
+  auto reloaded_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        const Node& node = graph.node(1);
+        return std::pair<uint64_t, int>{
+            graph.revision().value(),
+            as_int_flexible(node.parameters, "width", 0)};
+      });
+  const auto [reloaded_revision, reloaded_width] = reloaded_state.get();
+  EXPECT_EQ(reloaded_revision, captured_revision + 1);
+  EXPECT_EQ(reloaded_width, 13);
+
+  release_compute.set_value();
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  auto final_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        const Node& node = graph.node(1);
+        return std::pair<int, bool>{
+            as_int_flexible(node.parameters, "width", 0),
+            node.cached_output_high_precision.has_value()};
+      });
+  EXPECT_EQ(final_state.get(), (std::pair<int, bool>{13, false}));
+
+  reset_blocking_contract_source();
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves same-topology cache-clear intent rejects memory and disk
+ * output.
+ *
+ * @return Nothing; GoogleTest assertions report revision, topology, cache, or
+ * persistence failures.
+ * @throws Setup, cache, submission, or filesystem exceptions when the fixture
+ * cannot execute.
+ * @note Snapshot compute suppresses disk writes. The live memory-cache clear
+ * advances only GraphRevision, so stale rejection must not depend on topology
+ * generation and must leave both image and metadata artifacts absent.
+ */
+TEST(ComputeContracts,
+     SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication) {
+  register_contract_ops();
+  const std::string graph_name = "contract_cache_clear_stale_compute";
+  const auto root = clean_temp_path("photospider-contract-cache-clear-root");
+  const auto cache_root =
+      clean_temp_path("photospider-contract-cache-clear-cache-root");
+  const auto yaml_path = temp_path("photospider-contract-cache-clear.yaml");
+  write_blocking_source_graph(yaml_path, 8, true);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string(),
+                                "", cache_root.string()));
+  auto captured_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, uint64_t>{graph.revision().value(),
+                                             graph.topology_generation()};
+      });
+  const auto [captured_revision, captured_topology] = captured_state.get();
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = false;
+  request.cache.nosave = false;
+  request.execution.parallel = true;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    std::filesystem::remove_all(cache_root);
+    FAIL() << "cache-clear stale-operation fixture did not start";
+  }
+
+  EXPECT_TRUE(kernel.clear_memory_cache(graph_name));
+  auto cleared_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, uint64_t>{graph.revision().value(),
+                                             graph.topology_generation()};
+      });
+  const auto [cleared_revision, cleared_topology] = cleared_state.get();
+  EXPECT_EQ(cleared_revision, captured_revision + 1);
+  EXPECT_EQ(cleared_topology, captured_topology);
+
+  release_compute.set_value();
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  auto final_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, bool>{
+            graph.revision().value(),
+            graph.node(1).cached_output_high_precision.has_value()};
+      });
+  EXPECT_EQ(final_state.get(),
+            (std::pair<uint64_t, bool>{cleared_revision, false}));
+  const auto image_path = cache_root / graph_name / "1" / "blocking-output.png";
+  auto metadata_path = image_path;
+  metadata_path.replace_extension(".yml");
+  EXPECT_FALSE(std::filesystem::exists(image_path));
+  EXPECT_FALSE(std::filesystem::exists(metadata_path));
+
+  reset_blocking_contract_source();
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove_all(cache_root);
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+/**
+ * @brief Proves the live predicate and visible HP publication share one work
+ * item.
+ *
+ * @return Nothing; GoogleTest assertions report an interleaved mutation or
+ * incorrect final revision/cache state.
+ * @throws Setup, submission, or filesystem exceptions when the fixture cannot
+ * execute.
+ * @note A memory-cache clear submitted after predicate validation stays pending
+ * while the product hook blocks before the no-throw swap. It then runs after
+ * successful publication and advances from the committed state.
+ */
+TEST(ComputeContracts, CommitPredicateAndPublicationExcludeMutationToctou) {
+  register_contract_ops();
+  reset_blocking_contract_source();
+  const std::string graph_name = "contract_commit_toctou";
+  const auto root = clean_temp_path("photospider-contract-commit-toctou-root");
+  const auto yaml_path = temp_path("photospider-contract-commit-toctou.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  auto initial_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, uint64_t>{graph.revision().value(),
+                                             graph.topology_generation()};
+      });
+  const auto [initial_revision, initial_topology] = initial_state.get();
+
+  CommitCheckpointGate gate(
+      testing::KernelComputeCommitTestEvent::HighPrecisionPredicateValidated);
+  ScopedKernelComputeCommitHook hook(gate);
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.execution.parallel = true;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+  if (!gate.wait_until_entered(std::chrono::seconds(2))) {
+    gate.release();
+    (void)compute_future->get();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "HP commit predicate checkpoint was not reached";
+  }
+
+  std::promise<void> clear_entered;
+  auto clear_entered_future = clear_entered.get_future();
+  auto clear_future = std::async(std::launch::async, [&] {
+    clear_entered.set_value();
+    return kernel.clear_memory_cache(graph_name);
+  });
+  ASSERT_EQ(clear_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(clear_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  gate.release();
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_TRUE(outcome.ok);
+  EXPECT_FALSE(outcome.error.has_value());
+  EXPECT_TRUE(clear_future.get());
+  auto final_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::tuple<uint64_t, uint64_t, bool>{
+            graph.revision().value(), graph.topology_generation(),
+            graph.node(1).cached_output_high_precision.has_value()};
+      });
+  const auto [final_revision, final_topology, has_output] = final_state.get();
+  EXPECT_EQ(final_revision, initial_revision + 1);
+  EXPECT_EQ(final_topology, initial_topology);
+  EXPECT_FALSE(has_output);
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves committed RT state survives a later stale HP sibling rejection.
+ *
+ * @return Nothing; GoogleTest assertions report gate ordering, revision, or RT
+ * proxy rollback failures.
+ * @throws Setup, dirty compute, submission, or filesystem exceptions when the
+ * fixture cannot execute.
+ * @note The RT publication checkpoint blocks outside graph-state. A live cache
+ * clear advances revision before the gate opens; the HP provider then finishes
+ * staging, fails its own predicate, and cannot erase the RT proxy value.
+ */
+TEST(ComputeContracts, RealtimeCommitSurvivesStaleHighPrecisionSibling) {
+  register_contract_ops();
+  const std::string graph_name = "contract_rt_survives_stale_hp";
+  const auto root = clean_temp_path("photospider-contract-rt-stale-hp-root");
+  const auto yaml_path = temp_path("photospider-contract-rt-stale-hp.yaml");
+  write_blocking_process_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  reset_blocking_contract_source();
+  Kernel::ComputeRequest seed_request;
+  seed_request.name = graph_name;
+  seed_request.node_id = 2;
+  seed_request.cache.precision = "int8";
+  seed_request.cache.force_recache = true;
+  seed_request.cache.disable_disk_cache = true;
+  seed_request.cache.nosave = true;
+  seed_request.execution.parallel = false;
+  ASSERT_TRUE(kernel.compute(seed_request));
+  const uint64_t initial_revision =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) { return graph.revision().value(); })
+          .get();
+
+  std::promise<void> release_hp;
+  configure_blocking_contract_source(release_hp.get_future().share());
+  CommitCheckpointGate gate(
+      testing::KernelComputeCommitTestEvent::RealTimePublished);
+  ScopedKernelComputeCommitHook hook(gate);
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 2;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.execution.parallel = true;
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.dirty_roi = PixelRect{0, 0, 8, 8};
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+  if (!gate.wait_until_entered(std::chrono::seconds(2))) {
+    gate.release();
+    release_hp.set_value();
+    const Kernel::AsyncComputeResult early_outcome = compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "RT visible-publication checkpoint was not reached; ok="
+           << early_outcome.ok << ", error="
+           << (early_outcome.error ? early_outcome.error->message
+                                   : std::string("none"));
+  }
+  EXPECT_TRUE(wait_for_blocking_contract_source(std::chrono::seconds(2)));
+
+  EXPECT_TRUE(kernel.clear_memory_cache(graph_name));
+  const uint64_t mutated_revision =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) { return graph.revision().value(); })
+          .get();
+  EXPECT_EQ(mutated_revision, initial_revision + 1);
+  gate.release();
+  release_hp.set_value();
+
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  auto visible_state =
+      testing::KernelTestAccess::runtime(kernel, graph_name)
+          .graph_state()
+          .submit([&kernel, &graph_name](GraphModel& graph) {
+            const NodeOutput output =
+                testing::KernelTestAccess::runtime(kernel, graph_name)
+                    .realtime_proxy_graph()
+                    .require_output(2);
+            return std::tuple<uint64_t, bool, float>{
+                graph.revision().value(),
+                graph.node(2).cached_output_high_precision.has_value(),
+                toCvMat(output.image_buffer).at<float>(0, 0)};
+          });
+  const auto [final_revision, has_hp_output, rt_pixel] = visible_state.get();
+  EXPECT_EQ(final_revision, mutated_revision);
+  EXPECT_FALSE(has_hp_output);
+  EXPECT_FLOAT_EQ(rt_pixel, 5.0f);
+
+  reset_blocking_contract_source();
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+#endif
 
 /**
  * @brief Verifies scheduler info and replacement wait for active compute.
@@ -2299,12 +3008,12 @@ TEST(ComputeContracts, SchedulerObservationAndReplacementWaitForCompute) {
 /**
  * @brief Verifies graph close waits behind accepted asynchronous compute.
  *
- * @throws Nothing when close remains pending until the graph-state work item
- * completes, then removes the runtime without invalidating its owned outcome.
+ * @throws Nothing when close remains pending until the compute-request work
+ * item completes, then removes the runtime without invalidating its outcome.
  * @note The blocking operation creates a deterministic close/compute race and
  * avoids relying on a fixed operation sleep duration.
  */
-TEST(ComputeContracts, CloseWaitsForAcceptedAsyncGraphStateWork) {
+TEST(ComputeContracts, CloseWaitsForAcceptedAsyncComputeRequest) {
   register_contract_ops();
   const std::string graph_name = "contract_close_async_lifetime";
   const auto root = clean_temp_path("photospider-contract-close-life-root");
@@ -2356,6 +3065,66 @@ TEST(ComputeContracts, CloseWaitsForAcceptedAsyncGraphStateWork) {
   EXPECT_TRUE(close_future.get());
   EXPECT_FALSE(kernel.last_error(graph_name).has_value());
 
+  reset_blocking_contract_source();
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves dropping the observer future does not release accepted compute.
+ *
+ * @return Nothing; GoogleTest assertions report premature close or lost work
+ * ownership.
+ * @throws Setup, submission, or filesystem exceptions when the fixture cannot
+ * execute.
+ * @note The private compute-request lane owns the accepted callback after its
+ * caller destroys the future. Close must drain that callback before releasing
+ * Graph, graph-state, or scheduler ownership.
+ */
+TEST(ComputeContracts, DroppedAsyncFutureRemainsOwnedUntilCloseDrain) {
+  register_contract_ops();
+  const std::string graph_name = "contract_dropped_future_lifetime";
+  const auto root = clean_temp_path("photospider-contract-dropped-future-root");
+  const auto yaml_path = temp_path("photospider-contract-dropped-future.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+  auto observer = kernel.compute_async(request);
+  ASSERT_TRUE(observer.has_value());
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)observer->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "dropped-future compute did not start";
+  }
+  observer.reset();
+
+  std::promise<void> close_entered;
+  auto close_entered_future = close_entered.get_future();
+  auto close_future = std::async(std::launch::async, [&] {
+    close_entered.set_value();
+    return kernel.close_graph(graph_name);
+  });
+  ASSERT_EQ(close_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(close_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_compute.set_value();
+  EXPECT_TRUE(close_future.get());
+  EXPECT_FALSE(kernel.last_error(graph_name).has_value());
   reset_blocking_contract_source();
   std::filesystem::remove_all(root);
 }

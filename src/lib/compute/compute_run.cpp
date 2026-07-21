@@ -178,6 +178,7 @@ ComputeRunDescriptor::ComputeRunDescriptor(ComputeRunId id,
                                            ComputeRunSubmission submission)
     : id_(id),
       graph_identity_(std::move(submission.graph_identity)),
+      graph_instance_id_(submission.graph_instance_id),
       revision_(submission.revision),
       target_node_id_(submission.target_node_id),
       intent_(submission.intent),

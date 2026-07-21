@@ -240,7 +240,7 @@ bool Kernel::stop_graph_admission(const std::string& name) {
   if (it == graphs_.end()) {
     return false;
   }
-  it->second->graph_state().stop_admission();
+  it->second->stop_compute_request_admission();
   return true;
 }
 
@@ -252,12 +252,14 @@ bool Kernel::close_graph(const std::string& name) {
   }
 
   GraphRuntime& runtime = *it->second;
+  runtime.close_compute_requests();
   runtime.graph_state().close_and_drain();
   try {
     runtime.stop();
   } catch (...) {
     const std::exception_ptr stop_failure = std::current_exception();
     runtime.graph_state().restart_after_close_failure();
+    runtime.restart_compute_requests_after_close_failure();
     std::rethrow_exception(stop_failure);
   }
   graphs_.erase(it);

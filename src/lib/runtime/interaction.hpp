@@ -98,8 +98,8 @@ class InteractionService {
     }
   }
   /**
-   * @brief Stops graph-state admission for the first phase of Host close.
-   * @param name Graph session whose bounded lane must reject new submissions.
+   * @brief Stops compute-request admission for the first phase of Host close.
+   * @param name Graph session whose request lane rejects new submissions.
    * @return True when the graph exists; false when no runtime is loaded.
    * @throws std::logic_error if invoked from the target lane worker.
    * @throws std::overflow_error if the close-generation counter is exhausted.
@@ -115,12 +115,12 @@ class InteractionService {
 
   /**
    * @brief Completes graph close after Host admission drainage.
-   * @param name Graph session whose lane and schedulers must be torn down.
+   * @param name Graph session whose lanes and schedulers must be torn down.
    * @return True when the runtime existed and was removed; false when absent.
    * @throws Any executor or scheduler lifecycle failure propagated by Kernel.
-   * @note Kernel drains and joins the already-stopped lane before scheduler
-   *       shutdown. A scheduler stop failure reopens one lane worker before it
-   *       is rethrown.
+   * @note Kernel drains the already-stopped compute-request lane, then closes
+   *       graph-state before scheduler shutdown. A scheduler stop failure
+   *       reopens graph-state and compute-request workers before rethrow.
    */
   bool cmd_close_graph(const std::string& name) {
     return kernel_.close_graph(name);
@@ -525,10 +525,9 @@ class InteractionService {
    * @return Future resolving to the work item's owned exact result, or nullopt
    *         when the graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
-   *         fails while Kernel schedules graph-state work.
-   * @throws std::runtime_error if graph-state admission has stopped.
-   * @throws std::system_error if Kernel cannot launch runtime or graph-state
-   *         asynchronous execution.
+   *         fails while Kernel schedules compute-request work.
+   * @throws std::runtime_error if compute-request admission has stopped.
+   * @throws std::system_error if request-lane synchronization fails.
    * @note benchmark_events is still caller-owned and must outlive the future.
    *       Future get() may rethrow std::bad_alloc from compute execution or
    *       exact diagnostic construction.
