@@ -251,24 +251,25 @@ control owns the materialized plan and temporary slots; dirty phase contexts
 own copied dependency state and leases. Compute retains
 dependency/ready/completion semantics on every physical route.
 
-`GraphRuntime` owns graph state, the `GraphStateExecutor`, scheduler
-registration, events, and platform resources. It does not expose a general
-worker queue, task graph, or completion-counter API. Graph-state operations and
-compute requests that mutate the visible `GraphModel` use
-`GraphStateExecutor`, including scheduler-backed parallel compute. Scheduler
-implementations interact with the runtime only through `SchedulerHostContext`;
-neither `IScheduler` nor `SchedulerTaskRuntime` obtains direct ownership of the
-runtime model.
+`GraphRuntime` owns graph state, the `GraphStateExecutor`, a private bounded
+compute-request lane, scheduler registration, events, and platform resources.
+It does not expose a general worker queue, task graph, or completion-counter
+API. Visible capture, mutation, commit validation, and publication use
+`GraphStateExecutor`; scheduler-backed operation execution uses a request-owned
+snapshot outside that lane. Scheduler implementations interact with the runtime
+only through `SchedulerHostContext`; neither `IScheduler` nor
+`SchedulerTaskRuntime` obtains direct ownership of the runtime model.
 
-The same executor is the scheduler-owner access and teardown boundary. Runtime
-start, compute, scheduler name/statistics copying, and scheduler replacement
-cannot overlap for one session. Embedded close publishes its Host lifecycle
-marker, waits only pre-marker synchronous admissions, and then stops lane
-admission before waiting for async submission placeholders. The stop wakes any
-producer blocked on the bounded FIFO; admitted callbacks drain and the sole
-lane worker joins before runtime stop invokes any scheduler lifecycle method.
+The compute-request lane is the scheduler-owner access and teardown boundary.
+Runtime start through capture, compute, scheduler name/statistics copying, and
+scheduler replacement cannot overlap for one session. Embedded close publishes
+its Host lifecycle marker, waits only pre-marker synchronous admissions, and
+then stops compute-request admission before waiting for async submission
+placeholders. The stop wakes any producer blocked on that bounded FIFO;
+admitted request callbacks drain while graph-state remains available, then the
+graph-state lane drains before runtime stop invokes scheduler lifecycle methods.
 `get_scheduler()` may return a raw pointer internally, but its caller finishes
-all use while the graph-state callback is active; replacement cannot publish
+all use while the compute-request callback is active; replacement cannot publish
 and destroy the old owner until active compute has released it.
 
 ## Built-in Schedulers
@@ -365,8 +366,9 @@ The default ledger's 32 CPU slots bound simultaneous admitted service
 callbacks and workers represented by legacy built-in/plugin planning. Other
 dimensions default to 1 GiB retained memory, 512 MiB scratch, 65,536 ready
 entries, and 256 MiB ready bytes. These are Host-composition limits, not
-whole-process thread or allocation claims. `GraphStateExecutor` has a separate
-structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
+whole-process thread or allocation claims. `GraphStateExecutor` and the private
+compute-request executor each have a separate structural bound: one worker and
+at most 64 waiting callbacks per loaded Graph per lane.
 The default interactive headroom is one CPU slot, 64 MiB retained memory,
 32 MiB scratch, 1,024 ready entries, and 16 MiB ready bytes. Throughput
 admission atomically charges only active built-in Throughput root reservations
@@ -453,11 +455,12 @@ explicit replacement.
 `scheduler.info` and `scheduler.replace` first validate the opaque daemon
 session id, `ComputeIntent`, and replacement type where applicable, then retain
 one session admission through exactly one matching Host call. The embedded
-Host executes scheduler name/statistics copying and replacement inside the
-same per-graph `GraphStateExecutor` boundary as compute and graph close. A
-running compute therefore cannot overlap scheduler inspection or replacement
-for that graph, and replacement cannot destroy the displaced scheduler until
-the active compute releases it.
+Host executes scheduler name/statistics copying and replacement inside the same
+private per-graph compute-request lane as compute. A running compute therefore
+cannot overlap scheduler inspection or replacement for that graph, and
+replacement cannot destroy the displaced scheduler until the active compute
+releases it. Visible Graph capture/publication and close mutation remain on the
+separate graph-state lane.
 
 Every direct request and every first-page access uses the daemon's common Host
 mutex. Scheduler mutation is never retried. `scheduler.types` and
@@ -585,8 +588,10 @@ whole-process operating-system thread snapshot.
 - `IScheduler` is the current formal public scheduler interface.
 - Concrete ready parallel work is routed through the injected service or
   per-Graph scheduler task runtimes; plans are not pulled by either.
-- Graph-state commands and visible graph compute requests remain behind
-  a one-worker, 64-waiting-task `GraphStateExecutor` FIFO lane.
+- Visible Graph capture, mutation, commit validation, and publication remain
+  behind a one-worker, 64-waiting-task `GraphStateExecutor` FIFO lane. Operation
+  execution uses a request-owned snapshot outside that lane; same-Graph compute
+  and scheduler-owner access use a second lane with the same bound.
 - Scheduler runtimes are ready-task-only: they receive concrete callbacks with
   scheduler-local epoch and optional scheduler-specific hints, not task
   graphs or dirty work-set state.

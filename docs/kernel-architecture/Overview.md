@@ -12,12 +12,12 @@ Photospider is built around a graph runtime with a service split, operation
 registry, cache layer, scheduler abstraction, and a frontend-facing Host seam.
 Built-in CPU planned work dispatches through one fixed Host-composed
 `ExecutionService`; legacy serial, GPU, and plugin work dispatches through
-graph-owned scheduler runtimes. Graph-state commands and compute requests that
-mutate visible graph state enter an explicit per-graph `GraphStateExecutor`
-boundary instead of either ready-dispatch path. That boundary is a bounded FIFO
-lane with one graph-owned worker and at most 64 waiting callbacks plus one
-active callback. Parallel compute uses its selected service or legacy scheduler
-runtime for ready callbacks inside the graph-state boundary.
+graph-owned scheduler runtimes. Each Graph has one bounded serial
+compute-request lane and one explicit visible-state `GraphStateExecutor`, each
+with one worker and at most 64 waiting callbacks plus one active callback.
+Compute captures request-owned Graph/proxy snapshots through graph-state, runs
+planning and operations outside it through the selected execution route, and
+re-enters it only for exact-revision validation and no-throw publication.
 
 On macOS/Linux the same public Host seam also has a complete installed IPC
 adapter. `create_ipc_host(socket_path)` implements all 53 current
@@ -260,11 +260,11 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 55-method version 1 inventory; it validates correlated result shapes and exposes no raw JSON call. |
 | `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
 | daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
-| `GraphRuntime` | Per-graph resource container with model, one-worker/64-waiting-task graph-state lane, fixed-capacity scheduler trace ring, schedulers, and platform context. |
-| `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
+| `GraphRuntime` | Per-graph resource container with model, separate one-worker/64-waiting-task graph-state and compute-request lanes, fixed-capacity scheduler trace ring, schedulers, and platform context. |
+| `GraphModel` | Graph state holder with a non-reused strong instance identity, checked authoritative revision, private node/topology storage, cache root, timing data, quiet/skip-save flags, and complete compute snapshot/publication primitives. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
-| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns its descriptor, monotonic phase, exact terminal outcome, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. A request-owned `RunGroup` and the final lifecycle registry remain future. |
+| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision, monotonic phase, exact terminal outcome, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. A request-owned `RunGroup` and the final lifecycle registry remain future. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -287,8 +287,8 @@ Typical REPL compute flow:
 4. `Kernel` creates or uses services needed by `ComputeService`.
 5. For non-realtime HP, `ComputeService` creates one `ComputeRun`; a realtime
    request creates independent HP `Full` and RT `Interactive` child Runs
-   without a `RunGroup`. Each captures session identity, topology-only
-   submission revision, target, intent, quality, and explicit QoS.
+   without a `RunGroup`. Each captures session label, strong Graph instance
+   identity, authoritative revision, target, intent, quality, and explicit QoS.
 6. `ComputeService` resolves topology order with `GraphTraversalService`.
 7. `ComputeService` checks memory and disk cache with `GraphCacheService`.
 8. Dirty-region paths use `RoiPropagationService` and `GraphExtentResolver`
@@ -299,8 +299,11 @@ Typical REPL compute flow:
     serial, GPU, and plugin work uses its graph-owned scheduler. Full
     plans/temporary results and dirty staging remain owned by the matching Run
     until exact terminal publication.
-11. `GraphEventService` records per-node events and timing data.
-12. The embedded Host adapter copies results into public Host value snapshots,
+11. After staged output validation, the private product commit policy validates
+    the exact Run/staged/live identity and revision and publishes complete state
+    in one graph-state transaction before Run success.
+12. `GraphEventService` records per-node events and timing data.
+13. The embedded Host adapter copies results into public Host value snapshots,
     and the CLI renders those values.
 
 Typical embedded Host compute flow:
@@ -324,15 +327,15 @@ Typical embedded Host compute flow:
 7. Embedded close admission first publishes a lifecycle marker that rejects new
    compute/scheduler work plus required graph save, node-YAML replacement, and
    ROI projection work, timing inspection, and all-cache clearing. Calls
-   admitted before that marker finish caller-visible result/status translation;
-   graph-state users finish synchronous submission while the lane remains
-   accepting. Kernel then stops lane
-   admission, which wakes a producer blocked on the full FIFO; only then does
-   the Host wait for async submission placeholders and status promises. Kernel
-   drains prior FIFO work, joins the `GraphStateExecutor` worker, and only
+   admitted before that marker finish caller-visible result/status translation.
+   Kernel then stops compute-request admission, which wakes a producer blocked
+   on that full FIFO; only then does Host wait for async submission placeholders
+   and status promises. Accepted compute requests drain while graph-state stays
+   available for final commit. Kernel next drains `GraphStateExecutor`, and only
    afterward stops schedulers and removes the runtime. If scheduler stop fails,
-   one replacement lane worker reopens graph-state admission before the failure
-   is returned, so the retained session can be inspected or closed again.
+   graph-state and then compute-request admission restart before the failure is
+   returned, so the retained session can be inspected, computed, or closed
+   again.
    Close callers already joined to the completed generation still return even
    if that restart occurs before they wake. A retained runtime or scheduler
    cannot be erased, replaced, or destroyed while admitted work uses it.
@@ -429,9 +432,10 @@ narrow borrowed `SchedulerHostContext`, which preserves device capability,
 worker/epoch TLS attribution, and trace publication without exposing
 `GraphRuntime`. External scheduler DSOs must pass the numeric ABI handshake
 before discovery or creation. `GraphStateExecutor` remains the separate access
-boundary for graph-state operations and compute requests that read or mutate
-the visible `GraphModel`. Its one worker and 64-slot waiting FIFO are owned per
-Graph and are not charged to the `ExecutionService` ledger.
+boundary for visible Graph capture, mutation, predicate validation, and
+publication. The runtime's second bounded lane serializes same-Graph compute
+and scheduler-owner lifetime. Both one-worker/64-slot waiting FIFOs are owned
+per Graph and are not charged to the `ExecutionService` ledger.
 
 The public worker request range is zero through eight. Zero resolves before
 construction to `min(max(1, hardware_concurrency()), 8)`; explicit one through
@@ -529,8 +533,9 @@ Important current behavior:
 - `ComputeService` coordinates private collaborators; its module boundaries are
   implementation details behind `ps::Host`.
 - The current `ComputeRun` owns one non-realtime HP domain or one realtime
-  HP/RT child domain. Its topology generation is submission provenance, not
-  authoritative `GraphRevision`. Built-in CPU full, dirty, and preflight work
+  HP/RT child domain. Its descriptor retains strong Graph instance identity and
+  authoritative revision; topology generation remains a separate planning
+  cache key. Built-in CPU full, dirty, and preflight work
   executes owned callbacks under stable Run leases and routes failure by
   `(RunId, RunLocalTaskId)`; only legacy dirty scheduler routes retain their
   synchronous borrowed-handle path. Realtime children are not yet coordinated
@@ -590,9 +595,11 @@ Important current behavior:
   multi-Graph HP/RT service and child Runs, and issue #70 ledger admission and
   bounded ready store are current. Issue #71's private stateless Interactive
   and Throughput policies, hierarchy, aging, burst bound, and protected
-  headroom are also current; the final `RunGroup`, revision/cancellation/
-  supersession slices, replacement scheduler-policy ABI, lifecycle registry,
-  and close/shutdown fence remain future.
+  headroom are also current. Issue #72's strong Graph identity/revision,
+  request-owned product staging, exact-revision visible commit, and independent
+  RT-first child publication are current; the final `RunGroup`, cancellation,
+  supersession, replacement scheduler-policy ABI, lifecycle registry, and
+  close/shutdown fence remain future.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

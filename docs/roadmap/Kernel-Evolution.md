@@ -40,11 +40,12 @@ by [issue #42](https://github.com/kevin-zf1123/photospider/issues/42).
 [Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) established
 the initial scheduler-worker containment and
 [Issue #44](https://github.com/kevin-zf1123/photospider/issues/44) established
-the bounded graph-state lane. Issues #69 through #71 have since replaced the
+the bounded graph-state lane. Issues #69 through #72 have since replaced the
 worker-only containment for built-in CPU execution with one Host-composed
-service, atomic resource vectors, and policy-aware bounded ready storage.
-Visible compute
-still retains the graph-state lane for its whole callback, and legacy
+service, atomic resource vectors, policy-aware bounded ready storage, and
+revision-safe staged publication. Visible compute now captures complete
+request-owned state and executes outside graph-state; a second bounded serial
+lane preserves same-Graph compute and scheduler-owner lifetime. Legacy
 serial/GPU/plugin schedulers still own per-graph workers, queues, epochs, and
 policy. The current bounded contract:
 
@@ -69,28 +70,37 @@ policy. The current bounded contract:
   destruction; failed close retains the runtime and reservations for retry;
 - replaces graph-state async-per-submit with one worker and a 64-waiting-task
   FIFO per Graph, applying blocking backpressure without dropping admitted
-  work; and
+  work;
+- gives every Graph a second lane with the same bound for compute/scheduler
+  lifetime, while graph-state remains the sole visible capture/mutation/commit
+  boundary;
+- assigns every live Graph a non-reused strong identity and checked nonzero
+  revision, and publishes product snapshots only after exact equality; and
 - makes embedded close publish its Host marker, drain pre-marker synchronous
-  admissions, and stop lane admission before waiting for async placeholders,
-  so a full-FIFO producer cannot deadlock close; and
-- drains FIFO work and joins the lane worker before scheduler teardown, while
+  admissions, and stop compute-request admission before waiting for async
+  placeholders, so a full-FIFO producer cannot deadlock close; and
+- drains compute-request work while graph-state remains available, then drains
+  graph-state before scheduler teardown, while
   durable close generations let old waiters finish if a failed scheduler stop
-  creates one replacement lane worker and reopens admission for retry.
+  restarts both lanes in dependency order for retry.
 
 The default 32 CPU slots cover admitted Run callbacks and accounted legacy
 scheduler-worker owners. Fixed `ExecutionService` threads are infrastructure.
-The ledger does not count graph-state executors, which have their separate
-one-worker-per-Graph bound; nor does it claim operation-internal threads,
-daemon/frontend workers, all OS threads, or undeclared device/I/O/plugin
-resources. Issue #70 replaces the former worker-only counter completely:
+The ledger does not count graph-state or compute-request executors, which each
+have a separate one-worker-per-Graph bound; nor does it claim
+operation-internal threads, daemon/frontend workers, all OS threads, or
+undeclared device/I/O/plugin resources. Issue #70 replaces the former
+worker-only counter completely:
 `ExecutionService` now owns the sole Host-authoritative ledger, admits each
 built-in CPU Run with one checked full-vector reservation before publication,
 and requires initial and dependent work to hold entry/byte grants while stored
 in its bounded ready queue. Issue #71 adds the current private interactive and
 throughput strategies, explicit QoS ordering, work/byte charging, Graph/Run
-fairness, aging, headroom, and bounded throughput progress. Revision-aware
-preference, cancellation, supersession, and the replacement plugin policy ABI
-remain later work.
+fairness, aging, headroom, and bounded throughput progress. Issue #72 adds
+strong Graph identity/revision, request-owned product snapshots, exact-revision
+commit, and RT-first independent child publication. Revision-aware preference,
+cancellation, supersession, and the replacement plugin policy ABI remain later
+work.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 is authoritative for the detailed target Run lifetime, owner boundaries,
 resource mint, close/shutdown scope, and delivery dependencies; it does not make
@@ -155,12 +165,12 @@ does not mean a static singleton. Embedded tests, the desktop product, and a
 worker process must be able to construct, inject, and destroy an execution
 domain deterministically.
 
-The target graph-state lane captures an immutable revision and later validates
+The graph-state lane now captures an immutable revision and later validates
 the commit predicate. Long-running planning and execution occur outside the
 exclusive `GraphModel` mutation boundary, so one `ComputeRun` does not prevent
-the frontend from producing a newer revision. This is a target change from the
-current bounded `GraphStateExecutor` whole-callback FIFO lane documented in
-`docs/kernel-architecture/Compute-Boundaries.md`.
+the frontend from producing a newer revision. Issue #72 makes that minimum
+identity/revision staging behavior current; the diagram still includes later
+registry, cancellation, supersession, device, I/O, and plugin target slices.
 
 ## Run and Process Execution Domain Contract
 
@@ -171,11 +181,12 @@ detail.
 
 ### `ComputeRun`
 
-The current baseline from Issues #70 and #71 implements exactly one private Run
+The current baseline through Issue #72 implements exactly one private Run
 around every non-realtime HP service call. A realtime call instead creates
 separate HP `Full` and RT `Interactive` child Runs; it does not yet create the target
-`RunGroup`. Each Run captures a process-lifetime opaque id, session identity,
-topology-only submission revision, target, intent, quality, and explicit QoS;
+`RunGroup`. Each Run captures a process-lifetime opaque id, session label,
+strong Graph instance identity, authoritative revision, target, intent,
+quality, and explicit QoS;
 owns monotonic phase and exact-once terminal state; and owns the corresponding
 full submission plan/temporary results or standalone dirty staging through
 shared control. Scheduler-backed full HP work retains stable non-forgeable
@@ -185,11 +196,12 @@ and preflight work, now crosses the injected multi-Run `ExecutionService`
 boundary as move-only submissions with heap-owned callback context. The
 service obtains one checked full-vector reservation for each Run before
 publication. Initial and dependent ready work must hold bounded-store grants,
-which workers exchange for execution grants. The captured topology generation
-is not the target authoritative `GraphRevision` or commit predicate.
+which workers exchange for execution grants. Product compute uses complete
+request-owned Graph/proxy snapshots and publishes only after the issue #72
+exact-revision predicate succeeds.
 Explicit QoS class, deadline, and weight enter the current built-in policy
-route; intent and quality do not infer them. `RunGroup`, revision-safe commit,
-cancellation, and supersession remain subsequent slices.
+route; intent and quality do not infer them. `RunGroup`, cancellation, and
+supersession remain subsequent slices.
 
 The remainder of this section describes the complete accepted target.
 
@@ -280,20 +292,21 @@ grant. Dropping a caller observer does not implicitly cancel admitted work.
 
 ### Target `GraphRuntime`
 
-The target `GraphRuntime` owns `GraphModel`, graph-scoped runtime state, the
-graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit
-validation/publication, graph events, stable graph-instance identity, a
-graph-lifetime anchor, and platform/session metadata.
+The current issue #72 `GraphRuntime` owns `GraphModel`, graph-scoped runtime
+state, separate graph-state and compute-request lanes, monotonic
+`GraphRevision`, revision capture, serialized commit validation/publication,
+graph events, stable graph-instance identity, and platform/session metadata.
+The graph-lifetime anchor remains target behavior.
 
 It owns no Run, admitted-Run index, CPU/device/I/O/plugin worker, process ready
 store, process admission, `ResourceLedger`, `SchedulerPolicy`, or physical
 scheduler instance. A Run may hold a graph-lifetime lease without reversing that
 ownership.
 
-The target lane is held for immutable revision capture and validated visible
-commit, not for long-running planning/execution. This remains future behavior;
-the current whole-callback graph-state lane remains authoritative until the
-revision/commit migration lands.
+The graph-state lane is held for immutable revision capture and validated
+visible commit, not for long-running planning/execution. The private
+compute-request lane currently serializes same-Graph compute and scheduler
+lifetime; the target registry/lifetime fence remains future behavior.
 
 ## Process Execution Domain
 
@@ -307,8 +320,8 @@ it before participating Kernels/Hosts and retains it until they stop Run
 admission and drain their Runs. Graph close does not stop the service; only
 process execution-domain shutdown does.
 
-The current baseline from Issues #70 and #71 realizes the shared CPU/resource
-and policy boundary:
+The current baseline through Issue #72 realizes the shared CPU/resource,
+policy, and staged-commit boundary:
 `EmbeddedHostState` creates one fixed-pool CPU service with explicit limits
 before Kernel, and Kernel injects it into request-local `ComputeService`
 instances. Built-in CPU full HP, full RT, standalone dirty HP/RT, and preflight
@@ -322,7 +335,8 @@ before publication, requires initial and dependent ready work to enter the same
 bounded store with child grants, and releases every reservation/grant exactly
 once. The private interactive and throughput strategies apply explicit QoS,
 work/byte charging, Graph/Run fairness, deadline preference, aging, interactive
-headroom, and bounded throughput progress. Revision validation, cancellation,
+headroom, and bounded throughput progress. Exact Graph identity/revision
+validation and staged product publication are current. Cancellation,
 supersession, and the lifecycle registry remain future work.
 
 The final service owns physical CPU workers and later resource executors,
@@ -396,7 +410,8 @@ Issue #71 proves the seam with two real built-in policies and one shared route:
   across temporary emptiness.
 
 Latest-generation preference remains issue #74 work, revision-safe commit is
-#72, cancellation is #73, and the replacement scheduler policy ABI is #75.
+current from #72, cancellation is #73, and the replacement scheduler policy
+ABI is #75.
 Larger quanta and device-utilization awareness remain later profile/device
 targets; issue #71 does not claim them.
 
@@ -410,27 +425,31 @@ service-owned ledger.
 
 ### Revision, cancellation, and visible commit
 
-A Run captures one immutable `GraphRevision` before planning. The minimum
-serialized commit predicate requires an `Open` registry graph row, a registered
-Run with a valid graph-lifetime lease, exact equality with the current
-authoritative revision, a current supersession generation, no accepted
-cancellation/failure, and staged output valid for that Run.
+Issue #72 makes the minimum revision subset current. A Run captures one strong
+Graph instance identity and immutable `GraphRevision` before planning. Product
+work uses request-owned Graph/proxy snapshots. Its serialized predicate requires
+`CommitPending`, the expected domain/label, the exact staged owners, staged
+identity/revision equality with the descriptor, live identity/revision equality,
+and valid staged domain output. Successful publication preserves the revision
+and precedes Run success. Failed validation discards staged output and cannot
+mutate visible Graph/proxy state or write deferred cache artifacts.
 
-Failed validation discards staged output and cannot mutate visible Graph state.
-Supersession selects a newer generation and requests cancellation of older
-matching Runs without reusing their identity or mutating their plans.
-Non-preemptible work and external side effects may finish, but stale,
-cancelled, failed, or overdue output cannot commit.
+The complete target extends that predicate with an `Open` registry graph row,
+a registered Run and valid graph-lifetime lease, current supersession
+generation, and no accepted cancellation/failure. Supersession selects a newer
+generation and requests cancellation of older matching Runs without reusing
+their identity or mutating their plans. Non-preemptible work and external side
+effects may finish, but stale, cancelled, failed, or overdue output cannot
+commit.
 
 Any future compatible-revision optimization requires another explicit decision;
 compatibility is not inferred from equal topology.
 
-Paired RT/HP work additionally uses a monotonic `Pending` / `RtCommitted` /
-`Denied` sibling gate. Valid RT proxy publication alone opens it. RT
-failure/cancellation, graph closing, or process shutdown may permanently deny
-it. HP enters `GraphModel` commit only after `RtCommitted` and after its own Run
-predicate succeeds; later HP failure/cancellation does not roll back an RT
-commit that won first.
+Paired RT/HP work uses a monotonic `Pending` / `RtCommitted` / `Denied` sibling
+gate. Issue #72 currently opens it only after valid RT proxy publication and
+then applies an independent HP revision predicate; a later stale HP result does
+not roll back RT. Cancellation, graph-close, and process-shutdown denial reasons
+remain later slices of the complete gate contract.
 
 ### Close and shutdown scopes
 
@@ -463,15 +482,15 @@ lease; late completion performs cleanup only.
 | [#69](https://github.com/kevin-zf1123/photospider/issues/69) | Shared multi-Graph/HP/RT CPU domain and no per-Graph CPU workers | #68 |
 | [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Current production admission, bounded ready store, and ledger | #69 |
 | [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Current interactive and throughput built-in policies | #70 |
-| [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Revision capture and staged commit predicate | #67 |
+| [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Current revision capture and staged commit predicate | #67 |
 | [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Queued/running/commit cancellation | #70, #72 |
 | [#74](https://github.com/kevin-zf1123/photospider/issues/74) | Latest-wins supersession | #71, #73 |
 | [#75](https://github.com/kevin-zf1123/photospider/issues/75) | Complete policy-generation ABI replacement | #71 |
 | [#76](https://github.com/kevin-zf1123/photospider/issues/76) | Graph close, process shutdown, telemetry, final invariants | #69, #73, #74, #75 |
 
-The graph is acyclic. #72 may proceed after #67 in parallel with #68–#71;
-#75 may proceed after #71 in parallel with #72–#74. The table freezes ownership
-dependencies, not implementation algorithms or completion status.
+The graph is acyclic. #72 was permitted after #67 in parallel with #68–#71;
+#75 may proceed after #71 in parallel with #73–#74. The table freezes ownership
+dependencies, not implementation algorithms.
 
 ## Dependency-Neutral Kernel
 

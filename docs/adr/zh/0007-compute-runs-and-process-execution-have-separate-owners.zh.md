@@ -2,7 +2,7 @@
 
 ## 状态
 
-作为目标架构已接受。Issue #70 与 #71 已成为 CPU 执行/资源与调度切片的当前软件行为：embedded
+作为目标架构已接受。Issue #70 至 #72 已成为 CPU 执行/资源与调度切片的当前软件行为：embedded
 composition root 会注入一个固定的 `ExecutionService`；内建 CPU 的 HP、RT、
 connected-parameter preflight 和 dirty source/downstream 工作会跨越 move-only
 `ReadyTaskSubmission` 边界。来自多个 Graph 的
@@ -12,8 +12,11 @@ connected-parameter preflight 和 dirty source/downstream 工作会跨越 move-o
 现在独占一个 Host 权威 `ResourceLedger`，原子准入完整 Run vector，并让 initial/dependent work
 通过 policy-aware、按 entry/byte 有界的 ready storage。私有 interactive 与 throughput 策略现在
 执行 work/byte 计费、Graph/Run 公平性、deadline 偏好、aging、headroom 与有界 throughput 进展，
-且不拥有 worker 或资源权威。`RunLifecycleRegistry`、权威 `GraphRevision` commit validation、取消、
-supersession，以及用于替换现有 ABI、仅负责策略的新一代 scheduler 仍是目标行为。
+且不拥有 worker 或资源权威。Product compute 现在会捕获 request-owned Graph/proxy snapshot，
+在 graph-state lane 之外执行，并且只在强类型 Graph identity 与 authoritative revision 精确校验后
+发布。私有 compute-request lane 会串行化同一 Graph 的 compute 与 scheduler lifetime；RT
+publication 不受之后 stale HP result 的回滚影响。`RunLifecycleRegistry`、取消、supersession，以及
+用于替换现有 ABI、仅负责策略的新一代 scheduler 仍是目标行为。
 
 本决策会细化 ADR 0003，并在详细所有权与生命周期契约上取代它。ADR 0003 仍作为“把物理执行
 资源移出每个 Graph”的历史高层决策保留。ADR 0001 继续完全有效。
@@ -22,7 +25,7 @@ supersession，以及用于替换现有 ABI、仅负责策略的新一代 schedu
 
 当前实现会在每个 `GraphRuntime` 中为各 intent 保留一个 execution binding。Serial、GPU 与
 plugin binding 拥有过渡期 `IScheduler` 实例，其 interface 仍合并 worker、ready queue、epoch、
-completion、异常发布与排序 policy。内建 CPU binding 则选择 Issue #70 与 #71 的进程 service，不分配
+completion、异常发布与排序 policy。内建 CPU binding 则选择 Issue #70 至 #72 的进程 service，不分配
 Graph-owned scheduler，也不携带 per-Graph worker grant。
 
 显式注入的 service 直接拥有一个固定 CPU worker pool。它会在首次 CPU 使用前冻结一个解析后的
@@ -330,33 +333,40 @@ completion route 或 lifecycle authority。Issue #75 会把当前 worker-owning 
 
 ### Revision、staged commit、取消与 supersession
 
-`GraphRuntime` 会针对与计算正确性相关的 Graph mutation 推进单调 `GraphRevision`。Run 在规划前
-捕获一个不可变 revision。目标 graph-state lane 只在 revision capture 和经过验证的可见 commit
-期间持有，而不会覆盖长时间 planning/execution。
+Issue #72 使最小 revision 子集成为当前行为。`GraphRuntime` 会针对与计算正确性相关的 Graph
+mutation 推进 checked nonzero `GraphRevision`，同时每个 live Graph 都有强类型、不可复用的
+instance identity。Run 在 planning 前捕获二者，product work 使用 request-owned Graph/proxy
+snapshot。Graph-state lane 只在 capture 和经过验证的可见 publication 期间持有，而不会覆盖长时间
+planning/execution；私有 compute-request lane 会串行化同一 Graph 的 compute 与
+scheduler-owner access。
 
-最低 commit predicate 要求：
+当前串行化 commit predicate 要求：
 
-- registry graph row 仍为 `Open`、Run 仍已注册，且保留有效 graph-lifetime lease；
-- 当前权威 revision 等于捕获 revision；
-- 可选 supersession key/generation 仍为 current；
-- cancellation 或 failure 尚未 claim terminal state；
-- dispatcher completion 与 staged output 对当前 Run 有效。
+- `CommitPending`、预期 domain 与 graph label，以及精确 staged Graph/proxy owner；
+- staged identity/revision 与 immutable Run descriptor 相等；
+- live Graph identity/revision 与该 descriptor 相等；以及
+- 请求 domain 具有有效 staged output。
+
+成功 publication 会保留 authoritative revision，并先于 Run success。验证失败会丢弃 staged
+output，且不能修改可见 Graph/proxy state 或写入 deferred cache artifact。
+
+完整目标会扩展该 predicate，要求 registry graph row 为 `Open`、Run 已注册且 graph-lifetime
+lease 有效、supersession generation 为 current，并且没有已接受的 cancellation 或 failure。
 
 不能因为 topology 相等或输出相似，就推断 revision compatibility。任何未来 compatible-revision
-优化都需要新的显式决策。验证失败会丢弃 staged output，且不能修改可见 Graph state。
+优化都需要新的显式决策。
 
 Supersession 会让较新 generation 成为 current，并请求取消匹配的较旧 Run。它不会修改旧 Run
 的计划或复用其身份。不可抢占工作与外部副作用可以完成，但 stale、cancelled、failed 或 overdue
 output 不能提交。
 
 对于 paired realtime request，request-owned sibling gate 是一个单调三态 latch：
-`Pending`、`RtCommitted` 或 `Denied`。只有 RT child 能够在经过验证的 `RealtimeProxyGraph`
-publication 事务中执行 `Pending -> RtCommitted`。RT failure、cancellation、Graph closing 或
-process shutdown 可以转而执行 `Pending -> Denied`；即使迟到 RT work 完成，`Denied` 也永远不会
-重新开放。HP child 只有在观察到 `RtCommitted` 后才能进入串行 `GraphModel` commit，并且仍须
-满足自身 revision、supersession、cancellation、terminal 与 staged-output predicate。Gate
-denial 会丢弃 HP staged output；如果 RT commit 先获胜，后续 HP failure 或 cancellation 不会
-将其回滚。
+`Pending`、`RtCommitted` 或 `Denied`。Issue #72 只允许 RT child 在经过验证的
+`RealtimeProxyGraph` publication 事务中执行 `Pending -> RtCommitted`；随后 HP child 应用独立的
+revision predicate，之后出现 stale HP result 不会回滚 RT。完整目标还允许 RT failure、
+cancellation、Graph closing 或 process shutdown 转而执行 `Pending -> Denied`；即使迟到 RT work
+完成，`Denied` 也永远不会重新开放。HP 还必须满足 supersession、cancellation、terminal 与
+staged-output predicate。Gate denial 会丢弃 HP staged output。
 
 ### Close 与 shutdown 范围
 
@@ -372,8 +382,16 @@ Graph close：
    ownership；
 5. 等待 terminal outcome、物理 quiescence、graph finalization、exact resource release、
    admitted-Run unregistration 与 graph-lifetime lease release；
-6. 移除空 registry row，停止并排空 graph-state lane，再销毁 Graph state；
+6. 移除空 registry row，在 graph-state finalization 仍可用时停止并排空私有 per-Graph
+   compute-request lane，再停止并排空 graph-state lane、停止 scheduler owner，并销毁 Graph
+   state；
 7. 让 `ExecutionService` 和无关 Graph Run 继续运行。
+
+Issue #72 当前尚未引入 registry 的 close 已经保留这一本地双 lane 顺序：先停止 request
+admission，在 graph-state 仍开放时排空已接受的 request work，再排空 graph-state，最后才开始
+scheduler stop。Scheduler stop 失败时，会先重建 graph-state，再重建 request lane，使保留的 Graph
+可以安全重新开放。Issue #76 必须把 registry fence 与该顺序组合，或显式取代它；上述目标步骤不会
+恢复旧的单 lane close 模型。
 
 进程执行域 shutdown：
 
@@ -394,7 +412,7 @@ worker thread、使不同 Run 失败或跳过资源释放。终态发布或 Grap
 
 ## 交付边界
 
-本决策冻结依赖契约。Issue #66 到 #71 已作为当前切片实现；后续切片仍按以下目标顺序推进：
+本决策冻结依赖契约。Issue #66 到 #72 已作为当前切片实现；其余切片保持以下目标顺序：
 
 | Issue | 使用本决策的部分 | 该切片的明确非目标 |
 | --- | --- | --- |
@@ -404,13 +422,13 @@ worker thread、使不同 Run 失败或跳过资源释放。终态发布或 Grap
 | #69（已完成） | 多 Graph 与 HP/RT 共享 CPU domain；删除 per-Graph 内建 CPU worker；dirty/preflight 使用 owned submission | 完整 admission/policy 模型与 `RunGroup` |
 | #70（当前） | Production resource admission、有界 ready store 与 `ResourceLedger` | 公平性算法、lifecycle registry 与新的 device/I/O/plugin 维度 |
 | #71（当前） | Interactive 与 throughput 内建 policy | Plugin ABI 迁移、revision 偏好、取消与 supersession |
-| #72 | `GraphRevision` capture 与 staged commit predicate | Cooperative cancellation |
+| #72（当前） | `GraphRevision` capture 与 staged commit predicate | Cooperative cancellation |
 | #73 | Queued/running/commit cancellation，汇合 #70 与 #72 | Latest-wins policy |
 | #74 | #71 与 #73 之后的 latest-wins supersession | Scheduler ABI 替换 |
 | #75 | #71 之后完整替换为 policy-generation ABI | 永久 old/new adapter |
 | #76 | #69/#73/#74/#75 之后的 Graph close、进程 shutdown、telemetry 与最终不变量 | 新执行域能力 |
 
-依赖图无环。#72 可以在 #67 之后与 #68–#71 并行；#75 可以在 #71 之后与 #72–#74 并行。
+依赖图无环。#72 已获准在 #67 之后与 #68–#71 并行；#75 可以在 #71 之后与 #73–#74 并行。
 只有在每项后续实现及其长期行为测试落地后，当前事实文档才会继续改变。
 
 ## 结果
@@ -494,8 +512,8 @@ composition object。
   要求当前事实、本 accepted target 决策、roadmap 方向与 Issue/Project 状态保持分离。
 - [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md) 记录持久目标与交付依赖顺序。
 - 当前行为（包括 issue #69 的固定多 Graph HP/RT CPU pool、issue #70 的 admission/ledger 边界、
-  issue #71 的 policy-aware ready store、child Run、owned dirty submission 与
-  completion/failure isolation）继续以
+  issue #71 的 policy-aware ready store，以及 issue #72 的强类型 Graph revision 与 staged
+  publication 边界）继续以
   [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)、
   [计算流程](../../kernel-architecture/zh/Compute-Flow.zh.md) 和
   [调度器架构](../../kernel-architecture/zh/Scheduler-Architecture.zh.md) 为权威；其余目标只有在

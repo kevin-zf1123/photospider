@@ -311,8 +311,8 @@ explicit source paths, require the exact `GraphErrc` category for I/O, YAML,
 schema, topology, lifecycle, and unexpected failures, and prove that
 `std::bad_alloc` remains an exception. They also prove failed initial loads do
 not publish sessions, failed reloads preserve the complete prior Graph state,
-successful replacement advances topology generation and resets runtime state,
-and retry remains possible.
+successful replacement advances topology generation and authoritative
+`GraphRevision`, resets runtime state, and keeps retry possible.
 
 `test_host_adapter` owns the deterministic reload-versus-close lifetime
 regression. A real blocking compute and three explicit Host-operation gates
@@ -333,6 +333,45 @@ state to remain unchanged, then require an uninstrumented save retry to
 succeed. The const GraphIO boundary and serialized owner path provide the
 broader non-mutation guarantee. Production builds compile out the checkpoint
 and retain the single real writer.
+
+## Revision-Safe Compute Publication Validation
+
+Issue #72 uses three maintained test binaries to own the long-lived staged
+publication boundary. `test_compute_run` validates the checked nonzero strong
+`GraphInstanceId` and `GraphRevision` values, non-reused Graph identity,
+monotonic mutation revisions, and exact descriptor/snapshot provenance.
+`test_compute_service_split` proves `RealtimeProxyGraph` snapshot cloning is a
+deep isolation boundary and that complete prepared-state publication uses the
+documented no-throw swap path.
+
+`test_kernel_contracts` exercises the product Kernel boundary. Deterministic
+event gates hold operation execution outside graph-state while clear, same-label
+reload, or same-topology cache clear advances the live revision. Parallel and
+sequential stale results must return `GraphErrc::ComputeError`, preserve the
+newer visible state, and write no deferred cache artifact. A focused
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` checkpoint pauses after predicate
+validation inside the graph-state item, proving mutation cannot enter between
+validation and publication. The same checkpoint proves a valid RT proxy commit
+remains visible when the independently validated HP sibling later becomes
+stale. The macro is present only in provider-independent focused/full test
+builds and is compiled out of the ordinary product configuration.
+
+The same binary proves the private compute-request lane serializes scheduler
+observation/replacement with same-Graph compute, accepted async work survives a
+dropped caller future, and close drains compute-request work before graph-state
+and scheduler teardown. These races use explicit gates and bounded waits, not
+timing sleeps. Run the focused contract with:
+
+```bash
+cmake --build build \
+  --target test_compute_run test_compute_service_split test_kernel_contracts -j
+./build/tests/test_compute_run \
+  --gtest_filter='GraphRevision.*:ComputeRunDescriptor.CapturesIdRevisionIntentQualityAndQosWithoutReuse'
+./build/tests/test_compute_service_split \
+  --gtest_filter='RealtimeProxyGraph.*'
+./build/tests/test_kernel_contracts \
+  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain'
+```
 
 Focused companion regressions own the remaining boundaries:
 

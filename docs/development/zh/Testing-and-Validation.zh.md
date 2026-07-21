@@ -232,7 +232,7 @@ Graph document ingestion 与 save 契约。它同时覆盖 public embedded Host 
 “显式 source path”，对 I/O、YAML、schema、topology、lifecycle 与 unexpected failure
 要求精确的 `GraphErrc` 分类，并证明 `std::bad_alloc` 仍保持 exception 语义。测试还要求：
 initial load 失败不发布 session；reload 失败保留 prior Graph 的完整状态；成功 replacement
-推进 topology generation 并重置 runtime state；失败后仍可重试。
+推进 topology generation 与 authoritative `GraphRevision`、重置 runtime state，并保持可重试。
 
 `test_host_adapter` 负责确定性的 reload 与 close 生命周期回归。真实 blocking compute 与三个显式
 Host-operation gate 会证明：close marker 之前已准入的 reload 在进入 Kernel 前以及 public status
@@ -247,6 +247,39 @@ graph-state ordering。这些测试使用 event gate 与零时长 future snapsho
 destination bytes，以及通过 public inspection 观察的 session 与 node state 保持不变，然后要求
 未注入故障的 save retry 成功。Const GraphIO boundary 与串行化 owner path 提供更广泛的
 non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯一的真实 writer。
+
+## Revision-safe compute publication 验证
+
+Issue #72 使用三个维护中的 test binary 负责长期 staged publication 边界。`test_compute_run`
+验证 checked nonzero 强类型 `GraphInstanceId` 与 `GraphRevision`、不可复用 Graph identity、单调
+mutation revision，以及精确 descriptor/snapshot provenance。`test_compute_service_split` 证明
+`RealtimeProxyGraph` snapshot clone 是 deep isolation 边界，并且 complete prepared-state
+publication 使用文档所述 no-throw swap path。
+
+`test_kernel_contracts` 覆盖 product Kernel 边界。确定性 event gate 会把 operation execution 保持在
+graph-state 之外，同时由 clear、same-label reload 或 same-topology cache clear 推进 live revision。
+Parallel 与 sequential stale result 必须返回 `GraphErrc::ComputeError`、保留较新的 visible state，
+并且不写入 deferred cache artifact。聚焦的 `PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING`
+checkpoint 会在同一个 graph-state item 内完成 predicate validation 后暂停，证明 mutation 无法在
+validation 与 publication 之间进入。同一 checkpoint 还证明：有效 RT proxy commit 保持可见，
+即使独立校验的 HP sibling 之后变为 stale。该宏只存在于 provider-independent focused/full test
+build，并从普通 product configuration 中编译移除。
+
+同一个 binary 还证明：私有 compute-request lane 会把 scheduler observation/replacement 与同一
+Graph compute 串行化；accepted async work 在 caller future 被丢弃后仍继续存在；close 会在
+graph-state 与 scheduler teardown 前排空 compute-request work。这些竞态使用显式 gate 与有界
+wait，不使用 timing sleep。可用以下命令运行聚焦契约：
+
+```bash
+cmake --build build \
+  --target test_compute_run test_compute_service_split test_kernel_contracts -j
+./build/tests/test_compute_run \
+  --gtest_filter='GraphRevision.*:ComputeRunDescriptor.CapturesIdRevisionIntentQualityAndQosWithoutReuse'
+./build/tests/test_compute_service_split \
+  --gtest_filter='RealtimeProxyGraph.*'
+./build/tests/test_kernel_contracts \
+  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain'
+```
 
 以下 focused companion regression 负责其余边界：
 

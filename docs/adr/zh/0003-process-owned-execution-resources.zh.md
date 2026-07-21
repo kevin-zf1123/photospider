@@ -10,8 +10,10 @@ binding 也不再分配 per-Graph scheduler owner。Serial、GPU 与 plugin rout
 scheduler。Service 独占一个 Host 权威 ledger 与 policy-aware、按 entry/byte 有界的 ready store；
 完整 CPU/retained/scratch/ready Run vector 与保守 legacy scheduler CPU slot 共享该 authority。
 私有 interactive 与 throughput 策略通过 work/byte cost、分层 Graph/Run 计费、deadline 偏好、
-aging、interactive headroom 与有界 throughput 进展来排列工作。Device、I/O 与 plugin-specific
-accounting、`RunGroup`、取消、revision-safe commit 与 generation supersession 仍是目标行为。
+aging、interactive headroom 与有界 throughput 进展来排列工作。Issue #72 现在会把强类型 Graph
+identity、authoritative revision、request-owned staging 与 revision-safe publication 保持在
+execution service 之外。Device、I/O 与 plugin-specific accounting、`RunGroup`、取消和
+generation supersession 仍是目标行为。
 ADR 0007 只在详细所有权与生命周期契约上
 取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 
@@ -27,8 +29,9 @@ Run 重叠。
 当前软件通过解析后的 grant，以及每个 Host ledger 默认的 32-slot CPU 维度，限制 legacy worker
 的乘法增长。固定 service worker 属于基础设施；active Run 与 legacy scheduler owner 会竞争同一
 CPU authority。Retained Host memory、scratch、ready entry 与 ready byte 也会被准入。当前 service
-执行 Issue #71 的 CPU 公平性与 headroom 契约；取消、revision/supersession 规则以及新的
-device/I/O/plugin 维度仍不属于该切片。
+执行 Issue #71 的 CPU 公平性与 headroom 契约。Issue #72 的 exact revision validation 仍是
+service 之外的 Kernel/graph-state commit concern；取消、supersession 以及新的 device/I/O/plugin
+维度仍不属于该切片。
 
 如果没有稳定 Run 生命周期和 Host-owned 资源账本，只把这些 scheduler 移入全局对象仅仅是搬移问题。
 
@@ -75,7 +78,9 @@ ADR 0001 完全有效。Issue #69 至 #71 已取代
 `docs/kernel-architecture/Scheduler-Architecture.md` per-Graph scheduler 章节中描述的内建
 CPU 物理所有权：HP、RT、preflight 与 dirty ready work 都会在注入的固定 service 上执行。
 内建 CPU binding 在 `GraphRuntime` 中不拥有 owner；serial、GPU 与 plugin route 仍保留 legacy
-scheduler owner。ready-task-only 边界继续完全有效。
+scheduler owner。ready-task-only 边界继续完全有效。Issue #72 还会把 request-owned staged
+Graph/proxy state、精确 identity/revision validation 与 visible publication 保持在该边界的
+compute/graph-state 一侧。
 
 当前 contract 接受零到八的 worker 请求，把零解析为上限八的非零 grant，并只冻结一次 service
 数量。每个 Host ledger 都拥有不可变 composition limit。Run admission 会在 queue publication

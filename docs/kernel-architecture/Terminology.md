@@ -28,8 +28,9 @@ cache, traversal, inspection, and persistence services.
 
 **`GraphRuntime`**
 The per-graph resource container. It owns one `GraphModel`, one bounded
-graph-state lane, events, current schedulers, and platform runtime resources.
-It is not the owner of compute dependency planning.
+graph-state lane, one bounded private compute-request lane, events, current
+schedulers, and platform runtime resources. It is not the owner of compute
+dependency planning.
 
 **`GraphModel`**
 The in-memory graph state: nodes, topology adjacency, parameters, outputs,
@@ -44,12 +45,13 @@ ROI projection.
 
 **`GraphStateExecutor`**
 The per-graph exclusive access mechanism used by current graph-state operations
-and visible compute requests. It owns one worker and a FIFO queue of at most 64
-waiting callbacks, excluding the at-most-one active callback. Full-queue
-submission blocks; close stops admission, drains prior work, and joins the
-worker. Concurrent closers wait for the durable completion generation they
-joined, even if failure recovery reopens the lane before they wake. It is
-separate from scheduler dispatch and its worker is not a scheduler worker slot.
+and visible compute capture/commit transactions. It owns one worker and a FIFO
+queue of at most 64 waiting callbacks, excluding the at-most-one active
+callback. Full-queue submission blocks; close stops admission, drains prior
+work, and joins the worker. Concurrent closers wait for the durable completion
+generation they joined, even if failure recovery reopens the lane before they
+wake. It is separate from scheduler dispatch and its worker is not a scheduler
+worker slot.
 
 **Graph document**
 The persisted representation used to create or update graph state. YAML is the
@@ -57,8 +59,22 @@ current concrete format; the term graph document describes the behavior
 without treating a serialization library as graph state.
 
 **Per-graph exclusive access**
-The current behavior in which graph-state operations and compute requests do
-not concurrently read or mutate the same visible `GraphModel`.
+The current behavior in which visible Graph capture, mutation, commit
+validation, and publication are serialized by one graph-state lane. Long-running
+compute operates on a request-owned snapshot outside that lane, while a separate
+compute-request lane serializes same-Graph compute and scheduler-owner access.
+
+**`GraphInstanceId`**
+The private strong, nonzero, process-lifetime identity of one live Graph
+instance. Compute snapshots copy it. Reopening the same user-visible session
+label creates a different identity, preventing label-reuse ABA at commit.
+
+**`GraphRevision`**
+The private checked nonzero revision of compute-correctness state within one
+Graph instance. Scoped structural, document, cache, dirty, and lifecycle
+mutations advance it; compute snapshots and successful compute publication
+preserve it. Exact identity and revision equality is the current commit
+compatibility rule. Topology generation remains a separate planning cache key.
 
 ## Compute Planning and Execution
 
@@ -72,21 +88,22 @@ fairness, cancellation mode, or commit policy.
 **`ComputeService`**
 The internal compute facade. It coordinates request validation, planning,
 cache policy, dirty work selection, operation resolution, dispatch, metrics,
-and output commit through narrower collaborators.
+and staged output commit through narrower collaborators.
 
 **`ComputeRun`**
 The current private, request-owned execution record for one non-realtime HP
 domain or one realtime HP/RT child domain. Its immutable descriptor contains
-an opaque non-reused id, session identity, topology-only submission revision,
-target, single-domain intent, matching full/interactive quality, and explicit
-QoS. It owns monotonic phase and exact-once terminal state plus the full
+an opaque non-reused Run id, session label, strong Graph instance identity,
+authoritative `GraphRevision`, target, single-domain intent, matching
+full/interactive quality, and explicit QoS. It owns monotonic phase and
+exact-once terminal state plus the full
 submission plan/temporary results or dirty HP staging required by its path
 through shared control state. Built-in CPU full, dirty, and preflight tasks
 retain non-forgeable `ComputeRunLease` values, execute owned callbacks through
 the fixed multi-Graph `ExecutionService`, and publish failure only through a
 matching `(RunId, RunLocalTaskId)`. Realtime requests currently create paired
-child Runs without a `RunGroup`. Authoritative `GraphRevision`, the final
-lifecycle registry, and request-owned `RunGroup` remain future work.
+child Runs without a `RunGroup`. The final lifecycle registry, cancellation,
+supersession, and request-owned `RunGroup` remain future work.
 
 **`ComputeRunQos`**
 The private immutable scheduling inputs captured by a Run: an explicit

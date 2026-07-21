@@ -20,9 +20,10 @@ CLI / TUI
   -> RoiPropagationService / GraphExtentResolver
 ```
 
-`Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, the
-per-graph `GraphStateExecutor`, event service, platform context, and one
-execution binding per intent. Legacy bindings own scheduler instances;
+`Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, a
+per-graph visible-state `GraphStateExecutor`, a separate bounded serial
+compute-request lane, event service, platform context, and one execution
+binding per intent. Legacy bindings own scheduler instances;
 built-in CPU bindings select an ownerless process-service route. The embedded
 composition root also creates one private fixed CPU `ExecutionService` before
 Kernel. The service exclusively owns the Host-authoritative resource ledger
@@ -40,9 +41,9 @@ generation or propagation.
 Frontend compute commands build a public `ps::HostComputeRequest` rather than
 passing positional boolean flags or internal request types through the public
 seam. The embedded Host adapter translates that value to
-`Kernel::ComputeRequest`. `Kernel` owns graph lookup, runtime start, quiet-mode
-and skip-save side effects, async scheduling, image extraction, and LastError
-mapping. It then translates the internal request to
+`Kernel::ComputeRequest`. `Kernel` owns graph lookup, runtime start,
+request-local quiet/skip-save policy, async scheduling, image extraction, and
+LastError mapping. It then translates the internal request to
 `ComputeService::Request`, which carries node target, cache, telemetry, intent,
 dirty ROI, session identity, and explicit Run QoS data. Parallel/runtime
 selection is carried separately as `ComputeService::ExecutionStrategy`. The
@@ -102,12 +103,13 @@ ComputeService facade
 
 Before any of those planning steps, each non-realtime HP service call creates
 exactly one request-owned `ComputeRun`; a realtime call creates separate HP and
-RT child Runs. Each captures a fresh opaque id, session identity, target,
-single-domain intent, full or interactive quality, explicit QoS, and the
-current topology generation as a submission revision. That topology value is
-provenance only, not the authoritative graph-wide `GraphRevision` or a commit
-predicate. Sequential, legacy-scheduler, built-in CPU, and dirty variants share
-this boundary. Full HP Run control owns the materialized plan and runner; every
+RT child Runs. Each captures a fresh opaque Run id, caller-visible session
+label, non-reused strong Graph instance identity, nonzero authoritative
+`GraphRevision`, target, single-domain intent, full or interactive quality,
+and explicit QoS. Topology generation remains a separate task-shape cache key
+and is not Run revision provenance. Sequential, legacy-scheduler, built-in CPU,
+and dirty variants share this boundary. Full HP Run control owns the
+materialized plan and runner; every
 real ready task retains a non-forgeable Run lease and
 `(RunId, RunLocalTaskId)` through execution, dependency release, validation,
 and commit. Built-in CPU full HP, connected-parameter preflight, and dirty
@@ -130,12 +132,12 @@ node/cache-pruning semantics. Their execution mechanisms differ, while graph
 traversal, dirty planning, and task-graph pruning remain compute-owned.
 
 `ComputePlan` is a static analysis for the current compute request and domain.
-It is derived while graph state is stable and remains the topology contract for
-that request, whether the current path writes directly to visible graph state or
-uses the existing dirty-path staged buffers. Dirty updates do
-not rebuild topology semantics. They use the current `DirtyRegionSnapshot` and
-dirty ROI to activate or clip a `DirtyUpdateWorkSet` from the plan for each HP
-or RT update queue.
+It is derived from the request-owned Graph snapshot captured at one exact
+identity/revision and remains that request's topology contract. Every product
+path writes only request-owned Graph/proxy state during operation work. Dirty
+updates do not rebuild topology semantics. They use the current
+`DirtyRegionSnapshot` and dirty ROI to activate or clip a
+`DirtyUpdateWorkSet` from the plan for each HP or RT update queue.
 
 The request plan must enumerate the real compute tasks available to the
 request, including tile tasks when the selected implementation is tiled. Dirty
@@ -202,7 +204,8 @@ Sequential compute uses recursive dependency resolution:
    connected named `ParameterValue` outputs without format conversion.
 5. Resolve an operation implementation for HP intent.
 6. Execute monolithic or tiled operation.
-7. Store output, emit events, update timing, and save disk cache when enabled.
+7. Store output, emit events, and update timing in the request snapshot. Disk
+   writes stay suppressed until the final exact-revision commit transaction.
 
 Sequential compute is useful for simple execution and debugging. It creates
 the same internal full-expansion and node/cache-pruned task graph semantics as
@@ -229,9 +232,10 @@ exchanges that authority for CPU/memory/scratch while executing. Failure,
 queue purge, and successful settlement release exact capacity. The fixed pool
 never resizes per Run. Legacy scheduler owners instead retain conservative
 CPU-slot reservations from the same ledger. Scheduler inspection and
-replacement share the per-graph
-`GraphStateExecutor` boundary with compute. Replacement publishes either a
-legacy scheduler owner or an ownerless service route in one transaction.
+replacement share the per-graph compute-request lane with compute, so neither
+can race a scheduler owner borrowed by active work. Replacement publishes
+either a legacy scheduler owner or an ownerless service route in one
+transaction.
 Failed legacy candidate planning, attach, or start leaves the old binding and
 compute behavior unchanged and returns only candidate capacity.
 
@@ -290,50 +294,52 @@ Graph-state operations such as YAML loading, cache commands, inspection, and
 ROI projection are operations on the visible `GraphModel`. They are not
 compute-task dispatch and are not routed through `SchedulerTaskRuntime`.
 
-The current default is per-graph exclusive access through
-`GraphStateExecutor`: graph-state operations and compute requests for the same
-graph do not concurrently read or mutate the visible `GraphModel`. This includes
-scheduler-backed parallel compute; the outer Kernel request enters
-`GraphStateExecutor`, while ready node/tile callbacks are dispatched through
-the scheduler runtime inside that boundary. This keeps graph topology, cache
-fields, dirty snapshots, timing, and node runtime state coherent without
-routing non-compute commands through scheduler queues.
+The visible-state default is per-graph exclusive access through
+`GraphStateExecutor`. Structural/cache/dirty mutations, request snapshot
+capture, exact commit predicate evaluation, and no-throw publication use this
+lane. Long-running planning, operation callbacks, and scheduler waits use only
+request-owned `GraphModel` and optional `RealtimeProxyGraph` snapshots outside
+it. A mutation can therefore advance `GraphRevision` while an operation is
+blocked; that request later fails its exact revision predicate instead of
+overwriting the newer Graph.
 
-Scheduler and required-session lifetime are coordinated with this boundary.
-The graph-state portions of synchronous and asynchronous compute, scheduler
-information, scheduler replacement, required graph save, node-YAML replacement,
-and ROI projection are serialized by the per-graph executor. Required-session
-lifetime admission also covers timing inspection and all-cache clearing through
-public result/status translation, even though those calls do not introduce a
-new scheduler task boundary. During embedded close, the Host first publishes
-its close marker and lets synchronous calls admitted before that marker finish
-public translation; graph-state users finish submitting while the lane remains
-accepting.
-Kernel then stops lane admission before the Host waits for async submission
-placeholders and status publication. This wakes a producer blocked by the full
-FIFO without requiring queue space; previously admitted callbacks still drain
-before Kernel joins the executor and invokes runtime stop. Runtime startup may
-occur before graph-state submission; the embedded Host admits the complete call
-against close so close cannot erase the runtime during startup or before
-graph-state completion. Node replacement and ROI projection also perform
-required-node lookup and the operation in one work item, preventing a
-clear/reload check-then-act gap. Scheduler information copies name/statistics
-before leaving the boundary; no raw scheduler pointer survives it.
+Each runtime also owns a bounded serial compute-request lane. Synchronous,
+image-returning, and asynchronous compute use it, as do scheduler inspection
+and replacement. It preserves same-Graph request order and raw legacy
+scheduler-owner lifetime without exposing the live model to its callbacks.
+The lane retains accepted work even when its caller destroys the returned
+future. Unrelated Graph runtimes remain independent.
 
-The current dirty update implementation uses staged output commits for HP/RT
-sibling safety. A standalone `GlobalHighPrecision` dirty request stores its
-`HighPrecisionDirtyWriteBuffer` in the request Run. A `RealTimeUpdate` HP child
-stores that buffer in its own Run and commits to visible `GraphModel` only
-after the RT sibling has committed. RT dirty workers retain their RT child
-lease while writing a callback-local `RealtimeProxyWriteBuffer`, then commit to
-the runtime-owned `RealtimeProxyGraph`. There is no general graph-revision or
-interruptible commit policy in the current implementation. ADR 0003 and the
-kernel evolution roadmap define that accepted direction separately from
-current behavior; ADR 0007 fixes the complete Run/revision/commit race, of
-which the current child-Run and completion-isolation slice is only a part.
-Commit policy remains conceptually separate
-from `ComputeIntent`, because HP/RT intent semantics do not define visibility
-or interruption.
+Required-session lifetime admission still covers synchronous and asynchronous
+compute, required graph save, node-YAML replacement, ROI projection, timing
+inspection, and all-cache clearing through public result/status translation.
+During embedded close, Host first publishes its close marker and lets earlier
+synchronous admissions finish public translation. Kernel then stops
+compute-request admission before Host waits for async placeholders and status
+publication. This wakes a producer blocked by the full request FIFO without
+requiring queue space. Accepted requests drain while graph-state admission
+remains open for their final commit; Kernel then drains graph-state and only
+afterward stops scheduler owners. If scheduler stop fails, graph-state and the
+compute-request lane are restarted in that order for retry. Node replacement
+and ROI projection still perform required lookup and mutation in one
+graph-state work item. Scheduler information copies name/statistics inside the
+compute-request lane; no raw scheduler pointer survives it.
+
+Every product compute path now uses staged output. Kernel captures the complete
+Graph and optional RT proxy at one identity/revision, suppresses snapshot disk
+writes, and executes sequential, scheduler-backed, dirty HP, and RT work only
+against those snapshots. After local output validation, ComputeService advances
+the matching Run to `CommitPending`. A private product commit policy validates
+the exact Run/staged/live identity and revision, performs eligible deferred HP
+cache persistence, and swaps complete visible state in the same graph-state
+work item. It publishes Run success only after that transaction succeeds.
+
+This is the current issue #72 revision-safe predicate subset, not an
+interruptible or latest-wins policy. It does not claim cancellation,
+supersession, the final `RunLifecycleRegistry`, a graph-lifetime lease, or
+request-level `RunGroup` settlement. Commit policy remains conceptually
+separate from `ComputeIntent`, because HP/RT intent semantics do not define
+visibility or interruption.
 
 ## GlobalHighPrecision
 
@@ -379,11 +385,14 @@ planning rule as Global HP dirty update, while RT proxy work remains scoped to
 the RT dirty plan. The request creates one HP child Run with full quality and
 one RT child Run with interactive quality. When both physical execution domains
 are available, `IntentUpdateCoordinator` starts both siblings concurrently,
-waits for RT first, and uses a sibling commit gate so HP mutates `GraphModel`
-only after RT proxy commit succeeds. Built-in CPU children share the fixed
+waits for RT first, and uses a sibling commit gate so HP can attempt its
+independent Graph commit only after revision-validated RT proxy publication
+succeeds. Built-in CPU children share the fixed
 service; legacy routes use their intent schedulers. Without parallel domains,
 the same callbacks run inline in RT-then-HP order. Each child publishes its own
-terminal outcome; the target aggregate `RunGroup` policy is not implemented.
+terminal outcome only after its visible commit. A Graph mutation after valid RT
+publication may make the HP sibling stale; RT remains visible while HP fails
+with `ComputeError`. The target aggregate `RunGroup` policy is not implemented.
 
 The concurrent path also shares one request-owned per-node synchronization
 object between the siblings. It protects live `Node` snapshot and
@@ -500,31 +509,32 @@ published.
   staging. Every built-in CPU callback retains a matching child lease and
   composite task identity, but a Run does not own Graph state, workers, or the
   meaning of dependency transitions.
-- `GraphStateExecutor` protects visible graph coherence, while
-  `SchedulerTaskRuntime` receives only ready compute work. Graph-state commands
-  therefore never become scheduler tasks.
+- `GraphStateExecutor` protects visible graph coherence and exact commit, while
+  the private compute-request lane protects same-Graph request and scheduler
+  lifetime ordering. `SchedulerTaskRuntime` receives only ready compute work;
+  graph-state commands therefore never become scheduler tasks.
 - HP cache and RT proxy state use separate staged commit paths, so preview
   state cannot become authoritative HP output by implication.
 - Legacy scheduler epochs reject stale queued callbacks only and are not Run
   identity. Built-in CPU HP/RT failures route through
   `(RunId, RunLocalTaskId)` under a stable lease. Current Runs record explicit
   QoS that the service applies to ordering, fairness, and headroom admission,
-  plus a topology-only submission revision. A deadline is an ordering input,
-  not an expiry or cancellation trigger. There is no authoritative graph
-  revision, supersession, or cooperative cancellation contract.
+  plus exact Graph identity/revision provenance. A deadline is an ordering
+  input, not an expiry or cancellation trigger. There is no supersession or
+  cooperative cancellation contract.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 defines both the current fixed multi-Graph HP/RT service, independent child
-Runs, built-in policy ordering, lease/completion isolation, and RT-first commit
-gate, plus the later
+Runs, built-in policy ordering, lease/completion isolation, authoritative
+revision-safe staging, and RT-first independent commit gate, plus the later
 deterministic `RunGroup` settlement, admitted-Run registry, and broader
 lifecycle ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-describes the later revision and cancellation boundary without making it part
-of the current flow.
+describes the remaining cancellation, supersession, and lifecycle boundary
+without making those later slices part of the current flow.
 
 ## Implementation and Validation Entry Points
 

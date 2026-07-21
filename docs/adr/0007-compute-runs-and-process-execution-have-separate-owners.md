@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted as the target architecture. Issues #70 and #71 are current software
+Accepted as the target architecture. Issues #70 through #72 are current software
 behavior for the CPU execution/resource and scheduling slice: the embedded
 composition root injects one fixed `ExecutionService`; built-in CPU HP, RT,
 connected-parameter preflight, and
@@ -16,10 +16,13 @@ Host-authoritative `ResourceLedger`, atomically admits complete Run vectors,
 and routes initial/dependent work through policy-aware, entry/byte-bounded ready
 storage. Private interactive and throughput strategies now enforce work/byte
 billing, Graph/Run fairness, deadline preference, aging, headroom, and bounded
-throughput progress without owning workers or resource authority.
-`RunLifecycleRegistry`, authoritative `GraphRevision` commit validation,
-cancellation, supersession, and the replacement policy-only scheduler ABI
-remain target behavior.
+throughput progress without owning workers or resource authority. Product
+compute now captures request-owned Graph/proxy snapshots, executes outside the
+graph-state lane, and publishes only after exact strong Graph identity and
+authoritative revision validation. A private compute-request lane serializes
+same-Graph compute and scheduler lifetime, and RT publication is independent of
+a later stale HP result. `RunLifecycleRegistry`, cancellation, supersession,
+and the replacement policy-only scheduler ABI remain target behavior.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -32,7 +35,7 @@ The current implementation retains one execution binding per intent in each
 `GraphRuntime`. Serial, GPU, and plugin bindings own transitional `IScheduler`
 instances whose interfaces combine workers, ready queues, epochs, completion,
 exception publication, and ordering policy. Built-in CPU bindings instead
-select the process-service slice delivered by Issues #70 and #71 without
+select the process-service slice delivered by Issues #70 through #72 without
 allocating a Graph-owned
 scheduler or carrying a per-Graph worker grant.
 
@@ -413,24 +416,33 @@ worker-count grants, or retain a permanent compatibility shim.
 
 ### Revision, staged commit, cancellation, and supersession
 
-`GraphRuntime` advances a monotonic `GraphRevision` for graph mutations relevant
-to compute correctness. A Run captures one immutable revision before planning.
-The target graph-state lane is held for revision capture and validated visible
-commit, not for long-running planning/execution.
+Issue #72 makes the minimum revision subset current. `GraphRuntime` advances a
+checked nonzero `GraphRevision` for graph mutations relevant to compute
+correctness, while every live Graph has a strong non-reused instance identity.
+A Run captures both before planning and product work uses request-owned
+Graph/proxy snapshots. The graph-state lane is held for capture and validated
+visible publication, not for long-running planning/execution; the private
+compute-request lane serializes same-Graph compute and scheduler-owner access.
 
-The minimum commit predicate requires:
+The current serialized commit predicate requires:
 
-- the registry graph row is still `Open`, the Run is still registered, and it
-  retains a valid graph-lifetime lease;
-- the current authoritative revision equals the captured revision;
-- any supersession key/generation remains current;
-- cancellation or failure has not claimed terminal state; and
-- dispatcher completion and staged output are valid for this Run.
+- `CommitPending`, the expected domain and graph label, and the exact staged
+  Graph/proxy owners;
+- staged identity/revision equality with the immutable Run descriptor;
+- live Graph identity/revision equality with that descriptor; and
+- valid staged output for the requested domain.
+
+Successful publication preserves the authoritative revision and precedes Run
+success. Failed validation discards staged output and cannot mutate visible
+Graph/proxy state or write deferred cache artifacts.
+
+The complete target extends that predicate with an `Open` registry graph row,
+a registered Run and valid graph-lifetime lease, a current supersession
+generation, and no accepted cancellation or failure.
 
 Revision compatibility is never inferred from equal topology or similar
 output. Any future compatible-revision optimization requires a new explicit
-decision. Failed validation discards staged output and cannot mutate visible
-graph state.
+decision.
 
 Supersession makes a newer generation current and requests cancellation of
 older matching Runs. It does not mutate their plans or reuse their identity.
@@ -438,15 +450,14 @@ Non-preemptible work and external side effects may finish, but stale,
 cancelled, failed, or overdue output cannot commit.
 
 For a paired realtime request, the request-owned sibling gate is a monotonic
-three-state latch: `Pending`, `RtCommitted`, or `Denied`. The RT child alone may
-transition `Pending -> RtCommitted` as part of its validated
-`RealtimeProxyGraph` publication. RT failure, cancellation, graph closing, or
-process shutdown may instead transition `Pending -> Denied`; `Denied` never
-reopens, even if late RT work completes. The HP child may enter its serialized
-`GraphModel` commit only after observing `RtCommitted` and must still satisfy
-its own revision, supersession, cancellation, terminal, and staged-output
-predicate. A gate denial discards HP staged output; an RT commit that won first
-is not rolled back by a later HP failure or cancellation.
+three-state latch: `Pending`, `RtCommitted`, or `Denied`. Issue #72 lets the RT
+child alone transition `Pending -> RtCommitted` as part of its validated
+`RealtimeProxyGraph` publication; the HP child then applies an independent
+revision predicate, and a later stale HP result does not roll back RT. The
+complete target additionally lets RT failure, cancellation, graph closing, or
+process shutdown transition `Pending -> Denied`; `Denied` never reopens, even
+if late RT work completes. HP must also satisfy supersession, cancellation,
+terminal, and staged-output predicates. A gate denial discards HP staged output.
 
 ### Close and shutdown scopes
 
@@ -465,9 +476,19 @@ Graph close:
 5. waits for terminal outcome, physical quiescence, graph finalization, exact
    resource release, admitted-Run unregistration, and graph-lifetime lease
    release;
-6. removes the empty registry row, stops and drains the graph-state lane, then
-   destroys graph state; and
+6. removes the empty registry row, stops and drains the private per-Graph
+   compute-request lane while graph-state finalization remains available, then
+   stops and drains the graph-state lane, stops scheduler owners, and destroys
+   graph state; and
 7. leaves `ExecutionService` and unrelated Graph Runs running.
+
+Issue #72's current pre-registry close already preserves that local two-lane
+ordering: request admission stops first, accepted request work drains while
+graph-state remains open, graph-state drains second, and scheduler stop begins
+last. If scheduler stop fails, graph-state is recreated before the request lane
+so the retained Graph can reopen safely. Issue #76 must compose its registry
+fence with this ordering or explicitly supersede it; the target steps above do
+not restore the old single-lane close model.
 
 Process execution-domain shutdown:
 
@@ -493,9 +514,8 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract. Issues #66 through #71 are now
-implemented as current slices; the following later slices remain ordered target
-work:
+This decision fixes the dependency contract. Issues #66 through #72 are now
+implemented as current slices; the remaining slices retain this target order:
 
 | Issue | Consumes this decision | Explicit non-goal of the slice |
 | --- | --- | --- |
@@ -505,14 +525,14 @@ work:
 | #69 (completed) | Shared multi-Graph and HP/RT CPU domain; removal of per-Graph built-in CPU workers; owned dirty/preflight submissions | Full admission/policy model and `RunGroup` |
 | #70 (current) | Production resource admission, bounded ready store, and `ResourceLedger` | Fairness algorithms, lifecycle registry, and new device/I/O/plugin dimensions |
 | #71 (current) | Interactive and throughput built-in policies | Plugin ABI migration, revision preference, cancellation, and supersession |
-| #72 | `GraphRevision` capture and staged commit predicate | Cooperative cancellation |
+| #72 (current) | `GraphRevision` capture and staged commit predicate | Cooperative cancellation |
 | #73 | Queued/running/commit cancellation, joining #70 and #72 | Latest-wins policy |
 | #74 | Latest-wins supersession after #71 and #73 | Scheduler ABI replacement |
 | #75 | Complete policy-generation ABI replacement after #71 | Permanent old/new adapter |
 | #76 | Graph close, process shutdown, telemetry, and final invariants after #69/#73/#74/#75 | New execution-domain capabilities |
 
-The dependency graph is acyclic. #72 may proceed after #67 in parallel with
-#68–#71; #75 may proceed after #71 in parallel with #72–#74. Current-state
+The dependency graph is acyclic. #72 was permitted after #67 in parallel with
+#68–#71; #75 may proceed after #71 in parallel with #73–#74. Current-state
 documentation changes only when each additional implementation and its
 long-lived behavioral tests land.
 
@@ -614,7 +634,7 @@ static composition object.
   records the durable target and delivery dependency order.
 - Current behavior, including issue #69's fixed multi-Graph HP/RT CPU pool,
   issue #70's admission/ledger boundary, issue #71's policy-aware ready store,
-  child Runs, owned dirty submissions, and completion/failure isolation, remains
+  and issue #72's strong Graph revision and staged publication boundary, remains
   authoritative in
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md),
   [Compute Flow](../kernel-architecture/Compute-Flow.md), and

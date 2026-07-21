@@ -15,9 +15,11 @@ complete CPU/retained/scratch/ready Run vectors and conservative legacy
 scheduler CPU slots share that authority. Private interactive and throughput
 strategies order work with work/byte cost, hierarchical Graph/Run accounting,
 deadline preference, aging, interactive headroom, and bounded throughput
-progress. Device, I/O, and plugin-specific accounting, `RunGroup`,
-cancellation, revision-safe commit, and generation supersession remain target
-behavior. ADR 0007 supersedes this ADR only as the detailed
+progress. Issue #72 now keeps strong Graph identity, authoritative revision,
+request-owned staging, and revision-safe publication outside the execution
+service. Device, I/O, and plugin-specific accounting, `RunGroup`, cancellation,
+and generation supersession remain target behavior. ADR 0007 supersedes this
+ADR only as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
 and its historical context remain in force.
 
@@ -37,8 +39,9 @@ each Host ledger's default 32-slot CPU dimension. Fixed service workers are
 infrastructure, while active Runs and legacy scheduler owners compete for the
 same CPU authority. Retained Host memory, scratch, ready entries, and ready
 bytes are admitted too. The current service enforces the Issue #71 CPU
-fairness and headroom contract; cancellation, revision/supersession rules, and
-new device/I/O/plugin dimensions remain outside this slice.
+fairness and headroom contract. Issue #72 exact revision validation remains a
+Kernel/graph-state commit concern outside the service; cancellation,
+supersession, and new device/I/O/plugin dimensions remain outside this slice.
 
 Moving those schedulers to a global object without introducing a stable Run
 lifetime and host-owned resource accounting would only relocate the problem.
@@ -99,8 +102,10 @@ sections of
 `docs/kernel-architecture/Scheduler-Architecture.md`: HP, RT, preflight, and
 dirty ready work all execute on the injected fixed service. Built-in CPU
 bindings are ownerless at `GraphRuntime`; serial, GPU, and plugin routes retain
-legacy scheduler owners. The ready-task-only boundary remains fully in
-force.
+legacy scheduler owners. The ready-task-only boundary remains fully in force.
+Issue #72 additionally keeps request-owned staged Graph/proxy state, exact
+identity/revision validation, and visible publication on the
+compute/graph-state side of that boundary.
 
 The current contract accepts worker requests from zero through eight, resolves
 zero to a nonzero grant capped at eight, and freezes the service count once.

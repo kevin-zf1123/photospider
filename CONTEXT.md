@@ -41,9 +41,12 @@ three-to-one class arbitration first, then applies dispatch-count aging,
 deadline, and class-local Graph/Run fair-score ordering only within the selected
 class. Its protected headroom account charges only active built-in Throughput
 roots and follows exact ledger root lifetime; Interactive and transitional
-legacy roots do not debit that class quota. Do not describe the remaining
-accepted targets as current: issue #72 authoritative
-`GraphRevision` commit validation, issue #73 cancellation, issue #74
+legacy roots do not debit that class quota. Issue #72 makes strong non-reused
+Graph instance identity, checked nonzero authoritative `GraphRevision`,
+request-owned product snapshots, exact-revision staged publication, and the
+separate compute-request lane current. RT publishes before opening its sibling
+gate, and a later stale HP result cannot roll it back. Do not describe the
+remaining accepted targets as current: issue #73 cancellation, issue #74
 supersession, issue #75 policy-only scheduler ABI generation, and issue #76
 request-owned `RunGroup`, final `ExecutionService::RunLifecycleRegistry`,
 graph-close/process-shutdown fence, and final lifecycle/telemetry invariants
