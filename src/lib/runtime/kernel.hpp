@@ -466,22 +466,93 @@ class Kernel {
    */
   void save_graph_document(const std::string& name,
                            const std::string& document_path);
+
+  /**
+   * @brief Invalidates the Graph revision and removes its disk cache.
+   * @param name Graph session whose cache root should be cleared.
+   * @return True on success; false when the graph is missing or an ordinary
+   *         cache/executor failure is handled by the quiet facade.
+   * @throws std::bad_alloc from revision preparation, submission, or cache
+   *         clearing.
+   * @note Revision overflow fails before filesystem mutation. After successful
+   *       preparation, the successor is published before removal begins and
+   *       is never rolled back if removal/recreation later fails partially.
+   */
   bool clear_drive_cache(const std::string& name);
+
+  /**
+   * @brief Invalidates the Graph revision and clears formal HP memory caches.
+   * @param name Graph session whose node caches should be cleared.
+   * @return True on success; false for a missing graph or handled ordinary
+   *         cache/executor failure.
+   * @throws std::bad_alloc from preparation, submission, or cache traversal.
+   * @note Revision overflow occurs before node mutation. Once the successor is
+   *       published, a later partial clear failure never restores the old
+   *       revision, preventing captured Runs from publishing stale output.
+   */
   bool clear_memory_cache(const std::string& name);
+
+  /**
+   * @brief Invalidates the Graph revision and clears disk plus memory caches.
+   * @param name Graph session whose cache authority should be cleared.
+   * @return True on success; false for a missing graph or handled ordinary
+   *         cache/executor failure.
+   * @throws std::bad_alloc from preparation, submission, or either clear phase.
+   * @note The successor revision is published before the disk phase. It stays
+   *       advanced if disk or memory clearing later fails after partial work.
+   */
   bool clear_cache(const std::string& name);
   bool cache_all_nodes(const std::string& name,
                        const std::string& cache_precision);
+
+  /**
+   * @brief Invalidates the Graph revision and frees non-ending HP caches.
+   * @param name Graph session whose transient caches should be released.
+   * @return True on success; false for a missing graph or handled ordinary
+   *         traversal/cache/executor failure.
+   * @throws std::bad_alloc from preparation, submission, or traversal.
+   * @note Revision overflow precedes mutation. A published successor is never
+   *       rolled back after any partially successful node-cache release.
+   */
   bool free_transient_memory(const std::string& name);
   bool synchronize_disk_cache(const std::string& name,
                               const std::string& cache_precision);
   bool clear_graph(const std::string& name);
 
+  /**
+   * @brief Clears disk cache with revision invalidation and removal counts.
+   * @param name Graph session whose disk cache should be cleared.
+   * @return Removal statistics, or nullopt for a missing graph or handled
+   *         ordinary failure.
+   * @throws std::bad_alloc from preparation, submission, or cache clearing.
+   * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
+   *       clear_drive_cache().
+   */
   std::optional<GraphModel::DriveClearResult> clear_drive_cache_stats(
       const std::string& name);
+
+  /**
+   * @brief Clears formal HP memory caches with revision invalidation and count.
+   * @param name Graph session whose memory cache should be cleared.
+   * @return Clear statistics, or nullopt for a missing graph or handled
+   *         ordinary failure.
+   * @throws std::bad_alloc from preparation, submission, or cache traversal.
+   * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
+   *       clear_memory_cache().
+   */
   std::optional<GraphModel::MemoryClearResult> clear_memory_cache_stats(
       const std::string& name);
   std::optional<GraphModel::CacheSaveResult> cache_all_nodes_stats(
       const std::string& name, const std::string& cache_precision);
+  /**
+   * @brief Frees transient HP caches with revision invalidation and count.
+   * @param name Graph session whose non-ending caches should be released.
+   * @return Clear statistics, or nullopt for a missing graph or handled
+   *         ordinary failure.
+   * @throws std::bad_alloc from preparation, submission, or traversal.
+   * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
+   *       free_transient_memory().
+   */
   std::optional<GraphModel::MemoryClearResult> free_transient_memory_stats(
       const std::string& name);
   std::optional<GraphModel::DiskSyncResult> synchronize_disk_cache_stats(

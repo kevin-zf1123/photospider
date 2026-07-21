@@ -7,6 +7,10 @@
 
 namespace ps {
 
+namespace testing {
+class GraphInstanceIdTestAccess;
+}  // namespace testing
+
 /**
  * @brief Strong process-lifetime identity for one live Graph instance.
  *
@@ -40,21 +44,7 @@ class GraphInstanceId {
    * @note A compare/exchange loop publishes the reservation before return. A
    *       failed exhaustion check leaves the terminal counter unchanged.
    */
-  static GraphInstanceId mint() {
-    static std::atomic<uint64_t> last_issued{0};
-    uint64_t observed = last_issued.load(std::memory_order_relaxed);
-    for (;;) {
-      if (observed == std::numeric_limits<uint64_t>::max()) {
-        throw std::overflow_error("GraphInstanceId space is exhausted.");
-      }
-      const uint64_t candidate = observed + 1;
-      if (last_issued.compare_exchange_weak(observed, candidate,
-                                            std::memory_order_relaxed,
-                                            std::memory_order_relaxed)) {
-        return GraphInstanceId(candidate);
-      }
-    }
-  }
+  static GraphInstanceId mint() { return mint_from_counter(process_counter()); }
 
   /**
    * @brief Returns the stable scalar representation.
@@ -84,6 +74,44 @@ class GraphInstanceId {
   }
 
  private:
+  friend class testing::GraphInstanceIdTestAccess;
+
+  /**
+   * @brief Reserves one identity from a supplied monotonic atomic counter.
+   * @param last_issued Counter containing the last successfully issued value.
+   * @return Newly reserved nonzero identity.
+   * @throws std::overflow_error when the counter has reached UINT64_MAX.
+   * @note This is the single production CAS algorithm. `mint()` supplies the
+   *       process-lifetime counter, while the private test bridge supplies an
+   *       isolated counter so exhaustion can be exercised without resetting or
+   *       consuming production identity state.
+   */
+  static GraphInstanceId mint_from_counter(std::atomic<uint64_t>& last_issued) {
+    uint64_t observed = last_issued.load(std::memory_order_relaxed);
+    for (;;) {
+      if (observed == std::numeric_limits<uint64_t>::max()) {
+        throw std::overflow_error("GraphInstanceId space is exhausted.");
+      }
+      const uint64_t candidate = observed + 1;
+      if (last_issued.compare_exchange_weak(observed, candidate,
+                                            std::memory_order_relaxed,
+                                            std::memory_order_relaxed)) {
+        return GraphInstanceId(candidate);
+      }
+    }
+  }
+
+  /**
+   * @brief Returns the unique process-lifetime live-Graph identity counter.
+   * @return Mutable atomic counter shared by every production mint call.
+   * @throws Nothing.
+   * @note The counter is never reset or exposed through the test bridge.
+   */
+  static std::atomic<uint64_t>& process_counter() noexcept {
+    static std::atomic<uint64_t> last_issued{0};
+    return last_issued;
+  }
+
   /** @brief Nonzero process-lifetime identity representation. */
   uint64_t value_;
 };

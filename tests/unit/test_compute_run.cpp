@@ -41,6 +41,8 @@
 #include "runtime/graph_runtime.hpp"
 #include "support/cache_test_dependencies.hpp"
 #include "support/execution_service_test_access.hpp"
+#include "support/graph_model_test_access.hpp"
+#include "support/graph_revision_test_access.hpp"
 
 namespace ps::compute {
 namespace {
@@ -69,6 +71,94 @@ ComputeRunSubmission make_test_submission(std::string graph_identity,
       ComputeRunQuality::Full,
       ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 3, 2}};
 }
+
+/**
+ * @brief Releases and joins identity-mint workers before their storage expires.
+ * @throws Nothing from destruction.
+ * @note The worker vector reserves capacity before this guard is created. If
+ * any later launch or assertion throws, destruction opens the shared start gate
+ * and consumes every valid ready future before the vector is destroyed.
+ */
+class ScopedIdentityMintWorkerRecovery {
+ public:
+  /** @brief Future result produced by one terminal identity-mint worker. */
+  using WorkerResult = std::future<std::optional<GraphInstanceId>>;
+
+  /**
+   * @brief Borrows one start promise and its pre-reserved worker vector.
+   * @param start Promise awaited by every admitted worker.
+   * @param workers Worker handles that outlive this guard.
+   * @throws Nothing.
+   */
+  ScopedIdentityMintWorkerRecovery(std::promise<void>& start,
+                                   std::vector<WorkerResult>& workers) noexcept
+      : start_(start), workers_(workers) {}
+
+  /**
+   * @brief Opens the start gate and best-effort consumes unclaimed workers.
+   * @throws Nothing; promise, worker, and future exceptions are contained.
+   * @note Each wait is bounded. Gate release happens before any wait, so no
+   * worker can remain blocked on test-owned synchronization.
+   */
+  ~ScopedIdentityMintWorkerRecovery() noexcept {
+    release();
+    for (auto& worker : workers_) {
+      if (!worker.valid()) {
+        continue;
+      }
+      try {
+        if (worker.wait_for(std::chrono::seconds(2)) ==
+            std::future_status::ready) {
+          (void)worker.get();
+        }
+      } catch (...) {
+      }
+    }
+  }
+
+  /**
+   * @brief Opens the shared start gate exactly once.
+   * @return Nothing.
+   * @throws Nothing; an unexpected promise failure is contained for cleanup.
+   */
+  void release() noexcept {
+    if (released_) {
+      return;
+    }
+    released_ = true;
+    try {
+      start_.set_value();
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Disables copying of single-gate recovery ownership.
+   * @param other Guard whose cleanup ownership remains unique.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedIdentityMintWorkerRecovery(
+      const ScopedIdentityMintWorkerRecovery& other) = delete;
+
+  /**
+   * @brief Disables assignment of single-gate recovery ownership.
+   * @param other Guard whose ownership cannot replace this instance.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedIdentityMintWorkerRecovery& operator=(
+      const ScopedIdentityMintWorkerRecovery& other) = delete;
+
+ private:
+  /** @brief Borrowed one-shot start promise. */
+  std::promise<void>& start_;
+
+  /** @brief Borrowed pre-reserved future storage. */
+  std::vector<WorkerResult>& workers_;
+
+  /** @brief True after gate publication was attempted. */
+  bool released_ = false;
+};
 
 /**
  * @brief Builds deterministic descriptor input for built-in policy tests.
@@ -2016,9 +2106,9 @@ TEST(ComputeRunDescriptor, CapturesIdRevisionIntentQualityAndQosWithoutReuse) {
 }
 
 /**
- * @brief Verifies strong Graph values reject zero and stop before wrap.
- * @note Maximum identity is a legal comparison value; live mint exhaustion is
- * process-global and therefore is not consumed by this unit test.
+ * @brief Verifies strong Graph values reject zero and revisions stop at max.
+ * @note Identity reservation exhaustion is covered separately through the
+ * exact production CAS algorithm and an isolated atomic counter.
  */
 TEST(GraphRevision, RejectsIllegalValuesAndChecksMaximumSuccessor) {
   EXPECT_THROW((void)GraphInstanceId{0U}, std::invalid_argument);
@@ -2032,6 +2122,85 @@ TEST(GraphRevision, RejectsIllegalValuesAndChecksMaximumSuccessor) {
   EXPECT_EQ(penultimate.next().value(), std::numeric_limits<uint64_t>::max());
   const GraphRevision maximum_revision{std::numeric_limits<uint64_t>::max()};
   EXPECT_THROW((void)maximum_revision.next(), std::overflow_error);
+}
+
+/**
+ * @brief Exercises the production identity CAS loop at its terminal value.
+ * @return Nothing; GoogleTest assertions report reuse, wrap, or race failures.
+ * @throws std::bad_alloc or std::system_error if async fixture setup fails.
+ * @note Eight workers start from one shared gate and one penultimate isolated
+ * counter. Exactly one may reserve UINT64_MAX; every peer must observe terminal
+ * exhaustion. The production process counter remains inaccessible and
+ * untouched.
+ */
+TEST(GraphRevision, ConcurrentIdentityMintIssuesMaximumOnceThenExhausts) {
+  constexpr std::size_t kWorkerCount = 8;
+  const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+  std::atomic<uint64_t> last_issued{maximum - 1U};
+  std::promise<void> start;
+  const std::shared_future<void> start_signal = start.get_future().share();
+  std::vector<std::future<std::optional<GraphInstanceId>>> workers;
+  workers.reserve(kWorkerCount);
+  ScopedIdentityMintWorkerRecovery recovery(start, workers);
+
+  for (std::size_t worker = 0; worker < kWorkerCount; ++worker) {
+    workers.emplace_back(std::async(std::launch::async, [&] {
+      start_signal.wait();
+      try {
+        return std::optional<GraphInstanceId>{
+            testing::GraphInstanceIdTestAccess::mint_from(last_issued)};
+      } catch (const std::overflow_error&) {
+        return std::optional<GraphInstanceId>{};
+      }
+    }));
+  }
+
+  recovery.release();
+  std::size_t maximum_issuances = 0;
+  std::size_t exhaustion_count = 0;
+  for (auto& worker : workers) {
+    ASSERT_EQ(worker.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    const std::optional<GraphInstanceId> result = worker.get();
+    if (result) {
+      EXPECT_EQ(result->value(), maximum);
+      ++maximum_issuances;
+    } else {
+      ++exhaustion_count;
+    }
+  }
+
+  EXPECT_EQ(maximum_issuances, 1U);
+  EXPECT_EQ(exhaustion_count, kWorkerCount - 1U);
+  EXPECT_EQ(last_issued.load(std::memory_order_relaxed), maximum);
+  EXPECT_THROW((void)testing::GraphInstanceIdTestAccess::mint_from(last_issued),
+               std::overflow_error);
+  EXPECT_EQ(last_issued.load(std::memory_order_relaxed), maximum);
+}
+
+/**
+ * @brief Proves revision exhaustion preserves a prepared structural mutation.
+ * @return Nothing; GoogleTest assertions report graph or generation changes.
+ * @throws Graph, filesystem, or allocation exceptions from fixture setup.
+ * @note The private seam places a real Graph at UINT64_MAX only after its
+ * baseline node is published. `add_node()` still builds and validates a
+ * candidate, then must fail before the no-throw structural swap.
+ */
+TEST(GraphRevision, StructuralMutationOverflowPreservesPublishedGraph) {
+  GraphModel graph(std::filesystem::path{});
+  graph.add_node(make_plan_node(1));
+  const uint64_t topology_before = graph.topology_generation();
+  testing::GraphModelTestAccess::set_revision(
+      graph, GraphRevision{std::numeric_limits<uint64_t>::max()});
+
+  EXPECT_THROW(graph.add_node(make_plan_node(2)), std::overflow_error);
+  EXPECT_EQ(graph.revision().value(), std::numeric_limits<uint64_t>::max());
+  EXPECT_EQ(graph.topology_generation(), topology_before);
+  EXPECT_EQ(graph.node_count(), 1U);
+  EXPECT_TRUE(graph.has_node(1));
+  EXPECT_FALSE(graph.has_node(2));
+  EXPECT_TRUE(graph.upstream_edges(1).empty());
+  EXPECT_TRUE(graph.downstream_edges(1).empty());
 }
 
 /**

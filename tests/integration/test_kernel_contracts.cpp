@@ -7,6 +7,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -26,6 +27,9 @@
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+#include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#endif
 #include "graph/graph_io_service.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
 #include "adapters/yaml/yaml_graph_document_adapter_test_access.hpp"
@@ -43,6 +47,7 @@
 #endif
 #include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
+#include "support/graph_model_test_access.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
 
@@ -730,6 +735,175 @@ class ScopedKernelComputeCommitHook {
  private:
   /** @brief Borrowed hook installed for this scope. */
   testing::KernelComputeCommitTestHook hook_;
+};
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+/**
+ * @brief Counts post-removal cache checkpoints and optionally injects failure.
+ * @throws Nothing for construction.
+ * @note `fail_after_removal` is immutable while the borrowed callback is
+ * installed. The callback runs in the caller's graph-state work item.
+ */
+struct CacheRootRemovalFault {
+  /** @brief Whether the observed checkpoint throws deterministic bad_alloc. */
+  bool fail_after_removal = false;
+
+  /** @brief Number of observed post-removal checkpoints. */
+  std::atomic<int> observed{0};
+
+  /**
+   * @brief Observes root removal and optionally stops before recreation.
+   * @param context Borrowed CacheRootRemovalFault retained by the test.
+   * @param event Exact cache-service checkpoint.
+   * @param cache_root Removed root supplied for diagnostic provenance.
+   * @return Nothing.
+   * @throws std::bad_alloc when deterministic partial-failure injection is on.
+   */
+  static void notify(void* context, testing::GraphCacheServiceTestEvent event,
+                     const std::filesystem::path& cache_root) {
+    auto* fault = static_cast<CacheRootRemovalFault*>(context);
+    if (event != testing::GraphCacheServiceTestEvent::DriveCacheRootRemoved) {
+      return;
+    }
+    (void)cache_root;
+    fault->observed.fetch_add(1, std::memory_order_relaxed);
+    if (fault->fail_after_removal) {
+      throw std::bad_alloc{};
+    }
+  }
+};
+
+/**
+ * @brief Installs one borrowed cache-service hook and clears it at scope exit.
+ * @param fault Fault context retained by the calling scope.
+ * @throws Nothing.
+ * @note Affected cache operations must settle before this guard is destroyed.
+ */
+class ScopedGraphCacheServiceHook {
+ public:
+  /**
+   * @brief Installs the process-local cache observer.
+   * @param fault Context that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedGraphCacheServiceHook(CacheRootRemovalFault& fault)
+      : hook_{&fault, &CacheRootRemovalFault::notify} {
+    testing::set_graph_cache_service_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the borrowed hook before its context expires.
+   * @throws Nothing.
+   */
+  ~ScopedGraphCacheServiceHook() noexcept {
+    testing::set_graph_cache_service_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Disables copy construction of process-local hook ownership.
+   * @param other Guard whose installation remains unique.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedGraphCacheServiceHook(const ScopedGraphCacheServiceHook& other) =
+      delete;
+
+  /**
+   * @brief Disables copy assignment of process-local hook ownership.
+   * @param other Guard whose installation remains unique.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedGraphCacheServiceHook& operator=(
+      const ScopedGraphCacheServiceHook& other) = delete;
+
+ private:
+  /** @brief Borrowed hook installed for this scope. */
+  testing::GraphCacheServiceTestHook hook_;
+};
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+/**
+ * @brief Releases a commit checkpoint and consumes its compute future safely.
+ * @throws Nothing from destruction.
+ * @note Declare this guard after every borrowed hook guard. Early assertion
+ * returns then release the gate and settle the future before hook contexts or
+ * Kernel ownership can expire.
+ */
+class ScopedCommitComputeFuture {
+ public:
+  /**
+   * @brief Takes ownership of one admitted asynchronous compute.
+   * @param gate Commit gate that must open before future recovery.
+   * @param future Admitted Kernel compute future.
+   * @throws Nothing from moving the future handle.
+   */
+  ScopedCommitComputeFuture(CommitCheckpointGate& gate,
+                            std::future<Kernel::AsyncComputeResult> future)
+      : gate_(gate), future_(std::move(future)) {}
+
+  /**
+   * @brief Opens the gate and best-effort consumes an unclaimed future.
+   * @throws Nothing; compute errors and future-state errors are suppressed.
+   * @note The bounded wait diagnoses a stuck request without retaining a
+   * caller-controlled gate. The future then follows its standard destruction
+   * behavior after every borrowed test hook has already been made releasable.
+   */
+  ~ScopedCommitComputeFuture() noexcept {
+    gate_.release();
+    if (!future_.valid()) {
+      return;
+    }
+    try {
+      if (future_.wait_for(std::chrono::seconds(2)) ==
+          std::future_status::ready) {
+        (void)future_.get();
+      }
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Releases the checkpoint and consumes the exact compute outcome.
+   * @param timeout Maximum interval allowed for request completion.
+   * @return Exact asynchronous Kernel result.
+   * @throws std::runtime_error when the bounded wait expires.
+   * @throws std::future_error for invalid future state.
+   * @note Successful consumption invalidates the owned future so destruction
+   * performs no second wait.
+   */
+  Kernel::AsyncComputeResult release_and_get(
+      std::chrono::milliseconds timeout) {
+    gate_.release();
+    if (future_.wait_for(timeout) != std::future_status::ready) {
+      throw std::runtime_error("compute future missed its bounded deadline");
+    }
+    return future_.get();
+  }
+
+  /**
+   * @brief Disables copying of unique future and gate-recovery ownership.
+   * @param other Guard whose ownership cannot be duplicated.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedCommitComputeFuture(const ScopedCommitComputeFuture& other) = delete;
+
+  /**
+   * @brief Disables assignment of unique recovery ownership.
+   * @param other Guard whose ownership cannot replace this instance.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedCommitComputeFuture& operator=(const ScopedCommitComputeFuture& other) =
+      delete;
+
+ private:
+  /** @brief Borrowed gate that outlives this recovery guard. */
+  CommitCheckpointGate& gate_;
+
+  /** @brief Owned admitted future consumed before borrowed hooks expire. */
+  std::future<Kernel::AsyncComputeResult> future_;
 };
 #endif
 
@@ -2726,6 +2900,208 @@ TEST(ComputeContracts,
   std::filesystem::remove_all(root);
   std::filesystem::remove_all(cache_root);
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+/**
+ * @brief Proves revision exhaustion precedes every cache-clear side effect.
+ * @return Nothing; GoogleTest assertions report graph, cache, or file changes.
+ * @throws Setup, graph-state, or filesystem exceptions from the test fixture.
+ * @note Disk-only, memory-only, and combined public Kernel facades each run on
+ * an isolated real Graph at UINT64_MAX. Their quiet false result must occur
+ * before the cache service hook, node-cache reset, or sentinel-file removal.
+ */
+TEST(ComputeContracts, CacheClearRevisionOverflowPreservesAllAuthority) {
+  register_contract_ops();
+  CacheRootRemovalFault observer;
+  ScopedGraphCacheServiceHook hook(observer);
+
+  for (int clear_kind = 0; clear_kind < 3; ++clear_kind) {
+    const std::string suffix = std::to_string(clear_kind);
+    const std::string graph_name = "contract_cache_overflow_" + suffix;
+    const auto root =
+        clean_temp_path("photospider-contract-cache-overflow-root-" + suffix);
+    const auto cache_base =
+        clean_temp_path("photospider-contract-cache-overflow-cache-" + suffix);
+    const auto yaml_path =
+        temp_path("photospider-contract-cache-overflow-" + suffix + ".yaml");
+    write_blocking_source_graph(yaml_path, 8, true);
+
+    Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+    ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string(),
+                                  "", cache_base.string()));
+    auto prepared = testing::KernelTestAccess::submit_graph_state(
+        kernel, graph_name, [](GraphModel& graph) {
+          graph.mutate_node_runtime_state(
+              1, [](GraphModel::NodeRuntimeState& state) {
+                state.cached_output_high_precision = NodeOutput{};
+              });
+          testing::GraphModelTestAccess::set_revision(
+              graph, GraphRevision{std::numeric_limits<uint64_t>::max()});
+          return std::pair<std::filesystem::path, uint64_t>{
+              graph.cache_root, graph.topology_generation()};
+        });
+    ASSERT_EQ(prepared.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    const auto [cache_root, topology_before] = prepared.get();
+    const auto sentinel = cache_root / "overflow-sentinel.cache";
+    write_text(sentinel, "must survive revision overflow");
+
+    bool cleared = false;
+    if (clear_kind == 0) {
+      cleared = kernel.clear_drive_cache(graph_name);
+    } else if (clear_kind == 1) {
+      cleared = kernel.clear_memory_cache(graph_name);
+    } else {
+      cleared = kernel.clear_cache(graph_name);
+    }
+    EXPECT_FALSE(cleared);
+
+    auto preserved = testing::KernelTestAccess::submit_graph_state(
+        kernel, graph_name, [](GraphModel& graph) {
+          return std::tuple<uint64_t, uint64_t, std::size_t, bool>{
+              graph.revision().value(), graph.topology_generation(),
+              graph.node_count(),
+              graph.node(1).cached_output_high_precision.has_value()};
+        });
+    ASSERT_EQ(preserved.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    const auto [revision, topology, node_count, has_memory_cache] =
+        preserved.get();
+    EXPECT_EQ(revision, std::numeric_limits<uint64_t>::max());
+    EXPECT_EQ(topology, topology_before);
+    EXPECT_EQ(node_count, 1U);
+    EXPECT_TRUE(has_memory_cache);
+    EXPECT_TRUE(std::filesystem::exists(sentinel));
+    EXPECT_EQ(observer.observed.load(std::memory_order_relaxed), 0);
+
+    EXPECT_TRUE(kernel.close_graph(graph_name));
+    std::filesystem::remove_all(root);
+    std::filesystem::remove_all(cache_base);
+    std::filesystem::remove(yaml_path);
+  }
+}
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING) && \
+    defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+/**
+ * @brief Proves a partially failed disk clear still invalidates an older Run.
+ * @return Nothing; GoogleTest assertions report ordering, propagation, or
+ * stale/current publication failures.
+ * @throws Setup, filesystem, or graph-state exceptions from the fixture.
+ * @note Run A blocks after HP publication copies are prepared but before live
+ * graph-state submission. The real disk-clear facade publishes N+1, removes
+ * the root, and receives injected bad_alloc before recreation. The exception
+ * reaches the caller, N+1 remains authoritative, Run A is rejected, and a new
+ * N+1 Run succeeds without issue #73 cancellation semantics.
+ */
+TEST(ComputeContracts,
+     PartialDiskClearFailureAdvancesRevisionAndRejectsPreparedRun) {
+  register_contract_ops();
+  reset_blocking_contract_source();
+  const std::string graph_name = "contract_partial_disk_clear";
+  const auto root =
+      clean_temp_path("photospider-contract-partial-disk-clear-root");
+  const auto cache_base =
+      clean_temp_path("photospider-contract-partial-disk-clear-cache");
+  const auto yaml_path =
+      temp_path("photospider-contract-partial-disk-clear.yaml");
+  write_blocking_source_graph(yaml_path, 8, true);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string(),
+                                "", cache_base.string()));
+  auto initial = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::tuple<uint64_t, uint64_t, std::filesystem::path>{
+            graph.revision().value(), graph.topology_generation(),
+            graph.cache_root};
+      });
+  ASSERT_EQ(initial.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const auto [initial_revision, initial_topology, cache_root] = initial.get();
+  const auto sentinel = cache_root / "partial-clear-sentinel.cache";
+  write_text(sentinel, "removed before injected recreation failure");
+
+  CommitCheckpointGate commit_gate(
+      testing::KernelComputeCommitTestEvent::HighPrecisionCommitPrepared);
+  ScopedKernelComputeCommitHook commit_hook(commit_gate);
+  CacheRootRemovalFault fault;
+  fault.fail_after_removal = true;
+  ScopedGraphCacheServiceHook cache_hook(fault);
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = false;
+  request.cache.nosave = false;
+  request.execution.parallel = true;
+  auto admitted = kernel.compute_async(request);
+  ASSERT_TRUE(admitted.has_value());
+  ScopedCommitComputeFuture stale_compute(commit_gate, std::move(*admitted));
+
+  if (!commit_gate.wait_until_entered(std::chrono::seconds(2))) {
+    ADD_FAILURE() << "HP prepared-commit checkpoint was not reached";
+    return;
+  }
+
+  EXPECT_THROW((void)kernel.clear_drive_cache(graph_name), std::bad_alloc);
+  auto failed_clear_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, uint64_t>{graph.revision().value(),
+                                             graph.topology_generation()};
+      });
+  ASSERT_EQ(failed_clear_state.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const auto [failed_clear_revision, failed_clear_topology] =
+      failed_clear_state.get();
+  EXPECT_EQ(failed_clear_revision, initial_revision + 1U);
+  EXPECT_EQ(failed_clear_topology, initial_topology);
+  EXPECT_EQ(fault.observed.load(std::memory_order_relaxed), 1);
+  EXPECT_FALSE(std::filesystem::exists(cache_root));
+  EXPECT_FALSE(std::filesystem::exists(sentinel));
+
+  Kernel::AsyncComputeResult stale_outcome;
+  try {
+    stale_outcome = stale_compute.release_and_get(std::chrono::seconds(2));
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << error.what();
+    return;
+  }
+  EXPECT_FALSE(stale_outcome.ok);
+  ASSERT_TRUE(stale_outcome.error.has_value());
+  EXPECT_EQ(stale_outcome.error->code, GraphErrc::ComputeError);
+
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  auto current_compute = kernel.compute_async(request);
+  ASSERT_TRUE(current_compute.has_value());
+  ASSERT_EQ(current_compute->wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const Kernel::AsyncComputeResult current_outcome = current_compute->get();
+  EXPECT_TRUE(current_outcome.ok);
+  EXPECT_FALSE(current_outcome.error.has_value());
+
+  auto final_state = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [](GraphModel& graph) {
+        return std::pair<uint64_t, bool>{
+            graph.revision().value(),
+            graph.node(1).cached_output_high_precision.has_value()};
+      });
+  ASSERT_EQ(final_state.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(final_state.get(),
+            (std::pair<uint64_t, bool>{failed_clear_revision, true}));
+  EXPECT_FALSE(std::filesystem::exists(cache_root));
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove_all(cache_base);
+  std::filesystem::remove(yaml_path);
+}
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 /**

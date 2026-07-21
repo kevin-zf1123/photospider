@@ -9,6 +9,8 @@ namespace ps::testing {
  *       installed or exposed through Host.
  */
 enum class KernelComputeCommitTestEvent {
+  /** @brief HP publication copies are ready before graph-state submission. */
+  HighPrecisionCommitPrepared,
   /** @brief HP live predicate passed before the no-throw visible swap. */
   HighPrecisionPredicateValidated,
   /** @brief RT live predicate passed before the no-throw proxy swap. */

@@ -187,6 +187,10 @@ class KernelGraphRevisionCommitPolicy final
       proxy_publication = staged_proxy->clone_for_compute();
     }
 
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+    testing::notify_kernel_compute_commit_test_hook(
+        testing::KernelComputeCommitTestEvent::HighPrecisionCommitPrepared);
+#endif
     const GraphInstanceId instance_id = run.descriptor().graph_instance_id();
     const GraphRevision revision = run.descriptor().revision();
     runtime_.graph_state()

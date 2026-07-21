@@ -62,7 +62,13 @@ class GraphCacheService {
    * @param graph Graph whose disk cache root should be cleared.
    * @return Number of filesystem entries removed.
    * @throws std::filesystem::filesystem_error on filesystem failures.
-   * @note Empty cache roots are treated as a no-op.
+   * @throws std::bad_alloc when filesystem path or diagnostic storage exhausts
+   *         memory.
+   * @note Empty cache roots are treated as a no-op. Removal and recreation are
+   *       not an atomic filesystem transaction: removal may succeed before
+   *       recreation fails. The serialized facade therefore publishes its
+   *       prepared successor revision before calling this method and never
+   *       rolls that invalidation back.
    */
   GraphModel::DriveClearResult clear_drive_cache(GraphModel& graph) const;
 

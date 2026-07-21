@@ -16,6 +16,10 @@
 
 namespace ps {
 
+namespace testing {
+class GraphModelTestAccess;
+}  // namespace testing
+
 class GraphCacheService;
 class GraphIOService;
 class GraphTraversalService;
@@ -155,6 +159,19 @@ class GraphModel {
     uint64_t& parameters_version;
   };
 
+  /**
+   * @brief Creates one live Graph with a fresh process identity and revision.
+   * @param cache_root_dir Owned disk-cache root; an empty path disables root
+   *        creation.
+   * @throws std::overflow_error when live Graph identity space is exhausted.
+   * @throws std::filesystem::filesystem_error when nonempty root creation
+   *         fails.
+   * @throws std::bad_alloc when path or filesystem diagnostics allocate.
+   * @note Construction mints identity before creating the cache directory. A
+   *       failed directory creation consumes that never-reused identity but
+   *       publishes no Graph object. The Graph owns all model state while
+   *       cache codecs and runtimes remain external collaborators.
+   */
   explicit GraphModel(fs::path cache_root_dir = "cache");
 
   /**
@@ -187,9 +204,12 @@ class GraphModel {
    * @param prepared Exact value returned by revision().next() before mutation.
    * @return Nothing.
    * @throws Nothing.
-   * @note The caller must hold graph-state serialization and must publish only
-   *       after its mutation succeeds. This split lets cache/filesystem code
-   *       detect overflow before creating an otherwise unversioned side effect.
+   * @note The caller must hold graph-state serialization. For reversible
+   *       in-memory replacement, publish after all throwing preparation and
+   *       immediately before the no-throw swap. For cache/filesystem clears,
+   *       publish after all pure preparation and immediately before the first
+   *       possibly partial side effect. Once published, the revision is never
+   *       rolled back even if that side effect later throws.
    */
   void publish_prepared_revision(GraphRevision prepared) noexcept {
     revision_ = prepared;
@@ -438,6 +458,7 @@ class GraphModel {
   friend class compute::DownsampleExecutor;
   friend class compute::HighPrecisionDirtyExecutor;
   friend class compute::RealTimeDirtyExecutor;
+  friend class testing::GraphModelTestAccess;
 
   /** @brief Selects the allocation-free constructor used only by snapshots. */
   struct ComputeSnapshotTag {};

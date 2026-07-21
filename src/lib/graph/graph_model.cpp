@@ -173,6 +173,7 @@ bool GraphTopologyIndex::empty() const {
   return incoming_by_node.empty() && outgoing_by_node.empty();
 }
 
+/** @copydoc GraphModel::GraphModel(fs::path) */
 GraphModel::GraphModel(fs::path cache_root_dir)
     : cache_root(std::move(cache_root_dir)),
       instance_id_(GraphInstanceId::mint()),
@@ -320,6 +321,7 @@ void GraphModel::reset_runtime_state() noexcept {
   skip_save_cache_.store(false, std::memory_order_relaxed);
 }
 
+/** @copydoc GraphModel::clear */
 void GraphModel::clear() {
   const GraphRevision next_revision = revision_.next();
   const uint64_t next_generation =
@@ -332,6 +334,7 @@ void GraphModel::clear() {
   quiet_ = true;
 }
 
+/** @copydoc GraphModel::add_node */
 void GraphModel::add_node(const Node& node) {
   if (has_node(node.id)) {
     throw GraphError(
@@ -365,6 +368,7 @@ void GraphModel::add_node(const Node& node) {
                                  false);
 }
 
+/** @copydoc GraphModel::replace_node */
 void GraphModel::replace_node(const Node& node) {
   if (!has_node(node.id)) {
     throw GraphError(GraphErrc::NotFound,
@@ -378,6 +382,7 @@ void GraphModel::replace_node(const Node& node) {
                                  false);
 }
 
+/** @copydoc GraphModel::remove_node */
 void GraphModel::remove_node(int id) {
   if (!has_node(id)) {
     throw GraphError(GraphErrc::NotFound,
@@ -403,6 +408,7 @@ void GraphModel::remove_node(int id) {
                                  false);
 }
 
+/** @copydoc GraphModel::rewire_image_input */
 void GraphModel::rewire_image_input(int node_id, size_t input_index,
                                     int from_node_id,
                                     std::string from_output_name) {
@@ -422,6 +428,7 @@ void GraphModel::rewire_image_input(int node_id, size_t input_index,
                                  false);
 }
 
+/** @copydoc GraphModel::rewire_parameter_input */
 void GraphModel::rewire_parameter_input(int node_id, size_t input_index,
                                         int from_node_id,
                                         std::string from_output_name,
@@ -546,6 +553,7 @@ void GraphModel::validate_topology() const {
   validate_node_map(nodes_);
 }
 
+/** @copydoc GraphModel::rebuild_topology_index */
 void GraphModel::rebuild_topology_index() {
   validate_node_map(nodes_);
   GraphTopologyIndex topology = build_topology_index(nodes_);
