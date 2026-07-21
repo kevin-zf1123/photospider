@@ -90,10 +90,19 @@ defined anchors from all three production seam objects. Otherwise the smoke
 records a path-free failure reason and tries the next candidate; no candidate
 or all unusable candidates fail closed. The first usable full symbol table is
 authoritative and rejects every hook function/helper/global fragment. The
-smoke also rejects an installed test product archive, exported test target, or
-exported internal seam definition. This remains a labelled `build-smoke`;
-ordinary complete CTest selection does not make package construction part of
-runtime-test ownership.
+raw table is used only in memory for that decision; a forbidden symbol in the
+first usable table fails the verdict without trying a later candidate. The
+retained scan observation has a closed, path-free schema: stable `tool_source`,
+ordered structured attempt reasons, status and aggregate line/anchor/prohibited
+counts, plus counts keyed only by controlled symbol tokens. It retains no tool,
+archive, object, build, install, or workspace path; no raw symbol line or
+captured stdout/stderr; and no environment `PATH`. If aggregate package behavior
+fails, the JSON diagnostic is a whitelist projection of failed check labels,
+command statuses, and that sanitized scan observation rather than the complete
+transient observations. The smoke also rejects an installed test product
+archive, exported test target, or exported internal seam definition. This
+remains a labelled `build-smoke`; ordinary complete CTest selection does not
+make package construction part of runtime-test ownership.
 
 The smoke inspects every installed `Photospider*Targets*.cmake` file because
 the package separates base, OpenCV-dependent, and embedded-product targets

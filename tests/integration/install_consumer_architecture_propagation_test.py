@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import pathlib
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 from unittest import mock
 
@@ -73,6 +75,24 @@ ARCHITECTURE_ARGUMENT = f"-DCMAKE_OSX_ARCHITECTURES={ARCHITECTURES}"
 USABLE_PRODUCT_SYMBOL_OUTPUT = "\n".join(
     f"0000000000000000 T {fragment}"
     for fragment in static_product.REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+)
+#: @brief Exact path-free production archive observation field inventory.
+#: @note A reintroduced executable path or raw match field changes this set and
+#:   fails the end-to-end diagnostic regression before output is evaluated.
+ARCHIVE_SYMBOL_OBSERVATION_KEYS = frozenset(
+    {
+        "tool_source",
+        "status",
+        "line_count",
+        "prohibited_symbol_count",
+        "prohibited_symbols",
+        "required_anchor_count",
+        "required_anchor_total",
+        "required_anchors",
+        "covers_product_seams",
+        "attempts",
+        "failure_reason",
+    }
 )
 #: @brief Exact maintained install-consumer CTest names and driver basenames.
 #: @note Every expected entry carries the build-smoke label in real CTest
@@ -465,20 +485,22 @@ class SymbolToolHarness:
     def __init__(
         self,
         which_paths: dict[str, str | None],
-        process_results: dict[str, tuple[int, str] | OSError],
+        process_results: dict[
+            str, tuple[int, str] | tuple[int, str, str] | OSError
+        ],
         executable_paths: set[str] | None = None,
     ) -> None:
         """@brief Initialize one isolated symbol-tool fixture.
 
         @param which_paths Executable names mapped to synthetic lookup results.
         @param process_results Executable paths mapped to return-code/stdout
-          pairs or startup failures.
+          pairs, return-code/stdout/stderr triples, or startup failures.
         @param executable_paths Paths accepted from ``xcrun --find``; omitted
           values default to an empty set.
         @return None.
         @throws None Caller containers are copied before retention.
-        @note Stderr is intentionally absent because production diagnostics
-          must not echo arbitrary tool output.
+        @note Optional stderr exists only to prove production never exposes
+          arbitrary captured tool output.
         """
 
         #: @brief Ordered executable names requested through ``which``.
@@ -516,7 +538,7 @@ class SymbolToolHarness:
 
         @param command Executable and arguments produced by production code.
         @param cwd Working directory selected by production code.
-        @return Synthetic completed process with configured status/stdout.
+        @return Synthetic completed process with configured captured streams.
         @throws OSError When the configured process models startup failure.
         @throws AssertionError If no response exists for the executable.
         @note ``cwd`` is not accessed; argv is copied before recording.
@@ -532,12 +554,16 @@ class SymbolToolHarness:
         result = self._process_results[recorded[0]]
         if isinstance(result, OSError):
             raise result
-        returncode, stdout = result
+        if len(result) == 2:
+            returncode, stdout = result
+            stderr = "fixture stderr must remain private"
+        else:
+            returncode, stdout, stderr = result
         return subprocess.CompletedProcess(
             args=recorded,
             returncode=returncode,
             stdout=stdout,
-            stderr="fixture stderr must remain private",
+            stderr=stderr,
         )
 
     def is_executable(self, path: str) -> bool:
@@ -1000,6 +1026,179 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
         )
         self.assertEqual(harness.which_calls.count("xcrun"), 1)
 
+    def test_authoritative_forbidden_table_emits_only_safe_failure_json(
+        self,
+    ) -> None:
+        """@brief Exercise selection, verdict, and real failure JSON together.
+
+        @return None after the first complete xcrun table fails on one forbidden
+          token without running later clean PATH candidates or leaking sentinels.
+        @throws AssertionError If authority, counts, schema, or output safety
+          regresses.
+        @note Executable, install/archive/object, stdout/stderr, workspace, and
+          environment-PATH sentinels cross the in-memory boundary but none may
+          survive the production observation or failure diagnostic projection.
+        """
+
+        xcrun_executable = "/Users/archive-scan/XCRUN_EXECUTABLE_SENTINEL"
+        authoritative_tool = "/tmp/archive-scan/AUTHORITATIVE_TOOL_SENTINEL"
+        clean_path_llvm_nm = "/private/toolchain/CLEAN_PATH_LLVM_NM_SENTINEL"
+        clean_path_nm = "/private/toolchain/CLEAN_PATH_NM_SENTINEL"
+        prefix = pathlib.Path(
+            "/private/workspace/INSTALL_PREFIX_SENTINEL"
+        )
+        archive = "lib/ARCHIVE_PATH_SENTINEL.a"
+        forbidden_symbol = (
+            static_product.FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS[0]
+        )
+        raw_stdout = "\n".join(
+            [
+                *(
+                    "/private/object/RAW_SYMBOL_LINE_SENTINEL_"
+                    f"{index}.o: 0000000000000000 T {anchor}"
+                    for index, anchor in enumerate(
+                        static_product.REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+                    )
+                ),
+                "/Users/object/RAW_FORBIDDEN_LINE_SENTINEL.o: "
+                f"0000000000000000 T {forbidden_symbol}",
+            ]
+        )
+        raw_stderr = (
+            "/tmp/archive-scan/RAW_TOOL_STDERR_SENTINEL must stay private"
+        )
+        harness = SymbolToolHarness(
+            {
+                "xcrun": xcrun_executable,
+                "llvm-nm": clean_path_llvm_nm,
+                "nm": clean_path_nm,
+            },
+            {
+                xcrun_executable: (
+                    0,
+                    f"{authoritative_tool}\n",
+                    "/Users/archive-scan/RAW_DISCOVERY_STDERR_SENTINEL",
+                ),
+                authoritative_tool: (0, raw_stdout, raw_stderr),
+                clean_path_llvm_nm: (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+                clean_path_nm: (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+            },
+            {authoritative_tool},
+        )
+
+        observation = static_product.inspect_product_archive_symbols(
+            prefix,
+            [archive],
+            "Darwin",
+            which=harness.which,
+            captured_runner=harness.run,
+            executable_validator=harness.is_executable,
+        )
+        self.assertEqual(set(observation), ARCHIVE_SYMBOL_OBSERVATION_KEYS)
+        self.assertEqual(observation["tool_source"], "xcrun llvm-nm")
+        self.assertTrue(observation["covers_product_seams"])
+        self.assertEqual(observation["required_anchor_count"], 3)
+        self.assertEqual(observation["required_anchor_total"], 3)
+        self.assertEqual(observation["prohibited_symbol_count"], 1)
+        self.assertEqual(
+            observation["prohibited_symbols"], {forbidden_symbol: 1}
+        )
+        self.assertEqual(
+            observation["attempts"],
+            [
+                {
+                    "tool_source": "xcrun llvm-nm",
+                    "reason": "usable symbol table",
+                }
+            ],
+        )
+        self.assertEqual(
+            harness.run_executables(),
+            [xcrun_executable, authoritative_tool],
+        )
+        self.assertEqual(
+            harness.run_commands[1][1], str(prefix / archive)
+        )
+        for symbol in (
+            *observation["prohibited_symbols"],
+            *observation["required_anchors"],
+        ):
+            self.assertRegex(symbol, r"\A[A-Za-z0-9_]+\Z")
+        serialized_observation = json.dumps(observation, sort_keys=True)
+        self.assertNotIn("/", serialized_observation)
+        self.assertNotIn("RAW_SYMBOL_LINE_SENTINEL", serialized_observation)
+        self.assertNotIn("RAW_TOOL_STDERR_SENTINEL", serialized_observation)
+
+        observations = {
+            "commands": {"install": 0},
+            "install_tree": {
+                "production_archive_symbol_scan": observation,
+            },
+            "paths": {
+                "build": "/Users/build/BUILD_PATH_SENTINEL",
+                "install": str(prefix),
+                "workspace": "/tmp/work/WORKSPACE_PATH_SENTINEL",
+                "environment_PATH": (
+                    "/private/env/ENVIRONMENT_PATH_SENTINEL"
+                ),
+            },
+            "consumer": {
+                "selected": "/Users/consumer/EXECUTABLE_PATH_SENTINEL"
+            },
+        }
+        checks = {
+            "installed product archive omits internal test symbols": (
+                observation["prohibited_symbol_count"] == 0
+            )
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            passed = static_product.emit_behavior_verdict(
+                observations, checks
+            )
+
+        self.assertFalse(passed)
+        stdout_text = stdout.getvalue()
+        stderr_text = stderr.getvalue()
+        self.assertIn("overall=FAIL", stdout_text)
+        self.assertIn("source=xcrun llvm-nm", stdout_text)
+        diagnostic_marker = "package behavior diagnostic summary:\n"
+        self.assertTrue(stderr_text.startswith(diagnostic_marker))
+        diagnostic = json.loads(stderr_text[len(diagnostic_marker) :])
+        self.assertEqual(
+            diagnostic["archive_symbol_scan"]["tool_source"],
+            "xcrun llvm-nm",
+        )
+        self.assertEqual(
+            diagnostic["archive_symbol_scan"][
+                "prohibited_symbol_count"
+            ],
+            1,
+        )
+        self.assertNotIn("/", stderr_text)
+        combined_output = stdout_text + stderr_text
+        for sentinel in (
+            "XCRUN_EXECUTABLE_SENTINEL",
+            "AUTHORITATIVE_TOOL_SENTINEL",
+            "CLEAN_PATH_LLVM_NM_SENTINEL",
+            "CLEAN_PATH_NM_SENTINEL",
+            "INSTALL_PREFIX_SENTINEL",
+            "ARCHIVE_PATH_SENTINEL",
+            "RAW_SYMBOL_LINE_SENTINEL",
+            "RAW_FORBIDDEN_LINE_SENTINEL",
+            "RAW_TOOL_STDERR_SENTINEL",
+            "RAW_DISCOVERY_STDERR_SENTINEL",
+            "BUILD_PATH_SENTINEL",
+            "WORKSPACE_PATH_SENTINEL",
+            "ENVIRONMENT_PATH_SENTINEL",
+            "EXECUTABLE_PATH_SENTINEL",
+            "/private/",
+            "/Users/",
+            "/tmp/",
+        ):
+            self.assertNotIn(sentinel, combined_output)
+
     def test_darwin_xcrun_failure_falls_back_to_path_llvm_nm(
         self,
     ) -> None:
@@ -1030,9 +1229,19 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
             harness.run_executables(),
             ["/usr/bin/xcrun", "/toolchain/llvm-nm"],
         )
-        self.assertIn(
-            "xcrun llvm-nm: discovery exited with status 69",
+        self.assertEqual(
             observation["attempts"],
+            [
+                {
+                    "tool_source": "xcrun llvm-nm",
+                    "reason": "discovery exited with nonzero status",
+                    "status": 69,
+                },
+                {
+                    "tool_source": "PATH llvm-nm",
+                    "reason": "usable symbol table",
+                },
+            ],
         )
 
     def test_darwin_invalid_xcrun_path_falls_back_to_path_llvm_nm(
@@ -1064,9 +1273,18 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
             harness.run_executables(),
             ["/usr/bin/xcrun", "/toolchain/llvm-nm"],
         )
-        self.assertIn(
-            "xcrun llvm-nm: discovery returned an unusable path",
+        self.assertEqual(
             observation["attempts"],
+            [
+                {
+                    "tool_source": "xcrun llvm-nm",
+                    "reason": "discovery returned an unusable path",
+                },
+                {
+                    "tool_source": "PATH llvm-nm",
+                    "reason": "usable symbol table",
+                },
+            ],
         )
 
     def test_darwin_unusable_path_llvm_nm_falls_back_to_nm(self) -> None:
@@ -1098,9 +1316,25 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
             harness.run_executables(),
             ["/usr/bin/xcrun", "/toolchain/llvm-nm", "/usr/bin/nm"],
         )
-        self.assertIn(
-            "PATH llvm-nm: inspection missed 3/3 required anchors",
+        self.assertEqual(
             observation["attempts"],
+            [
+                {
+                    "tool_source": "xcrun llvm-nm",
+                    "reason": "discovery exited with nonzero status",
+                    "status": 1,
+                },
+                {
+                    "tool_source": "PATH llvm-nm",
+                    "reason": "inspection missed required anchors",
+                    "missing_anchor_count": 3,
+                    "required_anchor_total": 3,
+                },
+                {
+                    "tool_source": "PATH nm",
+                    "reason": "usable symbol table",
+                },
+            ],
         )
 
     def test_non_darwin_never_discovers_or_invokes_xcrun(self) -> None:
@@ -1146,13 +1380,32 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
 
         observation = self.inspect(harness)
 
-        self.assertEqual(observation["tool"], "")
+        self.assertEqual(set(observation), ARCHIVE_SYMBOL_OBSERVATION_KEYS)
+        self.assertEqual(observation["tool_source"], "")
         self.assertIsNone(observation["status"])
         self.assertFalse(observation["covers_product_seams"])
         self.assertEqual(harness.run_commands, [])
-        self.assertIn("xcrun llvm-nm: xcrun is unavailable", observation["stderr"])
-        self.assertIn("PATH llvm-nm: executable is unavailable", observation["stderr"])
-        self.assertIn("PATH nm: executable is unavailable", observation["stderr"])
+        self.assertEqual(
+            observation["attempts"],
+            [
+                {
+                    "tool_source": "xcrun llvm-nm",
+                    "reason": "xcrun is unavailable",
+                },
+                {
+                    "tool_source": "PATH llvm-nm",
+                    "reason": "executable is unavailable",
+                },
+                {
+                    "tool_source": "PATH nm",
+                    "reason": "executable is unavailable",
+                },
+            ],
+        )
+        self.assertEqual(
+            observation["failure_reason"],
+            "no usable archive-symbol inspection candidate",
+        )
 
     def test_all_unusable_candidates_fail_with_path_free_reasons(self) -> None:
         """@brief Reject startup, nonzero, and missing-anchor candidates.
@@ -1182,22 +1435,33 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
 
         observation = self.inspect(harness)
 
-        self.assertEqual(observation["tool"], "")
+        self.assertEqual(set(observation), ARCHIVE_SYMBOL_OBSERVATION_KEYS)
+        self.assertEqual(observation["tool_source"], "")
         self.assertFalse(observation["covers_product_seams"])
-        self.assertIn(
-            "xcrun llvm-nm: inspection could not start",
-            observation["stderr"],
+        self.assertEqual(
+            observation["attempts"],
+            [
+                {
+                    "tool_source": "xcrun llvm-nm",
+                    "reason": "inspection could not start",
+                },
+                {
+                    "tool_source": "PATH llvm-nm",
+                    "reason": "inspection exited with nonzero status",
+                    "status": 2,
+                },
+                {
+                    "tool_source": "PATH nm",
+                    "reason": "inspection missed required anchors",
+                    "missing_anchor_count": 3,
+                    "required_anchor_total": 3,
+                },
+            ],
         )
-        self.assertIn(
-            "PATH llvm-nm: inspection exited with status 2",
-            observation["stderr"],
-        )
-        self.assertIn(
-            "PATH nm: inspection missed 3/3 required anchors",
-            observation["stderr"],
-        )
-        self.assertNotIn("/private/", observation["stderr"])
-        self.assertNotIn("private failure output", observation["stderr"])
+        serialized_observation = json.dumps(observation, sort_keys=True)
+        self.assertNotIn("/", serialized_observation)
+        self.assertNotIn("private failure output", serialized_observation)
+        self.assertNotIn("private startup diagnostic", serialized_observation)
 
     def test_duplicate_canonical_candidate_paths_run_once(self) -> None:
         """@brief De-duplicate xcrun, llvm-nm, and nm path aliases.

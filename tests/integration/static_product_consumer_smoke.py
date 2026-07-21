@@ -275,19 +275,36 @@ class SymbolToolCandidate:
 
 
 @dataclass(frozen=True)
+class SymbolToolFailure:
+    """@brief Describe one path-free symbol-tool discovery failure.
+
+    @param source Stable source label from the closed candidate inventory.
+    @param reason Stable reason category containing no subprocess output/path.
+    @param status Optional nonzero child status for discovery failures.
+    @throws None Construction only retains immutable scalar values.
+    @note The record never stores executable text, stdout, stderr, or PATH.
+    """
+
+    source: str
+    reason: str
+    status: int | None = None
+
+
+@dataclass(frozen=True)
 class SymbolToolResolution:
-    """@brief Hold ordered unique symbol tools and safe discovery failures.
+    """@brief Hold ordered unique symbol tools and discovery outcomes.
 
     @param candidates Validated candidates in their required platform order.
-    @param failures Path-free reasons for discovery branches that were absent
-      or unusable before archive inspection began.
+    @param failures Path-free discovery records for absent/unusable branches.
+    @param sequence Candidate and failure records in source-priority order.
     @throws None Construction only retains immutable tuples.
     @note Duplicate canonical executable paths occur at most once in
-      ``candidates`` and are not failures.
+      ``candidates`` and become path-free skipped records in ``sequence``.
     """
 
     candidates: tuple[SymbolToolCandidate, ...]
-    failures: tuple[str, ...]
+    failures: tuple[SymbolToolFailure, ...]
+    sequence: tuple[SymbolToolCandidate | SymbolToolFailure, ...]
 
 
 def strict_remove_tree(path: Path) -> None:
@@ -413,49 +430,72 @@ def resolve_product_archive_symbol_tools(
       priority. No archive is read and no process-global environment changes.
     """
 
-    discovered: list[SymbolToolCandidate] = []
-    failures: list[str] = []
+    sequence: list[SymbolToolCandidate | SymbolToolFailure] = []
     if platform_system == "Darwin":
         xcrun = which("xcrun")
         if xcrun is None:
-            failures.append("xcrun llvm-nm: xcrun is unavailable")
+            sequence.append(
+                SymbolToolFailure(
+                    source="xcrun llvm-nm",
+                    reason="xcrun is unavailable",
+                )
+            )
         else:
             try:
                 resolved = captured_runner(
                     [xcrun, "--find", "llvm-nm"], cwd
                 )
             except OSError:
-                failures.append("xcrun llvm-nm: discovery could not start")
+                sequence.append(
+                    SymbolToolFailure(
+                        source="xcrun llvm-nm",
+                        reason="discovery could not start",
+                    )
+                )
             else:
                 resolved_path = resolved.stdout.strip()
                 if resolved.returncode != 0:
-                    failures.append(
-                        "xcrun llvm-nm: discovery exited with status "
-                        f"{resolved.returncode}"
-                    )
-                elif not resolved_path:
-                    failures.append(
-                        "xcrun llvm-nm: discovery returned no path"
-                    )
-                elif "\n" in resolved_path or "\r" in resolved_path:
-                    failures.append(
-                        "xcrun llvm-nm: discovery returned multiple lines"
-                    )
-                elif not Path(resolved_path).is_absolute():
-                    failures.append(
-                        "xcrun llvm-nm: discovery returned a relative path"
-                    )
-                elif not executable_validator(resolved_path):
-                    failures.append(
-                        "xcrun llvm-nm: discovery returned an unusable path"
-                    )
-                else:
-                    discovered.append(
-                        SymbolToolCandidate(
+                    sequence.append(
+                        SymbolToolFailure(
                             source="xcrun llvm-nm",
-                            executable=resolved_path,
+                            reason="discovery exited with nonzero status",
+                            status=resolved.returncode,
                         )
                     )
+                elif not resolved_path:
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned no path",
+                        )
+                    )
+                elif "\n" in resolved_path or "\r" in resolved_path:
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned multiple lines",
+                        )
+                    )
+                elif not Path(resolved_path).is_absolute():
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned a relative path",
+                        )
+                    )
+                elif not executable_validator(resolved_path):
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned an unusable path",
+                        )
+                    )
+                else:
+                    candidate = SymbolToolCandidate(
+                        source="xcrun llvm-nm",
+                        executable=resolved_path,
+                    )
+                    sequence.append(candidate)
 
     for source, executable_name in (
         ("PATH llvm-nm", "llvm-nm"),
@@ -463,23 +503,41 @@ def resolve_product_archive_symbol_tools(
     ):
         executable = which(executable_name)
         if executable is None:
-            failures.append(f"{source}: executable is unavailable")
-        else:
-            discovered.append(
-                SymbolToolCandidate(source=source, executable=executable)
+            sequence.append(
+                SymbolToolFailure(
+                    source=source,
+                    reason="executable is unavailable",
+                )
             )
+        else:
+            candidate = SymbolToolCandidate(
+                source=source, executable=executable
+            )
+            sequence.append(candidate)
 
     unique: list[SymbolToolCandidate] = []
+    ordered: list[SymbolToolCandidate | SymbolToolFailure] = []
     canonical_paths: set[str] = set()
-    for candidate in discovered:
-        canonical_path = os.path.normcase(
-            os.path.realpath(candidate.executable)
-        )
+    for entry in sequence:
+        if isinstance(entry, SymbolToolFailure):
+            ordered.append(entry)
+            continue
+        canonical_path = os.path.normcase(os.path.realpath(entry.executable))
         if canonical_path in canonical_paths:
+            ordered.append(
+                SymbolToolFailure(
+                    source=entry.source,
+                    reason="duplicate executable was skipped",
+                )
+            )
             continue
         canonical_paths.add(canonical_path)
-        unique.append(candidate)
-    return SymbolToolResolution(tuple(unique), tuple(failures))
+        unique.append(entry)
+        ordered.append(entry)
+    failures = tuple(
+        entry for entry in ordered if isinstance(entry, SymbolToolFailure)
+    )
+    return SymbolToolResolution(tuple(unique), failures, tuple(ordered))
 
 
 def run_installed_scheduler_contract_probe(plugin: Path) -> int:
@@ -1730,31 +1788,40 @@ def inspect_product_archive_symbols(
     @param captured_runner Injectable captured subprocess runner used for both
       discovery and archive scans.
     @param executable_validator Injectable validator for ``xcrun`` output.
-    @return Symbol-tool identity/status, scanned line count, and every forbidden
-      fragment match, together with path-free candidate-attempt diagnostics. A
+    @return Path-free symbol-tool source/status, aggregate line/anchor/prohibited
+      counts, controlled symbol tokens, and structured candidate diagnostics. A
       missing/non-unique archive or all unusable tools produces an unsuccessful
-      observation.
+      observation with the same closed schema.
     @throws None Process startup failures are converted to candidate failures;
       injected callbacks are otherwise expected to honor their contracts.
     @note Darwin tries validated Xcode ``xcrun`` llvm-nm, PATH llvm-nm, then
       PATH nm; other platforms never invoke xcrun. A candidate becomes
       authoritative only after a zero exit, nonempty symbol table, and defined
-      anchors from all three seam objects. Once authoritative, every defined or
-      unresolved forbidden fragment from that full table is retained and no
-      later tool may hide it.
+      anchors from all three seam objects. Raw lines remain only in this stack
+      frame: once authoritative, controlled fragment counts are retained and no
+      later tool may hide a forbidden symbol.
     """
 
     if len(archives) != 1:
         return {
-            "tool": "",
             "tool_source": "",
             "status": None,
             "line_count": 0,
-            "matches": {},
-            "required_anchors": {},
+            "prohibited_symbol_count": 0,
+            "prohibited_symbols": {},
+            "required_anchor_count": 0,
+            "required_anchor_total": len(
+                REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+            ),
+            "required_anchors": {
+                fragment: 0
+                for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+            },
             "covers_product_seams": False,
             "attempts": [],
-            "stderr": "expected exactly one installed product archive",
+            "failure_reason": (
+                "expected exactly one installed product archive"
+            ),
         }
     resolution = resolve_product_archive_symbol_tools(
         platform_system,
@@ -1763,86 +1830,131 @@ def inspect_product_archive_symbols(
         captured_runner=captured_runner,
         executable_validator=executable_validator,
     )
-    attempts = list(resolution.failures)
+    attempts: list[dict[str, Any]] = []
     last_status: int | None = None
     last_line_count = 0
-    last_matches: dict[str, list[str]] = {}
-    last_required_anchors: dict[str, list[str]] = {}
-    for candidate in resolution.candidates:
+    last_prohibited_symbols: dict[str, int] = {}
+    last_required_anchors = {
+        fragment: 0 for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+    }
+    for entry in resolution.sequence:
+        if isinstance(entry, SymbolToolFailure):
+            attempt: dict[str, Any] = {
+                "tool_source": entry.source,
+                "reason": entry.reason,
+            }
+            if entry.status is not None:
+                attempt["status"] = entry.status
+            attempts.append(attempt)
+            continue
+        candidate = entry
         try:
             completed = captured_runner(
                 [candidate.executable, str(prefix / archives[0])], prefix
             )
         except OSError:
             attempts.append(
-                f"{candidate.source}: inspection could not start"
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection could not start",
+                }
             )
             continue
         symbol_lines = completed.stdout.splitlines()
-        matches = {
-            fragment: [line for line in symbol_lines if fragment in line]
+        prohibited_symbols = {
+            fragment: sum(fragment in line for line in symbol_lines)
             for fragment in FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS
         }
         required_anchors = {
-            fragment: [
-                line
+            fragment: sum(
+                1
                 for line in symbol_lines
                 if fragment in line and re.search(r"\b[TW]\b", line)
-            ]
+            )
             for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
         }
         last_status = completed.returncode
         last_line_count = len(symbol_lines)
-        last_matches = {
-            fragment: lines for fragment, lines in matches.items() if lines
+        last_prohibited_symbols = {
+            fragment: count
+            for fragment, count in prohibited_symbols.items()
+            if count
         }
         last_required_anchors = required_anchors
         missing_anchor_count = sum(
-            not lines for lines in required_anchors.values()
+            count == 0 for count in required_anchors.values()
         )
         if completed.returncode != 0:
             attempts.append(
-                f"{candidate.source}: inspection exited with status "
-                f"{completed.returncode}"
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection exited with nonzero status",
+                    "status": completed.returncode,
+                }
             )
             continue
         if not symbol_lines:
             attempts.append(
-                f"{candidate.source}: inspection produced no symbol lines"
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection produced no symbol lines",
+                }
             )
             continue
         if missing_anchor_count:
             attempts.append(
-                f"{candidate.source}: inspection missed "
-                f"{missing_anchor_count}/{len(required_anchors)} required anchors"
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection missed required anchors",
+                    "missing_anchor_count": missing_anchor_count,
+                    "required_anchor_total": len(required_anchors),
+                }
             )
             continue
-        attempts.append(f"{candidate.source}: usable symbol table")
+        attempts.append(
+            {
+                "tool_source": candidate.source,
+                "reason": "usable symbol table",
+            }
+        )
+        prohibited_symbol_count = sum(last_prohibited_symbols.values())
+        required_anchor_count = sum(
+            count > 0 for count in required_anchors.values()
+        )
         return {
-            "tool": candidate.executable,
             "tool_source": candidate.source,
             "status": completed.returncode,
             "line_count": len(symbol_lines),
-            "matches": last_matches,
+            "prohibited_symbol_count": prohibited_symbol_count,
+            "prohibited_symbols": last_prohibited_symbols,
+            "required_anchor_count": required_anchor_count,
+            "required_anchor_total": len(required_anchors),
             "required_anchors": required_anchors,
             "covers_product_seams": True,
             "attempts": attempts,
-            "stderr": "",
+            "failure_reason": "",
         }
 
-    failure_summary = "; ".join(attempts)
-    if not failure_summary:
-        failure_summary = "no archive-symbol inspection candidate was resolved"
+    prohibited_symbol_count = sum(last_prohibited_symbols.values())
+    required_anchor_count = sum(
+        count > 0 for count in last_required_anchors.values()
+    )
     return {
-        "tool": "",
         "tool_source": "",
         "status": last_status,
         "line_count": last_line_count,
-        "matches": last_matches,
+        "prohibited_symbol_count": prohibited_symbol_count,
+        "prohibited_symbols": last_prohibited_symbols,
+        "required_anchor_count": required_anchor_count,
+        "required_anchor_total": len(
+            REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+        ),
         "required_anchors": last_required_anchors,
         "covers_product_seams": False,
         "attempts": attempts,
-        "stderr": failure_summary,
+        "failure_reason": (
+            "no usable archive-symbol inspection candidate"
+        ),
     }
 
 
@@ -2217,7 +2329,7 @@ def inspect_install_tree(
             product_symbol_scan["status"] == 0
             and product_symbol_scan["line_count"] > 0
             and product_symbol_scan["covers_product_seams"]
-            and product_symbol_scan["matches"] == {}
+            and product_symbol_scan["prohibited_symbol_count"] == 0
         ),
         "internal_test_product_artifacts": internal_test_product_artifacts,
         "install_omits_internal_test_product_artifacts": (
@@ -2331,6 +2443,260 @@ def inspect_install_tree(
     }
 
 
+def archive_symbol_diagnostic_summary(
+    symbol_scan: dict[str, Any],
+) -> dict[str, Any]:
+    """@brief Project one symbol scan onto its printable closed schema.
+
+    @param symbol_scan In-memory archive observation used by package checks.
+    @return Newly owned path-free diagnostic containing only controlled source,
+      reason, symbol-token, status, and aggregate-count fields.
+    @throws None Missing or malformed fields are replaced by safe defaults.
+    @note The whitelist intentionally ignores unknown keys, executable/archive
+      paths, raw symbol lines, captured streams, and environment data.
+    """
+
+    allowed_sources = {"xcrun llvm-nm", "PATH llvm-nm", "PATH nm"}
+    allowed_reasons = {
+        "xcrun is unavailable",
+        "discovery could not start",
+        "discovery exited with nonzero status",
+        "discovery returned no path",
+        "discovery returned multiple lines",
+        "discovery returned a relative path",
+        "discovery returned an unusable path",
+        "executable is unavailable",
+        "duplicate executable was skipped",
+        "inspection could not start",
+        "inspection exited with nonzero status",
+        "inspection produced no symbol lines",
+        "inspection missed required anchors",
+        "usable symbol table",
+    }
+    allowed_failure_reasons = {
+        "",
+        "expected exactly one installed product archive",
+        "no usable archive-symbol inspection candidate",
+    }
+    prohibited_input = symbol_scan.get("prohibited_symbols", {})
+    if not isinstance(prohibited_input, dict):
+        prohibited_input = {}
+    prohibited_symbols: dict[str, int] = {}
+    for symbol in FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS:
+        count = prohibited_input.get(symbol, 0)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            prohibited_symbols[symbol] = count
+    anchor_input = symbol_scan.get("required_anchors", {})
+    if not isinstance(anchor_input, dict):
+        anchor_input = {}
+    required_anchors: dict[str, int] = {}
+    for symbol in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS:
+        count = anchor_input.get(symbol, 0)
+        required_anchors[symbol] = (
+            count
+            if isinstance(count, int)
+            and not isinstance(count, bool)
+            and count > 0
+            else 0
+        )
+    attempts: list[dict[str, Any]] = []
+    raw_attempts = symbol_scan.get("attempts", [])
+    if not isinstance(raw_attempts, list):
+        raw_attempts = []
+    for raw_attempt in raw_attempts:
+        if not isinstance(raw_attempt, dict):
+            continue
+        source = raw_attempt.get("tool_source", "")
+        reason = raw_attempt.get("reason", "")
+        if (
+            not isinstance(source, str)
+            or source not in allowed_sources
+            or not isinstance(reason, str)
+            or reason not in allowed_reasons
+        ):
+            continue
+        attempt: dict[str, Any] = {
+            "tool_source": source,
+            "reason": reason,
+        }
+        status = raw_attempt.get("status")
+        if isinstance(status, int) and not isinstance(status, bool):
+            attempt["status"] = status
+        missing_anchor_count = raw_attempt.get("missing_anchor_count")
+        required_anchor_total = raw_attempt.get("required_anchor_total")
+        if (
+            isinstance(missing_anchor_count, int)
+            and not isinstance(missing_anchor_count, bool)
+            and missing_anchor_count >= 0
+            and isinstance(required_anchor_total, int)
+            and not isinstance(required_anchor_total, bool)
+            and required_anchor_total >= 0
+        ):
+            attempt["missing_anchor_count"] = missing_anchor_count
+            attempt["required_anchor_total"] = required_anchor_total
+        attempts.append(attempt)
+    tool_source = symbol_scan.get("tool_source", "")
+    if not isinstance(tool_source, str) or tool_source not in allowed_sources:
+        tool_source = ""
+    status = symbol_scan.get("status")
+    if not isinstance(status, int) or isinstance(status, bool):
+        status = None
+    line_count = symbol_scan.get("line_count", 0)
+    if (
+        not isinstance(line_count, int)
+        or isinstance(line_count, bool)
+        or line_count < 0
+    ):
+        line_count = 0
+    failure_reason = symbol_scan.get("failure_reason", "")
+    if (
+        not isinstance(failure_reason, str)
+        or failure_reason not in allowed_failure_reasons
+    ):
+        failure_reason = "no usable archive-symbol inspection candidate"
+    return {
+        "tool_source": tool_source,
+        "status": status,
+        "line_count": line_count,
+        "prohibited_symbol_count": sum(prohibited_symbols.values()),
+        "prohibited_symbols": prohibited_symbols,
+        "required_anchor_count": sum(
+            count > 0 for count in required_anchors.values()
+        ),
+        "required_anchor_total": len(
+            REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+        ),
+        "required_anchors": required_anchors,
+        "covers_product_seams": (
+            symbol_scan.get("covers_product_seams") is True
+        ),
+        "attempts": attempts,
+        "failure_reason": failure_reason,
+    }
+
+
+def behavior_diagnostic_summary(
+    observations: dict[str, Any], checks: dict[str, bool]
+) -> dict[str, Any]:
+    """@brief Build the only JSON projection allowed on package failure.
+
+    @param observations Complete in-memory package observations used for verdicts.
+    @param checks Stable named boolean behavior checks derived from observations.
+    @return Path-free diagnostic with failed check labels, whitelisted command
+      statuses, counts, and the sanitized archive-symbol observation.
+    @throws KeyError If the required symbol-scan observation is absent.
+    @note Full observations remain private because they contain transient build,
+      install, workspace, executable, manifest, and package paths.
+    """
+
+    command_names = (
+        "producer_configure",
+        "build_photospider",
+        "install",
+        "embedded_consumer_configure",
+        "embedded_consumer_build",
+        "ipc_consumer_configure",
+        "ipc_consumer_build",
+        "scheduler_sdk_configure",
+        "scheduler_sdk_build",
+        "scheduler_contract_probe",
+        "operation_sdk_configure",
+        "operation_sdk_build",
+        "operation_opencv_configure",
+        "operation_opencv_build",
+        "optional_opencv_missing_configure",
+        "required_opencv_missing_configure",
+        "unknown_component_configure",
+        "consumer_run",
+        "ipc_consumer_run",
+        "operation_sdk_run",
+        "operation_opencv_run",
+    )
+    command_input = observations.get("commands", {})
+    if not isinstance(command_input, dict):
+        command_input = {}
+    command_statuses: dict[str, int | None | str] = {}
+    for name in command_names:
+        status = command_input.get(name)
+        command_statuses[name] = (
+            status
+            if (status is None or isinstance(status, int))
+            and not isinstance(status, bool)
+            else "invalid status"
+        )
+    failed_checks = [
+        name
+        if re.fullmatch(r"[A-Za-z0-9 _+().,'-]+", name)
+        else "unprintable behavior check"
+        for name, passed in checks.items()
+        if not passed
+    ]
+    symbol_scan = observations["install_tree"][
+        "production_archive_symbol_scan"
+    ]
+    return {
+        "failed_checks": failed_checks,
+        "command_statuses": command_statuses,
+        "archive_symbol_scan": archive_symbol_diagnostic_summary(symbol_scan),
+    }
+
+
+def emit_behavior_verdict(
+    observations: dict[str, Any], checks: dict[str, bool]
+) -> bool:
+    """@brief Emit the CTest-facing package verdict and safe diagnostics.
+
+    @param observations Complete in-memory package behavior observations.
+    @param checks Stable named boolean behavior checks derived from observations.
+    @return ``True`` only when every supplied check passes.
+    @throws KeyError If the symbol-scan observation required for output is absent.
+    @note Success and failure output share the sanitized symbol projection. On
+      failure, only :func:`behavior_diagnostic_summary` is serialized; complete
+      observations and captured tool data never reach stdout or stderr.
+    """
+
+    passed = all(checks.values())
+    symbol_scan = archive_symbol_diagnostic_summary(
+        observations["install_tree"]["production_archive_symbol_scan"]
+    )
+    print("static_product_consumer_smoke")
+    print(
+        "archive symbol scan: "
+        f"source={symbol_scan['tool_source'] or 'none'}, "
+        f"prohibited={symbol_scan['prohibited_symbol_count']}, "
+        f"anchors={symbol_scan['required_anchor_count']}/"
+        f"{symbol_scan['required_anchor_total']}"
+    )
+    for attempt in symbol_scan["attempts"]:
+        details = [
+            f"source={attempt['tool_source']}",
+            f"reason={attempt['reason']}",
+        ]
+        if "status" in attempt:
+            details.append(f"status={attempt['status']}")
+        if "missing_anchor_count" in attempt:
+            details.append(
+                "missing_anchors="
+                f"{attempt['missing_anchor_count']} of "
+                f"{attempt['required_anchor_total']}"
+            )
+        print("archive symbol attempt: " + ", ".join(details))
+    for name, ok in checks.items():
+        print(f"{'PASS' if ok else 'FAIL'} {name}")
+    if not passed:
+        print(
+            "package behavior diagnostic summary:\n"
+            + json.dumps(
+                behavior_diagnostic_summary(observations, checks),
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+    print(f"overall={'PASS' if passed else 'FAIL'}")
+    return passed
+
+
 def evaluate_behavior(observations: dict[str, Any]) -> bool:
     """@brief Evaluate installed-package behavior in memory.
 
@@ -2338,10 +2704,9 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
       installed export sets, and external consumers.
     @return ``True`` only when every durable package invariant passes.
     @throws KeyError If the caller provides an incomplete observation schema.
-    @note Results and failure observations are printed directly for CTest to
-      capture; this function creates no report or comparison files. The symbol
-      summary exposes only its stable discovery source and aggregate counts,
-      never the selected executable path or captured tool stderr.
+    @note Results and a strict diagnostic projection are printed for CTest to
+      capture; complete observations remain in memory and no report file is
+      created. The projection excludes all transient paths and captured data.
     """
 
     install = observations["install_tree"]
@@ -2537,38 +2902,7 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         ]
         == 0,
     }
-    passed = all(checks.values())
-    symbol_scan = install["production_archive_symbol_scan"]
-    prohibited_symbol_lines = sum(
-        len(lines) for lines in symbol_scan["matches"].values()
-    )
-    covered_anchor_count = sum(
-        bool(lines) for lines in symbol_scan["required_anchors"].values()
-    )
-    print("static_product_consumer_smoke")
-    print(
-        "archive symbol scan: "
-        f"source={symbol_scan['tool_source'] or 'none'}, "
-        f"prohibited={prohibited_symbol_lines}, "
-        f"anchors={covered_anchor_count}/"
-        f"{len(REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS)}"
-    )
-    for attempt in symbol_scan["attempts"]:
-        print(f"archive symbol attempt: {attempt}")
-    for name, ok in checks.items():
-        print(f"{'PASS' if ok else 'FAIL'} {name}")
-    if install["unexpected_headers"]:
-        print("unexpected installed headers:", file=sys.stderr)
-        for header in install["unexpected_headers"]:
-            print(f"- {header}", file=sys.stderr)
-    if not passed:
-        print(
-            "package behavior observations:\n"
-            + json.dumps(observations, indent=2, sort_keys=True),
-            file=sys.stderr,
-        )
-    print(f"overall={'PASS' if passed else 'FAIL'}")
-    return passed
+    return emit_behavior_verdict(observations, checks)
 
 
 def main() -> int:
