@@ -1372,6 +1372,11 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)
+    gtest_discover_tests(test_disk_cache_diagnostic_concurrency
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS kernel-concurrency
+            TIMEOUT 20)
 
     add_ps_test(test_optional_opencv_operation_provider
         tests/integration/test_optional_opencv_operation_provider.cpp)
@@ -1973,11 +1978,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_kernel_contracts
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_disk_cache_diagnostic_concurrency
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        PROPERTIES
-            LABELS kernel-concurrency
-            TIMEOUT 20)
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_stdlib_image_buffer_processing
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

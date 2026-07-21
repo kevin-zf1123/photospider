@@ -574,12 +574,16 @@ the public ABI.
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph
 CLI, and operation-plugin defaults remain enabled. The provider-aware broad
 suite gate is therefore off. The driver validates the exact CMake cache
-profile, builds only the provider-independent focused binary and its
-stdlib-only fixture, then queries the machine-readable CTest inventory. That
-inventory must contain exactly `DependencyDisabledInstallSmoke` and
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`; no broad
-provider-dependent test may remain registered. The driver runs the focused
-case through CTest. The disabled profile requires dependency-neutral
+profile, builds the provider-independent focused provider binary, its
+stdlib-only fixture, and the dedicated disk-cache diagnostic concurrency binary,
+then queries the machine-readable CTest inventory. That inventory must contain
+exactly `DependencyDisabledInstallSmoke`,
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, and the three
+`DiskCacheDiagnosticConcurrency.*` cases; every concurrency case must retain
+only the `kernel-concurrency` label and its 20-second timeout. No broad
+provider-dependent test may remain registered. The driver runs the optional
+provider case and all three concurrency cases through CTest. The disabled
+profile requires dependency-neutral
 analyzer/math operations to remain seeded, OpenCV-backed operation keys to be
 absent, and the replacement provider to publish, execute, and fully retire its
 resize key. The transient build is a long-lived product configuration check;
@@ -711,7 +715,8 @@ When only `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is disabled from that
 otherwise default test profile, CMake does not create or discover the broad
 suite. It keeps the provider-independent `test_kernel_contracts` target
 buildable for the injected-codec smoke and registers exactly the focused
-optional-provider GoogleTest plus `DependencyDisabledInstallSmoke`.
+optional-provider GoogleTest, the three dedicated disk-cache diagnostic
+concurrency cases, and `DependencyDisabledInstallSmoke`.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific

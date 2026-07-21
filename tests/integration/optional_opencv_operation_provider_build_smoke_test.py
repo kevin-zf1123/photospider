@@ -8,9 +8,86 @@ import os
 import pathlib
 import tempfile
 import unittest
+from typing import Optional
 from unittest import mock
 
 import optional_opencv_operation_provider_build_smoke as subject
+
+
+#: @brief Stable disk-cache concurrency cases required in focused inventories.
+#: @note These test-owned values independently mirror the CMake contract.
+DISK_CACHE_CTEST_NAMES = (
+    (
+        "DiskCacheDiagnosticConcurrency."
+        "RecordSnapshotClearAndPublicationRemainLive"
+    ),
+    (
+        "DiskCacheDiagnosticConcurrency."
+        "SameStoreAndOppositeDirectionExchangeRemainLive"
+    ),
+    "DiskCacheDiagnosticConcurrency.SnapshotBadAllocReleasesScopedGuard",
+)
+#: @brief Stable focused optional-provider case required by the nested profile.
+#: @note This exact value keeps the regression independent of production sets.
+OPTIONAL_PROVIDER_CTEST_NAME = (
+    "OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores"
+)
+#: @brief Stable build-smoke entry required by every provider-disabled profile.
+#: @note Its own build-smoke label is not inherited by diagnostic cases.
+DEPENDENCY_DISABLED_CTEST_NAME = "DependencyDisabledInstallSmoke"
+
+
+def ctest_json_test(
+    name: str,
+    *,
+    labels: Optional[list[str]] = None,
+    timeout: Optional[int] = None,
+) -> dict[str, object]:
+    """@brief Construct one synthetic CTest JSON-v1 test record.
+
+    @param name Nonempty registered test name.
+    @param labels Optional serialized CTest LABELS value.
+    @param timeout Optional serialized CTest TIMEOUT value in seconds.
+    @return Test record with a complete property list.
+    @throws Nothing; callers provide deterministic in-memory values.
+    @note The helper mirrors only fields consumed by the production parser.
+    """
+
+    properties: list[dict[str, object]] = []
+    if labels is not None:
+        properties.append({"name": "LABELS", "value": labels})
+    if timeout is not None:
+        properties.append({"name": "TIMEOUT", "value": timeout})
+    return {"name": name, "properties": properties}
+
+
+def provider_disabled_ctest_payload() -> str:
+    """@brief Construct the valid provider-disabled JSON-v1 inventory.
+
+    @return JSON payload containing two profile entries and three disk cases.
+    @throws Nothing; every serialized value is deterministic and JSON-safe.
+    @note Only disk cases receive `kernel-concurrency` and 20-second properties.
+    """
+
+    names = {
+        DEPENDENCY_DISABLED_CTEST_NAME,
+        OPTIONAL_PROVIDER_CTEST_NAME,
+        *DISK_CACHE_CTEST_NAMES,
+    }
+    return json.dumps(
+        {
+            "tests": [
+                ctest_json_test(
+                    name,
+                    labels=["kernel-concurrency"]
+                    if name in DISK_CACHE_CTEST_NAMES
+                    else None,
+                    timeout=20 if name in DISK_CACHE_CTEST_NAMES else None,
+                )
+                for name in sorted(names)
+            ]
+        }
+    )
 
 
 def synthetic_temporary_directory(
@@ -486,54 +563,80 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after JSON parsing preserves both exact test names.
-        @throws AssertionError If parsing or validation rejects the inventory.
-        @note Test properties are intentionally omitted because only registered
-          names define this gate.
+        @return None after parsing preserves five names and disk properties.
+        @throws AssertionError If parsing or validation rejects the contract.
+        @note Exact labels exclude the build-smoke label from disk test cases.
         """
 
         expected = {
-            "DependencyDisabledInstallSmoke",
-            (
-                "OptionalOpenCvOperationProvider."
-                "ReplacementExecutesAndRestores"
-            ),
+            DEPENDENCY_DISABLED_CTEST_NAME,
+            OPTIONAL_PROVIDER_CTEST_NAME,
+            *DISK_CACHE_CTEST_NAMES,
         }
-        payload = json.dumps(
-            {"tests": [{"name": name} for name in sorted(expected)]}
+
+        inventory = subject.parse_ctest_inventory(
+            provider_disabled_ctest_payload()
         )
 
-        names = subject.parse_ctest_inventory(payload)
+        self.assertEqual(set(inventory), expected)
+        subject.validate_provider_disabled_inventory(inventory)
 
-        self.assertEqual(names, expected)
-        subject.validate_provider_disabled_inventory(names)
+    def test_rejects_malformed_broad_or_drifted_ctest_inventory(self) -> None:
+        """@brief Reject malformed, broad, missing, or drifted inventories.
 
-    def test_rejects_malformed_or_broad_ctest_inventory(self) -> None:
-        """@brief Reject malformed JSON and a residual broad-suite test.
-
-        @return None after both invalid inventory forms raise RuntimeError.
-        @throws AssertionError If malformed or over-broad inventory is accepted.
-        @note The broad example uses the scheduler placeholder CTest emits for
-          an unbuilt discovered GoogleTest target.
+        @return None after every invalid inventory raises RuntimeError.
+        @throws AssertionError If malformed or drifted inventory is accepted.
+        @note Missing disk cases model the former full-suite-only registration;
+          the broad example models an unbuilt scheduler discovery placeholder.
         """
 
         with self.assertRaisesRegex(RuntimeError, "no test list"):
             subject.parse_ctest_inventory("{}")
         with self.assertRaisesRegex(RuntimeError, "duplicate"):
             subject.parse_ctest_inventory(
-                '{"tests":[{"name":"duplicate"},{"name":"duplicate"}]}'
+                json.dumps(
+                    {
+                        "tests": [
+                            ctest_json_test("duplicate"),
+                            ctest_json_test("duplicate"),
+                        ]
+                    }
+                )
             )
 
-        broad_names = {
-            "DependencyDisabledInstallSmoke",
-            (
-                "OptionalOpenCvOperationProvider."
-                "ReplacementExecutesAndRestores"
-            ),
-            "test_scheduler_NOT_BUILT",
+        old_full_only_inventory = {
+            name: {}
+            for name in {
+                DEPENDENCY_DISABLED_CTEST_NAME,
+                OPTIONAL_PROVIDER_CTEST_NAME,
+            }
         }
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
-            subject.validate_provider_disabled_inventory(broad_names)
+            subject.validate_provider_disabled_inventory(
+                old_full_only_inventory
+            )
+
+        valid_inventory = subject.parse_ctest_inventory(
+            provider_disabled_ctest_payload()
+        )
+        drifted_inventory = {
+            name: dict(properties)
+            for name, properties in valid_inventory.items()
+        }
+        drifted_inventory[DISK_CACHE_CTEST_NAMES[-1]]["LABELS"] = [
+            "kernel-concurrency",
+            "build-smoke",
+        ]
+        with self.assertRaisesRegex(RuntimeError, "property mismatch"):
+            subject.validate_provider_disabled_inventory(drifted_inventory)
+
+        broad_inventory = {
+            name: dict(properties)
+            for name, properties in valid_inventory.items()
+        }
+        broad_inventory["test_scheduler_NOT_BUILT"] = {}
+        with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
+            subject.validate_provider_disabled_inventory(broad_inventory)
 
 
 if __name__ == "__main__":

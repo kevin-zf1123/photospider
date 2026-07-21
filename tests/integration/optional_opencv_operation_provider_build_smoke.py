@@ -187,13 +187,15 @@ def validate_provider_disabled_cache(values: dict[str, str]) -> None:
         )
 
 
-def parse_ctest_inventory(payload: str) -> set[str]:
-    """@brief Parse test names from CTest's versioned JSON inventory.
+def parse_ctest_inventory(
+    payload: str,
+) -> dict[str, dict[str, object]]:
+    """@brief Parse tests and properties from CTest's JSON inventory.
 
     @param payload Complete stdout from `ctest --show-only=json-v1`.
-    @return Unique registered test names.
+    @return Mapping from unique registered names to unique properties.
     @throws RuntimeError If the payload is invalid JSON, lacks a test list,
-      contains a malformed entry, or repeats a test name.
+      contains a malformed test/property entry, or repeats a name/property.
     @note The parser consumes CTest's machine-readable schema rather than
       locale-sensitive human inventory text.
     """
@@ -205,16 +207,38 @@ def parse_ctest_inventory(payload: str) -> set[str]:
     tests = document.get("tests") if isinstance(document, dict) else None
     if not isinstance(tests, list):
         raise RuntimeError("CTest inventory has no test list")
-    names: list[str] = []
+    inventory: dict[str, dict[str, object]] = {}
     for test in tests:
         name = test.get("name") if isinstance(test, dict) else None
         if not isinstance(name, str) or not name:
             raise RuntimeError("CTest inventory contains a malformed test")
-        names.append(name)
-    unique_names = set(names)
-    if len(unique_names) != len(names):
-        raise RuntimeError("CTest inventory contains duplicate test names")
-    return unique_names
+        if name in inventory:
+            raise RuntimeError("CTest inventory contains duplicate test names")
+        raw_properties = test.get("properties")
+        if not isinstance(raw_properties, list):
+            raise RuntimeError("CTest inventory test has no property list")
+        properties: dict[str, object] = {}
+        for raw_property in raw_properties:
+            property_name = (
+                raw_property.get("name")
+                if isinstance(raw_property, dict)
+                else None
+            )
+            if (
+                not isinstance(property_name, str)
+                or not property_name
+                or "value" not in raw_property
+            ):
+                raise RuntimeError(
+                    "CTest inventory contains a malformed test property"
+                )
+            if property_name in properties:
+                raise RuntimeError(
+                    "CTest inventory contains duplicate test properties"
+                )
+            properties[property_name] = raw_property["value"]
+        inventory[name] = properties
+    return inventory
 
 
 def query_ctest_inventory(
@@ -222,14 +246,14 @@ def query_ctest_inventory(
     build: pathlib.Path,
     configuration: str,
     cwd: pathlib.Path,
-) -> set[str]:
+) -> dict[str, dict[str, object]]:
     """@brief Query one configured build's real CTest inventory.
 
     @param ctest_executable CTest executable paired with the selected CMake.
     @param build Configured nested provider-disabled build directory.
     @param configuration Exact build configuration to query.
     @param cwd Existing working directory for the child process.
-    @return Registered test names parsed from the JSON-v1 inventory.
+    @return Registered tests and properties parsed from the JSON-v1 inventory.
     @throws OSError If CTest cannot be started.
     @throws subprocess.CalledProcessError If inventory discovery exits nonzero.
     @throws RuntimeError If the JSON inventory violates its expected schema.
@@ -261,29 +285,62 @@ def query_ctest_inventory(
     return parse_ctest_inventory(completed.stdout)
 
 
-def validate_provider_disabled_inventory(names: set[str]) -> None:
+def validate_provider_disabled_inventory(
+    inventory: dict[str, dict[str, object]],
+) -> None:
     """@brief Require the runnable provider-disabled CTest surface.
 
-    @param names Unique registered test names from the nested build.
-    @return None when only the install smoke and focused provider test exist.
-    @throws RuntimeError If either focused test is missing or any broad-suite
-      test remains registered.
+    @param inventory Unique registered tests and properties from the nested
+      build.
+    @return None when only the intended focused tests and install smoke exist.
+    @throws RuntimeError If a focused test is missing, a broad-suite test
+      remains registered, or a disk-cache concurrency property drifts.
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
     """
 
+    disk_cache_tests = {
+        (
+            "DiskCacheDiagnosticConcurrency."
+            "RecordSnapshotClearAndPublicationRemainLive"
+        ),
+        (
+            "DiskCacheDiagnosticConcurrency."
+            "SameStoreAndOppositeDirectionExchangeRemainLive"
+        ),
+        (
+            "DiskCacheDiagnosticConcurrency."
+            "SnapshotBadAllocReleasesScopedGuard"
+        ),
+    }
     expected = {
         "DependencyDisabledInstallSmoke",
         (
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
-    }
+    } | disk_cache_tests
+    names = set(inventory)
     if names != expected:
         raise RuntimeError(
             "provider-disabled CTest inventory mismatch: "
             f"expected {sorted(expected)}, got {sorted(names)}"
+        )
+
+    property_mismatches = {
+        name: {
+            "LABELS": inventory[name].get("LABELS"),
+            "TIMEOUT": inventory[name].get("TIMEOUT"),
+        }
+        for name in disk_cache_tests
+        if inventory[name].get("LABELS") != ["kernel-concurrency"]
+        or inventory[name].get("TIMEOUT") != 20
+    }
+    if property_mismatches:
+        raise RuntimeError(
+            "provider-disabled disk-cache CTest property mismatch: "
+            f"{property_mismatches}"
         )
 
 
@@ -350,7 +407,7 @@ def configured_test_executable(
 def main() -> int:
     """@brief Configure, build, and run the provider-disabled regression.
 
-    @return Zero after the focused test executable succeeds.
+    @return Zero after the focused provider and concurrency cases succeed.
     @throws OSError If path handling or command startup fails.
     @throws SystemExit If command-line parsing rejects the invocation.
     @throws UnicodeError If the nested CMake cache is not valid UTF-8 text.
@@ -399,6 +456,7 @@ def main() -> int:
         str(work),
         "--target",
         "test_optional_opencv_operation_provider",
+        "test_disk_cache_diagnostic_concurrency",
         "-j",
         "4",
     ]
@@ -425,8 +483,9 @@ def main() -> int:
             configuration,
             "-R",
             (
-                "^OptionalOpenCvOperationProvider\\."
-                "ReplacementExecutesAndRestores$"
+                "^(DiskCacheDiagnosticConcurrency\\..*|"
+                "OptionalOpenCvOperationProvider\\."
+                "ReplacementExecutesAndRestores)$"
             ),
         ],
         repo,
