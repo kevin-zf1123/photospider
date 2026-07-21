@@ -143,8 +143,10 @@ the callback begins, an installed-plan bootstrap or a lease-validated
 registered task releases that unit and skips planned submission/execution. A
 mismatched or unregistered task route is rejected before decrementing, while a
 callback that enters the active plan retains the normal success or
-first-exception path. This is settlement of already accepted work, not
-cooperative cancellation or a new scheduler/plugin ABI behavior.
+first-exception path. Under issue #73 this is also the legacy cooperative
+cancellation path: terminal callbacks skip operation and dependency release
+while retiring only their owned unit. Cancellation authority remains in the
+Run/plan boundary and adds no scheduler/plugin ABI behavior.
 
 ### Batch exception publication and reuse
 
@@ -537,15 +539,20 @@ HP output; otherwise it is a planning contract error.
 
 ## Epoch and Cancellation
 
-Scheduler queues use epochs to cancel stale queued work. Epoch `0` is treated
+Scheduler queues use epochs to discard stale queued work. Epoch `0` is treated
 as non-cancelable compatibility work. Only submissions carrying a real epoch
-can be dropped as stale. Epoch filtering does not cancel a callback that is
+can be dropped as stale. Epoch filtering does not stop a callback that is
 already running and is not a general `ComputeRun` cancellation contract. A
 scheduler epoch is not Run identity: current full HP completion isolation uses
-`(RunId, RunLocalTaskId)` under a stable lease. The current HP Run has
-exact-once terminal arbitration but no product cancellation claimant.
-Operational cancellation remains a later ADR 0007 slice and is not implemented
-by the current epoch.
+`(RunId, RunLocalTaskId)` under a stable lease.
+
+Issue #73 gives the private Run arbiter a cancellation claimant independently
+of scheduler epoch. The built-in `ExecutionService` receives a Run-only
+notification, closes ready admission, purges matching queued entries, rejects
+dependent re-entry, and waits for in-flight callbacks to drain. Sequential,
+dirty, preflight, and legacy callbacks observe the same Run at their existing
+boundaries. Legacy schedulers still expose no cancel method; public control,
+supersession, and lifecycle cancellation remain later work.
 
 ## Observability
 

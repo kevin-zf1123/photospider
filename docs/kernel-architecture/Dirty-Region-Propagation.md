@@ -2,9 +2,10 @@
 
 This document describes the dirty-region behavior implemented by the current
 kernel. It separates graph-scoped dirty facts, request planning, task selection,
-scheduler filtering, and output commit. Proposed Macro retile, adaptive
-coarsening, and Run cancellation belong in the kernel evolution roadmap, not
-in this current-state contract. The dirty-geometry path and the private
+scheduler filtering, output commit, and the cooperative Run-cancellation
+observations implemented through issue #73. Proposed Macro retile and adaptive
+coarsening belong in the kernel evolution roadmap, not in this current-state
+contract. The dirty-geometry path and the private
 clone/resize/channel/ROI processing contract are kernel-owned. The configured
 build selects either an OpenCV adapter or the standard-library implementation,
 so compute/runtime code does not directly declare OpenCV.
@@ -38,7 +39,7 @@ Ownership is divided as follows:
 | `DirtyRegionSnapshotBuilder` | Normalize source ROIs and materialize snapshot-only Micro tile or monolithic records | Graph traversal or compute requests |
 | `RoiPropagationService` | Compute operator-specific forward inspection and backward demand projections | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | Select and clip active tasks from an existing request plan | New task shapes |
-| dirty executors and write buffers | Execute source-first work and stage HP/RT output; standalone non-realtime HP staging is owned by its `ComputeRun`, while paired realtime sibling buffers remain callback-local | General cancellation, dirty-path Run leases/grouping, or graph revision policy |
+| dirty executors and write buffers | Execute source-first work, observe the matching Run lease at existing phase/node/tile/provider boundaries, and stage HP/RT output; standalone non-realtime HP staging is owned by its `ComputeRun`, while paired realtime sibling buffers remain callback-local | Cancellation authority, Run grouping, or graph revision policy |
 
 ## Current Flow
 
@@ -204,6 +205,14 @@ downstream nodes do not perform this comparison. This is a narrow stale-source
 guard, not general revision validation, supersession, deadline handling, or
 cooperative cancellation.
 
+Issue #73 adds a separate Run-owned cooperative boundary. Dirty preflight,
+source and downstream phases, node/tile/provider entry and return, dependency
+release, and final commit observe the matching child lease. Explicit requests
+and expired monotonic deadlines use the same terminal arbiter. An operation
+already entered may finish, but cancellation closes later publication and the
+request-owned staging is discarded. These checks do not turn dirty generation
+or scheduler epoch into cancellation authority.
+
 ## Staging and Commit
 
 HP dirty tasks stage output in `HighPrecisionDirtyWriteBuffer`; RT dirty tasks
@@ -246,8 +255,9 @@ The current implementation does not provide:
 - Macro dirty-key materialization or dynamic Micro/Macro coarsening;
 - sparse ROI sets, dirty-area caps, time-window merging, or adaptive batching;
 - a node-to-backend dirty subscription that automatically launches compute;
-- a final policy-bearing `RunGroup`, enforced deadline, issue #74 supersession,
-  or issue #73 cooperative cancellation of already-running callbacks.
+- a final policy-bearing `RunGroup`, issue #74 supersession, public or
+  lifecycle-driven cancellation, or preemption of an already-entered provider
+  callback.
 
 Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
 across the Host request, graph state, ROI propagation, planning, snapshot,

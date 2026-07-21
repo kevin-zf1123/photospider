@@ -224,7 +224,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `GraphModel` | 图状态持有者：不复用的强 instance identity、经过检查的权威 revision、私有节点/拓扑存储、缓存根目录、计时数据、quiet/skip-save 标志，以及完整 compute snapshot/publication primitive。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
-| `ComputeRun` | 一个非 realtime HP domain 或一个 realtime HP/RT child domain 的私有 request owner。每个 Run 都拥有带精确 Graph identity/revision 的不可变 descriptor、单调 phase、唯一 terminal outcome，以及由共享 control 持有的 full-plan/temporary storage 或 dirty staging storage。内建 CPU full、dirty 与 preflight work 会通过固定的多 Graph service 保留稳定 lease 与复合 task identity。Request-owned `RunGroup` 和最终 lifecycle registry 仍是后续工作。 |
+| `ComputeRun` | 一个非 realtime HP domain 或一个 realtime HP/RT child domain 的私有 request owner。每个 Run 都拥有带精确 Graph identity/revision 的不可变 descriptor、单调 phase、一个 terminal arbiter、稳定 cooperative-cancellation reason，以及由共享 control 持有的 full-plan/temporary storage 或 dirty staging storage。内建 CPU full、dirty 与 preflight work 会通过固定的多 Graph service 保留稳定 lease 与复合 task identity。Request-owned `RunGroup`、public cancellation control 和最终 lifecycle registry 仍是后续工作。 |
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
 | `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
@@ -253,7 +253,9 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 9. `ComputeService` 从 `OpRegistry` 选择操作实现。
 10. 内建 CPU full、dirty 与 preflight ready work 会在完整 ledger 准入后跨越固定的多 Graph
     `ExecutionService`；旧式 serial、GPU 与 plugin work 使用其 graph-owned scheduler。
-    Full plan/temporary result 与 dirty staging 会由匹配 Run 持有到唯一 terminal publication。
+    Full plan/temporary result 与 dirty staging 会由匹配 Run 持有到唯一 terminal publication。私有
+    cancellation 会在 planning、queue、callback、dependency、phase 与 commit 边界被观察；已经
+    进入的 non-preemptible provider 会排空，但不能授权 publication。
 11. Staged output 验证后，私有产品 commit policy 会验证精确 Run/staged/live identity 与
     revision，并在 Run success 前通过一个 graph-state transaction 发布完整状态。
 12. `GraphEventService` 记录每节点事件和计时数据。
@@ -434,7 +436,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   planning cache key。内建 CPU
   full、dirty 与 preflight work 会在稳定 Run lease 下执行 owned callback，并按
   `(RunId, RunLocalTaskId)` 路由 failure；只有旧式 dirty scheduler route 仍保留同步
-  borrowed-handle 路径。Realtime child 尚未由 request-owned `RunGroup` 协调。
+  borrowed-handle 路径。一个私有 request source 会把显式 cancellation 扇出到当前 child Run，
+  同时每个 child 保留自己的 outcome 与 deadline。Realtime child 尚未由 request-owned
+  `RunGroup` 协调。
 - `GraphTraversalService` 只拥有 topology query。
 - `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
@@ -476,8 +480,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   的 ledger 准入与 bounded ready store 已经是当前行为。Issue #71 的私有无状态 Interactive/
   Throughput policy、层级、公平 aging、burst 上限与受保护 headroom 也是当前行为。Issue #72
   的强 Graph identity/revision、request-owned 产品 staging、精确 revision visible commit 与
-  RT-first 独立 child publication 也是当前行为；最终 `RunGroup`、cancellation、supersession、
-  替代用 scheduler-policy ABI、lifecycle registry 与 close/shutdown fence 仍是未来行为。
+  RT-first 独立 child publication 也是当前行为。Issue #73 的私有 cooperative Run cancellation、
+  deadline observation、精确 queue/resource drainage 与 cancellation/commit arbitration 也是当前
+  行为；最终 `RunGroup`、Issue #74 supersession、Issue #75 替代用 scheduler-policy ABI、Issue
+  #76 lifecycle registry/close/shutdown fence 与 public cancellation control 仍是未来行为。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

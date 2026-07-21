@@ -264,7 +264,7 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `GraphModel` | Graph state holder with a non-reused strong instance identity, checked authoritative revision, private node/topology storage, cache root, timing data, quiet/skip-save flags, and complete compute snapshot/publication primitives. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
-| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision, monotonic phase, exact terminal outcome, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. A request-owned `RunGroup` and the final lifecycle registry remain future. |
+| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision, monotonic phase, one terminal arbiter, stable cooperative-cancellation reason, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. A request-owned `RunGroup`, public cancellation control, and the final lifecycle registry remain future. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -298,7 +298,9 @@ Typical REPL compute flow:
     multi-Graph `ExecutionService` after complete ledger admission; legacy
     serial, GPU, and plugin work uses its graph-owned scheduler. Full
     plans/temporary results and dirty staging remain owned by the matching Run
-    until exact terminal publication.
+    until exact terminal publication. Private cancellation is observed at
+    planning, queue, callback, dependency, phase, and commit boundaries;
+    entered non-preemptible providers drain without authorizing publication.
 11. After staged output validation, the private product commit policy validates
     the exact Run/staged/live identity and revision and publishes complete state
     in one graph-state transaction before Run success.
@@ -538,8 +540,10 @@ Important current behavior:
   cache key. Built-in CPU full, dirty, and preflight work
   executes owned callbacks under stable Run leases and routes failure by
   `(RunId, RunLocalTaskId)`; only legacy dirty scheduler routes retain their
-  synchronous borrowed-handle path. Realtime children are not yet coordinated
-  by a request-owned `RunGroup`.
+  synchronous borrowed-handle path. One private request source fans explicit
+  cancellation into the current child Runs, while each child retains its own
+  outcome and deadline. Realtime children are not yet coordinated by a
+  request-owned `RunGroup`.
 - `GraphTraversalService` owns topology queries only.
 - `RoiPropagationService` and `GraphExtentResolver` own spatial propagation and
   HP-authoritative extent resolution.
@@ -597,9 +601,12 @@ Important current behavior:
   and Throughput policies, hierarchy, aging, burst bound, and protected
   headroom are also current. Issue #72's strong Graph identity/revision,
   request-owned product staging, exact-revision visible commit, and independent
-  RT-first child publication are current; the final `RunGroup`, cancellation,
-  supersession, replacement scheduler-policy ABI, lifecycle registry, and
-  close/shutdown fence remain future.
+  RT-first child publication are current. Issue #73's private cooperative Run
+  cancellation, deadline observation, exact queue/resource drainage, and
+  cancellation/commit arbitration are also current; the final `RunGroup`,
+  issue #74 supersession, issue #75 replacement scheduler-policy ABI, issue #76
+  lifecycle registry/close/shutdown fence, and public cancellation control
+  remain future.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

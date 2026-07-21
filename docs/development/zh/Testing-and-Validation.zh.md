@@ -331,6 +331,53 @@ ctest --test-dir build --output-on-failure \
   -R '^DiskCacheDiagnosticConcurrency\.'
 ```
 
+## Cooperative Run cancellation 验证
+
+Issue #73 把 cancellation coverage 保留在长期维护的行为测试中，而不是 issue-specific replay
+tool。`test_compute_run` 负责私有 Run source、稳定 first reason、注入式 monotonic deadline、
+terminal-before-quiescent state、request fan-out，以及 cancellation/failure/commit arbitration。同一
+binary 还覆盖 `ExecutionService` 在 active publication 前的 cancellation、精确 queued-Run purge、
+dequeue/pre-callback race、non-preemptible callback drainage、被抑制的 dependent re-entry、peer
+isolation 与精确 grant/root release。其 legacy `A -> B` case 证明：A 返回后发生 cancellation 时，
+callback-owned unit 与仍由 plan 拥有的 unit 都恰好一次 retire，B 不会进入，也不会发布 staged
+output；其配套 exception 分支还证明后续 provider failure 无法替换已经接受的 cancellation。
+
+`test_kernel_contracts` 负责产品边界。确定性 commit hook 证明 claim 前 cancellation 不会发布任何
+Graph/proxy/cache state，而 claim 后的 request 无法撤销成功 publication。RT/HP case 会在 HP
+sibling 随后变 stale 时保留已提交 proxy；sequential case 证明 provider 返回后会在 staged
+publication 前观察 cancellation；close case 则证明逻辑上已取消的 request 仍会在 Graph 销毁前
+排空 running provider，并完成 public `ComputeError` translation。`test_compute_service_split` 会在
+legacy serial route 的 connected preflight 内触发 cancellation，并证明 dirty HP 与配对 HP/RT
+request 都不会进入 parameter dependent 或 phase-two target work。
+
+Public surface 不扩张仍由现有长期契约负责：`test_ipc_protocol` 固定精确的 55-method protocol
+inventory、拒绝 `compute.cancel`、round-trip 每个 version-one status label，并要求
+`cancellable: false`；`test_compute_request_registry` 固定 daemon job snapshot；
+`test_scheduler_plugin_loader` 固定 scheduler ABI v2；`StaticProductConsumerSmoke` 则会编译并运行
+已安装的 53-virtual Host、55-call Client、operation ABI v2 与 scheduler ABI v2 consumer。这些测试
+不得为该私有变更新增 compatibility cancellation shim。
+
+可用以下命令执行 focused cancellation boundary：
+
+```bash
+cmake --build build \
+  --target test_compute_run test_compute_service_split \
+  test_kernel_contracts test_ipc_protocol test_compute_request_registry \
+  test_scheduler_plugin_loader -j
+./build/tests/test_compute_run \
+  --gtest_filter='ComputeRunCancellation.*:ComputeRunCommitArbiter.LinearizesCancellationBeforeOrAfterCommitClaim:ExecutionServiceCancellation.*'
+./build/tests/test_compute_service_split \
+  --gtest_filter='ComputeServiceCancellation.ConnectedPreflightCancellationSuppressesDirtyAndSiblingPublication'
+./build/tests/test_kernel_contracts \
+  --gtest_filter='ComputeContracts.SequentialCancellationAfterProviderReturnSuppressesPublication:ComputeContracts.CancellationBeforeCommitClaimSuppressesPublication:ComputeContracts.CancellationAfterCommitClaimPreservesPublication:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.CancelledComputeStillDrainsBeforeGraphClose'
+./build/tests/test_ipc_protocol \
+  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionOneMethods:EnumCodec.RoundTripsEveryDefinedVersionOneLabel:HostRoutedGraphStateProtocolTest.ComputeLifecyclePreservesEveryTypedHostRequestFieldAndStableShapes'
+./build/tests/test_compute_request_registry \
+  --gtest_filter='ComputeRequestRegistrySubmission.PublishesQueuedCommitSnapshot'
+./build/tests/test_scheduler_plugin_loader \
+  --gtest_filter='SchedulerPluginLoaderTest.PublicSchedulerAbiIsExactlyVersionTwo'
+```
+
 以下 focused companion regression 负责其余边界：
 
 - `test_kernel_contracts` 驱动真实 `GraphIOService` stream 进入 post-write、post-flush 与

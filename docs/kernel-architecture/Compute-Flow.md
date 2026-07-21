@@ -334,12 +334,15 @@ the exact Run/staged/live identity and revision, performs eligible deferred HP
 cache persistence, and swaps complete visible state in the same graph-state
 work item. It publishes Run success only after that transaction succeeds.
 
-This is the current issue #72 revision-safe predicate subset, not an
-interruptible or latest-wins policy. It does not claim cancellation,
-supersession, the final `RunLifecycleRegistry`, a graph-lifetime lease, or
-request-level `RunGroup` settlement. Commit policy remains conceptually
-separate from `ComputeIntent`, because HP/RT intent semantics do not define
-visibility or interruption.
+This is the current baseline through issue #73. A private request source can
+cooperatively cancel one HP Run or both current realtime child Runs; immutable
+deadlines propose `DeadlineExceeded` at bounded observation points, and the
+Run-owned terminal arbiter orders cancellation, failure, and visible commit.
+This is not preemptive or latest-wins execution. It does not claim issue #74
+supersession, the final `RunLifecycleRegistry`, a graph-lifetime lease,
+request-level `RunGroup` settlement, or public Host/CLI/IPC cancellation.
+Commit policy remains conceptually separate from `ComputeIntent`, because
+HP/RT intent semantics define neither visibility nor cancellation authority.
 
 ## GlobalHighPrecision
 
@@ -519,9 +522,13 @@ published.
   identity. Built-in CPU HP/RT failures route through
   `(RunId, RunLocalTaskId)` under a stable lease. Current Runs record explicit
   QoS that the service applies to ordering, fairness, and headroom admission,
-  plus exact Graph identity/revision provenance. A deadline is an ordering
-  input, not an expiry or cancellation trigger. There is no supersession or
-  cooperative cancellation contract.
+  plus exact Graph identity/revision provenance. A deadline remains an ordering
+  input and is also an expiry trigger when a Run reaches a cooperative
+  observation point. Built-in ready publication, queue/dequeue, operation,
+  dependency, phase, and commit boundaries observe private Run cancellation;
+  entered non-preemptible providers may finish, but their staged output cannot
+  commit. There is no supersession, public cancellation control, or lifecycle
+  cancellation contract.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
@@ -529,12 +536,12 @@ governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 defines both the current fixed multi-Graph HP/RT service, independent child
 Runs, built-in policy ordering, lease/completion isolation, authoritative
-revision-safe staging, and RT-first independent commit gate, plus the later
-deterministic `RunGroup` settlement, admitted-Run registry, and broader
-lifecycle ownership, while the
+revision-safe staging, RT-first independent commit gate, and cooperative Run
+cancellation, plus the later deterministic `RunGroup` settlement, admitted-Run
+registry, and broader lifecycle ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-describes the remaining cancellation, supersession, and lifecycle boundary
-without making those later slices part of the current flow.
+describes the remaining supersession and lifecycle boundary without making
+those later slices part of the current flow.
 
 ## Implementation and Validation Entry Points
 

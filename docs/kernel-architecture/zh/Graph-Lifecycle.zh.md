@@ -157,7 +157,8 @@ work item 会先计算 checked successor revision，因此 overflow 会保持 Gr
 该纯准备成功后，work item 以 no-throw 方式发布 successor revision，随后才进入 cache side effect。
 后续 clear failure 仍按现有 facade contract 返回，但 revision 绝不回滚：即使 cache root 已删除却
 无法重建，或只释放了部分 memory cache，clear intent 前捕获的每个 Run 仍为 stale。这是 revision-safe
-invalidation，不是 Issue #73 对已运行 work 的 cancellation。
+invalidation，与 Issue #73 的 cooperative cancellation 不同。Cache clear 不会请求 cancellation；
+stale Run 与 cancelled Run 只在“都不得发布 request-owned staged output”这一规则上汇合。
 
 ## ROI 投影
 
@@ -313,9 +314,11 @@ operation 会使用 unavailable adapter，并返回 `GraphErrc::Io`。
 已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
 现在约束已实现的强 Graph identity/revision、staged compute、exact commit predicate，以及分离的
-compute-request/graph-state lane。其完整目标仍需未来由 `ExecutionService` 拥有的
-admitted-Run registry、原子 Run-admission/Graph-close fence、cancellation、supersession 与
-Run-group policy。本文不声称已具备这些后续能力。
+compute-request/graph-state lane，也约束 cooperative Run cancellation。当前 graph close 仍会排空
+已接受 work，包括仍处于物理 active 状态的 cancelled Run；close 本身不是 cancellation requester。
+完整目标仍需未来由 `ExecutionService` 拥有的 admitted-Run registry、原子
+Run-admission/Graph-close fence、Issue #74 supersession、lifecycle-driven close/shutdown
+cancellation 与 Run-group policy。本文不声称已具备这些后续能力。
 
 ## 实现与验证入口
 

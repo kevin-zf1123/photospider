@@ -263,10 +263,13 @@ scheduler-backed、dirty HP 与 RT work。本地 output validation 后，Compute
 执行符合条件的延迟 HP cache persistence，并在同一 graph-state work item 中交换完整可见状态。
 只有该 transaction 成功后才会发布 Run success。
 
-这是当前 issue #72 的 revision-safe predicate 子集，不是 interruptible 或 latest-wins policy。
-它不声称实现 cancellation、supersession、最终 `RunLifecycleRegistry`、graph-lifetime lease 或
-request-level `RunGroup` settlement。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT
-intent 语义不定义可见性或中断。
+这是截至 issue #73 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
+realtime request 的两个 child Run；immutable deadline 会在有界 observation point 提议
+`DeadlineExceeded`，Run-owned terminal arbiter 则会排列 cancellation、failure 与 visible commit。
+这不是 preemptive 或 latest-wins execution；它不声称实现 issue #74 supersession、最终
+`RunLifecycleRegistry`、graph-lifetime lease、request-level `RunGroup` settlement，或 public
+Host/CLI/IPC cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent
+语义既不定义可见性，也不定义 cancellation authority。
 
 ## GlobalHighPrecision
 
@@ -410,19 +413,22 @@ ledger 耗尽时，`GraphErrc::ComputeError` 会通过 embedded Host 与 IPC sta
 - Legacy scheduler epoch 只拒绝陈旧的 queued callback，并不是 Run identity。内建 CPU HP/RT
   failure 会在稳定 lease 下通过 `(RunId, RunLocalTaskId)` 路由。当前 Run 会记录显式 QoS，service
   会将其用于 ordering、公平性与 headroom admission，同时记录精确 Graph identity/revision
-  provenance。Deadline 是 ordering input，不是 expiry 或 cancellation trigger。当前没有
-  supersession 或 cooperative cancellation contract。
+  provenance。Deadline 仍是 ordering input，并且会在 Run 到达 cooperative observation point 时
+  触发 expiry。内建 ready publication、queue/dequeue、operation、dependency、phase 与 commit
+  边界都会观察私有 Run cancellation；已经进入的 non-preemptible provider 可以完成，但其 staged
+  output 不能 commit。当前仍没有 supersession、public cancellation control 或 lifecycle
+  cancellation contract。
 
 这些拆分使 planning、physical dispatch 与 visible commit 可以独立测试。
 [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)约束当前
 graph-state/dispatch 区分。已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
 同时定义当前固定的多 Graph HP/RT service、独立 child Run、内建 policy ordering、
-lease/completion isolation、权威 revision-safe staging 与 RT-first 独立 commit gate，以及后续
-确定性 `RunGroup` settlement、admitted-Run registry 与更广泛的
+lease/completion isolation、权威 revision-safe staging、RT-first 独立 commit gate 与 cooperative
+Run cancellation，以及后续确定性 `RunGroup` settlement、admitted-Run registry 与更广泛的
 lifecycle 所有权，而
-[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述剩余 cancellation、
-supersession 与 lifecycle 边界，但不会让这些后续切片成为当前流程的一部分。
+[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述剩余 supersession 与
+lifecycle 边界，但不会让这些后续切片成为当前流程的一部分。
 
 ## 实现与验证入口
 

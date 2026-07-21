@@ -202,7 +202,9 @@ cache side effects. A later clear failure is returned through the existing
 facade contract, but the revision is never rolled back: every Run captured
 before the clear intent remains stale even when the cache root was removed but
 could not be recreated, or only part of memory cache was released. This is
-revision-safe invalidation, not issue #73 cancellation of already-running work.
+revision-safe invalidation, distinct from issue #73 cooperative cancellation.
+A cache clear does not request cancellation; stale and cancelled Runs converge
+only at the rule that neither may publish request-owned staged output.
 
 ## ROI Projection
 
@@ -388,10 +390,14 @@ uses an unavailable adapter and returns `GraphErrc::Io`.
 The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 now governs the implemented strong Graph identity/revision, staged compute,
-exact commit predicate, and separate compute-request/graph-state lanes. Its
-complete target still requires the future `ExecutionService`-owned admitted-Run
-registry, atomic Run-admission/Graph-close fence, cancellation, supersession,
-and Run-group policy. This document does not claim those later capabilities.
+exact commit predicate, cooperative Run cancellation, and separate
+compute-request/graph-state lanes. Current graph close still drains accepted
+work, including physically active cancelled Runs, and is not a cancellation
+requester. The complete target still requires the future
+`ExecutionService`-owned admitted-Run registry, atomic
+Run-admission/Graph-close fence, issue #74 supersession, lifecycle-driven
+close/shutdown cancellation, and Run-group policy. This document does not claim
+those later capabilities.
 
 ## Implementation and Validation Entry Points
 

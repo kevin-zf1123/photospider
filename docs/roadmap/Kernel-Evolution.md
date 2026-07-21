@@ -98,9 +98,11 @@ in its bounded ready queue. Issue #71 adds the current private interactive and
 throughput strategies, explicit QoS ordering, work/byte charging, Graph/Run
 fairness, aging, headroom, and bounded throughput progress. Issue #72 adds
 strong Graph identity/revision, request-owned product snapshots, exact-revision
-commit, and RT-first independent child publication. Revision-aware preference,
-cancellation, supersession, and the replacement plugin policy ABI remain later
-work.
+commit, and RT-first independent child publication. Issue #73 adds private
+cooperative cancellation, monotonic deadline observation, exact queued/running
+drainage, and cancellation/commit arbitration. Revision-aware preference and
+supersession remain issue #74, the replacement plugin policy ABI remains issue
+#75, and registry-owned close/shutdown cancellation remains issue #76.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 is authoritative for the detailed target Run lifetime, owner boundaries,
 resource mint, close/shutdown scope, and delivery dependencies; it does not make
@@ -181,7 +183,7 @@ detail.
 
 ### `ComputeRun`
 
-The current baseline through Issue #72 implements exactly one private Run
+The current baseline through Issue #73 implements exactly one private Run
 around every non-realtime HP service call. A realtime call instead creates
 separate HP `Full` and RT `Interactive` child Runs; it does not yet create the target
 `RunGroup`. Each Run captures a process-lifetime opaque id, session label,
@@ -200,8 +202,10 @@ which workers exchange for execution grants. Product compute uses complete
 request-owned Graph/proxy snapshots and publishes only after the issue #72
 exact-revision predicate succeeds.
 Explicit QoS class, deadline, and weight enter the current built-in policy
-route; intent and quality do not infer them. `RunGroup`, cancellation, and
-supersession remain subsequent slices.
+route; intent and quality do not infer them. Issue #73 observes each immutable
+deadline and private request source at bounded planning, queue, callback,
+dependency, phase, and commit boundaries. `RunGroup`, supersession, public
+cancellation control, and lifecycle registry wiring remain subsequent slices.
 
 The remainder of this section describes the complete accepted target.
 
@@ -320,7 +324,7 @@ it before participating Kernels/Hosts and retains it until they stop Run
 admission and drain their Runs. Graph close does not stop the service; only
 process execution-domain shutdown does.
 
-The current baseline through Issue #72 realizes the shared CPU/resource,
+The current baseline through Issue #73 realizes the shared CPU/resource,
 policy, and staged-commit boundary:
 `EmbeddedHostState` creates one fixed-pool CPU service with explicit limits
 before Kernel, and Kernel injects it into request-local `ComputeService`
@@ -336,8 +340,11 @@ bounded store with child grants, and releases every reservation/grant exactly
 once. The private interactive and throughput strategies apply explicit QoS,
 work/byte charging, Graph/Run fairness, deadline preference, aging, interactive
 headroom, and bounded throughput progress. Exact Graph identity/revision
-validation and staged product publication are current. Cancellation,
-supersession, and the lifecycle registry remain future work.
+validation and staged product publication are current. Private cooperative Run
+cancellation closes matching ready admission, purges matching queued entries,
+rejects dependent re-entry, waits for in-flight callbacks, and arbitrates with
+commit. Supersession, public cancellation control, and the lifecycle registry
+remain future work.
 
 The final service owns physical CPU workers and later resource executors,
 bounded ready storage, Run/resource admission, policy-result validation,
@@ -380,9 +387,9 @@ queues/memory/in-flight work, compute-I/O operations/bytes, and
 plugin-process/invocation/IPC remain future dimensions and are not represented
 by fake zero-valued authority. Current success, failure, rejection, rollback,
 replacement, and worker-exception paths release every reservation and grant
-exactly once. Later cancellation, close, and shutdown slices must preserve that
-contract. Capacity exhaustion and checked overflow fail without partial
-reservation, overcommit, or silent clamping.
+exactly once. Current cancellation and later close/shutdown slices must
+preserve that contract. Capacity exhaustion and checked overflow fail without
+partial reservation, overcommit, or silent clamping.
 
 `SchedulerPolicy` is an internal comparison seam, not a physical executor or
 resource authority. The current interactive and throughput strategies rank
@@ -409,9 +416,9 @@ Issue #71 proves the seam with two real built-in policies and one shared route:
 - initial and dependent work use the same policy route, retaining Run rows
   across temporary emptiness.
 
-Latest-generation preference remains issue #74 work, revision-safe commit is
-current from #72, cancellation is #73, and the replacement scheduler policy
-ABI is #75.
+Latest-generation preference remains issue #74 work. Revision-safe commit is
+current from #72, cooperative cancellation is current from #73, and the
+replacement scheduler policy ABI remains #75.
 Larger quanta and device-utilization awareness remain later profile/device
 targets; issue #71 does not claim them.
 
@@ -434,13 +441,21 @@ and valid staged domain output. Successful publication preserves the revision
 and precedes Run success. Failed validation discards staged output and cannot
 mutate visible Graph/proxy state or write deferred cache artifacts.
 
-The complete target extends that predicate with an `Open` registry graph row,
-a registered Run and valid graph-lifetime lease, current supersession
-generation, and no accepted cancellation/failure. Supersession selects a newer
-generation and requests cancellation of older matching Runs without reusing
-their identity or mutating their plans. Non-preemptible work and external side
-effects may finish, but stale, cancelled, failed, or overdue output cannot
-commit.
+Issue #73 makes cancellation part of that current predicate. One private
+request source and immutable monotonic deadline contend through the same Run
+arbiter as failure and commit. Built-in ready entries are purged by exact Run
+identity, dependent re-entry is rejected, legacy plan/callback completion units
+retire exactly once, and entered non-preemptible work drains without permitting
+staged publication. The accepted commit contender, exact predicate, eligible
+persistence, visible swap, and terminal resolution share one serialized
+graph-state work item.
+
+The complete target further extends that predicate with an `Open` registry
+graph row, a registered Run and valid graph-lifetime lease, and a current
+supersession generation. Supersession selects a newer generation and requests
+cancellation of older matching Runs without reusing their identity or mutating
+their plans. Non-preemptible work and external side effects may finish, but
+stale, cancelled, failed, or overdue output cannot commit.
 
 Any future compatible-revision optimization requires another explicit decision;
 compatibility is not inferred from equal topology.
@@ -448,8 +463,10 @@ compatibility is not inferred from equal topology.
 Paired RT/HP work uses a monotonic `Pending` / `RtCommitted` / `Denied` sibling
 gate. Issue #72 currently opens it only after valid RT proxy publication and
 then applies an independent HP revision predicate; a later stale HP result does
-not roll back RT. Cancellation, graph-close, and process-shutdown denial reasons
-remain later slices of the complete gate contract.
+not roll back RT. Issue #73 makes RT cancellation while `Pending` deny the gate
+and request HP cancellation; HP cancellation after `RtCommitted` cannot roll
+back RT. Graph-close and process-shutdown denial reasons remain later slices of
+the complete gate contract.
 
 ### Close and shutdown scopes
 
@@ -483,7 +500,7 @@ lease; late completion performs cleanup only.
 | [#70](https://github.com/kevin-zf1123/photospider/issues/70) | Current production admission, bounded ready store, and ledger | #69 |
 | [#71](https://github.com/kevin-zf1123/photospider/issues/71) | Current interactive and throughput built-in policies | #70 |
 | [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Current revision capture and staged commit predicate | #67 |
-| [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Queued/running/commit cancellation | #70, #72 |
+| [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Current queued/running/commit cancellation | #70, #72 |
 | [#74](https://github.com/kevin-zf1123/photospider/issues/74) | Latest-wins supersession | #71, #73 |
 | [#75](https://github.com/kevin-zf1123/photospider/issues/75) | Complete policy-generation ABI replacement | #71 |
 | [#76](https://github.com/kevin-zf1123/photospider/issues/76) | Graph close, process shutdown, telemetry, final invariants | #69, #73, #74, #75 |

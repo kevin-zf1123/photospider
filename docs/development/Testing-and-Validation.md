@@ -440,6 +440,61 @@ ctest --test-dir build --output-on-failure \
   -R '^DiskCacheDiagnosticConcurrency\.'
 ```
 
+## Cooperative Run Cancellation Validation
+
+Issue #73 keeps cancellation coverage in maintained behavior tests rather than
+an issue-specific replay tool. `test_compute_run` owns the private Run source,
+stable first reason, injected monotonic deadline, terminal-before-quiescent
+state, request fan-out, and cancellation/failure/commit arbitration. The same
+binary exercises `ExecutionService` cancellation before active publication,
+exact queued-Run purge, the dequeue/pre-callback race, non-preemptible callback
+drainage, suppressed dependent re-entry, peer isolation, and exact grant/root
+release. Its legacy `A -> B` case proves cancellation after A returns retires
+the callback-owned and still-plan-owned units exactly once without entering B
+or publishing staged output; its companion exception branch proves a later
+provider failure cannot replace the already accepted cancellation.
+
+`test_kernel_contracts` owns the product boundary. Deterministic commit hooks
+prove cancellation before claim publishes no Graph/proxy/cache state and a
+request after claim cannot undo successful publication. The RT/HP case keeps a
+committed proxy visible when the HP sibling later becomes stale, while the
+sequential case proves provider return observes cancellation before staged
+publication, and the close case proves a logically cancelled request still
+drains its running provider and public `ComputeError` translation before Graph
+destruction. `test_compute_service_split` cancels from connected preflight on
+the legacy serial route and proves that dirty HP and paired HP/RT requests enter
+neither the parameter dependent nor phase-two target work.
+
+Public non-expansion remains part of existing durable contracts:
+`test_ipc_protocol` locks the exact 55-method protocol inventory, rejects
+`compute.cancel`, round-trips every version-one status label, and requires
+`cancellable: false`; `test_compute_request_registry` locks the daemon job
+snapshot; `test_scheduler_plugin_loader` locks scheduler ABI v2; and
+`StaticProductConsumerSmoke` compiles and runs the installed 53-virtual Host,
+55-call Client, operation ABI v2, and scheduler ABI v2 consumers. These tests
+must not gain a compatibility cancellation shim for this private change.
+
+Run the focused cancellation boundary with:
+
+```bash
+cmake --build build \
+  --target test_compute_run test_compute_service_split \
+  test_kernel_contracts test_ipc_protocol test_compute_request_registry \
+  test_scheduler_plugin_loader -j
+./build/tests/test_compute_run \
+  --gtest_filter='ComputeRunCancellation.*:ComputeRunCommitArbiter.LinearizesCancellationBeforeOrAfterCommitClaim:ExecutionServiceCancellation.*'
+./build/tests/test_compute_service_split \
+  --gtest_filter='ComputeServiceCancellation.ConnectedPreflightCancellationSuppressesDirtyAndSiblingPublication'
+./build/tests/test_kernel_contracts \
+  --gtest_filter='ComputeContracts.SequentialCancellationAfterProviderReturnSuppressesPublication:ComputeContracts.CancellationBeforeCommitClaimSuppressesPublication:ComputeContracts.CancellationAfterCommitClaimPreservesPublication:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.CancelledComputeStillDrainsBeforeGraphClose'
+./build/tests/test_ipc_protocol \
+  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionOneMethods:EnumCodec.RoundTripsEveryDefinedVersionOneLabel:HostRoutedGraphStateProtocolTest.ComputeLifecyclePreservesEveryTypedHostRequestFieldAndStableShapes'
+./build/tests/test_compute_request_registry \
+  --gtest_filter='ComputeRequestRegistrySubmission.PublishesQueuedCommitSnapshot'
+./build/tests/test_scheduler_plugin_loader \
+  --gtest_filter='SchedulerPluginLoaderTest.PublicSchedulerAbiIsExactlyVersionTwo'
+```
+
 Focused companion regressions own the remaining boundaries:
 
 - `test_kernel_contracts` drives the real `GraphIOService` stream through

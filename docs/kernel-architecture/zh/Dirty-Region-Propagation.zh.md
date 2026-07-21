@@ -1,8 +1,9 @@
 # 脏区传播与工作选择
 
 本文描述当前内核已经实现的 dirty-region 行为，并区分 graph-scoped dirty facts、request
-planning、task selection、scheduler filtering 与 output commit。拟议的 Macro retile、自适应
-coarsening 与 Run cancellation 属于内核演进路线图，而不是本文的当前行为契约。Dirty geometry
+planning、task selection、scheduler filtering、output commit，以及截至 issue #73 已实现的
+cooperative Run-cancellation observation。拟议的 Macro retile 与自适应 coarsening 属于内核演进
+路线图，而不是本文的当前行为契约。Dirty geometry
 路径与私有 clone/resize/channel/ROI processing contract 都由内核拥有；configured build 会选择
 OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声明 OpenCV。
 
@@ -33,7 +34,7 @@ record 使用的 RT proxy coordinate）。HP 与 RT 是不同 compute domain；d
 | `DirtyRegionSnapshotBuilder` | 规范化 source ROI，物化 snapshot-only Micro tile 或 monolithic record | Graph traversal 或 compute request |
 | `RoiPropagationService` | 计算 operation-specific forward inspection 与 backward demand projection | Graph topology ownership |
 | `DirtySnapshotTaskGraphPruner` | 从现有 request plan 中选择并裁剪 active task | 新 task shape |
-| dirty executor 与 write buffer | 按 source-first 顺序执行并暂存 HP/RT output；standalone 非 realtime HP staging 由其 `ComputeRun` 拥有，配对 realtime sibling buffer 仍保持 callback-local | 通用 cancellation、dirty-path Run lease/grouping 或 graph revision policy |
+| dirty executor 与 write buffer | 按 source-first 顺序执行，在现有 phase/node/tile/provider 边界观察匹配 Run lease，并暂存 HP/RT output；standalone 非 realtime HP staging 由其 `ComputeRun` 拥有，配对 realtime sibling buffer 仍保持 callback-local | Cancellation authority、Run grouping 或 graph revision policy |
 
 ## 当前流程
 
@@ -172,6 +173,12 @@ committed source generation 更旧，则跳过并记录 trace；相同 generatio
 node 也不会进行该比较。这只是狭窄的 source-boundary stale guard，不是通用 revision validation、
 supersession、deadline handling 或 cooperative cancellation。
 
+Issue #73 增加了一条独立的 Run-owned cooperative 边界。Dirty preflight、source 与 downstream
+phase、node/tile/provider 进入与返回、dependency release，以及最终 commit 都会观察匹配 child
+lease。显式 request 与过期 monotonic deadline 使用同一个 terminal arbiter。已经进入的 operation
+可以完成，但 cancellation 会关闭后续 publication，并丢弃 request-owned staging。这些检查不会把
+dirty generation 或 scheduler epoch 变成 cancellation authority。
+
 ## 暂存与提交
 
 HP dirty task 把 output 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty task 暂存到
@@ -206,8 +213,8 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 - Macro dirty-key materialization 或动态 Micro/Macro coarsening；
 - sparse ROI set、dirty-area cap、time-window merge 或 adaptive batching；
 - 自动启动 compute 的 node-to-backend dirty subscription；
-- 最终 policy-bearing `RunGroup`、已执行 deadline、Issue #74 supersession，或 Issue #73 对已运行
-  callback 的 cooperative cancellation。
+- 最终 policy-bearing `RunGroup`、Issue #74 supersession、public 或 lifecycle-driven
+  cancellation，或对已经进入的 provider callback 进行 preemption。
 
 当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
 task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和

@@ -216,10 +216,13 @@ one GiB of artifact bytes with a 512-MiB per-artifact ceiling, 8,192 compute
 events per session, and 65,536 scheduler-trace entries per session. Event
 drains are destructive pages of at most 1,024 entries; trace pages are
 non-destructive pages of at most 4,096 entries, and every frame is capped at
-16 MiB. Compute cancellation,
-`daemon.shutdown`, TCP, Windows transport, and `graph_cli --connect` remain
-unavailable. The CLI options and REPL commands in this manual remain local
-embedded-Host behavior and do not auto-connect to a daemon. See
+16 MiB. Issue #73 adds private cooperative cancellation inside the embedded
+Kernel/ComputeService boundary, but it does not add a Host virtual, CLI command,
+or IPC method. User-controlled compute cancellation, `daemon.shutdown`, TCP,
+Windows transport, and `graph_cli --connect` therefore remain unavailable, and
+daemon jobs continue to report `cancellable:false`. The CLI options and REPL
+commands in this manual remain local embedded-Host behavior and do not
+auto-connect to a daemon. See
 `docs/codebase-structure/IPC-Protocol-v1.md` for framing, errors, polling,
 output security, socket selection, and lifecycle details.
 
