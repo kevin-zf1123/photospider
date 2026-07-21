@@ -17,9 +17,16 @@ strategies order work with work/byte cost, hierarchical Graph/Run accounting,
 deadline preference, aging, interactive headroom, and bounded throughput
 progress. Issue #72 now keeps strong Graph identity, authoritative revision,
 request-owned staging, and revision-safe publication outside the execution
-service. Device, I/O, and plugin-specific accounting, `RunGroup`, cancellation,
-and generation supersession remain target behavior. ADR 0007 supersedes this
-ADR only as the detailed
+service. Issue #73 now gives each current Run a private weak-lifetime
+cancellation source, read-only lease/deadline observation, one terminal/commit
+arbiter, exact-Run queued purge, running drainage, dependent rejection, and
+RT-denies-HP cancellation. The commit policy owns no cancellation source; it
+retains a read-only lease and resolves the Run-owned contender inside the
+serialized publication transaction. Latest-wins supersession and request-level
+`RunGroup` (#74), the scheduler ABI replacement (#75), the final lifecycle
+registry/graph-close/process-shutdown/telemetry contract (#76), and public
+Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes
+this ADR only as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
 and its historical context remain in force.
 
@@ -39,9 +46,14 @@ each Host ledger's default 32-slot CPU dimension. Fixed service workers are
 infrastructure, while active Runs and legacy scheduler owners compete for the
 same CPU authority. Retained Host memory, scratch, ready entries, and ready
 bytes are admitted too. The current service enforces the Issue #71 CPU
-fairness and headroom contract. Issue #72 exact revision validation remains a
-Kernel/graph-state commit concern outside the service; cancellation,
-supersession, and new device/I/O/plugin dimensions remain outside this slice.
+fairness and headroom contract. At the Issue #72 delivery snapshot, exact
+revision validation remained a Kernel/graph-state commit concern outside the
+service, while cancellation and supersession remained outside that historical
+slice. Current software now implements Issue #73 cooperative cancellation as
+Run-owned terminal correctness: the service observes and purges/drains only the
+matching Run, while the graph-state transaction arbitrates cancellation against
+commit. Latest-wins supersession remains Issue #74 work; final lifecycle-driven
+graph-close/process-shutdown cancellation remains Issue #76 work.
 
 Moving those schedulers to a global object without introducing a stable Run
 lifetime and host-owned resource accounting would only relocate the problem.
@@ -105,7 +117,13 @@ bindings are ownerless at `GraphRuntime`; serial, GPU, and plugin routes retain
 legacy scheduler owners. The ready-task-only boundary remains fully in force.
 Issue #72 additionally keeps request-owned staged Graph/proxy state, exact
 identity/revision validation, and visible publication on the
-compute/graph-state side of that boundary.
+compute/graph-state side of that boundary. Issue #73 adds a private request
+cancellation coordinator, independent HP/RT child sources, cooperative
+monotonic deadline expiry, and Run-owned terminal/commit contention on that
+same side. `ExecutionService` registers a read-only cancellation notification,
+purges only the matching Run's queued entries, suppresses dependent re-entry,
+and waits for non-preemptible running callbacks to drain; it does not become
+cancellation authority or visible-commit owner.
 
 The current contract accepts worker requests from zero through eight, resolves
 zero to a nonzero grant capped at eight, and freezes the service count once.
@@ -123,7 +141,12 @@ reservations at the general ceiling. Interactive and transitional Issue #70
 legacy roots do not debit that class quota, while the ledger remains final
 authority for all shared physical capacity. Throughput check, reservation, and
 class charge are atomic, and the charge remains until exact root release after
-all child grants.
+all child grants. Cancellation accepted before the graph-state commit contender
+publishes no Graph, proxy, or deferred cache state. Once that contender wins,
+late cancellation is a no-op; predicate/persistence failure or visible success
+resolves the same Run arbiter. RT cancellation before proxy commit denies and
+cancels HP, while HP cancellation cannot roll back an already committed RT
+proxy.
 Graph load reserves only legacy HP/RT owners, and legacy replacement still
 requires transient candidate capacity while its old owner remains live;
 built-in CPU load or replacement publishes an ownerless service route and

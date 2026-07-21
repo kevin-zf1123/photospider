@@ -95,15 +95,20 @@ The current private, request-owned execution record for one non-realtime HP
 domain or one realtime HP/RT child domain. Its immutable descriptor contains
 an opaque non-reused Run id, session label, strong Graph instance identity,
 authoritative `GraphRevision`, target, single-domain intent, matching
-full/interactive quality, and explicit QoS. It owns monotonic phase and
-exact-once terminal state plus the full
-submission plan/temporary results or dirty HP staging required by its path
-through shared control state. Built-in CPU full, dirty, and preflight tasks
-retain non-forgeable `ComputeRunLease` values, execute owned callbacks through
-the fixed multi-Graph `ExecutionService`, and publish failure only through a
-matching `(RunId, RunLocalTaskId)`. Realtime requests currently create paired
-child Runs without a `RunGroup`. The final lifecycle registry, cancellation,
-supersession, and request-owned `RunGroup` remain future work.
+full/interactive quality, and explicit QoS. Its shared control owns monotonic
+phase, one exact terminal/commit arbiter, the stable first cancellation reason,
+and the full submission plan/temporary results or dirty HP staging required by
+its path. The Run mints a private weak-lifetime cancellation source; ordinary
+`ComputeRunLease` values can only observe explicit cancellation or an expired
+deadline and retain cleanup/commit-contender lifetime. Built-in CPU full,
+dirty, and preflight tasks execute owned callbacks through the fixed
+multi-Graph `ExecutionService` and publish failure only through a matching
+`(RunId, RunLocalTaskId)`. Realtime requests create independent HP and RT child
+Runs without a `RunGroup`; RT cancellation before proxy commit denies HP, while
+HP cancellation cannot roll back an already committed RT proxy. Latest-wins
+supersession and request-owned `RunGroup` (#74), the final lifecycle registry
+and close/shutdown wiring (#76), and public cancellation controls remain future
+work.
 
 **`ComputeRunQos`**
 The private immutable scheduling inputs captured by a Run: an explicit
@@ -111,9 +116,12 @@ The private immutable scheduling inputs captured by a Run: an explicit
 deadline, a positive weight, and an optional positive maximum-parallelism
 descriptor. The current service applies class, deadline, and weight to policy
 ordering and headroom admission. Maximum parallelism remains recorded but is
-not yet an execution cap. A deadline orders interactive work; it does not
-expire or cancel a Run. Current Kernel requests use throughput, and none of
-these values is inferred from intent or output quality.
+not yet an execution cap. A deadline orders interactive work and, when an
+existing cooperative boundary observes the injected monotonic clock at or
+after that value, proposes `DeadlineExceeded` through the Run's terminal
+arbiter. This expires the Run cooperatively without a timer thread or wall
+clock. Current Kernel requests use throughput, and none of these values is
+inferred from intent or output quality.
 
 **`FullTaskGraph`**
 The complete node/tile task shape for one graph generation, compute intent, and

@@ -77,14 +77,15 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 - Graph、compute、runtime、Host、plugin、scheduler、benchmark 与 adapter 的实现文件和私有头
   现在都位于按角色归属的 `src/lib/**` 目录。内部 target 通过私有 `src/lib/` root 构建，
   可安装 public header inventory 则继续限定在 `include/photospider/**`。
-- 当前 issue #70/#71 Run/service 实现位于
+- 当前 issue #69–#73 Run/service/commit 实现位于
   `src/lib/compute/{compute_run,execution_service}.*`，共享 accounting primitive 位于
   `src/lib/runtime/resource_ledger.*`。`Kernel` 把 session identity 与显式默认
   QoS 传给私有 request，并注入 composition-root CPU service。`ComputeService` 为每次非
   realtime HP call 创建一个 Run，并为 realtime call 创建彼此分离的 HP `Full` 与 RT
   `Interactive` 子 Run。共享 Run control 会持有对应的 full-plan/temporary storage 或
-  standalone dirty staging storage，直到唯一 terminal publication。内建 CPU 的 HP/RT full、
-  dirty 与 preflight work 会把具有 owned callback context 的 move-only、由 lease 支撑的
+  standalone dirty staging storage、private cancellation state 与精确 terminal/commit
+  arbitration。内建 CPU 的 HP/RT full、dirty 与 preflight work 会把具有 owned callback context
+  的 move-only、由 lease 支撑的
   submission 转移给固定的 multi-Run service。每个 Run 使用一个 checked complete vector
   admission；initial 与 dependent work 都会在 child grant 下进入同一个 policy-aware、受
   entry/byte 约束的 ready store，worker 再将其交换为 execution grant。每个 ready item 使用
@@ -93,8 +94,11 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
   后的稳定 aging，以及 Throughput work ready 时最多连续三个 Interactive dispatch 的 burst 上限。
   可配置的受保护 headroom 只限制 active 内建 Throughput root reservation。Interactive 与过渡期
   Issue #70 legacy root 不会扣减这项 class quota，而同一个 service ledger 仍是最终物理权威；
-  Throughput charge 会跟随 root，直到所有 child grant 结束。Legacy route 保留 owned callback，
-  并从该 ledger 获取 CPU reservation。
+  Throughput charge 会跟随 root，直到所有 child grant 结束。Issue #72 增加 request-owned
+  staging 与 exact-revision graph-state commit transaction；Issue #73 增加 private request
+  cancellation source、read-only lease/deadline observation、精确 Run ready purge、running
+  drainage、dependent suppression 与 Run-owned commit contender。Legacy route 保留 owned
+  callback，并从该 ledger 获取 CPU reservation。
   Installed header、Host value、operation ABI 与 scheduler ABI 都不会命名这些私有对象。
 - dirty-region 诊断、compute planning 诊断和 scheduler trace 诊断都通过 Host 的拷贝值
   snapshot 暴露。公开头不再需要命名后端 graph/runtime/service/planning 类型或具体 scheduler
@@ -263,8 +267,10 @@ Issue #38 已完成最终的 `include/photospider/{plugin,scheduler}/` 契约，
 role-owned 目录，并移除八个过渡性 extension header；没有新增 shim，也没有复制这些头。Issue #70
 把纯 worker-request resolution 与 concrete instance planning 保持在 `src/lib/scheduler/`，但把唯一
 Host 权威 ledger 与 move-only reservation/grant 实现放在 `src/lib/runtime/`。Issue #71 则把
-内建 policy strategy 与 bounded policy store 保持为 `src/lib/compute/` 下的私有实现。这些
-implementation owner 都不会成为 public Host、SDK 或 IPC type。
+内建 policy strategy 与 bounded policy store 保持为 `src/lib/compute/` 下的私有实现。Issue
+#72 把 exact-revision product commit 分置于 private compute policy 与 graph-state lane；Issue #73
+把 cancellation source、lease、observation 与 commit contender 保持为 `src/lib/compute/` 下的
+私有实现。这些 implementation owner 都不会成为 public Host、SDK 或 IPC type。
 
 命名规则：
 
@@ -384,9 +390,12 @@ CMake 规则：
 固定完整的进程执行所有权。其 issue #69 私有 HP/RT Run、稳定 lease/复合 identity、
 owned ready-submission 与注入的 multi-Run CPU service 切片现在已经位于当前
 `src/lib/compute/`。Issue #70 的完整 resource admission 与 issue #71 的内建 policy-aware ready
-store 也已在该处成为当前实现。`EmbeddedHostState` 会在 Kernel 前构造该 owner，Kernel 再把它
-注入 request-local `ComputeService`，不使用 static singleton。`RunGroup`、revision-safe commit、
-cancellation、supersession 与最终 lifecycle fence 仍是目标布局。
+store 也已在该处成为当前实现。Issue #72 的 exact-revision staged commit，以及 Issue #73 的
+private cooperative cancellation、Run-owned commit arbitration 与 RT-denies-HP 行为也已成为当前
+实现。`EmbeddedHostState` 会在 Kernel 前构造 process execution owner，Kernel 再把它注入
+request-local `ComputeService`，不使用 static singleton。Request-level `RunGroup` 与 latest-wins
+supersession（#74）、scheduler ABI replacement（#75），以及最终 lifecycle
+fence/shutdown/telemetry（#76）仍是目标布局。
 
 在该目标中：
 
@@ -394,10 +403,11 @@ cancellation、supersession 与最终 lifecycle fence 仍是目标布局。
   validation、稳定 graph-instance identity 与 lifetime anchor、event 与 platform/session
   metadata；
 - 当前 `ComputeRun` 的共享 control 拥有非 realtime HP Run，以及 realtime call 中彼此分离的
-  HP `Full`/RT `Interactive` 子 Run，包括 descriptor/phase/terminal state 与对应的
-  full-plan/temporary storage 或 standalone dirty staging storage；scheduler-backed full HP
-  work 会保留不可伪造的 lease 与复合 task identity，目标则会把该 owner 扩展到 cancellation
-  与 reservation；
+  HP `Full`/RT `Interactive` 子 Run，包括 descriptor/phase/terminal 与 cancellation state、
+  Run-owned one-shot commit contender，以及对应的 full-plan/temporary storage 或 standalone
+  dirty staging storage；scheduler-backed full HP work 会保留不可伪造的 read-only lease 与复合
+  task identity，剩余目标会增加 request-level grouping、supersession 与最终 lifecycle
+  registration；
 - request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - 当前 `ExecutionService` 拥有一个固定的内建 CPU worker pool、一个 Host 权威 ledger、
@@ -405,9 +415,10 @@ cancellation、supersession 与最终 lifecycle fence 仍是目标布局。
   cost、class-local Graph/weighted-Run 公平性、稳定 aging、三个 Interactive dispatch 的 burst
   上限、与精确 root lifetime 一致的 Throughput-owned protected-headroom accounting、并发
   multi-Graph Run、exact reservation/grant release，以及按 Run 隔离的 completion、first-failure、
-  trace 与 Host-context routing。Interactive 与过渡期 Issue #70 legacy root 不会扣减 Throughput
-  class quota；后续 slice 会增加通用 resource execution 与最终 lifecycle fence，但不会移动 ledger
-  authority；
+  trace 与 Host-context routing。它还会观察已接受的 Run cancellation，只清除该 Run 的 queued
+  entry、拒绝 dependent re-entry，并等待 running callback 排空。Interactive 与过渡期 Issue #70
+  legacy root 不会扣减 Throughput class quota；后续 slice 会增加通用 resource execution 与最终
+  lifecycle fence，但不会移动 ledger authority；
 - 其私有 `RunLifecycleRegistry` 提供唯一 process admission/Graph-close/process-shutdown
   fence、pending-candidate tracking、按 Graph 建索引且由 registry 持有的 `RunLease` entry 与
   process enumeration，同时不拥有 Run plan、dispatcher、terminal state、Graph state 或 resource
@@ -616,8 +627,10 @@ ready-byte vector；其 initial 与 dependent work 共享同一个受 entry/byte
 Issue #71 现在增加了私有无状态 Interactive/Throughput strategy、经过检查的 work/byte cost、
 class-local Graph/weighted-Run 公平、稳定 aging、三个 Interactive dispatch 的 burst 上限，以及
 与精确 root lifetime 一致的 Throughput-owned protected-headroom charge，且不改变 ledger 的最终
-权威或 Issue #70 的 full-ledger legacy capacity。#72–#74 增加 revision、cancellation 与
-supersession；#75 替换拥有 worker 的 ABI；#76 收束 lifecycle 与 telemetry 不变量。权威的无环
+权威或 Issue #70 的 full-ledger legacy capacity。Issue #72 的强 identity/revision staging 与
+Issue #73 的 private cooperative cancellation、精确 Run purge/drain、Run-owned commit
+contention 与 RT-denies-HP 契约现在均已成为当前行为。#74 增加 latest-wins supersession，#75
+替换拥有 worker 的 ABI，#76 收束 registry、graph-close/process-shutdown 与 telemetry 不变量。权威的无环
 依赖表位于
 [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md#交付依赖契约)。
 
@@ -670,7 +683,8 @@ supersession；#75 替换拥有 worker 的 ABI；#76 收束 lifecycle 与 teleme
    `Threads::Threads`。Installed IPC-header gate 正向只允许当前 C++ standard-library include set
    与已安装的 `photospider/` public include，并明确拒绝 raw JSON、socket address/descriptor、
    file identity、file mapping 与 backend declaration。这是精确的 tested boundary，不声称穷举
-   POSIX vocabulary。Cancellation 仍不可用。
+   POSIX vocabulary。Public Host/CLI/IPC cancellation 仍不可用；当前 private backend
+   cancellation source 与 cooperative Run control 不会进入该 installed surface。
 8. **已完成 plugin boundary 工作：** Issue #38 已收紧两套 extension SDK，issue #43 又把
    scheduler contract 推进到 ABI v2。
    - Operation plugin 使用与 host 无关的 v2 snapshot 和 host-provided registrar；scheduler plugin 使用

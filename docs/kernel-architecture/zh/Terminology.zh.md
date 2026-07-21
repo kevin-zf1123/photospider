@@ -79,20 +79,25 @@ mode 或 commit policy。
 当前用于一个非 realtime HP domain 或一个 realtime HP/RT child domain 的私有、
 request-owned 执行记录。其不可变 descriptor 包含不透明且不复用的 Run id、session label、
 强类型 Graph instance identity、权威 `GraphRevision`、target、单 domain intent、匹配的
-full/interactive quality 与显式 QoS。它拥有单调 phase、exact-once terminal state，并通过共享 control state
-拥有相应路径所需的 full submission plan/temporary result 或 dirty HP staging。内建 CPU
-full、dirty 与 preflight task 会保留不可伪造的 `ComputeRunLease`，通过固定的多 Graph
-`ExecutionService` 执行 owned callback，并且只通过匹配的
-`(RunId, RunLocalTaskId)` 发布失败。Realtime request 当前会创建成对的 child Run，
-但不创建 `RunGroup`。最终 lifecycle registry、cancellation、supersession 与 request-owned
-`RunGroup` 仍是后续工作。
+full/interactive quality 与显式 QoS。其 shared control 拥有单调 phase、唯一 exact
+terminal/commit arbiter、稳定的第一个 cancellation reason，以及相应路径所需的 full submission
+plan/temporary result 或 dirty HP staging。Run 会 mint 一个私有弱生命周期 cancellation source；
+普通 `ComputeRunLease` 只能观察 explicit cancellation 或过期 deadline，并保留 cleanup/
+commit-contender lifetime。内建 CPU full、dirty 与 preflight task 会通过固定的多 Graph
+`ExecutionService` 执行 owned callback，并且只通过匹配的 `(RunId, RunLocalTaskId)` 发布失败。
+Realtime request 会创建彼此独立的 HP 与 RT child Run，但不创建 `RunGroup`；RT 在 proxy commit
+前取消会拒绝 HP，而 HP cancellation 不能回滚已经提交的 RT proxy。Latest-wins supersession 与
+request-owned `RunGroup`（#74）、最终 lifecycle registry 与 close/shutdown wiring（#76），以及
+public cancellation control 仍是后续工作。
 
 **`ComputeRunQos`**
 Run 捕获的私有不可变调度输入：显式 `Interactive` 或 `Throughput` service class、可选的单调时钟
 absolute deadline、正 weight 与可选的正 maximum-parallelism descriptor。当前 service 会将
 class、deadline 与 weight 用于 policy ordering 和 headroom admission。Maximum parallelism 会
-继续记录，但尚不是 execution cap。Deadline 用于排列 interactive work，不会让 Run 过期或取消。
-当前 Kernel request 使用 throughput，且这些值都不会从 intent 或 output quality 推断。
+继续记录，但尚不是 execution cap。Deadline 会排列 interactive work；当现有 cooperative boundary
+观察到 injected monotonic clock 已达到或超过该值时，还会通过 Run terminal arbiter 提出
+`DeadlineExceeded`。这会在没有 timer thread 或 wall clock 的情况下协作式使 Run 过期。当前
+Kernel request 使用 throughput，且这些值都不会从 intent 或 output quality 推断。
 
 **`FullTaskGraph`**
 一个 graph generation、compute intent 和 task-shape 配置下完整的 node/tile task 形态。

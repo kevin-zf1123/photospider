@@ -97,7 +97,7 @@ Resolved seam tightening in the current branch:
   `src/lib/**` directories. Internal targets compile with the private
   `src/lib/` root, while the installable public header inventory remains
   limited to `include/photospider/**`.
-- The current issue #70/#71 Run/service implementation lives under
+- The current issue #69–#73 Run/service/commit implementation lives under
   `src/lib/compute/{compute_run,execution_service}.*`, while the shared
   accounting primitive lives under `src/lib/runtime/resource_ledger.*`.
   `Kernel` supplies
@@ -105,8 +105,9 @@ Resolved seam tightening in the current branch:
   the composition-root CPU service. `ComputeService` creates one Run for each
   non-realtime HP call and separate HP `Full` plus RT `Interactive` child Runs
   for realtime calls. Shared Run control owns the corresponding full-plan/
-  temporary or standalone dirty staging storage through exact terminal
-  publication. Built-in CPU HP/RT full, dirty, and preflight work transfers
+  temporary or standalone dirty staging storage, private cancellation state,
+  and exact terminal/commit arbitration. Built-in CPU HP/RT full, dirty, and
+  preflight work transfers
   move-only, lease-backed submissions with owned callback context to the fixed
   multi-Run service. Each Run is admitted with one checked complete vector;
   initial and dependent work enters the same policy-aware entry/byte-bounded
@@ -119,8 +120,12 @@ Resolved seam tightening in the current branch:
   built-in Throughput root reservations. Interactive and transitional Issue
   #70 legacy roots do not debit that class quota, while the same service ledger
   remains final physical authority; a Throughput charge follows its root until
-  all child grants release. Legacy routes retain owned callbacks and obtain CPU
-  reservations from that ledger. No
+  all child grants release. Issue #72 contributes request-owned staging and the
+  exact-revision graph-state commit transaction. Issue #73 contributes a
+  private request cancellation source, read-only lease/deadline observation,
+  exact-Run ready purge, running drainage, dependent suppression, and the
+  Run-owned commit contender. Legacy routes retain owned callbacks and obtain
+  CPU reservations from that ledger. No
   installed header, Host value, operation ABI, or scheduler ABI names these
   private objects.
 - Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
@@ -305,7 +310,10 @@ without shims or duplicates. Issue #70 keeps pure worker-request resolution and
 concrete instance planning under `src/lib/scheduler/`, but places the sole
 Host-authoritative ledger and move-only reservation/grant implementation under
 `src/lib/runtime/`. Issue #71 keeps its built-in policy strategies and bounded
-policy store private under `src/lib/compute/`. None of those implementation
+policy store private under `src/lib/compute/`. Issue #72 keeps exact-revision
+product commit split between the private compute policy and graph-state lane;
+issue #73 keeps cancellation sources, leases, observations, and commit
+contenders private under `src/lib/compute/`. None of those implementation
 owners becomes a public Host, SDK, or IPC type.
 
 Naming rules:
@@ -453,10 +461,13 @@ fixes the complete process-execution ownership. Its issue #69 private HP/RT
 Runs, stable lease/composite identity, owned ready-submission, and injected
 multi-Run CPU service slice is now current under `src/lib/compute/`. Issue #70's
 complete resource admission and issue #71's built-in policy-aware ready store
-are current there as well. `EmbeddedHostState` constructs that owner before
-Kernel, and Kernel injects it into request-local `ComputeService` instances
-without a static singleton. `RunGroup`, revision-safe commit, cancellation,
-supersession, and the final lifecycle fence remain target layout.
+are current there as well. Issue #72's exact-revision staged commit and issue
+#73's private cooperative cancellation, Run-owned commit arbitration, and
+RT-denies-HP behavior are current too. `EmbeddedHostState` constructs the
+process execution owner before Kernel, and Kernel injects it into request-local
+`ComputeService` instances without a static singleton. Request-level `RunGroup`
+and latest-wins supersession (#74), the scheduler ABI replacement (#75), and
+the final lifecycle fence/shutdown/telemetry work (#76) remain target layout.
 
 In that target:
 
@@ -465,10 +476,11 @@ In that target:
   lifetime anchor, events, and platform/session metadata;
 - the current `ComputeRun` shared control owns non-realtime HP Runs and the
   separate HP `Full`/RT `Interactive` child Runs of realtime calls, including
-  descriptor/phase/terminal state plus corresponding full-plan/temporary or
-  standalone dirty staging storage; scheduler-backed full HP work retains
-  non-forgeable leases and composite task identity, while the target extends
-  that owner with cancellation and reservations;
+  descriptor/phase/terminal and cancellation state, the Run-owned one-shot
+  commit contender, and corresponding full-plan/temporary or standalone dirty
+  staging storage; scheduler-backed full HP work retains non-forgeable
+  read-only leases and composite task identity, while the remaining target adds
+  request-level grouping, supersession, and final lifecycle registration;
 - request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
@@ -478,10 +490,12 @@ In that target:
   weighted-Run fairness, stable aging, a three-Interactive burst bound,
   Throughput-owned protected-headroom accounting with exact root lifetime,
   concurrent multi-Graph Runs, exact reservation/grant release, and per-Run
-  completion, first-failure, trace, and Host-context routing. Interactive and
-  transitional Issue #70 legacy roots do not debit the Throughput class quota;
-  later slices extend the service with general resource execution and the final
-  lifecycle fence without moving ledger authority;
+  completion, first-failure, trace, and Host-context routing. It also observes
+  accepted Run cancellation, purges only that Run's queued entries, rejects
+  dependent re-entry, and waits for running callbacks to drain. Interactive
+  and transitional Issue #70 legacy roots do not debit the Throughput class
+  quota; later slices extend the service with general resource execution and
+  the final lifecycle fence without moving ledger authority;
 - its private `RunLifecycleRegistry` supplies the single process admission/
   graph-close/process-shutdown fence, pending-candidate tracking,
   graph-indexed registry-held `RunLease` entries, and process enumeration without
@@ -730,9 +744,12 @@ policy store. Issue #71 now adds private stateless Interactive and Throughput
 strategies, checked work/byte cost, class-local Graph/weighted-Run fairness,
 stable aging, a three-Interactive burst bound, and a Throughput-owned protected
 headroom charge that follows exact root lifetime without changing final ledger
-authority or Issue #70's full-ledger legacy capacity. #72–#74 add revision,
-cancellation, and supersession; #75 replaces the worker-owning ABI; and #76
-closes lifecycle and telemetry invariants. The authoritative acyclic
+authority or Issue #70's full-ledger legacy capacity. Issue #72's strong
+identity/revision staging and issue #73's private cooperative cancellation,
+exact-Run purge/drain, Run-owned commit contention, and RT-denies-HP contract
+are now current. #74 adds latest-wins supersession, #75 replaces the
+worker-owning ABI, and #76 closes registry, graph-close/process-shutdown, and
+telemetry invariants. The authoritative acyclic
 dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 
@@ -807,7 +824,9 @@ dependency table is in the
    public includes, and explicitly rejects raw JSON, socket-address/descriptor,
    file-identity, file-mapping, and backend declarations. This is a precise
    tested boundary rather than an exhaustive POSIX vocabulary claim.
-   Cancellation remains unavailable.
+   Public Host/CLI/IPC cancellation remains unavailable; the current private
+   backend cancellation source and cooperative Run control do not enter this
+   installed surface.
 8. **Completed plugin-boundary work:** Issue #38 tightened both extension SDKs,
    and issue #43 advanced the scheduler contract to ABI v2.
    - Operation plugins use v2 host-independent snapshots and a host-provided

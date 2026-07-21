@@ -91,8 +91,8 @@ scheduler-owner slots.
 | Module | Current responsibility | Does not own |
 | --- | --- | --- |
 | `ComputeService` | Request validation, intent coordination, creation/settlement of one HP Run or separate HP/RT child Runs, staged commit-policy invocation, collaborator construction, and final result selection | Frontend values, worker threads, graph documents, live Graph revision authority, or target `RunGroup` policy |
-| `ComputeRun` | Immutable single-domain HP/RT descriptor with exact Graph identity/revision, monotonic phase, exact terminal outcome, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, revision mint/publication authority, cancellation, or resource admission |
-| `ComputeCommitPolicy` | Product-only validation of exact Run/staged/live provenance, deferred HP cache persistence, and serialized visible publication before Run success | Planning, execution workers, cancellation, supersession, final lifecycle registry, or public ABI |
+| `ComputeRun` | Immutable single-domain HP/RT descriptor with exact Graph identity/revision, monotonic phase, a private weak-lifetime cancellation source, read-only lease observation, one terminal/commit arbiter, shared-control ownership of full-plan/temporary or dirty-HP staging storage, stable leases, and composite task identity | Paired realtime grouping, Graph state, workers, revision mint/publication authority, public cancellation control, or resource admission |
+| `ComputeCommitPolicy` | Product-only validation of exact Run/staged/live provenance, a retained read-only Run lease, in-transaction cancellation observation and Run-owned commit-contender resolution, deferred HP cache persistence, and serialized visible publication before Run success | Planning, execution workers, a cancellation source or arbitrary cancellation authority, supersession, final lifecycle registry, or public ABI |
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
 | `FullTaskGraphExpander` | Complete node/tile task shape for one graph generation and domain | Request target, cache pruning, dirty pruning |
@@ -104,7 +104,7 @@ scheduler-owner slots.
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, or scheduler policy |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, variants, result slots, and callback owner for one full HP request | Scheduler workers, Run terminal state, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One injected fixed built-in CPU worker domain, one host-authoritative `ResourceLedger`, a policy-aware entry/byte-bounded ready store, private interactive/throughput policy state, atomic whole-Run resource admission, Run-local completion/failure/trace settlement, and HP/RT dirty/preflight execution | Planning, dependencies, Graph/cache state, GPU/plugin execution, lifecycle admission registry, or visible commit |
+| `ExecutionService` | One injected fixed built-in CPU worker domain, one host-authoritative `ResourceLedger`, a policy-aware entry/byte-bounded ready store, private interactive/throughput policy state, atomic whole-Run resource admission, cancellation notification with exact-Run queued purge and running-callback drainage, Run-local completion/failure/trace settlement, and HP/RT dirty/preflight execution | Planning, dependencies, Graph/cache state, cancellation authority, GPU/plugin execution, lifecycle admission registry, or visible commit |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Scheduler trace ownership |
 | `SchedulerFactory` | Resolve `0..8` worker requests and plan each scheduler's conservative slot charge before construction | Process capacity ownership or graph-state access |
@@ -182,7 +182,10 @@ scheduler ABI replacement.
    planning. For realtime it creates separate HP and RT child Runs before
    preflight. Each captures a fresh Run id, session label, strong Graph instance
    identity, authoritative revision, target, single-domain intent, full or
-   interactive quality, and explicit QoS. No target `RunGroup` exists yet.
+   interactive quality, and explicit QoS. A private request cancellation
+   coordinator attaches the HP Run or both independent realtime children; it
+   can fan one explicit request to both children without creating the target
+   `RunGroup`.
 4. Connected parameter producers are stabilized into one request-local HP
    snapshot before extent, ROI, or task-shape decisions use them.
 5. The planner expands the complete task shape for one domain and prunes it to
@@ -195,18 +198,25 @@ scheduler ABI replacement.
    `(RunId, RunLocalTaskId)`, then sends only ready work to the fixed
    `ExecutionService`. Full HP uses `TaskSubmissionPlan`; preflight and dirty
    HP/RT use heap-owned phase contexts. Serial, GPU, and plugin routes retain
-   their selected per-Graph schedulers.
+   their selected per-Graph schedulers. Explicit cancellation or an expired
+   injected monotonic deadline is observed at existing planning, queue,
+   callback, dependency, phase, and commit boundaries. The service closes and
+   purges only the matching Run's queued entries; already entered callbacks
+   drain without releasing new dependents or publishing staged output.
 8. Workers write only request-owned Graph/proxy state, including Run-owned
    full-plan temporary results or dirty-HP staging. RT staging remains
    sibling-callback-local, and all service callbacks retain the RT child lease
    through synchronous settlement.
 9. After validated output, each Run reaches `CommitPending`. The product policy
-   validates exact staged/live identity and revision, optionally persists
-   changed HP artifacts, and publishes complete Graph/proxy state in the same
-   graph-state work item. Run success follows that publication; stale or failed
-   commit becomes failure. The coordinator returns RT output only after both
-   children settle; result, events, timing, and errors then cross the Host value
-   boundary.
+   retains a read-only Run lease, enters the graph-state work item, observes
+   cancellation, and tries to claim the Run-owned one-shot commit contender.
+   Cancellation accepted before that claim publishes no Graph, proxy, or
+   deferred cache state. Once the contender wins, later cancellation is a
+   terminal no-op; the policy validates exact staged/live identity and
+   revision, optionally persists changed HP artifacts, publishes complete
+   Graph/proxy state, and resolves success or exact failure in the same work
+   item. The coordinator returns RT output only after both children settle;
+   result, events, timing, and errors then cross the Host value boundary.
 
 ## Planning Invariants
 
@@ -289,8 +299,11 @@ all owners still share final physical capacity in the sole ledger. Throughput
 quota check, ledger commit, and class charge form one serialized transaction;
 the charge remains until the matching root vector is physically returned after
 both parent and child-grant ownership end. The private policy strategies own no
-worker, ready entry, resource token, budget, Run, or Graph. Revision preference,
-cancellation, and supersession are not part of this scheduling slice.
+worker, ready entry, resource token, budget, Run, or Graph. Revision preference
+and supersession are not scheduling-policy inputs. Cancellation is instead a
+Run-terminal correctness rule: `ExecutionService` observes the matching Run,
+closes only its ready admission, purges only its queued entries, and waits for
+its already running callbacks to drain.
 
 Built-in CPU bindings are ownerless at `GraphRuntime` for both intents. Serial,
 GPU, and plugin scheduler resources remain owned per Graph and intent, but
@@ -372,19 +385,27 @@ scheduler-backed full/dirty HP, and RT workers cannot modify the live Graph or
 proxy during operation work. Snapshot disk writes are suppressed.
 
 After local output validation, the matching Run reaches `CommitPending` and a
-private `ComputeCommitPolicy` materializes complete publication copies. One
-graph-state work item then requires the exact staged owner, Run domain/label,
-strong Graph identity, and authoritative revision to match both the descriptor
-and live Graph. Only a valid HP transaction may persist changed staged cache
-artifacts; complete Graph/proxy publication is a no-throw state swap and
-preserves the revision. Run `Succeeded` follows publication. A stale predicate
-publishes no Graph, proxy, or deferred disk output and becomes `ComputeError`.
+private `ComputeCommitPolicy` materializes complete publication copies. The
+policy owns no cancellation source; it retains a read-only Run lease and, in
+one graph-state work item, observes explicit/deadline cancellation before
+trying to claim the Run-owned commit contender. Cancellation accepted before
+that claim leaves the Run `Cancelled` and publishes no Graph, proxy, or
+deferred disk output. An accepted contender makes later cancellation a no-op,
+then requires the exact staged owner, Run domain/label, strong Graph identity,
+and authoritative revision to match both the descriptor and live Graph. Only a
+valid HP transaction may persist changed staged cache artifacts; complete
+Graph/proxy publication is a no-throw state swap and preserves the revision.
+The contender resolves `Succeeded` after publication or preserves the exact
+predicate/persistence failure as `Failed` before the work item returns.
 
 RT applies that predicate and publishes its proxy before opening the sibling
 gate. HP later validates independently. A newer Graph revision can therefore
-reject HP without rolling back an RT publication that already won. This issue
-Issue #72 does not provide cancellation, latest-wins supersession, the final
-lifecycle registry/lease, or request-level `RunGroup` settlement.
+reject HP without rolling back an RT publication that already won. RT
+cancellation while the gate is `Pending` permanently denies HP commit and
+requests cancellation of the HP child. HP cancellation remains child-local and
+cannot roll back an RT proxy that already committed. The installed Host, CLI,
+and IPC version 1 surfaces expose no cancellation entry; IPC jobs continue to
+report `cancellable: false`.
 
 ## Failure and Lifetime Semantics
 
@@ -411,6 +432,11 @@ lifecycle registry/lease, or request-level `RunGroup` settlement.
   current request.
 - Operation callbacks may already have external side effects; staged graph
   output does not roll those effects back.
+- `Cancelled` terminal publication may precede physical quiescence. Matching
+  queued work is purged, while an entered non-preemptible callback may finish
+  only to release its lease, completion ownership, and grants. Close/drain
+  waits for that cleanup; no cancelled Run releases new dependents or commits
+  request-owned staging.
 - Scheduler-backed full HP work no longer borrows a raw `TaskExecutor`.
   `TaskSubmissionPlan` owns its runner. Built-in CPU ready work crosses the
   service boundary as `ReadyTaskSubmission`; legacy full HP uses an owned
@@ -435,14 +461,19 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted replacement direction and detailed ownership contract.
-This document is authoritative through issue #72: the fixed multi-Graph HP/RT
+This document is authoritative through issue #73: the fixed multi-Graph HP/RT
 CPU service, ownerless built-in CPU bindings, separate realtime child Runs,
 owned dirty/preflight submissions, atomic vector admission, bounded ready
 storage, built-in interactive/throughput fairness and headroom, retained legacy
 per-Graph schedulers sharing one host ledger, strong Graph identity/revision,
-request-owned product staging, and exact-revision visible commit. `RunGroup`,
-final lifecycle admission/leases, cancellation, supersession, and the scheduler
-ABI replacement remain future behavior.
+request-owned product staging, exact-revision visible commit, private
+request/deadline cancellation, exact-Run queued purge, running
+observation/drainage, dependent suppression, Run-owned commit arbitration, and
+RT-denies-HP cancellation are current behavior. Latest-wins supersession and
+request-level `RunGroup` (#74), the scheduler ABI replacement (#75), final
+lifecycle admission/leases with graph-close/process-shutdown cancellation and
+telemetry (#76), and public Host/CLI/IPC cancellation entry points remain
+future behavior.
 
 ## Implementation and Validation Entry Points
 
