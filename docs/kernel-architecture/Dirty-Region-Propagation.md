@@ -209,12 +209,19 @@ cooperative cancellation.
 HP dirty tasks stage output in `HighPrecisionDirtyWriteBuffer`; RT dirty tasks
 stage output in `RealtimeProxyWriteBuffer`. A successful request commits staged
 HP state to `GraphModel` or RT state to `RealtimeProxyGraph` through the
-intent-specific commit path. For a standalone non-realtime HP request, the
-`HighPrecisionDirtyWriteBuffer` is owned by the request `ComputeRun` until
-commit or failure cleanup. This dirty path does not use the issue #67 full-HP
-callback lease/composite-identity route. The HP child of `RealTimeUpdate` has
-no child Run and retains its callback-local buffer until later
-child-Run/`RunGroup` support.
+intent-specific commit path. A standalone non-realtime HP request owns one
+`ComputeRun`. Each `RealTimeUpdate` creates distinct HP and RT child Runs before
+preflight; both capture the same strong Graph instance identity and
+authoritative revision while retaining independent domain, lease, phase,
+terminal, and staging state. No mixed-domain Run or final policy-bearing
+`RunGroup` is created.
+
+Kernel's product commit policy materializes publication copies and then checks
+that each child Run is `CommitPending`, owns the exact staged Graph/proxy, and
+still matches the live Graph identity and revision inside the graph-state work
+item. A stale child publishes no Graph/proxy/cache output and fails through the
+existing `ComputeError` path. This exact revision predicate rejects old work; it
+does not stop an already-running callback.
 
 For a `RealTimeUpdate`, RT and HP are sibling computations. The RT sibling may
 commit proxy state first, while the HP sibling observes the sibling commit gate
@@ -239,8 +246,8 @@ The current implementation does not provide:
 - Macro dirty-key materialization or dynamic Micro/Macro coarsening;
 - sparse ROI sets, dirty-area caps, time-window merging, or adaptive batching;
 - a node-to-backend dirty subscription that automatically launches compute;
-- dirty-path Run leases, paired realtime child Runs/`RunGroup`, authoritative
-  graph revision, enforced deadline, supersession, or cooperative cancellation.
+- a final policy-bearing `RunGroup`, enforced deadline, issue #74 supersession,
+  or issue #73 cooperative cancellation of already-running callbacks.
 
 Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
 across the Host request, graph state, ROI propagation, planning, snapshot,

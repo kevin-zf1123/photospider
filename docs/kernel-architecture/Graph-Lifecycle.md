@@ -177,17 +177,29 @@ missing or closing session, or a missing requested node, is
 an existing target are `GraphErrc::InvalidYaml`.
 
 Replacement copies the current node map, validates the complete candidate
-topology, and only then swaps it into visible state. Parse,
-missing-dependency, or cycle validation failure leaves the previous node map
-and topology unchanged. The current implementation does not claim an
-all-exception strong guarantee: allocation failure while rebuilding the
-already-validated topology may occur after the candidate node map has been
-moved into the model.
+topology, prepares successor topology/revision generations, and only then uses
+no-throw container swaps plus scalar stores to publish visible state. Parse,
+missing-dependency, cycle, allocation, or generation-overflow failure therefore
+leaves the previous node map, topology, generations, revision, and runtime state
+unchanged. Publication begins only after all throwing structural preparation
+has completed.
 
 `add_node()`, `remove_node()`, and input-rewire methods follow the same
 candidate-map pattern. A successful structural edit rebuilds the adjacency
 index, advances topology generation and authoritative revision, and clears the
 cached full task graph. A rejected candidate advances neither value.
+
+Explicit disk, memory, combined, and transient-memory cache clears use a
+different failure boundary because filesystem deletion and multi-node clearing
+can succeed partially before a later operation throws. The graph-state work
+item first computes the checked successor revision. Overflow therefore leaves
+the Graph, caches, and files unchanged. After that pure preparation succeeds,
+it publishes the successor revision without throwing and only then enters the
+cache side effects. A later clear failure is returned through the existing
+facade contract, but the revision is never rolled back: every Run captured
+before the clear intent remains stale even when the cache root was removed but
+could not be recreated, or only part of memory cache was released. This is
+revision-safe invalidation, not issue #73 cancellation of already-running work.
 
 ## ROI Projection
 

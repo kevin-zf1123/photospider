@@ -139,14 +139,23 @@ closing session，以及 requested node 缺失，都会返回 `GraphErrc::NotFou
 target，parsing 与完整 candidate-topology validation failure 返回
 `GraphErrc::InvalidYaml`。
 
-Replacement 会复制当前 node map、验证完整 candidate topology，最后才交换到 visible state。
-Parse、missing-dependency 或 cycle validation failure 会保留之前的 node map 与 topology。当前
-implementation 不承诺 all-exception strong guarantee：重建已验证 topology 时的 allocation
-failure 可能发生在 candidate node map 已被 move 进 model 之后。
+Replacement 会复制当前 node map、验证完整 candidate topology、准备 topology/revision 的
+successor generation，最后才通过 no-throw container swap 与 scalar store 发布 visible state。
+因此，parse、missing-dependency、cycle、allocation 或 generation-overflow failure 都会保留之前的
+node map、topology、generation、revision 与 runtime state。只有全部可能抛异常的 structural
+preparation 完成后才开始 publication。
 
 `add_node()`、`remove_node()` 和 input-rewire 方法采用同一种 candidate-map 模式。成功的结构编辑
 会重建 adjacency index、推进 topology generation 与 authoritative revision，并清除 cached
 full task graph。被拒绝的 candidate 不会推进这两个值。
+
+显式 disk、memory、combined 与 transient-memory cache clear 使用不同的 failure boundary，因为
+filesystem deletion 与多 node clearing 可能先部分成功，后续 operation 才抛出异常。Graph-state
+work item 会先计算 checked successor revision，因此 overflow 会保持 Graph、cache 与 file 不变。
+该纯准备成功后，work item 以 no-throw 方式发布 successor revision，随后才进入 cache side effect。
+后续 clear failure 仍按现有 facade contract 返回，但 revision 绝不回滚：即使 cache root 已删除却
+无法重建，或只释放了部分 memory cache，clear intent 前捕获的每个 Run 仍为 stale。这是 revision-safe
+invalidation，不是 Issue #73 对已运行 work 的 cancellation。
 
 ## ROI 投影
 
