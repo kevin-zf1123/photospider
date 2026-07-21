@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for install-consumer CMake architecture propagation."""
+"""Regression tests for install-consumer platform policy and registration."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -66,6 +67,13 @@ ARCHITECTURES = "arm64;x86_64"
 #: @note This process-lifetime assertion value must stay aligned with
 #:   ``ARCHITECTURES`` and remain one unsplit argv element.
 ARCHITECTURE_ARGUMENT = f"-DCMAKE_OSX_ARCHITECTURES={ARCHITECTURES}"
+#: @brief Minimal usable symbol table covering every production seam object.
+#: @note Each line uses a defined text-symbol marker accepted by the production
+#:   archive scanner and contains no forbidden test-seam fragment.
+USABLE_PRODUCT_SYMBOL_OUTPUT = "\n".join(
+    f"0000000000000000 T {fragment}"
+    for fragment in static_product.REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+)
 #: @brief Exact maintained install-consumer CTest names and driver basenames.
 #: @note Every expected entry carries the build-smoke label in real CTest
 #:   inventory; ordering is stable only for deterministic diagnostics.
@@ -446,6 +454,114 @@ class CommandRecorder:
         ]
 
 
+class SymbolToolHarness:
+    """@brief Provide deterministic executable discovery and scan processes.
+
+    @throws AssertionError If production invokes an unconfigured executable.
+    @note The harness records only process-local lists, never launches a child,
+      and never changes PATH or another process-global environment value.
+    """
+
+    def __init__(
+        self,
+        which_paths: dict[str, str | None],
+        process_results: dict[str, tuple[int, str] | OSError],
+        executable_paths: set[str] | None = None,
+    ) -> None:
+        """@brief Initialize one isolated symbol-tool fixture.
+
+        @param which_paths Executable names mapped to synthetic lookup results.
+        @param process_results Executable paths mapped to return-code/stdout
+          pairs or startup failures.
+        @param executable_paths Paths accepted from ``xcrun --find``; omitted
+          values default to an empty set.
+        @return None.
+        @throws None Caller containers are copied before retention.
+        @note Stderr is intentionally absent because production diagnostics
+          must not echo arbitrary tool output.
+        """
+
+        #: @brief Ordered executable names requested through ``which``.
+        #: @note The list is owned for one test-local harness lifetime.
+        self.which_calls: list[str] = []
+        #: @brief Ordered no-shell command argv observed by the fake runner.
+        #: @note Detached lists allow exact priority assertions after a scan.
+        self.run_commands: list[list[str]] = []
+        #: @brief Synthetic executable lookup table owned by this harness.
+        #: @note Missing names model unavailable PATH candidates.
+        self._which_paths = dict(which_paths)
+        #: @brief Synthetic captured-process outcomes keyed by executable path.
+        #: @note Values never leave this test-process fixture.
+        self._process_results = dict(process_results)
+        #: @brief Exact xcrun result paths accepted by the fake validator.
+        #: @note Membership is immutable after initialization.
+        self._executable_paths = set(executable_paths or set())
+
+    def which(self, executable_name: str) -> str | None:
+        """@brief Resolve one synthetic executable name.
+
+        @param executable_name Basename requested by production discovery.
+        @return Configured path or ``None`` when unavailable.
+        @throws None Missing mapping entries are treated as unavailable.
+        @note Every lookup is recorded in call order.
+        """
+
+        self.which_calls.append(executable_name)
+        return self._which_paths.get(executable_name)
+
+    def run(
+        self, command: list[str], cwd: pathlib.Path
+    ) -> subprocess.CompletedProcess[str]:
+        """@brief Return one configured captured-process result.
+
+        @param command Executable and arguments produced by production code.
+        @param cwd Working directory selected by production code.
+        @return Synthetic completed process with configured status/stdout.
+        @throws OSError When the configured process models startup failure.
+        @throws AssertionError If no response exists for the executable.
+        @note ``cwd`` is not accessed; argv is copied before recording.
+        """
+
+        del cwd
+        recorded = list(command)
+        self.run_commands.append(recorded)
+        if not recorded or recorded[0] not in self._process_results:
+            raise AssertionError(
+                f"unexpected symbol-tool command: {recorded!r}"
+            )
+        result = self._process_results[recorded[0]]
+        if isinstance(result, OSError):
+            raise result
+        returncode, stdout = result
+        return subprocess.CompletedProcess(
+            args=recorded,
+            returncode=returncode,
+            stdout=stdout,
+            stderr="fixture stderr must remain private",
+        )
+
+    def is_executable(self, path: str) -> bool:
+        """@brief Validate one synthetic ``xcrun`` result path.
+
+        @param path Exact discovery text after production whitespace trimming.
+        @return Whether the path belongs to the configured executable set.
+        @throws None Membership lookup is in-memory.
+        @note The production helper independently enforces absolute spelling.
+        """
+
+        return path in self._executable_paths
+
+    def run_executables(self) -> list[str]:
+        """@brief Return executable paths in observed process order.
+
+        @return Detached first-argv values from every recorded command.
+        @throws None Recorded commands are always nonempty after ``run``.
+        @note Discovery and inspection commands remain distinguishable by path.
+        """
+
+        return [command[0] for command in self.run_commands]
+
+
 class InstallConsumerCTestRegistrationTest(unittest.TestCase):
     """@brief Lock active CTest commands for the three real install smokes.
 
@@ -810,6 +926,317 @@ class ProducerArchitectureArgumentPolicyTest(unittest.TestCase):
                 ),
                 (),
             )
+
+
+class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
+    """@brief Lock platform symbol-tool ordering and fail-closed fallback.
+
+    @throws AssertionError If discovery order, validation, de-duplication,
+      archive usability checks, or path-free diagnostics regress.
+    @note Every case injects callbacks into the real production helpers. No
+      process launches and no process-global PATH mutation occur.
+    """
+
+    def inspect(
+        self,
+        harness: SymbolToolHarness,
+        platform_system: str = "Darwin",
+    ) -> dict[str, Any]:
+        """@brief Inspect one synthetic installed archive through production.
+
+        @param harness Test-local lookup, validation, and process callbacks.
+        @param platform_system Platform policy selected by the production code.
+        @return Complete production symbol-scan observation.
+        @throws AssertionError If production invokes an unconfigured command.
+        @note The synthetic archive need not exist because the injected runner
+          never accesses its argv path.
+        """
+
+        return static_product.inspect_product_archive_symbols(
+            pathlib.Path("/fixture/install-prefix"),
+            ["lib/libphotospider.a"],
+            platform_system,
+            which=harness.which,
+            captured_runner=harness.run,
+            executable_validator=harness.is_executable,
+        )
+
+    def test_darwin_uses_xcrun_before_incompatible_path_llvm_nm(
+        self,
+    ) -> None:
+        """@brief Prefer Xcode llvm-nm even when PATH has another llvm-nm.
+
+        @return None after only xcrun discovery and its usable result execute.
+        @throws AssertionError If PATH-first or xcrun-skipping behavior returns.
+        @note The PATH llvm-nm intentionally lacks every required anchor, so a
+          priority mutation cannot accidentally satisfy the assertion.
+        """
+
+        harness = SymbolToolHarness(
+            {
+                "xcrun": "/usr/bin/xcrun",
+                "llvm-nm": "/fake/path/llvm-nm",
+                "nm": "/usr/bin/nm",
+            },
+            {
+                "/usr/bin/xcrun": (0, "/xcode/usr/bin/llvm-nm\n"),
+                "/xcode/usr/bin/llvm-nm": (
+                    0,
+                    USABLE_PRODUCT_SYMBOL_OUTPUT,
+                ),
+                "/fake/path/llvm-nm": (0, "0000 T unrelated"),
+                "/usr/bin/nm": (0, "0000 T unrelated"),
+            },
+            {"/xcode/usr/bin/llvm-nm"},
+        )
+
+        observation = self.inspect(harness)
+
+        self.assertEqual(observation["tool_source"], "xcrun llvm-nm")
+        self.assertTrue(observation["covers_product_seams"])
+        self.assertEqual(
+            harness.run_executables(),
+            ["/usr/bin/xcrun", "/xcode/usr/bin/llvm-nm"],
+        )
+        self.assertEqual(harness.which_calls.count("xcrun"), 1)
+
+    def test_darwin_xcrun_failure_falls_back_to_path_llvm_nm(
+        self,
+    ) -> None:
+        """@brief Continue to PATH llvm-nm after xcrun discovery fails.
+
+        @return None after the second candidate supplies the authoritative scan.
+        @throws AssertionError If discovery failure skips or aborts fallback.
+        @note PATH nm exists but must not execute after PATH llvm-nm succeeds.
+        """
+
+        harness = SymbolToolHarness(
+            {
+                "xcrun": "/usr/bin/xcrun",
+                "llvm-nm": "/toolchain/llvm-nm",
+                "nm": "/usr/bin/nm",
+            },
+            {
+                "/usr/bin/xcrun": (69, "private discovery output"),
+                "/toolchain/llvm-nm": (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+                "/usr/bin/nm": (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+            },
+        )
+
+        observation = self.inspect(harness)
+
+        self.assertEqual(observation["tool_source"], "PATH llvm-nm")
+        self.assertEqual(
+            harness.run_executables(),
+            ["/usr/bin/xcrun", "/toolchain/llvm-nm"],
+        )
+        self.assertIn(
+            "xcrun llvm-nm: discovery exited with status 69",
+            observation["attempts"],
+        )
+
+    def test_darwin_invalid_xcrun_path_falls_back_to_path_llvm_nm(
+        self,
+    ) -> None:
+        """@brief Reject an unusable absolute xcrun result before scanning.
+
+        @return None after validated PATH llvm-nm completes the scan.
+        @throws AssertionError If unvalidated xcrun stdout becomes executable.
+        @note The fake validator rejects the Xcode path without filesystem I/O.
+        """
+
+        harness = SymbolToolHarness(
+            {
+                "xcrun": "/usr/bin/xcrun",
+                "llvm-nm": "/toolchain/llvm-nm",
+                "nm": None,
+            },
+            {
+                "/usr/bin/xcrun": (0, "/xcode/missing/llvm-nm\n"),
+                "/toolchain/llvm-nm": (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+            },
+        )
+
+        observation = self.inspect(harness)
+
+        self.assertEqual(observation["tool_source"], "PATH llvm-nm")
+        self.assertEqual(
+            harness.run_executables(),
+            ["/usr/bin/xcrun", "/toolchain/llvm-nm"],
+        )
+        self.assertIn(
+            "xcrun llvm-nm: discovery returned an unusable path",
+            observation["attempts"],
+        )
+
+    def test_darwin_unusable_path_llvm_nm_falls_back_to_nm(self) -> None:
+        """@brief Try PATH nm when earlier discovery/scan candidates fail.
+
+        @return None after nm supplies all three required anchors.
+        @throws AssertionError If a zero-exit but anchor-blind tool is accepted.
+        @note This models a PATH llvm-nm that cannot inspect the installed
+          archive format despite exiting successfully.
+        """
+
+        harness = SymbolToolHarness(
+            {
+                "xcrun": "/usr/bin/xcrun",
+                "llvm-nm": "/toolchain/llvm-nm",
+                "nm": "/usr/bin/nm",
+            },
+            {
+                "/usr/bin/xcrun": (1, ""),
+                "/toolchain/llvm-nm": (0, "0000 T unrelated"),
+                "/usr/bin/nm": (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+            },
+        )
+
+        observation = self.inspect(harness)
+
+        self.assertEqual(observation["tool_source"], "PATH nm")
+        self.assertEqual(
+            harness.run_executables(),
+            ["/usr/bin/xcrun", "/toolchain/llvm-nm", "/usr/bin/nm"],
+        )
+        self.assertIn(
+            "PATH llvm-nm: inspection missed 3/3 required anchors",
+            observation["attempts"],
+        )
+
+    def test_non_darwin_never_discovers_or_invokes_xcrun(self) -> None:
+        """@brief Keep xcrun entirely outside non-Darwin resolution.
+
+        @return None after PATH llvm-nm is selected without an xcrun lookup.
+        @throws AssertionError If non-Darwin behavior depends on Xcode tooling.
+        @note An available xcrun mapping makes an accidental lookup observable.
+        """
+
+        harness = SymbolToolHarness(
+            {
+                "xcrun": "/usr/bin/xcrun",
+                "llvm-nm": "/toolchain/llvm-nm",
+                "nm": "/usr/bin/nm",
+            },
+            {
+                "/usr/bin/xcrun": (0, "/xcode/usr/bin/llvm-nm\n"),
+                "/toolchain/llvm-nm": (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+                "/usr/bin/nm": (0, USABLE_PRODUCT_SYMBOL_OUTPUT),
+            },
+            {"/xcode/usr/bin/llvm-nm"},
+        )
+
+        observation = self.inspect(harness, platform_system="Linux")
+
+        self.assertEqual(observation["tool_source"], "PATH llvm-nm")
+        self.assertEqual(harness.which_calls, ["llvm-nm", "nm"])
+        self.assertEqual(harness.run_executables(), ["/toolchain/llvm-nm"])
+
+    def test_no_symbol_tool_fails_closed(self) -> None:
+        """@brief Reject an archive scan when every discovery branch is absent.
+
+        @return None after the unsuccessful observation names all safe sources.
+        @throws AssertionError If missing tools become a skip or successful scan.
+        @note No fake process is configured, proving no command can execute.
+        """
+
+        harness = SymbolToolHarness(
+            {"xcrun": None, "llvm-nm": None, "nm": None},
+            {},
+        )
+
+        observation = self.inspect(harness)
+
+        self.assertEqual(observation["tool"], "")
+        self.assertIsNone(observation["status"])
+        self.assertFalse(observation["covers_product_seams"])
+        self.assertEqual(harness.run_commands, [])
+        self.assertIn("xcrun llvm-nm: xcrun is unavailable", observation["stderr"])
+        self.assertIn("PATH llvm-nm: executable is unavailable", observation["stderr"])
+        self.assertIn("PATH nm: executable is unavailable", observation["stderr"])
+
+    def test_all_unusable_candidates_fail_with_path_free_reasons(self) -> None:
+        """@brief Reject startup, nonzero, and missing-anchor candidates.
+
+        @return None after every attempted source and reason appears safely.
+        @throws AssertionError If any unusable candidate passes or a private
+          executable/captured-stderr path reaches the failure summary.
+        @note The three independent failure modes exercise the complete loop.
+        """
+
+        harness = SymbolToolHarness(
+            {
+                "xcrun": "/usr/bin/xcrun",
+                "llvm-nm": "/private/toolchain/llvm-nm",
+                "nm": "/private/toolchain/nm",
+            },
+            {
+                "/usr/bin/xcrun": (0, "/private/xcode/llvm-nm\n"),
+                "/private/xcode/llvm-nm": OSError(
+                    "private startup diagnostic"
+                ),
+                "/private/toolchain/llvm-nm": (2, "private failure output"),
+                "/private/toolchain/nm": (0, "0000 T unrelated"),
+            },
+            {"/private/xcode/llvm-nm"},
+        )
+
+        observation = self.inspect(harness)
+
+        self.assertEqual(observation["tool"], "")
+        self.assertFalse(observation["covers_product_seams"])
+        self.assertIn(
+            "xcrun llvm-nm: inspection could not start",
+            observation["stderr"],
+        )
+        self.assertIn(
+            "PATH llvm-nm: inspection exited with status 2",
+            observation["stderr"],
+        )
+        self.assertIn(
+            "PATH nm: inspection missed 3/3 required anchors",
+            observation["stderr"],
+        )
+        self.assertNotIn("/private/", observation["stderr"])
+        self.assertNotIn("private failure output", observation["stderr"])
+
+    def test_duplicate_canonical_candidate_paths_run_once(self) -> None:
+        """@brief De-duplicate xcrun, llvm-nm, and nm path aliases.
+
+        @return None after one canonical candidate retains xcrun priority.
+        @throws AssertionError If an equivalent executable remains duplicated.
+        @note The PATH llvm-nm spelling contains a parent segment to exercise
+          canonical rather than string-only comparison.
+        """
+
+        harness = SymbolToolHarness(
+            {
+                "xcrun": "/usr/bin/xcrun",
+                "llvm-nm": "/toolchain/../toolchain/shared-nm",
+                "nm": "/toolchain/shared-nm",
+            },
+            {
+                "/usr/bin/xcrun": (0, "/toolchain/shared-nm\n"),
+            },
+            {"/toolchain/shared-nm"},
+        )
+
+        resolution = static_product.resolve_product_archive_symbol_tools(
+            "Darwin",
+            pathlib.Path("/fixture/install-prefix"),
+            which=harness.which,
+            captured_runner=harness.run,
+            executable_validator=harness.is_executable,
+        )
+
+        self.assertEqual(
+            resolution.candidates,
+            (
+                static_product.SymbolToolCandidate(
+                    source="xcrun llvm-nm",
+                    executable="/toolchain/shared-nm",
+                ),
+            ),
+        )
 
 
 class InstallConsumerArchitecturePropagationTest(unittest.TestCase):

@@ -81,13 +81,19 @@ install and export sets.
 
 `StaticProductConsumerSmoke` enforces that boundary for both
 `BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
-real product is installed, the smoke resolves a bitcode-capable `llvm-nm`
-(including Xcode's `xcrun` tool) or platform `nm`, proves that defined anchors
-from all three production seam objects were actually inspected, and rejects
-every hook function/helper/global fragment. It also rejects an installed test
-product archive, exported test target, or exported internal seam definition.
-This remains a labelled `build-smoke`; ordinary complete CTest selection does
-not make package construction part of runtime-test ownership.
+real product is installed, Darwin first invokes and validates
+`xcrun --find llvm-nm`, then falls back to PATH `llvm-nm` and PATH `nm`;
+non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
+that order. Canonically identical executable paths run once. A candidate is
+usable only when it starts, exits successfully, emits symbols, and exposes
+defined anchors from all three production seam objects. Otherwise the smoke
+records a path-free failure reason and tries the next candidate; no candidate
+or all unusable candidates fail closed. The first usable full symbol table is
+authoritative and rejects every hook function/helper/global fragment. The
+smoke also rejects an installed test product archive, exported test target, or
+exported internal seam definition. This remains a labelled `build-smoke`;
+ordinary complete CTest selection does not make package construction part of
+runtime-test ownership.
 
 The smoke inspects every installed `Photospider*Targets*.cmake` file because
 the package separates base, OpenCV-dependent, and embedded-product targets
@@ -186,9 +192,14 @@ not itself start CMake, CTest, an install, or a compile target.
 shard: it runs the three install-consumer drivers' real command-construction
 paths against disposable producer cache fixtures while replacing subprocess
 execution, so it verifies cache-to-child-argv propagation without launching a
-configure, build, or install. When CMake registers the safety test, it also
-supplies the current build tree, CTest executable, configuration, and Python
-launcher. The test queries that tree through
+configure, build, or install. The same process injects executable lookup,
+validation, and captured-command callbacks into the static-product driver's
+production archive-symbol helpers. It locks Darwin xcrun-first fallback,
+non-Darwin independence, all-candidate failure, and canonical path
+de-duplication without changing process PATH or replacing the real installed
+archive scan. When CMake registers the safety test, it also supplies the
+current build tree, CTest executable, configuration, and Python launcher. The
+test queries that tree through
 `ctest --show-only=json-v1` and the production inventory parser. It requires
 `DependencyDisabledInstallSmoke` and `IpcDisabledInstallSmoke` exactly once in
 every profile, requires `StaticProductConsumerSmoke` exactly once only when

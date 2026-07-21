@@ -6,15 +6,17 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import platform
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
-from typing import Any
+from typing import Any, Callable
 
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
@@ -257,6 +259,37 @@ OPENCV_COMPONENT_TARGET_VARIANTS = {
 APPLE_PRODUCT_LINK_FLAGS = ("-framework Metal", "-framework Foundation")
 
 
+@dataclass(frozen=True)
+class SymbolToolCandidate:
+    """@brief Name one validated archive-symbol inspection candidate.
+
+    @param source Stable path-free label describing how the tool was found.
+    @param executable Exact executable path passed to ``subprocess``.
+    @throws None Construction only retains immutable strings.
+    @note Diagnostics expose ``source`` rather than ``executable`` so a failed
+      scan does not disclose a user or toolchain installation path.
+    """
+
+    source: str
+    executable: str
+
+
+@dataclass(frozen=True)
+class SymbolToolResolution:
+    """@brief Hold ordered unique symbol tools and safe discovery failures.
+
+    @param candidates Validated candidates in their required platform order.
+    @param failures Path-free reasons for discovery branches that were absent
+      or unusable before archive inspection began.
+    @throws None Construction only retains immutable tuples.
+    @note Duplicate canonical executable paths occur at most once in
+      ``candidates`` and are not failures.
+    """
+
+    candidates: tuple[SymbolToolCandidate, ...]
+    failures: tuple[str, ...]
+
+
 def strict_remove_tree(path: Path) -> None:
     """@brief Remove one transient test directory without hiding failure.
 
@@ -303,6 +336,150 @@ def run_command(
             flush=True,
         )
     return proc.returncode
+
+
+def run_captured_command(
+    command: list[str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    """@brief Run one diagnostic command with captured text streams.
+
+    @param command Executable and arguments passed directly without a shell.
+    @param cwd Working directory for the child process.
+    @return Completed process with replacement-decoded stdout and stderr.
+    @throws OSError If the executable cannot start.
+    @note This helper is reserved for short symbol-tool discovery/inspection;
+      callers convert failures to path-free diagnostics and never echo captured
+      stderr into the package verdict.
+    """
+
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+
+
+def is_executable_file(path: str) -> bool:
+    """@brief Validate one absolute regular executable path.
+
+    @param path Candidate returned by an external discovery command.
+    @return ``True`` only for an absolute regular file executable by this user.
+    @throws None Filesystem lookup errors produce ``False`` through the
+      ``Path.is_file`` and ``os.access`` contracts.
+    @note PATH candidates already pass ``shutil.which``; this stricter helper
+      validates untrusted text returned by ``xcrun --find``.
+    """
+
+    try:
+        candidate = Path(path)
+        return (
+            candidate.is_absolute()
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_product_archive_symbol_tools(
+    platform_system: str,
+    cwd: Path,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    captured_runner: Callable[
+        [list[str], Path], subprocess.CompletedProcess[str]
+    ] = run_captured_command,
+    executable_validator: Callable[[str], bool] = is_executable_file,
+) -> SymbolToolResolution:
+    """@brief Resolve ordered, unique archive-symbol inspection candidates.
+
+    Darwin first invokes ``xcrun --find llvm-nm`` and accepts its result only
+    when it is one absolute executable path. PATH ``llvm-nm`` and PATH ``nm``
+    follow in that order. Other platforms never discover or invoke ``xcrun``
+    and use only the two PATH candidates.
+
+    @param platform_system Host platform name such as ``Darwin`` or ``Linux``.
+    @param cwd Working directory for the optional ``xcrun`` discovery command.
+    @param which Injectable executable lookup matching ``shutil.which``.
+    @param captured_runner Injectable no-shell captured subprocess runner.
+    @param executable_validator Injectable validator for ``xcrun`` output.
+    @return Ordered candidates plus path-free discovery failures.
+    @throws None ``OSError`` from ``xcrun`` startup is converted to a failure;
+      injected callbacks are otherwise expected to honor their contracts.
+    @note Canonical paths are de-duplicated without changing the first source's
+      priority. No archive is read and no process-global environment changes.
+    """
+
+    discovered: list[SymbolToolCandidate] = []
+    failures: list[str] = []
+    if platform_system == "Darwin":
+        xcrun = which("xcrun")
+        if xcrun is None:
+            failures.append("xcrun llvm-nm: xcrun is unavailable")
+        else:
+            try:
+                resolved = captured_runner(
+                    [xcrun, "--find", "llvm-nm"], cwd
+                )
+            except OSError:
+                failures.append("xcrun llvm-nm: discovery could not start")
+            else:
+                resolved_path = resolved.stdout.strip()
+                if resolved.returncode != 0:
+                    failures.append(
+                        "xcrun llvm-nm: discovery exited with status "
+                        f"{resolved.returncode}"
+                    )
+                elif not resolved_path:
+                    failures.append(
+                        "xcrun llvm-nm: discovery returned no path"
+                    )
+                elif "\n" in resolved_path or "\r" in resolved_path:
+                    failures.append(
+                        "xcrun llvm-nm: discovery returned multiple lines"
+                    )
+                elif not Path(resolved_path).is_absolute():
+                    failures.append(
+                        "xcrun llvm-nm: discovery returned a relative path"
+                    )
+                elif not executable_validator(resolved_path):
+                    failures.append(
+                        "xcrun llvm-nm: discovery returned an unusable path"
+                    )
+                else:
+                    discovered.append(
+                        SymbolToolCandidate(
+                            source="xcrun llvm-nm",
+                            executable=resolved_path,
+                        )
+                    )
+
+    for source, executable_name in (
+        ("PATH llvm-nm", "llvm-nm"),
+        ("PATH nm", "nm"),
+    ):
+        executable = which(executable_name)
+        if executable is None:
+            failures.append(f"{source}: executable is unavailable")
+        else:
+            discovered.append(
+                SymbolToolCandidate(source=source, executable=executable)
+            )
+
+    unique: list[SymbolToolCandidate] = []
+    canonical_paths: set[str] = set()
+    for candidate in discovered:
+        canonical_path = os.path.normcase(
+            os.path.realpath(candidate.executable)
+        )
+        if canonical_path in canonical_paths:
+            continue
+        canonical_paths.add(canonical_path)
+        unique.append(candidate)
+    return SymbolToolResolution(tuple(unique), tuple(failures))
 
 
 def run_installed_scheduler_contract_probe(plugin: Path) -> int:
@@ -1534,87 +1711,138 @@ def installed_static_product_archives(prefix: Path, install_libdir: str) -> list
 
 
 def inspect_product_archive_symbols(
-    prefix: Path, archives: list[str]
+    prefix: Path,
+    archives: list[str],
+    platform_system: str,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    captured_runner: Callable[
+        [list[str], Path], subprocess.CompletedProcess[str]
+    ] = run_captured_command,
+    executable_validator: Callable[[str], bool] = is_executable_file,
 ) -> dict[str, Any]:
     """@brief Inspect the installed product archive for private test seams.
 
     @param prefix Temporary package installation prefix.
     @param archives Product archive paths relative to ``prefix``.
+    @param platform_system Host platform controlling Darwin ``xcrun`` use.
+    @param which Injectable executable lookup for deterministic regression.
+    @param captured_runner Injectable captured subprocess runner used for both
+      discovery and archive scans.
+    @param executable_validator Injectable validator for ``xcrun`` output.
     @return Symbol-tool identity/status, scanned line count, and every forbidden
-      fragment match. A missing or non-unique archive produces an unsuccessful
-      observation without invoking a tool.
-    @throws OSError If the selected symbol-inspection process cannot start.
-    @note ``llvm-nm`` is preferred, including Xcode's ``xcrun``-resolved tool,
-      with platform ``nm`` as the Unix fallback. The full symbol table is
-      scanned so both defined globals and unresolved hook references fail the
-      production boundary. Required defined symbols from all three seam
-      objects prevent a bitcode-unaware fallback from producing a false pass;
-      only matching lines are retained in observations.
+      fragment match, together with path-free candidate-attempt diagnostics. A
+      missing/non-unique archive or all unusable tools produces an unsuccessful
+      observation.
+    @throws None Process startup failures are converted to candidate failures;
+      injected callbacks are otherwise expected to honor their contracts.
+    @note Darwin tries validated Xcode ``xcrun`` llvm-nm, PATH llvm-nm, then
+      PATH nm; other platforms never invoke xcrun. A candidate becomes
+      authoritative only after a zero exit, nonempty symbol table, and defined
+      anchors from all three seam objects. Once authoritative, every defined or
+      unresolved forbidden fragment from that full table is retained and no
+      later tool may hide it.
     """
 
     if len(archives) != 1:
         return {
             "tool": "",
+            "tool_source": "",
             "status": None,
             "line_count": 0,
             "matches": {},
             "required_anchors": {},
             "covers_product_seams": False,
+            "attempts": [],
             "stderr": "expected exactly one installed product archive",
         }
-    symbol_tool = shutil.which("llvm-nm") or shutil.which("nm")
-    xcrun = shutil.which("xcrun")
-    if shutil.which("llvm-nm") is None and xcrun is not None:
-        resolved = subprocess.run(
-            [xcrun, "--find", "llvm-nm"],
-            cwd=prefix,
-            check=False,
-            capture_output=True,
-            text=True,
-            errors="replace",
-        )
-        resolved_path = resolved.stdout.strip()
-        if resolved.returncode == 0 and resolved_path:
-            symbol_tool = resolved_path
-    if symbol_tool is None:
-        return {
-            "tool": "",
-            "status": None,
-            "line_count": 0,
-            "matches": {},
-            "required_anchors": {},
-            "covers_product_seams": False,
-            "stderr": "neither llvm-nm nor nm is available",
-        }
-    completed = subprocess.run(
-        [symbol_tool, str(prefix / archives[0])],
-        cwd=prefix,
-        check=False,
-        capture_output=True,
-        text=True,
-        errors="replace",
+    resolution = resolve_product_archive_symbol_tools(
+        platform_system,
+        prefix,
+        which=which,
+        captured_runner=captured_runner,
+        executable_validator=executable_validator,
     )
-    symbol_lines = completed.stdout.splitlines()
-    matches = {
-        fragment: [line for line in symbol_lines if fragment in line]
-        for fragment in FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS
-    }
-    required_anchors = {
-        fragment: [
-            line
-            for line in symbol_lines
-            if fragment in line and re.search(r"\b[TW]\b", line)
-        ]
-        for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
-    }
+    attempts = list(resolution.failures)
+    last_status: int | None = None
+    last_line_count = 0
+    last_matches: dict[str, list[str]] = {}
+    last_required_anchors: dict[str, list[str]] = {}
+    for candidate in resolution.candidates:
+        try:
+            completed = captured_runner(
+                [candidate.executable, str(prefix / archives[0])], prefix
+            )
+        except OSError:
+            attempts.append(
+                f"{candidate.source}: inspection could not start"
+            )
+            continue
+        symbol_lines = completed.stdout.splitlines()
+        matches = {
+            fragment: [line for line in symbol_lines if fragment in line]
+            for fragment in FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS
+        }
+        required_anchors = {
+            fragment: [
+                line
+                for line in symbol_lines
+                if fragment in line and re.search(r"\b[TW]\b", line)
+            ]
+            for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+        }
+        last_status = completed.returncode
+        last_line_count = len(symbol_lines)
+        last_matches = {
+            fragment: lines for fragment, lines in matches.items() if lines
+        }
+        last_required_anchors = required_anchors
+        missing_anchor_count = sum(
+            not lines for lines in required_anchors.values()
+        )
+        if completed.returncode != 0:
+            attempts.append(
+                f"{candidate.source}: inspection exited with status "
+                f"{completed.returncode}"
+            )
+            continue
+        if not symbol_lines:
+            attempts.append(
+                f"{candidate.source}: inspection produced no symbol lines"
+            )
+            continue
+        if missing_anchor_count:
+            attempts.append(
+                f"{candidate.source}: inspection missed "
+                f"{missing_anchor_count}/{len(required_anchors)} required anchors"
+            )
+            continue
+        attempts.append(f"{candidate.source}: usable symbol table")
+        return {
+            "tool": candidate.executable,
+            "tool_source": candidate.source,
+            "status": completed.returncode,
+            "line_count": len(symbol_lines),
+            "matches": last_matches,
+            "required_anchors": required_anchors,
+            "covers_product_seams": True,
+            "attempts": attempts,
+            "stderr": "",
+        }
+
+    failure_summary = "; ".join(attempts)
+    if not failure_summary:
+        failure_summary = "no archive-symbol inspection candidate was resolved"
     return {
-        "tool": symbol_tool,
-        "status": completed.returncode,
-        "line_count": len(symbol_lines),
-        "matches": {fragment: lines for fragment, lines in matches.items() if lines},
-        "required_anchors": required_anchors,
-        "covers_product_seams": all(required_anchors.values()),
-        "stderr": completed.stderr.strip(),
+        "tool": "",
+        "tool_source": "",
+        "status": last_status,
+        "line_count": last_line_count,
+        "matches": last_matches,
+        "required_anchors": last_required_anchors,
+        "covers_product_seams": False,
+        "attempts": attempts,
+        "stderr": failure_summary,
     }
 
 
@@ -1917,7 +2145,9 @@ def inspect_install_tree(
     ]
     source_root = repo.as_posix()
     archives = installed_static_product_archives(prefix, install_libdir)
-    product_symbol_scan = inspect_product_archive_symbols(prefix, archives)
+    product_symbol_scan = inspect_product_archive_symbols(
+        prefix, archives, platform_system
+    )
     internal_test_product_artifacts = sorted(
         relative_or_absolute(prefix, path)
         for path in prefix.rglob("*")
@@ -2109,7 +2339,9 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
     @return ``True`` only when every durable package invariant passes.
     @throws KeyError If the caller provides an incomplete observation schema.
     @note Results and failure observations are printed directly for CTest to
-      capture; this function creates no report or comparison files.
+      capture; this function creates no report or comparison files. The symbol
+      summary exposes only its stable discovery source and aggregate counts,
+      never the selected executable path or captured tool stderr.
     """
 
     install = observations["install_tree"]
@@ -2306,7 +2538,23 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         == 0,
     }
     passed = all(checks.values())
+    symbol_scan = install["production_archive_symbol_scan"]
+    prohibited_symbol_lines = sum(
+        len(lines) for lines in symbol_scan["matches"].values()
+    )
+    covered_anchor_count = sum(
+        bool(lines) for lines in symbol_scan["required_anchors"].values()
+    )
     print("static_product_consumer_smoke")
+    print(
+        "archive symbol scan: "
+        f"source={symbol_scan['tool_source'] or 'none'}, "
+        f"prohibited={prohibited_symbol_lines}, "
+        f"anchors={covered_anchor_count}/"
+        f"{len(REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS)}"
+    )
+    for attempt in symbol_scan["attempts"]:
+        print(f"archive symbol attempt: {attempt}")
     for name, ok in checks.items():
         print(f"{'PASS' if ok else 'FAIL'} {name}")
     if install["unexpected_headers"]:

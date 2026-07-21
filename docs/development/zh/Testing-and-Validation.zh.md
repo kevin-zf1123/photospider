@@ -58,11 +58,16 @@ deterministic seam 重新编译这三个 translation unit。没有 target 同时
 product 也不会进入 install 或 export set。
 
 `StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
-configuration 强制执行这条边界。真实 product 安装后，smoke 会解析能读取 bitcode 的 `llvm-nm`
-（包括 Xcode 的 `xcrun` tool）或平台 `nm`，先证明三个 production seam object 的 defined anchor
-确实都被检查，再拒绝任何 hook function/helper/global fragment。它也会拒绝已安装的 test product
-archive、已导出的 test target 或已导出的内部 seam definition。该测试继续属于带 label 的
-`build-smoke`；普通完整 CTest selection 不会让 package construction 混入 runtime-test ownership。
+configuration 强制执行这条边界。真实 product 安装后，Darwin 会先调用并验证
+`xcrun --find llvm-nm`，然后依次回退到 PATH `llvm-nm` 与 PATH `nm`；非 Darwin 平台绝不会
+调用 `xcrun`，只按上述顺序使用两个 PATH candidate。Canonical path 相同的 executable 只运行
+一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露三个 production seam object 的
+全部 defined anchor 时才可用；否则 smoke 会记录不含路径的 failure reason 并尝试下一项。没有
+candidate 或全部 candidate 都不可用时必须 fail closed。第一个可用的完整 symbol table 是权威
+结果，并用于拒绝任何 hook function/helper/global fragment。Smoke 也会拒绝已安装的 test
+product archive、已导出的 test target 或已导出的内部 seam definition。该测试继续属于带 label
+的 `build-smoke`；普通完整 CTest selection 不会让 package construction 混入 runtime-test
+ownership。
 
 该 smoke 会检查每个已安装的 `Photospider*Targets*.cmake` 文件，因为 package 将基础 target、
 依赖 OpenCV 的 target 与 embedded-product target 分到不同 export set 中。它的 dependency
@@ -137,9 +142,13 @@ helper，它会作为普通 safety regression 留在完整 CTest 分片。
 safety regression，本身不会启动 CMake、CTest、install 或 compile target。
 `InstallConsumerArchitecturePropagationSafety` 同样留在主分片：它使用可丢弃的 producer cache
 fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
-在不启动 configure、build 或 install 的情况下验证 cache 到 child argv 的传播。CMake 注册该
-safety test 时，还会传入当前 build tree、CTest executable、configuration 与 Python launcher。
-测试随后通过 `ctest --show-only=json-v1` 和生产 inventory parser 查询该 build tree，并要求三个
+在不启动 configure、build 或 install 的情况下验证 cache 到 child argv 的传播。同一进程还会向
+static-product driver 的 production archive-symbol helper 注入 executable lookup、validation 与
+captured-command callback；它会在不改变进程 PATH、也不取代真实 installed archive scan 的前提下，
+锁定 Darwin xcrun-first fallback、非 Darwin 独立性、全部 candidate failure 与 canonical path
+去重。CMake 注册该 safety test 时，还会传入当前 build tree、CTest executable、configuration 与
+Python launcher。测试随后通过 `ctest --show-only=json-v1` 和生产 inventory parser 查询该 build
+tree，并要求三个
 真实 smoke 遵循配置相关的精确集合：所有 profile 都必须各自只注册一次
 `DependencyDisabledInstallSmoke` 与 `IpcDisabledInstallSmoke`；
 `StaticProductConsumerSmoke` 只在 IPC enabled 时必须精确注册一次，在 IPC disabled 时必须缺席。
