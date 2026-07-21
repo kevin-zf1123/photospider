@@ -64,6 +64,31 @@ child output, and assertion diagnostics to stdout/stderr for CTest to capture.
 All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
+`BUILD_TESTING` controls availability of internal test products, not how the
+installed `photospider` archive compiles the Issue #72 observation seams. The
+product source inventory is divided into common objects, compiled once, and
+production objects for `graph_cache_service.cpp`,
+`graph_state_executor.cpp`, and `kernel_compute.cpp`. The real archive always
+uses the production form of those three translation units, with no
+`PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`,
+`PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, or
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` declarations, globals, branches,
+or symbols. Focused tests link a non-installed
+`photospider_internal_test_product` that reuses the same common objects and
+recompiles only those three translation units with the deterministic seams.
+No target links both complete archives, and the test product is absent from
+install and export sets.
+
+`StaticProductConsumerSmoke` enforces that boundary for both
+`BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
+real product is installed, the smoke resolves a bitcode-capable `llvm-nm`
+(including Xcode's `xcrun` tool) or platform `nm`, proves that defined anchors
+from all three production seam objects were actually inspected, and rejects
+every hook function/helper/global fragment. It also rejects an installed test
+product archive, exported test target, or exported internal seam definition.
+This remains a labelled `build-smoke`; ordinary complete CTest selection does
+not make package construction part of runtime-test ownership.
+
 The smoke inspects every installed `Photospider*Targets*.cmake` file because
 the package separates base, OpenCV-dependent, and embedded-product targets
 into distinct export sets. Its dependency classifier recognizes only the exact
@@ -353,8 +378,11 @@ newer visible state, and write no deferred cache artifact. A focused
 validation inside the graph-state item, proving mutation cannot enter between
 validation and publication. The same checkpoint proves a valid RT proxy commit
 remains visible when the independently validated HP sibling later becomes
-stale. The macro is present only in provider-independent focused/full test
-builds and is compiled out of the ordinary product configuration.
+stale. Together with `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING` and
+`PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, this macro is present only
+in the three-translation-unit test-product variant used by
+`test_kernel_contracts` and `test_host_adapter`. The installable product uses
+the matching production objects even when `BUILD_TESTING=ON`.
 
 The same binary proves the private compute-request lane serializes scheduler
 observation/replacement with same-Graph compute, accepted async work survives a
