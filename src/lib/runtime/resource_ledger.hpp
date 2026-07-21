@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 namespace ps {
@@ -108,6 +109,44 @@ struct ResourceReservationState;
  */
 class ResourceLedger final {
  public:
+  /**
+   * @brief Observes exact root release under one caller-owned transaction lock.
+   *
+   * @throws Nothing from destruction or either callback.
+   * @note This private source-tree seam carries no resource authority. The
+   * ledger retains a shared observer only for a successfully committed root
+   * reservation and calls it exactly once after that root vector is physically
+   * returned, including when outstanding child grants defer the release.
+   */
+  class ReservationReleaseObserver {
+   public:
+    /**
+     * @brief Releases one non-authoritative observer owner.
+     * @throws Nothing.
+     */
+    virtual ~ReservationReleaseObserver() noexcept = default;
+
+    /**
+     * @brief Returns the external lock serializing admission and release.
+     * @return Stable mutex retained for the observer lifetime.
+     * @throws Nothing.
+     * @note The mutex must be distinct from ledger and reservation mutexes.
+     */
+    virtual std::mutex& release_transaction_mutex() noexcept = 0;
+
+    /**
+     * @brief Updates companion non-authoritative accounting after root release.
+     * @param released Exact vector already returned to ledger capacity.
+     * @return Nothing.
+     * @throws Nothing.
+     * @note The ledger holds `release_transaction_mutex()` while calling this
+     * method. Implementations must not call back into the ledger or take
+     * another lock.
+     */
+    virtual void on_reservation_released(
+        const ResourceVector& released) noexcept = 0;
+  };
+
   /** @brief Move-only exact child authority minted by one reservation. */
   class Grant;
 
@@ -376,12 +415,19 @@ class ResourceLedger final {
   /**
    * @brief Atomically commits one complete root vector.
    * @param requested Checked resource demand.
+   * @param release_observer Optional non-authoritative owner retained only for
+   * a successful reservation and notified after its exact physical release.
    * @return Move-only reservation, or `std::nullopt` without state change when
    * any dimension lacks capacity.
    * @throws std::bad_alloc when reservation state allocation fails.
    * @throws std::system_error when internal mutex locking fails.
+   * @note A caller coupling admission to companion accounting must hold the
+   * observer's transaction mutex across this call and its own successful
+   * charge. The ledger remains the sole capacity authority.
    */
-  std::optional<Reservation> try_reserve(const ResourceVector& requested);
+  std::optional<Reservation> try_reserve(
+      const ResourceVector& requested,
+      std::shared_ptr<ReservationReleaseObserver> release_observer = nullptr);
 
   /**
    * @brief Atomically commits two independently owned root vectors.

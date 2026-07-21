@@ -72,6 +72,19 @@ class ExecutionServiceTestAccess final {
     service.initial_submission_storage_observer_ = nullptr;
     service.initial_submission_storage_observer_context_ = nullptr;
   }
+
+  /**
+   * @brief Copies active built-in Throughput reservation charges.
+   * @param service Isolated service under test.
+   * @return Exact class-owned vector excluding Interactive and legacy owners.
+   * @throws std::system_error when private accounting locking fails.
+   * @note This is a non-authoritative test diagnostic; the ledger snapshot
+   * remains the physical-capacity source of truth.
+   */
+  static ResourceVector throughput_reservation_snapshot(
+      const compute::ExecutionService& service) {
+    return service.throughput_reservation_snapshot_for_testing();
+  }
 };
 
 }  // namespace ps::testing

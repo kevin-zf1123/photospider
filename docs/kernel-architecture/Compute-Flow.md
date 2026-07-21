@@ -237,18 +237,22 @@ compute behavior unchanged and returns only candidate capacity.
 
 The ready-store policy charges each dispatch
 `work_units + ceil(complete_ready_grant_bytes / 4096)`: Graph fairness uses raw
-cost and Run fairness uses `ceil(cost / weight)`. Interactive work prefers an
-earlier present monotonic deadline; throughput ordering is weighted and
-deterministic. The store first selects the service class, forcing Throughput
-after at most three Interactive dispatches while both classes remain ready.
-Eight-dispatch aging then applies only within that selected class and cannot
-change it. Configured interactive headroom is excluded from the general Run
-admission ceiling. Transitional legacy scheduler owners retain Issue #70
-full-ledger admission and are not reclassified as Throughput. Initial and
-dependent submissions use the same route, and the service retains each Run
-fairness row across temporary emptiness. Policy strategies own no worker,
-token, budget, Run, or Graph; the service and ledger remain the physical and
-resource authorities.
+cost in one accumulator per selected service class, while each immutable-class
+Run uses `ceil(cost / weight)`. Interactive work prefers an earlier present
+monotonic deadline; throughput ordering is weighted and deterministic. The
+store first selects the service class, forcing Throughput after at most three
+Interactive dispatches while both classes remain ready. Eight-dispatch aging
+then applies only within that selected class and cannot change it.
+
+Configured interactive headroom limits only active built-in Throughput root
+reservations to the general ceiling. Interactive and transitional legacy
+owners do not consume that class quota, but the sole ledger still authorizes
+their shared physical capacity. A Throughput charge is committed atomically
+with its ledger reservation and is removed only when the root reservation is
+physically released after all child grants. Initial and dependent submissions
+use the same route, and the service retains each Run fairness row across
+temporary emptiness. Policy strategies own no worker, token, budget, Run, or
+Graph; the service and ledger remain the physical and resource authorities.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
 node-id mapping, temporary-result indexing, event logging, exception

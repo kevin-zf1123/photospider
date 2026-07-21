@@ -109,11 +109,17 @@ struct ResourceReservationState final {
    * @brief Creates a live parent state after root commit staging.
    * @param root_state Matching ledger root.
    * @param committed_resources Exact root reservation vector.
+   * @param observer Optional non-authoritative exact-release observer.
    * @throws Nothing after shared owner construction.
    */
-  ResourceReservationState(std::shared_ptr<ResourceLedgerRootState> root_state,
-                           ResourceVector committed_resources) noexcept
-      : root(std::move(root_state)), committed(committed_resources) {}
+  ResourceReservationState(
+      std::shared_ptr<ResourceLedgerRootState> root_state,
+      ResourceVector committed_resources,
+      std::shared_ptr<ResourceLedger::ReservationReleaseObserver> observer =
+          nullptr) noexcept
+      : root(std::move(root_state)),
+        committed(committed_resources),
+        release_observer(std::move(observer)) {}
 
   /** @brief Serializes parent closure and child accounting. */
   mutable std::mutex mutex;
@@ -126,6 +132,11 @@ struct ResourceReservationState final {
 
   /** @brief Exact vector currently held by live child grants. */
   ResourceVector granted;
+
+  /**
+   * @brief Optional non-authoritative owner notified after exact root release.
+   */
+  std::shared_ptr<ResourceLedger::ReservationReleaseObserver> release_observer;
 
   /** @brief Number of live child owner values. */
   std::uint64_t child_count = 0U;
@@ -143,18 +154,34 @@ namespace {
  * @brief Returns one exact vector to the root ledger.
  * @param root Matching shared root state.
  * @param resources Previously committed vector.
+ * @param observer Optional companion-accounting observer.
  * @return Nothing.
  * @throws Nothing; invariant or synchronization failure terminates.
+ * @note With an observer, its transaction mutex spans root release and the
+ * callback. This preserves one lock order for admission and release while the
+ * ledger remains the only physical-capacity authority.
  */
 void release_root_resources(
     const std::shared_ptr<ResourceLedgerRootState>& root,
-    const ResourceVector& resources) noexcept {
+    const ResourceVector& resources,
+    const std::shared_ptr<ResourceLedger::ReservationReleaseObserver>&
+        observer) noexcept {
   try {
-    std::lock_guard<std::mutex> lock(root->mutex);
-    if (!resources_fit(resources, root->reserved)) {
-      std::terminate();
+    std::unique_lock<std::mutex> transaction_lock;
+    if (observer) {
+      transaction_lock =
+          std::unique_lock<std::mutex>(observer->release_transaction_mutex());
     }
-    root->reserved = subtract_resources(root->reserved, resources);
+    {
+      std::lock_guard<std::mutex> lock(root->mutex);
+      if (!resources_fit(resources, root->reserved)) {
+        std::terminate();
+      }
+      root->reserved = subtract_resources(root->reserved, resources);
+    }
+    if (observer) {
+      observer->on_reservation_released(resources);
+    }
   } catch (...) {
     std::terminate();
   }
@@ -342,7 +369,8 @@ void ResourceLedger::Reservation::reset() noexcept {
     std::terminate();
   }
   if (release_root) {
-    release_root_resources(state->root, state->committed);
+    release_root_resources(state->root, state->committed,
+                           state->release_observer);
   }
 }
 
@@ -417,7 +445,8 @@ void ResourceLedger::Grant::reset() noexcept {
     std::terminate();
   }
   if (release_root) {
-    release_root_resources(state->root, state->committed);
+    release_root_resources(state->root, state->committed,
+                           state->release_observer);
   }
 }
 
@@ -430,9 +459,10 @@ ResourceLedger::~ResourceLedger() noexcept = default;
 
 /** @copydoc ResourceLedger::try_reserve */
 std::optional<ResourceLedger::Reservation> ResourceLedger::try_reserve(
-    const ResourceVector& requested) {
-  auto reservation_state =
-      std::make_shared<ResourceReservationState>(state_, requested);
+    const ResourceVector& requested,
+    std::shared_ptr<ReservationReleaseObserver> release_observer) {
+  auto reservation_state = std::make_shared<ResourceReservationState>(
+      state_, requested, std::move(release_observer));
   std::lock_guard<std::mutex> lock(state_->mutex);
   const std::optional<ResourceVector> next_reserved =
       checked_add_resources(state_->reserved, requested);

@@ -361,12 +361,14 @@ reserved, or represented by fake nonzero values in the current ledger:
 Admission validates one checked resource vector transactionally and returns a
 complete Run reservation or nothing. Trusted service code suballocates
 ready-entry/byte and CPU/memory/scratch child grants within that reservation.
-The service subtracts configured interactive headroom from the general
-admission ceiling, permits only explicit interactive Runs to use that
-headroom, and still requires the ledger to authorize every reservation and
-grant. This Run-policy ceiling does not reclassify transitional legacy
-scheduler owners: they preserve Issue #70 full-ledger admission and may consume
-shared capacity that would otherwise remain available to an interactive Run.
+The service charges only active built-in Throughput root reservations against
+the general ceiling after configured interactive headroom is subtracted.
+Interactive Runs and transitional Issue #70 legacy scheduler owners do not
+debit this class quota, but the ledger still authorizes every reservation and
+grant and remains the sole physical-capacity authority. Throughput quota check,
+ledger reservation, and class charge are one serialized transaction. The
+non-authoritative class charge is removed only at exact physical root release,
+including when live child grants defer that release.
 
 Current success, callback failure, construction rollback, worker failure,
 legacy Graph close, and owner destruction release each reservation/grant
@@ -388,10 +390,12 @@ The current private `InteractiveSchedulerPolicy` and
 `ThroughputSchedulerPolicy` are stateless comparison strategies over immutable
 ready descriptors. `ExecutionService` owns the physical ready store and all
 fairness rows. It charges each dispatch
-`work_units + ceil(complete_ready_grant_bytes / 4096)`, charges Graph rows the
-raw cost, and charges Run rows `ceil(cost / weight)`. Interactive ordering first
-prefers an earlier present monotonic deadline; throughput ordering is weighted
-and deterministic. Stable enqueue sequence is the final tie break.
+`work_units + ceil(complete_ready_grant_bytes / 4096)`, charges each Graph's
+selected-class accumulator the raw cost, and charges each immutable-class Run
+row `ceil(cost / weight)`. Interactive ordering first prefers an earlier
+present monotonic deadline; throughput ordering is weighted and deterministic.
+Stable enqueue sequence is the final tie break. Service history in one class
+cannot change Graph selection in the other class.
 
 A ready item ages after eight successful service dispatches. While throughput
 work remains ready, no more than three consecutive interactive dispatches may

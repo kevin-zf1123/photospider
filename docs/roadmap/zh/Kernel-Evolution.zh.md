@@ -306,12 +306,14 @@ grant/token、native device handle、executor、completion route 或 lifecycle a
 Issue #71 使用两个真实内建 policy 与一条共享路径证明该 seam：
 
 - dispatch cost 为 `work_units + ceil(complete_ready_grant_bytes / 4096)`；
-- Graph service 使用原始 cost，Run service 使用 `ceil(cost / weight)`；
+- Graph service 在每个已选 class 各自独立的 accumulator 中使用原始 cost，Run service 在每个
+  Run 的不可变 class 中使用 `ceil(cost / weight)`；
 - interactive 排序偏好存在且更早的单调时钟 deadline，throughput 排序采用加权且确定的规则；
 - ready entry 在八次成功 dispatch 后 aging；
 - throughput 持续 ready 时，至多三次连续 interactive dispatch 后必须保证 throughput 进展；
-- 配置的 interactive headroom 从 general admission 中排除，同时 ledger 保留最终权威；过渡期
-  legacy owner 保留 Issue #70 的 full-ledger admission，不会被重新分类为 Throughput；
+- 配置的 interactive headroom 只限制 active 内建 Throughput root reservation；Interactive 与
+  过渡期 Issue #70 legacy owner 不会扣减该 class quota，而 ledger 保留最终物理权威；Throughput
+  charge 会跟随精确 root lifetime，直到 deferred child release 完成；
 - initial 与 dependent work 使用同一 policy route，Run row 会跨越临时为空的阶段继续存在。
 
 Latest-generation preference 仍属于 issue #74，revision-safe commit 属于 #72，cancellation 属于

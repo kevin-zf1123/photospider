@@ -38,8 +38,11 @@ Issue #70 makes the same service the current owner of one Host-authoritative
 ready store used by initial and dependency-released work. Issue #71 makes the
 private Interactive/Throughput policy seam current: the store performs fixed
 three-to-one class arbitration first, then applies dispatch-count aging,
-deadline, and fair-score ordering only within the selected class. Do not
-describe the remaining accepted targets as current: issue #72 authoritative
+deadline, and class-local Graph/Run fair-score ordering only within the selected
+class. Its protected headroom account charges only active built-in Throughput
+roots and follows exact ledger root lifetime; Interactive and transitional
+legacy roots do not debit that class quota. Do not describe the remaining
+accepted targets as current: issue #72 authoritative
 `GraphRevision` commit validation, issue #73 cancellation, issue #74
 supersession, issue #75 policy-only scheduler ABI generation, and issue #76
 request-owned `RunGroup`, final `ExecutionService::RunLifecycleRegistry`,

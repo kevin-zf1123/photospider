@@ -189,15 +189,19 @@ transaction 中发布 legacy scheduler owner 或 ownerless service route。Legac
 planning、attach 或 start 失败会保留旧 binding 及其 compute 行为，只归还 candidate 容量。
 
 Ready-store policy 对每次 dispatch 按
-`work_units + ceil(complete_ready_grant_bytes / 4096)` 计费：Graph 公平性使用原始 cost，Run
-公平性使用 `ceil(cost / weight)`。Interactive work 会偏好存在且更早的单调时钟 deadline；
-throughput 排序采用加权且确定的规则。Store 会先选择 service class；两个 class 都持续 ready 时，
-它会在至多三次 Interactive dispatch 后强制选择 Throughput。八次 dispatch aging 随后只在该已选
-class 内生效，不能改变 class 决策。配置的 interactive headroom 从 general Run admission ceiling
-中排除。过渡期 legacy scheduler owner 保留 Issue #70 的 full-ledger admission，不会被重新分类为
-Throughput。Initial 与 dependent submission 使用同一路径，service 会让每个 Run fairness row
-跨越临时为空的阶段继续存在。Policy 策略不拥有 worker、token、budget、Run 或 Graph；service
-与 ledger 仍分别是物理和资源权威。
+`work_units + ceil(complete_ready_grant_bytes / 4096)` 计费：Graph 公平性在已选 service class
+各自独立的 accumulator 中使用原始 cost，而每个 class 不可变的 Run 使用
+`ceil(cost / weight)`。Interactive work 会偏好存在且更早的单调时钟 deadline；throughput 排序
+采用加权且确定的规则。Store 会先选择 service class；两个 class 都持续 ready 时，它会在至多三次
+Interactive dispatch 后强制选择 Throughput。八次 dispatch aging 随后只在该已选 class 内生效，
+不能改变 class 决策。
+
+配置的 interactive headroom 只把 active 内建 Throughput root reservation 限制在 general
+ceiling。Interactive 与过渡期 legacy owner 不会消耗这项 class quota，但唯一 ledger 仍会授权它们
+共享的物理容量。Throughput charge 与 ledger reservation 原子提交，并且只有在所有 child grant
+结束、root reservation 被物理释放时才扣回。Initial 与 dependent submission 使用同一路径，
+service 会让每个 Run fairness row 跨越临时为空的阶段继续存在。Policy 策略不拥有 worker、token、
+budget、Run 或 Graph；service 与 ledger 仍分别是物理和资源权威。
 
 `ComputeTaskDispatcher` 将 plan execution、依赖计数、稀疏 node-id 映射、temporary-result
 indexing、事件日志、异常传播和最终目标选择保留在 compute-service 边界内；对应 plan 与

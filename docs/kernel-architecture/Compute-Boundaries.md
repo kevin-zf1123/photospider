@@ -258,21 +258,26 @@ failure, and exceptional paths release the exact vector once. Independent Runs
 remain isolated.
 
 The ready store charges each dispatch
-`work_units + ceil(complete_ready_grant_bytes / 4096)`. Graph rows accrue raw
-cost; Run rows accrue `ceil(cost / weight)`. Explicit interactive QoS prefers an
-earlier present monotonic deadline, while throughput ordering is weighted and
-deterministic. The store first chooses the service class, forcing Throughput
-after at most three consecutive Interactive dispatches while both remain
-ready. It then applies eight-dispatch aging only within the chosen class;
-aging cannot replace that class decision. Run rows remain installed across
-temporary emptiness so dependent re-entry cannot reset fairness history.
-Configured interactive headroom is unavailable to throughput Run admission;
-Interactive Runs may use it, and every reservation still requires final
-ledger authorization. Transitional legacy scheduler owners keep Issue #70
-full-ledger admission instead of being classified as Throughput. The private
-policy strategies own no worker, ready entry, resource token, budget, Run, or
-Graph. Revision preference, cancellation, and supersession are not part of
-this scheduling slice.
+`work_units + ceil(complete_ready_grant_bytes / 4096)`. Each Graph accrues raw
+cost in a separate accumulator for the selected service class; each Run has one
+immutable class and accrues `ceil(cost / weight)` there. Explicit interactive
+QoS prefers an earlier present monotonic deadline, while throughput ordering is
+weighted and deterministic. The store first chooses the service class,
+forcing Throughput after at most three consecutive Interactive dispatches
+while both remain ready. It then applies eight-dispatch aging only within the
+chosen class; aging cannot replace that class decision. Run rows remain
+installed across temporary emptiness so dependent re-entry cannot reset
+fairness history.
+
+Configured interactive headroom caps only active built-in Throughput root
+reservations at `limits - interactive_headroom`. Interactive Runs and
+transitional Issue #70 legacy owners do not debit that class quota, although
+all owners still share final physical capacity in the sole ledger. Throughput
+quota check, ledger commit, and class charge form one serialized transaction;
+the charge remains until the matching root vector is physically returned after
+both parent and child-grant ownership end. The private policy strategies own no
+worker, ready entry, resource token, budget, Run, or Graph. Revision preference,
+cancellation, and supersession are not part of this scheduling slice.
 
 Built-in CPU bindings are ownerless at `GraphRuntime` for both intents. Serial,
 GPU, and plugin scheduler resources remain owned per Graph and intent, but

@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -99,6 +100,60 @@ class ConcurrentAdmissionGate final {
 
   /** @brief True after the controller opens the gate. */
   bool open_ = false;
+};
+
+/**
+ * @brief Records one exact root-release notification under the ledger hook.
+ *
+ * @throws std::system_error when snapshot locking fails.
+ * @note The observer owns no resource authority. Its mutex serializes a
+ * companion admission transaction with the callback delivered only after the
+ * parent and all child grants have released the root vector.
+ */
+class RecordingReservationReleaseObserver final
+    : public ResourceLedger::ReservationReleaseObserver {
+ public:
+  /** @copydoc
+   * ResourceLedger::ReservationReleaseObserver::release_transaction_mutex */
+  std::mutex& release_transaction_mutex() noexcept override { return mutex_; }
+
+  /** @copydoc
+   * ResourceLedger::ReservationReleaseObserver::on_reservation_released */
+  void on_reservation_released(
+      const ResourceVector& released) noexcept override {
+    ++release_count_;
+    released_resources_ = released;
+  }
+
+  /**
+   * @brief Copies the number of exact notifications received.
+   * @return Zero before release, otherwise one for this test observer.
+   * @throws std::system_error when transaction locking fails.
+   */
+  std::uint64_t release_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return release_count_;
+  }
+
+  /**
+   * @brief Copies the most recently released root vector.
+   * @return Exact callback value, or zero before notification.
+   * @throws std::system_error when transaction locking fails.
+   */
+  ResourceVector released_resources() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return released_resources_;
+  }
+
+ private:
+  /** @brief Serializes the ledger release transaction and test snapshots. */
+  mutable std::mutex mutex_;
+
+  /** @brief Exact number of delivered release callbacks. */
+  std::uint64_t release_count_ = 0U;
+
+  /** @brief Complete vector from the most recent callback. */
+  ResourceVector released_resources_;
 };
 
 /**
@@ -274,6 +329,38 @@ TEST(ResourceLedgerGrant, ParentReleaseWaitsForEveryOutstandingChild) {
   EXPECT_EQ(ledger.snapshot().reserved, committed);
   second_child.reset();
   EXPECT_EQ(ledger.snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves release observers follow deferred physical root lifetime.
+ * @throws Nothing when the observer fires once after the final child release.
+ * @note Closing the parent while a child remains must retain both ledger
+ * capacity and the companion charge; notifying at parent destruction would
+ * make policy accounting understate the still-active root commitment.
+ */
+TEST(ResourceLedgerGrant, ReleaseObserverWaitsForOutstandingChild) {
+  const ResourceVector committed{2U, 4U, 6U, 8U, 10U};
+  ResourceLedger ledger(committed);
+  auto observer = std::make_shared<RecordingReservationReleaseObserver>();
+  std::optional<ResourceLedger::Grant> child;
+  std::optional<ResourceLedger::Reservation> reservation;
+
+  {
+    std::lock_guard<std::mutex> transaction_lock(
+        observer->release_transaction_mutex());
+    reservation = ledger.try_reserve(committed, observer);
+  }
+  ASSERT_TRUE(reservation.has_value());
+  child = reservation->try_grant(ResourceVector{1U, 2U, 3U, 4U, 5U});
+  ASSERT_TRUE(child.has_value());
+  reservation.reset();
+
+  EXPECT_EQ(ledger.snapshot().reserved, committed);
+  EXPECT_EQ(observer->release_count(), 0U);
+  child.reset();
+  EXPECT_EQ(ledger.snapshot().reserved, ResourceVector{});
+  EXPECT_EQ(observer->release_count(), 1U);
+  EXPECT_EQ(observer->released_resources(), committed);
 }
 
 /**

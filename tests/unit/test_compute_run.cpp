@@ -905,6 +905,30 @@ bool wait_for_ready_task_count(const ExecutionService& service,
 }
 
 /**
+ * @brief Waits until the authoritative ledger exposes one exact commitment.
+ *
+ * @param service Configured service whose asynchronous cleanup may still run.
+ * @param expected Exact root vector expected after Run settlement.
+ * @return True when the vector appears within two seconds; false on timeout.
+ * @throws std::system_error when service-state locking fails.
+ * @note A Run completion can become observable just before its worker finishes
+ * destroying the final ready grant, so release-lifetime tests poll the ledger
+ * rather than assuming future readiness is the release linearization point.
+ */
+bool wait_for_resource_reservation(const ExecutionService& service,
+                                   const ResourceVector& expected) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  do {
+    if (service.resource_snapshot().reserved == expected) {
+      return true;
+    }
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  return service.resource_snapshot().reserved == expected;
+}
+
+/**
  * @brief Owns one asynchronously submitted policy-test Run and its Host.
  *
  * @throws Nothing for default construction and movement.
@@ -1040,6 +1064,55 @@ AsyncPolicyRun launch_blocking_policy_run(
   std::future<void> completion = std::async(
       std::launch::async,
       [&service, host_pointer, ready = std::move(ready), run_demand]() mutable {
+        service.execute_cpu_run(*host_pointer, std::move(ready), 1, run_demand);
+      });
+  return AsyncPolicyRun{std::move(host), std::move(run), std::move(completion)};
+}
+
+/**
+ * @brief Launches one blocker behind a shared concurrent-admission gate.
+ *
+ * @param service Fixed-worker service shared by all contenders.
+ * @param submission Descriptor carrying explicit immutable QoS.
+ * @param resource_demand Uniform trusted demand for the sole task.
+ * @param admission_start Gate released after every contender is launched.
+ * @param entered Number of callbacks that reached a service worker.
+ * @param callback_release Shared gate controlling callback completion.
+ * @return Owned asynchronous Run, Host, and settlement future.
+ * @throws std::bad_alloc from Run, Host, callback, vector, or future storage.
+ * @throws std::future_error from asynchronous state construction.
+ * @throws std::system_error when asynchronous launch fails.
+ * @note The outer future waits before calling `execute_cpu_run()`, so one
+ * release exposes concurrent policy admission rather than merely concurrent
+ * callback execution.
+ */
+AsyncPolicyRun launch_concurrent_blocking_policy_run(
+    ExecutionService& service, ComputeRunSubmission submission,
+    ReadyTaskResourceDemand resource_demand,
+    std::shared_future<void> admission_start, std::atomic_int& entered,
+    std::shared_future<void> callback_release) {
+  auto host = std::make_unique<ExecutionServiceHost>();
+  auto run = std::make_unique<ComputeRun>(std::move(submission));
+  ComputeRunLease lease = run->acquire_lease();
+  const ComputeRunTaskIdentity identity = lease.task_identity(0U);
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(
+      std::move(lease), identity, 0, true,
+      [&entered, callback_release](ComputeRunLease&,
+                                   const ComputeRunTaskIdentity&,
+                                   SchedulerTaskRuntime& runtime) {
+        entered.fetch_add(1, std::memory_order_release);
+        callback_release.wait();
+        runtime.dec_tasks_to_complete();
+      },
+      SchedulerTaskPriority::Normal, resource_demand);
+
+  ExecutionServiceHost* host_pointer = host.get();
+  const CpuRunResourceDemand run_demand{0U, resource_demand};
+  std::future<void> completion = std::async(
+      std::launch::async, [&service, host_pointer, ready = std::move(ready),
+                           run_demand, admission_start]() mutable {
+        admission_start.wait();
         service.execute_cpu_run(*host_pointer, std::move(ready), 1, run_demand);
       });
   return AsyncPolicyRun{std::move(host), std::move(run), std::move(completion)};
@@ -3867,6 +3940,112 @@ TEST(ExecutionServicePolicy, RepeatsHierarchicalGraphAndRunFairness) {
 }
 
 /**
+ * @brief Verifies Graph fairness history is local to the selected QoS class.
+ *
+ * @return Nothing.
+ * @throws Standard Run, service, future, or synchronization exceptions from
+ * two real one-worker service paths.
+ * @note In the first path Graph A receives only Throughput service before
+ * equal-deadline/equal-cost Interactive A and B candidates are published in
+ * that order; cross-class leakage would incorrectly choose B. The second path
+ * gives Graph A prior Interactive service and must choose B, proving same-class
+ * Graph fairness remains effective.
+ */
+TEST(ExecutionServicePolicy, KeepsGraphFairnessLocalToSelectedClass) {
+  constexpr ReadyTaskResourceDemand kDemand{1U, 1U, 1U, 1U};
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::minutes(1);
+
+  {
+    ExecutionService service(1U);
+    std::promise<void> blocker_entered;
+    std::future<void> blocker_entered_future = blocker_entered.get_future();
+    std::promise<void> release_blocker;
+    const std::shared_future<void> blocker_release =
+        release_blocker.get_future().share();
+    std::vector<int> execution_order;
+    std::mutex execution_order_mutex;
+    AsyncPolicyRun blocker;
+    std::vector<AsyncPolicyRun> targets;
+    targets.reserve(2U);
+    ScopedPromiseRelease release_guard(release_blocker);
+
+    blocker = launch_blocking_policy_run(
+        service,
+        make_policy_submission("class-local-graph-a", 1U, 0,
+                               ComputeRunQosClass::Throughput),
+        kDemand, blocker_entered, blocker_release);
+    ASSERT_EQ(blocker_entered_future.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    targets.push_back(launch_ordered_policy_run(
+        service,
+        make_policy_submission("class-local-graph-a", 2U, 11,
+                               ComputeRunQosClass::Interactive, 1U, deadline),
+        {11}, kDemand, execution_order, execution_order_mutex));
+    ASSERT_TRUE(wait_for_ready_task_count(service, 1U));
+    targets.push_back(launch_ordered_policy_run(
+        service,
+        make_policy_submission("class-local-graph-b", 3U, 21,
+                               ComputeRunQosClass::Interactive, 1U, deadline),
+        {21}, kDemand, execution_order, execution_order_mutex));
+    ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
+
+    EXPECT_TRUE(release_guard.release());
+    expect_policy_runs_settle(targets);
+    ASSERT_EQ(blocker.completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_NO_THROW(blocker.completion.get());
+    EXPECT_EQ(execution_order, (std::vector<int>{11, 21}));
+    EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+    EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  }
+
+  {
+    ExecutionService service(1U);
+    std::promise<void> blocker_entered;
+    std::future<void> blocker_entered_future = blocker_entered.get_future();
+    std::promise<void> release_blocker;
+    const std::shared_future<void> blocker_release =
+        release_blocker.get_future().share();
+    std::vector<int> execution_order;
+    std::mutex execution_order_mutex;
+    AsyncPolicyRun blocker;
+    std::vector<AsyncPolicyRun> targets;
+    targets.reserve(2U);
+    ScopedPromiseRelease release_guard(release_blocker);
+
+    blocker = launch_blocking_policy_run(
+        service,
+        make_policy_submission("same-class-graph-a", 10U, 0,
+                               ComputeRunQosClass::Interactive, 1U, deadline),
+        kDemand, blocker_entered, blocker_release);
+    ASSERT_EQ(blocker_entered_future.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    targets.push_back(launch_ordered_policy_run(
+        service,
+        make_policy_submission("same-class-graph-a", 11U, 11,
+                               ComputeRunQosClass::Interactive, 1U, deadline),
+        {11}, kDemand, execution_order, execution_order_mutex));
+    ASSERT_TRUE(wait_for_ready_task_count(service, 1U));
+    targets.push_back(launch_ordered_policy_run(
+        service,
+        make_policy_submission("same-class-graph-b", 12U, 21,
+                               ComputeRunQosClass::Interactive, 1U, deadline),
+        {21}, kDemand, execution_order, execution_order_mutex));
+    ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
+
+    EXPECT_TRUE(release_guard.release());
+    expect_policy_runs_settle(targets);
+    ASSERT_EQ(blocker.completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_NO_THROW(blocker.completion.get());
+    EXPECT_EQ(execution_order, (std::vector<int>{21, 11}));
+    EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+    EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  }
+}
+
+/**
  * @brief Verifies positive Run weight changes within-Graph service share.
  *
  * @return Nothing.
@@ -4319,17 +4498,17 @@ TEST(ExecutionServicePolicy, BoundsOlderThroughputFloodAtThreeToOne) {
 }
 
 /**
- * @brief Verifies protected headroom admits interactive but not throughput.
+ * @brief Verifies headroom charges only active built-in Throughput Runs.
  *
  * @return Nothing.
  * @throws Standard Run, estimator, service, future, or synchronization
- * exceptions from the real one-worker execution path.
+ * exceptions from the real two-worker execution path.
  * @note Limits are exactly two identical Run vectors and headroom is exactly
- * one. A blocked throughput Run fills general capacity; another throughput
- * Run is rejected without mutation. A legacy scheduler owner may still use
- * the Issue #70 full-ledger capacity, then releases it before an otherwise
- * identical explicit interactive Run occupies the protected capacity and
- * settles.
+ * one. A blocked Interactive Run does not consume general quota, so one blocked
+ * Throughput Run is admitted and the ledger reaches its exact full vector.
+ * After Interactive releases, another Throughput Run is still rejected by the
+ * class quota even though physical capacity is available; a legacy owner may
+ * use that full-ledger capacity. Final release clears ledger and class charges.
  */
 TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   constexpr ReadyTaskResourceDemand kDemand{1U, 1U, 1U, 1U};
@@ -4348,34 +4527,70 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   ASSERT_TRUE(doubled.has_value());
   ExecutionResourceLimits limits = execution_limits(*doubled);
   limits.interactive_headroom = required;
-  ExecutionService service(1U, limits);
+  ExecutionService service(2U, limits);
 
-  std::promise<void> blocker_entered;
-  std::future<void> blocker_entered_future = blocker_entered.get_future();
-  std::promise<void> release_blocker;
-  const std::shared_future<void> blocker_release =
-      release_blocker.get_future().share();
+  std::promise<void> interactive_entered;
+  std::future<void> interactive_entered_future =
+      interactive_entered.get_future();
+  std::promise<void> release_interactive;
+  const std::shared_future<void> interactive_release =
+      release_interactive.get_future().share();
+  std::promise<void> throughput_entered;
+  std::future<void> throughput_entered_future = throughput_entered.get_future();
+  std::promise<void> release_throughput;
+  const std::shared_future<void> throughput_release =
+      release_throughput.get_future().share();
   std::vector<int> execution_order;
   std::mutex execution_order_mutex;
-  AsyncPolicyRun blocker;
+  AsyncPolicyRun interactive;
+  AsyncPolicyRun throughput;
   std::vector<AsyncPolicyRun> targets;
   targets.reserve(1U);
-  ScopedPromiseRelease release_guard(release_blocker);
-  blocker = launch_blocking_policy_run(
+  ScopedPromiseRelease interactive_release_guard(release_interactive);
+  ScopedPromiseRelease throughput_release_guard(release_throughput);
+  interactive = launch_blocking_policy_run(
       service,
       make_policy_submission(graph_identity, 2U, 2,
-                             ComputeRunQosClass::Throughput),
-      kDemand, blocker_entered, blocker_release);
-  ASSERT_EQ(blocker_entered_future.wait_for(std::chrono::seconds(2)),
+                             ComputeRunQosClass::Interactive),
+      kDemand, interactive_entered, interactive_release);
+  ASSERT_EQ(interactive_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      ResourceVector{});
+
+  throughput = launch_blocking_policy_run(
+      service,
+      make_policy_submission(graph_identity, 3U, 3,
+                             ComputeRunQosClass::Throughput),
+      kDemand, throughput_entered, throughput_release);
+  ASSERT_EQ(throughput_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(service.resource_snapshot().reserved, *doubled);
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      required);
+
+  EXPECT_TRUE(interactive_release_guard.release());
+  ASSERT_EQ(interactive.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(interactive.completion.get());
+  EXPECT_TRUE(wait_for_resource_reservation(service, required));
+  EXPECT_EQ(service.resource_snapshot().reserved, required);
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      required);
 
   std::atomic_int rejected_entered{0};
   ComputeRun rejected_run(make_policy_submission(
-      graph_identity, 3U, 3, ComputeRunQosClass::Throughput));
+      graph_identity, 4U, 4, ComputeRunQosClass::Throughput));
   std::vector<ReadyTaskSubmission> rejected_ready;
   rejected_ready.push_back(make_counted_ready_submission(
-      rejected_run.acquire_lease(), 0U, 3, rejected_entered,
+      rejected_run.acquire_lease(), 0U, 4, rejected_entered,
       SchedulerTaskPriority::Normal, kDemand));
   try {
     ExecutionServiceHost rejected_host;
@@ -4387,6 +4602,10 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   }
   EXPECT_EQ(rejected_entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      required);
 
   ASSERT_EQ(required.cpu_slots, 1U);
   auto legacy = service.try_reserve_legacy_scheduler_workers(1U);
@@ -4396,22 +4615,140 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_EQ(service.resource_snapshot().reserved, with_legacy);
   legacy.reset();
   EXPECT_EQ(service.resource_snapshot().reserved, required);
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      required);
+
+  EXPECT_TRUE(throughput_release_guard.release());
+  ASSERT_EQ(throughput.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(throughput.completion.get());
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      ResourceVector{});
 
   targets.push_back(launch_ordered_policy_run(
       service,
-      make_policy_submission(graph_identity, 4U, 4,
-                             ComputeRunQosClass::Interactive),
-      {4}, kDemand, execution_order, execution_order_mutex));
-  ASSERT_TRUE(wait_for_ready_task_count(service, 1U));
-  EXPECT_EQ(service.resource_snapshot().reserved, *doubled);
-
-  EXPECT_TRUE(release_guard.release());
+      make_policy_submission(graph_identity, 5U, 5,
+                             ComputeRunQosClass::Throughput),
+      {5}, kDemand, execution_order, execution_order_mutex));
   expect_policy_runs_settle(targets);
-  ASSERT_EQ(blocker.completion.wait_for(std::chrono::seconds(2)),
-            std::future_status::ready);
-  EXPECT_NO_THROW(blocker.completion.get());
-  EXPECT_EQ(execution_order, (std::vector<int>{4}));
+  EXPECT_EQ(execution_order, (std::vector<int>{5}));
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      ResourceVector{});
+}
+
+/**
+ * @brief Verifies concurrent Throughput admissions share one atomic quota.
+ *
+ * @return Nothing.
+ * @throws Standard Run, estimator, service, future, or synchronization
+ * exceptions from two admission contenders and two real workers.
+ * @note Physical limits hold two identical Runs while general quota holds one.
+ * Releasing a shared start gate must therefore yield exactly one callback and
+ * one admission rejection; deleting or splitting check/reserve/charge admits
+ * both contenders into physical headroom.
+ */
+TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
+  constexpr ReadyTaskResourceDemand kDemand{1U, 1U, 1U, 1U};
+  const std::string graph_identity = "concurrent-throughput";
+  ExecutionService probe(1U);
+  std::atomic_int probe_entered{0};
+  ComputeRun probe_run(make_policy_submission(graph_identity, 1U, 1,
+                                              ComputeRunQosClass::Throughput));
+  ReadyTaskSubmission representative = make_counted_ready_submission(
+      probe_run.acquire_lease(), 0U, 1, probe_entered,
+      SchedulerTaskPriority::Normal, kDemand);
+  const ResourceVector required = probe.estimate_cpu_run_resources(
+      representative, 1, CpuRunResourceDemand{0U, kDemand});
+  const std::optional<ResourceVector> doubled =
+      checked_add_resources(required, required);
+  ASSERT_TRUE(doubled.has_value());
+  ExecutionResourceLimits limits = execution_limits(*doubled);
+  limits.interactive_headroom = required;
+  ExecutionService service(2U, limits);
+
+  std::promise<void> admission_start;
+  const std::shared_future<void> admission_start_gate =
+      admission_start.get_future().share();
+  std::promise<void> callback_release;
+  const std::shared_future<void> callback_release_gate =
+      callback_release.get_future().share();
+  std::atomic_int entered{0};
+  std::vector<AsyncPolicyRun> contenders;
+  contenders.reserve(2U);
+  ScopedPromiseRelease admission_start_guard(admission_start);
+  ScopedPromiseRelease callback_release_guard(callback_release);
+
+  contenders.push_back(launch_concurrent_blocking_policy_run(
+      service,
+      make_policy_submission(graph_identity, 2U, 2,
+                             ComputeRunQosClass::Throughput),
+      kDemand, admission_start_gate, entered, callback_release_gate));
+  contenders.push_back(launch_concurrent_blocking_policy_run(
+      service,
+      make_policy_submission(graph_identity, 3U, 3,
+                             ComputeRunQosClass::Throughput),
+      kDemand, admission_start_gate, entered, callback_release_gate));
+  EXPECT_TRUE(admission_start_guard.release());
+
+  std::size_t settled_while_blocked = 0U;
+  const auto observation_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  do {
+    settled_while_blocked = 0U;
+    for (AsyncPolicyRun& contender : contenders) {
+      if (contender.completion.wait_for(std::chrono::seconds(0)) ==
+          std::future_status::ready) {
+        ++settled_while_blocked;
+      }
+    }
+    if (entered.load(std::memory_order_acquire) >= 2 ||
+        (entered.load(std::memory_order_acquire) == 1 &&
+         settled_while_blocked == 1U)) {
+      break;
+    }
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < observation_deadline);
+
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(settled_while_blocked, 1U);
+  EXPECT_EQ(service.resource_snapshot().reserved, required);
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      required);
+
+  EXPECT_TRUE(callback_release_guard.release());
+  int successful = 0;
+  int rejected = 0;
+  for (AsyncPolicyRun& contender : contenders) {
+    ASSERT_EQ(contender.completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    try {
+      contender.completion.get();
+      ++successful;
+    } catch (const GraphError& error) {
+      EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+      ++rejected;
+    }
+  }
+  EXPECT_EQ(successful, 1);
+  EXPECT_EQ(rejected, 1);
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_EQ(
+      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
+          service),
+      ResourceVector{});
 }
 
 /**

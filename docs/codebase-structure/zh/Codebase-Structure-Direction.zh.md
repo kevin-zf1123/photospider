@@ -89,11 +89,12 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
   admission；initial 与 dependent work 都会在 child grant 下进入同一个 policy-aware、受
   entry/byte 约束的 ready store，worker 再将其交换为 execution grant。每个 ready item 使用
   checked work-unit 加 4-KiB byte-quanta cost。私有无状态 Interactive/Throughput strategy 使用
-  Graph cost、按 weight 归一化的 Run cost、八次成功 dispatch 后的稳定 aging，以及 Throughput
-  work ready 时最多连续三个 Interactive dispatch 的 burst 上限。只有显式 Interactive Run 可以
-  使用可配置的受保护 headroom；ledger 仍是最终权威。过渡期 legacy scheduler route 保留 Issue
-  #70 的 full-ledger admission，不会被分类为 Throughput；它们保留 owned callback，并从同一个
-  service ledger 获取 CPU reservation。
+  class-local Graph cost、每个 Run 不可变 class 内按 weight 归一化的 Run cost、八次成功 dispatch
+  后的稳定 aging，以及 Throughput work ready 时最多连续三个 Interactive dispatch 的 burst 上限。
+  可配置的受保护 headroom 只限制 active 内建 Throughput root reservation。Interactive 与过渡期
+  Issue #70 legacy root 不会扣减这项 class quota，而同一个 service ledger 仍是最终物理权威；
+  Throughput charge 会跟随 root，直到所有 child grant 结束。Legacy route 保留 owned callback，
+  并从该 ledger 获取 CPU reservation。
   Installed header、Host value、operation ABI 与 scheduler ABI 都不会命名这些私有对象。
 - dirty-region 诊断、compute planning 诊断和 scheduler trace 诊断都通过 Host 的拷贝值
   snapshot 暴露。公开头不再需要命名后端 graph/runtime/service/planning 类型或具体 scheduler
@@ -401,19 +402,21 @@ cancellation、supersession 与最终 lifecycle fence 仍是目标布局。
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - 当前 `ExecutionService` 拥有一个固定的内建 CPU worker pool、一个 Host 权威 ledger、
   policy-aware、受 entry/byte 约束的 ready store、checked full-vector Run admission、work/byte
-  cost、Graph/weighted-Run 公平性、稳定 aging、三个 Interactive dispatch 的 burst 上限、受保护的
-  Interactive headroom、并发 multi-Graph Run、exact reservation/grant release，以及按 Run 隔离的
-  completion、first-failure、trace 与 Host-context routing。过渡期 legacy scheduler owner 在这些
-  Run policy class 之外保留 Issue #70 的 full-ledger admission；后续 slice 会增加通用 resource
-  execution 与最终 lifecycle fence，但不会移动 ledger authority；
+  cost、class-local Graph/weighted-Run 公平性、稳定 aging、三个 Interactive dispatch 的 burst
+  上限、与精确 root lifetime 一致的 Throughput-owned protected-headroom accounting、并发
+  multi-Graph Run、exact reservation/grant release，以及按 Run 隔离的 completion、first-failure、
+  trace 与 Host-context routing。Interactive 与过渡期 Issue #70 legacy root 不会扣减 Throughput
+  class quota；后续 slice 会增加通用 resource execution 与最终 lifecycle fence，但不会移动 ledger
+  authority；
 - 其私有 `RunLifecycleRegistry` 提供唯一 process admission/Graph-close/process-shutdown
   fence、pending-candidate tracking、按 Graph 建索引且由 registry 持有的 `RunLease` entry 与
   process enumeration，同时不拥有 Run plan、dispatcher、terminal state、Graph state 或 resource
   token；
 - 内部 Host 权威 `ResourceLedger` 是唯一的 reservation 与 grant mint；以及
-- 当前私有无状态 `SchedulerPolicy` strategy 只排列 work：Interactive 会在共享公平 score 前考虑
-  显式 deadline，Throughput 则直接使用这些 score。Policy 不拥有 worker、queue、token、native
-  resource、Run 或 Graph state；替代用 scheduler-policy ABI 仍是未来工作。
+- 当前私有无状态 `SchedulerPolicy` strategy 只排列 work：Interactive 会在已选 class 的
+  class-local 公平 score 前考虑显式 deadline，Throughput 则直接使用自己 class-local 的 score。
+  Policy 不拥有 worker、queue、token、native resource、Run 或 Graph state；替代用
+  scheduler-policy ABI 仍是未来工作。
 
 该所有权目标不为后续 policy/general-resource slice 选择新的源码目录、build target 或 plugin ABI
 shape；这些选择属于对应 implementation work。旧的 worker-only budget 已经作为完整迁移被删除，
@@ -611,10 +614,11 @@ owner 共享原子 CPU admission。Graph load 会原子预留 legacy HP/RT sched
 会在发布前预留完整且经过 checked arithmetic 的 CPU、retained-memory、scratch、ready-entry 与
 ready-byte vector；其 initial 与 dependent work 共享同一个受 entry/byte 约束的 ready store。
 Issue #71 现在增加了私有无状态 Interactive/Throughput strategy、经过检查的 work/byte cost、
-Graph/weighted-Run 公平、稳定 aging、三个 Interactive dispatch 的 burst 上限与受保护 headroom，
-且不改变 ledger 的最终权威或 Issue #70 的 full-ledger legacy capacity。#72–#74 增加 revision、
-cancellation 与 supersession；#75 替换拥有 worker 的 ABI；#76 收束 lifecycle 与 telemetry
-不变量。权威的无环依赖表位于
+class-local Graph/weighted-Run 公平、稳定 aging、三个 Interactive dispatch 的 burst 上限，以及
+与精确 root lifetime 一致的 Throughput-owned protected-headroom charge，且不改变 ledger 的最终
+权威或 Issue #70 的 full-ledger legacy capacity。#72–#74 增加 revision、cancellation 与
+supersession；#75 替换拥有 worker 的 ABI；#76 收束 lifecycle 与 telemetry 不变量。权威的无环
+依赖表位于
 [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md#交付依赖契约)。
 
 1. **已完成：** 建立 public header 安装与 self-containment 边界。

@@ -557,17 +557,19 @@ Important current behavior:
   `ExecutionService` per embedded Host. Its ledger atomically admits complete
   Run vectors and legacy scheduler-owner CPU grants; its policy-aware ready
   store is bounded by entries and bytes. Ready work pays checked work-unit plus
-  4-KiB byte-quanta cost, Graph and weight-normalized Run scores preserve
-  multi-tenant fairness, and class arbitration forces Throughput after at most
-  three consecutive Interactive dispatches while both classes are ready.
-  Eight-dispatch aging applies only within the class that arbitration selected
-  and cannot replace that decision. Only explicit Interactive Runs may consume
-  the configured protected headroom within the Run-policy classes, while the
-  ledger remains the final resource authority. Transitional legacy schedulers
-  retain Issue #70 full-ledger admission rather than being classified as
-  Throughput, as well as per-graph/intent physical ownership and bounded
-  constructor grants. ADR 0003 and ADR 0007 record the accepted
-  ownership/lifetime contract.
+  4-KiB byte-quanta cost. Graph scores are local to the selected service class
+  and weight-normalized Run scores remain in each Run's immutable class,
+  preserving multi-tenant fairness without cross-class history leakage. Class
+  arbitration forces Throughput after at most three consecutive Interactive
+  dispatches while both classes are ready. Eight-dispatch aging applies only
+  within the class that arbitration selected and cannot replace that decision.
+  The protected headroom caps active built-in Throughput root reservations
+  only; Interactive and transitional Issue #70 legacy owners do not debit that
+  class quota, while the ledger remains final authority for shared physical
+  capacity. A Throughput charge remains until its exact root release after all
+  child grants. Legacy schedulers also retain per-graph/intent physical
+  ownership and bounded constructor grants. ADR 0003 and ADR 0007 record the
+  accepted ownership/lifetime contract.
 
 - [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
   separates graph-state access from scheduler dispatch.

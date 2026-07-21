@@ -108,14 +108,17 @@ Every Host ledger has immutable composition limits. Run admission commits one
 complete vector before queue publication; initial and dependent submissions
 enter the same policy-aware bounded store and retain the same Run fairness row
 across temporary emptiness. Ready cost is `work_units + ceil(bytes / 4096)`;
-Graphs are charged raw cost and Runs are charged `ceil(cost / weight)`. An
-earlier interactive deadline wins within its policy class, a ready item ages
-after eight successful dispatches, and at most three interactive dispatches
-may precede required throughput progress while throughput remains ready.
-Configured interactive headroom is reserved from the general ceiling but the
-ledger remains the final admission authority. That ceiling partitions only
-built-in Interactive and Throughput Runs; transitional legacy scheduler owners
-retain Issue #70 full-ledger admission and are not classified as Throughput.
+Graphs are charged raw cost independently in each selected service class and
+Runs are charged `ceil(cost / weight)` in their immutable class. An earlier
+interactive deadline wins within its policy class, a ready item ages after
+eight successful dispatches, and at most three interactive dispatches may
+precede required throughput progress while throughput remains ready.
+Configured interactive headroom caps only active built-in Throughput root
+reservations at the general ceiling. Interactive and transitional Issue #70
+legacy roots do not debit that class quota, while the ledger remains final
+authority for all shared physical capacity. Throughput check, reservation, and
+class charge are atomic, and the charge remains until exact root release after
+all child grants.
 Graph load reserves only legacy HP/RT owners, and legacy replacement still
 requires transient candidate capacity while its old owner remains live;
 built-in CPU load or replacement publishes an ownerless service route and

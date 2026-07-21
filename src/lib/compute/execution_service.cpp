@@ -753,7 +753,8 @@ class ExecutionService::BoundedReadyStore final {
       std::terminate();
     }
     selected.run_state->charged_service = selected.run_score;
-    selected.run_state->graph->charged_service = selected.graph_score;
+    selected.run_state->graph->charged_service_for(selected_class) =
+        selected.graph_score;
 
     std::shared_ptr<QueueEntry> entry = *selected.entry->store_position;
     remove_entry(*selected.entry, *selected.run_state);
@@ -881,8 +882,29 @@ class ExecutionService::BoundedReadyStore final {
    * @throws Nothing for value construction.
    */
   struct PolicyGraphState final {
-    /** @brief Raw work/byte service charged to this Graph. */
-    std::uint64_t charged_service = 0U;
+    /**
+     * @brief Returns the class-local raw service accumulator.
+     * @param service_class Class already chosen by inter-class arbitration.
+     * @return Mutable raw Graph service for only that class.
+     * @throws Nothing; an invalid trusted enum terminates.
+     * @note Interactive and Throughput history never share this scalar.
+     */
+    std::uint64_t& charged_service_for(
+        ComputeRunQosClass service_class) noexcept {
+      switch (service_class) {
+        case ComputeRunQosClass::Interactive:
+          return interactive_charged_service;
+        case ComputeRunQosClass::Throughput:
+          return throughput_charged_service;
+      }
+      std::terminate();
+    }
+
+    /** @brief Raw work/byte service charged to Interactive selections. */
+    std::uint64_t interactive_charged_service = 0U;
+
+    /** @brief Raw work/byte service charged to Throughput selections. */
+    std::uint64_t throughput_charged_service = 0U;
 
     /** @brief Active Run policy rows currently sharing this Graph. */
     std::uint64_t active_runs = 0U;
@@ -909,7 +931,9 @@ class ExecutionService::BoundedReadyStore final {
     /** @brief Stable shared Graph accounting row. */
     PolicyGraphState* graph = nullptr;
 
-    /** @brief Weight-normalized service charged to this Run. */
+    /**
+     * @brief Weight-normalized service charged within this Run's fixed class.
+     */
     std::uint64_t charged_service = 0U;
 
     /** @brief Same-Run high-hint FIFO. */
@@ -1084,7 +1108,8 @@ class ExecutionService::BoundedReadyStore final {
         continue;
       }
       const std::uint64_t graph_score = saturating_add(
-          state.graph->charged_service, entry->policy_service_cost);
+          state.graph->charged_service_for(policy.service_class()),
+          entry->policy_service_cost);
       const std::uint64_t run_score =
           saturating_add(state.charged_service,
                          policy.normalized_cost(entry->policy_service_cost,
@@ -1234,6 +1259,99 @@ ResourceVector calculate_general_capacity(const ResourceVector& limits,
   };
 }
 
+/**
+ * @brief Tracks built-in Throughput root reservations against general quota.
+ *
+ * @throws std::system_error when its transaction mutex cannot be locked.
+ * @note This accounting owns no physical capacity. `ResourceLedger` remains
+ * the sole authority and retains this observer until the matching root vector
+ * is physically returned after both parent and child-grant ownership end.
+ */
+class ThroughputReservationAccount final
+    : public ResourceLedger::ReservationReleaseObserver {
+ public:
+  /**
+   * @brief Fixes the policy-only ceiling for the service lifetime.
+   * @param capacity Complete `limits - interactive_headroom` vector.
+   * @throws Nothing.
+   */
+  explicit ThroughputReservationAccount(ResourceVector capacity) noexcept
+      : capacity_(capacity) {}
+
+  /** @copydoc
+   * ResourceLedger::ReservationReleaseObserver::release_transaction_mutex */
+  std::mutex& release_transaction_mutex() noexcept override { return mutex_; }
+
+  /** @copydoc
+   * ResourceLedger::ReservationReleaseObserver::on_reservation_released */
+  void on_reservation_released(
+      const ResourceVector& released) noexcept override {
+    if (!resources_fit(released, reserved_)) {
+      std::terminate();
+    }
+    reserved_ = ResourceVector{
+        reserved_.cpu_slots - released.cpu_slots,
+        reserved_.retained_memory_bytes - released.retained_memory_bytes,
+        reserved_.scratch_bytes - released.scratch_bytes,
+        reserved_.ready_entries - released.ready_entries,
+        reserved_.ready_bytes - released.ready_bytes,
+    };
+  }
+
+  /**
+   * @brief Computes one prospective Throughput charge without mutation.
+   * @param resources Complete candidate Run vector.
+   * @return Next class-owned total, or null on overflow/quota exhaustion.
+   * @throws Nothing.
+   * @note Caller holds `release_transaction_mutex()`.
+   */
+  std::optional<ResourceVector> checked_charge(
+      const ResourceVector& resources) const noexcept {
+    const std::optional<ResourceVector> after =
+        checked_add_resources(reserved_, resources);
+    if (!after.has_value() || !resources_fit(*after, capacity_)) {
+      return std::nullopt;
+    }
+    return after;
+  }
+
+  /**
+   * @brief Commits a prevalidated charge after ledger reservation succeeds.
+   * @param charged Exact value returned by `checked_charge()`.
+   * @return Nothing.
+   * @throws Nothing; a non-monotonic value terminates.
+   * @note Caller holds `release_transaction_mutex()` and the ledger has already
+   * committed the matching root reservation with this object as observer.
+   */
+  void commit_charge(const ResourceVector& charged) noexcept {
+    if (!resources_fit(reserved_, charged) ||
+        !resources_fit(charged, capacity_)) {
+      std::terminate();
+    }
+    reserved_ = charged;
+  }
+
+  /**
+   * @brief Copies current Throughput-owned root commitments for tests.
+   * @return Exact class-owned vector; no authority is minted.
+   * @throws std::system_error when transaction locking fails.
+   */
+  ResourceVector snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return reserved_;
+  }
+
+ private:
+  /** @brief Serializes Throughput check/commit with exact root release. */
+  mutable std::mutex mutex_;
+
+  /** @brief Immutable policy quota excluding configured headroom. */
+  const ResourceVector capacity_;
+
+  /** @brief Active built-in Throughput root vectors only. */
+  ResourceVector reserved_;
+};
+
 }  // namespace
 
 /**
@@ -1252,11 +1370,9 @@ class ExecutionService::PoolState final {
    * @throws std::bad_alloc when ledger state cannot allocate.
    */
   explicit PoolState(ExecutionResourceLimits resource_limits)
-      : resource_limits(resource_limits.resource_vector()),
-        interactive_headroom(resource_limits.interactive_headroom),
-        general_capacity(
+      : throughput_reservations(std::make_shared<ThroughputReservationAccount>(
             calculate_general_capacity(resource_limits.resource_vector(),
-                                       resource_limits.interactive_headroom)),
+                                       resource_limits.interactive_headroom))),
         ledger(resource_limits.resource_vector()),
         ready_store(resource_limits.ready_entries,
                     resource_limits.ready_bytes) {}
@@ -1268,34 +1384,38 @@ class ExecutionService::PoolState final {
    * @return Ledger-minted reservation, or null without mutation when either
    * policy ceiling or authoritative capacity is unavailable.
    * @throws std::bad_alloc or std::system_error from ledger admission.
-   * @note Caller holds `mutex`. The policy mints no token; `ledger` performs
-   * the final atomic capacity validation and constructs the sole authority.
+   * @note Caller holds `mutex`. Throughput check, ledger commit, and class
+   * charge are serialized by the account transaction mutex; exact root release
+   * takes the same lock before returning capacity and debiting the class. The
+   * policy mints no token; `ledger` remains the sole physical authority.
    */
   std::optional<ResourceLedger::Reservation> try_reserve_for_policy(
       const ResourceVector& resources, ComputeRunQosClass service_class) {
     const SchedulerPolicy& policy = ready_store.policy_for(service_class);
-    if (!policy.may_consume_headroom()) {
-      const ResourceLedger::Snapshot snapshot = ledger.snapshot();
-      if (snapshot.limits != resource_limits) {
-        std::terminate();
-      }
-      const std::optional<ResourceVector> after =
-          checked_add_resources(snapshot.reserved, resources);
-      if (!after.has_value() || !resources_fit(*after, general_capacity)) {
-        return std::nullopt;
-      }
+    if (policy.may_consume_headroom()) {
+      return ledger.try_reserve(resources);
     }
-    return ledger.try_reserve(resources);
+
+    std::lock_guard<std::mutex> transaction_lock(
+        throughput_reservations->release_transaction_mutex());
+    const std::optional<ResourceVector> after =
+        throughput_reservations->checked_charge(resources);
+    if (!after.has_value()) {
+      return std::nullopt;
+    }
+    std::optional<ResourceLedger::Reservation> reservation =
+        ledger.try_reserve(resources, throughput_reservations);
+    if (!reservation.has_value()) {
+      return std::nullopt;
+    }
+    throughput_reservations->commit_charge(*after);
+    return reservation;
   }
 
-  /** @brief Immutable complete capacity configured for the sole ledger. */
-  const ResourceVector resource_limits;
-
-  /** @brief Immutable subset protected from Throughput Run admission. */
-  const ResourceVector interactive_headroom;
-
-  /** @brief Immutable ceiling for Throughput Runs. */
-  const ResourceVector general_capacity;
+  /**
+   * @brief Non-authoritative quota for active built-in Throughput reservations.
+   */
+  const std::shared_ptr<ThroughputReservationAccount> throughput_reservations;
 
   /** @brief Serializes fixed configuration, queues, and active Run registry. */
   mutable std::mutex mutex;
@@ -1496,6 +1616,12 @@ ExecutionService::try_reserve_legacy_scheduler_worker_pair(
 /** @copydoc ExecutionService::resource_snapshot */
 ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
   return pool_->ledger.snapshot();
+}
+
+/** @copydoc ExecutionService::throughput_reservation_snapshot_for_testing */
+ResourceVector ExecutionService::throughput_reservation_snapshot_for_testing()
+    const {
+  return pool_->throughput_reservations->snapshot();
 }
 
 /** @copydoc ExecutionService::estimate_cpu_run_resources */

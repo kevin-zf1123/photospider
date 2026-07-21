@@ -81,12 +81,14 @@ scheduler owner。ready-task-only 边界继续完全有效。
 数量。每个 Host ledger 都拥有不可变 composition limit。Run admission 会在 queue publication
 前提交一个完整 vector；initial 与 dependent submission 会进入同一个 policy-aware 有界 store，
 并在临时为空时保留同一 Run fairness row。Ready cost 为
-`work_units + ceil(bytes / 4096)`；Graph 按原始 cost 计费，Run 按 `ceil(cost / weight)` 计费。
-同一 policy class 内更早的 interactive deadline 优先；ready item 在八次成功 dispatch 后 aging；
-throughput 持续 ready 时，至多允许三次 interactive dispatch，随后必须保证 throughput 进展。
-配置的 interactive headroom 从 general ceiling 中保留，但 ledger 仍是最终准入 authority。
-该 ceiling 只划分内建 Interactive/Throughput Run；过渡期 legacy scheduler owner 保留 Issue #70
-的 full-ledger admission，不会被分类为 Throughput。Graph load 只为 legacy HP/RT owner 预留；
+`work_units + ceil(bytes / 4096)`；Graph 在每个已选 service class 中独立按原始 cost 计费，Run
+在自己的不可变 class 中按 `ceil(cost / weight)` 计费。同一 policy class 内更早的 interactive
+deadline 优先；ready item 在八次成功 dispatch 后 aging；throughput 持续 ready 时，至多允许三次
+interactive dispatch，随后必须保证 throughput 进展。配置的 interactive headroom 只把 active
+内建 Throughput root reservation 限制在 general ceiling。Interactive 与过渡期 Issue #70 legacy
+root 不会扣减该 class quota，而 ledger 仍是全部共享物理容量的最终 authority。Throughput check、
+reservation 与 class charge 是原子的；该 charge 会一直保留到全部 child grant 结束后的精确 root
+release。Graph load 只为 legacy HP/RT owner 预留；
 legacy replacement 在旧 owner 保持存活时仍需要 transient candidate capacity；内建 CPU load 或
 replacement 会发布 ownerless service route，且绝不调整 pool 大小。原 worker-only budget 已经
 完整删除，不保留 wrapper、alias 或第二 authority。

@@ -112,14 +112,15 @@ Resolved seam tightening in the current branch:
   initial and dependent work enters the same policy-aware entry/byte-bounded
   ready store under child grants, which workers exchange for execution grants.
   Each ready item pays checked work-unit plus 4-KiB byte-quanta cost. Private
-  stateless Interactive and Throughput strategies use Graph cost,
-  weight-normalized Run cost, stable aging after eight successful dispatches,
-  and a three-Interactive burst bound while Throughput work is ready. Only
-  explicit Interactive Runs may consume configurable protected headroom; the
-  ledger remains the final authority. Transitional legacy scheduler routes
-  retain Issue #70 full-ledger admission rather than being classified as
-  Throughput; they retain owned callbacks and obtain CPU reservations from the
-  same service ledger. No
+  stateless Interactive and Throughput strategies use class-local Graph cost,
+  weight-normalized Run cost within each Run's immutable class, stable aging
+  after eight successful dispatches, and a three-Interactive burst bound while
+  Throughput work is ready. Configurable protected headroom caps only active
+  built-in Throughput root reservations. Interactive and transitional Issue
+  #70 legacy roots do not debit that class quota, while the same service ledger
+  remains final physical authority; a Throughput charge follows its root until
+  all child grants release. Legacy routes retain owned callbacks and obtain CPU
+  reservations from that ledger. No
   installed header, Host value, operation ABI, or scheduler ABI names these
   private objects.
 - Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
@@ -473,14 +474,14 @@ In that target:
   creates cross-domain task dependencies;
 - the current `ExecutionService` owns one fixed built-in CPU worker pool, one
   Host-authoritative ledger, a policy-aware entry/byte-bounded ready store,
-  checked full-vector Run admission, work/byte cost, Graph and weighted-Run
-  fairness, stable aging, a three-Interactive burst bound, protected
-  Interactive headroom, concurrent multi-Graph Runs, exact reservation/grant
-  release, and per-Run completion, first-failure, trace, and Host-context
-  routing. Transitional legacy scheduler owners keep Issue #70 full-ledger
-  admission outside those Run policy classes; later slices extend the service
-  with general resource execution and the final lifecycle fence without moving
-  ledger authority;
+  checked full-vector Run admission, work/byte cost, class-local Graph and
+  weighted-Run fairness, stable aging, a three-Interactive burst bound,
+  Throughput-owned protected-headroom accounting with exact root lifetime,
+  concurrent multi-Graph Runs, exact reservation/grant release, and per-Run
+  completion, first-failure, trace, and Host-context routing. Interactive and
+  transitional Issue #70 legacy roots do not debit the Throughput class quota;
+  later slices extend the service with general resource execution and the final
+  lifecycle fence without moving ledger authority;
 - its private `RunLifecycleRegistry` supplies the single process admission/
   graph-close/process-shutdown fence, pending-candidate tracking,
   graph-indexed registry-held `RunLease` entries, and process enumeration without
@@ -488,10 +489,10 @@ In that target:
 - the internal host-authoritative `ResourceLedger` is the only reservation and
   grant mint; and
 - the current private, stateless `SchedulerPolicy` strategies rank work only;
-  Interactive considers explicit deadlines before the shared fairness scores,
-  while Throughput uses those scores directly. A policy owns no worker, queue,
-  token, native resource, Run, or Graph state. A replacement scheduler-policy
-  ABI remains future work.
+  Interactive considers explicit deadlines before the class-local fairness
+  scores for the selected class, while Throughput uses its own class-local
+  scores directly. A policy owns no worker, queue, token, native resource, Run,
+  or Graph state. A replacement scheduler-policy ABI remains future work.
 
 This ownership target does not select a new source directory, build target, or
 plugin ABI shape for future policy/general-resource slices. Those choices
@@ -726,11 +727,12 @@ precedes exact release. Built-in CPU Runs reserve complete checked CPU,
 retained-memory, scratch, ready-entry, and ready-byte vectors before
 publication; their initial and dependent work share one entry/byte-bounded
 policy store. Issue #71 now adds private stateless Interactive and Throughput
-strategies, checked work/byte cost, Graph/weighted-Run fairness, stable aging,
-a three-Interactive burst bound, and protected headroom without changing final
-ledger authority or Issue #70's full-ledger legacy capacity. #72–#74 add
-revision, cancellation, and supersession; #75 replaces the worker-owning ABI;
-and #76 closes lifecycle and telemetry invariants. The authoritative acyclic
+strategies, checked work/byte cost, class-local Graph/weighted-Run fairness,
+stable aging, a three-Interactive burst bound, and a Throughput-owned protected
+headroom charge that follows exact root lifetime without changing final ledger
+authority or Issue #70's full-ledger legacy capacity. #72–#74 add revision,
+cancellation, and supersession; #75 replaces the worker-owning ABI; and #76
+closes lifecycle and telemetry invariants. The authoritative acyclic
 dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 

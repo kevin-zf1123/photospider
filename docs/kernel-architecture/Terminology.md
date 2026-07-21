@@ -189,16 +189,19 @@ that the ledger may invent.
 The private Host-authoritative mint exclusively owned by one
 `ExecutionService`. It atomically admits complete vectors, mints only bounded
 child grants, and releases exact capacity after parent and child ownership
-ends. Default limits belong to the Host composition, not a static process
-singleton. It owns no worker, ready ordering, dependency, lifecycle registry,
-device/I/O/plugin estimate, or fairness authority.
+ends. A private release observer may update non-authoritative companion
+accounting at that exact root-release point, but it cannot mint or enlarge
+capacity. Default limits belong to the Host composition, not a static process
+singleton. The ledger owns no worker, ready ordering, dependency, lifecycle
+registry, device/I/O/plugin estimate, or fairness authority.
 
 **Bounded ready store**
 The `ExecutionService`-owned policy-aware store whose aggregate entry and
 accounted-byte counts cannot exceed immutable ledger limits. It bills one
 dispatch as `work_units + ceil(complete_ready_grant_bytes / 4096)`, accumulates
-raw Graph service and weight-normalized Run service, honors interactive
-deadline ordering, and first selects a service class using fixed three-to-one
+raw Graph service independently per selected class and weight-normalized Run
+service within each Run's immutable class, honors interactive deadline
+ordering, and first selects a service class using fixed three-to-one
 Interactive/Throughput arbitration. Within that selected class, ready entries
 age after eight successful dispatches before ordinary policy comparison;
 aging never changes the selected class. Initial and dependency-released
@@ -214,7 +217,9 @@ reservation pair before constructing either scheduler; replacement acquires
 one candidate reservation while the old owner remains live. A
 `ReservationOwnedScheduler` destroys its concrete scheduler before exact
 release. A Run root remains committed until every queued/executing child grant
-has ended.
+has ended. For a built-in Throughput Run, its non-authoritative class-quota
+charge has the same root lifetime; Interactive and legacy roots do not debit
+that quota.
 
 **`SchedulerTaskRuntime`**
 The scheduler-owned push-only ready-task dispatch mechanism. It accepts initial

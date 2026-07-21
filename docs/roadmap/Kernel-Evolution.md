@@ -380,15 +380,18 @@ completion route, or lifecycle authority.
 Issue #71 proves the seam with two real built-in policies and one shared route:
 
 - dispatch cost is `work_units + ceil(complete_ready_grant_bytes / 4096)`;
-- Graph service uses raw cost and Run service uses `ceil(cost / weight)`;
+- Graph service uses raw cost in one accumulator per selected class, and Run
+  service uses `ceil(cost / weight)` within each Run's immutable class;
 - interactive ordering prefers an earlier present monotonic deadline, while
   throughput ordering is weighted and deterministic;
 - a ready entry ages after eight successful dispatches;
 - at most three consecutive interactive dispatches precede required
   throughput progress while throughput remains ready;
-- configured interactive headroom is excluded from general admission, with the
-  ledger retaining final authority; transitional legacy owners retain Issue
-  #70 full-ledger admission and are not reclassified as Throughput; and
+- configured interactive headroom caps only active built-in Throughput root
+  reservations; Interactive and transitional Issue #70 legacy owners do not
+  debit that class quota, while the ledger retains final physical authority;
+  the Throughput charge follows exact root lifetime through deferred child
+  release; and
 - initial and dependent work use the same policy route, retaining Run rows
   across temporary emptiness.
 

@@ -289,10 +289,12 @@ finalization 已完成，并且所有 reservation/grant 与 Run-owned graph-life
 
 Admission 会事务性验证一个 checked resource vector，只返回完整 Run reservation 或什么也不
 返回。可信 service code 会在该 reservation 内部分配 ready-entry/byte 与 CPU/memory/scratch
-child grant。Service 会从 general admission ceiling 中减去配置的 interactive headroom，只允许
-显式 interactive Run 使用该 headroom，并且每个 reservation 与 grant 仍必须由 ledger 授权。
-这个 Run-policy ceiling 不会重新分类过渡期 legacy scheduler owner：它们保留 Issue #70 的
-full-ledger admission，并可能使用原本可留给 interactive Run 的共享容量。
+child grant。Service 从 general admission ceiling 中减去配置的 interactive headroom 后，只把
+active 内建 Throughput root reservation 计入该 ceiling。Interactive Run 与过渡期 Issue #70
+legacy scheduler owner 不会扣减这项 class quota，但每个 reservation 与 grant 仍必须由 ledger
+授权，ledger 也仍是唯一物理容量 authority。Throughput quota check、ledger reservation 与 class
+charge 构成一个串行 transaction。不具权威的 class charge 只有在精确物理 root release 时才会
+扣回，包括 live child grant 推迟该 release 的情况。
 
 当前 success、callback failure、construction rollback、worker failure、legacy Graph close 与
 owner destruction 都会让每个 reservation/grant 恰好释放一次。只要 child grant 仍存活，Run
@@ -309,9 +311,11 @@ registry 切片必须保持同一个不变量。
 
 当前私有 `InteractiveSchedulerPolicy` 与 `ThroughputSchedulerPolicy` 是对不可变 ready descriptor
 执行比较的无状态策略。`ExecutionService` 拥有物理 ready store 与全部 fairness row。每次 dispatch
-按 `work_units + ceil(complete_ready_grant_bytes / 4096)` 计费；Graph row 按原始 cost 计费，Run
-row 按 `ceil(cost / weight)` 计费。Interactive 排序首先偏好存在且更早的单调时钟 deadline；
-throughput 排序采用加权且确定的规则。Stable enqueue sequence 是最后的平局裁定项。
+按 `work_units + ceil(complete_ready_grant_bytes / 4096)` 计费；每个 Graph 在已选 class 的
+accumulator 中按原始 cost 计费，每个 class 不可变的 Run row 按 `ceil(cost / weight)` 计费。
+Interactive 排序首先偏好存在且更早的单调时钟 deadline；throughput 排序采用加权且确定的规则。
+Stable enqueue sequence 是最后的平局裁定项。一个 class 的 service history 不能改变另一个 class
+中的 Graph selection。
 
 Ready item 会在八次成功 service dispatch 后 aging。throughput work 持续 ready 时，至多允许三次
 连续 interactive dispatch，随后必须保证 throughput 进展；该界限优先于 aging。Initial work 与

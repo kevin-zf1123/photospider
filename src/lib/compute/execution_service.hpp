@@ -988,6 +988,17 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   std::shared_ptr<RunState> find_active_run(ComputeRunId run_id);
 
   /**
+   * @brief Copies the built-in Throughput admission charge for repository
+   * tests.
+   * @return Exact active Throughput root vectors, excluding Interactive and
+   * transitional legacy reservations.
+   * @throws std::system_error when private accounting locking fails.
+   * @note This private diagnostic mints no authority and is exposed only
+   * through `ExecutionServiceTestAccess`, never an installed API.
+   */
+  ResourceVector throughput_reservation_snapshot_for_testing() const;
+
+  /**
    * @brief Returns the Run currently executing on this service worker.
    * @return Borrowed Run state valid for the callback interval.
    * @throws std::logic_error outside a service worker callback.

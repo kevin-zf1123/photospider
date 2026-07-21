@@ -318,16 +318,17 @@ the store owns the fairness rows and physical entries. Built-in CPU
 `GraphRuntime` bindings own no scheduler.
 
 Dispatch cost is `work_units + ceil(complete_ready_grant_bytes / 4096)`.
-Graph rows receive raw cost and Run rows receive `ceil(cost / weight)`.
-Interactive ordering prefers an earlier present monotonic deadline;
-throughput ordering is weighted and deterministic. Class arbitration runs
-first: while both classes remain ready, the service chooses Throughput after
-at most three consecutive Interactive dispatches. Only then does selection
-within that class allow a ready item to age after eight successful dispatches;
-aging cannot cross or replace the chosen class. Initial and dependent work
-share the same route, and Run fairness rows persist across temporary emptiness.
-The strategies own no worker, physical ready store, token, budget, Run, or
-Graph.
+Graph rows receive raw cost in separate Interactive and Throughput
+accumulators; each Run has one immutable class and receives
+`ceil(cost / weight)` in that class. Interactive ordering prefers an earlier
+present monotonic deadline; throughput ordering is weighted and deterministic.
+Class arbitration runs first: while both classes remain ready, the service
+chooses Throughput after at most three consecutive Interactive dispatches.
+Only then does selection within that class allow a ready item to age after
+eight successful dispatches; aging cannot cross or replace the chosen class.
+Initial and dependent work share the same route, and Run fairness rows persist
+across temporary emptiness. The strategies own no worker, physical ready store,
+token, budget, Run, or Graph.
 
 A registered plugin is charged the full resolved grant and may own fewer
 workers but not more. `gpu_pipeline` and `heterogeneous` are charged the
@@ -368,11 +369,12 @@ whole-process thread or allocation claims. `GraphStateExecutor` has a separate
 structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
 The default interactive headroom is one CPU slot, 64 MiB retained memory,
 32 MiB scratch, 1,024 ready entries, and 16 MiB ready bytes. Throughput
-admission is limited to the general ceiling after subtracting that vector;
-Interactive admission may use the reserve, but every Run still requires ledger
-authorization. Transitional legacy scheduler owners preserve Issue #70
-full-ledger admission; they are not assigned the Throughput Run policy and may
-consume shared capacity inside that headroom.
+admission atomically charges only active built-in Throughput root reservations
+against the general ceiling after subtracting that vector. Interactive and
+transitional Issue #70 legacy owners do not debit this class quota; every owner
+still requires ledger authorization and may consume shared physical capacity.
+The Throughput charge follows the exact root lifetime and is removed only after
+the parent and all child grants release the matching ledger commitment.
 
 Issue #70 deliberately removes the installed inline
 `kSchedulerWorkerProcessMax` constant. This is a source-contract break for
