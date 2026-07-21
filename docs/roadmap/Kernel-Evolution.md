@@ -171,8 +171,9 @@ The graph-state lane now captures an immutable revision and later validates
 the commit predicate. Long-running planning and execution occur outside the
 exclusive `GraphModel` mutation boundary, so one `ComputeRun` does not prevent
 the frontend from producing a newer revision. Issue #72 makes that minimum
-identity/revision staging behavior current; the diagram still includes later
-registry, cancellation, supersession, device, I/O, and plugin target slices.
+identity/revision staging behavior current, and Issue #73 makes private Run
+cancellation and commit arbitration current. The diagram still includes later
+registry, supersession, device, I/O, and plugin target slices.
 
 ## Run and Process Execution Domain Contract
 

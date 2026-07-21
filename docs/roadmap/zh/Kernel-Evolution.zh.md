@@ -140,8 +140,9 @@ flowchart TD
 
 图状态 lane 现在会先捕获 immutable revision，之后再校验 commit predicate。长时间 planning 与
 execution 发生在 `GraphModel` 独占变更边界之外，因此一个 `ComputeRun` 不会阻止 frontend
-产生更新 revision。Issue #72 使最小 identity/revision staging 行为成为当前行为；图中仍包含
-后续 registry、cancellation、supersession、device、I/O 与 plugin 目标切片。
+产生更新 revision。Issue #72 使最小 identity/revision staging 行为成为当前行为，Issue #73 则使
+私有 Run cancellation 与 commit arbitration 成为当前行为；图中仍包含后续 registry、
+supersession、device、I/O 与 plugin 目标切片。
 
 ## Run 与进程执行域契约
 
