@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -912,6 +913,9 @@ bool wait_for_ready_task_count(const ExecutionService& service,
  * Callback-borrowed stack state must be declared before this owner, while any
  * gate release guard must be declared after it, so exceptional unwinding
  * releases gates, joins the Run, and only then destroys borrowed state.
+ * Every post-launch adoption moves only these three owners. The compile-time
+ * checks below keep those moves non-throwing, while each owning vector reserves
+ * its final size before any asynchronous launch so adoption cannot allocate.
  */
 struct AsyncPolicyRun final {
   /** @brief Host observation target retained through synchronous settlement. */
@@ -923,6 +927,21 @@ struct AsyncPolicyRun final {
   /** @brief Asynchronous synchronous-Run call completion. */
   std::future<void> completion;
 };
+
+static_assert(std::is_nothrow_move_constructible_v<std::future<void>>,
+              "Asynchronous completion ownership must move without throwing.");
+static_assert(std::is_nothrow_move_assignable_v<std::future<void>>,
+              "Asynchronous completion replacement must not throw.");
+static_assert(
+    std::is_nothrow_move_constructible_v<decltype(AsyncPolicyRun::host)>,
+    "Asynchronous Host ownership must move without throwing.");
+static_assert(
+    std::is_nothrow_move_constructible_v<decltype(AsyncPolicyRun::run)>,
+    "Asynchronous Run ownership must move without throwing.");
+static_assert(std::is_nothrow_move_constructible_v<AsyncPolicyRun>,
+              "Async policy owner adoption must not throw during movement.");
+static_assert(std::is_nothrow_move_assignable_v<AsyncPolicyRun>,
+              "Async policy owner replacement must not throw during movement.");
 
 /**
  * @brief Publishes one policy-test Run whose initial tasks record markers.
@@ -3651,6 +3670,7 @@ TEST(ExecutionServicePolicy, ChargesWorkAndReadyBytesBeforeStableTie) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(3U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -3736,6 +3756,7 @@ TEST(ExecutionServicePolicy, ChargesExactReadyByteQuantumBoundaries) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(4U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -3803,6 +3824,7 @@ TEST(ExecutionServicePolicy, RepeatsHierarchicalGraphAndRunFairness) {
     std::mutex execution_order_mutex;
     AsyncPolicyRun blocker;
     std::vector<AsyncPolicyRun> targets;
+    targets.reserve(3U);
     ScopedPromiseRelease release_guard(release_blocker);
 
     blocker = launch_blocking_policy_run(
@@ -3866,6 +3888,7 @@ TEST(ExecutionServicePolicy, AppliesRunWeightWithinOneGraph) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(2U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -3920,6 +3943,7 @@ TEST(ExecutionServicePolicy, PrefersEarlierExplicitInteractiveDeadline) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(2U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -3983,6 +4007,7 @@ TEST(ExecutionServicePolicy, PrefersPresentDeadlineOverAbsentDeadlines) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(3U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4043,6 +4068,7 @@ TEST(ExecutionServicePolicy, AgesExpensiveWaiterAfterEightDispatches) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(11U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4103,6 +4129,7 @@ TEST(ExecutionServicePolicy, AgesNormalLaneThroughHighPriorityStream) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(1U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4186,6 +4213,7 @@ TEST(ExecutionServicePolicy, BoundsInteractiveFloodAtThreeToOne) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(13U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4249,6 +4277,7 @@ TEST(ExecutionServicePolicy, BoundsOlderThroughputFloodAtThreeToOne) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(20U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4330,6 +4359,7 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(1U);
   ScopedPromiseRelease release_guard(release_blocker);
   blocker = launch_blocking_policy_run(
       service,
@@ -4407,6 +4437,7 @@ TEST(ExecutionServicePolicy, RetainsPolicyHistoryAcrossDependentReentry) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(2U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4522,6 +4553,7 @@ TEST(ExecutionServicePolicy, SaturatesGraphCounterWithoutWrapping) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(2U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4603,6 +4635,7 @@ TEST(ExecutionServicePolicy, SaturatesRunCounterAcrossDependentReentry) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun saturated;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(1U);
   ScopedPromiseRelease publish_dependent_guard(publish_dependent);
   ScopedPromiseRelease release_saturated_guard(release_saturated_initial);
 
@@ -4702,6 +4735,7 @@ TEST(ExecutionServicePolicy, UnwindsPolicyCostOverflowWithoutAffectingPeer) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
+  targets.reserve(1U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
