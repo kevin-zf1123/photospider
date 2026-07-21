@@ -12,6 +12,8 @@ class GraphRuntime;
 
 namespace ps::compute {
 
+class ComputeRunLease;
+
 /**
  * @brief Refreshes real-time proxy buffers from committed HP dirty outputs.
  *
@@ -55,12 +57,15 @@ class DownsampleExecutor {
    * @param proxy_graph RT proxy graph receiving downsampled output.
    * @param runtime Optional runtime used only for scheduler trace events.
    * @param events Event service that receives downsample status events.
+   * @param run_lease Optional borrowed HP lifecycle lease used for cooperative
+   * cancellation observations between requests and before proxy publication.
    * @throws Nothing directly.
    * @note The executor stores borrowed references and performs no ownership
    * transfer.
    */
   DownsampleExecutor(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
-                     GraphRuntime* runtime, GraphEventService& events);
+                     GraphRuntime* runtime, GraphEventService& events,
+                     const ComputeRunLease* run_lease = nullptr);
 
   /**
    * @brief Executes all pending downsample requests in caller order.
@@ -197,6 +202,10 @@ class DownsampleExecutor {
 
   /** @brief Borrowed event sink for downsample status events. */
   GraphEventService& events_;
+
+  /** @brief Optional borrowed HP lifecycle lease for cooperative observations.
+   */
+  const ComputeRunLease* run_lease_ = nullptr;
 };
 
 }  // namespace ps::compute

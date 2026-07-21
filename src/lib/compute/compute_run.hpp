@@ -3,10 +3,12 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
@@ -21,8 +23,11 @@ class SchedulerTaskRuntime;
 
 namespace ps::compute {
 class ComputeRunControl;
+class ComputeRunCancellationSlot;
+class ComputeRequestCancellationControl;
 class HighPrecisionDirtyWriteBuffer;
 class TaskSubmissionPlan;
+class ComputeRun;
 
 /**
  * @brief Opaque stable identity for one request-owned compute Run.
@@ -523,6 +528,313 @@ struct ComputeRunTerminalOutcome {
 };
 
 /**
+ * @brief Injected monotonic time source used by cooperative deadline checks.
+ *
+ * @return Current point in the same `steady_clock` domain as Run deadlines.
+ * @throws Implementations must not throw. An exception from a
+ * contract-violating injected clock propagates from the observation boundary.
+ * @note Production Runs use `std::chrono::steady_clock::now`. Injection exists
+ * only on this private backend surface so deadline tests need no wall-clock
+ * sleeps or timer thread.
+ */
+using ComputeRunMonotonicClock =
+    // NOLINTNEXTLINE(whitespace/indent_namespace)
+    std::function<std::chrono::steady_clock::time_point()>;
+
+/**
+ * @brief Private cancellation authority for exactly one ComputeRun.
+ *
+ * Sources are minted only by their matching Run. Copying preserves the same
+ * authority without granting it to ordinary Run leases. A source holds weak
+ * control ownership, so retaining a request handle cannot prolong Run staging,
+ * callback, or resource lifetime.
+ *
+ * @throws std::system_error if Run-state synchronization fails.
+ * @note The first accepted reason publishes `Cancelled`; repeated requests,
+ * requests after failure/success, and requests after a commit contender is
+ * accepted are idempotent no-ops. This private type is not installed or exposed
+ * through Host, CLI, IPC, operation, or scheduler contracts.
+ */
+class ComputeRunCancellationSource {
+ public:
+  /**
+   * @brief Requests monotonic cancellation with one stable reason.
+   * @param reason Internal reason proposed to the matching Run arbiter.
+   * @return True only when this request claims the open terminal arbiter.
+   * @throws std::system_error if Run-state or cleanup synchronization fails.
+   * @throws Any exception from a registered cleanup callback after
+   * cancellation becomes terminal.
+   * @note Cleanup notifications run after the terminal mutex is released.
+   */
+  bool request_cancellation(ComputeRunCancellationReason reason) const;
+
+  /**
+   * @brief Reports whether the matching Run still exists.
+   * @return True while some observer or lease retains the Run control block.
+   * @throws Nothing.
+   */
+  bool has_live_run() const noexcept { return !control_.expired(); }
+
+ private:
+  friend class ComputeRun;
+  friend class ComputeRequestCancellationSource;
+
+  /**
+   * @brief Binds private authority to one Run without retaining its lifetime.
+   * @param control Weakly retained matching Run control.
+   * @throws Nothing.
+   */
+  explicit ComputeRunCancellationSource(
+      std::weak_ptr<ComputeRunControl> control) noexcept
+      : control_(std::move(control)) {}
+
+  /** @brief Weak matching control; expiry makes requests terminal no-ops. */
+  std::weak_ptr<ComputeRunControl> control_;
+};
+
+/**
+ * @brief Private request coordinator that fans cancellation into child Runs.
+ *
+ * ComputeService attaches one HP Run for an ordinary request and distinct HP/RT
+ * children for a realtime request. The coordinator remembers the first request
+ * reason and immediately applies it to children attached after that request.
+ * Child Runs keep independent ids, terminal arbiters, deadlines, staging, and
+ * cleanup; this class is deliberately not a `RunGroup` and aggregates no
+ * result.
+ *
+ * @throws std::bad_alloc when coordinator or child-source storage grows.
+ * @throws std::system_error when coordinator or child Run locking fails.
+ * @note Child sources are weak with respect to Run lifetime. The class is a
+ * private launch seam and never enters an installed request or IPC value.
+ */
+class ComputeRequestCancellationSource final {
+ public:
+  /**
+   * @brief Creates one empty current-request cancellation coordinator.
+   * @throws std::bad_alloc when shared control allocation fails.
+   */
+  ComputeRequestCancellationSource();
+
+  /**
+   * @brief Attaches one independent child Run source to this request.
+   * @param run Current HP or RT child Run; duplicate attachment is idempotent.
+   * @return Nothing.
+   * @throws std::bad_alloc when source storage grows.
+   * @throws std::system_error when coordinator or Run locking fails.
+   * @throws Any exception from a child cleanup callback when attaching after
+   * request cancellation.
+   * @note If cancellation was already requested, the new child is cancelled
+   * before this call returns using the stable first request reason.
+   */
+  void attach(ComputeRun& run);
+
+  /**
+   * @brief Broadcasts one explicit current-request cancellation.
+   * @return True only for the first request-level acceptance.
+   * @throws std::bad_alloc when a temporary child-source snapshot allocates.
+   * @throws std::system_error when coordinator or child Run locking fails.
+   * @throws Any exception from a child cleanup callback after the request
+   * reason becomes stable.
+   * @note A true result does not imply every child was still open; each child
+   * arbitrates the request independently.
+   */
+  bool request_cancellation();
+
+  /**
+   * @brief Returns the stable accepted request reason when requested.
+   * @return `ExplicitRequest` after the first request, otherwise nullopt.
+   * @throws std::system_error when coordinator locking fails.
+   */
+  std::optional<ComputeRunCancellationReason> accepted_reason() const;
+
+ private:
+  /** @brief Shared coordinator state retained by request/test launch owners. */
+  std::shared_ptr<ComputeRequestCancellationControl> control_;
+};
+
+/**
+ * @brief Move-only lifetime for one private Run cancellation notification.
+ *
+ * Destruction deactivates the callback and synchronizes with any invocation
+ * already selected by cancellation publication. It neither requests
+ * cancellation nor retains Run control ownership.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note The registration is used by ExecutionService and realtime sibling
+ * coordination only; scheduler ABI callbacks are unchanged.
+ */
+class ComputeRunCancellationRegistration final {
+ public:
+  /**
+   * @brief Creates an inactive registration value.
+   * @throws Nothing.
+   */
+  ComputeRunCancellationRegistration() noexcept = default;
+
+  /**
+   * @brief Transfers notification lifetime from another registration.
+   * @param other Registration left inactive.
+   * @throws Nothing.
+   */
+  ComputeRunCancellationRegistration(
+      ComputeRunCancellationRegistration&& other) noexcept;
+
+  /**
+   * @brief Replaces this registration through synchronized transfer.
+   * @param other Registration left inactive.
+   * @return Reference to this value.
+   * @throws Nothing.
+   */
+  ComputeRunCancellationRegistration& operator=(
+      ComputeRunCancellationRegistration&& other) noexcept;
+
+  /**
+   * @brief Deactivates this notification and waits for an active callback.
+   * @throws Nothing; synchronization failure terminates as an invariant breach.
+   */
+  ~ComputeRunCancellationRegistration() noexcept;
+
+  /**
+   * @brief Prevents copying one notification-deactivation owner.
+   * @param other Registration that cannot be copied.
+   * @throws Nothing because the operation is deleted.
+   */
+  ComputeRunCancellationRegistration(
+      const ComputeRunCancellationRegistration&) = delete;
+
+  /**
+   * @brief Prevents copy assignment of notification lifetime.
+   * @param other Registration that cannot be assigned.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ComputeRunCancellationRegistration& operator=(
+      const ComputeRunCancellationRegistration&) = delete;
+
+  /**
+   * @brief Reports whether this value owns an installed notification slot.
+   * @return True before movement or reset.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return slot_ != nullptr; }
+
+ private:
+  friend class ComputeRunLease;
+
+  /**
+   * @brief Owns one installed callback slot.
+   * @param slot Shared slot retained by Run control during notification.
+   * @throws Nothing.
+   */
+  explicit ComputeRunCancellationRegistration(
+      std::shared_ptr<ComputeRunCancellationSlot> slot) noexcept
+      : slot_(std::move(slot)) {}
+
+  /** @brief Deactivates and releases the current slot. */
+  void reset() noexcept;
+
+  /** @brief Shared slot whose own mutex serializes invoke/deactivate. */
+  std::shared_ptr<ComputeRunCancellationSlot> slot_;
+};
+
+/**
+ * @brief Move-only one-shot ownership of an accepted Run commit attempt.
+ *
+ * A contender can be minted only by a matching lease while the Run is
+ * `CommitPending`, after a fresh deadline observation, and while the terminal
+ * arbiter is open. It blocks later cancellation/failure contenders until its
+ * owner resolves success or exact failure.
+ *
+ * @throws std::system_error when terminal synchronization fails.
+ * @note Product code acquires this value inside the graph-state work item and
+ * resolves it before that item returns. Destroying an unresolved value
+ * publishes an internal failure; it never silently reopens the arbiter.
+ */
+class ComputeRunCommitContender final {
+ public:
+  /**
+   * @brief Transfers the one-shot commit claim.
+   * @param other Claim left empty.
+   * @throws Nothing.
+   */
+  ComputeRunCommitContender(ComputeRunCommitContender&& other) noexcept;
+
+  /**
+   * @brief Transfers a claim after failing any unresolved previous claim.
+   * @param other Claim left empty.
+   * @return Reference to this contender.
+   * @throws Nothing; failure to resolve an abandoned claim terminates.
+   */
+  ComputeRunCommitContender& operator=(
+      ComputeRunCommitContender&& other) noexcept;
+
+  /**
+   * @brief Resolves an accidentally abandoned claim as internal failure.
+   * @throws Nothing; allocation/synchronization failure terminates.
+   */
+  ~ComputeRunCommitContender() noexcept;
+
+  /**
+   * @brief Prevents copying one exclusive commit claim.
+   * @param other Contender that cannot be copied.
+   * @throws Nothing because the operation is deleted.
+   */
+  ComputeRunCommitContender(const ComputeRunCommitContender&) = delete;
+
+  /**
+   * @brief Prevents copy assignment of exclusive commit ownership.
+   * @param other Contender that cannot be assigned.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ComputeRunCommitContender& operator=(const ComputeRunCommitContender&) =
+      delete;
+
+  /**
+   * @brief Resolves this accepted commit after no-throw visible publication.
+   * @return True only for this still-active matching contender.
+   * @throws std::system_error if Run-state locking fails.
+   * @note Success becomes observable before the serialized transaction returns.
+   */
+  bool publish_succeeded();
+
+  /**
+   * @brief Resolves this accepted commit with its exact predicate/persist
+   * error.
+   * @param failure Non-null exception captured inside the commit transaction.
+   * @return True only for this still-active matching contender.
+   * @throws std::invalid_argument when failure is null.
+   * @throws std::system_error if Run-state locking fails.
+   */
+  bool publish_failed(std::exception_ptr failure);
+
+  /**
+   * @brief Reports whether this value still owns an unresolved claim.
+   * @return True before either terminal resolution or movement.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return control_ != nullptr; }
+
+ private:
+  friend class ComputeRunLease;
+
+  /**
+   * @brief Binds the claim accepted under matching Run synchronization.
+   * @param control Strong Run control retained through transaction resolution.
+   * @throws Nothing.
+   */
+  explicit ComputeRunCommitContender(
+      std::shared_ptr<ComputeRunControl> control) noexcept
+      : control_(std::move(control)) {}
+
+  /** @brief Publishes internal failure for an unresolved owned claim. */
+  void abandon() noexcept;
+
+  /** @brief Matching control while this contender remains unresolved. */
+  std::shared_ptr<ComputeRunControl> control_;
+};
+
+/**
  * @brief Non-forgeable strong ownership of one ComputeRun control block.
  *
  * A lease is minted only by ComputeRun::acquire_lease() and remains bound to
@@ -605,6 +917,22 @@ class ComputeRunLease {
   std::uint64_t retained_memory_bytes() const;
 
   /**
+   * @brief Estimates one cancellation-notification allocation envelope.
+   *
+   * @param callback_capture_bytes Structural bytes captured by the registered
+   * callback and conservatively charged in case std::function owns them out of
+   * line.
+   * @return Checked slot object, shared-control, and callback-capture bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The Run's weak-slot vector capacity is part of
+   * retained_memory_bytes() and is intentionally excluded here.
+   * Allocator-private metadata remains outside the structural accounting
+   * boundary.
+   */
+  static std::uint64_t cancellation_notification_retained_memory_bytes(
+      std::uint64_t callback_capture_bytes = 0U);
+
+  /**
    * @brief Builds a composite identity in this lease's Run namespace.
    *
    * @param local_task_id Dense local value to pair with the retained Run id.
@@ -650,11 +978,53 @@ class ComputeRunLease {
   std::optional<ComputeRunTerminalOutcome> terminal_outcome() const;
 
   /**
+   * @brief Observes explicit cancellation and the immutable Run deadline.
+   * @return Stable cancellation reason when cancellation owns the terminal
+   * outcome, otherwise nullopt for an open, failed, or succeeded Run.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @throws Any exception from a contract-violating injected clock.
+   * @throws Any exception from a registered cleanup callback when deadline
+   * cancellation wins.
+   * @note An expired injected monotonic deadline proposes `DeadlineExceeded`
+   * through the same arbiter. Leases cannot choose any other reason.
+   */
+  std::optional<ComputeRunCancellationReason> observe_cancellation() const;
+
+  /**
+   * @brief Installs a private notification for accepted Run cancellation.
+   * @param callback Non-empty cleanup callback receiving the stable reason.
+   * @return Move-only registration that synchronizes callback deactivation.
+   * @throws std::invalid_argument when callback is empty.
+   * @throws std::bad_alloc when callback/slot storage cannot allocate.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @throws Any callback exception when registering after cancellation.
+   * @note Registration on an already cancelled Run invokes the callback before
+   * return. Callbacks run without the Run control mutex and must be idempotent.
+   */
+  ComputeRunCancellationRegistration register_cancellation_notification(
+      std::function<void(ComputeRunCancellationReason)> callback) const;
+
+  /**
+   * @brief Attempts to reserve the terminal arbiter for visible commit.
+   * @return Active one-shot contender when phase/deadline/arbiter permit
+   * commit, otherwise nullopt without changing an existing terminal outcome.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @throws Any exception from a contract-violating injected clock.
+   * @throws Any exception from a registered cleanup callback when deadline
+   * cancellation wins.
+   * @note Deadline is observed immediately before the atomic claim. Only the
+   * returned contender can resolve an accepted commit claim.
+   */
+  std::optional<ComputeRunCommitContender> try_claim_commit() const;
+
+  /**
    * @brief Executes one registered task through the matching Run-owned plan.
    *
    * @param identity Composite task identity carried by an accepted callback.
    * @param task_runtime Scheduler runtime used for trace, ready submission, and
    * completion accounting.
+   * @param callback_owns_completion Whether a legacy exact-once token, rather
+   * than this lease route, owns retirement of the callback's pre-counted unit.
    * @return Nothing.
    * @throws std::invalid_argument when identity does not match this lease or a
    * registered local task.
@@ -670,7 +1040,8 @@ class ComputeRunLease {
    * throws, its exception propagates instead.
    */
   void execute_task(const ComputeRunTaskIdentity& identity,
-                    SchedulerTaskRuntime& task_runtime);
+                    SchedulerTaskRuntime& task_runtime,
+                    bool callback_owns_completion = false);
 
   /**
    * @brief Runs the full-HP scheduler bootstrap through this lease.
@@ -744,6 +1115,8 @@ class ComputeRun {
    *
    * @param submission Immutable request values captured before this domain's
    * planning and preflight.
+   * @param monotonic_clock Non-empty private steady-clock source used for
+   * deterministic deadline observation.
    * @throws std::invalid_argument for unsupported intent, intent/quality
    * mismatch, or invalid QoS.
    * @throws std::overflow_error when no non-reused Run id remains.
@@ -751,7 +1124,11 @@ class ComputeRun {
    * @note Construction leaves the Run in Created with no terminal outcome or
    * execution storage.
    */
-  explicit ComputeRun(ComputeRunSubmission submission);
+  explicit ComputeRun(
+      ComputeRunSubmission submission,
+      ComputeRunMonotonicClock monotonic_clock = [] {
+        return std::chrono::steady_clock::now();
+      });
 
   /**
    * @brief Passively releases the request observer.
@@ -822,7 +1199,29 @@ class ComputeRun {
    * @note Dispatcher and commit continuations keep their own lease while every
    * accepted callback receives a copied or moved lease.
    */
-  ComputeRunLease acquire_lease();
+  ComputeRunLease acquire_lease() const;
+
+  /**
+   * @brief Mints private cancellation authority for this exact Run.
+   * @return Weak-lifetime source bound to this Run's terminal arbiter.
+   * @throws Nothing.
+   * @note Ordinary callbacks receive leases instead and cannot request an
+   * arbitrary cancellation reason.
+   */
+  ComputeRunCancellationSource cancellation_source() const noexcept;
+
+  /**
+   * @brief Observes explicit cancellation and the immutable Run deadline.
+   * @return Stable cancellation reason when this Run is cancelled, otherwise
+   * nullopt.
+   * @throws std::system_error when Run-state synchronization fails.
+   * @throws Any exception from a contract-violating injected clock.
+   * @throws Any exception from a registered cleanup callback when deadline
+   * cancellation wins.
+   * @note This request-observer convenience has the same read-only authority as
+   * lease observation.
+   */
+  std::optional<ComputeRunCancellationReason> observe_cancellation() const;
 
   /**
    * @brief Reports current Run-local physical quiescence.
@@ -878,17 +1277,6 @@ class ComputeRun {
    * @note The method stores exception identity without rethrowing it.
    */
   bool publish_failed(std::exception_ptr failure);
-
-  /**
-   * @brief Publishes cancelled terminal outcome with a stable reason.
-   *
-   * @param reason Cancellation cause accepted by the Run arbiter.
-   * @return true only for the winning terminal publication.
-   * @throws std::system_error if mutex locking fails.
-   * @note Current product paths do not call this method; it exists so exact
-   * terminal arbitration is complete before a control surface arrives.
-   */
-  bool publish_cancelled(ComputeRunCancellationReason reason);
 
   /**
    * @brief Copies the current terminal outcome if one exists.

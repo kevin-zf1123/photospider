@@ -14,6 +14,22 @@
 #include "compute/execution_service.hpp"
 
 namespace ps::compute {
+namespace {
+
+/**
+ * @brief Rejects one full-plan boundary after accepted Run cancellation.
+ * @param lease Retained lifecycle lease for the active dispatch.
+ * @return Nothing while cancellation has not won.
+ * @throws GraphError with ComputeError after explicit/deadline cancellation.
+ */
+void observe_dispatch_cancellation(const ComputeRunLease& lease) {
+  if (lease.observe_cancellation().has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "ComputeRun cancelled during full-plan dispatch.");
+  }
+}
+
+}  // namespace
 
 /**
  * @brief Constructs the dispatcher with borrowed compute services.
@@ -104,6 +120,8 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @param request Per-call dispatch options.
  * @param run Request observer that mints a dispatcher lease retaining plan,
  * runner, callback, exception, and output state through commit.
+ * @param lifecycle_lease Retained request lease observed and copied into
+ * scheduler callback ownership.
  * @return Mutable high-precision output stored on the target graph node.
  * @throws GraphError for missing targets, missing final output, compute
  * failures, or scheduling failures; may also propagate operation/cache
@@ -118,8 +136,10 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-    const ComputeDispatchRequest& request, ComputeRun& run) {
-  return execute_impl(graph, task_runtime, nullptr, nullptr, request, run);
+    const ComputeDispatchRequest& request, ComputeRun& run,
+    const ComputeRunLease& lifecycle_lease) {
+  return execute_impl(graph, task_runtime, nullptr, nullptr, request, run,
+                      lifecycle_lease);
 }
 
 /**
@@ -130,6 +150,8 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * @param host Active Graph trace observation context.
  * @param request Per-call dispatch options.
  * @param run Request owner retaining leased dispatcher state.
+ * @param lifecycle_lease Retained request lease observed and copied into
+ * service submission ownership.
  * @return Mutable committed target output.
  * @throws GraphError or standard exceptions from shared planning, service
  * execution, cache, telemetry, and commit.
@@ -137,9 +159,9 @@ NodeOutput& ComputeTaskDispatcher::execute(
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, ExecutionService& execution_service,
     SchedulerHostContext& host, const ComputeDispatchRequest& request,
-    ComputeRun& run) {
+    ComputeRun& run, const ComputeRunLease& lifecycle_lease) {
   return execute_impl(graph, execution_service, &execution_service, &host,
-                      request, run);
+                      request, run, lifecycle_lease);
 }
 
 /**
@@ -151,6 +173,8 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * @param host Optional Graph observation target for service execution.
  * @param request Per-call dispatch options.
  * @param run Request observer that mints all retained leases.
+ * @param lifecycle_lease Retained request lease observed and copied into the
+ * selected physical route.
  * @return Mutable high-precision output stored on the target graph node.
  * @throws GraphError or standard exceptions from the selected route and shared
  * semantic stages.
@@ -160,7 +184,9 @@ NodeOutput& ComputeTaskDispatcher::execute(
 NodeOutput& ComputeTaskDispatcher::execute_impl(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
     ExecutionService* execution_service, SchedulerHostContext* host,
-    const ComputeDispatchRequest& request, ComputeRun& run) {
+    const ComputeDispatchRequest& request, ComputeRun& run,
+    const ComputeRunLease& lifecycle_lease) {
+  observe_dispatch_cancellation(lifecycle_lease);
   const int node_id = request.node_id;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
@@ -180,7 +206,8 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
     graph.clear_full_task_graph_cache();
   }
 
-  ComputeRunLease dispatcher_lease = run.acquire_lease();
+  ComputeRunLease dispatcher_lease = lifecycle_lease;
+  observe_dispatch_cancellation(dispatcher_lease);
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal_, node_id, task_runtime.available_devices());
   if (request.force_recache) {
@@ -204,9 +231,15 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
       request.enable_timing,
       request.disable_disk_cache,
       request.benchmark_events,
+      &dispatcher_lease,
   });
-  run.advance_to(ComputeRunPhase::Queued);
-  run.advance_to(ComputeRunPhase::Running);
+  observe_dispatch_cancellation(dispatcher_lease);
+  if (!run.advance_to(ComputeRunPhase::Queued)) {
+    observe_dispatch_cancellation(dispatcher_lease);
+  }
+  if (!run.advance_to(ComputeRunPhase::Running)) {
+    observe_dispatch_cancellation(dispatcher_lease);
+  }
   if (execution_service != nullptr) {
     if (host == nullptr) {
       throw std::logic_error(
@@ -218,14 +251,20 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
     dispatch_planned_tasks(graph, task_runtime, node_id, plan,
                            dispatcher_lease);
   }
-  run.advance_to(ComputeRunPhase::CommitPending);
+  observe_dispatch_cancellation(dispatcher_lease);
+  if (!run.advance_to(ComputeRunPhase::CommitPending)) {
+    observe_dispatch_cancellation(dispatcher_lease);
+  }
 
+  observe_dispatch_cancellation(dispatcher_lease);
   ComputeResultCommitter committer(cache_, graph_mutex,
                                    request.cache_precision);
   if (request.enable_timing) {
     committer.finalize_timing(timing_results, timing_mutex);
   }
+  observe_dispatch_cancellation(dispatcher_lease);
   committer.commit(graph, plan.execution_order(), plan.temp_results());
+  observe_dispatch_cancellation(dispatcher_lease);
 
   if (!graph.node(node_id).cached_output_high_precision) {
     throw GraphError(GraphErrc::ComputeError,

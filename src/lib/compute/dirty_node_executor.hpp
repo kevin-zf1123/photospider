@@ -20,6 +20,7 @@ class GraphRuntime;
 
 namespace ps::compute {
 
+class ComputeRunLease;
 class StabilizedDirtyParameters;
 
 /**
@@ -61,6 +62,13 @@ struct DirtyNodeExecutionContext {
    * snapshot only for parameter edges and never for image-edge domain data.
    */
   const StabilizedDirtyParameters* stabilized_parameters = nullptr;
+
+  /**
+   * @brief Optional borrowed Run lease for node/tile cancellation observation.
+   * @note The owning dirty executor keeps the pointed-to lifecycle lease alive
+   * through synchronous task settlement; this context never retains it.
+   */
+  const ComputeRunLease* run_lease = nullptr;
 };
 
 /**
@@ -97,6 +105,7 @@ class HighPrecisionDirtyNodeExecutor {
    *
    * @param node Mutable node selected by the outer dirty executor.
    * @param entry HP dirty ROI, extent, and halo metadata for this node.
+   * @return Nothing.
    * @throws GraphError when dependencies or operators are missing, or when the
    * selected operation fails.
    * @note Empty HP ROIs are valid no-op entries.
@@ -155,9 +164,12 @@ class HighPrecisionDirtyNodeExecutor {
    * @param tile_fn Tiled HP operation implementation.
    * @param entry HP ROI, extent, and halo metadata.
    * @param image_inputs_ready Resolved HP image inputs.
+   * @param hp_buffer Request-local destination buffer.
+   * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
    * @note Scheduler tile trace events are emitted before execution to mirror
-   * the previous combined dirty executor.
+   * the previous combined dirty executor. A supplied lifecycle lease is
+   * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
                      const HpPlanEntry& entry,
@@ -232,6 +244,9 @@ class HighPrecisionDirtyNodeExecutor {
 
   /** @brief Per-node critical sections borrowed from the dirty transaction. */
   DirtyNodeSynchronization& node_synchronization_;
+
+  /** @brief Optional borrowed lifecycle lease for cooperative observations. */
+  const ComputeRunLease* run_lease_ = nullptr;
 };
 
 /**
@@ -269,6 +284,7 @@ class RealTimeDirtyNodeExecutor {
    *
    * @param node Mutable node selected by the outer dirty executor.
    * @param entry RT dirty ROI, HP ROI, extent, and halo metadata.
+   * @return Nothing.
    * @throws GraphError when dependencies or operators are missing, or when the
    * selected operation fails.
    * @note Empty RT ROIs are valid no-op entries.
@@ -375,9 +391,11 @@ class RealTimeDirtyNodeExecutor {
    * @param entry RT dirty ROI, extent, and halo metadata.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
+   * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
    * @note Scheduler tile trace events are emitted after tiled execution, as in
-   * the previous combined dirty executor.
+   * the previous combined dirty executor. A supplied lifecycle lease is
+   * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
                      const RtPlanEntry& entry,
@@ -445,6 +463,9 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Per-node critical sections borrowed from the dirty transaction. */
   DirtyNodeSynchronization& node_synchronization_;
+
+  /** @brief Optional borrowed lifecycle lease for cooperative observations. */
+  const ComputeRunLease* run_lease_ = nullptr;
 };
 
 }  // namespace ps::compute

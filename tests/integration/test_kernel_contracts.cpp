@@ -3278,15 +3278,291 @@ TEST(ComputeContracts, CommitPredicateAndPublicationExcludeMutationToctou) {
 }
 
 /**
+ * @brief Proves sequential provider return observes cooperative cancellation.
+ *
+ * @return Nothing; GoogleTest assertions report premature preemption, missing
+ * cancellation translation, unbounded settlement, or leaked Graph state.
+ * @throws Setup, submission, graph-state, or filesystem exceptions unchanged.
+ * @note The monolithic provider is non-preemptible. Cancellation becomes
+ * terminal while it is blocked, the request remains pending until provider
+ * return, and the post-provider sequential observation discards the private
+ * staged Graph before product publication.
+ */
+TEST(ComputeContracts,
+     SequentialCancellationAfterProviderReturnSuppressesPublication) {
+  register_contract_ops();
+  reset_blocking_contract_source();
+  const std::string graph_name = "contract_sequential_cancellation";
+  const auto root =
+      clean_temp_path("photospider-contract-sequential-cancellation-root");
+  const auto yaml_path =
+      temp_path("photospider-contract-sequential-cancellation.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  const auto initial_state =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<uint64_t, bool>{
+                graph.revision().value(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+  ASSERT_FALSE(initial_state.second);
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+  auto cancellation_source =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.execution.parallel = false;
+  request.cancellation_source = cancellation_source;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    std::filesystem::remove(yaml_path);
+    FAIL() << "sequential blocking provider did not start";
+  }
+
+  EXPECT_TRUE(cancellation_source->request_cancellation());
+  EXPECT_FALSE(cancellation_source->request_cancellation());
+  EXPECT_EQ(compute_future->wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout)
+      << "cooperative cancellation must not preempt the active provider";
+  release_compute.set_value();
+  ASSERT_EQ(compute_future->wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  EXPECT_NE(
+      outcome.error->message.find("ComputeRun cancelled: explicit request."),
+      std::string::npos)
+      << outcome.error->message;
+
+  const auto final_state =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<uint64_t, bool>{
+                graph.revision().value(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+  EXPECT_EQ(final_state, initial_state);
+  reset_blocking_contract_source();
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
+ * @brief Proves cancellation before the graph-state commit claim suppresses HP
+ * publication and deferred cache persistence.
+ *
+ * @return Nothing; GoogleTest assertions report request translation or leaked
+ * visible state.
+ * @throws Setup, submission, graph-state, or filesystem exceptions unchanged.
+ * @note The prepared checkpoint is outside the graph-state lane and before
+ * `try_claim_commit()`. Cancellation therefore owns the child Run terminal
+ * outcome, and the staged graph must be discarded without visible mutation or
+ * a configured disk-cache artifact.
+ */
+TEST(ComputeContracts, CancellationBeforeCommitClaimSuppressesPublication) {
+  register_contract_ops();
+  reset_blocking_contract_source();
+  const std::string graph_name = "contract_cancel_before_commit_claim";
+  const auto root =
+      clean_temp_path("photospider-contract-cancel-before-commit-root");
+  const auto cache_base =
+      clean_temp_path("photospider-contract-cancel-before-commit-cache");
+  const auto yaml_path =
+      temp_path("photospider-contract-cancel-before-commit.yaml");
+  write_blocking_source_graph(yaml_path, 8, true);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string(),
+                                "", cache_base.string()));
+  const auto initial_state =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<uint64_t, bool>{
+                graph.revision().value(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+  ASSERT_FALSE(initial_state.second);
+
+  CommitCheckpointGate gate(
+      testing::KernelComputeCommitTestEvent::HighPrecisionCommitPrepared);
+  ScopedKernelComputeCommitHook hook(gate);
+  auto cancellation_source =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = false;
+  request.cache.nosave = false;
+  request.execution.parallel = true;
+  request.cancellation_source = cancellation_source;
+  auto admitted = kernel.compute_async(request);
+  ASSERT_TRUE(admitted.has_value());
+  ScopedCommitComputeFuture compute(gate, std::move(*admitted));
+  if (!gate.wait_until_entered(std::chrono::seconds(2))) {
+    ADD_FAILURE() << "HP prepared-commit checkpoint was not reached";
+    return;
+  }
+
+  EXPECT_TRUE(cancellation_source->request_cancellation());
+  EXPECT_FALSE(cancellation_source->request_cancellation());
+  Kernel::AsyncComputeResult outcome;
+  try {
+    outcome = compute.release_and_get(std::chrono::seconds(2));
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << error.what();
+    return;
+  }
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  EXPECT_NE(
+      outcome.error->message.find("ComputeRun cancelled: explicit request."),
+      std::string::npos)
+      << outcome.error->message;
+
+  const auto final_state =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::pair<uint64_t, bool>{
+                graph.revision().value(),
+                graph.node(1).cached_output_high_precision.has_value()};
+          })
+          .get();
+  EXPECT_EQ(final_state, initial_state);
+  const auto image_path = cache_base / graph_name / "1" / "blocking-output.png";
+  auto metadata_path = image_path;
+  metadata_path.replace_extension(".yml");
+  EXPECT_FALSE(std::filesystem::exists(image_path));
+  EXPECT_FALSE(std::filesystem::exists(metadata_path));
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove_all(cache_base);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
+ * @brief Proves cancellation after commit claim cannot roll back HP
+ * publication.
+ *
+ * @return Nothing; GoogleTest assertions report incorrect request or visible
+ * state arbitration.
+ * @throws Setup, submission, graph-state, or filesystem exceptions unchanged.
+ * @note The predicate checkpoint runs after `try_claim_commit()` while the same
+ * graph-state work item owns publication. The request source accepts its first
+ * broadcast, but the child Run rejects cancellation and resolves success.
+ */
+TEST(ComputeContracts, CancellationAfterCommitClaimPreservesPublication) {
+  register_contract_ops();
+  reset_blocking_contract_source();
+  const std::string graph_name = "contract_cancel_after_commit_claim";
+  const auto root =
+      clean_temp_path("photospider-contract-cancel-after-commit-root");
+  const auto yaml_path =
+      temp_path("photospider-contract-cancel-after-commit.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  const uint64_t initial_revision =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) { return graph.revision().value(); })
+          .get();
+
+  CommitCheckpointGate gate(
+      testing::KernelComputeCommitTestEvent::HighPrecisionPredicateValidated);
+  ScopedKernelComputeCommitHook hook(gate);
+  auto cancellation_source =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.execution.parallel = true;
+  request.cancellation_source = cancellation_source;
+  auto admitted = kernel.compute_async(request);
+  ASSERT_TRUE(admitted.has_value());
+  ScopedCommitComputeFuture compute(gate, std::move(*admitted));
+  if (!gate.wait_until_entered(std::chrono::seconds(2))) {
+    ADD_FAILURE() << "HP predicate-validated checkpoint was not reached";
+    return;
+  }
+
+  EXPECT_TRUE(cancellation_source->request_cancellation());
+  EXPECT_FALSE(cancellation_source->request_cancellation());
+  Kernel::AsyncComputeResult outcome;
+  try {
+    outcome = compute.release_and_get(std::chrono::seconds(2));
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << error.what();
+    return;
+  }
+  EXPECT_TRUE(outcome.ok);
+  EXPECT_FALSE(outcome.error.has_value());
+
+  const auto final_state =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::tuple<uint64_t, bool, float>{
+                graph.revision().value(),
+                graph.node(1).cached_output_high_precision.has_value(),
+                toCvMat(
+                    graph.node(1).cached_output_high_precision->image_buffer)
+                    .at<float>(0, 0)};
+          })
+          .get();
+  EXPECT_EQ(std::get<0>(final_state), initial_revision);
+  EXPECT_TRUE(std::get<1>(final_state));
+  EXPECT_FLOAT_EQ(std::get<2>(final_state), 3.0f);
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
  * @brief Proves committed RT state survives a later stale HP sibling rejection.
  *
  * @return Nothing; GoogleTest assertions report gate ordering, revision, or RT
  * proxy rollback failures.
  * @throws Setup, dirty compute, submission, or filesystem exceptions when the
  * fixture cannot execute.
- * @note The RT publication checkpoint blocks outside graph-state. A live cache
- * clear advances revision before the gate opens; the HP provider then finishes
- * staging, fails its own predicate, and cannot erase the RT proxy value.
+ * @note The RT publication checkpoint blocks inside the graph-state commit
+ * transaction. A cache clear submitted while that transaction is blocked must
+ * remain pending; after RT publication resolves, the clear advances revision
+ * before the HP provider finishes, so the stale sibling cannot erase the RT
+ * proxy value.
  */
 TEST(ComputeContracts, RealtimeCommitSurvivesStaleHighPrecisionSibling) {
   register_contract_ops();
@@ -3344,14 +3620,25 @@ TEST(ComputeContracts, RealtimeCommitSurvivesStaleHighPrecisionSibling) {
   }
   EXPECT_TRUE(wait_for_blocking_contract_source(std::chrono::seconds(2)));
 
-  EXPECT_TRUE(kernel.clear_memory_cache(graph_name));
+  std::promise<void> clear_entered;
+  auto clear_entered_future = clear_entered.get_future();
+  auto clear_future = std::async(std::launch::async, [&] {
+    clear_entered.set_value();
+    return kernel.clear_memory_cache(graph_name);
+  });
+  EXPECT_EQ(clear_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(clear_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  gate.release();
+  EXPECT_TRUE(clear_future.get());
   const uint64_t mutated_revision =
       testing::KernelTestAccess::submit_graph_state(
           kernel, graph_name,
           [](GraphModel& graph) { return graph.revision().value(); })
           .get();
   EXPECT_EQ(mutated_revision, initial_revision + 1);
-  gate.release();
   release_hp.set_value();
 
   const Kernel::AsyncComputeResult outcome = compute_future->get();
@@ -3535,6 +3822,83 @@ TEST(ComputeContracts, CloseWaitsForAcceptedAsyncComputeRequest) {
 
   reset_blocking_contract_source();
   std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves explicit cancellation does not replace graph-close drainage.
+ *
+ * @return Nothing; GoogleTest assertions report premature close, lost
+ * cancellation translation, or failed runtime removal.
+ * @throws Setup, submission, or filesystem exceptions when the fixture cannot
+ * execute.
+ * @note The request Run becomes logically cancelled while its provider remains
+ * physically in flight. `close_graph()` must still wait for that callback to
+ * return because close is a drain boundary, not a cancellation requester.
+ */
+TEST(ComputeContracts, CancelledComputeStillDrainsBeforeGraphClose) {
+  register_contract_ops();
+  const std::string graph_name = "contract_cancelled_close_drain";
+  const auto root =
+      clean_temp_path("photospider-contract-cancelled-close-root");
+  const auto yaml_path = temp_path("photospider-contract-cancelled-close.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+  auto cancellation_source =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+  request.cancellation_source = cancellation_source;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    std::filesystem::remove(yaml_path);
+    FAIL() << "blocking compute did not start before cancellation";
+  }
+
+  EXPECT_TRUE(cancellation_source->request_cancellation());
+  EXPECT_FALSE(cancellation_source->request_cancellation());
+  std::promise<void> close_entered;
+  auto close_entered_future = close_entered.get_future();
+  auto close_future = std::async(std::launch::async, [&] {
+    close_entered.set_value();
+    return kernel.close_graph(graph_name);
+  });
+  EXPECT_EQ(close_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(close_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_compute.set_value();
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  EXPECT_NE(
+      outcome.error->message.find("ComputeRun cancelled: explicit request."),
+      std::string::npos)
+      << outcome.error->message;
+  EXPECT_TRUE(close_future.get());
+  EXPECT_FALSE(kernel.last_error(graph_name).has_value());
+
+  reset_blocking_contract_source();
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
 }
 
 /**

@@ -1236,9 +1236,15 @@ TEST(DirtyExecutorBadAllocBoundary,
   const GraphSessionId session = load_dirty_boundary_graph(
       *host, directory.root(), "rt_dirty_host", "rt_dirty_resource_exhausted");
 
-  EXPECT_THROW((void)host->compute(make_dirty_host_request(
-                   session, ComputeIntent::RealTimeUpdate)),
-               std::bad_alloc);
+  try {
+    const VoidResult result = host->compute(
+        make_dirty_host_request(session, ComputeIntent::RealTimeUpdate));
+    FAIL() << "std::bad_alloc was converted to Host status: code="
+           << static_cast<int>(result.status.code)
+           << " message=" << result.status.message;
+  } catch (const std::bad_alloc&) {
+    SUCCEED();
+  }
 }
 
 /**

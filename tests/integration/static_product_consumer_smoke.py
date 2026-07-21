@@ -649,10 +649,42 @@ def ipc_consumer_source() -> str:
 
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace {
+
+/**
+ * @brief Detects a public ``cancel_compute`` compatibility member.
+ * @tparam T Installed Host or Client contract under inspection.
+ * @tparam Probe Substitution-only member-address expression.
+ * @throws Nothing.
+ * @note Issue #73 is private and must not add this public control shim.
+ */
+template <typename T, typename Probe = void>
+struct HasCancelCompute : std::false_type {};
+
+/** @copydoc HasCancelCompute */
+template <typename T>
+struct HasCancelCompute<T, std::void_t<decltype(&T::cancel_compute)>>
+    : std::true_type {};
+
+static_assert(!HasCancelCompute<ps::Host>::value,
+              "installed Host must expose no cancellation shim");
+static_assert(!HasCancelCompute<ps::ipc::Client>::value,
+              "installed Client must expose no cancellation shim");
+static_assert(static_cast<int>(ps::ipc::ComputeJobState::Queued) == 0 &&
+                  static_cast<int>(ps::ipc::ComputeJobState::Running) == 1 &&
+                  static_cast<int>(ps::ipc::ComputeJobState::Succeeded) == 2 &&
+                  static_cast<int>(ps::ipc::ComputeJobState::Failed) == 3,
+              "IPC v1 compute state inventory must remain unchanged");
+static_assert(static_cast<int>(ps::OperationErrorDomain::None) == 0 &&
+                  static_cast<int>(ps::OperationErrorDomain::Transport) == 1 &&
+                  static_cast<int>(ps::OperationErrorDomain::Protocol) == 2 &&
+                  static_cast<int>(ps::OperationErrorDomain::Graph) == 3 &&
+                  static_cast<int>(ps::OperationErrorDomain::Daemon) == 4,
+              "public status-domain inventory must remain unchanged");
 
 /**
  * @brief References every typed Client call and non-destructor Host virtual.
@@ -818,6 +850,10 @@ int main(int argc, char** argv) {
   std::unique_ptr<ps::Host> host = ps::ipc::create_ipc_host("");
   if (!host) {
     return 2;
+  }
+  const ps::ipc::ComputeJobSnapshot default_job;
+  if (default_job.cancellable) {
+    return 3;
   }
   if (argc > 1) {
     return reference_complete_surface(client, *host);
@@ -1129,6 +1165,26 @@ def installed_scheduler_plugin_source() -> str:
                       "concrete executor destruction must remain polymorphic");
         static_assert(!std::is_destructible_v<ps::TaskExecutor>,
                       "borrowed TaskExecutor must not be base-deletable");
+        static_assert(ps::PS_SCHEDULER_PLUGIN_ABI_VERSION == 2U,
+                      "scheduler plugin ABI must remain version two");
+
+        /**
+         * @brief Detects an added scheduler cancellation compatibility method.
+         * @tparam T Installed scheduler contract under inspection.
+         * @tparam Probe Substitution-only member-address expression.
+         * @throws Nothing.
+         * @note Issue #73 observes private Run state without changing ABI v2.
+         */
+        template <typename T, typename Probe = void>
+        struct HasSchedulerCancel : std::false_type {};
+
+        /** @copydoc HasSchedulerCancel */
+        template <typename T>
+        struct HasSchedulerCancel<T, std::void_t<decltype(&T::cancel)>>
+            : std::true_type {};
+
+        static_assert(!HasSchedulerCancel<ps::IScheduler>::value,
+                      "scheduler ABI v2 must expose no cancellation shim");
 
         namespace {
 
@@ -1449,8 +1505,39 @@ def installed_operation_plugin_source() -> str:
     return dedent(
         r"""
         #include <stdexcept>
+        #include <string_view>
+        #include <type_traits>
 
         #include <photospider/plugin/plugin_api.hpp>
+
+        /**
+         * @brief Detects an added operation-registrar cancellation shim.
+         * @tparam T Installed registrar contract under inspection.
+         * @tparam Probe Substitution-only member-address expression.
+         * @throws Nothing.
+         * @note Operation ABI v2 receives callbacks only; it owns no Run.
+         */
+        template <typename T, typename Probe = void>
+        struct HasOperationCancel : std::false_type {};
+
+        /** @copydoc HasOperationCancel */
+        template <typename T>
+        struct HasOperationCancel<T, std::void_t<decltype(&T::cancel)>>
+            : std::true_type {};
+
+        static_assert(!HasOperationCancel<
+                          ps::plugin::OperationPluginRegistrar>::value,
+                      "operation ABI v2 must expose no cancellation shim");
+        static_assert(std::is_standard_layout_v<
+                          ps::plugin::OperationPluginRegistrar>,
+                      "operation ABI v2 registrar must remain standard layout");
+        static_assert(
+            sizeof(ps::plugin::OperationPluginRegistrar) == 9U * sizeof(void*),
+            "operation ABI v2 registrar pointer-table layout changed");
+        static_assert(
+            std::string_view(ps::plugin::kOperationPluginRegisterSymbolV2) ==
+                "register_photospider_ops_v2",
+            "operation plugin handshake must remain version two");
 
         /**
          * @brief Registers one installed-SDK operation using the image factory.

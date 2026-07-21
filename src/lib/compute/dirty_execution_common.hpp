@@ -178,6 +178,14 @@ struct DirtySourceFirstRunRequest {
    */
   ComputeRun* run = nullptr;
 
+  /**
+   * @brief Existing lifecycle lease copied into phase/callback ownership.
+   * @note ComputeService supplies this before attaching request cancellation,
+   * eliminating terminal-time lease acquisition races. Direct legacy tests may
+   * omit it and retain the pre-cancellation acquisition behavior.
+   */
+  const ComputeRunLease* run_lease = nullptr;
+
   /** @brief Compute plan containing immutable dirty task graph metadata. */
   const ComputePlan* compute_plan = nullptr;
 
@@ -592,6 +600,7 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
    * @param active_task_ids Task ids active in this source or downstream phase.
    * @param run_task Callable invoked with one active dirty task id.
    * @param task_runtime Runtime used for dependent handle submission.
+   * @param run_lease Optional read-only lease for cooperative cancellation.
    * @param release_dependents Whether completed tasks should release
    * downstream dependents.
    * @param priority Priority used when dependency release submits ready work.
@@ -601,6 +610,7 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
                           const DirtyTaskSelectionOverlay* selection,
                           const std::vector<int>& active_task_ids,
                           RunTask& run_task, SchedulerTaskRuntime& task_runtime,
+                          const ComputeRunLease* run_lease,
                           bool release_dependents,
                           SchedulerTaskPriority priority)
       : compute_plan_(compute_plan),
@@ -614,6 +624,8 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
                                       active_task_ids)),
         run_task_(run_task),
         task_runtime_(task_runtime),
+        run_lease_(run_lease ? std::optional<ComputeRunLease>(*run_lease)
+                             : std::nullopt),
         release_dependents_(release_dependents),
         priority_(priority) {
     task_handles_.resize(compute_plan_.task_graph.tasks.size());
@@ -650,13 +662,22 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
    * @brief Executes one dirty task id and releases dependent task handles.
    *
    * @param task_id Dirty task id selected by scheduler.
+   * @return Nothing.
    * @throws Any exception propagated by the dirty node executor.
    * @note Completion accounting mirrors TaskSubmissionPlan::run_task().
    */
   void run_task(int task_id) override {
     const auto& task = compute_plan_.task_graph.tasks.at(task_id);
     try {
+      if (run_lease_ && run_lease_->observe_cancellation().has_value()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "ComputeRun cancelled before legacy dirty task.");
+      }
       run_task_(task_id);
+      if (run_lease_ && run_lease_->observe_cancellation().has_value()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "ComputeRun cancelled after legacy dirty task.");
+      }
       if (release_dependents_) {
         std::vector<int> ready_ids =
             dependency_state_.release_dependents(task_id);
@@ -683,6 +704,9 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
 
   /** @brief Scheduler runtime borrowed for ready release and completion. */
   SchedulerTaskRuntime& task_runtime_;
+
+  /** @brief Optional retained Run observer for legacy callback boundaries. */
+  std::optional<ComputeRunLease> run_lease_;
 
   /** @brief Ready handles aligned with task id. */
   std::vector<TaskHandle> task_handles_;
@@ -731,6 +755,7 @@ auto make_dirty_context_and_release_outer_callable(
  * @tparam RunTask Callable that executes one dirty task id.
  * @param request Source-first dispatch request and boundary validation.
  * @param run_task Task runner invoked with dense task ids.
+ * @return Nothing.
  * @throws Exceptions from task construction, task execution, boundary
  * validation, scheduler lookup, or scheduler submission.
  * @note Legacy scheduler execution delegates source-first submission to
@@ -752,6 +777,19 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
   const ComputePlan& compute_plan = *request.compute_plan;
   const std::vector<int>& source_task_ids = *request.source_task_ids;
   const std::vector<int>& downstream_task_ids = *request.downstream_task_ids;
+  const auto observe_cancellation = [&request]() {
+    std::optional<ComputeRunCancellationReason> reason;
+    if (request.run_lease != nullptr) {
+      reason = request.run_lease->observe_cancellation();
+    } else if (request.run != nullptr) {
+      reason = request.run->observe_cancellation();
+    }
+    if (reason.has_value()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "ComputeRun cancelled during dirty dispatch.");
+    }
+  };
+  observe_cancellation();
 
   if (request.execution_service) {
     if (!request.host || !request.run) {
@@ -762,7 +800,9 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
         owned_callable_retained_memory_bytes(
             static_cast<std::uint64_t>(sizeof(RunTask)));
     std::function<void(int)> owned_run_task(std::move(run_task));
-    ComputeRunLease phase_lease = request.run->acquire_lease();
+    ComputeRunLease phase_lease = request.run_lease != nullptr
+                                      ? *request.run_lease
+                                      : request.run->acquire_lease();
     const auto additional_phase_retained_bytes =
         [&request](const std::vector<int>& task_ids) {
           RetainedMemoryEstimator estimate("dirty phase retained demand");
@@ -790,9 +830,12 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           *request.host, std::move(source_submissions),
           static_cast<int>(source_task_ids.size()),
           source_context->run_resource_demand(source_phase_retained.bytes()));
+      observe_cancellation();
     }
     if (request.before_downstream) {
+      observe_cancellation();
       request.before_downstream();
+      observe_cancellation();
     }
 
     if (!downstream_task_ids.empty()) {
@@ -821,6 +864,7 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           static_cast<int>(downstream_task_ids.size()),
           downstream_context->run_resource_demand(
               additional_phase_retained_bytes(downstream_task_ids)));
+      observe_cancellation();
     }
     return;
   }
@@ -830,10 +874,12 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
         ensure_running_scheduler(*request.runtime, request.intent);
     DirtyHandleTaskExecutor<RunTask> source_executor(
         compute_plan, request.selection, source_task_ids, run_task,
-        dirty_task_runtime, false, SchedulerTaskPriority::High);
+        dirty_task_runtime, request.run_lease, false,
+        SchedulerTaskPriority::High);
     DirtyHandleTaskExecutor<RunTask> downstream_executor(
         compute_plan, request.selection, downstream_task_ids, run_task,
-        dirty_task_runtime, true, SchedulerTaskPriority::Normal);
+        dirty_task_runtime, request.run_lease, true,
+        SchedulerTaskPriority::Normal);
     std::vector<int> initial_downstream_ids;
     if (request.selection) {
       initial_downstream_ids = request.selection->initial_downstream_task_ids;
@@ -848,14 +894,19 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
         downstream_executor.handles_for(initial_downstream_ids),
         static_cast<int>(downstream_task_ids.size()),
         request.before_downstream);
+    observe_cancellation();
     return;
   }
 
   for (int source_task_id : source_task_ids) {
+    observe_cancellation();
     run_task(source_task_id);
+    observe_cancellation();
   }
   if (request.before_downstream) {
+    observe_cancellation();
     request.before_downstream();
+    observe_cancellation();
   }
   TaskDependencyState dependency_state =
       request.selection
@@ -877,7 +928,9 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
   while (!ready_stack.empty()) {
     const int task_id = ready_stack.back();
     ready_stack.pop_back();
+    observe_cancellation();
     run_task(task_id);
+    observe_cancellation();
     std::vector<int> ready_ids = dependency_state.release_dependents(task_id);
     for (auto it = ready_ids.rbegin(); it != ready_ids.rend(); ++it) {
       ready_stack.push_back(*it);

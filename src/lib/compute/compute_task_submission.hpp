@@ -4,9 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "compute/compute_node_task_runner.hpp"
@@ -212,12 +214,24 @@ class TaskSubmissionPlan {
    * @throws std::logic_error when the registered task already entered.
    * @throws GraphError or operation exceptions from NodeTaskRunner and
    * dependency release.
-   * @note Success releases dependents and one scheduler completion unit.
+   * @note Success releases dependents; the calling lease route or legacy
+   * exact-once token retires this callback's scheduler completion unit.
    * Failure publication is owned by the calling lease route.
    */
   void execute_task(const ComputeRunTaskIdentity& identity,
                     const ComputeRunLease& lease,
                     SchedulerTaskRuntime& task_runtime);
+
+  /**
+   * @brief Closes all future ready publication and retires plan-owned legacy
+   * completion units.
+   * @return Nothing.
+   * @throws Nothing; an impossible scheduler completion failure terminates.
+   * @note The operation is idempotent and may race callback execution,
+   * dependency release, inline scheduler submission, failure, and cancellation.
+   * Callback-owned units remain owned by their exact-once retirement tokens.
+   */
+  void close_publication() noexcept;
 
  private:
   /**
@@ -230,10 +244,121 @@ class TaskSubmissionPlan {
     Pending = 0U,
     /** @brief One matching callback owns execution. */
     Executing = 1U,
-    /** @brief Execution, dependent release, and completion succeeded. */
+    /** @brief Execution and dependent release succeeded. */
     Completed = 2U,
     /** @brief Execution or completion routing threw. */
     Failed = 3U,
+  };
+
+  /**
+   * @brief Exact completion ownership for one legacy pre-counted plan task.
+   * @throws Nothing for atomic representation operations.
+   */
+  enum class LegacyCompletionOwner : std::uint8_t {
+    /** @brief Plan owns an unmaterialized completion unit. */
+    Plan = 0U,
+    /** @brief One copy-safe callback token owns the materialized unit. */
+    Callback = 1U,
+    /** @brief Exactly one owner retired the scheduler completion unit. */
+    Retired = 2U,
+  };
+
+  /**
+   * @brief Per-task exact-once record for legacy whole-plan completion count.
+   *
+   * @throws Nothing after construction; invalid runtime completion behavior
+   * terminates instead of abandoning or duplicating a counted unit.
+   */
+  class LegacyCompletionRecord final {
+   public:
+    /**
+     * @brief Binds one plan-owned unit to the active legacy runtime.
+     * @param runtime Runtime whose whole-plan count already includes this unit.
+     * @throws Nothing.
+     */
+    explicit LegacyCompletionRecord(SchedulerTaskRuntime& runtime) noexcept
+        : runtime_(&runtime) {}
+
+    /**
+     * @brief Transfers plan ownership to a materialized callback.
+     * @return True only for the exact Plan-to-Callback transition.
+     * @throws Nothing.
+     */
+    bool transfer_to_callback() noexcept;
+
+    /**
+     * @brief Retires an unmaterialized plan-owned unit once.
+     * @return Nothing.
+     * @throws Nothing; invalid runtime completion behavior terminates.
+     */
+    void retire_plan_owned() noexcept;
+
+    /**
+     * @brief Retires a materialized callback-owned unit once.
+     * @return Nothing.
+     * @throws Nothing; invalid runtime completion behavior terminates.
+     */
+    void retire_callback_owned() noexcept;
+
+   private:
+    /** @brief Calls the existing scheduler completion operation exactly once.
+     */
+    void retire_runtime() noexcept;
+
+    /** @brief Atomic plan/callback/retired ownership state. */
+    std::atomic<std::uint8_t> owner_{
+        static_cast<std::uint8_t>(LegacyCompletionOwner::Plan)};
+
+    /** @brief Borrowed active runtime valid until scheduler wait settles. */
+    SchedulerTaskRuntime* runtime_ = nullptr;
+  };
+
+  /**
+   * @brief Copy-safe shared token whose final owner covers queued callback
+   * drop.
+   * @throws Nothing; invalid runtime completion behavior terminates.
+   */
+  class LegacyCompletionToken final {
+   public:
+    /**
+     * @brief Retains one callback-owned completion record.
+     * @param record Shared record already transferred from plan ownership.
+     * @throws Nothing.
+     */
+    explicit LegacyCompletionToken(
+        std::shared_ptr<LegacyCompletionRecord> record) noexcept
+        : record_(std::move(record)) {}
+
+    /**
+     * @brief Arms retirement after the record ownership transfer succeeds.
+     * @return Nothing.
+     * @throws Nothing.
+     * @note Allocation and callback construction deliberately precede the
+     * Plan-to-Callback transfer, so their rollback cannot retire a plan-owned
+     * unit. The token becomes active immediately before scheduler submission.
+     */
+    void arm() noexcept { armed_.store(true, std::memory_order_release); }
+
+    /** @brief Retires a dropped callback's unit through exact-once state. */
+    ~LegacyCompletionToken() noexcept { retire(); }
+
+    /**
+     * @brief Retires this materialized callback unit on entry/exit.
+     * @return Nothing.
+     * @throws Nothing; repeated copies/invocations are idempotent.
+     */
+    void retire() noexcept {
+      if (armed_.load(std::memory_order_acquire)) {
+        record_->retire_callback_owned();
+      }
+    }
+
+   private:
+    /** @brief Shared per-task record retained by every std::function copy. */
+    std::shared_ptr<LegacyCompletionRecord> record_;
+
+    /** @brief True only after exact completion ownership reaches Callback. */
+    std::atomic<bool> armed_{false};
   };
 
   /**
@@ -263,6 +388,48 @@ class TaskSubmissionPlan {
   void release_dependents(int current_task_id, int current_node_id,
                           const ComputeRunLease& lease,
                           SchedulerTaskRuntime& task_runtime);
+
+  /**
+   * @brief Initializes one plan-owned completion record per legacy task.
+   * @param lease Matching Run lease used to reject a concurrently terminal Run.
+   * @param task_runtime Legacy runtime whose count receives the whole plan.
+   * @return True when the ledger is active, false when publication was already
+   * closed by cancellation/failure.
+   * @throws std::logic_error for duplicate initialization.
+   * @throws std::bad_alloc or scheduler completion-count exceptions.
+   * @note Record allocation precedes the whole-plan increment; publication is
+   * enabled only after that increment succeeds.
+   */
+  bool initialize_legacy_completion_ledger(const ComputeRunLease& lease,
+                                           SchedulerTaskRuntime& task_runtime);
+
+  /**
+   * @brief Transfers and submits one legacy callback under the publication
+   * gate.
+   * @param lease Matching Run lease copied into callback ownership.
+   * @param identity Registered task identity whose record is transferred.
+   * @param task_runtime Runtime receiving the move-owned callback.
+   * @return True when a callback was submitted, false after closure.
+   * @throws std::bad_alloc or scheduler submission exceptions.
+   * @note The recursive gate supports serial inline invocation before the void
+   * submission call returns. Submission rollback or final callback destruction
+   * retires the transferred token exactly once.
+   */
+  bool publish_legacy_callback(const ComputeRunLease& lease,
+                               const ComputeRunTaskIdentity& identity,
+                               SchedulerTaskRuntime& task_runtime);
+
+  /**
+   * @brief Publishes one service submission through the same cancellation gate.
+   * @param lease Matching Run lease.
+   * @param identity Registered ready task identity.
+   * @param ready_runtime Process service runtime accepting the owned value.
+   * @return True when accepted, false after terminal closure.
+   * @throws Submission construction or service admission exceptions.
+   */
+  bool publish_service_submission(const ComputeRunLease& lease,
+                                  const ComputeRunTaskIdentity& identity,
+                                  ReadyTaskSubmissionRuntime& ready_runtime);
 
   /**
    * @brief Discovers and validates the full initial ready identity set.
@@ -358,6 +525,24 @@ class TaskSubmissionPlan {
 
   /** @brief Exact-once state aligned with composite local task ids. */
   std::vector<std::atomic<std::uint8_t>> task_execution_states_;
+
+  /**
+   * @brief Linearizes plan-owned/callback-owned transfer with terminal closure.
+   * @note Recursive locking is required for the serial scheduler, which may run
+   * a callback and publish its dependent before the submission call returns.
+   */
+  std::recursive_mutex publication_mutex_;
+
+  /** @brief True after failure/cancellation closes all future publication. */
+  bool publication_closed_ = false;
+
+  /** @brief True after the legacy whole-plan count and records are installed.
+   */
+  bool legacy_completion_initialized_ = false;
+
+  /** @brief Per-task exact ownership records for legacy scheduling only. */
+  std::vector<std::shared_ptr<LegacyCompletionRecord>>
+      legacy_completion_records_;
 
   /** @brief Run-owned worker runner retained by callback leases. */
   std::unique_ptr<NodeTaskRunner> task_runner_;

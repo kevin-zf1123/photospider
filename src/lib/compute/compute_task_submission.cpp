@@ -96,24 +96,6 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
 }
 
 /**
- * @brief Builds one scheduler-owned callback with Run lifetime and identity.
- *
- * @param lease Strong lease copied or moved into callback ownership.
- * @param identity Composite task identity routed by the callback.
- * @param task_runtime Runtime that executes and receives dependent work.
- * @return Owned callback suitable for submit_ready_task_any_thread().
- * @throws std::bad_alloc if std::function state allocation fails.
- * @note The callback captures no plan, runner, or TaskExecutor pointer.
- */
-SchedulerTaskRuntime::Task make_owned_run_task(
-    ComputeRunLease lease, ComputeRunTaskIdentity identity,
-    SchedulerTaskRuntime& task_runtime) {
-  return [lease = std::move(lease), identity, &task_runtime]() mutable {
-    lease.execute_task(identity, task_runtime);
-  };
-}
-
-/**
  * @brief Best-effort settles a batch whose bootstrap submission threw.
  *
  * @param task_runtime Runtime whose empty batch owns one completion unit.
@@ -173,6 +155,52 @@ TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
   }
 }
 
+/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::transfer_to_callback */
+bool TaskSubmissionPlan::LegacyCompletionRecord::
+    transfer_to_callback() noexcept {
+  std::uint8_t expected =
+      static_cast<std::uint8_t>(LegacyCompletionOwner::Plan);
+  return owner_.compare_exchange_strong(
+      expected, static_cast<std::uint8_t>(LegacyCompletionOwner::Callback),
+      std::memory_order_acq_rel, std::memory_order_acquire);
+}
+
+/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::retire_plan_owned */
+void TaskSubmissionPlan::LegacyCompletionRecord::retire_plan_owned() noexcept {
+  std::uint8_t expected =
+      static_cast<std::uint8_t>(LegacyCompletionOwner::Plan);
+  if (owner_.compare_exchange_strong(
+          expected, static_cast<std::uint8_t>(LegacyCompletionOwner::Retired),
+          std::memory_order_acq_rel, std::memory_order_acquire)) {
+    retire_runtime();
+  }
+}
+
+/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::retire_callback_owned
+ */
+void TaskSubmissionPlan::LegacyCompletionRecord::
+    retire_callback_owned() noexcept {
+  std::uint8_t expected =
+      static_cast<std::uint8_t>(LegacyCompletionOwner::Callback);
+  if (owner_.compare_exchange_strong(
+          expected, static_cast<std::uint8_t>(LegacyCompletionOwner::Retired),
+          std::memory_order_acq_rel, std::memory_order_acquire)) {
+    retire_runtime();
+  }
+}
+
+/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::retire_runtime */
+void TaskSubmissionPlan::LegacyCompletionRecord::retire_runtime() noexcept {
+  try {
+    if (runtime_ == nullptr) {
+      std::terminate();
+    }
+    runtime_->dec_tasks_to_complete();
+  } catch (...) {
+    std::terminate();
+  }
+}
+
 /** @copydoc TaskSubmissionPlan::retained_memory_bytes */
 std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
   RetainedMemoryEstimator estimate("TaskSubmissionPlan");
@@ -193,6 +221,14 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       static_cast<std::uint64_t>(submitted_initial_task_ids_.size()));
   estimate.add_objects<std::atomic<std::uint8_t>>(
       static_cast<std::uint64_t>(task_execution_states_.capacity()));
+  estimate.add_objects<std::shared_ptr<LegacyCompletionRecord>>(
+      static_cast<std::uint64_t>(legacy_completion_records_.capacity()));
+  estimate.add_objects<LegacyCompletionRecord>(
+      static_cast<std::uint64_t>(legacy_completion_records_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(legacy_completion_records_.size()));
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(legacy_completion_records_.size()));
   if (task_runner_) {
     estimate.add_bytes(task_runner_->retained_memory_bytes());
   }
@@ -338,11 +374,12 @@ void TaskSubmissionPlan::submit_initial_ready_tasks(
   const std::vector<ComputeRunTaskIdentity> initial_identities =
       initial_ready_identities();
 
-  task_runtime.inc_tasks_to_complete(static_cast<int>(size()));
+  if (!initialize_legacy_completion_ledger(lease, task_runtime)) {
+    return;
+  }
   log_initial_assignments(task_runtime);
   for (const ComputeRunTaskIdentity& identity : initial_identities) {
-    task_runtime.submit_ready_task_any_thread(
-        make_owned_run_task(lease, identity, task_runtime));
+    (void)publish_legacy_callback(lease, identity, task_runtime);
   }
 }
 
@@ -386,6 +423,10 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
     throw std::invalid_argument(
         "Task identity does not belong to this Run submission plan.");
   }
+  (void)lease.observe_cancellation();
+  if (lease.terminal_outcome().has_value()) {
+    return;
+  }
   const int task_id = static_cast<int>(identity.local_task_id().value());
   std::uint8_t expected =
       static_cast<std::uint8_t>(TaskExecutionState::Pending);
@@ -410,8 +451,10 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
   task_runtime.log_event(execute_action, task.node_id);
   try {
     task_runner_->run_task(task_id);
-    release_dependents(task.task_id, task.node_id, lease, task_runtime);
-    task_runtime.dec_tasks_to_complete();
+    (void)lease.observe_cancellation();
+    if (!lease.terminal_outcome().has_value()) {
+      release_dependents(task.task_id, task.node_id, lease, task_runtime);
+    }
     task_execution_states_.at(task_id).store(
         static_cast<std::uint8_t>(TaskExecutionState::Completed),
         std::memory_order_release);
@@ -482,19 +525,21 @@ void TaskSubmissionPlan::release_dependents(
     int current_task_id, int current_node_id, const ComputeRunLease& lease,
     SchedulerTaskRuntime& task_runtime) {
   try {
+    (void)lease.observe_cancellation();
+    if (lease.terminal_outcome().has_value()) {
+      return;
+    }
     std::atomic_thread_fence(std::memory_order_release);
     const std::vector<int> ready_task_ids =
         dependency_state_.release_dependents(current_task_id);
+    auto* ready_runtime =
+        dynamic_cast<ReadyTaskSubmissionRuntime*>(&task_runtime);
     for (int dependent_task_id : ready_task_ids) {
       const ComputeRunTaskIdentity identity = task_identity(dependent_task_id);
-      auto* ready_runtime =
-          dynamic_cast<ReadyTaskSubmissionRuntime*>(&task_runtime);
       if (ready_runtime != nullptr) {
-        ready_runtime->submit_ready_submission(
-            make_ready_submission(lease, identity, false));
+        (void)publish_service_submission(lease, identity, *ready_runtime);
       } else {
-        task_runtime.submit_ready_task_any_thread(
-            make_owned_run_task(lease, identity, task_runtime));
+        (void)publish_legacy_callback(lease, identity, task_runtime);
       }
     }
   } catch (const std::bad_alloc&) {
@@ -508,6 +553,108 @@ void TaskSubmissionPlan::release_dependents(
   } catch (...) {
     std::rethrow_exception(
         scheduling_failure(graph_, current_node_id, "unknown exception"));
+  }
+}
+
+/** @copydoc TaskSubmissionPlan::initialize_legacy_completion_ledger */
+bool TaskSubmissionPlan::initialize_legacy_completion_ledger(
+    const ComputeRunLease& lease, SchedulerTaskRuntime& task_runtime) {
+  (void)lease.observe_cancellation();
+  std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+  if (legacy_completion_initialized_) {
+    throw std::logic_error(
+        "TaskSubmissionPlan legacy completion ledger is already initialized.");
+  }
+  if (publication_closed_ || lease.terminal_outcome().has_value()) {
+    publication_closed_ = true;
+    return false;
+  }
+
+  std::vector<std::shared_ptr<LegacyCompletionRecord>> records;
+  records.reserve(size());
+  for (std::size_t index = 0U; index < size(); ++index) {
+    records.push_back(std::make_shared<LegacyCompletionRecord>(task_runtime));
+  }
+  task_runtime.inc_tasks_to_complete(static_cast<int>(size()));
+  legacy_completion_records_ = std::move(records);
+  legacy_completion_initialized_ = true;
+
+  if (lease.terminal_outcome().has_value()) {
+    publication_closed_ = true;
+    for (const auto& record : legacy_completion_records_) {
+      record->retire_plan_owned();
+    }
+    return false;
+  }
+  return true;
+}
+
+/** @copydoc TaskSubmissionPlan::publish_legacy_callback */
+bool TaskSubmissionPlan::publish_legacy_callback(
+    const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+    SchedulerTaskRuntime& task_runtime) {
+  (void)lease.observe_cancellation();
+  std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+  if (publication_closed_ || lease.terminal_outcome().has_value()) {
+    return false;
+  }
+  if (!legacy_completion_initialized_) {
+    throw std::logic_error(
+        "Legacy callback publication requires an initialized completion "
+        "ledger.");
+  }
+  const std::size_t task_index =
+      static_cast<std::size_t>(identity.local_task_id().value());
+  const std::shared_ptr<LegacyCompletionRecord>& record =
+      legacy_completion_records_.at(task_index);
+  auto token = std::make_shared<LegacyCompletionToken>(record);
+  ComputeRunLease callback_lease = lease;
+  SchedulerTaskRuntime::Task callback = [lease = std::move(callback_lease),
+                                         identity, &task_runtime,
+                                         token]() mutable {
+    try {
+      lease.execute_task(identity, task_runtime, true);
+      token->retire();
+    } catch (...) {
+      token->retire();
+      throw;
+    }
+  };
+  if (!record->transfer_to_callback()) {
+    return false;
+  }
+  token->arm();
+  task_runtime.submit_ready_task_any_thread(std::move(callback));
+  return true;
+}
+
+/** @copydoc TaskSubmissionPlan::publish_service_submission */
+bool TaskSubmissionPlan::publish_service_submission(
+    const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+    ReadyTaskSubmissionRuntime& ready_runtime) {
+  (void)lease.observe_cancellation();
+  std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+  if (publication_closed_ || lease.terminal_outcome().has_value()) {
+    return false;
+  }
+  ready_runtime.submit_ready_submission(
+      make_ready_submission(lease, identity, false));
+  return true;
+}
+
+/** @copydoc TaskSubmissionPlan::close_publication */
+void TaskSubmissionPlan::close_publication() noexcept {
+  try {
+    std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+    if (publication_closed_) {
+      return;
+    }
+    publication_closed_ = true;
+    for (const auto& record : legacy_completion_records_) {
+      record->retire_plan_owned();
+    }
+  } catch (...) {
+    std::terminate();
   }
 }
 

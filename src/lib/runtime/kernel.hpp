@@ -237,6 +237,15 @@ class Kernel {
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
     std::optional<PixelRect> dirty_roi;
+
+    /**
+     * @brief Optional private current-request cancellation authority.
+     * @note Internal backend tests and future private launch owners may retain
+     * this source while compute is active. Embedded Host conversion leaves it
+     * null, and the field is absent from installed Host, CLI, and IPC values.
+     */
+    std::shared_ptr<compute::ComputeRequestCancellationSource>
+        cancellation_source;
   };
 
   /**

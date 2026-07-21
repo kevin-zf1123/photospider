@@ -10,10 +10,13 @@
  * `HostComputeRequest`; the embedded adapter translates it to
  * `Kernel::ComputeRequest` before these helpers run.
  */
+#include <exception>
 #include <future>
 #include <memory>
 #include <new>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -101,7 +104,8 @@ compute::ComputeRunQos make_default_compute_run_qos(
  * @param commit_policy Product policy tied to the exact staged Graph.
  * @param staged_proxy Optional request-owned RT proxy snapshot.
  * @return Service request containing target, cache, telemetry, intent, dirty
- * ROI, stable session identity, and explicit default Run QoS.
+ * ROI, stable session identity, explicit default Run QoS, and any private
+ * request cancellation authority.
  * @throws std::bad_alloc if copying the cache precision string allocates.
  * @note Quiet mode, skip-save, and scheduler selection stay in the internal
  * Kernel boundary because they belong to GraphRuntime orchestration. The graph
@@ -123,7 +127,8 @@ ComputeService::Request make_service_compute_request(
       request.name,
       make_default_compute_run_qos(request.execution.parallel),
       std::move(commit_policy),
-      staged_proxy};
+      staged_proxy,
+      request.cancellation_source};
 }
 
 /**
@@ -169,11 +174,11 @@ class KernelGraphRevisionCommitPolicy final
 
   /** @copydoc compute::ComputeCommitPolicy::commit_high_precision */
   void commit_high_precision(
-      const compute::ComputeRun& run, GraphModel& staged_graph,
+      const compute::ComputeRunLease& run_lease, GraphModel& staged_graph,
       compute::RealtimeProxyGraph* staged_proxy) override {
-    validate_staged_run(run, ComputeIntent::GlobalHighPrecision, staged_graph,
-                        staged_proxy, false);
-    const int target_node_id = run.descriptor().target_node_id();
+    validate_staged_run(run_lease, ComputeIntent::GlobalHighPrecision,
+                        staged_graph, staged_proxy, false);
+    const int target_node_id = run_lease.descriptor().target_node_id();
     const Node* target = staged_graph.find_node(target_node_id);
     if (target == nullptr || !target->cached_output_high_precision) {
       throw GraphError(GraphErrc::ComputeError,
@@ -191,67 +196,107 @@ class KernelGraphRevisionCommitPolicy final
     testing::notify_kernel_compute_commit_test_hook(
         testing::KernelComputeCommitTestEvent::HighPrecisionCommitPrepared);
 #endif
-    const GraphInstanceId instance_id = run.descriptor().graph_instance_id();
-    const GraphRevision revision = run.descriptor().revision();
+    const GraphInstanceId instance_id =
+        run_lease.descriptor().graph_instance_id();
+    const GraphRevision revision = run_lease.descriptor().revision();
+    compute::ComputeRunLease commit_lease = run_lease;
     runtime_.graph_state()
         .submit([this, instance_id, revision,
+                 commit_lease = std::move(commit_lease),
                  graph_publication = std::move(graph_publication),
                  proxy_publication = std::move(proxy_publication)](
                     GraphModel& live_graph) mutable {
-          validate_live_graph(live_graph, instance_id, revision);
-#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
-          testing::notify_kernel_compute_commit_test_hook(
-              testing::KernelComputeCommitTestEvent::
-                  HighPrecisionPredicateValidated);
-#endif
-          if (save_cache_) {
-            graph_publication->set_skip_save_cache(false);
-            persist_changed_hp_nodes(live_graph, *graph_publication);
+          std::optional<compute::ComputeRunCommitContender> contender =
+              commit_lease.try_claim_commit();
+          if (!contender.has_value()) {
+            return;
           }
-          live_graph.publish_compute_snapshot(*graph_publication);
-          if (proxy_publication) {
-            runtime_.realtime_proxy_graph().publish_compute_snapshot(
-                *proxy_publication);
+          try {
+            validate_live_graph(live_graph, instance_id, revision);
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+            testing::notify_kernel_compute_commit_test_hook(
+                testing::KernelComputeCommitTestEvent::
+                    HighPrecisionPredicateValidated);
+#endif
+            if (save_cache_) {
+              graph_publication->set_skip_save_cache(false);
+              persist_changed_hp_nodes(live_graph, *graph_publication);
+            }
+            live_graph.publish_compute_snapshot(*graph_publication);
+            if (proxy_publication) {
+              runtime_.realtime_proxy_graph().publish_compute_snapshot(
+                  *proxy_publication);
+            }
+            if (!contender->publish_succeeded()) {
+              throw std::logic_error(
+                  "HP commit contender failed to resolve success.");
+            }
+          } catch (...) {
+            const std::exception_ptr failure = std::current_exception();
+            if (contender->active()) {
+              (void)contender->publish_failed(failure);
+            }
+            std::rethrow_exception(failure);
           }
         })
         .get();
   }
 
   /** @copydoc compute::ComputeCommitPolicy::commit_real_time */
-  void commit_real_time(const compute::ComputeRun& run,
+  void commit_real_time(const compute::ComputeRunLease& run_lease,
                         GraphModel& staged_graph,
                         compute::RealtimeProxyGraph& staged_proxy) override {
-    validate_staged_run(run, ComputeIntent::RealTimeUpdate, staged_graph,
+    validate_staged_run(run_lease, ComputeIntent::RealTimeUpdate, staged_graph,
                         &staged_proxy, true);
-    (void)staged_proxy.require_output(run.descriptor().target_node_id());
+    (void)staged_proxy.require_output(run_lease.descriptor().target_node_id());
     std::unique_ptr<compute::RealtimeProxyGraph> proxy_publication =
         staged_proxy.clone_for_compute();
-    const GraphInstanceId instance_id = run.descriptor().graph_instance_id();
-    const GraphRevision revision = run.descriptor().revision();
+    const GraphInstanceId instance_id =
+        run_lease.descriptor().graph_instance_id();
+    const GraphRevision revision = run_lease.descriptor().revision();
+    compute::ComputeRunLease commit_lease = run_lease;
     runtime_.graph_state()
         .submit([this, instance_id, revision,
+                 commit_lease = std::move(commit_lease),
                  proxy_publication = std::move(proxy_publication)](
                     GraphModel& live_graph) mutable {
-          validate_live_graph(live_graph, instance_id, revision);
+          std::optional<compute::ComputeRunCommitContender> contender =
+              commit_lease.try_claim_commit();
+          if (!contender.has_value()) {
+            return;
+          }
+          try {
+            validate_live_graph(live_graph, instance_id, revision);
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
-          testing::notify_kernel_compute_commit_test_hook(
-              testing::KernelComputeCommitTestEvent::
-                  RealTimePredicateValidated);
+            testing::notify_kernel_compute_commit_test_hook(
+                testing::KernelComputeCommitTestEvent::
+                    RealTimePredicateValidated);
 #endif
-          runtime_.realtime_proxy_graph().publish_compute_snapshot(
-              *proxy_publication);
+            runtime_.realtime_proxy_graph().publish_compute_snapshot(
+                *proxy_publication);
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+            testing::notify_kernel_compute_commit_test_hook(
+                testing::KernelComputeCommitTestEvent::RealTimePublished);
+#endif
+            if (!contender->publish_succeeded()) {
+              throw std::logic_error(
+                  "RT commit contender failed to resolve success.");
+            }
+          } catch (...) {
+            const std::exception_ptr failure = std::current_exception();
+            if (contender->active()) {
+              (void)contender->publish_failed(failure);
+            }
+            std::rethrow_exception(failure);
+          }
         })
         .get();
-#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
-    testing::notify_kernel_compute_commit_test_hook(
-        testing::KernelComputeCommitTestEvent::RealTimePublished);
-#endif
   }
 
  private:
   /**
-   * @brief Validates Run phase, domain, label, and exact staged provenance.
-   * @param run Commit-pending domain Run.
+   * @brief Validates Run domain, label, and exact staged provenance.
+   * @param run_lease Commit-pending domain Run lease.
    * @param expected_intent HP or RT domain expected by the caller.
    * @param staged_graph Graph argument supplied back by ComputeService.
    * @param staged_proxy Proxy argument supplied back by ComputeService.
@@ -259,15 +304,14 @@ class KernelGraphRevisionCommitPolicy final
    * @return Nothing after every predicate succeeds.
    * @throws GraphError on the first failed predicate.
    */
-  void validate_staged_run(const compute::ComputeRun& run,
+  void validate_staged_run(const compute::ComputeRunLease& run_lease,
                            ComputeIntent expected_intent,
                            const GraphModel& staged_graph,
                            const compute::RealtimeProxyGraph* staged_proxy,
                            bool proxy_required) const {
-    const compute::ComputeRunDescriptor& descriptor = run.descriptor();
+    const compute::ComputeRunDescriptor& descriptor = run_lease.descriptor();
     const bool proxy_matches = staged_proxy == staged_proxy_;
-    if (run.phase() != compute::ComputeRunPhase::CommitPending ||
-        descriptor.intent() != expected_intent ||
+    if (descriptor.intent() != expected_intent ||
         descriptor.graph_identity() != graph_label_ ||
         &staged_graph != staged_graph_ || !staged_graph.is_compute_snapshot() ||
         descriptor.graph_instance_id() != staged_graph.instance_id() ||

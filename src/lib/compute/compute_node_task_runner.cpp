@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "compute/compute_metrics_recorder.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/node_executor.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "core/param_utils.hpp"
@@ -122,6 +123,24 @@ std::pair<int, DataType> infer_tile_channels_and_type(
   return {1, DataType::FLOAT32};
 }
 
+/**
+ * @brief Observes cancellation at one node or tile execution boundary.
+ *
+ * @param run_lease Optional borrowed request lifecycle lease.
+ * @return Nothing when no cancellation owns the Run terminal outcome.
+ * @throws GraphError when the matching Run has accepted cancellation.
+ * @throws std::system_error when Run-state synchronization fails.
+ * @note The exact stable cancellation reason remains owned by ComputeRun and is
+ * translated by the outer ComputeService wrapper. This local exception only
+ * stops further operation work and cannot replace terminal ownership.
+ */
+void observe_runner_cancellation(const ComputeRunLease* run_lease) {
+  if (run_lease != nullptr && run_lease->observe_cancellation().has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "ComputeRun cancelled before node or tile execution.");
+  }
+}
+
 }  // namespace
 
 /** @copydoc NodeTaskRunner::retained_memory_bytes */
@@ -146,6 +165,7 @@ std::uint64_t NodeTaskRunner::retained_memory_bytes() const {
   return estimate.bytes();
 }
 
+/** @copydoc NodeTaskRunner::NodeTaskRunner */
 NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
     : graph_(context.graph),
       cache_(context.cache),
@@ -161,7 +181,8 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
       force_recache_(context.force_recache),
       enable_timing_(context.enable_timing),
       disable_disk_cache_(context.disable_disk_cache),
-      benchmark_events_(context.benchmark_events) {
+      benchmark_events_(context.benchmark_events),
+      run_lease_(context.run_lease) {
   planned_output_sizes_.assign(execution_order_.size(), PixelSize{});
   tile_task_counts_.assign(execution_order_.size(), 0);
   completed_tile_counts_ =
@@ -200,6 +221,7 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
  * all other failures retain the existing node-context diagnostic contract.
  */
 void NodeTaskRunner::run_node(int node_idx) {
+  observe_runner_cancellation(run_lease_);
   const int node_id = execution_order_.at(node_idx);
   try {
     compute_node(node_idx, node_id);
@@ -226,6 +248,7 @@ void NodeTaskRunner::run_node(int node_idx) {
  * run_node(), while scheduler transport remains outside this runner.
  */
 void NodeTaskRunner::run_task(int task_id) {
+  observe_runner_cancellation(run_lease_);
   const PlannedTask& task = task_graph_.tasks.at(task_id);
   try {
     if (task.kind == PlannedTaskKind::Tile) {
@@ -339,7 +362,6 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
       task.tile_size > 0 ? task.tile_size : tiled_config.tile_size;
   tiled_config.output_roi = task.output_roi;
   tiled_config.output_size = planned_output_sizes_.at(node_idx);
-  tiled_config.on_tile = nullptr;
 
   BenchmarkEvent current_event = start_event(target_node);
   NodeExecutor::execute_tiled_into(graph_, node_for_exec,
@@ -506,6 +528,7 @@ TiledExecutionConfig NodeTaskRunner::tiled_config_for(
     }
   }
   tiled_config.on_tile = [this, node_id = target_node.id](const PixelRect&) {
+    observe_runner_cancellation(run_lease_);
     task_runtime_.log_event(SchedulerTraceAction::ExecuteTile, node_id);
   };
   return tiled_config;

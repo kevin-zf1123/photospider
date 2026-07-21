@@ -15,7 +15,7 @@ enum class KernelComputeCommitTestEvent {
   HighPrecisionPredicateValidated,
   /** @brief RT live predicate passed before the no-throw proxy swap. */
   RealTimePredicateValidated,
-  /** @brief RT proxy publication completed and graph-state was released. */
+  /** @brief RT proxy publication completed while commit ownership is held. */
   RealTimePublished,
 };
 

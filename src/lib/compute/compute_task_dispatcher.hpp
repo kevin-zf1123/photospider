@@ -18,6 +18,7 @@ class SchedulerHostContext;
 
 namespace ps::compute {
 class ComputeRun;
+class ComputeRunLease;
 class ExecutionService;
 
 /**
@@ -110,6 +111,8 @@ class ComputeTaskDispatcher {
    * @param request Immutable execution options for this dispatch.
    * @param run Request observer that retains the plan and mints leases for
    * dispatcher, owned runner, callback, exception, and temporary-output state.
+   * @param lifecycle_lease Retained request lease observed and copied into
+   * dispatcher/callback ownership.
    * @return Mutable target high-precision output stored in the graph.
    * @throws GraphError when the node is missing, no operation exists, a
    * dependency is unavailable, scheduling fails, or dispatch finishes without
@@ -125,7 +128,8 @@ class ComputeTaskDispatcher {
    * commit still require synchronous wait.
    */
   NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-                      const ComputeDispatchRequest& request, ComputeRun& run);
+                      const ComputeDispatchRequest& request, ComputeRun& run,
+                      const ComputeRunLease& lifecycle_lease);
 
   /**
    * @brief Executes one full-HP plan through the injected CPU service.
@@ -135,6 +139,8 @@ class ComputeTaskDispatcher {
    * @param host Active Graph observation context for worker trace forwarding.
    * @param request Immutable full-HP dispatch options.
    * @param run Request owner retaining plan, runner, results, and leases.
+   * @param lifecycle_lease Retained request lease observed and copied into
+   * service submissions.
    * @return Mutable target high-precision output stored in Graph state.
    * @throws GraphError for planning, operation, service, cache, or output
    * validation failures.
@@ -146,7 +152,8 @@ class ComputeTaskDispatcher {
    */
   NodeOutput& execute(GraphModel& graph, ExecutionService& execution_service,
                       SchedulerHostContext& host,
-                      const ComputeDispatchRequest& request, ComputeRun& run);
+                      const ComputeDispatchRequest& request, ComputeRun& run,
+                      const ComputeRunLease& lifecycle_lease);
 
   /**
    * @brief Runs dirty task handles with source-before-downstream ordering.
@@ -185,6 +192,7 @@ class ComputeTaskDispatcher {
    * @brief Clears graph timing state before a timed dispatch.
    *
    * @param graph Graph whose TimingCollector is reset.
+   * @return Nothing.
    * @throws Nothing directly.
    * @note Holds graph.timing_mutex_ while mutating timing fields.
    */
@@ -200,6 +208,8 @@ class ComputeTaskDispatcher {
    * @param host Non-null active trace target only for the service route.
    * @param request Immutable dispatch controls.
    * @param run Request owner retaining all asynchronous state.
+   * @param lifecycle_lease Retained request lease observed and copied into the
+   * selected physical route.
    * @return Mutable committed target output.
    * @throws GraphError or standard exceptions from planning, execution,
    * service/scheduler settlement, cache, telemetry, or commit.
@@ -211,7 +221,8 @@ class ComputeTaskDispatcher {
                            ExecutionService* execution_service,
                            SchedulerHostContext* host,
                            const ComputeDispatchRequest& request,
-                           ComputeRun& run);
+                           ComputeRun& run,
+                           const ComputeRunLease& lifecycle_lease);
 
   /** @brief Borrowed traversal service used to build target execution order. */
   GraphTraversalService& traversal_;

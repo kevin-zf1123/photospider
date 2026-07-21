@@ -22,6 +22,8 @@ class GraphEventService;
 
 namespace ps::compute {
 
+class ComputeRunLease;
+
 /**
  * @brief Borrowed state required by NodeTaskRunner worker closures.
  *
@@ -79,6 +81,14 @@ struct NodeTaskRunnerContext {
 
   /** @brief Optional borrowed benchmark event sink. */
   std::vector<BenchmarkEvent>* benchmark_events = nullptr;
+
+  /**
+   * @brief Optional borrowed Run lease used only for cooperative observations.
+   * @note The plan must not retain a lease strongly because the Run owns the
+   * plan. Product dispatch keeps this pointed-to lifecycle lease alive through
+   * synchronous scheduler settlement.
+   */
+  const ComputeRunLease* run_lease = nullptr;
 };
 
 /**
@@ -307,6 +317,13 @@ class NodeTaskRunner {
   /** @brief Optional borrowed benchmark event sink, guarded by timing_mutex_.
    */
   std::vector<BenchmarkEvent>* benchmark_events_;
+
+  /**
+   * @brief Optional borrowed lifecycle lease for node/tile cancellation checks.
+   * @note This pointer never owns Run lifetime and is valid through dispatcher
+   * settlement by the NodeTaskRunnerContext contract.
+   */
+  const ComputeRunLease* run_lease_;
 };
 
 }  // namespace ps::compute

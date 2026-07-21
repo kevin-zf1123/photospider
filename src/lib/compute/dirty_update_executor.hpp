@@ -211,7 +211,8 @@ class StabilizedDirtyParameters {
   stabilize_connected_dirty_parameters(GraphModel&, GraphTraversalService&, int,
                                        uint64_t, uint64_t,
                                        SchedulerTaskRuntime*, ExecutionService*,
-                                       SchedulerHostContext*, ComputeRun*);
+                                       SchedulerHostContext*, ComputeRun*,
+                                       const ComputeRunLease*);
 
   /** @brief Generation shared by every domain of one dirty request. */
   uint64_t request_generation_ = 0;
@@ -263,6 +264,8 @@ class StabilizedDirtyParameters {
  * @param host Optional service trace target; required with execution_service.
  * @param run Optional HP child Run whose leases name owned preflight work;
  * required with execution_service.
+ * @param run_lease Optional borrowed lifecycle lease observed before/after
+ * each preflight node and tiled operation chunk.
  * @return Immutable shared request snapshot. An empty producer set means no
  * connected-parameter preflight was needed, but generation identity remains.
  * @throws GraphError for missing targets, dependencies, operations, or empty
@@ -280,7 +283,8 @@ stabilize_connected_dirty_parameters(
     uint64_t request_generation, uint64_t topology_generation,
     SchedulerTaskRuntime* task_runtime = nullptr,
     ExecutionService* execution_service = nullptr,
-    SchedulerHostContext* host = nullptr, ComputeRun* run = nullptr);
+    SchedulerHostContext* host = nullptr, ComputeRun* run = nullptr,
+    const ComputeRunLease* run_lease = nullptr);
 
 /**
  * @brief Immutable options for one dirty update executor call.
@@ -414,6 +418,8 @@ class HighPrecisionDirtyExecutor {
    * submissions remain Run-scoped.
    * @param execution_service Optional process CPU service selected by the
    * runtime route. It requires non-null runtime and run.
+   * @param run_lease Optional borrowed lifecycle lease observed across dirty
+   * planning, provider, tile, downsample, and commit boundaries.
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
@@ -429,7 +435,8 @@ class HighPrecisionDirtyExecutor {
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
                       GraphRuntime* runtime, const DirtyUpdateRequest& request,
                       ComputeRun* run = nullptr,
-                      ExecutionService* execution_service = nullptr);
+                      ExecutionService* execution_service = nullptr,
+                      const ComputeRunLease* run_lease = nullptr);
 
  private:
   /**
@@ -500,6 +507,8 @@ class RealTimeDirtyExecutor {
    * @param run Optional RT child Run required for process-service routing.
    * @param execution_service Optional process CPU service selected by the
    * runtime route.
+   * @param run_lease Optional borrowed lifecycle lease observed across dirty
+   * planning, provider, tile, and proxy-commit boundaries.
    * @return Mutable real-time target output stored in the proxy graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
@@ -512,7 +521,8 @@ class RealTimeDirtyExecutor {
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
                       GraphRuntime* runtime, const DirtyUpdateRequest& request,
                       ComputeRun* run = nullptr,
-                      ExecutionService* execution_service = nullptr);
+                      ExecutionService* execution_service = nullptr,
+                      const ComputeRunLease* run_lease = nullptr);
 
  private:
   /**

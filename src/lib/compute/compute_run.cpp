@@ -7,9 +7,11 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -110,6 +112,77 @@ int nonterminal_phase_rank(ComputeRunPhase phase) {
 }  // namespace
 
 /**
+ * @brief Serializes one registered cancellation callback with deactivation.
+ *
+ * @throws std::bad_alloc when callback ownership is created.
+ * @note Invocation holds this slot's mutex but never the Run-control mutex.
+ * Registration owners must not destroy their own slot recursively from inside
+ * the callback. Production service and sibling callbacks satisfy that rule.
+ */
+class ComputeRunCancellationSlot final {
+ public:
+  /**
+   * @brief Owns one non-empty cancellation cleanup callback.
+   * @param callback Callback invoked with the stable accepted reason.
+   * @throws std::bad_alloc when callable ownership allocates.
+   */
+  explicit ComputeRunCancellationSlot(
+      std::function<void(ComputeRunCancellationReason)> callback)
+      : callback_(std::move(callback)) {}
+
+  /**
+   * @brief Invokes the callback once when the slot remains active.
+   * @param reason Stable Run cancellation reason.
+   * @return Nothing.
+   * @throws Any callback exception unchanged to the cancellation requester.
+   */
+  void invoke(ComputeRunCancellationReason reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_) {
+      callback_(reason);
+    }
+  }
+
+  /**
+   * @brief Prevents future invocation and synchronizes with an active callback.
+   * @return Nothing.
+   * @throws std::system_error when mutex locking fails.
+   */
+  void deactivate() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_ = false;
+  }
+
+ private:
+  /** @brief Serializes invocation and registration destruction. */
+  std::mutex mutex_;
+
+  /** @brief True until the move-only registration is released. */
+  bool active_ = true;
+
+  /** @brief Cleanup callback retained independently from Run control lifetime.
+   */
+  std::function<void(ComputeRunCancellationReason)> callback_;
+};
+
+namespace {
+
+/**
+ * @brief Internal ownership state of the shared terminal/commit arbiter.
+ * @throws Nothing for value operations.
+ */
+enum class ComputeRunArbiterState : std::uint8_t {
+  /** @brief Cancellation, failure, or a commit contender may still claim. */
+  Open,
+  /** @brief One commit contender exclusively owns terminal resolution. */
+  CommitClaimed,
+  /** @brief Exactly one terminal outcome has been published. */
+  Terminal,
+};
+
+}  // namespace
+
+/**
  * @brief Shared private lifetime and mutable state for one ComputeRun.
  *
  * The request observer and every active ComputeRunLease retain this control
@@ -127,12 +200,15 @@ class ComputeRunControl {
    * @brief Constructs a new control block with a fresh Run identity.
    *
    * @param submission Immutable request inputs transferred into the descriptor.
+   * @param monotonic_clock Non-empty private clock used for deadline
+   * observation.
    * @throws std::invalid_argument for unsupported intent or invalid QoS.
    * @throws std::overflow_error when Run identity values are exhausted.
    * @throws std::bad_alloc when descriptor ownership cannot allocate.
    * @note No lease exists until ComputeRun::acquire_lease() is called.
    */
-  explicit ComputeRunControl(ComputeRunSubmission submission);
+  ComputeRunControl(ComputeRunSubmission submission,
+                    ComputeRunMonotonicClock monotonic_clock);
 
   /**
    * @brief Passively destroys Run-owned plan and staging storage.
@@ -142,6 +218,57 @@ class ComputeRunControl {
    * creates no new lease.
    */
   ~ComputeRunControl() noexcept;
+
+  /**
+   * @brief Attempts a non-commit terminal publication.
+   * @param outcome Fully formed success or exact failure value.
+   * @return True only when the open arbiter accepted this outcome.
+   * @throws std::system_error when Run/plan synchronization fails.
+   * @note CommitClaimed can be resolved only by its one-shot contender.
+   */
+  bool publish_terminal(ComputeRunTerminalOutcome outcome);
+
+  /**
+   * @brief Attempts cancellation and performs plan/notification cleanup.
+   * @param reason Stable reason proposed by a private source or deadline check.
+   * @return True only when cancellation claimed the open arbiter.
+   * @throws Callback or synchronization exceptions after terminal publication.
+   * @note Terminal state is fixed before cleanup runs outside `mutex`.
+   */
+  bool request_cancellation(ComputeRunCancellationReason reason);
+
+  /**
+   * @brief Observes the immutable deadline and current cancellation outcome.
+   * @return Stable cancellation reason when Cancelled, otherwise nullopt.
+   * @throws Clock callback or synchronization exceptions.
+   */
+  std::optional<ComputeRunCancellationReason> observe_cancellation();
+
+  /**
+   * @brief Atomically observes deadline and reserves commit terminal ownership.
+   * @return True only when phase is CommitPending and the arbiter was open.
+   * @throws Clock callback or synchronization exceptions.
+   * @note Deadline cancellation cleanup runs before a false return.
+   */
+  bool try_claim_commit();
+
+  /**
+   * @brief Resolves the sole accepted commit contender.
+   * @param outcome Succeeded or exact Failed terminal value.
+   * @return True only while CommitClaimed.
+   * @throws std::system_error when Run/plan synchronization fails.
+   */
+  bool resolve_commit(ComputeRunTerminalOutcome outcome);
+
+  /**
+   * @brief Installs or immediately invokes a cancellation cleanup slot.
+   * @param slot Shared non-null callback slot.
+   * @return True when installed for a future cancellation, false when no future
+   * cancellation can win or callback was invoked immediately.
+   * @throws std::bad_alloc or synchronization/callback exceptions.
+   */
+  bool register_cancellation_slot(
+      const std::shared_ptr<ComputeRunCancellationSlot>& slot);
 
   /** @brief Immutable identity and request inputs captured before planning. */
   const ComputeRunDescriptor descriptor;
@@ -154,6 +281,20 @@ class ComputeRunControl {
 
   /** @brief Exactly-one terminal outcome, absent before settlement. */
   std::optional<ComputeRunTerminalOutcome> terminal_outcome;
+
+  /** @brief Ownership state shared by cancellation, failure, and commit. */
+  ComputeRunArbiterState arbiter_state = ComputeRunArbiterState::Open;
+
+  /** @brief Injected steady-clock source used only at cooperative boundaries.
+   */
+  ComputeRunMonotonicClock monotonic_clock;
+
+  /**
+   * @brief Weak registered cleanup slots within pre-accounted product capacity.
+   * @note Registrations own slots strongly; expired positions are reused so
+   * sequential service phases do not grow retained Run storage after admission.
+   */
+  std::vector<std::weak_ptr<ComputeRunCancellationSlot>> cancellation_slots;
 
   /** @brief Optional full HP plan, dependency state, runner, and temp output.
    */
@@ -193,12 +334,21 @@ ComputeRunDescriptor::ComputeRunDescriptor(ComputeRunId id,
  * @throws std::overflow_error when Run id allocation is exhausted.
  * @throws std::bad_alloc when descriptor ownership cannot allocate.
  */
-ComputeRunControl::ComputeRunControl(ComputeRunSubmission submission)
+ComputeRunControl::ComputeRunControl(
+    ComputeRunSubmission submission,
+    ComputeRunMonotonicClock monotonic_clock_in)
     : descriptor([&submission]() {
         validate_submission(submission);
         return ComputeRunDescriptor(ComputeRunId(mint_compute_run_id_value()),
                                     std::move(submission));
-      }()) {}
+      }()),  // NOLINT(whitespace/indent_namespace)
+      monotonic_clock(std::move(monotonic_clock_in)) {
+  if (!monotonic_clock) {
+    throw std::invalid_argument(
+        "ComputeRun requires a non-empty monotonic clock.");
+  }
+  cancellation_slots.reserve(4U);
+}
 
 /**
  * @brief Passively releases Run-local storage after all owners disappear.
@@ -207,11 +357,372 @@ ComputeRunControl::ComputeRunControl(ComputeRunSubmission submission)
  */
 ComputeRunControl::~ComputeRunControl() noexcept = default;
 
+/** @copydoc ComputeRunControl::publish_terminal */
+bool ComputeRunControl::publish_terminal(ComputeRunTerminalOutcome outcome) {
+  TaskSubmissionPlan* plan = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (arbiter_state != ComputeRunArbiterState::Open) {
+      return false;
+    }
+    terminal_outcome = std::move(outcome);
+    arbiter_state = ComputeRunArbiterState::Terminal;
+    plan = submission_plan.get();
+  }
+  if (plan != nullptr) {
+    plan->close_publication();
+  }
+  return true;
+}
+
+/** @copydoc ComputeRunControl::request_cancellation */
+bool ComputeRunControl::request_cancellation(
+    ComputeRunCancellationReason reason) {
+  TaskSubmissionPlan* plan = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (arbiter_state != ComputeRunArbiterState::Open) {
+      return false;
+    }
+    terminal_outcome = ComputeRunTerminalOutcome{
+        ComputeRunTerminalKind::Cancelled, nullptr, reason};
+    arbiter_state = ComputeRunArbiterState::Terminal;
+    plan = submission_plan.get();
+  }
+  if (plan != nullptr) {
+    plan->close_publication();
+  }
+
+  std::size_t slot_index = 0U;
+  for (;;) {
+    std::shared_ptr<ComputeRunCancellationSlot> slot;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (slot_index >= cancellation_slots.size()) {
+        break;
+      }
+      slot = cancellation_slots[slot_index++].lock();
+    }
+    if (slot != nullptr) {
+      slot->invoke(reason);
+    }
+  }
+  return true;
+}
+
+/** @copydoc ComputeRunControl::observe_cancellation */
+std::optional<ComputeRunCancellationReason>
+ComputeRunControl::observe_cancellation() {
+  const std::chrono::steady_clock::time_point now = monotonic_clock();
+  bool deadline_expired = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    deadline_expired = arbiter_state == ComputeRunArbiterState::Open &&
+                       descriptor.qos().deadline.has_value() &&
+                       now >= *descriptor.qos().deadline;
+  }
+  if (deadline_expired) {
+    (void)request_cancellation(ComputeRunCancellationReason::DeadlineExceeded);
+  }
+
+  std::lock_guard<std::mutex> lock(mutex);
+  if (terminal_outcome.has_value() &&
+      terminal_outcome->kind == ComputeRunTerminalKind::Cancelled) {
+    return terminal_outcome->cancellation_reason;
+  }
+  return std::nullopt;
+}
+
+/** @copydoc ComputeRunControl::try_claim_commit */
+bool ComputeRunControl::try_claim_commit() {
+  const std::chrono::steady_clock::time_point now = monotonic_clock();
+  TaskSubmissionPlan* plan = nullptr;
+  bool deadline_cancelled = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (arbiter_state != ComputeRunArbiterState::Open) {
+      return false;
+    }
+    if (descriptor.qos().deadline.has_value() &&
+        now >= *descriptor.qos().deadline) {
+      terminal_outcome = ComputeRunTerminalOutcome{
+          ComputeRunTerminalKind::Cancelled, nullptr,
+          ComputeRunCancellationReason::DeadlineExceeded};
+      arbiter_state = ComputeRunArbiterState::Terminal;
+      plan = submission_plan.get();
+      deadline_cancelled = true;
+    } else if (phase != ComputeRunPhase::CommitPending) {
+      return false;
+    } else {
+      arbiter_state = ComputeRunArbiterState::CommitClaimed;
+      return true;
+    }
+  }
+
+  if (plan != nullptr) {
+    plan->close_publication();
+  }
+  if (deadline_cancelled) {
+    std::size_t slot_index = 0U;
+    for (;;) {
+      std::shared_ptr<ComputeRunCancellationSlot> slot;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (slot_index >= cancellation_slots.size()) {
+          break;
+        }
+        slot = cancellation_slots[slot_index++].lock();
+      }
+      if (slot != nullptr) {
+        slot->invoke(ComputeRunCancellationReason::DeadlineExceeded);
+      }
+    }
+  }
+  return false;
+}
+
+/** @copydoc ComputeRunControl::resolve_commit */
+bool ComputeRunControl::resolve_commit(ComputeRunTerminalOutcome outcome) {
+  TaskSubmissionPlan* plan = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (arbiter_state != ComputeRunArbiterState::CommitClaimed) {
+      return false;
+    }
+    terminal_outcome = std::move(outcome);
+    arbiter_state = ComputeRunArbiterState::Terminal;
+    plan = submission_plan.get();
+  }
+  if (plan != nullptr) {
+    plan->close_publication();
+  }
+  return true;
+}
+
+/** @copydoc ComputeRunControl::register_cancellation_slot */
+bool ComputeRunControl::register_cancellation_slot(
+    const std::shared_ptr<ComputeRunCancellationSlot>& slot) {
+  std::optional<ComputeRunCancellationReason> immediate_reason;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (arbiter_state == ComputeRunArbiterState::Open) {
+      for (std::weak_ptr<ComputeRunCancellationSlot>& existing :
+           cancellation_slots) {
+        if (existing.expired()) {
+          existing = slot;
+          return true;
+        }
+      }
+      cancellation_slots.push_back(slot);
+      return true;
+    }
+    if (terminal_outcome.has_value() &&
+        terminal_outcome->kind == ComputeRunTerminalKind::Cancelled) {
+      immediate_reason = terminal_outcome->cancellation_reason;
+    }
+  }
+  if (immediate_reason.has_value()) {
+    slot->invoke(*immediate_reason);
+  }
+  return false;
+}
+
+/**
+ * @brief Shared child-source list and stable request cancellation state.
+ * @throws std::bad_alloc when source storage grows.
+ */
+class ComputeRequestCancellationControl final {
+ public:
+  /** @brief Serializes attachment and first request acceptance. */
+  mutable std::mutex mutex;
+
+  /** @brief Stable first request reason, absent before explicit cancellation.
+   */
+  std::optional<ComputeRunCancellationReason> accepted_reason;
+
+  /** @brief Child Run ids already attached to this request. */
+  std::vector<std::uint64_t> child_ids;
+
+  /** @brief Independent weak-lifetime child cancellation authorities. */
+  std::vector<ComputeRunCancellationSource> child_sources;
+};
+
+/** @copydoc ComputeRunCancellationSource::request_cancellation */
+bool ComputeRunCancellationSource::request_cancellation(
+    ComputeRunCancellationReason reason) const {
+  const std::shared_ptr<ComputeRunControl> control = control_.lock();
+  return control != nullptr && control->request_cancellation(reason);
+}
+
+/** @copydoc ComputeRequestCancellationSource::ComputeRequestCancellationSource
+ */
+ComputeRequestCancellationSource::ComputeRequestCancellationSource()
+    : control_(std::make_shared<ComputeRequestCancellationControl>()) {}
+
+/** @copydoc ComputeRequestCancellationSource::attach */
+void ComputeRequestCancellationSource::attach(ComputeRun& run) {
+  const ComputeRunCancellationSource child = run.cancellation_source();
+  const std::uint64_t child_id = run.descriptor().id().value();
+  std::optional<ComputeRunCancellationReason> immediate_reason;
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    for (std::uint64_t existing_id : control_->child_ids) {
+      if (existing_id == child_id) {
+        return;
+      }
+    }
+    control_->child_ids.push_back(child_id);
+    try {
+      control_->child_sources.push_back(child);
+    } catch (...) {
+      control_->child_ids.pop_back();
+      throw;
+    }
+    immediate_reason = control_->accepted_reason;
+  }
+  if (immediate_reason.has_value()) {
+    (void)child.request_cancellation(*immediate_reason);
+  }
+}
+
+/** @copydoc ComputeRequestCancellationSource::request_cancellation */
+bool ComputeRequestCancellationSource::request_cancellation() {
+  std::vector<ComputeRunCancellationSource> children;
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (control_->accepted_reason.has_value()) {
+      return false;
+    }
+    children = control_->child_sources;
+    control_->accepted_reason = ComputeRunCancellationReason::ExplicitRequest;
+  }
+  for (const ComputeRunCancellationSource& child : children) {
+    (void)child.request_cancellation(
+        ComputeRunCancellationReason::ExplicitRequest);
+  }
+  return true;
+}
+
+/** @copydoc ComputeRequestCancellationSource::accepted_reason */
+std::optional<ComputeRunCancellationReason>
+ComputeRequestCancellationSource::accepted_reason() const {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->accepted_reason;
+}
+
+/** @copydoc
+ * ComputeRunCancellationRegistration::ComputeRunCancellationRegistration */
+ComputeRunCancellationRegistration::ComputeRunCancellationRegistration(
+    ComputeRunCancellationRegistration&& other) noexcept
+    : slot_(std::move(other.slot_)) {}
+
+/** @copydoc ComputeRunCancellationRegistration::operator= */
+ComputeRunCancellationRegistration&
+ComputeRunCancellationRegistration::operator=(
+    ComputeRunCancellationRegistration&& other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  reset();
+  slot_ = std::move(other.slot_);
+  return *this;
+}
+
+/** @copydoc
+ * ComputeRunCancellationRegistration::~ComputeRunCancellationRegistration */
+ComputeRunCancellationRegistration::
+    ~ComputeRunCancellationRegistration() noexcept {
+  reset();
+}
+
+/** @copydoc ComputeRunCancellationRegistration::reset */
+void ComputeRunCancellationRegistration::reset() noexcept {
+  if (slot_ == nullptr) {
+    return;
+  }
+  try {
+    slot_->deactivate();
+  } catch (...) {
+    std::terminate();
+  }
+  slot_.reset();
+}
+
+/** @copydoc ComputeRunCommitContender::ComputeRunCommitContender */
+ComputeRunCommitContender::ComputeRunCommitContender(
+    ComputeRunCommitContender&& other) noexcept
+    : control_(std::move(other.control_)) {}
+
+/** @copydoc ComputeRunCommitContender::operator= */
+ComputeRunCommitContender& ComputeRunCommitContender::operator=(
+    ComputeRunCommitContender&& other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  abandon();
+  control_ = std::move(other.control_);
+  return *this;
+}
+
+/** @copydoc ComputeRunCommitContender::~ComputeRunCommitContender */
+ComputeRunCommitContender::~ComputeRunCommitContender() noexcept {
+  abandon();
+}
+
+/** @copydoc ComputeRunCommitContender::publish_succeeded */
+bool ComputeRunCommitContender::publish_succeeded() {
+  if (control_ == nullptr) {
+    return false;
+  }
+  const bool published = control_->resolve_commit(ComputeRunTerminalOutcome{
+      ComputeRunTerminalKind::Succeeded, nullptr, std::nullopt});
+  if (published) {
+    control_.reset();
+  }
+  return published;
+}
+
+/** @copydoc ComputeRunCommitContender::publish_failed */
+bool ComputeRunCommitContender::publish_failed(std::exception_ptr failure) {
+  if (!failure) {
+    throw std::invalid_argument(
+        "ComputeRun commit failure publication requires an exception.");
+  }
+  if (control_ == nullptr) {
+    return false;
+  }
+  const bool published = control_->resolve_commit(ComputeRunTerminalOutcome{
+      ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt});
+  if (published) {
+    control_.reset();
+  }
+  return published;
+}
+
+/** @copydoc ComputeRunCommitContender::abandon */
+void ComputeRunCommitContender::abandon() noexcept {
+  if (control_ == nullptr) {
+    return;
+  }
+  try {
+    const std::exception_ptr failure = std::make_exception_ptr(std::logic_error(
+        "ComputeRun commit contender was abandoned without resolution."));
+    if (!control_->resolve_commit(ComputeRunTerminalOutcome{
+            ComputeRunTerminalKind::Failed, failure, std::nullopt})) {
+      std::terminate();
+    }
+    control_.reset();
+  } catch (...) {
+    std::terminate();
+  }
+}
+
 /**
  * @brief Constructs one request observer and shared domain Run control block.
  *
  * @param submission Descriptor inputs captured before single-domain planning
  * and preflight.
+ * @param monotonic_clock Non-empty injected steady-clock source.
  * @throws std::invalid_argument for unsupported intent, intent/quality
  * mismatch, or invalid QoS.
  * @throws std::overflow_error if Run identity allocation is exhausted.
@@ -219,8 +730,11 @@ ComputeRunControl::~ComputeRunControl() noexcept = default;
  * @note The fresh id is minted only after semantic validation succeeds; no
  * active lease exists yet.
  */
-ComputeRun::ComputeRun(ComputeRunSubmission submission)
-    : control_(std::make_shared<ComputeRunControl>(std::move(submission))) {}
+ComputeRun::ComputeRun(ComputeRunSubmission submission,
+                       ComputeRunMonotonicClock monotonic_clock)
+    : control_(std::make_shared<ComputeRunControl>(
+          std::move(submission), std::move(monotonic_clock))) {
+}  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Passively releases the request observer.
@@ -248,12 +762,23 @@ const ComputeRunDescriptor& ComputeRun::descriptor_ref() const noexcept {
  * @throws std::logic_error when terminal state is already published.
  * @throws std::system_error if mutex locking fails.
  */
-ComputeRunLease ComputeRun::acquire_lease() {
+ComputeRunLease ComputeRun::acquire_lease() const {
   std::lock_guard<std::mutex> lock(control_->mutex);
   if (control_->terminal_outcome.has_value()) {
     throw std::logic_error("Cannot acquire a lease for a terminal ComputeRun.");
   }
   return ComputeRunLease(control_);
+}
+
+/** @copydoc ComputeRun::cancellation_source */
+ComputeRunCancellationSource ComputeRun::cancellation_source() const noexcept {
+  return ComputeRunCancellationSource(control_);
+}
+
+/** @copydoc ComputeRun::observe_cancellation */
+std::optional<ComputeRunCancellationReason> ComputeRun::observe_cancellation()
+    const {
+  return control_->observe_cancellation();
 }
 
 /**
@@ -274,8 +799,9 @@ bool ComputeRun::is_quiescent() const noexcept {
  */
 ComputeRunPhase ComputeRun::phase() const {
   std::lock_guard<std::mutex> lock(control_->mutex);
-  return control_->terminal_outcome.has_value() ? ComputeRunPhase::Terminal
-                                                : control_->phase;
+  return control_->arbiter_state == ComputeRunArbiterState::Terminal
+             ? ComputeRunPhase::Terminal
+             : control_->phase;
 }
 
 /**
@@ -290,7 +816,7 @@ ComputeRunPhase ComputeRun::phase() const {
 bool ComputeRun::advance_to(ComputeRunPhase next) {
   const int next_rank = nonterminal_phase_rank(next);
   std::lock_guard<std::mutex> lock(control_->mutex);
-  if (control_->terminal_outcome.has_value()) {
+  if (control_->arbiter_state != ComputeRunArbiterState::Open) {
     return false;
   }
   const int current_rank = nonterminal_phase_rank(control_->phase);
@@ -333,18 +859,6 @@ bool ComputeRun::publish_failed(std::exception_ptr failure) {
 }
 
 /**
- * @brief Publishes cancellation with a stable reason.
- *
- * @param reason Cancellation cause.
- * @return true only when this call wins.
- * @throws std::system_error if mutex locking fails.
- */
-bool ComputeRun::publish_cancelled(ComputeRunCancellationReason reason) {
-  return publish_terminal(ComputeRunTerminalOutcome{
-      ComputeRunTerminalKind::Cancelled, nullptr, reason});
-}
-
-/**
  * @brief Copies the terminal outcome under the Run mutex.
  *
  * @return Outcome snapshot or nullopt before settlement.
@@ -363,7 +877,7 @@ std::optional<ComputeRunTerminalOutcome> ComputeRun::terminal_outcome() const {
  */
 bool ComputeRun::is_terminal() const {
   std::lock_guard<std::mutex> lock(control_->mutex);
-  return control_->terminal_outcome.has_value();
+  return control_->arbiter_state == ComputeRunArbiterState::Terminal;
 }
 
 /**
@@ -383,7 +897,7 @@ TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
     GraphModel& graph, GraphTraversalService& traversal, int node_id,
     std::vector<Device> available_devices) {
   std::lock_guard<std::mutex> lock(control_->mutex);
-  if (control_->terminal_outcome.has_value()) {
+  if (control_->arbiter_state != ComputeRunArbiterState::Open) {
     throw std::logic_error(
         "Cannot install submission plan on a terminal ComputeRun.");
   }
@@ -418,7 +932,7 @@ TaskSubmissionPlan* ComputeRun::submission_plan() {
 HighPrecisionDirtyWriteBuffer& ComputeRun::emplace_dirty_hp_write_buffer(
     bool seed_existing_outputs) {
   std::lock_guard<std::mutex> lock(control_->mutex);
-  if (control_->terminal_outcome.has_value()) {
+  if (control_->arbiter_state != ComputeRunArbiterState::Open) {
     throw std::logic_error(
         "Cannot install dirty HP storage on a terminal ComputeRun.");
   }
@@ -449,12 +963,7 @@ HighPrecisionDirtyWriteBuffer* ComputeRun::dirty_hp_write_buffer() {
  * @throws std::system_error if mutex locking fails.
  */
 bool ComputeRun::publish_terminal(ComputeRunTerminalOutcome outcome) {
-  std::lock_guard<std::mutex> lock(control_->mutex);
-  if (control_->terminal_outcome.has_value()) {
-    return false;
-  }
-  control_->terminal_outcome = std::move(outcome);
-  return true;
+  return control_->publish_terminal(std::move(outcome));
 }
 
 /**
@@ -583,6 +1092,8 @@ std::uint64_t ComputeRunLease::retained_memory_bytes() const {
   estimate.add_bytes(static_cast<std::uint64_t>(
       control_->descriptor.graph_identity().capacity()));
   estimate.add_bytes(1U);
+  estimate.add_objects<std::weak_ptr<ComputeRunCancellationSlot>>(
+      static_cast<std::uint64_t>(control_->cancellation_slots.capacity()));
   if (control_->submission_plan) {
     estimate.add_bytes(control_->submission_plan->retained_memory_bytes());
   }
@@ -590,6 +1101,25 @@ std::uint64_t ComputeRunLease::retained_memory_bytes() const {
     estimate.add_bytes(
         control_->dirty_hp_write_buffer->retained_memory_bytes());
   }
+  return estimate.bytes();
+}
+
+/**
+ * @brief Estimates one heap-owned cancellation notification registration.
+ *
+ * @param callback_capture_bytes Structural callback-capture bytes supplied by
+ * the registration owner.
+ * @return Checked slot, shared-control, and conservative capture bytes.
+ * @throws GraphError when checked structural arithmetic overflows.
+ * @note The complete slot type is private to this translation unit, keeping the
+ * estimator accurate without exposing cancellation internals in the header.
+ */
+std::uint64_t ComputeRunLease::cancellation_notification_retained_memory_bytes(
+    std::uint64_t callback_capture_bytes) {
+  RetainedMemoryEstimator estimate("ComputeRun cancellation notification");
+  estimate.add_objects<ComputeRunCancellationSlot>();
+  estimate.add_shared_control_block();
+  estimate.add_bytes(callback_capture_bytes);
   return estimate.bytes();
 }
 
@@ -635,15 +1165,15 @@ bool ComputeRunLease::publish_task_failure(
     throw std::invalid_argument(
         "ComputeRun task failure requires an exception.");
   }
-  std::lock_guard<std::mutex> lock(control_->mutex);
-  if (control_->submission_plan == nullptr ||
-      !control_->submission_plan->contains_task_identity(identity) ||
-      control_->terminal_outcome.has_value()) {
-    return false;
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (control_->submission_plan == nullptr ||
+        !control_->submission_plan->contains_task_identity(identity)) {
+      return false;
+    }
   }
-  control_->terminal_outcome = ComputeRunTerminalOutcome{
-      ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt};
-  return true;
+  return control_->publish_terminal(ComputeRunTerminalOutcome{
+      ComputeRunTerminalKind::Failed, std::move(failure), std::nullopt});
 }
 
 /**
@@ -658,11 +1188,44 @@ std::optional<ComputeRunTerminalOutcome> ComputeRunLease::terminal_outcome()
   return control_->terminal_outcome;
 }
 
+/** @copydoc ComputeRunLease::observe_cancellation */
+std::optional<ComputeRunCancellationReason>
+ComputeRunLease::observe_cancellation() const {
+  return control_->observe_cancellation();
+}
+
+/** @copydoc ComputeRunLease::register_cancellation_notification */
+ComputeRunCancellationRegistration
+ComputeRunLease::register_cancellation_notification(
+    std::function<void(ComputeRunCancellationReason)> callback) const {
+  if (!callback) {
+    throw std::invalid_argument(
+        "ComputeRun cancellation notification requires a callback.");
+  }
+  auto slot = std::make_shared<ComputeRunCancellationSlot>(std::move(callback));
+  if (!control_->register_cancellation_slot(slot)) {
+    slot->deactivate();
+    return ComputeRunCancellationRegistration();
+  }
+  return ComputeRunCancellationRegistration(std::move(slot));
+}
+
+/** @copydoc ComputeRunLease::try_claim_commit */
+std::optional<ComputeRunCommitContender> ComputeRunLease::try_claim_commit()
+    const {
+  if (!control_->try_claim_commit()) {
+    return std::nullopt;
+  }
+  return ComputeRunCommitContender(control_);
+}
+
 /**
  * @brief Routes one accepted callback into its matching Run-owned plan.
  *
  * @param identity Composite task identity carried by the callback.
  * @param task_runtime Active scheduler runtime.
+ * @param callback_owns_completion Whether a legacy exact-once token owns the
+ * pre-counted callback unit instead of this lease route.
  * @return Nothing.
  * @throws std::invalid_argument for mismatched or unregistered identity.
  * @throws std::system_error if the control mutex cannot be locked.
@@ -675,7 +1238,9 @@ std::optional<ComputeRunTerminalOutcome> ComputeRunLease::terminal_outcome()
  * rethrow; an exception from that publication propagates instead.
  */
 void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
-                                   SchedulerTaskRuntime& task_runtime) {
+                                   SchedulerTaskRuntime& task_runtime,
+                                   bool callback_owns_completion) {
+  (void)observe_cancellation();
   TaskSubmissionPlan* plan = nullptr;
   bool skip_terminal_run = false;
   {
@@ -692,12 +1257,17 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
     }
   }
   if (skip_terminal_run) {
-    task_runtime.dec_tasks_to_complete();
+    if (!callback_owns_completion) {
+      task_runtime.dec_tasks_to_complete();
+    }
     return;
   }
 
   try {
     plan->execute_task(identity, *this, task_runtime);
+    if (!callback_owns_completion) {
+      task_runtime.dec_tasks_to_complete();
+    }
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
     (void)publish_task_failure(identity, failure);
@@ -717,6 +1287,7 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
  * task identity.
  */
 void ComputeRunLease::execute_bootstrap(SchedulerTaskRuntime& task_runtime) {
+  (void)observe_cancellation();
   TaskSubmissionPlan* plan = nullptr;
   bool skip_terminal_run = false;
   {
@@ -741,13 +1312,12 @@ void ComputeRunLease::execute_bootstrap(SchedulerTaskRuntime& task_runtime) {
     task_runtime.dec_tasks_to_complete();
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
-    {
-      std::lock_guard<std::mutex> lock(control_->mutex);
-      if (!control_->terminal_outcome.has_value()) {
-        control_->terminal_outcome = ComputeRunTerminalOutcome{
-            ComputeRunTerminalKind::Failed, failure, std::nullopt};
-      }
+    try {
+      task_runtime.dec_tasks_to_complete();
+    } catch (...) {
     }
+    (void)control_->publish_terminal(ComputeRunTerminalOutcome{
+        ComputeRunTerminalKind::Failed, failure, std::nullopt});
     std::rethrow_exception(failure);
   }
 }

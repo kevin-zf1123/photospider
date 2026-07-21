@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "compute/compute_geometry.hpp"
+#include "compute/compute_run.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
@@ -70,22 +71,44 @@ RealtimeProxyGraph::NodeState clone_proxy_state(
   return cloned;
 }
 
+/**
+ * @brief Observes cancellation between downsample requests or before commit.
+ *
+ * @param run_lease Optional borrowed HP child lifecycle lease.
+ * @return Nothing while cancellation has not claimed the matching Run.
+ * @throws GraphError after accepted cancellation to suppress later proxy work.
+ * @throws std::system_error when Run-state synchronization fails.
+ * @note The Run retains the exact reason for outer service translation. One
+ * OpenCV resize remains non-preemptible, but its result is checked before proxy
+ * publication.
+ */
+void observe_downsample_cancellation(const ComputeRunLease* run_lease) {
+  if (run_lease != nullptr && run_lease->observe_cancellation().has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "ComputeRun cancelled during downsample execution.");
+  }
+}
+
 }  // namespace
 
 /** @copydoc DownsampleExecutor::DownsampleExecutor */
 DownsampleExecutor::DownsampleExecutor(GraphModel& graph,
                                        RealtimeProxyGraph& proxy_graph,
                                        GraphRuntime* runtime,
-                                       GraphEventService& events)
+                                       GraphEventService& events,
+                                       const ComputeRunLease* run_lease)
     : graph_(graph),
       proxy_graph_(proxy_graph),
       runtime_(runtime),
-      events_(events) {}  // NOLINT
+      events_(events),
+      run_lease_(run_lease) {}  // NOLINT
 
 /** @copydoc DownsampleExecutor::execute */
 void DownsampleExecutor::execute(const std::vector<Request>& requests) {
   for (const auto& request : requests) {
+    observe_downsample_cancellation(run_lease_);
     execute_one(request);
+    observe_downsample_cancellation(run_lease_);
   }
 }
 
@@ -119,6 +142,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   if (hp_buffer.width <= 0 || hp_buffer.height <= 0 ||
       hp_buffer.device != Device::CPU || !hp_buffer.data) {
     apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+    observe_downsample_cancellation(run_lease_);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
   }
@@ -126,6 +150,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   const PixelSize rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
   if (rt_size.width <= 0 || rt_size.height <= 0) {
     apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+    observe_downsample_cancellation(run_lease_);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
   }
@@ -133,6 +158,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   ImageBuffer& rt_buffer = ensure_rt_buffer(proxy_state, hp_buffer, rt_size);
   downsample_roi(hp_buffer, rt_buffer, roi_hp, rt_size);
   commit_rt_metadata(proxy_state, roi_hp, hp_size, request.hp_version);
+  observe_downsample_cancellation(run_lease_);
   proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
   events_.push(node.id, node.name, "downsample", 0.0);
 

@@ -449,6 +449,8 @@ class ReadyTaskSubmission final {
   void execute(SchedulerTaskRuntime& task_runtime);
 
  private:
+  friend class ExecutionService;
+
   /** @brief Immutable request and trace metadata copied before queueing. */
   ReadyTaskMetadata metadata_;
 
@@ -989,6 +991,19 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   void fail_run(const std::shared_ptr<RunState>& run,
                 std::exception_ptr failure) noexcept;
+
+  /**
+   * @brief Closes one exact Run admission and purges only its queued entries.
+   * @param run Matching Run state retained through cleanup.
+   * @param reason Stable cancellation reason already accepted by ComputeRun.
+   * @return Nothing.
+   * @throws Nothing; cancellation cleanup cannot replace terminal ownership.
+   * @note Acquires the pool mutex before the Run mutex, matching publication,
+   * failure cleanup, and worker dequeue. In-flight callbacks remain counted
+   * until their actual exit and are never synchronously interrupted.
+   */
+  void cancel_run(const std::shared_ptr<RunState>& run,
+                  ComputeRunCancellationReason reason) noexcept;
 
   /**
    * @brief Resolves a registered Run from one submission identity.

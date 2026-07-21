@@ -155,6 +155,15 @@ class ComputeService {
      * non-null pointer is valid only together with that request lifetime.
      */
     compute::RealtimeProxyGraph* staged_realtime_proxy = nullptr;
+
+    /**
+     * @brief Optional private current-request cancellation authority.
+     * @note Direct backend callers may retain this source and request explicit
+     * cancellation. ComputeService creates a request-local source when absent.
+     * The field is not installed and does not expand Host, CLI, or IPC v1.
+     */
+    std::shared_ptr<compute::ComputeRequestCancellationSource>
+        cancellation_source;
   };
 
   /**
@@ -284,6 +293,9 @@ class ComputeService {
 
     /** @brief Optional caller-owned benchmark sink for this request. */
     std::vector<BenchmarkEvent>* benchmark_events = nullptr;
+
+    /** @brief Retained read-only Run lease observed at recursive boundaries. */
+    const compute::ComputeRunLease& run_lease;
   };
 
   /**
@@ -318,6 +330,8 @@ class ComputeService {
    * @param stabilized_parameters Optional immutable connected-parameter
    * snapshot shared by paired dirty work.
    * @param run GlobalHighPrecision Run owning staging and task leases.
+   * @param run_lease Optional borrowed lifecycle lease observed across dirty
+   * planning, provider, tile, and commit boundaries.
    * @return Mutable target HP output owned by graph.
    * @throws std::bad_alloc unchanged when planning, task, cache, or output
    * storage exhausts memory.
@@ -334,7 +348,8 @@ class ComputeService {
           nullptr,
       std::shared_ptr<const compute::StabilizedDirtyParameters>
           stabilized_parameters = nullptr,
-      compute::ComputeRun* run = nullptr);
+      compute::ComputeRun* run = nullptr,
+      const compute::ComputeRunLease* run_lease = nullptr);
 
   /**
    * @brief Delegates one RT dirty update to RealTimeDirtyExecutor.
@@ -347,6 +362,8 @@ class ComputeService {
    * @param node_synchronization Optional per-node critical sections shared with
    * the concurrent HP sibling of the same RealTimeUpdate transaction.
    * @param run RealTimeUpdate child Run owning task leases and lifecycle state.
+   * @param run_lease Optional borrowed lifecycle lease observed across dirty
+   * planning, provider, tile, and proxy-commit boundaries.
    * @return Mutable target RT output owned by proxy_graph.
    * @throws std::bad_alloc unchanged when planning, task, proxy, or output
    * storage exhausts memory.
@@ -363,7 +380,8 @@ class ComputeService {
           stabilized_parameters = nullptr,
       std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization =
           nullptr,
-      compute::ComputeRun* run = nullptr);
+      compute::ComputeRun* run = nullptr,
+      const compute::ComputeRunLease* run_lease = nullptr);
 
   /**
    * @brief Resolves the RT proxy graph for one compute request.
@@ -400,6 +418,8 @@ class ComputeService {
    * @param request Target, cache, and telemetry options without scheduler
    * ownership.
    * @param run Request-owned HP descriptor and terminal/storage owner.
+   * @param run_lease Retained lifecycle lease observed by recursive nodes and
+   * tiled-provider boundaries.
    * @return Mutable target HP output owned by graph.
    * @throws std::bad_alloc unchanged when planning, recursion, cache,
    * telemetry, or result storage exhausts memory.
@@ -409,8 +429,9 @@ class ComputeService {
    * completion. Product Kernel callers supply a request-owned Graph snapshot;
    * the outer Run wrapper advances to CommitPending before visible commit.
    */
-  NodeOutput& compute_sequential_impl(GraphModel& graph, const Request& request,
-                                      compute::ComputeRun& run);
+  NodeOutput& compute_sequential_impl(
+      GraphModel& graph, const Request& request, compute::ComputeRun& run,
+      const compute::ComputeRunLease& run_lease);
 
   /**
    * @brief Executes one full execution-bound HP request through its Run.
@@ -422,6 +443,8 @@ class ComputeService {
    * @param request Full HP target, cache, and telemetry options.
    * @param run Request observer for leased plan, runner, callback, temporary
    * output, exception, and lifecycle state.
+   * @param run_lease Retained lifecycle lease copied into dispatcher and
+   * accepted callback ownership.
    * @return Mutable target HP output owned by graph cache.
    * @throws GraphError for scheduler, planning, execution, cache, or output
    * failures.
@@ -431,9 +454,9 @@ class ComputeService {
    * task identity. The dispatcher still waits synchronously because graph
    * lifetime and visible commit decoupling remain later work.
    */
-  NodeOutput& compute_parallel_hp_impl(GraphModel& graph, GraphRuntime& runtime,
-                                       const Request& request,
-                                       compute::ComputeRun& run);
+  NodeOutput& compute_parallel_hp_impl(
+      GraphModel& graph, GraphRuntime& runtime, const Request& request,
+      compute::ComputeRun& run, const compute::ComputeRunLease& run_lease);
 
   /**
    * @brief Executes an intent-aware request without a GraphRuntime.
@@ -443,6 +466,9 @@ class ComputeService {
    * @param hp_run Request-owned HP Run. Realtime requests supply their HP
    * child.
    * @param rt_run Request-owned RT child Run, or null for
+   * GlobalHighPrecision.
+   * @param hp_run_lease Borrowed lifecycle lease for the HP child.
+   * @param rt_run_lease Borrowed lifecycle lease for the RT child, or null for
    * GlobalHighPrecision.
    * @return Mutable HP or RT output selected by the intent.
    * @throws std::bad_alloc unchanged when coordination, dirty execution, cache,
@@ -454,10 +480,10 @@ class ComputeService {
    * coordination uses separate child Runs and never creates a mixed-domain
    * Run.
    */
-  NodeOutput& compute_with_intent_impl(GraphModel& graph,
-                                       const Request& request,
-                                       compute::ComputeRun* hp_run,
-                                       compute::ComputeRun* rt_run);
+  NodeOutput& compute_with_intent_impl(
+      GraphModel& graph, const Request& request, compute::ComputeRun* hp_run,
+      compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
+      const compute::ComputeRunLease* rt_run_lease);
 
   /**
    * @brief Binds intent coordinator callbacks to concrete compute executors.
@@ -469,6 +495,10 @@ class ComputeService {
    * child.
    * @param rt_run Request-owned RT child Run, or null for
    * GlobalHighPrecision.
+   * @param hp_run_lease Borrowed lifecycle lease for HP preflight, execution,
+   * and commit coordination.
+   * @param rt_run_lease Borrowed lifecycle lease for RT execution, sibling
+   * cancellation, and commit coordination, or null for HP-only requests.
    * @return Mutable output selected by IntentUpdateCoordinator.
    * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
    * output storage exhausts memory.
@@ -479,11 +509,11 @@ class ComputeService {
    * remain with strategy/runtime/service. Explicit full HP callbacks reuse the
    * supplied outer Run. Realtime callbacks settle separate HP and RT children.
    */
-  NodeOutput& compute_intent_update_impl(GraphModel& graph,
-                                         const ExecutionStrategy& strategy,
-                                         const Request& request,
-                                         compute::ComputeRun* hp_run,
-                                         compute::ComputeRun* rt_run);
+  NodeOutput& compute_intent_update_impl(
+      GraphModel& graph, const ExecutionStrategy& strategy,
+      const Request& request, compute::ComputeRun* hp_run,
+      compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
+      const compute::ComputeRunLease* rt_run_lease);
 
   /** @brief Borrowed traversal service used by planning and dirty execution. */
   GraphTraversalService& traversal_;

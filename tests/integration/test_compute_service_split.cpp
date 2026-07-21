@@ -136,6 +136,15 @@ std::atomic_int g_host_preparation_hp_target_calls{0};
 std::atomic_int g_host_preparation_rt_target_calls{0};
 
 /**
+ * @brief Optional request source cancelled by the host-preparation provider.
+ * @note Atomic shared ownership lets the scheduler callback safely retain the
+ * source while its synchronous owning test clears the process-global hook.
+ */
+std::shared_ptr<compute::ComputeRequestCancellationSource>
+    // NOLINTNEXTLINE(whitespace/indent_namespace)
+    g_host_preparation_cancellation_source;
+
+/**
  * @brief Original operation failure text used by the LastError integration
  * contract.
  *
@@ -189,6 +198,50 @@ class ScopedTestDirectory {
  private:
   /** @brief Runtime root removed when the guard leaves scope. */
   std::filesystem::path path_;
+};
+
+/**
+ * @brief Installs one request source for deterministic preflight cancellation.
+ *
+ * The host-preparation source provider loads this shared owner immediately
+ * before returning its staged output. Destruction clears the hook only after
+ * the synchronous ComputeService call has settled.
+ *
+ * @throws Nothing from construction or destruction.
+ * @note Tests must not overlap installations. The fixture owns no Run and
+ * exposes no cancellation authority outside this translation unit.
+ */
+class ScopedHostPreparationCancellationSource final {
+ public:
+  /**
+   * @brief Publishes the request source observed by the provider callback.
+   * @param source Non-null request-owned cancellation coordinator.
+   * @throws Nothing.
+   */
+  explicit ScopedHostPreparationCancellationSource(
+      std::shared_ptr<compute::ComputeRequestCancellationSource> source) {
+    std::atomic_store_explicit(&g_host_preparation_cancellation_source,
+                               std::move(source), std::memory_order_release);
+  }
+
+  /**
+   * @brief Clears the provider-visible request source.
+   * @throws Nothing.
+   */
+  ~ScopedHostPreparationCancellationSource() noexcept {
+    std::atomic_store_explicit(
+        &g_host_preparation_cancellation_source,
+        std::shared_ptr<compute::ComputeRequestCancellationSource>{},
+        std::memory_order_release);
+  }
+
+  /** @brief Prevents overlapping ownership of the process-global hook. */
+  ScopedHostPreparationCancellationSource(
+      const ScopedHostPreparationCancellationSource&) = delete;
+
+  /** @brief Prevents reassignment of the process-global hook owner. */
+  ScopedHostPreparationCancellationSource& operator=(
+      const ScopedHostPreparationCancellationSource&) = delete;
 };
 
 /**
@@ -700,8 +753,11 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
  * @throws std::bad_alloc when parameter/output storage fails.
  * @throws std::invalid_argument when image-buffer allocation rejects shape.
  * @throws std::runtime_error or cv::Exception when CPU pixels cannot be filled.
+ * @throws Exceptions from request cancellation cleanup callbacks unchanged.
  * @note The mismatched String remains a valid ParameterValue; the exact public
- * Int64 accessor is the intended failure.
+ * Int64 accessor is the intended failure. When the test-only request source is
+ * installed, cancellation is requested after output production and directly
+ * before provider return.
  */
 NodeOutput execute_host_preparation_source(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -718,6 +774,12 @@ NodeOutput execute_host_preparation_source(
     output.data["injected"] = "not-an-integer";
   } else {
     output.data["injected"] = 1;
+  }
+  const std::shared_ptr<compute::ComputeRequestCancellationSource>
+      cancellation_source = std::atomic_load_explicit(
+          &g_host_preparation_cancellation_source, std::memory_order_acquire);
+  if (cancellation_source) {
+    (void)cancellation_source->request_cancellation();
   }
   return output;
 }
@@ -2890,6 +2952,145 @@ TEST(ComputeServiceSplit,
                    toCvMat(proxy_after->output->image_buffer), cv::NORM_INF),
           0.0);
     }
+    runtime.stop();
+  }
+}
+
+/**
+ * @brief Proves connected-preflight cancellation suppresses dirty phase two.
+ *
+ * @return Nothing; GoogleTest assertions report dependent entry, publication,
+ * or terminal-translation failures for HP and paired HP/RT requests.
+ * @throws Setup, scheduler, graph, allocation, or image-adaptation exceptions
+ * when the fixture itself cannot execute.
+ * @note The legacy serial scheduler runs source preflight. Its provider
+ * requests cancellation immediately before return, so the parameter callback,
+ * HP/RT target tiles, inspection publication, Graph caches, and RT proxy must
+ * remain unchanged after bounded synchronous settlement.
+ */
+TEST(ComputeServiceCancellation,
+     ConnectedPreflightCancellationSuppressesDirtyAndSiblingPublication) {
+  register_split_ops();
+  for (const ComputeIntent intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    const bool is_rt = intent == ComputeIntent::RealTimeUpdate;
+    SCOPED_TRACE(is_rt ? "RT" : "HP");
+    const std::string suffix = is_rt ? "rt" : "hp";
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        ("photospider-connected-preflight-cancellation-" + suffix));
+    GraphRuntime::Info info;
+    info.name = "connected-preflight-cancellation-" + suffix;
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
+    GraphRuntime runtime(info);
+    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                          std::make_unique<SerialDebugScheduler>());
+    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                          std::make_unique<SerialDebugScheduler>());
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    populate_host_preparation_failure_graph(graph);
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    compute::ExecutionService execution_service;
+    ComputeService service(traversal, cache, events, execution_service);
+    ComputeService::Request request;
+    request.node_id = 2;
+    request.cache.precision = "float32";
+    request.cache.disable_disk_cache = true;
+    (void)service.compute_parallel(graph, runtime, request);
+
+    ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
+    const cv::Mat source_pixels_before =
+        toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
+            .clone();
+    const cv::Mat target_pixels_before =
+        toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
+            .clone();
+    const int source_version_before = graph.node(1).hp_version;
+    const int target_version_before = graph.node(2).hp_version;
+    const int parameter_version_before = graph.node(3).hp_version;
+    const std::optional<PixelRect> source_roi_before = graph.node(1).hp_roi;
+    const std::optional<PixelRect> target_roi_before = graph.node(2).hp_roi;
+    const std::optional<PixelRect> parameter_roi_before = graph.node(3).hp_roi;
+    const std::size_t dirty_snapshots_before =
+        graph.recent_dirty_region_snapshots.size();
+    const std::size_t compute_plans_before = graph.recent_compute_plans.size();
+    const std::size_t plan_summaries_before =
+        graph.recent_compute_plan_summaries.size();
+    const std::uint64_t request_generation_before =
+        graph.dirty_generation_counter;
+    ASSERT_EQ(runtime.realtime_proxy_graph().find_state(2), nullptr);
+
+    g_host_preparation_emit_malformed_value.store(false,
+                                                  std::memory_order_release);
+    g_host_preparation_source_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_plugin_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_hp_target_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_rt_target_calls.store(0, std::memory_order_relaxed);
+    auto cancellation_source =
+        std::make_shared<compute::ComputeRequestCancellationSource>();
+    request.intent = intent;
+    request.dirty_roi = PixelRect{8, 0, 4, 4};
+    request.cancellation_source = cancellation_source;
+    bool saw_cancellation = false;
+    {
+      ScopedHostPreparationCancellationSource cancellation_hook(
+          cancellation_source);
+      try {
+        (void)service.compute_parallel(graph, runtime, request);
+      } catch (const GraphError& error) {
+        saw_cancellation = true;
+        EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+        EXPECT_NE(std::string(error.what())
+                      .find("ComputeRun cancelled: explicit request."),
+                  std::string::npos)
+            << error.what();
+      }
+    }
+
+    EXPECT_TRUE(saw_cancellation);
+    EXPECT_EQ(cancellation_source->accepted_reason(),
+              compute::ComputeRunCancellationReason::ExplicitRequest);
+    EXPECT_EQ(g_host_preparation_source_calls.load(std::memory_order_relaxed),
+              1);
+    EXPECT_EQ(g_host_preparation_plugin_calls.load(std::memory_order_relaxed),
+              0)
+        << "the dependent parameter callback must not enter";
+    EXPECT_EQ(
+        g_host_preparation_hp_target_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(
+        g_host_preparation_rt_target_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(graph.dirty_generation_counter, request_generation_before + 1);
+    EXPECT_EQ(graph.recent_dirty_region_snapshots.size(),
+              dirty_snapshots_before);
+    EXPECT_EQ(graph.recent_compute_plans.size(), compute_plans_before);
+    EXPECT_EQ(graph.recent_compute_plan_summaries.size(),
+              plan_summaries_before);
+    EXPECT_EQ(graph.node(1).hp_version, source_version_before);
+    EXPECT_EQ(graph.node(2).hp_version, target_version_before);
+    EXPECT_EQ(graph.node(3).hp_version, parameter_version_before);
+    EXPECT_EQ(graph.node(1).hp_roi, source_roi_before);
+    EXPECT_EQ(graph.node(2).hp_roi, target_roi_before);
+    EXPECT_EQ(graph.node(3).hp_roi, parameter_roi_before);
+    EXPECT_DOUBLE_EQ(
+        cv::norm(
+            source_pixels_before,
+            toCvMat(graph.node(1).cached_output_high_precision->image_buffer),
+            cv::NORM_INF),
+        0.0);
+    EXPECT_DOUBLE_EQ(
+        cv::norm(
+            target_pixels_before,
+            toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
+            cv::NORM_INF),
+        0.0);
+    EXPECT_EQ(runtime.realtime_proxy_graph().find_state(2), nullptr);
     runtime.stop();
   }
 }

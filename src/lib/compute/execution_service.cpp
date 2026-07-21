@@ -94,7 +94,11 @@ ReadyTaskSubmission::default_resource_demand() noexcept {
 /** @copydoc ReadyTaskSubmission::execute */
 void ReadyTaskSubmission::execute(SchedulerTaskRuntime& task_runtime) {
   try {
+    if (lease_.observe_cancellation().has_value()) {
+      return;
+    }
     executable_(lease_, identity_, task_runtime);
+    (void)lease_.observe_cancellation();
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
     try {
@@ -154,7 +158,7 @@ struct ExecutionService::RunState final
    */
   bool settled() const noexcept {
     return in_flight == 0 &&
-           (first_exception != nullptr || tasks_to_complete == 0);
+           (cancelled || first_exception != nullptr || tasks_to_complete == 0);
   }
 
   /** @brief Opaque Run namespace used for route and trace isolation. */
@@ -207,6 +211,12 @@ struct ExecutionService::RunState final
 
   /** @brief Exact first callback exception, or null before failure. */
   std::exception_ptr first_exception;
+
+  /** @brief Whether accepted ComputeRun cancellation closed this admission. */
+  bool cancelled = false;
+
+  /** @brief Stable first cancellation reason when `cancelled` is true. */
+  std::optional<ComputeRunCancellationReason> cancellation_reason;
 
   /** @brief Whether dependency release may publish additional ready work. */
   bool accepting = true;
@@ -1232,6 +1242,10 @@ std::uint64_t ExecutionService::service_run_envelope_bytes(
   estimate.add_bytes(static_cast<std::uint64_t>(graph_key.capacity()));
   estimate.add_bytes(1U);
   estimate.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
+  estimate.add_bytes(
+      ComputeRunLease::cancellation_notification_retained_memory_bytes(
+          static_cast<std::uint64_t>(sizeof(ExecutionService*)) +
+          static_cast<std::uint64_t>(sizeof(std::weak_ptr<RunState>))));
   return estimate.bytes();
 }
 
@@ -1661,6 +1675,10 @@ void ExecutionService::execute_cpu_run(
         "ExecutionService initial ready count exceeds total task count.");
   }
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
+  ComputeRunLease service_lease = initial_submissions.front().lease_;
+  if (service_lease.observe_cancellation().has_value()) {
+    return;
+  }
   for (const ReadyTaskSubmission& submission : initial_submissions) {
     if (submission.metadata().run_id() != run_id) {
       throw std::invalid_argument(
@@ -1712,6 +1730,17 @@ void ExecutionService::execute_cpu_run(
       run_resource_demand.task, admission.ready_bytes_per_task,
       admission.execution_retained_bytes_per_task, std::move(*reservation));
 
+  const std::weak_ptr<RunState> weak_run(run);
+  ComputeRunCancellationRegistration cancellation_registration =
+      service_lease.register_cancellation_notification(
+          [this, weak_run](ComputeRunCancellationReason reason) noexcept {
+            if (const std::shared_ptr<RunState> accepted_run =
+                    weak_run.lock()) {
+              cancel_run(accepted_run, reason);
+            }
+          });
+
+  bool published = false;
   {
     std::vector<std::shared_ptr<QueueEntry>> staged_entries;
     staged_entries.reserve(initial_submissions.size());
@@ -1727,13 +1756,17 @@ void ExecutionService::execute_cpu_run(
         initial_submissions);
 
     {
-      std::lock_guard<std::mutex> lock(pool_->mutex);
+      std::lock_guard<std::mutex> pool_lock(pool_->mutex);
       if (pool_->configured_workers == 0U || pool_->workers.empty()) {
         throw std::logic_error(
             "ExecutionService worker count is not configured.");
       }
       if (pool_->stopping) {
         throw std::logic_error("ExecutionService is stopping.");
+      }
+      std::lock_guard<std::mutex> run_lock(run->mutex);
+      if (run->cancelled) {
+        return;
       }
       const uint64_t key = run_id.value();
       const auto existing = pool_->active_runs.find(key);
@@ -1750,6 +1783,7 @@ void ExecutionService::execute_cpu_run(
                 "ExecutionService bounded ready store rejected initial work.");
           }
         }
+        published = true;
       } catch (...) {
         (void)pool_->ready_store.erase_run(run);
         pool_->active_runs.erase(key);
@@ -1757,6 +1791,9 @@ void ExecutionService::execute_cpu_run(
         throw;
       }
     }
+  }
+  if (!published) {
+    return;
   }
   pool_->ready_cv.notify_all();
 
@@ -1836,6 +1873,12 @@ ExecutionService::make_queue_entry(const std::shared_ptr<RunState>& run,
 /** @copydoc ExecutionService::enqueue_submission */
 void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
                                           ReadyTaskSubmission submission) {
+  const std::optional<ComputeRunCancellationReason> cancellation =
+      submission.lease_.observe_cancellation();
+  if (cancellation.has_value()) {
+    cancel_run(run, *cancellation);
+    return;
+  }
   std::shared_ptr<QueueEntry> entry =
       make_queue_entry(run, std::move(submission));
 
@@ -1851,6 +1894,9 @@ void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
           "ExecutionService Run no longer accepts ready work.");
     }
     std::lock_guard<std::mutex> run_lock(run->mutex);
+    if (run->cancelled) {
+      return;
+    }
     if (!run->accepting || run->first_exception) {
       throw std::logic_error(
           "ExecutionService Run no longer accepts ready work.");
@@ -1959,7 +2005,7 @@ void ExecutionService::inc_tasks_to_complete(int delta) {
   }
   RunState& run = current_worker_run();
   std::lock_guard<std::mutex> lock(run.mutex);
-  if (run.first_exception) {
+  if (run.cancelled || run.first_exception) {
     return;
   }
   if (run.tasks_to_complete > std::numeric_limits<int>::max() - delta) {
@@ -1972,7 +2018,7 @@ void ExecutionService::inc_tasks_to_complete(int delta) {
 void ExecutionService::dec_tasks_to_complete() {
   RunState& run = current_worker_run();
   std::lock_guard<std::mutex> lock(run.mutex);
-  if (run.first_exception) {
+  if (run.cancelled || run.first_exception) {
     return;
   }
   if (run.tasks_to_complete <= 0) {
@@ -2000,9 +2046,32 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
     {
       std::lock_guard<std::mutex> pool_lock(pool_->mutex);
       std::lock_guard<std::mutex> run_lock(run->mutex);
-      if (!run->first_exception) {
+      if (!run->cancelled && !run->first_exception) {
         run->first_exception = std::move(failure);
       }
+      if (!run->cancelled) {
+        run->accepting = false;
+      }
+      (void)pool_->ready_store.erase_run(run);
+    }
+    run->settled_cv.notify_all();
+  } catch (...) {
+  }
+}
+
+/** @copydoc ExecutionService::cancel_run */
+void ExecutionService::cancel_run(
+    const std::shared_ptr<RunState>& run,
+    ComputeRunCancellationReason reason) noexcept {
+  try {
+    {
+      std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+      std::lock_guard<std::mutex> run_lock(run->mutex);
+      if (!run->cancelled) {
+        run->cancelled = true;
+        run->cancellation_reason = reason;
+      }
+      run->first_exception = nullptr;
       run->accepting = false;
       (void)pool_->ready_store.erase_run(run);
     }
@@ -2029,7 +2098,8 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
         std::terminate();
       }
       std::lock_guard<std::mutex> run_lock(entry->run->mutex);
-      if (!entry->run->accepting || entry->run->first_exception) {
+      if (!entry->run->accepting || entry->run->cancelled ||
+          entry->run->first_exception) {
         entry.reset();
       } else {
         try {
@@ -2065,6 +2135,33 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
     }
 
     const std::shared_ptr<RunState> run = entry->run;
+    try {
+      const std::optional<ComputeRunCancellationReason> cancellation =
+          entry->submission.lease_.observe_cancellation();
+      if (cancellation.has_value()) {
+        cancel_run(run, *cancellation);
+      }
+    } catch (...) {
+      fail_run(run, std::current_exception());
+    }
+    {
+      std::lock_guard<std::mutex> lock(run->mutex);
+      if (run->cancelled || run->first_exception) {
+        entry->execution_grant.reset();
+        if (run->in_flight <= 0) {
+          std::terminate();
+        }
+        --run->in_flight;
+        if (run->settled()) {
+          run->settled_cv.notify_all();
+        }
+        entry.reset();
+      }
+    }
+    if (!entry) {
+      continue;
+    }
+
     tls_run_state_ = run.get();
     tls_worker_id_ = worker_id;
     run->host->set_task_context(worker_id, run->id.value());
@@ -2074,6 +2171,11 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
                   entry->submission.metadata().trace_node_id());
       }
       entry->submission.execute(*this);
+      const std::optional<ComputeRunCancellationReason> cancellation =
+          entry->submission.lease_.observe_cancellation();
+      if (cancellation.has_value()) {
+        cancel_run(run, *cancellation);
+      }
     } catch (...) {
       fail_run(run, std::current_exception());
     }

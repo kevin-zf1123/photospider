@@ -9,6 +9,7 @@
 
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/dirty_execution_common.hpp"
 #include "compute/dirty_update_executor.hpp"
 #include "compute/domain_op_metadata.hpp"
@@ -72,8 +73,27 @@ bool has_image_payload(const ImageBuffer& buffer) noexcept {
          (buffer.data || buffer.context);
 }
 
+/**
+ * @brief Observes cancellation at a dirty node or tile execution boundary.
+ *
+ * @param run_lease Optional borrowed lifecycle lease.
+ * @return Nothing while cancellation has not claimed this child Run.
+ * @throws GraphError after accepted cancellation to stop further staged work.
+ * @throws std::system_error when Run-state synchronization fails.
+ * @note ComputeRun retains the exact stable reason; the outer service wrapper
+ * performs the public translation and this helper cannot override that outcome.
+ */
+void observe_dirty_node_cancellation(const ComputeRunLease* run_lease) {
+  if (run_lease != nullptr && run_lease->observe_cancellation().has_value()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ComputeRun cancelled before dirty node or tile execution.");
+  }
+}
+
 }  // namespace
 
+/** @copydoc HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor */
 HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
     DirtyNodeExecutionContext context,
     HighPrecisionDirtyWriteBuffer& hp_write_buffer)
@@ -83,11 +103,13 @@ HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
       snapshot_(context.snapshot),
       dirty_generation_(context.dirty_generation),
       hp_write_buffer_(hp_write_buffer),
-      node_synchronization_(context.node_synchronization) {
-}  // NOLINT(whitespace/indent_namespace)
+      node_synchronization_(context.node_synchronization),
+      run_lease_(context.run_lease) {}  // NOLINT(whitespace/indent_namespace)
 
+/** @copydoc HighPrecisionDirtyNodeExecutor::execute */
 void HighPrecisionDirtyNodeExecutor::execute(Node& node,
                                              const HpPlanEntry& entry) {
+  observe_dirty_node_cancellation(run_lease_);
   if (is_rect_empty(entry.roi_hp)) {
     return;
   }
@@ -136,6 +158,7 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
                          node_for_exec.type + ":" + node_for_exec.subtype);
   }
 
+  observe_dirty_node_cancellation(run_lease_);
   {
     std::lock_guard<std::mutex> lock(node_mutex(node.id));
     commit_node(node, entry, dirty_source);
@@ -219,6 +242,7 @@ ImageBuffer& HighPrecisionDirtyNodeExecutor::ensure_hp_buffer(
   return hp_buffer;
 }
 
+/** @copydoc HighPrecisionDirtyNodeExecutor::execute_tiled */
 void HighPrecisionDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const HpPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready,
@@ -232,6 +256,9 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
           OpRegistry::instance().get_metadata(node.type, node.subtype)) {
     config.metadata = *metadata;
   }
+  config.on_tile = [this](const PixelRect&) {
+    observe_dirty_node_cancellation(run_lease_);
+  };
   if (runtime_) {
     runtime_->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE, node.id);
     runtime_->log_event(
@@ -277,6 +304,7 @@ std::mutex& HighPrecisionDirtyNodeExecutor::node_mutex(int node_id) const {
   return node_synchronization_.mutex_for(node_id);
 }
 
+/** @copydoc RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor */
 RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
     DirtyNodeExecutionContext context, RealtimeProxyGraph& proxy_graph,
     RealtimeProxyWriteBuffer& rt_write_buffer)
@@ -288,10 +316,12 @@ RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
       stabilized_parameters_(context.stabilized_parameters),
       proxy_graph_(proxy_graph),
       rt_write_buffer_(rt_write_buffer),
-      node_synchronization_(context.node_synchronization) {
-}  // NOLINT(whitespace/indent_namespace)
+      node_synchronization_(context.node_synchronization),
+      run_lease_(context.run_lease) {}  // NOLINT(whitespace/indent_namespace)
 
+/** @copydoc RealTimeDirtyNodeExecutor::execute */
 void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
+  observe_dirty_node_cancellation(run_lease_);
   if (is_rect_empty(entry.roi_rt)) {
     return;
   }
@@ -343,6 +373,7 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
                   resolved_inputs.image_inputs, *rt_buffer);
   }
 
+  observe_dirty_node_cancellation(run_lease_);
   {
     std::lock_guard<std::mutex> lock(node_mutex(node.id));
     commit_node(node, entry, dirty_source);
@@ -501,6 +532,7 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
                            OutputTileView{&rt_buffer, entry.roi_rt});
 }
 
+/** @copydoc RealTimeDirtyNodeExecutor::execute_tiled */
 void RealTimeDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const RtPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready,
@@ -514,6 +546,9 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
           metadata_for_domain(node.type, node.subtype, DirtyDomain::RealTime)) {
     config.metadata = *metadata;
   }
+  config.on_tile = [this](const PixelRect&) {
+    observe_dirty_node_cancellation(run_lease_);
+  };
   NodeExecutor::execute_tiled_into(graph_, node, tile_fn, image_inputs_ready,
                                    rt_buffer, config);
   if (runtime_) {

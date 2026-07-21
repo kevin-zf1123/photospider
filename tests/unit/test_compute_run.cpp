@@ -236,6 +236,156 @@ std::atomic_int g_resource_dirty_hp_operation_calls{0};
  */
 std::atomic_int g_resource_dirty_rt_operation_calls{0};
 
+/** @brief Serializes process-global legacy cancellation callback configuration.
+ */
+std::mutex g_legacy_cancellation_source_mutex;
+
+/**
+ * @brief Optional weak Run authority copied by the legacy source operation.
+ * @note The scoped test owner resets this value after synchronous drainage.
+ */
+std::optional<ComputeRunCancellationSource> g_legacy_cancellation_source;
+
+/** @brief Counts legacy chain source operation entry. */
+std::atomic_int g_legacy_cancellation_source_calls{0};
+
+/** @brief Counts legacy chain dependent operation entry. */
+std::atomic_int g_legacy_cancellation_dependent_calls{0};
+
+/** @brief Stable provider failure emitted after legacy cancellation wins. */
+constexpr auto kLegacyPostCancellationFailure =
+    // NOLINTNEXTLINE(whitespace/indent_namespace)
+    "legacy source failure after cancellation";
+
+/**
+ * @brief Installs and later clears one source used by a process-global test op.
+ *
+ * @throws std::system_error when configuration mutex locking fails.
+ * @note The stored source is weak with respect to Run lifetime. This guard must
+ * outlive deterministic CompletionTrackingRuntime drainage.
+ */
+class ScopedLegacyCancellationSource final {
+ public:
+  /**
+   * @brief Publishes the source copied by the registered source operation.
+   * @param source Weak-lifetime matching Run authority.
+   * @throws std::system_error when configuration mutex locking fails.
+   */
+  explicit ScopedLegacyCancellationSource(ComputeRunCancellationSource source) {
+    std::lock_guard<std::mutex> lock(g_legacy_cancellation_source_mutex);
+    g_legacy_cancellation_source = std::move(source);
+  }
+
+  /**
+   * @brief Clears process-global callback configuration.
+   * @throws Nothing; synchronization failure terminates the test process.
+   */
+  ~ScopedLegacyCancellationSource() noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(g_legacy_cancellation_source_mutex);
+      g_legacy_cancellation_source.reset();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents copying process-global test configuration ownership.
+   * @param other Guard that cannot be copied.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedLegacyCancellationSource(const ScopedLegacyCancellationSource&) =
+      delete;
+
+  /**
+   * @brief Prevents copy assignment of process-global test configuration.
+   * @param other Guard that cannot be assigned.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedLegacyCancellationSource& operator=(
+      const ScopedLegacyCancellationSource&) = delete;
+};
+
+/**
+ * @brief Executes ordinary source A without requesting cancellation.
+ * @return Staged source output whose completed call arms the injected deadline.
+ * @throws std::bad_alloc when output storage cannot allocate.
+ * @note The source-call counter changes before return. The matching test clock
+ * keeps the deadline open for observations inside NodeTaskRunner and expires it
+ * only on the next observation after run_task() returns.
+ */
+NodeOutput execute_legacy_cancellation_source() {
+  NodeOutput output;
+  output.data["value"] = 1;
+  g_legacy_cancellation_source_calls.store(1, std::memory_order_release);
+  return output;
+}
+
+/**
+ * @brief Requests cancellation and then throws source A's injected failure.
+ *
+ * @return Never returns.
+ * @throws std::logic_error when no scoped Run source is installed.
+ * @throws std::runtime_error with kLegacyPostCancellationFailure for the
+ * injected provider exception.
+ * @throws std::bad_alloc or std::system_error from source copying, locking, or
+ * cancellation cleanup unchanged.
+ * @note Explicit cancellation wins before exception transport exercises losing
+ * failure publication and callback-token retirement.
+ */
+[[noreturn]] NodeOutput execute_legacy_post_cancellation_failure() {
+  g_legacy_cancellation_source_calls.fetch_add(1, std::memory_order_release);
+  std::optional<ComputeRunCancellationSource> source;
+  {
+    std::lock_guard<std::mutex> lock(g_legacy_cancellation_source_mutex);
+    source = g_legacy_cancellation_source;
+  }
+  if (!source.has_value()) {
+    throw std::logic_error("Legacy cancellation source is not configured.");
+  }
+  (void)source->request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest);
+  throw std::runtime_error(kLegacyPostCancellationFailure);
+}
+
+/**
+ * @brief Registers the deterministic legacy A-to-B cancellation operations.
+ *
+ * @return Nothing.
+ * @throws Registry or callback allocation exceptions unchanged.
+ * @note Registration is process-persistent and idempotent. The ordinary source
+ * returns staged output for post-provider deadline observation; the failure
+ * source requests explicit cancellation before throwing.
+ */
+void ensure_legacy_cancellation_operations_registered() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_cancel_chain", "source",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              return execute_legacy_cancellation_source();
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_cancel_chain", "source_throw_after_cancel",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              return execute_legacy_post_cancellation_failure();
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_cancel_chain", "dependent",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              g_legacy_cancellation_dependent_calls.fetch_add(
+                  1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["value"] = 2;
+              return output;
+            }));
+  });
+}
+
 /**
  * @brief Builds one small CPU image output for dirty product tests.
  * @param value Named scalar retained with the deterministic image.
@@ -736,6 +886,33 @@ class ExecutionServiceHost final : public SchedulerHostContext {
     } catch (...) {
       trace_recording_failed_.store(true, std::memory_order_relaxed);
     }
+    if (action == SchedulerTraceAction::AssignInitial) {
+      const ComputeRunCancellationSource* source =
+          cancel_on_assignment_.exchange(nullptr, std::memory_order_acq_rel);
+      if (source != nullptr) {
+        try {
+          (void)source->request_cancellation(
+              ComputeRunCancellationReason::ExplicitRequest);
+        } catch (...) {
+          trace_recording_failed_.store(true, std::memory_order_relaxed);
+        }
+      }
+    }
+  }
+
+  /**
+   * @brief Arms deterministic cancellation at the next initial assignment
+   * trace.
+   * @param source Borrowed source that outlives the armed callback and Run
+   * wait.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The worker has already dequeued and counted the task in flight when
+   * this hook runs, but ReadyTaskSubmission has not entered its executable.
+   */
+  void cancel_on_next_initial_assignment(
+      const ComputeRunCancellationSource& source) noexcept {
+    cancel_on_assignment_.store(&source, std::memory_order_release);
   }
 
   /**
@@ -791,6 +968,10 @@ class ExecutionServiceHost final : public SchedulerHostContext {
 
   /** @brief Whether noexcept trace observation lost any event. */
   std::atomic_bool trace_recording_failed_{false};
+
+  /** @brief Optional one-shot source used by the deterministic dequeue race. */
+  std::atomic<const ComputeRunCancellationSource*> cancel_on_assignment_{
+      nullptr};
 };
 
 /**
@@ -2270,6 +2451,7 @@ TEST(ComputeRunDescriptor, AcceptsRtChildAndRejectsMismatchedQualityOrQos) {
  */
 TEST(ComputeRunLifecycle, AdvancesMonotonicallyAndSettlesSuccessOnce) {
   ComputeRun run(make_test_submission("phase", 9, 3));
+  const ComputeRunCancellationSource cancellation = run.cancellation_source();
 
   EXPECT_EQ(run.phase(), ComputeRunPhase::Created);
   EXPECT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
@@ -2283,8 +2465,8 @@ TEST(ComputeRunLifecycle, AdvancesMonotonicallyAndSettlesSuccessOnce) {
   EXPECT_EQ(run.phase(), ComputeRunPhase::Terminal);
   EXPECT_FALSE(run.advance_to(ComputeRunPhase::CommitPending));
   EXPECT_FALSE(run.publish_succeeded());
-  EXPECT_FALSE(
-      run.publish_cancelled(ComputeRunCancellationReason::ExplicitRequest));
+  EXPECT_FALSE(cancellation.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
   EXPECT_FALSE(
       run.publish_failed(std::make_exception_ptr(std::runtime_error("late"))));
 
@@ -2328,6 +2510,7 @@ TEST(ComputeRunLifecycle, PreservesOriginalFailureException) {
  */
 TEST(ComputeRunLifecycle, ConcurrentTerminalContendersSelectExactlyOne) {
   ComputeRun run(make_test_submission("terminal-race", 6, 7));
+  const ComputeRunCancellationSource cancellation = run.cancellation_source();
   std::atomic_bool start{false};
   std::atomic_int accepted{0};
   std::vector<std::thread> contenders;
@@ -2348,7 +2531,7 @@ TEST(ComputeRunLifecycle, ConcurrentTerminalContendersSelectExactlyOne) {
               std::make_exception_ptr(std::runtime_error("race failure")));
           break;
         default:
-          won = run.publish_cancelled(
+          won = cancellation.request_cancellation(
               ComputeRunCancellationReason::ExplicitRequest);
           break;
       }
@@ -2366,6 +2549,178 @@ TEST(ComputeRunLifecycle, ConcurrentTerminalContendersSelectExactlyOne) {
   EXPECT_EQ(accepted.load(std::memory_order_relaxed), 1);
   EXPECT_TRUE(run.is_terminal());
   EXPECT_TRUE(run.terminal_outcome().has_value());
+}
+
+/**
+ * @brief Verifies explicit cancellation keeps one stable reason and callback.
+ *
+ * @return Nothing; GoogleTest assertions report arbiter, notification, or
+ * quiescence failures.
+ * @throws Allocation or synchronization exceptions from fixture setup.
+ * @note A live lease proves terminal publication precedes physical quiescence;
+ * registering after cancellation invokes immediately but retains no slot.
+ */
+TEST(ComputeRunCancellation,
+     ExplicitRequestIsIdempotentStableAndTerminalBeforeQuiescent) {
+  ComputeRun run(make_test_submission("explicit-cancellation", 31, 41));
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  std::atomic_int notifications{0};
+  std::optional<ComputeRunCancellationReason> notified_reason;
+
+  {
+    ComputeRunLease lease = run.acquire_lease();
+    ComputeRunCancellationRegistration registration =
+        lease.register_cancellation_notification(
+            [&](ComputeRunCancellationReason reason) {
+              notified_reason = reason;
+              notifications.fetch_add(1, std::memory_order_relaxed);
+            });
+    ASSERT_TRUE(registration.active());
+
+    EXPECT_TRUE(
+        source.request_cancellation(ComputeRunCancellationReason::GraphClose));
+    EXPECT_FALSE(source.request_cancellation(
+        ComputeRunCancellationReason::ExplicitRequest));
+    EXPECT_EQ(lease.observe_cancellation(),
+              ComputeRunCancellationReason::GraphClose);
+    EXPECT_TRUE(run.is_terminal());
+    EXPECT_FALSE(run.is_quiescent());
+    EXPECT_EQ(notifications.load(std::memory_order_relaxed), 1);
+    ASSERT_TRUE(notified_reason.has_value());
+    EXPECT_EQ(*notified_reason, ComputeRunCancellationReason::GraphClose);
+
+    ComputeRunCancellationRegistration late =
+        lease.register_cancellation_notification(
+            [&](ComputeRunCancellationReason reason) {
+              notified_reason = reason;
+              notifications.fetch_add(1, std::memory_order_relaxed);
+            });
+    EXPECT_FALSE(late.active());
+    EXPECT_EQ(notifications.load(std::memory_order_relaxed), 2);
+  }
+
+  EXPECT_TRUE(run.is_quiescent());
+  const auto outcome = run.terminal_outcome();
+  ASSERT_TRUE(outcome.has_value());
+  EXPECT_EQ(outcome->kind, ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(outcome->cancellation_reason,
+            ComputeRunCancellationReason::GraphClose);
+}
+
+/**
+ * @brief Verifies an injected monotonic deadline wins without wall-clock sleep.
+ *
+ * @return Nothing; GoogleTest assertions report deadline-arbiter failures.
+ * @throws Allocation or synchronization exceptions from fixture setup.
+ * @note Equality with the immutable deadline is expired. A later explicit
+ * request cannot replace `DeadlineExceeded` or invoke the slot again.
+ */
+TEST(ComputeRunCancellation, InjectedDeadlineUsesTheSharedTerminalArbiter) {
+  using Clock = std::chrono::steady_clock;
+  Clock::time_point now = Clock::time_point{} + std::chrono::seconds(10);
+  ComputeRunSubmission submission =
+      make_test_submission("deadline-cancellation", 32, 42);
+  submission.qos.deadline = now + std::chrono::seconds(5);
+  ComputeRun run(std::move(submission), [&now]() noexcept { return now; });
+  ComputeRunLease lease = run.acquire_lease();
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  std::atomic_int notifications{0};
+  ComputeRunCancellationRegistration registration =
+      lease.register_cancellation_notification(
+          [&](ComputeRunCancellationReason reason) {
+            EXPECT_EQ(reason, ComputeRunCancellationReason::DeadlineExceeded);
+            notifications.fetch_add(1, std::memory_order_relaxed);
+          });
+
+  EXPECT_FALSE(lease.observe_cancellation().has_value());
+  now += std::chrono::seconds(5);
+  EXPECT_EQ(lease.observe_cancellation(),
+            ComputeRunCancellationReason::DeadlineExceeded);
+  EXPECT_EQ(notifications.load(std::memory_order_relaxed), 1);
+  EXPECT_FALSE(source.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  EXPECT_EQ(lease.observe_cancellation(),
+            ComputeRunCancellationReason::DeadlineExceeded);
+  EXPECT_EQ(notifications.load(std::memory_order_relaxed), 1);
+}
+
+/**
+ * @brief Verifies cancellation and visible-commit claims are mutually
+ * exclusive.
+ *
+ * @return Nothing; GoogleTest assertions report commit/cancellation ordering
+ * failures.
+ * @throws Allocation or synchronization exceptions from fixture setup.
+ * @note Cancellation before claim denies commit, while an accepted contender
+ * rejects every later cancellation/failure until that contender resolves.
+ */
+TEST(ComputeRunCommitArbiter, LinearizesCancellationBeforeOrAfterCommitClaim) {
+  ComputeRun cancelled(make_test_submission("cancel-before-commit", 33, 43));
+  ComputeRunLease cancelled_lease = cancelled.acquire_lease();
+  ASSERT_TRUE(cancelled.advance_to(ComputeRunPhase::CommitPending));
+  EXPECT_TRUE(cancelled.cancellation_source().request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  EXPECT_FALSE(cancelled_lease.try_claim_commit().has_value());
+  ASSERT_TRUE(cancelled.terminal_outcome().has_value());
+  EXPECT_EQ(cancelled.terminal_outcome()->kind,
+            ComputeRunTerminalKind::Cancelled);
+
+  ComputeRun committed(make_test_submission("commit-before-cancel", 34, 44));
+  ComputeRunLease committed_lease = committed.acquire_lease();
+  ASSERT_TRUE(committed.advance_to(ComputeRunPhase::CommitPending));
+  std::optional<ComputeRunCommitContender> contender =
+      committed_lease.try_claim_commit();
+  ASSERT_TRUE(contender.has_value());
+  EXPECT_FALSE(committed.cancellation_source().request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  EXPECT_FALSE(committed.publish_failed(
+      std::make_exception_ptr(std::runtime_error("late failure"))));
+  EXPECT_FALSE(committed.is_terminal());
+  EXPECT_TRUE(contender->publish_succeeded());
+  ASSERT_TRUE(committed.terminal_outcome().has_value());
+  EXPECT_EQ(committed.terminal_outcome()->kind,
+            ComputeRunTerminalKind::Succeeded);
+}
+
+/**
+ * @brief Verifies one private request source fans out to independent child
+ * Runs.
+ *
+ * @return Nothing; GoogleTest assertions report request fanout failures.
+ * @throws Allocation or synchronization exceptions from fixture setup.
+ * @note Duplicate attachment is idempotent and a child attached after the first
+ * request is synchronously cancelled with the same stable reason.
+ */
+TEST(ComputeRunCancellation, RequestSourceFansOutAndCancelsLateChildren) {
+  ComputeRequestCancellationSource request_source;
+  ComputeRun hp(make_test_submission("fanout-hp", 35, 45));
+  ComputeRunSubmission rt_submission = make_policy_submission(
+      "fanout-rt", 36, 45, ComputeRunQosClass::Interactive);
+  rt_submission.intent = ComputeIntent::RealTimeUpdate;
+  rt_submission.quality = ComputeRunQuality::Interactive;
+  ComputeRun rt(std::move(rt_submission));
+  ComputeRun late(make_test_submission("fanout-late", 37, 45));
+  ComputeRunLease hp_lease = hp.acquire_lease();
+  ComputeRunLease rt_lease = rt.acquire_lease();
+  ComputeRunLease late_lease = late.acquire_lease();
+
+  request_source.attach(hp);
+  request_source.attach(rt);
+  request_source.attach(hp);
+  EXPECT_TRUE(request_source.request_cancellation());
+  EXPECT_FALSE(request_source.request_cancellation());
+  request_source.attach(late);
+
+  EXPECT_EQ(request_source.accepted_reason(),
+            ComputeRunCancellationReason::ExplicitRequest);
+  EXPECT_EQ(hp_lease.observe_cancellation(),
+            ComputeRunCancellationReason::ExplicitRequest);
+  EXPECT_EQ(rt_lease.observe_cancellation(),
+            ComputeRunCancellationReason::ExplicitRequest);
+  EXPECT_EQ(late_lease.observe_cancellation(),
+            ComputeRunCancellationReason::ExplicitRequest);
+  EXPECT_NE(hp.descriptor().id(), rt.descriptor().id());
+  EXPECT_NE(rt.descriptor().id(), late.descriptor().id());
 }
 
 /**
@@ -5836,6 +6191,228 @@ TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
 }
 
 /**
+ * @brief Verifies cancellation before service publication admits no callback.
+ *
+ * @return Nothing; GoogleTest assertions report premature admission or leaked
+ * resources.
+ * @throws Allocation, service, or synchronization exceptions from setup.
+ * @note The submission already owns a lease when cancellation wins. The service
+ * must return before reserving resources or publishing the initial ready value.
+ */
+TEST(ExecutionServiceCancellation,
+     PrepublicationCancellationSkipsAdmissionAndExecution) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("cancel-before-service", 61, 71));
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 71, entered));
+
+  ASSERT_TRUE(source.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(ready), 1));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(host.context_entries(), 0);
+  EXPECT_EQ(host.context_exits(), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies the post-dequeue/pre-callback cancellation observation seam.
+ *
+ * @return Nothing; GoogleTest assertions report callback entry or resource
+ * drainage failures.
+ * @throws Allocation, service, or synchronization exceptions from setup.
+ * @note The Host hook runs after the worker counts the task in flight. The
+ * submission executable must remain unentered and all grants must still drain.
+ */
+TEST(ExecutionServiceCancellation,
+     CancellationAfterDequeueSuppressesExecutableAndDrainsExactly) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("cancel-after-dequeue", 62, 72));
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  host.cancel_on_next_initial_assignment(source);
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(
+      make_counted_ready_submission(run.acquire_lease(), 0U, 72, entered));
+
+  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(ready), 1));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(host.context_entries(), 1);
+  EXPECT_EQ(host.context_exits(), 1);
+  EXPECT_FALSE(host.trace_recording_failed());
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies exact queued-Run purge without disturbing an executing peer.
+ *
+ * @return Nothing; GoogleTest assertions report cross-Run purge or reservation
+ * failures.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and settlement.
+ * @note A single worker remains occupied by the peer while both target values
+ * enter the bounded ready store. Cancellation settles only the target and
+ * releases its complete root reservation before the peer gate opens.
+ */
+TEST(ExecutionServiceCancellation,
+     PurgesOnlyTheCancelledQueuedRunAndReleasesItsReservation) {
+  ExecutionService service(1);
+  ExecutionServiceHost peer_host;
+  ExecutionServiceHost target_host;
+  ComputeRun peer(make_test_submission("cancel-queue-peer", 63, 73));
+  ComputeRun target(make_test_submission("cancel-queue-target", 64, 74));
+  const ComputeRunCancellationSource target_source =
+      target.cancellation_source();
+  std::promise<void> peer_entered;
+  std::promise<void> release_peer;
+  const std::shared_future<void> peer_release =
+      release_peer.get_future().share();
+  std::atomic_int target_entered{0};
+
+  std::vector<ReadyTaskSubmission> peer_ready;
+  ComputeRunLease peer_lease = peer.acquire_lease();
+  peer_ready.emplace_back(peer_lease, peer_lease.task_identity(0U), 73, true,
+                          [&peer_entered, peer_release](
+                              ComputeRunLease&, const ComputeRunTaskIdentity&,
+                              SchedulerTaskRuntime& runtime) {
+                            peer_entered.set_value();
+                            peer_release.wait();
+                            runtime.dec_tasks_to_complete();
+                          });
+  const CpuRunResourceDemand run_demand{};
+  const ResourceVector peer_required =
+      service.estimate_cpu_run_resources(peer_ready.front(), 1, run_demand);
+
+  std::vector<ReadyTaskSubmission> target_ready;
+  target_ready.push_back(make_counted_ready_submission(target.acquire_lease(),
+                                                       0U, 74, target_entered));
+  target_ready.push_back(make_counted_ready_submission(target.acquire_lease(),
+                                                       1U, 74, target_entered));
+  const ResourceVector target_required =
+      service.estimate_cpu_run_resources(target_ready.front(), 2, run_demand);
+  const std::optional<ResourceVector> combined_required =
+      checked_add_resources(peer_required, target_required);
+  ASSERT_TRUE(combined_required.has_value());
+
+  std::future<void> peer_future;
+  std::future<void> target_future;
+  ScopedPromiseRelease peer_release_guard(release_peer);
+  peer_future = std::async(
+      std::launch::async,
+      [&service, &peer_host, ready = std::move(peer_ready)]() mutable {
+        service.execute_cpu_run(peer_host, std::move(ready), 1);
+      });
+  ASSERT_EQ(peer_entered.get_future().wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  target_future = std::async(
+      std::launch::async,
+      [&service, &target_host, ready = std::move(target_ready)]() mutable {
+        service.execute_cpu_run(target_host, std::move(ready), 2);
+      });
+  ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
+  ASSERT_TRUE(wait_for_resource_reservation(service, *combined_required));
+
+  EXPECT_TRUE(target_source.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  ASSERT_EQ(target_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(target_future.get());
+  EXPECT_EQ(target_entered.load(std::memory_order_relaxed), 0);
+  EXPECT_TRUE(wait_for_resource_reservation(service, peer_required));
+  EXPECT_EQ(peer_future.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+
+  EXPECT_TRUE(peer_release_guard.release());
+  ASSERT_EQ(peer_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(peer_future.get());
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+  EXPECT_EQ(peer_host.context_entries(), peer_host.context_exits());
+  EXPECT_EQ(target_host.context_entries(), 0);
+}
+
+/**
+ * @brief Verifies cancellation waits for an active non-preemptible callback.
+ *
+ * @return Nothing; GoogleTest assertions report premature settlement,
+ * dependent re-entry, or resource leakage.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and settlement.
+ * @note The active callback attempts dependent publication after cancellation.
+ * The dependent is rejected without entry, while caller settlement waits for
+ * the original callback's actual exit instead of logical completion count.
+ */
+TEST(ExecutionServiceCancellation,
+     RunningCallbackDrainsBeforeSettlementAndCannotPublishDependentWork) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("cancel-running", 65, 75));
+  const ComputeRunCancellationSource source = run.cancellation_source();
+  std::promise<void> initial_entered;
+  std::promise<void> release_initial;
+  const std::shared_future<void> release = release_initial.get_future().share();
+  std::atomic_int dependent_entered{0};
+
+  ComputeRunLease initial_lease = run.acquire_lease();
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(
+      initial_lease, initial_lease.task_identity(0U), 75, true,
+      [&initial_entered, release, &dependent_entered](
+          ComputeRunLease& retained_lease, const ComputeRunTaskIdentity&,
+          SchedulerTaskRuntime& runtime) {
+        initial_entered.set_value();
+        release.wait();
+        auto* ready_runtime =
+            dynamic_cast<ReadyTaskSubmissionRuntime*>(&runtime);
+        if (ready_runtime == nullptr) {
+          throw std::logic_error(
+              "Cancellation test requires ready-submission runtime.");
+        }
+        ComputeRunLease dependent_lease = retained_lease;
+        const ComputeRunTaskIdentity dependent_identity =
+            dependent_lease.task_identity(1U);
+        ready_runtime->submit_ready_submission(ReadyTaskSubmission(
+            std::move(dependent_lease), dependent_identity, 76, false,
+            [&dependent_entered](ComputeRunLease&,
+                                 const ComputeRunTaskIdentity&,
+                                 SchedulerTaskRuntime& dependent_runtime) {
+              dependent_entered.fetch_add(1, std::memory_order_relaxed);
+              dependent_runtime.dec_tasks_to_complete();
+            }));
+        runtime.dec_tasks_to_complete();
+      });
+
+  std::future<void> run_future;
+  ScopedPromiseRelease release_guard(release_initial);
+  run_future =
+      std::async(std::launch::async,
+                 [&service, &host, ready = std::move(ready)]() mutable {
+                   service.execute_cpu_run(host, std::move(ready), 2);
+                 });
+  ASSERT_EQ(initial_entered.get_future().wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_TRUE(source.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  EXPECT_EQ(run_future.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run_future.get());
+  EXPECT_EQ(dependent_entered.load(std::memory_order_relaxed), 0);
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+  EXPECT_EQ(host.context_entries(), host.context_exits());
+}
+
+/**
  * @brief Verifies registered worker failure preserves exception identity.
  *
  * @note The custom executable publishes through its retained matching lease
@@ -5902,6 +6479,135 @@ TEST(ExecutionService, RejectsBorrowedHandlesAndAnonymousCallbacks) {
   EXPECT_THROW(service.submit_ready_task_any_thread(
                    [] {}, SchedulerTaskPriority::Normal, std::nullopt),
                std::logic_error);
+}
+
+/**
+ * @brief Verifies legacy A completion cannot publish B after cancellation.
+ *
+ * @return Nothing; GoogleTest assertions report callback entry, ledger, or
+ * staged-publication failures.
+ * @throws Allocation, registry, scheduler, or synchronization exceptions from
+ * fixture setup and execution.
+ * @note In the return branch, an injected deadline expires at the first
+ * observation after source A returns and before dependency release. In the
+ * exception branch, explicit cancellation wins immediately before A throws.
+ * The recursive publication gate retires B's plan-owned completion unit, A
+ * retires its callback unit, and deterministic drainage reaches zero without
+ * entering B or mutating committed Graph caches. The later exception cannot
+ * replace Cancelled.
+ */
+TEST(ComputeRunCancellation,
+     LegacySourceReturnAndExceptionSuppressDependentAndSettleLedger) {
+  ensure_legacy_cancellation_operations_registered();
+  for (const bool throw_after_cancellation : {false, true}) {
+    SCOPED_TRACE(throw_after_cancellation ? "exception" : "return");
+    g_legacy_cancellation_source_calls.store(0, std::memory_order_relaxed);
+    g_legacy_cancellation_dependent_calls.store(0, std::memory_order_relaxed);
+
+    GraphModel graph(throw_after_cancellation
+                         ? "cache/legacy-cancellation-exception-chain"
+                         : "cache/legacy-cancellation-return-chain");
+    Node source = make_plan_node(91);
+    source.type = "compute_run_cancel_chain";
+    source.subtype =
+        throw_after_cancellation ? "source_throw_after_cancel" : "source";
+    Node dependent = make_plan_node(92);
+    dependent.type = "compute_run_cancel_chain";
+    dependent.subtype = "dependent";
+    dependent.image_inputs.push_back(ImageInput{91, "image"});
+    graph.add_node(std::move(source));
+    graph.add_node(std::move(dependent));
+    graph.validate_topology();
+
+    GraphTraversalService traversal;
+    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                            testing::make_yaml_cache_metadata_codec()};
+    GraphEventService events;
+    CompletionTrackingRuntime runtime;
+    TimingCollector timings;
+    std::mutex timing_mutex;
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point deadline =
+        Clock::time_point{} + std::chrono::seconds(10);
+    ComputeRunSubmission submission = make_test_submission(
+        "legacy-cancel-chain", graph.revision().value(), 92);
+    submission.qos.deadline = deadline;
+    ComputeRun run(std::move(submission), [throw_after_cancellation,
+                                           deadline]() noexcept {
+      if (!throw_after_cancellation && g_legacy_cancellation_source_calls.load(
+                                           std::memory_order_acquire) > 0) {
+        return deadline;
+      }
+      return deadline - std::chrono::seconds(1);
+    });
+    ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+    TaskSubmissionPlan& plan = run.emplace_submission_plan(
+        graph, traversal, 92, std::vector<Device>{Device::CPU});
+    ASSERT_EQ(plan.size(), 2U);
+    ComputeRunLease lease = run.acquire_lease();
+    ScopedLegacyCancellationSource configured_source(run.cancellation_source());
+    plan.emplace_task_runner(NodeTaskRunnerContext{
+        graph,
+        cache,
+        events,
+        runtime,
+        timings,
+        timing_mutex,
+        plan.execution_order(),
+        plan.id_to_idx(),
+        plan.temp_results(),
+        plan.resolved_ops(),
+        plan.compute_plan().task_graph,
+        false,
+        false,
+        true,
+        nullptr,
+        &lease,
+    });
+
+    runtime.submit_initial_task_handles({}, 0);
+    plan.submit_initial_ready_tasks(lease, runtime);
+    ASSERT_EQ(runtime.callbacks_submitted(), 1);
+    std::exception_ptr observed_failure;
+    try {
+      runtime.wait_for_completion();
+    } catch (...) {
+      observed_failure = std::current_exception();
+    }
+    if (throw_after_cancellation) {
+      ASSERT_TRUE(observed_failure);
+      try {
+        std::rethrow_exception(observed_failure);
+      } catch (const std::exception& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(kLegacyPostCancellationFailure),
+            std::string::npos)
+            << error.what();
+      }
+    } else {
+      EXPECT_FALSE(observed_failure);
+    }
+
+    EXPECT_EQ(
+        g_legacy_cancellation_source_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(
+        g_legacy_cancellation_dependent_calls.load(std::memory_order_relaxed),
+        0);
+    EXPECT_EQ(runtime.callbacks_submitted(), 1);
+    EXPECT_EQ(runtime.callbacks_invoked(), 1);
+    EXPECT_EQ(runtime.total_units_added(), 2);
+    EXPECT_EQ(runtime.completion_releases(), 2);
+    EXPECT_EQ(runtime.tasks_to_complete(), 0);
+    EXPECT_EQ(runtime.planned_execution_events(), 1);
+    EXPECT_FALSE(graph.node(91).cached_output_high_precision.has_value());
+    EXPECT_FALSE(graph.node(92).cached_output_high_precision.has_value());
+    ASSERT_TRUE(run.terminal_outcome().has_value());
+    EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+    EXPECT_EQ(run.terminal_outcome()->cancellation_reason,
+              throw_after_cancellation
+                  ? ComputeRunCancellationReason::ExplicitRequest
+                  : ComputeRunCancellationReason::DeadlineExceeded);
+  }
 }
 
 /**

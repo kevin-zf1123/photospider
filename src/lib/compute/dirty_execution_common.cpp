@@ -189,7 +189,15 @@ void DirtyReadyTaskContext::execute(ComputeRunLease& lease,
 
   const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_id);
   try {
+    if (lease.observe_cancellation().has_value()) {
+      task_runtime.dec_tasks_to_complete();
+      return;
+    }
     run_task_(task_id);
+    if (lease.observe_cancellation().has_value()) {
+      task_runtime.dec_tasks_to_complete();
+      return;
+    }
     if (release_dependents_) {
       const std::vector<int> ready_ids =
           dependency_state_->release_dependents(task_id);
@@ -202,6 +210,9 @@ void DirtyReadyTaskContext::execute(ComputeRunLease& lease,
             "Dirty owned context requires a ready-submission runtime.");
       }
       for (ReadyTaskSubmission& submission : ready_submissions) {
+        if (lease.observe_cancellation().has_value()) {
+          break;
+        }
         ready_runtime->submit_ready_submission(std::move(submission));
       }
     }
