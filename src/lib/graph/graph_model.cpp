@@ -192,30 +192,21 @@ void GraphModel::DiskCacheDiagnosticStore::record(DiskCacheLoadResult result) {
   static_assert(
       std::is_nothrow_swappable_v<decltype(prepared)>,
       "Disk-cache diagnostic replacement must remain no-throw after locking");
-  lock();
+  const ScopedLock lock(*this);
   value_.swap(prepared);
-  unlock();
 }
 
 /** @copydoc GraphModel::DiskCacheDiagnosticStore::snapshot */
 std::optional<GraphModel::DiskCacheLoadResult>
 GraphModel::DiskCacheDiagnosticStore::snapshot() const {
-  lock();
-  try {
-    std::optional<DiskCacheLoadResult> result = value_;
-    unlock();
-    return result;
-  } catch (...) {
-    unlock();
-    throw;
-  }
+  const ScopedLock lock(*this);
+  return value_;
 }
 
 /** @copydoc GraphModel::DiskCacheDiagnosticStore::clear */
 void GraphModel::DiskCacheDiagnosticStore::clear() noexcept {
-  lock();
+  const ScopedLock lock(*this);
   value_.reset();
-  unlock();
 }
 
 /** @copydoc GraphModel::DiskCacheDiagnosticStore::exchange_with */
@@ -232,11 +223,9 @@ void GraphModel::DiskCacheDiagnosticStore::exchange_with(
   if (std::less<DiskCacheDiagnosticStore*>{}(second, first)) {
     std::swap(first, second);
   }
-  first->lock();
-  second->lock();
+  const ScopedLock first_lock(*first);
+  const ScopedLock second_lock(*second);
   value_.swap(other.value_);
-  second->unlock();
-  first->unlock();
 }
 
 /** @copydoc GraphModel::GraphModel(fs::path) */

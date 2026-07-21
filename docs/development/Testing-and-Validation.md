@@ -381,7 +381,7 @@ and retain the single real writer.
 
 ## Revision-Safe Compute Publication Validation
 
-Issue #72 uses three maintained test binaries to own the long-lived staged
+Issue #72 uses four maintained test binaries to own the long-lived staged
 publication boundary. `test_compute_run` validates the checked nonzero strong
 `GraphInstanceId` and `GraphRevision` values, non-reused Graph identity,
 monotonic mutation revisions, and exact descriptor/snapshot provenance.
@@ -408,25 +408,36 @@ The same binary proves the private compute-request lane serializes scheduler
 observation/replacement with same-Graph compute, accepted async work survives a
 dropped caller future, and close drains compute-request work before graph-state
 and scheduler teardown. These races use explicit gates and bounded waits, not
-timing sleeps. Its
-`CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication`
-case runs gated production record/snapshot workers while real `GraphModel`
-clear, `GraphIOService` reload, clone, and staged publication repeat. Every
-snapshot must be empty or one complete value; failed reload retains the prior
-diagnostic, and final successful clear/reload resets it. The test uses no
-product seam and owns asynchronous cleanup with bounded readiness observation
-and deterministic future recovery.
+timing sleeps. Every discovered `test_kernel_contracts` case also has a
+30-second CTest timeout.
+
+`test_disk_cache_diagnostic_concurrency` is the separate long-lived
+multithreaded fault-isolation binary. Production record/snapshot workers run
+while `GraphModel` clear, clone, and staged publication repeat; another case
+invokes the two-store exchange from both argument orders through an inline,
+source-tree-only bridge; a deterministic allocation failure proves a throwing
+snapshot copy releases the private scoped guard. Every discovered case carries
+the `kernel-concurrency` label and a 20-second CTest timeout. If a lock
+regression prevents worker recovery, CTest terminates that dedicated process;
+neither a `std::future` destructor nor a thread join can retain the broad
+kernel-contract process or wait for the CI job timeout. The sequential
+`CacheSemantics.DiskCacheDiagnosticStorePreservesClearReloadAndPublicationSemantics`
+case remains in `test_kernel_contracts` to prove failed reload preservation and
+successful clear/reload reset without duplicating the deadlock probe.
 Run the focused contract with:
 
 ```bash
 cmake --build build \
-  --target test_compute_run test_compute_service_split test_kernel_contracts -j
+  --target test_compute_run test_compute_service_split test_kernel_contracts \
+  test_disk_cache_diagnostic_concurrency -j
 ./build/tests/test_compute_run \
   --gtest_filter='GraphRevision.*:ComputeRunDescriptor.CapturesIdRevisionIntentQualityAndQosWithoutReuse'
 ./build/tests/test_compute_service_split \
   --gtest_filter='RealtimeProxyGraph.*'
 ./build/tests/test_kernel_contracts \
-  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain:CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication'
+  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain:CacheSemantics.DiskCacheDiagnosticStorePreservesClearReloadAndPublicationSemantics'
+ctest --test-dir build --output-on-failure \
+  -R '^DiskCacheDiagnosticConcurrency\.'
 ```
 
 Focused companion regressions own the remaining boundaries:

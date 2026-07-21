@@ -478,12 +478,17 @@ class GraphModel {
    * The store serializes record, snapshot, clear, clone, and staged-publication
    * exchange. Its no-throw mutex preserves GraphModel's no-throw publication
    * phase without holding a diagnostic lock across filesystem, cache,
-   * scheduler, callback, lane, ledger, or other Graph-lock operations.
+   * scheduler, callback, lane, ledger, or other Graph-lock operations. Each
+   * store is owned directly by exactly one live or staged GraphModel and has no
+   * detached lifetime or independently shared state.
    *
    * @note The mutex is non-recursive. Two-store exchange acquires mutexes in
    * address order, so live/staged publication has no reverse lock order. The
    * contained optional is private to prevent future GraphModel code from
-   * bypassing this synchronization contract.
+   * bypassing this synchronization contract. Every worker and runtime lane
+   * that can access the store must be stopped, drained, and joined before its
+   * owning GraphModel reaches member destruction; no store call may race that
+   * destruction.
    */
   class DiskCacheDiagnosticStore {
    public:
@@ -538,6 +543,76 @@ class GraphModel {
      * @throws Nothing.
      */
     void unlock() const noexcept;
+
+    /**
+     * @brief Owns one store mutex acquisition for a lexical scope.
+     *
+     * Construction acquires exactly one non-recursive store mutex and
+     * destruction releases it on normal return and exception unwinding.
+     * Record, snapshot, clear, and ordered exchange use this guard so no
+     * operation contains a manual release path.
+     *
+     * @note The guard is private, non-copyable, and non-movable. Ordered
+     * two-store exchange constructs the lower-address guard first and the
+     * higher-address guard second; normal C++ destruction releases them in the
+     * inverse order.
+     */
+    class ScopedLock {
+     public:
+      /**
+       * @brief Acquires the supplied store mutex for this guard's lifetime.
+       * @param store Store whose mutex remains held until guard destruction.
+       * @throws Nothing.
+       * @note The caller must not already hold the same non-recursive mutex.
+       */
+      explicit ScopedLock(const DiskCacheDiagnosticStore& store) noexcept
+          : store_(store) {
+        store_.lock();
+      }
+
+      /**
+       * @brief Releases the mutex acquired by this guard.
+       * @throws Nothing.
+       * @note Destruction performs exactly one no-throw release, including
+       * exception-unwinding paths such as a failed diagnostic snapshot copy.
+       */
+      ~ScopedLock() noexcept { store_.unlock(); }
+
+      /**
+       * @brief Disables copying of mutex ownership.
+       * @param other Guard whose ownership cannot be duplicated.
+       * @throws Nothing because construction is unavailable.
+       */
+      ScopedLock(const ScopedLock& other) = delete;
+
+      /**
+       * @brief Disables copy assignment of mutex ownership.
+       * @param other Guard whose ownership cannot replace this guard.
+       * @return No value because assignment is unavailable.
+       * @throws Nothing because assignment is unavailable.
+       */
+      ScopedLock& operator=(const ScopedLock& other) = delete;
+
+      /**
+       * @brief Disables moving of mutex ownership.
+       * @param other Guard whose ownership cannot be transferred.
+       * @throws Nothing because construction is unavailable.
+       */
+      ScopedLock(ScopedLock&& other) = delete;
+
+      /**
+       * @brief Disables move assignment of mutex ownership.
+       * @param other Guard whose ownership cannot be transferred.
+       * @return No value because assignment is unavailable.
+       * @throws Nothing because assignment is unavailable.
+       */
+      ScopedLock& operator=(ScopedLock&& other) = delete;
+
+     private:
+      /** @brief Store whose mutex is held for this guard's complete lifetime.
+       */
+      const DiskCacheDiagnosticStore& store_;
+    };
 
     /** @brief No-throw mutex flag protecting value_. */
     mutable std::atomic_flag mutex_ = ATOMIC_FLAG_INIT;

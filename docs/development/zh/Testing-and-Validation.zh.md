@@ -283,7 +283,7 @@ non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯
 
 ## Revision-safe compute publication 验证
 
-Issue #72 使用三个维护中的 test binary 负责长期 staged publication 边界。`test_compute_run`
+Issue #72 使用四个维护中的 test binary 负责长期 staged publication 边界。`test_compute_run`
 验证 checked nonzero 强类型 `GraphInstanceId` 与 `GraphRevision`、不可复用 Graph identity、单调
 mutation revision，以及精确 descriptor/snapshot provenance。`test_compute_service_split` 证明
 `RealtimeProxyGraph` snapshot clone 是 deep isolation 边界，并且 complete prepared-state
@@ -304,22 +304,31 @@ validation 与 publication 之间进入。同一 checkpoint 还证明：有效 R
 同一个 binary 还证明：私有 compute-request lane 会把 scheduler observation/replacement 与同一
 Graph compute 串行化；accepted async work 在 caller future 被丢弃后仍继续存在；close 会在
 graph-state 与 scheduler teardown 前排空 compute-request work。这些竞态使用显式 gate 与有界
-wait，不使用 timing sleep。它的
-`CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication` 用例会在 gated
-production record/snapshot worker 运行期间，重复真实 `GraphModel` clear、`GraphIOService`
-reload、clone 与 staged publication。每份 snapshot 必须为空或是一个完整 value；失败 reload
-保留此前诊断，最终成功 clear/reload 会将其 reset。该测试不使用 product seam，并通过有界
-readiness observation 与确定性的 future recovery 自行管理异步清理。可用以下命令运行聚焦契约：
+wait，不使用 timing sleep。每个被发现的 `test_kernel_contracts` case 还拥有 30 秒 CTest timeout。
+
+`test_disk_cache_diagnostic_concurrency` 是独立的长期多线程故障隔离 binary。Production
+record/snapshot worker 会在 `GraphModel` clear、clone 与 staged publication 重复期间运行；另一个
+case 通过只存在于 source tree 的 inline bridge，从两个参数顺序调用双 store exchange；确定性
+allocation failure 则证明 snapshot copy 抛异常时会释放私有 scoped guard。每个被发现的 case 都
+带有 `kernel-concurrency` label 与 20 秒 CTest timeout。如果锁回归阻止 worker recovery，CTest
+会终止该专用进程；`std::future` 析构或 thread join 都不能继续占住 broad kernel-contract 进程，
+也不必等到 CI job timeout。顺序执行的
+`CacheSemantics.DiskCacheDiagnosticStorePreservesClearReloadAndPublicationSemantics` case 仍保留在
+`test_kernel_contracts` 中，用于验证失败 reload 保留状态以及成功 clear/reload reset，同时不重复
+deadlock probe。可用以下命令运行聚焦契约：
 
 ```bash
 cmake --build build \
-  --target test_compute_run test_compute_service_split test_kernel_contracts -j
+  --target test_compute_run test_compute_service_split test_kernel_contracts \
+  test_disk_cache_diagnostic_concurrency -j
 ./build/tests/test_compute_run \
   --gtest_filter='GraphRevision.*:ComputeRunDescriptor.CapturesIdRevisionIntentQualityAndQosWithoutReuse'
 ./build/tests/test_compute_service_split \
   --gtest_filter='RealtimeProxyGraph.*'
 ./build/tests/test_kernel_contracts \
-  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain:CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication'
+  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain:CacheSemantics.DiskCacheDiagnosticStorePreservesClearReloadAndPublicationSemantics'
+ctest --test-dir build --output-on-failure \
+  -R '^DiskCacheDiagnosticConcurrency\.'
 ```
 
 以下 focused companion regression 负责其余边界：

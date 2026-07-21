@@ -102,8 +102,15 @@ recording the latest diagnostic through GraphModel's private disk-cache
 diagnostic store. That store exclusively owns the optional value and its
 no-throw mutex, so worker record, reader snapshot, clear/reload reset, compute
 clone, and staged publication cannot bypass one synchronization contract.
-Callers inspect independent snapshots instead of mutable storage. The
-diagnostic result distinguishes skipped attempts, true misses, hits, and
+Every operation holds the mutex through a private non-copyable scoped guard;
+snapshot-copy exceptions release it during stack unwinding, while two-store
+publication acquires a `std::less` address order and releases in inverse guard
+destruction order. Each store is a direct member of exactly one live or staged
+`GraphModel` and owns no worker lifetime. Runtime compute-request work,
+graph-state work, and scheduler workers that can reach it must be drained and
+joined before that owning model is destroyed; access may not race member
+teardown. Callers inspect independent snapshots instead of mutable storage.
+The diagnostic result distinguishes skipped attempts, true misses, hits, and
 read/parse errors. Bad image files, invalid YAML metadata, and filesystem
 failures are recorded as errors with an error code and message instead of being
 indistinguishable from a normal cache miss.
@@ -168,6 +175,7 @@ describe the final adapter and document boundary.
 - `src/lib/graph/graph_model.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
+- `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`

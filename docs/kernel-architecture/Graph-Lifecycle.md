@@ -303,7 +303,11 @@ the runtime map while Kernel services remain alive. Every `GraphRuntime` drains
 and joins its compute-request lane, then graph-state, before scheduler teardown,
 and all graph reservations return before Host destruction completes. Direct
 internal Kernel owners have the same duty to stop concurrent callers before
-destruction. `NotFound` is reserved for a session that is actually absent.
+destruction. Those joined boundaries are also the lifetime fence for the
+diagnostic store owned directly by each live or staged `GraphModel`: scheduler
+workers and both runtime lanes must stop accessing it before model member
+teardown, and the store itself owns no thread or detached lifetime. `NotFound`
+is reserved for a session that is actually absent.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
@@ -427,6 +431,7 @@ and Run-group policy. This document does not claim those later capabilities.
 - `tests/unit/test_graph_document_adapter.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
+- `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_run.cpp`

@@ -239,8 +239,10 @@ Close 成功时，concrete scheduler 会先 shutdown 并销毁，随后才归还
 async status worker 并停止外部 admission；随后 `Kernel::~Kernel()` 会在 Kernel service
 仍存活时清空 runtime map。每个 `GraphRuntime` 都会先排空并 join compute-request lane，
 再排空 graph-state，最后进入 scheduler teardown；在 Host 析构完成前会归还所有 graph
-reservation。直接拥有内部 Kernel 的调用方同样必须在析构前停止并发调用。只有 session
-确实不存在时才返回 `NotFound`。
+reservation。直接拥有内部 Kernel 的调用方同样必须在析构前停止并发调用。这些 joined boundary
+同时也是每个 live 或 staged `GraphModel` 直接拥有的 diagnostic store 的 lifetime fence：
+scheduler worker 与两条 runtime lane 必须在 model member teardown 前停止访问该 store；store
+本身不拥有 thread 或 detached lifetime。只有 session 确实不存在时才返回 `NotFound`。
 
 `photospiderd` 围绕该 embedded Host contract 拥有 daemon session identity、job admission、Host
 serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shutdown 规则定义在
@@ -353,6 +355,7 @@ Run-group policy。本文不声称已具备这些后续能力。
 - `tests/unit/test_graph_document_adapter.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
+- `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_compute_run.cpp`
