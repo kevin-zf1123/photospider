@@ -909,6 +909,9 @@ bool wait_for_ready_task_count(const ExecutionService& service,
  * @throws Nothing for default construction and movement.
  * @note Field order destroys the asynchronous completion first, so Host and
  * Run ownership remain alive until `execute_cpu_run()` has returned.
+ * Callback-borrowed stack state must be declared before this owner, while any
+ * gate release guard must be declared after it, so exceptional unwinding
+ * releases gates, joins the Run, and only then destroys borrowed state.
  */
 struct AsyncPolicyRun final {
   /** @brief Host observation target retained through synchronous settlement. */
@@ -3644,11 +3647,11 @@ TEST(ExecutionServicePolicy, ChargesWorkAndReadyBytesBeforeStableTie) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -3729,11 +3732,11 @@ TEST(ExecutionServicePolicy, ChargesExactReadyByteQuantumBoundaries) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -3796,11 +3799,11 @@ TEST(ExecutionServicePolicy, RepeatsHierarchicalGraphAndRunFairness) {
     std::promise<void> release_blocker;
     const std::shared_future<void> blocker_release =
         release_blocker.get_future().share();
+    std::vector<int> execution_order;
+    std::mutex execution_order_mutex;
     AsyncPolicyRun blocker;
     std::vector<AsyncPolicyRun> targets;
     ScopedPromiseRelease release_guard(release_blocker);
-    std::vector<int> execution_order;
-    std::mutex execution_order_mutex;
 
     blocker = launch_blocking_policy_run(
         service,
@@ -3859,11 +3862,11 @@ TEST(ExecutionServicePolicy, AppliesRunWeightWithinOneGraph) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -3913,11 +3916,11 @@ TEST(ExecutionServicePolicy, PrefersEarlierExplicitInteractiveDeadline) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -3976,11 +3979,11 @@ TEST(ExecutionServicePolicy, PrefersPresentDeadlineOverAbsentDeadlines) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -4036,11 +4039,11 @@ TEST(ExecutionServicePolicy, AgesExpensiveWaiterAfterEightDispatches) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -4096,11 +4099,11 @@ TEST(ExecutionServicePolicy, AgesNormalLaneThroughHighPriorityStream) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -4179,11 +4182,11 @@ TEST(ExecutionServicePolicy, BoundsInteractiveFloodAtThreeToOne) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -4242,11 +4245,11 @@ TEST(ExecutionServicePolicy, BoundsOlderThroughputFloodAtThreeToOne) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -4323,11 +4326,11 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
   blocker = launch_blocking_policy_run(
       service,
       make_policy_submission(graph_identity, 2U, 2,
@@ -4400,11 +4403,11 @@ TEST(ExecutionServicePolicy, RetainsPolicyHistoryAcrossDependentReentry) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -4515,11 +4518,11 @@ TEST(ExecutionServicePolicy, SaturatesGraphCounterWithoutWrapping) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
@@ -4596,12 +4599,12 @@ TEST(ExecutionServicePolicy, SaturatesRunCounterAcrossDependentReentry) {
   std::promise<void> release_saturated_initial;
   const std::shared_future<void> saturated_initial_release =
       release_saturated_initial.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun saturated;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease publish_dependent_guard(publish_dependent);
   ScopedPromiseRelease release_saturated_guard(release_saturated_initial);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   auto saturated_host = std::make_unique<ExecutionServiceHost>();
   auto saturated_run = std::make_unique<ComputeRun>(make_policy_submission(
@@ -4695,11 +4698,11 @@ TEST(ExecutionServicePolicy, UnwindsPolicyCostOverflowWithoutAffectingPeer) {
   std::promise<void> release_blocker;
   const std::shared_future<void> blocker_release =
       release_blocker.get_future().share();
+  std::vector<int> execution_order;
+  std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
   ScopedPromiseRelease release_guard(release_blocker);
-  std::vector<int> execution_order;
-  std::mutex execution_order_mutex;
 
   blocker = launch_blocking_policy_run(
       service,
