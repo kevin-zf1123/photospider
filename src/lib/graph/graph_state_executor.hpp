@@ -14,9 +14,6 @@
 #include <utility>
 
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
-#include "graph/graph_state_executor_test_access.hpp"  // NOLINT(build/include_subdir)
-#endif
 
 namespace ps {
 
@@ -229,19 +226,6 @@ class GraphStateExecutor {
    *       waiting so behavior does not depend on current queue occupancy.
    */
   void reject_worker_reentry(const char* operation) const;
-
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
-  /**
-   * @brief Publishes one locked lane snapshot through the BUILD_TESTING seam.
-   * @param event Lifecycle checkpoint represented by the snapshot.
-   * @return Nothing.
-   * @throws Nothing.
-   * @note Caller must hold `mutex_`. The installed callback may inspect scalar
-   *       values only and must not allocate, block, or re-enter this executor.
-   */
-  void publish_test_snapshot_locked(
-      testing::GraphStateExecutorTestEvent event) const noexcept;
-#endif
 
   /** @brief Borrowed model whose owner also owns this executor. */
   GraphModel& model_;

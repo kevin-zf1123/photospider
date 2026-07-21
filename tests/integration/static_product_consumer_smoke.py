@@ -26,6 +26,32 @@ STATIC_PRODUCT_ARCHIVE_NAMES = {
     "libphotospider.lib",
     "photospider.lib",
 }
+INTERNAL_TEST_PRODUCT_STEM = "photospider_internal_test_product"
+INTERNAL_PRODUCT_TEST_DEFINITIONS = (
+    "PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING",
+    "PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING",
+    "PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING",
+)
+FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
+    "g_graph_cache_service_test_hook",
+    "set_graph_cache_service_test_hook",
+    "notify_graph_cache_service_test_hook",
+    "g_graph_state_executor_test_hook",
+    "set_graph_state_executor_test_hook",
+    "notify_graph_state_executor_test_hook",
+    "g_close_publish_test_hook",
+    "set_graph_state_executor_close_publish_test_hook",
+    "notify_graph_state_executor_close_publish_test_hook",
+    "publish_graph_state_executor_test_snapshot",
+    "g_kernel_compute_commit_test_hook",
+    "set_kernel_compute_commit_test_hook",
+    "notify_kernel_compute_commit_test_hook",
+)
+REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS = (
+    "GraphCacheService17clear_drive_cache",
+    "GraphStateExecutor15close_and_drain",
+    "Kernel30execute_staged_compute_request",
+)
 EXPORTED_TARGET = "Photospider::photospider"
 IPC_EXPORTED_TARGET = "Photospider::photospider_ipc_client"
 REQUIRED_IPC_PUBLIC_HEADERS = {
@@ -1507,6 +1533,91 @@ def installed_static_product_archives(prefix: Path, install_libdir: str) -> list
     )
 
 
+def inspect_product_archive_symbols(
+    prefix: Path, archives: list[str]
+) -> dict[str, Any]:
+    """@brief Inspect the installed product archive for private test seams.
+
+    @param prefix Temporary package installation prefix.
+    @param archives Product archive paths relative to ``prefix``.
+    @return Symbol-tool identity/status, scanned line count, and every forbidden
+      fragment match. A missing or non-unique archive produces an unsuccessful
+      observation without invoking a tool.
+    @throws OSError If the selected symbol-inspection process cannot start.
+    @note ``llvm-nm`` is preferred, including Xcode's ``xcrun``-resolved tool,
+      with platform ``nm`` as the Unix fallback. The full symbol table is
+      scanned so both defined globals and unresolved hook references fail the
+      production boundary. Required defined symbols from all three seam
+      objects prevent a bitcode-unaware fallback from producing a false pass;
+      only matching lines are retained in observations.
+    """
+
+    if len(archives) != 1:
+        return {
+            "tool": "",
+            "status": None,
+            "line_count": 0,
+            "matches": {},
+            "required_anchors": {},
+            "covers_product_seams": False,
+            "stderr": "expected exactly one installed product archive",
+        }
+    symbol_tool = shutil.which("llvm-nm") or shutil.which("nm")
+    xcrun = shutil.which("xcrun")
+    if shutil.which("llvm-nm") is None and xcrun is not None:
+        resolved = subprocess.run(
+            [xcrun, "--find", "llvm-nm"],
+            cwd=prefix,
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        resolved_path = resolved.stdout.strip()
+        if resolved.returncode == 0 and resolved_path:
+            symbol_tool = resolved_path
+    if symbol_tool is None:
+        return {
+            "tool": "",
+            "status": None,
+            "line_count": 0,
+            "matches": {},
+            "required_anchors": {},
+            "covers_product_seams": False,
+            "stderr": "neither llvm-nm nor nm is available",
+        }
+    completed = subprocess.run(
+        [symbol_tool, str(prefix / archives[0])],
+        cwd=prefix,
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    symbol_lines = completed.stdout.splitlines()
+    matches = {
+        fragment: [line for line in symbol_lines if fragment in line]
+        for fragment in FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS
+    }
+    required_anchors = {
+        fragment: [
+            line
+            for line in symbol_lines
+            if fragment in line and re.search(r"\b[TW]\b", line)
+        ]
+        for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+    }
+    return {
+        "tool": symbol_tool,
+        "status": completed.returncode,
+        "line_count": len(symbol_lines),
+        "matches": {fragment: lines for fragment, lines in matches.items() if lines},
+        "required_anchors": required_anchors,
+        "covers_product_seams": all(required_anchors.values()),
+        "stderr": completed.stderr.strip(),
+    }
+
+
 def relative_or_absolute(prefix: Path, path: Path) -> str:
     """@brief Render installed paths without assuming prefix containment.
 
@@ -1779,9 +1890,11 @@ def inspect_install_tree(
     @param package_cmake_dir Relative or absolute package CMake destination
       containing the config file and every Photospider target export set.
     @param platform_system Host platform used for dl/framework expectations.
-    @return Installed header/archive/config/export inventory and exact parsed
-      target properties aggregated across all matching export-set files.
-    @throws OSError If installed files cannot be traversed or read.
+    @return Installed header/archive/config/export inventory, production archive
+      symbol observations, and exact parsed target properties aggregated across
+      all matching export-set files.
+    @throws OSError If installed files cannot be traversed or read, or the
+      selected symbol-inspection process cannot start.
     @note ``INTERFACE_LINK_LIBRARIES`` is derived from the real installed
       ``Photospider*Targets*.cmake`` files. File concatenation preserves each
       generated export fragment, while property parsing accepts only the exact
@@ -1804,6 +1917,12 @@ def inspect_install_tree(
     ]
     source_root = repo.as_posix()
     archives = installed_static_product_archives(prefix, install_libdir)
+    product_symbol_scan = inspect_product_archive_symbols(prefix, archives)
+    internal_test_product_artifacts = sorted(
+        relative_or_absolute(prefix, path)
+        for path in prefix.rglob("*")
+        if path.is_file() and INTERNAL_TEST_PRODUCT_STEM in path.name.lower()
+    )
     interface_link_raw = exported_target_property(
         target_text, EXPORTED_TARGET, "INTERFACE_LINK_LIBRARIES"
     )
@@ -1863,6 +1982,17 @@ def inspect_install_tree(
         "unexpected_headers": unexpected_headers,
         "static_product_archives": archives,
         "archive_exists": len(archives) == 1,
+        "production_archive_symbol_scan": product_symbol_scan,
+        "production_archive_omits_internal_test_symbols": (
+            product_symbol_scan["status"] == 0
+            and product_symbol_scan["line_count"] > 0
+            and product_symbol_scan["covers_product_seams"]
+            and product_symbol_scan["matches"] == {}
+        ),
+        "internal_test_product_artifacts": internal_test_product_artifacts,
+        "install_omits_internal_test_product_artifacts": (
+            internal_test_product_artifacts == []
+        ),
         "config_exists": config_path.is_file(),
         "targets_exists": targets_path.is_file(),
         "target_files": [relative_or_absolute(prefix, path) for path in target_paths],
@@ -1945,6 +2075,13 @@ def inspect_install_tree(
         "export_omits_source_root": source_root not in target_text
         and source_root not in config_text,
         "export_omits_src_include_root": "/src" not in target_text,
+        "export_omits_internal_test_product": (
+            INTERNAL_TEST_PRODUCT_STEM not in target_text
+            and all(
+                definition not in target_text
+                for definition in INTERNAL_PRODUCT_TEST_DEFINITIONS
+            )
+        ),
         "export_interface_link_libraries": {
             "raw": interface_link_raw,
             "entries": interface_link_entries,
@@ -1990,6 +2127,12 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "photospider target build succeeded": commands["build_photospider"] == 0,
         "install command succeeded": commands["install"] == 0,
         "installed static archive exists": install["archive_exists"],
+        "installed product archive omits internal test symbols": install[
+            "production_archive_omits_internal_test_symbols"
+        ],
+        "install omits internal test product artifacts": install[
+            "install_omits_internal_test_product_artifacts"
+        ],
         "package config and targets exist": install["config_exists"]
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
@@ -2038,6 +2181,9 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
             "export_omits_source_root"
         ]
         and install["export_omits_src_include_root"],
+        "export omits internal test product and definitions": install[
+            "export_omits_internal_test_product"
+        ],
         "installed export contains exact target link interface": bool(
             install["export_interface_link_libraries"]["raw"]
         ),

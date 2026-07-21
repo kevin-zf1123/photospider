@@ -283,6 +283,7 @@ class GraphModel {
    * generation so runtime-owned mirrors such as RealtimeProxyGraph discard any
    * state keyed by reused node ids from the previous graph contents.
    *
+   * @return Nothing.
    * @throws std::overflow_error before mutation when GraphRevision or topology
    *         generation has no successor.
    * @note Success advances topology generation and GraphRevision exactly once.

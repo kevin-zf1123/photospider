@@ -674,59 +674,144 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-add_library(photospider STATIC ${PHOTOSPIDER_PRODUCT_SOURCES})
+# These three translation units own the Issue #72 deterministic observation
+# seams. The installable archive always receives their production objects;
+# focused tests receive a non-installed variant while reusing every common
+# object. Keeping the split at translation-unit granularity avoids compiling a
+# second copy of the complete embedded product.
+set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
+    src/lib/graph/graph_cache_service.cpp
+    src/lib/graph/graph_state_executor.cpp
+    src/lib/runtime/kernel_compute.cpp)
+foreach(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
+        IN LISTS PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES)
+    if(NOT PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
+            IN_LIST PHOTOSPIDER_PRODUCT_SOURCES)
+        message(FATAL_ERROR
+            "Product test-seam source is absent from the product inventory: ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE}")
+    endif()
+endforeach()
+set(PHOTOSPIDER_PRODUCT_COMMON_SOURCES ${PHOTOSPIDER_PRODUCT_SOURCES})
+list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
+    ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES})
 
-target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
-if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
-    target_compile_definitions(photospider PRIVATE
-        PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
-endif()
-if(PHOTOSPIDER_ENABLE_OPENCV)
-    target_compile_definitions(photospider PRIVATE PHOTOSPIDER_HAS_OPENCV)
-endif()
-if(PHOTOSPIDER_ENABLE_YAML)
-    target_compile_definitions(photospider PRIVATE PHOTOSPIDER_HAS_YAML)
-endif()
-if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
-    target_compile_definitions(photospider PRIVATE
-        PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
-        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
-        PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
-endif()
+# Apply the private compile environment shared by production and test-only
+# product object variants. Test-seam definitions are intentionally added by
+# the caller only to the three-source test object target.
+function(configure_photospider_product_objects TARGET_NAME)
+    target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
+    target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(${TARGET_NAME} PRIVATE
+        Photospider::operation_sdk
+        Photospider::operation_runtime
+        Photospider::scheduler_sdk
+        Threads::Threads
+        ${CMAKE_DL_LIBS})
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        target_compile_definitions(${TARGET_NAME} PRIVATE
+            PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
+    endif()
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_HAS_OPENCV)
+        target_include_directories(${TARGET_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(${TARGET_NAME} PRIVATE
+            Photospider::operation_opencv
+            ${OpenCV_LIBS})
+    endif()
+    if(PHOTOSPIDER_ENABLE_YAML)
+        target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_HAS_YAML)
+        target_link_libraries(${TARGET_NAME} PRIVATE yaml-cpp::yaml-cpp)
+    endif()
+endfunction()
+
+# Apply the public and link interface shared by both complete static archives.
+# Only `photospider` is installed or exported.
+function(configure_photospider_product_archive TARGET_NAME)
+    target_compile_definitions(${TARGET_NAME} PUBLIC PHOTOSPIDER_STATIC)
+    target_compile_features(${TARGET_NAME} PUBLIC cxx_std_17)
+    target_include_directories(${TARGET_NAME}
+        PUBLIC
+            "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
+            "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
+    target_link_libraries(${TARGET_NAME} PRIVATE
+        Photospider::operation_sdk
+        Photospider::operation_runtime
+        Photospider::scheduler_sdk
+        Threads::Threads
+        ${CMAKE_DL_LIBS})
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        target_link_libraries(${TARGET_NAME} PRIVATE
+            Photospider::operation_opencv
+            ${OpenCV_LIBS})
+    endif()
+    if(PHOTOSPIDER_ENABLE_YAML)
+        target_link_libraries(${TARGET_NAME} PRIVATE yaml-cpp::yaml-cpp)
+    endif()
+endfunction()
+
+add_library(photospider_product_common_objects OBJECT
+    ${PHOTOSPIDER_PRODUCT_COMMON_SOURCES})
+configure_photospider_product_objects(
+    photospider_product_common_objects)
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
-    target_compile_definitions(photospider PRIVATE
+    target_compile_definitions(photospider_product_common_objects PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 endif()
-target_compile_features(photospider PUBLIC cxx_std_17)
 
-target_include_directories(photospider
-    PUBLIC
-        "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
-        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-    PRIVATE
-        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
-)
+add_library(photospider_product_seam_objects OBJECT
+    ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES})
+configure_photospider_product_objects(photospider_product_seam_objects)
 
-target_link_libraries(photospider PRIVATE
-    Photospider::operation_sdk
-    Photospider::operation_runtime
-    Photospider::scheduler_sdk
-    Threads::Threads
-    ${CMAKE_DL_LIBS}
-)
-if(PHOTOSPIDER_ENABLE_OPENCV)
-    target_include_directories(photospider PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(photospider PRIVATE
-        Photospider::operation_opencv
-        ${OpenCV_LIBS})
+add_library(photospider STATIC
+    $<TARGET_OBJECTS:photospider_product_common_objects>
+    $<TARGET_OBJECTS:photospider_product_seam_objects>)
+configure_photospider_product_archive(photospider)
+
+set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
+    PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
+    PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+    PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
+    add_library(photospider_internal_test_product_seam_objects OBJECT
+        ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES})
+    configure_photospider_product_objects(
+        photospider_internal_test_product_seam_objects)
+    target_compile_definitions(
+        photospider_internal_test_product_seam_objects PRIVATE
+        ${PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS})
+
+    add_library(photospider_internal_test_product STATIC
+        $<TARGET_OBJECTS:photospider_product_common_objects>
+        $<TARGET_OBJECTS:photospider_internal_test_product_seam_objects>)
+    configure_photospider_product_archive(
+        photospider_internal_test_product)
 endif()
-if(PHOTOSPIDER_ENABLE_YAML)
-    target_link_libraries(photospider PRIVATE yaml-cpp::yaml-cpp)
-endif()
+
+# Fail configuration if a future refactor accidentally restores an Issue #72
+# test definition on any production product target.
+function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
+    get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
+        ${TARGET_NAME} COMPILE_DEFINITIONS)
+    foreach(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITION
+            IN LISTS PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS)
+        if(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITION
+                IN_LIST PHOTOSPIDER_TARGET_DEFINITIONS)
+            message(FATAL_ERROR
+                "Production target ${TARGET_NAME} contains test definition ${PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITION}")
+        endif()
+    endforeach()
+endfunction()
+assert_target_omits_internal_product_test_definitions(
+    photospider_product_common_objects)
+assert_target_omits_internal_product_test_definitions(
+    photospider_product_seam_objects)
+assert_target_omits_internal_product_test_definitions(photospider)
 
 # ==============================================================================
 # 2a. Versioned Local IPC Products (Unix only)
@@ -1159,6 +1244,12 @@ if(APPLE)
         "-framework Metal"
         "-framework Foundation"
     )
+    if(TARGET photospider_internal_test_product)
+        target_link_libraries(photospider_internal_test_product PRIVATE
+            "-framework Metal"
+            "-framework Foundation"
+        )
+    endif()
 
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
         find_library(COREIMAGE_FRAMEWORK NAMES CoreImage)
@@ -1242,6 +1333,10 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     include(GoogleTest)
     find_package(GTest REQUIRED)
     macro(add_ps_test TEST_NAME SOURCE_FILE)
+        set(PHOTOSPIDER_TEST_PRODUCT_TARGET photospider)
+        if(NOT "${ARGV2}" STREQUAL "")
+            set(PHOTOSPIDER_TEST_PRODUCT_TARGET "${ARGV2}")
+        endif()
         add_executable(${TEST_NAME} ${SOURCE_FILE})
         set_target_properties(${TEST_NAME} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
@@ -1253,7 +1348,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
             "${PROJECT_SOURCE_DIR}/tests"
             ${OpenCV_INCLUDE_DIRS})
         target_link_libraries(${TEST_NAME} PRIVATE
-            photospider
+            ${PHOTOSPIDER_TEST_PRODUCT_TARGET}
             GTest::gtest
             GTest::gtest_main
             yaml-cpp::yaml-cpp
@@ -1264,7 +1359,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     # buildable when the repository OpenCV operation provider is disabled
     # without registering the provider-dependent broad suite.
     add_ps_test(test_kernel_contracts
-        tests/integration/test_kernel_contracts.cpp)
+        tests/integration/test_kernel_contracts.cpp
+        photospider_internal_test_product)
     target_compile_definitions(test_kernel_contracts PRIVATE
         PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
@@ -1503,7 +1599,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_cli_compute_event_paging.cpp)
     target_include_directories(test_cli_compute_event_paging PRIVATE
         "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
-    add_ps_test(test_host_adapter tests/integration/test_host_adapter.cpp)
+    add_ps_test(test_host_adapter tests/integration/test_host_adapter.cpp
+        photospider_internal_test_product)
     target_link_libraries(test_host_adapter PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(test_host_adapter PRIVATE
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
@@ -1927,6 +2024,42 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_scheduler_exception_publication
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
+
+# The test-only product must have a closed direct-consumer set, and no target
+# may combine it with the installable archive. This assertion runs after all
+# root targets have been declared so later CMake edits cannot silently widen
+# the test seam or create a duplicate-definition link.
+if(TARGET photospider_internal_test_product)
+    get_property(PHOTOSPIDER_ROOT_TARGETS DIRECTORY
+        PROPERTY BUILDSYSTEM_TARGETS)
+    set(PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS "")
+    foreach(PHOTOSPIDER_ROOT_TARGET IN LISTS PHOTOSPIDER_ROOT_TARGETS)
+        get_target_property(PHOTOSPIDER_ROOT_TARGET_LINKS
+            ${PHOTOSPIDER_ROOT_TARGET} LINK_LIBRARIES)
+        if(photospider_internal_test_product
+                IN_LIST PHOTOSPIDER_ROOT_TARGET_LINKS)
+            if(photospider IN_LIST PHOTOSPIDER_ROOT_TARGET_LINKS)
+                message(FATAL_ERROR
+                    "Target ${PHOTOSPIDER_ROOT_TARGET} links both production and test products")
+            endif()
+            list(APPEND PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS
+                ${PHOTOSPIDER_ROOT_TARGET})
+        endif()
+    endforeach()
+    set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
+        test_kernel_contracts)
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+        list(APPEND PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
+            test_host_adapter)
+    endif()
+    list(SORT PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS)
+    list(SORT PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS)
+    if(NOT PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS STREQUAL
+            PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS)
+        message(FATAL_ERROR
+            "Unexpected internal test-product consumers: ${PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS}")
+    endif()
 endif()
 
 # --- Summary ---
