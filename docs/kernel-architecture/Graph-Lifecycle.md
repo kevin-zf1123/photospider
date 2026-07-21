@@ -108,7 +108,10 @@ the live Graph instance identity, and advances both topology generation and
 authoritative revision even when node ids are reused. Runtime-owned mirrors
 such as `RealtimeProxyGraph` observe the topology-generation boundary and
 discard stale per-node state; staged compute also fails exact revision
-validation rather than publishing into the replacement.
+validation rather than publishing into the replacement. Disk-cache diagnostic
+reset crosses the same private no-throw store used by worker record and reader
+snapshot. It occurs only in successful replacement publication; a failed reload
+retains the prior complete diagnostic together with the rest of runtime state.
 
 ## Scheduler Replacement
 
@@ -258,7 +261,10 @@ session remains loaded. It also does not delete disk-cache files, clear
 runtime-owned event/trace rings, directly clear `RealtimeProxyGraph`, or clear
 Kernel-owned `LastError`. `RealtimeProxyGraph` invalidates itself when its next
 synchronization observes the advanced topology generation; an older staged
-compute is rejected by revision validation.
+compute is rejected by revision validation. Diagnostic record, snapshot, reset,
+clone, and staged exchange all use one encapsulated no-throw mutex contract, so
+clear can overlap worker diagnostic traffic without unsynchronized
+optional/path/string access.
 
 ## Close and Lifetime
 

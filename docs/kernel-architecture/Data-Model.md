@@ -21,7 +21,7 @@ Important fields:
 | `cache_root` | Resolved root directory for this graph's disk cache files. |
 | `timing_results` | Latest timing summary when timing is enabled. |
 | `total_io_time_ms` | Accumulated disk cache IO time. |
-| disk-cache diagnostic snapshot | Most recent disk-cache load diagnostic, including skipped/miss/hit/error status and error details when a read fails. GraphModel protects this state with a dedicated diagnostic mutex and exposes value snapshots to readers. |
+| disk-cache diagnostic snapshot | Most recent disk-cache load diagnostic, including skipped/miss/hit/error status and error details when a read fails. A private diagnostic store exclusively owns both the optional value and one no-throw mutex; record, snapshot, clear/reload reset, compute clone, and staged publication all cross that store, and readers receive independent value snapshots. |
 
 External code must not mutate graph structure through raw node-map access.
 Reads use helpers such as `node()`, `find_node()`, `node_ids()`, and controlled
@@ -46,7 +46,9 @@ callers that omit a cache root keep the session-local fallback
 `GraphModel::clear()` resets model-level runtime state, not only nodes.
 Clearing a graph resets nodes, topology adjacency, timing results,
 accumulated IO time, skip-save state, and other per-run state so reload behavior
-is not polluted by stale metadata.
+is not polluted by stale metadata. Disk-cache diagnostic reset uses the same
+encapsulated store as worker record and reader snapshot; no GraphModel method
+can directly read, write, copy, swap, or reset its optional/path/string storage.
 
 ## GraphDefinition and the In-Memory Adapter
 

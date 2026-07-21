@@ -238,7 +238,9 @@ class GraphModel {
    * @note The caller must first prove that both models have equal identity and
    *       revision, that prepared is a compute snapshot, and that publication
    *       executes in the graph-state lane. Identity, revision, cache root, and
-   *       live request flags are deliberately not swapped.
+   *       live request flags are deliberately not swapped. The two diagnostic
+   *       stores exchange under address-ordered no-throw mutexes, and every
+   *       other state swap in the publication phase is also no-throw.
    */
   void publish_compute_snapshot(GraphModel& prepared) noexcept;
 
@@ -249,9 +251,12 @@ class GraphModel {
    * @brief Stores the latest disk-cache load diagnostic under its own lock.
    *
    * @param result Value-type diagnostic produced by GraphCacheService.
-   * @throws std::bad_alloc if optional storage or member copies allocate.
+   * @return Nothing.
+   * @throws std::bad_alloc if the by-value diagnostic copy cannot allocate.
    * @note Disk-cache diagnostics are updated from scheduler worker paths, so
-   * they use a dedicated mutex instead of graph_mutex_ or timing_mutex_.
+   * they use one encapsulated no-throw mutex instead of graph_mutex_ or
+   * timing_mutex_. Shared storage is reachable only through the diagnostic
+   * store, and replacement is no-throw after argument preparation.
    */
   void record_disk_cache_load_result(DiskCacheLoadResult result);
 
@@ -260,8 +265,9 @@ class GraphModel {
    *
    * @return Diagnostic snapshot when one has been recorded, otherwise nullopt.
    * @throws std::bad_alloc if copying path/string members allocates.
-   * @note Callers receive a value copy so they do not hold the diagnostic lock
-   * while inspecting frontend or test state.
+   * @note Callers receive a value copy so they do not hold the diagnostic
+   * store mutex while inspecting frontend or test state. Mutex acquisition is
+   * no-throw and never nests another Graph lock.
    */
   std::optional<DiskCacheLoadResult> last_disk_cache_load_result_snapshot()
       const;
@@ -269,11 +275,13 @@ class GraphModel {
   /**
    * @brief Clears the latest disk-cache load diagnostic under its own lock.
    *
-   * @throws Nothing under current optional reset behavior.
+   * @return Nothing.
+   * @throws Nothing.
    * @note Graph reload and clear paths use this to avoid stale diagnostics
-   * leaking across graph lifetimes.
+   * leaking across graph lifetimes. The encapsulated store makes reset and
+   * mutex acquisition one no-throw operation.
    */
-  void clear_disk_cache_load_result();
+  void clear_disk_cache_load_result() noexcept;
 
   /**
    * @brief Clears all nodes and resets model-level runtime state.
@@ -465,6 +473,80 @@ class GraphModel {
   struct ComputeSnapshotTag {};
 
   /**
+   * @brief Encapsulates the sole mutable disk-cache diagnostic and its mutex.
+   *
+   * The store serializes record, snapshot, clear, clone, and staged-publication
+   * exchange. Its no-throw mutex preserves GraphModel's no-throw publication
+   * phase without holding a diagnostic lock across filesystem, cache,
+   * scheduler, callback, lane, ledger, or other Graph-lock operations.
+   *
+   * @note The mutex is non-recursive. Two-store exchange acquires mutexes in
+   * address order, so live/staged publication has no reverse lock order. The
+   * contained optional is private to prevent future GraphModel code from
+   * bypassing this synchronization contract.
+   */
+  class DiskCacheDiagnosticStore {
+   public:
+    /**
+     * @brief Replaces the current diagnostic with a complete prepared value.
+     * @param result Diagnostic whose owned path/string state is moved in.
+     * @return Nothing.
+     * @throws std::bad_alloc only if preparing local value storage allocates.
+     * @note Shared-state replacement occurs under the sole store mutex and is
+     * no-throw once that local preparation has completed.
+     */
+    void record(DiskCacheLoadResult result);
+
+    /**
+     * @brief Copies the current diagnostic while holding the store mutex.
+     * @return Independent diagnostic value, or nullopt when empty.
+     * @throws std::bad_alloc if path/string copying allocates.
+     * @note The mutex is released on both success and exception paths.
+     */
+    std::optional<DiskCacheLoadResult> snapshot() const;
+
+    /**
+     * @brief Resets the current diagnostic under the store mutex.
+     * @return Nothing.
+     * @throws Nothing.
+     */
+    void clear() noexcept;
+
+    /**
+     * @brief Exchanges two live/staged diagnostics under ordered mutexes.
+     * @param other Distinct store receiving this store's displaced value.
+     * @return Nothing.
+     * @throws Nothing.
+     * @note Self-exchange is a no-op. Distinct mutexes are acquired in address
+     * order and released before GraphModel touches any other state.
+     */
+    void exchange_with(DiskCacheDiagnosticStore& other) noexcept;
+
+   private:
+    /**
+     * @brief Acquires the store's no-throw spin mutex.
+     * @return Nothing.
+     * @throws Nothing.
+     * @note Contention yields the worker instead of acquiring another lock or
+     * invoking an external callback.
+     */
+    void lock() const noexcept;
+
+    /**
+     * @brief Releases the store's no-throw spin mutex.
+     * @return Nothing.
+     * @throws Nothing.
+     */
+    void unlock() const noexcept;
+
+    /** @brief No-throw mutex flag protecting value_. */
+    mutable std::atomic_flag mutex_ = ATOMIC_FLAG_INIT;
+
+    /** @brief Latest diagnostic, accessed only while mutex_ is held. */
+    std::optional<DiskCacheLoadResult> value_;
+  };
+
+  /**
    * @brief Constructs empty staged storage with retained Graph provenance.
    * @param tag Snapshot-only overload selector.
    * @param cache_root_dir Cache root copied from the live Graph.
@@ -482,8 +564,9 @@ class GraphModel {
    * @return Nothing.
    * @throws Nothing.
    * @note Caller owns graph-state serialization. The implementation performs
-   *       only no-throw container clears, optional resets, and scalar stores so
-   *       a prepared structural publication cannot fail after container swap.
+   *       only no-throw container clears, diagnostic-store reset, optional
+   *       resets, and scalar stores so a prepared structural publication
+   *       cannot fail after container swap.
    */
   void reset_runtime_state() noexcept;
 
@@ -497,7 +580,8 @@ class GraphModel {
    * @throws std::overflow_error before publication when either generation is
    *         exhausted.
    * @note Candidate containers must already be complete. Container swaps and
-   *       scalar publication are non-throwing after the checked preparation.
+   *       scalar publication, including the encapsulated diagnostic reset, are
+   *       non-throwing after the checked preparation.
    */
   void publish_structural_replacement(NodeMap nodes,
                                       GraphTopologyIndex topology,
@@ -509,8 +593,7 @@ class GraphModel {
   GraphTopologyIndex topology_;
   std::mutex graph_mutex_;
   mutable std::mutex timing_mutex_;
-  mutable std::mutex disk_cache_diagnostics_mutex_;
-  std::optional<DiskCacheLoadResult> last_disk_cache_load_result_;
+  DiskCacheDiagnosticStore disk_cache_diagnostics_;
   uint64_t topology_generation_ = 0;
   std::unordered_map<std::string, std::shared_ptr<const compute::FullTaskGraph>>
       full_task_graph_cache_;

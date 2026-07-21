@@ -18,7 +18,7 @@
 | `cache_root` | 当前图磁盘缓存文件的已解析根目录。 |
 | `timing_results` | 启用计时时的最新计时摘要。 |
 | `total_io_time_ms` | 累计磁盘缓存 IO 时间。 |
-| disk-cache diagnostic snapshot | 最近一次磁盘缓存加载诊断，包含 skipped/miss/hit/error 状态，并在读取失败时包含错误详情。GraphModel 使用专用 diagnostic mutex 保护该状态，并向读取方暴露值快照。 |
+| disk-cache diagnostic snapshot | 最近一次磁盘缓存加载诊断，包含 skipped/miss/hit/error 状态，并在读取失败时包含错误详情。一个私有 diagnostic store 独占 optional value 与一把 no-throw mutex；record、snapshot、clear/reload reset、compute clone 与 staged publication 全部经过该 store，读取方只取得独立值快照。 |
 
 外部代码不得通过原始节点 map 改变图结构。读取使用 `node()`、`find_node()`、`node_ids()` 和受控遍历等 helper。结构变更使用 `add_node()`、`replace_node()`、`remove_node()` 和输入重连 API；这些 helper 会在返回前验证并刷新拓扑邻接。节点本地运行态缓存/状态更新可以使用 `mutable_node()`，但结构编辑仍属于模型变更 helper。
 
@@ -31,7 +31,7 @@ frontend caller。
 `<cache_root_dir>/<graph_name>`；相对路径按进程当前工作目录解析。未提供 cache root 的底层
 `Kernel::load_graph` 调用继续使用 session-local fallback：`<root_dir>/<graph_name>/cache`。
 
-`GraphModel::clear()` 会重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
+`GraphModel::clear()` 会重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。Disk-cache diagnostic reset 与 worker record、reader snapshot 使用同一个封装 store；任何 `GraphModel` method 都不能直接读、写、复制、交换或 reset 其中的 optional/path/string storage。
 
 ## GraphDefinition 与内存适配器
 

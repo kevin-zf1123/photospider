@@ -86,7 +86,9 @@ runtime state 与 Graph/session identity 都保持不变。这项保证同时覆
 成功 reload 会替换整个图、重置 model runtime state、保留 live Graph instance identity，并且即使
 复用 node id 也会同时推进 topology generation 与 authoritative revision。`RealtimeProxyGraph`
 等 runtime-owned mirror 会观察 topology-generation boundary 并丢弃陈旧的 per-node state；staged
-compute 也会因 exact revision validation 失败，而不能发布到 replacement 中。
+compute 也会因 exact revision validation 失败，而不能发布到 replacement 中。Disk-cache
+diagnostic reset 会经过 worker record 与 reader snapshot 使用的同一个私有 no-throw store，并且只在
+成功 replacement publication 中发生；失败 reload 会与其余 runtime state 一起保留此前完整诊断。
 
 ## Scheduler Replacement
 
@@ -205,7 +207,9 @@ mode。它不会关闭或销毁所属 `GraphRuntime`；session 仍处于 loaded 
 删除 disk-cache file、清除 runtime-owned event/trace ring、直接清除
 `RealtimeProxyGraph`，或清除 Kernel-owned `LastError`。`RealtimeProxyGraph` 会在下一次
 synchronization 观察到已推进的 topology generation 时自行失效；较旧的 staged compute
-会被 revision validation 拒绝。
+会被 revision validation 拒绝。Diagnostic record、snapshot、reset、clone 与 staged exchange
+全部使用同一个封装的 no-throw mutex 契约，因此 clear 可以与 worker diagnostic traffic 重叠，而
+不会无同步访问 optional/path/string。
 
 ## Close 与 Lifetime
 

@@ -304,7 +304,12 @@ validation 与 publication 之间进入。同一 checkpoint 还证明：有效 R
 同一个 binary 还证明：私有 compute-request lane 会把 scheduler observation/replacement 与同一
 Graph compute 串行化；accepted async work 在 caller future 被丢弃后仍继续存在；close 会在
 graph-state 与 scheduler teardown 前排空 compute-request work。这些竞态使用显式 gate 与有界
-wait，不使用 timing sleep。可用以下命令运行聚焦契约：
+wait，不使用 timing sleep。它的
+`CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication` 用例会在 gated
+production record/snapshot worker 运行期间，重复真实 `GraphModel` clear、`GraphIOService`
+reload、clone 与 staged publication。每份 snapshot 必须为空或是一个完整 value；失败 reload
+保留此前诊断，最终成功 clear/reload 会将其 reset。该测试不使用 product seam，并通过有界
+readiness observation 与确定性的 future recovery 自行管理异步清理。可用以下命令运行聚焦契约：
 
 ```bash
 cmake --build build \
@@ -314,7 +319,7 @@ cmake --build build \
 ./build/tests/test_compute_service_split \
   --gtest_filter='RealtimeProxyGraph.*'
 ./build/tests/test_kernel_contracts \
-  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain'
+  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain:CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication'
 ```
 
 以下 focused companion regression 负责其余边界：

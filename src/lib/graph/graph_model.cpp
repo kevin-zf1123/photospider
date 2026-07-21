@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -173,6 +174,71 @@ bool GraphTopologyIndex::empty() const {
   return incoming_by_node.empty() && outgoing_by_node.empty();
 }
 
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::lock */
+void GraphModel::DiskCacheDiagnosticStore::lock() const noexcept {
+  while (mutex_.test_and_set(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::unlock */
+void GraphModel::DiskCacheDiagnosticStore::unlock() const noexcept {
+  mutex_.clear(std::memory_order_release);
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::record */
+void GraphModel::DiskCacheDiagnosticStore::record(DiskCacheLoadResult result) {
+  std::optional<DiskCacheLoadResult> prepared(std::move(result));
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(prepared)>,
+      "Disk-cache diagnostic replacement must remain no-throw after locking");
+  lock();
+  value_.swap(prepared);
+  unlock();
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::snapshot */
+std::optional<GraphModel::DiskCacheLoadResult>
+GraphModel::DiskCacheDiagnosticStore::snapshot() const {
+  lock();
+  try {
+    std::optional<DiskCacheLoadResult> result = value_;
+    unlock();
+    return result;
+  } catch (...) {
+    unlock();
+    throw;
+  }
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::clear */
+void GraphModel::DiskCacheDiagnosticStore::clear() noexcept {
+  lock();
+  value_.reset();
+  unlock();
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::exchange_with */
+void GraphModel::DiskCacheDiagnosticStore::exchange_with(
+    DiskCacheDiagnosticStore& other) noexcept {
+  if (this == &other) {
+    return;
+  }
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(value_)>,
+      "Disk-cache diagnostic publication must remain no-throw after locking");
+  DiskCacheDiagnosticStore* first = this;
+  DiskCacheDiagnosticStore* second = &other;
+  if (std::less<DiskCacheDiagnosticStore*>{}(second, first)) {
+    std::swap(first, second);
+  }
+  first->lock();
+  second->lock();
+  value_.swap(other.value_);
+  second->unlock();
+  first->unlock();
+}
+
 /** @copydoc GraphModel::GraphModel(fs::path) */
 GraphModel::GraphModel(fs::path cache_root_dir)
     : cache_root(std::move(cache_root_dir)),
@@ -212,8 +278,11 @@ std::unique_ptr<GraphModel> GraphModel::clone_for_compute() const {
   snapshot->recent_compute_plan_summaries = recent_compute_plan_summaries;
   snapshot->nodes_ = nodes_;
   snapshot->topology_ = topology_;
-  snapshot->last_disk_cache_load_result_ =
-      last_disk_cache_load_result_snapshot();
+  std::optional<DiskCacheLoadResult> diagnostic =
+      disk_cache_diagnostics_.snapshot();
+  if (diagnostic.has_value()) {
+    snapshot->disk_cache_diagnostics_.record(std::move(*diagnostic));
+  }
   snapshot->topology_generation_ = topology_generation_;
   snapshot->full_task_graph_cache_ = full_task_graph_cache_;
   snapshot->quiet_ = quiet_;
@@ -249,8 +318,6 @@ void GraphModel::publish_compute_snapshot(GraphModel& prepared) noexcept {
       std::is_nothrow_swappable_v<decltype(topology_.incoming_by_node)>);
   static_assert(
       std::is_nothrow_swappable_v<decltype(topology_.outgoing_by_node)>);
-  static_assert(
-      std::is_nothrow_swappable_v<decltype(last_disk_cache_load_result_)>);
   static_assert(std::is_nothrow_swappable_v<decltype(full_task_graph_cache_)>);
   using std::swap;
   swap(timing_results, prepared.timing_results);
@@ -268,7 +335,7 @@ void GraphModel::publish_compute_snapshot(GraphModel& prepared) noexcept {
   nodes_.swap(prepared.nodes_);
   topology_.incoming_by_node.swap(prepared.topology_.incoming_by_node);
   topology_.outgoing_by_node.swap(prepared.topology_.outgoing_by_node);
-  last_disk_cache_load_result_.swap(prepared.last_disk_cache_load_result_);
+  disk_cache_diagnostics_.exchange_with(prepared.disk_cache_diagnostics_);
   full_task_graph_cache_.swap(prepared.full_task_graph_cache_);
 
   const double live_io = total_io_time_ms.load(std::memory_order_relaxed);
@@ -286,20 +353,20 @@ bool GraphModel::is_quiet() const {
   return quiet_;
 }
 
+/** @copydoc GraphModel::record_disk_cache_load_result */
 void GraphModel::record_disk_cache_load_result(DiskCacheLoadResult result) {
-  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
-  last_disk_cache_load_result_ = std::move(result);
+  disk_cache_diagnostics_.record(std::move(result));
 }
 
+/** @copydoc GraphModel::last_disk_cache_load_result_snapshot */
 std::optional<GraphModel::DiskCacheLoadResult>
 GraphModel::last_disk_cache_load_result_snapshot() const {
-  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
-  return last_disk_cache_load_result_;
+  return disk_cache_diagnostics_.snapshot();
 }
 
-void GraphModel::clear_disk_cache_load_result() {
-  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
-  last_disk_cache_load_result_.reset();
+/** @copydoc GraphModel::clear_disk_cache_load_result */
+void GraphModel::clear_disk_cache_load_result() noexcept {
+  disk_cache_diagnostics_.clear();
 }
 
 /** @copydoc GraphModel::reset_runtime_state */
@@ -316,7 +383,7 @@ void GraphModel::reset_runtime_state() noexcept {
   last_compute_plan_summary.reset();
   recent_compute_plan_summaries.clear();
   full_task_graph_cache_.clear();
-  last_disk_cache_load_result_.reset();
+  disk_cache_diagnostics_.clear();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);
   skip_save_cache_.store(false, std::memory_order_relaxed);
 }

@@ -98,13 +98,15 @@ lifetime, error categories, and resource exhaustion without declaring YAML
 types in cache code.
 
 Disk cache load attempts preserve the existing try-load bool contract while also
-recording the latest diagnostic through GraphModel's dedicated disk-cache
-diagnostic mutex. Callers inspect that state through a snapshot API instead of
-reading mutable optional storage directly. The diagnostic result distinguishes
-skipped attempts, true misses, hits, and read/parse errors. Bad image files,
-invalid YAML metadata, and filesystem failures are recorded as errors with an
-error code and message instead of being indistinguishable from a normal cache
-miss.
+recording the latest diagnostic through GraphModel's private disk-cache
+diagnostic store. That store exclusively owns the optional value and its
+no-throw mutex, so worker record, reader snapshot, clear/reload reset, compute
+clone, and staged publication cannot bypass one synchronization contract.
+Callers inspect independent snapshots instead of mutable storage. The
+diagnostic result distinguishes skipped attempts, true misses, hits, and
+read/parse errors. Bad image files, invalid YAML metadata, and filesystem
+failures are recorded as errors with an error code and message instead of being
+indistinguishable from a normal cache miss.
 
 ## Cache Commands
 

@@ -1394,8 +1394,8 @@ class KernelCodecTeardownScenario final {
  * cached process node, and removes the root in the destructor with
  * `std::error_code` so cleanup never masks assertion failures.
  *
- * @note The helper keeps the four disk-cache diagnostic tests focused on their
- * distinct miss/hit/error assertions instead of repeating filesystem setup.
+ * @note The helper keeps disk-cache diagnostic tests focused on their distinct
+ * miss/hit/error/concurrency assertions instead of repeating filesystem setup.
  */
 struct DiskCacheDiagnosticContext {
   /** @brief Fake codec owner retained for call and failure assertions. */
@@ -1458,6 +1458,264 @@ struct DiskCacheDiagnosticContext {
     path.replace_extension(".yml");
     return path;
   }
+};
+
+/**
+ * @brief Builds one internally self-identifying disk-cache diagnostic value.
+ * @param sequence Positive sequence embedded in every owned field.
+ * @return Complete diagnostic whose fields can be checked for torn copies.
+ * @throws std::bad_alloc if string or path construction cannot allocate.
+ * @note Concurrent tests use one unique sequence per record operation. Any
+ * cross-record mixture of optional/path/string fields fails the matching
+ * predicate below.
+ */
+GraphModel::DiskCacheLoadResult make_concurrent_disk_cache_diagnostic(
+    int sequence) {
+  const std::string token = std::to_string(sequence);
+  GraphModel::DiskCacheLoadResult result;
+  result.node_id = sequence;
+  result.cache_type = "image-" + token;
+  result.location = "entry-" + token + ".png";
+  result.cache_file = std::filesystem::path("cache") / result.location;
+  result.metadata_file =
+      std::filesystem::path("metadata") / ("entry-" + token + ".yml");
+  result.status = GraphModel::DiskCacheLoadStatus::Miss;
+  result.code = GraphErrc::Unknown;
+  result.message = "diagnostic-" + token;
+  return result;
+}
+
+/**
+ * @brief Validates that one diagnostic snapshot came from one complete record.
+ * @param result Value snapshot returned by GraphModel.
+ * @return True when every optional/path/string field carries the same token.
+ * @throws std::bad_alloc if expected string/path construction cannot allocate.
+ * @note Empty snapshots are handled by callers because clear/reload may
+ * legitimately linearize between a record and a snapshot.
+ */
+bool is_complete_concurrent_disk_cache_diagnostic(
+    const GraphModel::DiskCacheLoadResult& result) {
+  const std::string token = std::to_string(result.node_id);
+  return result.node_id > 0 && result.cache_type == "image-" + token &&
+         result.location == "entry-" + token + ".png" &&
+         result.cache_file ==
+             std::filesystem::path("cache") / result.location &&
+         result.metadata_file ==
+             std::filesystem::path("metadata") / ("entry-" + token + ".yml") &&
+         result.status == GraphModel::DiskCacheLoadStatus::Miss &&
+         result.code == GraphErrc::Unknown &&
+         result.message == "diagnostic-" + token;
+}
+
+/**
+ * @brief Owns concurrent diagnostic writers/readers behind a start gate.
+ *
+ * Workers wait until start(), repeatedly publish complete diagnostics, and
+ * immediately snapshot the store. Destruction always opens the gate, requests
+ * stop, and recovers every future, so a fatal assertion before start cannot
+ * strand asynchronous work or borrowed GraphModel state.
+ *
+ * @note Worker exceptions are contained as a failed health flag. No product
+ * test seam is used; all traffic crosses GraphModel's production APIs.
+ */
+class DiskCacheDiagnosticWorkerPool {
+ public:
+  /**
+   * @brief Launches the requested number of gated asynchronous workers.
+   * @param graph GraphModel borrowed until this pool is stopped or destroyed.
+   * @param worker_count Positive worker count.
+   * @throws std::invalid_argument when worker_count is zero.
+   * @throws std::bad_alloc or std::system_error if worker launch fails.
+   * @note Partial launch failure opens/stops already launched workers before
+   * constructor unwinding destroys their futures.
+   */
+  DiskCacheDiagnosticWorkerPool(GraphModel& graph, std::size_t worker_count)
+      : graph_(graph), worker_count_(worker_count) {
+    if (worker_count_ == 0) {
+      throw std::invalid_argument(
+          "disk-cache diagnostic worker count must be positive");
+    }
+    workers_.reserve(worker_count_);
+    try {
+      for (std::size_t i = 0; i < worker_count_; ++i) {
+        workers_.push_back(std::async(std::launch::async,
+                                      [this]() noexcept { worker_loop(); }));
+      }
+    } catch (...) {
+      started_.store(true, std::memory_order_release);
+      stop_.store(true, std::memory_order_release);
+      throw;
+    }
+  }
+
+  /**
+   * @brief Stops and recovers every worker before borrowed state expires.
+   * @throws Nothing; worker and future errors become a failed health flag.
+   */
+  ~DiskCacheDiagnosticWorkerPool() noexcept { stop_and_join(); }
+
+  /**
+   * @brief Disables copying of worker/future ownership.
+   * @param other Pool whose asynchronous ownership remains unique.
+   * @throws Nothing because construction is unavailable.
+   */
+  DiskCacheDiagnosticWorkerPool(const DiskCacheDiagnosticWorkerPool& other) =
+      delete;
+
+  /**
+   * @brief Disables assignment of worker/future ownership.
+   * @param other Pool whose asynchronous ownership remains unique.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  DiskCacheDiagnosticWorkerPool& operator=(
+      const DiskCacheDiagnosticWorkerPool& other) = delete;
+
+  /**
+   * @brief Waits until every launched worker reaches the closed gate.
+   * @param timeout Maximum bounded readiness interval.
+   * @return True when every worker is ready before the deadline.
+   * @throws Nothing.
+   */
+  bool wait_until_ready(std::chrono::milliseconds timeout) const noexcept {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (ready_count_.load(std::memory_order_acquire) == worker_count_) {
+        return true;
+      }
+      std::this_thread::yield();
+    }
+    return ready_count_.load(std::memory_order_acquire) == worker_count_;
+  }
+
+  /**
+   * @brief Waits until at least one worker completes a record/snapshot cycle.
+   * @param timeout Maximum bounded activity interval after start().
+   * @return True when worker traffic is observable before the deadline.
+   * @throws Nothing.
+   */
+  bool wait_until_active(std::chrono::milliseconds timeout) const noexcept {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (operation_count_.load(std::memory_order_acquire) > 0) {
+        return true;
+      }
+      std::this_thread::yield();
+    }
+    return operation_count_.load(std::memory_order_acquire) > 0;
+  }
+
+  /**
+   * @brief Opens the worker start gate.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void start() noexcept { started_.store(true, std::memory_order_release); }
+
+  /**
+   * @brief Requests stop and consumes all asynchronous worker futures.
+   * @return Nothing.
+   * @throws Nothing; a two-second bounded-wait miss or future error marks the
+   * pool unhealthy before best-effort future recovery.
+   * @note Repeated calls are safe because consumed futures become invalid.
+   */
+  void stop_and_join() noexcept {
+    started_.store(true, std::memory_order_release);
+    stop_.store(true, std::memory_order_release);
+    for (auto& worker : workers_) {
+      if (!worker.valid()) {
+        continue;
+      }
+      try {
+        if (worker.wait_for(std::chrono::seconds(2)) !=
+            std::future_status::ready) {
+          healthy_.store(false, std::memory_order_release);
+        }
+        worker.get();
+      } catch (...) {
+        healthy_.store(false, std::memory_order_release);
+      }
+    }
+  }
+
+  /**
+   * @brief Reports whether every observed snapshot was complete.
+   * @return True when no worker exception, torn snapshot, or timeout occurred.
+   * @throws Nothing.
+   */
+  bool healthy() const noexcept {
+    return healthy_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the number of completed record/snapshot cycles.
+   * @return Aggregate worker operation count.
+   * @throws Nothing.
+   */
+  std::uint64_t operation_count() const noexcept {
+    return operation_count_.load(std::memory_order_acquire);
+  }
+
+ private:
+  /**
+   * @brief Runs one gated record/snapshot loop with exception containment.
+   * @return Nothing.
+   * @throws Nothing; all failures mark the pool unhealthy and request stop.
+   */
+  void worker_loop() noexcept {
+    ready_count_.fetch_add(1, std::memory_order_release);
+    while (!started_.load(std::memory_order_acquire) &&
+           !stop_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    try {
+      while (!stop_.load(std::memory_order_acquire)) {
+        const int sequence =
+            next_sequence_.fetch_add(1, std::memory_order_relaxed);
+        graph_.record_disk_cache_load_result(
+            make_concurrent_disk_cache_diagnostic(sequence));
+        const auto snapshot = graph_.last_disk_cache_load_result_snapshot();
+        if (snapshot.has_value() &&
+            !is_complete_concurrent_disk_cache_diagnostic(*snapshot)) {
+          healthy_.store(false, std::memory_order_release);
+          stop_.store(true, std::memory_order_release);
+          return;
+        }
+        operation_count_.fetch_add(1, std::memory_order_release);
+        std::this_thread::yield();
+      }
+    } catch (...) {
+      healthy_.store(false, std::memory_order_release);
+      stop_.store(true, std::memory_order_release);
+    }
+  }
+
+  /** @brief GraphModel borrowed by every worker. */
+  GraphModel& graph_;
+
+  /** @brief Number of futures expected at the start gate. */
+  const std::size_t worker_count_;
+
+  /** @brief Futures owning every launched worker until recovery. */
+  std::vector<std::future<void>> workers_;
+
+  /** @brief Number of workers waiting at the start gate. */
+  std::atomic<std::size_t> ready_count_{0};
+
+  /** @brief True after the start gate has opened. */
+  std::atomic<bool> started_{false};
+
+  /** @brief True when workers must stop borrowing GraphModel. */
+  std::atomic<bool> stop_{false};
+
+  /** @brief True unless a worker, snapshot, or join invariant fails. */
+  std::atomic<bool> healthy_{true};
+
+  /** @brief Unique positive token reserved for the next record. */
+  std::atomic<int> next_sequence_{1};
+
+  /** @brief Aggregate completed record/snapshot cycles. */
+  std::atomic<std::uint64_t> operation_count_{0};
 };
 
 }  // namespace
@@ -2377,6 +2635,98 @@ TEST(CacheSemantics, DiskCacheDiagnosticSnapshotSupportsConcurrentWriters) {
   EXPECT_GE(final_snapshot->node_id, 0);
   EXPECT_LT(final_snapshot->node_id, kWriterCount);
   EXPECT_EQ(final_snapshot->status, GraphModel::DiskCacheLoadStatus::Miss);
+}
+
+/**
+ * @brief Exercises the production diagnostic store across live lifecycle
+ * publication while worker record/snapshot traffic remains active.
+ *
+ * @return Nothing; GoogleTest assertions report readiness, torn values,
+ * lifecycle reset, or failed-reload preservation mismatches.
+ * @throws std::bad_alloc, std::system_error, filesystem, or Graph exceptions
+ * if fixture setup, worker launch, or a supposedly valid reload fails.
+ * @note Clear, real GraphIO reload, clone, and compute publication run for
+ * multiple rounds without a test-only product seam. Ordinary stress validates
+ * runtime behavior; the private-store production structure separately makes a
+ * reintroduced bare GraphModel reset fail compilation.
+ */
+TEST(CacheSemantics,
+     DiskCacheDiagnosticStoreSerializesClearReloadAndPublication) {
+  DiskCacheDiagnosticContext ctx(
+      "photospider-contract-disk-cache-diagnostic-lifecycle", "unused.png");
+  const auto first_path = ctx.root / "first.yaml";
+  const auto second_path = ctx.root / "second.yaml";
+  const auto invalid_path = ctx.root / "invalid.yaml";
+  write_text(first_path,
+             "- id: 11\n"
+             "  name: first\n"
+             "  type: kernel_contract_test\n"
+             "  subtype: source\n");
+  write_text(second_path,
+             "- id: 22\n"
+             "  name: second\n"
+             "  type: kernel_contract_test\n"
+             "  subtype: source\n");
+  write_text(invalid_path,
+             "- id: 33\n"
+             "  name: invalid\n"
+             "  type: kernel_contract_test\n"
+             "  subtype: source\n"
+             "  image_inputs:\n"
+             "    - from_node_id: 404\n");
+
+  GraphIOService io = ps::testing::make_yaml_graph_io_service();
+  io.load(ctx.graph, first_path);
+  ASSERT_TRUE(ctx.graph.has_node(11));
+
+  constexpr std::size_t kWorkerCount = 8;
+  constexpr int kLifecycleRounds = 96;
+  DiskCacheDiagnosticWorkerPool workers(ctx.graph, kWorkerCount);
+  ASSERT_TRUE(workers.wait_until_ready(std::chrono::seconds(2)));
+  workers.start();
+  ASSERT_TRUE(workers.wait_until_active(std::chrono::seconds(2)));
+
+  for (int round = 0; round < kLifecycleRounds; ++round) {
+    if (round % 3 == 0) {
+      ctx.graph.clear();
+    } else if (round % 3 == 1) {
+      io.load(ctx.graph, round % 2 == 0 ? first_path : second_path);
+    } else {
+      std::unique_ptr<GraphModel> staged = ctx.graph.clone_for_compute();
+      staged->record_disk_cache_load_result(
+          make_concurrent_disk_cache_diagnostic(100000 + round));
+      ctx.graph.publish_compute_snapshot(*staged);
+    }
+
+    const auto snapshot = ctx.graph.last_disk_cache_load_result_snapshot();
+    if (snapshot.has_value()) {
+      EXPECT_TRUE(is_complete_concurrent_disk_cache_diagnostic(*snapshot));
+    }
+  }
+
+  workers.stop_and_join();
+  EXPECT_TRUE(workers.healthy());
+  EXPECT_GT(workers.operation_count(), 0U);
+
+  constexpr int kFailedReloadToken = 200001;
+  ctx.graph.record_disk_cache_load_result(
+      make_concurrent_disk_cache_diagnostic(kFailedReloadToken));
+  EXPECT_THROW(io.load(ctx.graph, invalid_path), GraphError);
+  const auto after_failed_reload =
+      ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(after_failed_reload.has_value());
+  EXPECT_EQ(after_failed_reload->node_id, kFailedReloadToken);
+  EXPECT_TRUE(
+      is_complete_concurrent_disk_cache_diagnostic(*after_failed_reload));
+
+  ctx.graph.clear();
+  EXPECT_FALSE(ctx.graph.last_disk_cache_load_result_snapshot().has_value());
+
+  ctx.graph.record_disk_cache_load_result(
+      make_concurrent_disk_cache_diagnostic(200002));
+  io.load(ctx.graph, first_path);
+  EXPECT_TRUE(ctx.graph.has_node(11));
+  EXPECT_FALSE(ctx.graph.last_disk_cache_load_result_snapshot().has_value());
 }
 
 TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {

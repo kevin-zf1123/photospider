@@ -408,7 +408,15 @@ The same binary proves the private compute-request lane serializes scheduler
 observation/replacement with same-Graph compute, accepted async work survives a
 dropped caller future, and close drains compute-request work before graph-state
 and scheduler teardown. These races use explicit gates and bounded waits, not
-timing sleeps. Run the focused contract with:
+timing sleeps. Its
+`CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication`
+case runs gated production record/snapshot workers while real `GraphModel`
+clear, `GraphIOService` reload, clone, and staged publication repeat. Every
+snapshot must be empty or one complete value; failed reload retains the prior
+diagnostic, and final successful clear/reload resets it. The test uses no
+product seam and owns asynchronous cleanup with bounded readiness observation
+and deterministic future recovery.
+Run the focused contract with:
 
 ```bash
 cmake --build build \
@@ -418,7 +426,7 @@ cmake --build build \
 ./build/tests/test_compute_service_split \
   --gtest_filter='RealtimeProxyGraph.*'
 ./build/tests/test_kernel_contracts \
-  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain'
+  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.SchedulerObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain:CacheSemantics.DiskCacheDiagnosticStoreSerializesClearReloadAndPublication'
 ```
 
 Focused companion regressions own the remaining boundaries:
