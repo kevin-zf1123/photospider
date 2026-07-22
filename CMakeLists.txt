@@ -566,8 +566,10 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_geometry.cpp
     src/lib/compute/compute_metrics_recorder.cpp
     src/lib/compute/compute_node_task_runner.cpp
+    src/lib/compute/compute_request_coordinator.cpp
     src/lib/compute/compute_result_committer.cpp
     src/lib/compute/compute_run.cpp
+    src/lib/compute/compute_supersession.cpp
     src/lib/compute/compute_task_dependency_state.cpp
     src/lib/compute/compute_task_submission.cpp
     src/lib/compute/execution_service.cpp
@@ -588,6 +590,7 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/node_input_resolver.cpp
     src/lib/compute/realtime_proxy_graph.cpp
     src/lib/compute/resource_demand_estimator.cpp
+    src/lib/compute/run_group.cpp
     src/lib/compute/compute_task_dispatcher.cpp
     src/lib/compute/compute_service.cpp
     src/lib/runtime/graph_event_service.cpp
@@ -1669,6 +1672,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_compile_definitions(test_scheduler_instance_limits PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     add_ps_test(test_compute_run tests/unit/test_compute_run.cpp)
+    add_ps_test(test_compute_supersession
+        tests/unit/test_compute_supersession.cpp)
     add_ps_test(test_bad_alloc_boundaries
         tests/integration/test_bad_alloc_boundaries.cpp)
     target_sources(test_bad_alloc_boundaries PRIVATE

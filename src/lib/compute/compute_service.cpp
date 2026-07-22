@@ -38,6 +38,7 @@
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
 #include "compute/realtime_proxy_graph.hpp"
+#include "compute/run_group.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_cache_service.hpp"
@@ -373,45 +374,6 @@ void throw_if_run_unsuccessful(const compute::ComputeRunLease& lease) {
 }
 
 /**
- * @brief Rethrows an exact resource-exhaustion exception when present.
- * @param failure Non-null exception captured at the realtime coordinator
- * boundary.
- * @return Nothing when failure is not derived from std::bad_alloc.
- * @throws The exact std::bad_alloc-derived exception retained by failure.
- * @note Re-throwing from the matching catch preserves the original exception
- * object and keeps resource exhaustion ahead of sibling cancellation
- * translation without inspecting or aggregating child failure outcomes.
- */
-void rethrow_if_bad_alloc(const std::exception_ptr& failure) {
-  if (!failure) {
-    return;
-  }
-  try {
-    std::rethrow_exception(failure);
-  } catch (const std::bad_alloc&) {
-    throw;
-  } catch (...) {
-  }
-}
-
-/**
- * @brief Translates only one child's retained cancellation outcome.
- * @param lease Child Run continuation whose stable reason may be publicized.
- * @return Nothing for open, succeeded, or failed child state.
- * @throws GraphError with ComputeError and the Run-owned cancellation reason.
- * @note Failure outcomes are deliberately ignored because the realtime
- * coordinator, not this request wrapper, owns cross-child failure priority.
- */
-void throw_if_run_cancelled(const compute::ComputeRunLease& lease) {
-  const std::optional<compute::ComputeRunTerminalOutcome> outcome =
-      lease.terminal_outcome();
-  if (outcome.has_value() &&
-      outcome->kind == compute::ComputeRunTerminalKind::Cancelled) {
-    throw_terminal_outcome(*outcome);
-  }
-}
-
-/**
  * @brief Observes a cooperative boundary and rejects any terminal Run.
  * @param lease Retained read-only Run continuation.
  * @return Nothing while the Run remains open.
@@ -471,6 +433,18 @@ compute::ComputeRunSubmission make_run_submission(
     throw std::invalid_argument(
         "ComputeService Run submission requires HP or RT intent.");
   }
+  const compute::SupersessionIdentity supersession =
+      request.supersession.value_or(compute::SupersessionIdentity{
+          compute::SupersessionKey(
+              request.node_id,
+              compute::normalize_supersession_intent(request.intent)),
+          compute::SupersessionGeneration(1)});
+  if (supersession.key.target_node_id() != request.node_id ||
+      supersession.key.request_intent() !=
+          compute::normalize_supersession_intent(request.intent)) {
+    throw std::invalid_argument(
+        "ComputeService request supersession lineage is not canonical.");
+  }
   return compute::ComputeRunSubmission{
       request.graph_identity,
       graph.instance_id(),
@@ -480,7 +454,8 @@ compute::ComputeRunSubmission make_run_submission(
       intent == ComputeIntent::RealTimeUpdate
           ? compute::ComputeRunQuality::Interactive
           : compute::ComputeRunQuality::Full,
-      request.qos};
+      request.qos,
+      supersession};
 }
 
 /**
@@ -655,33 +630,28 @@ NodeOutput& execute_realtime_child_run(
  * @brief Admits and failure-contains one paired realtime request.
  *
  * @tparam Execute Callable coordinating the separate HP and RT children.
- * @param hp_run GlobalHighPrecision child Run.
- * @param rt_run RealTimeUpdate child Run.
- * @param request_cancellation Request coordinator that attaches both child
- * cancellation authorities before either child is admitted.
+ * @param run_group Request-owned shared lineage, cancellation, gate, and
+ * independent HP/RT child Runs.
  * @param execute Callback that runs shared preflight and sibling coordination.
  * @return Mutable committed RT output returned by execute.
  * @throws Rethrows the exact coordinator exception after best-effort failure
  * publication for every child that did not already settle.
  * @throws GraphError if normal return leaves either child unsettled.
- * @note The children remain independent terminal domains; this helper is not a
- * RunGroup. The coordinator owns RT-first and resource-exhaustion failure
- * priority. This wrapper preserves its exact resource failure first, then
- * translates only a child-owned cancellation reason instead of route-local
- * control-flow text; it never replaces another failure with one child's
- * independently retained failure outcome. The request cancellation source
- * fans one accepted reason to both children without aggregating terminal
- * results, supersession, or revision.
+ * @note The RunGroup preserves independent child terminal domains while
+ * aggregating resource failure, other failure, stable request cancellation,
+ * child-local cancellation, and success in deterministic order.
  */
 template <typename Execute>
-NodeOutput& execute_request_owned_realtime_runs(
-    compute::ComputeRun& hp_run, compute::ComputeRun& rt_run,
-    compute::ComputeRequestCancellationSource& request_cancellation,
-    Execute&& execute) {
-  compute::ComputeRunLease hp_lifecycle_lease = hp_run.acquire_lease();
-  compute::ComputeRunLease rt_lifecycle_lease = rt_run.acquire_lease();
-  request_cancellation.attach(hp_run);
+NodeOutput& execute_request_owned_realtime_runs(compute::RunGroup& run_group,
+                                                Execute&& execute) {
+  compute::ComputeRun& hp_run = run_group.hp_run();
+  compute::ComputeRun& rt_run = run_group.rt_run();
+  compute::ComputeRequestCancellationSource& request_cancellation =
+      run_group.cancellation_source();
+  const compute::ComputeRunLease& hp_lifecycle_lease = run_group.hp_lease();
+  const compute::ComputeRunLease& rt_lifecycle_lease = run_group.rt_lease();
   request_cancellation.attach(rt_run);
+  request_cancellation.attach(hp_run);
   try {
     observe_open_run_or_throw(hp_lifecycle_lease);
     observe_open_run_or_throw(rt_lifecycle_lease);
@@ -698,8 +668,12 @@ NodeOutput& execute_request_owned_realtime_runs(
           GraphErrc::ComputeError,
           "Realtime coordination returned before both child Runs settled.");
     }
-    (void)require_run_success(hp_lifecycle_lease, output);
-    return require_run_success(rt_lifecycle_lease, output);
+    const compute::ComputeRunTerminalOutcome aggregate =
+        run_group.aggregate_terminal_outcome();
+    if (aggregate.kind != compute::ComputeRunTerminalKind::Succeeded) {
+      throw_terminal_outcome(aggregate);
+    }
+    return output;
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
     if (!hp_run.is_terminal()) {
@@ -708,9 +682,11 @@ NodeOutput& execute_request_owned_realtime_runs(
     if (!rt_run.is_terminal()) {
       (void)rt_run.publish_failed(failure);
     }
-    rethrow_if_bad_alloc(failure);
-    throw_if_run_cancelled(rt_lifecycle_lease);
-    throw_if_run_cancelled(hp_lifecycle_lease);
+    const compute::ComputeRunTerminalOutcome aggregate =
+        run_group.aggregate_terminal_outcome();
+    if (aggregate.kind != compute::ComputeRunTerminalKind::Succeeded) {
+      throw_terminal_outcome(aggregate);
+    }
     std::rethrow_exception(failure);
   }
 }
@@ -1082,10 +1058,10 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(
  * @throws GraphError from scheduler lookup, planning, task dispatch, dirty
  * execution, cache access, missing target output, or private cancellation.
  * @note Every non-realtime HP request creates exactly one Run before planning.
- * RealTimeUpdate creates separate HP and RT child Runs before preflight; no
- * mixed-domain Run or final RunGroup policy is introduced here. Lifecycle
- * leases are acquired before the request cancellation source attaches, and a
- * cancellation winner is translated from the child Run's stable reason.
+ * RealTimeUpdate creates one request-owned RunGroup with separate HP and RT
+ * child Runs before preflight. Lifecycle leases are acquired before the
+ * request cancellation source attaches, and aggregate cancellation/failure is
+ * translated from stable Run-owned state.
  */
 NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
                                              GraphRuntime& runtime,
@@ -1093,17 +1069,19 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
   const std::shared_ptr<compute::ComputeRequestCancellationSource>
       request_cancellation = cancellation_source_for_request(request);
   if (is_realtime_request(request)) {
-    compute::ComputeRun hp_run(make_run_submission(
-        graph, request, ComputeIntent::GlobalHighPrecision));
-    compute::ComputeRun rt_run(
-        make_run_submission(graph, request, ComputeIntent::RealTimeUpdate));
+    compute::RunGroup run_group(
+        make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision),
+        make_run_submission(graph, request, ComputeIntent::RealTimeUpdate),
+        request_cancellation);
+    compute::ComputeRun& hp_run = run_group.hp_run();
+    compute::ComputeRun& rt_run = run_group.rt_run();
     return execute_request_owned_realtime_runs(
-        hp_run, rt_run, *request_cancellation,
+        run_group,
         [&](const compute::ComputeRunLease& hp_lease,
             const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
           return compute_intent_update_impl(
               graph, ExecutionStrategy{&runtime, true}, request, &hp_run,
-              &rt_run, &hp_lease, &rt_lease);
+              &rt_run, &hp_lease, &rt_lease, run_group.sibling_commit_gate());
         });
   }
 
@@ -1115,7 +1093,7 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
         if (request.intent) {
           return compute_intent_update_impl(
               graph, ExecutionStrategy{&runtime, true}, request, &run, nullptr,
-              &run_lease, nullptr);
+              &run_lease, nullptr, nullptr);
         }
         return compute_parallel_hp_impl(graph, runtime, request, run,
                                         run_lease);
@@ -1156,7 +1134,8 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     GraphModel& graph, const ExecutionStrategy& strategy,
     const Request& request, compute::ComputeRun* hp_run,
     compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
-    const compute::ComputeRunLease* rt_run_lease) {
+    const compute::ComputeRunLease* rt_run_lease,
+    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate) {
   compute::IntentUpdateCallbacks callbacks;
   const ComputeIntent intent = request.intent.value();
   compute::IntentUpdateCoordinator::validate(intent, request.dirty_roi);
@@ -1263,10 +1242,12 @@ NodeOutput& ComputeService::compute_intent_update_impl(
 
   compute::RealtimeProxyGraph& rt_proxy_graph =
       realtime_proxy_graph_for(graph, strategy, request);
-  std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate;
   compute::ComputeRunCancellationRegistration rt_cancellation_registration;
   if (intent == ComputeIntent::RealTimeUpdate) {
-    sibling_commit_gate = std::make_shared<compute::DirtySiblingCommitGate>();
+    if (!sibling_commit_gate) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Realtime RunGroup has no sibling commit gate.");
+    }
     callbacks.sibling_commit_gate = sibling_commit_gate;
     const compute::ComputeRunCancellationSource hp_cancellation =
         hp_run->cancellation_source();
@@ -1385,9 +1366,11 @@ NodeOutput& ComputeService::compute_intent_update_impl(
 NodeOutput& ComputeService::compute_with_intent_impl(
     GraphModel& graph, const Request& request, compute::ComputeRun* hp_run,
     compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
-    const compute::ComputeRunLease* rt_run_lease) {
+    const compute::ComputeRunLease* rt_run_lease,
+    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate) {
   return compute_intent_update_impl(graph, ExecutionStrategy{}, request, hp_run,
-                                    rt_run, hp_run_lease, rt_run_lease);
+                                    rt_run, hp_run_lease, rt_run_lease,
+                                    std::move(sibling_commit_gate));
 }
 
 /**
@@ -1402,25 +1385,28 @@ NodeOutput& ComputeService::compute_with_intent_impl(
  * @throws GraphError from validation, planning, recursive compute, or cache
  * operations, including private cancellation translated to ComputeError.
  * @note Missing intent and explicit GlobalHighPrecision both create exactly one
- * request-owned Run before planning. RealTimeUpdate creates separate HP and RT
- * child Runs without a mixed-domain Run. Leases are acquired before attaching
- * the request cancellation source, and cancellation that wins commit
- * arbitration leaves product staging unpublished.
+ * request-owned Run before planning. RealTimeUpdate creates one RunGroup with
+ * separate HP and RT child Runs. Leases are acquired before attaching the
+ * request cancellation source, and cancellation that wins commit arbitration
+ * leaves product staging unpublished.
  */
 NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
   const std::shared_ptr<compute::ComputeRequestCancellationSource>
       request_cancellation = cancellation_source_for_request(request);
   if (is_realtime_request(request)) {
-    compute::ComputeRun hp_run(make_run_submission(
-        graph, request, ComputeIntent::GlobalHighPrecision));
-    compute::ComputeRun rt_run(
-        make_run_submission(graph, request, ComputeIntent::RealTimeUpdate));
+    compute::RunGroup run_group(
+        make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision),
+        make_run_submission(graph, request, ComputeIntent::RealTimeUpdate),
+        request_cancellation);
+    compute::ComputeRun& hp_run = run_group.hp_run();
+    compute::ComputeRun& rt_run = run_group.rt_run();
     return execute_request_owned_realtime_runs(
-        hp_run, rt_run, *request_cancellation,
+        run_group,
         [&](const compute::ComputeRunLease& hp_lease,
             const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
           return compute_with_intent_impl(graph, request, &hp_run, &rt_run,
-                                          &hp_lease, &rt_lease);
+                                          &hp_lease, &rt_lease,
+                                          run_group.sibling_commit_gate());
         });
   }
 
@@ -1431,7 +1417,7 @@ NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
       [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
         if (request.intent) {
           return compute_with_intent_impl(graph, request, &run, nullptr,
-                                          &run_lease, nullptr);
+                                          &run_lease, nullptr, nullptr);
         }
         return compute_sequential_impl(graph, request, run, run_lease);
       },

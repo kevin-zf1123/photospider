@@ -10,6 +10,7 @@
  * `HostComputeRequest`; the embedded adapter translates it to
  * `Kernel::ComputeRequest` before these helpers run.
  */
+#include <atomic>
 #include <exception>
 #include <future>
 #include <memory>
@@ -19,10 +20,6 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-
-#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
-#include <atomic>
-#endif
 
 #include "compute/realtime_proxy_graph.hpp"
 #include "core/image_buffer_processing.hpp"
@@ -78,6 +75,176 @@ std::string make_async_exception_message(bool intent_aware, int node_id,
 }
 
 /**
+ * @brief Exact-once promise owner shared by one published candidate.
+ * @tparam T Future result value.
+ * @throws std::bad_alloc when the promise shared state cannot be allocated.
+ * @note Supersession, execution, and fallback callbacks may race logically;
+ * only the first settlement mutates the promise. This helper owns no worker or
+ * cancellation authority.
+ */
+template <typename T>
+class CandidateCompletion final {
+ public:
+  /**
+   * @brief Creates the sole future before publication.
+   * @return Future bound to this candidate's exact-once state.
+   * @throws std::future_error if a future was already retrieved.
+   */
+  std::future<T> take_future() { return promise_.get_future(); }
+
+  /**
+   * @brief Publishes one successful result if this callback wins.
+   * @param value Owned result transferred to the future.
+   * @return Nothing.
+   * @throws Nothing; promise invariant failures terminate.
+   */
+  void set_value(T value) noexcept {
+    if (completed_.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    try {
+      promise_.set_value(std::move(value));
+    } catch (...) {
+      try {
+        promise_.set_exception(std::current_exception());
+      } catch (...) {
+        std::terminate();
+      }
+    }
+  }
+
+  /**
+   * @brief Publishes one exact failure if this callback wins.
+   * @param failure Captured non-null exception.
+   * @return Nothing.
+   * @throws Nothing; promise invariant failures terminate.
+   */
+  void set_exception(std::exception_ptr failure) noexcept {
+    if (completed_.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    try {
+      promise_.set_exception(std::move(failure));
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /** @brief Sole future shared state. */
+  std::promise<T> promise_;
+  /** @brief First-settlement arbitration. */
+  std::atomic<bool> completed_{false};
+};
+
+/**
+ * @brief Void specialization of exact-once candidate completion.
+ * @throws std::bad_alloc when the promise shared state cannot be allocated.
+ */
+template <>
+class CandidateCompletion<void> final {
+ public:
+  /**
+   * @brief Creates the sole future before publication.
+   * @return Future bound to this candidate's exact-once state.
+   * @throws std::future_error if a future was already retrieved.
+   */
+  std::future<void> take_future() { return promise_.get_future(); }
+
+  /**
+   * @brief Publishes successful completion if this callback wins.
+   * @return Nothing.
+   * @throws Nothing; promise invariant failures terminate.
+   */
+  void set_value() noexcept {
+    if (completed_.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    try {
+      promise_.set_value();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Publishes one exact failure if this callback wins.
+   * @param failure Captured non-null exception.
+   * @return Nothing.
+   * @throws Nothing; promise invariant failures terminate.
+   */
+  void set_exception(std::exception_ptr failure) noexcept {
+    if (completed_.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    try {
+      promise_.set_exception(std::move(failure));
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /** @brief Sole future shared state. */
+  std::promise<void> promise_;
+  /** @brief First-settlement arbitration. */
+  std::atomic<bool> completed_{false};
+};
+
+/**
+ * @brief Builds the stable product failure for an unmaterialized loser.
+ * @return Captured ComputeError exception.
+ * @throws Nothing; allocation exhaustion is captured as std::bad_alloc.
+ */
+std::exception_ptr make_superseded_exception() noexcept {
+  try {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Compute request was superseded by a newer generation.");
+  } catch (...) {
+    return std::current_exception();
+  }
+}
+
+/**
+ * @brief Owns normalized product request and coordinator preparation.
+ * @throws Nothing for destruction after members are constructed.
+ */
+struct PreparedProductCompute {
+  /** @brief Request copy carrying exact source and lineage identity. */
+  Kernel::ComputeRequest request;
+  /** @brief Request-wide cancellation authority published with the candidate.
+   */
+  std::shared_ptr<compute::ComputeRequestCancellationSource> cancellation;
+  /** @brief Provisional generation/ticket ownership. */
+  compute::ComputeRequestCoordinator::PreparedCandidate prepared;
+};
+
+/**
+ * @brief Normalizes one request, allocates generation, and reserves capacity.
+ * @param runtime Per-Graph supersession and request-lane owner.
+ * @param request Caller request copied or moved into candidate ownership.
+ * @return Prepared request ready for graph-state publication.
+ * @throws std::invalid_argument for invalid target/intent normalization.
+ * @throws std::overflow_error for exhausted generation space.
+ * @throws std::bad_alloc or executor synchronization/admission exceptions.
+ */
+PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
+                                               Kernel::ComputeRequest request) {
+  compute::SupersessionKey key(
+      request.node_id, compute::normalize_supersession_intent(request.intent));
+  std::shared_ptr<compute::ComputeRequestCancellationSource> cancellation =
+      request.cancellation_source != nullptr
+          ? request.cancellation_source
+          : std::make_shared<compute::ComputeRequestCancellationSource>();
+  compute::ComputeRequestCoordinator::PreparedCandidate prepared =
+      runtime.prepare_compute_request(key);
+  request.cancellation_source = cancellation;
+  request.supersession = prepared.identity();
+  return PreparedProductCompute{std::move(request), std::move(cancellation),
+                                std::move(prepared)};
+}
+
+/**
  * @brief Builds the explicit default QoS consumed by built-in CPU Runs.
  *
  * @param use_parallel_executor Whether the request selects scheduler-backed
@@ -128,7 +295,8 @@ ComputeService::Request make_service_compute_request(
       make_default_compute_run_qos(request.execution.parallel),
       std::move(commit_policy),
       staged_proxy,
-      request.cancellation_source};
+      request.cancellation_source,
+      request.supersession};
 }
 
 /**
@@ -214,6 +382,7 @@ class KernelGraphRevisionCommitPolicy final
             return;
           }
           try {
+            validate_current_supersession(commit_lease);
             validate_live_graph(live_graph, instance_id, revision);
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
             testing::notify_kernel_compute_commit_test_hook(
@@ -253,6 +422,10 @@ class KernelGraphRevisionCommitPolicy final
     (void)staged_proxy.require_output(run_lease.descriptor().target_node_id());
     std::unique_ptr<compute::RealtimeProxyGraph> proxy_publication =
         staged_proxy.clone_for_compute();
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+    testing::notify_kernel_compute_commit_test_hook(
+        testing::KernelComputeCommitTestEvent::RealTimeCommitPrepared);
+#endif
     const GraphInstanceId instance_id =
         run_lease.descriptor().graph_instance_id();
     const GraphRevision revision = run_lease.descriptor().revision();
@@ -268,6 +441,7 @@ class KernelGraphRevisionCommitPolicy final
             return;
           }
           try {
+            validate_current_supersession(commit_lease);
             validate_live_graph(live_graph, instance_id, revision);
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
             testing::notify_kernel_compute_commit_test_hook(
@@ -324,6 +498,27 @@ class KernelGraphRevisionCommitPolicy final
         (proxy_required && staged_proxy == nullptr)) {
       throw GraphError(GraphErrc::ComputeError,
                        "ComputeRun staged commit predicate failed.");
+    }
+  }
+
+  /**
+   * @brief Enforces latest-wins currency inside graph-state commit ordering.
+   * @param run_lease Commit contender carrying the request lineage snapshot.
+   * @return Nothing when this exact generation is still current.
+   * @throws GraphError when a newer generation was published first.
+   * @throws std::system_error when coordinator synchronization fails.
+   * @note This publication predicate runs after contender claim but before
+   * revision validation, persistence, or visible state mutation. Cooperative
+   * cancellation is therefore only a latency optimization, never authority.
+   */
+  void validate_current_supersession(
+      const compute::ComputeRunLease& run_lease) const {
+    if (!runtime_.is_current_supersession(
+            run_lease.descriptor().supersession())) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "ComputeRun supersession generation is stale; staged output "
+          "discarded.");
     }
   }
 
@@ -471,11 +666,27 @@ bool Kernel::compute_request(const ComputeRequest& request) {
 
   try {
     auto& runtime = *it->second;
-    runtime
-        .submit_compute_request([this, &runtime, request] {
-          execute_staged_compute_request(runtime, request);
-        })
-        .get();
+    PreparedProductCompute product = prepare_product_compute(runtime, request);
+    auto completion = std::make_shared<CandidateCompletion<void>>();
+    std::future<void> settled = completion->take_future();
+    ComputeRequest candidate_request = std::move(product.request);
+    runtime.publish_compute_request(
+        std::move(product.prepared), std::move(product.cancellation),
+        [this, &runtime, request = std::move(candidate_request), completion] {
+          try {
+            execute_staged_compute_request(runtime, request);
+            completion->set_value();
+          } catch (...) {
+            completion->set_exception(std::current_exception());
+          }
+        },
+        [completion] {
+          completion->set_exception(make_superseded_exception());
+        },
+        [completion](std::exception_ptr failure) {
+          completion->set_exception(std::move(failure));
+        });
+    settled.get();
 
     clear_last_error(request.name);
     return true;
@@ -532,14 +743,28 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
 
   try {
     auto& runtime = *it->second;
-    NodeOutput output = runtime
-                            .submit_compute_request([this, &runtime, request] {
-                              NodeOutput committed_output;
-                              execute_staged_compute_request(runtime, request,
-                                                             &committed_output);
-                              return committed_output;
-                            })
-                            .get();
+    PreparedProductCompute product = prepare_product_compute(runtime, request);
+    auto completion = std::make_shared<CandidateCompletion<NodeOutput>>();
+    std::future<NodeOutput> settled = completion->take_future();
+    ComputeRequest candidate_request = std::move(product.request);
+    runtime.publish_compute_request(
+        std::move(product.prepared), std::move(product.cancellation),
+        [this, &runtime, request = std::move(candidate_request), completion] {
+          try {
+            NodeOutput committed_output;
+            execute_staged_compute_request(runtime, request, &committed_output);
+            completion->set_value(std::move(committed_output));
+          } catch (...) {
+            completion->set_exception(std::current_exception());
+          }
+        },
+        [completion] {
+          completion->set_exception(make_superseded_exception());
+        },
+        [completion](std::exception_ptr failure) {
+          completion->set_exception(std::move(failure));
+        });
+    NodeOutput output = settled.get();
 
     if (output.image_buffer.width == 0) {
       clear_last_error(request.name);
@@ -605,30 +830,65 @@ Kernel::compute_async_request(ComputeRequest request) {
   }
 
   GraphRuntime* const runtime_ptr = it->second.get();
-  return runtime_ptr->submit_compute_request([this, runtime_ptr,
-                                              request = std::move(request)] {
-    try {
-      execute_staged_compute_request(*runtime_ptr, request);
-      clear_last_error(request.name);
-      return AsyncComputeResult{true, std::nullopt};
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (const GraphError& ge) {
-      LastError error{ge.code(), ge.what()};
-      store_last_error(request.name, error);
-      return AsyncComputeResult{false, std::move(error)};
-    } catch (const std::exception& e) {
-      LastError error{GraphErrc::Unknown,
-                      make_async_exception_message(request.intent.has_value(),
-                                                   request.node_id, e.what())};
-      store_last_error(request.name, error);
-      return AsyncComputeResult{false, std::move(error)};
-    } catch (...) {
-      LastError error{GraphErrc::Unknown, std::string("unknown error")};
-      store_last_error(request.name, error);
-      return AsyncComputeResult{false, std::move(error)};
-    }
-  });
+  PreparedProductCompute product =
+      prepare_product_compute(*runtime_ptr, std::move(request));
+  auto completion = std::make_shared<CandidateCompletion<AsyncComputeResult>>();
+  std::future<AsyncComputeResult> settled = completion->take_future();
+  ComputeRequest candidate_request = std::move(product.request);
+  const std::string graph_name = candidate_request.name;
+  runtime_ptr->publish_compute_request(
+      std::move(product.prepared), std::move(product.cancellation),
+      [this, runtime_ptr, request = std::move(candidate_request), completion] {
+        try {
+          execute_staged_compute_request(*runtime_ptr, request);
+          clear_last_error(request.name);
+          completion->set_value(AsyncComputeResult{true, std::nullopt});
+        } catch (const std::bad_alloc&) {
+          completion->set_exception(std::current_exception());
+        } catch (const GraphError& ge) {
+          try {
+            LastError error{ge.code(), ge.what()};
+            store_last_error(request.name, error);
+            completion->set_value(AsyncComputeResult{false, std::move(error)});
+          } catch (...) {
+            completion->set_exception(std::current_exception());
+          }
+        } catch (const std::exception& e) {
+          try {
+            LastError error{GraphErrc::Unknown, make_async_exception_message(
+                                                    request.intent.has_value(),
+                                                    request.node_id, e.what())};
+            store_last_error(request.name, error);
+            completion->set_value(AsyncComputeResult{false, std::move(error)});
+          } catch (...) {
+            completion->set_exception(std::current_exception());
+          }
+        } catch (...) {
+          try {
+            LastError error{GraphErrc::Unknown, std::string("unknown error")};
+            store_last_error(request.name, error);
+            completion->set_value(AsyncComputeResult{false, std::move(error)});
+          } catch (...) {
+            completion->set_exception(std::current_exception());
+          }
+        }
+      },
+      [this, graph_name, completion] {
+        try {
+          LastError error{
+              GraphErrc::ComputeError,
+              std::string(
+                  "Compute request was superseded by a newer generation.")};
+          store_last_error(graph_name, error);
+          completion->set_value(AsyncComputeResult{false, std::move(error)});
+        } catch (...) {
+          completion->set_exception(std::current_exception());
+        }
+      },
+      [completion](std::exception_ptr failure) {
+        completion->set_exception(std::move(failure));
+      });
+  return std::optional<std::future<AsyncComputeResult>>{std::move(settled)};
 }
 
 /** @copydoc Kernel::execute_staged_compute_request */

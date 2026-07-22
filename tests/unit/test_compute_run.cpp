@@ -69,7 +69,10 @@ ComputeRunSubmission make_test_submission(std::string graph_identity,
       target_node_id,
       ComputeIntent::GlobalHighPrecision,
       ComputeRunQuality::Full,
-      ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 3, 2}};
+      ComputeRunQos{ComputeRunQosClass::Throughput, std::nullopt, 3, 2},
+      SupersessionIdentity{
+          SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
+          SupersessionGeneration(1)}};
 }
 
 /**

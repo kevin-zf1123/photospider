@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/compute_supersession.hpp"
 #include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/device.hpp"
@@ -313,6 +314,13 @@ struct ComputeRunSubmission {
 
   /** @brief Explicit request QoS captured before service policy selection. */
   ComputeRunQos qos;
+
+  /**
+   * @brief Canonical request key/generation shared by realtime child Runs.
+   * @note Child `intent` remains independent: the HP child of a realtime
+   * request retains the realtime request key carried here.
+   */
+  SupersessionIdentity supersession;
 };
 
 /**
@@ -397,6 +405,17 @@ class ComputeRunDescriptor {
    */
   const ComputeRunQos& qos() const noexcept { return qos_; }
 
+  /**
+   * @brief Returns the immutable request lineage shared by sibling Runs.
+   * @return Canonical request key and graph-wide generation.
+   * @throws Nothing.
+   * @note This value is independent from this descriptor's RunId, child
+   * intent, GraphRevision, and scheduler epoch.
+   */
+  const SupersessionIdentity& supersession() const noexcept {
+    return supersession_;
+  }
+
  private:
   friend class ComputeRun;
   friend class ComputeRunControl;
@@ -436,6 +455,9 @@ class ComputeRunDescriptor {
 
   /** @brief Explicit QoS inputs retained without owning policy/resources. */
   ComputeRunQos qos_;
+
+  /** @brief Canonical request lineage version captured before planning. */
+  SupersessionIdentity supersession_;
 };
 
 /**
@@ -599,8 +621,8 @@ class ComputeRunCancellationSource {
  * children for a realtime request. The coordinator remembers the first request
  * reason and immediately applies it to children attached after that request.
  * Child Runs keep independent ids, terminal arbiters, deadlines, staging, and
- * cleanup; this class is deliberately not a `RunGroup` and aggregates no
- * result.
+ * cleanup. This fan-out component aggregates no result; a realtime RunGroup
+ * composes it with independent child ownership and terminal aggregation.
  *
  * @throws std::bad_alloc when coordinator or child-source storage grows.
  * @throws std::system_error when coordinator or child Run locking fails.
@@ -629,20 +651,24 @@ class ComputeRequestCancellationSource final {
   void attach(ComputeRun& run);
 
   /**
-   * @brief Broadcasts one explicit current-request cancellation.
+   * @brief Broadcasts one private current-request cancellation reason.
+   * @param reason Explicit, supersession, deadline, close, or shutdown reason
+   * proposed by the trusted request owner.
    * @return True only for the first request-level acceptance.
    * @throws std::bad_alloc when a temporary child-source snapshot allocates.
    * @throws std::system_error when coordinator or child Run locking fails.
    * @throws Any exception from a child cleanup callback after the request
    * reason becomes stable.
-   * @note A true result does not imply every child was still open; each child
-   * arbitrates the request independently.
+   * @note The no-argument form remains explicit cancellation. A true result
+   * does not imply every child was still open; each child arbitrates the stable
+   * first request reason independently.
    */
-  bool request_cancellation();
+  bool request_cancellation(ComputeRunCancellationReason reason =
+                                ComputeRunCancellationReason::ExplicitRequest);
 
   /**
    * @brief Returns the stable accepted request reason when requested.
-   * @return `ExplicitRequest` after the first request, otherwise nullopt.
+   * @return Stable first request reason, otherwise nullopt.
    * @throws std::system_error when coordinator locking fails.
    */
   std::optional<ComputeRunCancellationReason> accepted_reason() const;

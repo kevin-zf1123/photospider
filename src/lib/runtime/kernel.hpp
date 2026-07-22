@@ -246,6 +246,14 @@ class Kernel {
      */
     std::shared_ptr<compute::ComputeRequestCancellationSource>
         cancellation_source;
+
+    /**
+     * @brief Product-assigned canonical key/generation before staging.
+     * @note Embedded Host conversion leaves this empty. Kernel assigns it at
+     * latest-wins publication and ComputeService copies it into every child
+     * Run descriptor. It is private and absent from Host, CLI, and IPC v1.
+     */
+    std::optional<compute::SupersessionIdentity> supersession;
   };
 
   /**

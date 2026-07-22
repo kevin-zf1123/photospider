@@ -291,6 +291,8 @@ struct GraphStateExecutorLaneState {
   std::atomic<std::size_t> max_active_tasks{0};
   /** @brief Greatest live lane-worker count observed. */
   std::atomic<std::size_t> max_worker_threads{0};
+  /** @brief Greatest total-admission charge observed. */
+  std::atomic<std::size_t> max_admitted_units{0};
   /** @brief Number of close callers observed at lifecycle coordination. */
   std::atomic<std::uint64_t> close_wait_events{0};
   /** @brief Number of worker-stop checkpoints observed. */
@@ -315,6 +317,7 @@ void record_graph_state_executor_snapshot(
   update_atomic_max(state->max_queued_tasks, snapshot.queued_tasks);
   update_atomic_max(state->max_active_tasks, snapshot.active_tasks);
   update_atomic_max(state->max_worker_threads, snapshot.worker_threads);
+  update_atomic_max(state->max_admitted_units, snapshot.admitted_units);
   if (snapshot.event == testing::GraphStateExecutorTestEvent::TaskQueued &&
       snapshot.queued_tasks > 0) {
     state->queued_events.fetch_add(1, std::memory_order_release);
@@ -699,6 +702,27 @@ bool wait_for_atomic_event_count(const std::atomic<std::uint64_t>& event,
     std::this_thread::yield();
   }
   return event.load(std::memory_order_acquire) >= expected;
+}
+
+/**
+ * @brief Waits until an atomic size reaches one lower bound.
+ * @param value Scalar maximum to observe.
+ * @param expected Minimum value required for success.
+ * @param timeout Maximum monotonic wait duration.
+ * @return True when the value becomes visible before the deadline.
+ * @throws Nothing.
+ */
+bool wait_for_atomic_size_at_least(const std::atomic<std::size_t>& value,
+                                   std::size_t expected,
+                                   std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (value.load(std::memory_order_acquire) >= expected) {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+  return value.load(std::memory_order_acquire) >= expected;
 }
 #endif
 
@@ -1153,6 +1177,33 @@ void write_host_adapter_graph(const std::filesystem::path& path, int width = 6,
   if (subtype == "resized_extent") {
     out << "    roi_width: 12\n"
         << "    roi_height: 9\n";
+  }
+}
+
+/**
+ * @brief Writes independent targets for exact compute-lane admission tests.
+ *
+ * @param path YAML file path to create.
+ * @param target_count Positive number of independent target nodes to write.
+ * @return Nothing.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
+ *         creation fails.
+ * @note Node one uses the deterministic blocking operation. Every later node
+ *       uses the ordinary source operation, so each target forms a distinct
+ *       supersession key without adding graph dependencies.
+ */
+void write_host_adapter_many_target_graph(const std::filesystem::path& path,
+                                          std::size_t target_count) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out(path);
+  for (std::size_t index = 1; index <= target_count; ++index) {
+    out << "- id: " << index << "\n"
+        << "  name: host_source_" << index << "\n"
+        << "  type: host_adapter_test\n"
+        << "  subtype: " << (index == 1 ? "blocking_source" : "source") << "\n"
+        << "  parameters:\n"
+        << "    width: 6\n"
+        << "    height: 4\n";
   }
 }
 
@@ -1725,6 +1776,35 @@ GraphSessionId load_test_graph(Host& host, const std::filesystem::path& root,
   request.yaml_path = (root / "source" / (session + ".yaml")).string();
   request.cache_root_dir = (root / "cache").string();
   write_host_adapter_graph(request.yaml_path, 6, 4, subtype, slow_sleep_ms);
+  auto loaded = host.load_graph(request);
+  EXPECT_TRUE(loaded.status.ok) << loaded.status.message;
+  EXPECT_EQ(loaded.value.value, session);
+  return loaded.value;
+}
+
+/**
+ * @brief Loads a deterministic graph with independent compute targets.
+ *
+ * @param host Host under test.
+ * @param root Temporary root containing source and session folders.
+ * @param session Session label to load.
+ * @param target_count Positive independent-target count.
+ * @return Loaded session id.
+ * @throws std::bad_alloc if path or diagnostic strings allocate and fail.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure if the
+ *         YAML fixture cannot be written.
+ * @note Test assertions fail immediately if loading is rejected.
+ */
+GraphSessionId load_many_target_test_graph(Host& host,
+                                           const std::filesystem::path& root,
+                                           const std::string& session,
+                                           std::size_t target_count) {
+  GraphLoadRequest request;
+  request.session = GraphSessionId{session};
+  request.root_dir = (root / "sessions").string();
+  request.yaml_path = (root / "source" / (session + ".yaml")).string();
+  request.cache_root_dir = (root / "cache").string();
+  write_host_adapter_many_target_graph(request.yaml_path, target_count);
   auto loaded = host.load_graph(request);
   EXPECT_TRUE(loaded.status.ok) << loaded.status.message;
   EXPECT_EQ(loaded.value.value, session);
@@ -2733,22 +2813,25 @@ TEST(GraphStateExecutorLane,
 
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
 /**
- * @brief Proves real Host submission pressure respects graph-state lane bounds.
+ * @brief Proves distinct-key Host pressure respects compute-lane admission.
  * @return Nothing; GoogleTest assertions report capacity, worker, admission, or
  *         status failures.
  * @throws std::bad_alloc, std::system_error, or filesystem exceptions if Host,
  *         graph, worker, or fixture setup fails.
  * @note Caller threads and Host status-mapping workers are separate ownership
- *       domains. This test observes only the worker and queue owned by the real
- *       per-Graph `GraphStateExecutor` reached through the public Host path.
+ *       domains. One active and sixty-three parked distinct-key tickets consume
+ *       the exact 64-total bound; the sixty-fifth key must wait without adding
+ *       a worker or hidden active unit.
  */
-TEST(EmbeddedHostAdapter, SubmissionStormKeepsGraphStateLaneBounded) {
+TEST(EmbeddedHostAdapter, DistinctTargetStormKeepsComputeLaneBounded) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_graph_state_storm_test");
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
-  const GraphSessionId session = load_test_graph(
-      *host, temp.root(), "graph_state_storm", "blocking_source");
+  constexpr std::size_t kTargetCount =
+      GraphStateExecutor::kDefaultQueueCapacity + 1;
+  const GraphSessionId session = load_many_target_test_graph(
+      *host, temp.root(), "graph_state_storm", kTargetCount);
 
   GraphStateExecutorLaneState lane_state;
   ScopedGraphStateExecutorTestHook lane_hook(lane_state);
@@ -2763,26 +2846,39 @@ TEST(EmbeddedHostAdapter, SubmissionStormKeepsGraphStateLaneBounded) {
   cleanup.accepted.push_back(std::move(active.value));
   ASSERT_TRUE(wait_for_host_blocking_source(std::chrono::seconds(2)));
 
-  cleanup.accepted.reserve(GraphStateExecutor::kDefaultQueueCapacity + 2);
-  for (std::size_t index = 0; index < GraphStateExecutor::kDefaultQueueCapacity;
-       ++index) {
-    auto queued = host->compute_async(request);
+  cleanup.accepted.reserve(kTargetCount);
+  for (std::size_t index = 2;
+       index <= GraphStateExecutor::kDefaultQueueCapacity; ++index) {
+    HostComputeRequest queued_request = request;
+    queued_request.node = NodeId{static_cast<int>(index)};
+    auto queued = host->compute_async(queued_request);
     ASSERT_TRUE(queued.status.ok) << queued.status.message;
     cleanup.accepted.push_back(std::move(queued.value));
   }
 
+  ASSERT_TRUE(wait_for_atomic_size_at_least(
+      lane_state.max_admitted_units, GraphStateExecutor::kDefaultQueueCapacity,
+      std::chrono::seconds(2)));
+  ASSERT_TRUE(wait_for_atomic_size_at_least(
+      lane_state.max_queued_tasks,
+      GraphStateExecutor::kDefaultQueueCapacity - 1, std::chrono::seconds(2)));
+
   EXPECT_EQ(lane_state.queue_capacity.load(std::memory_order_acquire),
             GraphStateExecutor::kDefaultQueueCapacity);
   EXPECT_EQ(lane_state.max_queued_tasks.load(std::memory_order_acquire),
-            GraphStateExecutor::kDefaultQueueCapacity);
+            GraphStateExecutor::kDefaultQueueCapacity - 1);
   EXPECT_EQ(lane_state.max_active_tasks.load(std::memory_order_acquire), 1u);
   EXPECT_EQ(lane_state.max_worker_threads.load(std::memory_order_acquire), 1u);
+  EXPECT_EQ(lane_state.max_admitted_units.load(std::memory_order_acquire),
+            GraphStateExecutor::kDefaultQueueCapacity);
 
   std::promise<void> blocked_entered;
   std::future<void> blocked_entered_future = blocked_entered.get_future();
   cleanup.blocked_submission = std::async(std::launch::async, [&] {
     blocked_entered.set_value();
-    return host->compute_async(request);
+    HostComputeRequest blocked_request = request;
+    blocked_request.node = NodeId{static_cast<int>(kTargetCount)};
+    return host->compute_async(blocked_request);
   });
   ASSERT_EQ(blocked_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
@@ -2814,12 +2910,13 @@ TEST(EmbeddedHostAdapter, SubmissionStormKeepsGraphStateLaneBounded) {
  *         producer rejection, drain, or public-status failures.
  * @throws std::bad_alloc, std::system_error, or filesystem exceptions if Host,
  *         graph, worker, or synchronization setup fails.
- * @note One public async compute holds the real graph-state worker while 64
- *       later computes fill the production FIFO. A sixty-sixth producer then
- *       blocks in admission. Close must claim its Host marker and reject that
- *       blocked producer before the active compute releases queue space. The
- *       test always releases and joins every participant before assertions so
- *       a regression fails without leaving background work behind.
+ * @note One public async compute holds the real compute-lane worker while 63
+ *       distinct-key tickets fill the remaining total admission. A sixty-fifth
+ *       distinct key then blocks in admission. Close must claim its Host marker
+ *       and reject that blocked producer before the active compute releases
+ *       capacity. The test always releases and joins every participant before
+ *       assertions so a regression fails without leaving background work
+ *       behind.
  */
 TEST(EmbeddedHostAdapter,
      CloseStopsFullLaneBeforeWaitingForBlockedAsyncPlaceholder) {
@@ -2827,8 +2924,10 @@ TEST(EmbeddedHostAdapter,
   ScopedTempDir temp("photospider_host_full_lane_close_test");
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
-  const GraphSessionId session = load_test_graph(
-      *host, temp.root(), "host_full_lane_close", "blocking_source");
+  constexpr std::size_t kTargetCount =
+      GraphStateExecutor::kDefaultQueueCapacity + 1;
+  const GraphSessionId session = load_many_target_test_graph(
+      *host, temp.root(), "host_full_lane_close", kTargetCount);
 
   GraphStateExecutorLaneState lane_state;
   ScopedGraphStateExecutorTestHook lane_hook(lane_state);
@@ -2845,21 +2944,33 @@ TEST(EmbeddedHostAdapter,
   cleanup.accepted.push_back(std::move(active.value));
   ASSERT_TRUE(wait_for_host_blocking_source(std::chrono::seconds(2)));
 
-  cleanup.accepted.reserve(GraphStateExecutor::kDefaultQueueCapacity + 1);
-  for (std::size_t index = 0; index < GraphStateExecutor::kDefaultQueueCapacity;
-       ++index) {
-    auto queued = host->compute_async(request);
+  cleanup.accepted.reserve(GraphStateExecutor::kDefaultQueueCapacity);
+  for (std::size_t index = 2;
+       index <= GraphStateExecutor::kDefaultQueueCapacity; ++index) {
+    HostComputeRequest queued_request = request;
+    queued_request.node = NodeId{static_cast<int>(index)};
+    auto queued = host->compute_async(queued_request);
     ASSERT_TRUE(queued.status.ok) << queued.status.message;
     cleanup.accepted.push_back(std::move(queued.value));
   }
+  ASSERT_TRUE(wait_for_atomic_size_at_least(
+      lane_state.max_admitted_units, GraphStateExecutor::kDefaultQueueCapacity,
+      std::chrono::seconds(2)));
+  ASSERT_TRUE(wait_for_atomic_size_at_least(
+      lane_state.max_queued_tasks,
+      GraphStateExecutor::kDefaultQueueCapacity - 1, std::chrono::seconds(2)));
   ASSERT_EQ(lane_state.max_queued_tasks.load(std::memory_order_acquire),
+            GraphStateExecutor::kDefaultQueueCapacity - 1);
+  ASSERT_EQ(lane_state.max_admitted_units.load(std::memory_order_acquire),
             GraphStateExecutor::kDefaultQueueCapacity);
 
   std::promise<void> blocked_entered;
   std::future<void> blocked_entered_future = blocked_entered.get_future();
   cleanup.blocked_submission = std::async(std::launch::async, [&] {
     blocked_entered.set_value();
-    return host->compute_async(request);
+    HostComputeRequest blocked_request = request;
+    blocked_request.node = NodeId{static_cast<int>(kTargetCount)};
+    return host->compute_async(blocked_request);
   });
   ASSERT_EQ(blocked_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);

@@ -14,6 +14,8 @@ enum class GraphStateExecutorTestEvent {
   WorkerStarted,
   /** @brief One submission was appended to the bounded FIFO. */
   TaskQueued,
+  /** @brief One parked continuation reserved a total-admission unit. */
+  ContinuationReserved,
   /** @brief One queued task became the sole active task. */
   TaskStarted,
   /** @brief The active task finished and the lane became idle. */
@@ -38,7 +40,7 @@ struct GraphStateExecutorTestSnapshot {
   /** @brief Checkpoint that produced this snapshot. */
   GraphStateExecutorTestEvent event =
       GraphStateExecutorTestEvent::WorkerStarted;
-  /** @brief Fixed maximum number of waiting tasks. */
+  /** @brief Fixed waiting-only or total-admission bound. */
   std::size_t queue_capacity = 0;
   /** @brief Tasks waiting in FIFO storage. */
   std::size_t queued_tasks = 0;
@@ -46,6 +48,8 @@ struct GraphStateExecutorTestSnapshot {
   std::size_t active_tasks = 0;
   /** @brief Executor-owned worker loops currently alive; zero or one. */
   std::size_t worker_threads = 0;
+  /** @brief Total charged units in total-admission mode, otherwise zero. */
+  std::size_t admitted_units = 0;
 };
 
 /**

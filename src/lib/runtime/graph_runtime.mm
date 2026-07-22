@@ -138,7 +138,10 @@ GraphRuntime::GraphRuntime(const Info& info)
     : info_(info),
       model_(info.cache_root.empty() ? info.root / "cache" : info.cache_root),
       graph_state_(model_),
-      compute_requests_(model_),
+      compute_requests_(model_, GraphStateExecutor::kDefaultQueueCapacity,
+                        GraphStateExecutor::CapacityMode::TotalAdmission),
+      compute_request_coordinator_(graph_state_, compute_requests_,
+                                   info.supersession_first_generation),
       event_service_(info.compute_event_capacity,
                      info.compute_event_initial_sequence,
                      info.compute_event_initial_dropped_count),
@@ -179,6 +182,7 @@ GraphRuntime::GraphRuntime(const Info& info)
 /** @copydoc GraphRuntime::~GraphRuntime */
 GraphRuntime::~GraphRuntime() noexcept {
   try {
+    compute_request_coordinator_.stop_admission();
     compute_requests_.close_and_drain();
     graph_state_.close_and_drain();
   } catch (...) {

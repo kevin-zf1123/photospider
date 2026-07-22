@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/compute_request_coordinator.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"
 #include "photospider/scheduler/scheduler.hpp"
@@ -138,6 +139,9 @@ class GraphRuntime : public SchedulerHostContext {
 
     /** @brief Initial unsequenced scheduler drop count test seam. */
     uint64_t scheduler_trace_initial_dropped_count = 0;
+
+    /** @brief First graph-wide supersession generation test seam. */
+    uint64_t supersession_first_generation = 1;
   };
 
   /**
@@ -364,6 +368,67 @@ class GraphRuntime : public SchedulerHostContext {
   }
 
   /**
+   * @brief Prepares one canonical compute candidate and reserves key capacity.
+   * @param key Target/request-intent supersession lineage.
+   * @return Move-only identity and provisional ticket adoption.
+   * @throws The allocation, admission, and synchronization errors documented
+   * by compute::ComputeRequestCoordinator::prepare.
+   * @note This is private Kernel infrastructure, not public Host ABI.
+   */
+  compute::ComputeRequestCoordinator::PreparedCandidate prepare_compute_request(
+      const compute::SupersessionKey& key) {
+    return compute_request_coordinator_.prepare(key);
+  }
+
+  /**
+   * @brief Publishes one latest-wins compute candidate to the logical runner.
+   * @param prepared Prepared identity and provisional ownership.
+   * @param cancellation Request-wide cancellation fan-out source.
+   * @param execute Existing synchronous Kernel compute path.
+   * @param settle_superseded Exact-once completion for an unmaterialized loser.
+   * @param settle_failure Fallback completion for an escaping callback.
+   * @return Nothing after graph-state publication work is admitted.
+   * @throws The validation, allocation, admission, and synchronization errors
+   * documented by compute::ComputeRequestCoordinator::publish.
+   * @note The admitted graph-state item linearizes later in FIFO order.
+   * Execution uses only the existing compute-request lane worker; this method
+   * creates no thread or asynchronous loop.
+   */
+  void publish_compute_request(
+      compute::ComputeRequestCoordinator::PreparedCandidate prepared,
+      std::shared_ptr<compute::ComputeRequestCancellationSource> cancellation,
+      compute::ComputeRequestCoordinator::ExecuteCallback execute,
+      compute::ComputeRequestCoordinator::SupersededCallback settle_superseded,
+      compute::ComputeRequestCoordinator::FailureCallback settle_failure) {
+    compute_request_coordinator_.publish(
+        std::move(prepared), std::move(cancellation), std::move(execute),
+        std::move(settle_superseded), std::move(settle_failure));
+  }
+
+  /**
+   * @brief Tests exact request currency inside product commit arbitration.
+   * @param identity Run-captured canonical key/generation.
+   * @return True only for the latest graph-state-published generation.
+   * @throws std::system_error for synchronization failure.
+   */
+  bool is_current_supersession(
+      const compute::SupersessionIdentity& identity) const {
+    return compute_request_coordinator_.is_current(identity);
+  }
+
+  /**
+   * @brief Returns bounded coordinator/ticket ownership for private tests.
+   * @return Scalar snapshot with no retained runtime ownership.
+   * @throws std::system_error if coordinator or lane locking fails.
+   * @note This observation is not installed Host ABI and may become stale
+   * immediately after return.
+   */
+  compute::ComputeRequestCoordinator::Snapshot compute_request_snapshot()
+      const {
+    return compute_request_coordinator_.snapshot();
+  }
+
+  /**
    * @brief Stops new private compute-request admission without draining work.
    * @return Nothing.
    * @throws The lifecycle errors documented by
@@ -372,7 +437,10 @@ class GraphRuntime : public SchedulerHostContext {
    * producer blocked on the bounded request queue is rejected and can retire
    * its pre-registration.
    */
-  void stop_compute_request_admission() { compute_requests_.stop_admission(); }
+  void stop_compute_request_admission() {
+    compute_request_coordinator_.stop_admission();
+    compute_requests_.stop_admission();
+  }
 
   /**
    * @brief Stops and drains every accepted private compute request.
@@ -383,7 +451,10 @@ class GraphRuntime : public SchedulerHostContext {
    * because accepted requests may still submit their final predicate
    * transaction.
    */
-  void close_compute_requests() { compute_requests_.close_and_drain(); }
+  void close_compute_requests() {
+    compute_request_coordinator_.stop_admission();
+    compute_requests_.close_and_drain();
+  }
 
   /**
    * @brief Restarts request admission after scheduler shutdown aborts close.
@@ -395,6 +466,7 @@ class GraphRuntime : public SchedulerHostContext {
    */
   void restart_compute_requests_after_close_failure() {
     compute_requests_.restart_after_close_failure();
+    compute_request_coordinator_.restart_after_close_failure();
   }
 
   /**
@@ -701,6 +773,11 @@ class GraphRuntime : public SchedulerHostContext {
    * lane before graph_state_ during ordinary reverse destruction.
    */
   GraphStateExecutor compute_requests_;
+  /**
+   * @brief Per-Graph latest-wins publication domain and logical ticket pump.
+   * @note Reverse destruction releases this state before either executor lane.
+   */
+  compute::ComputeRequestCoordinator compute_request_coordinator_;
   /** @brief Fixed-capacity graph compute-event service. */
   GraphEventService event_service_;
   /** @brief Runtime-owned low-resolution real-time proxy graph. */

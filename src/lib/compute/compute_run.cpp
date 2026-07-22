@@ -80,6 +80,11 @@ void validate_submission(const ComputeRunSubmission& submission) {
     throw std::invalid_argument(
         "ComputeRun maximum parallelism must be positive when set.");
   }
+  if (submission.supersession.key.target_node_id() !=
+      submission.target_node_id) {
+    throw std::invalid_argument(
+        "ComputeRun supersession key must match its target node.");
+  }
 }
 
 /**
@@ -324,7 +329,9 @@ ComputeRunDescriptor::ComputeRunDescriptor(ComputeRunId id,
       target_node_id_(submission.target_node_id),
       intent_(submission.intent),
       quality_(submission.quality),
-      qos_(submission.qos) {}  // NOLINT(whitespace/indent_namespace)
+      qos_(submission.qos),
+      supersession_(std::move(submission.supersession)) {
+}  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Constructs shared Run state after validating immutable submission.
@@ -586,7 +593,8 @@ void ComputeRequestCancellationSource::attach(ComputeRun& run) {
 }
 
 /** @copydoc ComputeRequestCancellationSource::request_cancellation */
-bool ComputeRequestCancellationSource::request_cancellation() {
+bool ComputeRequestCancellationSource::request_cancellation(
+    ComputeRunCancellationReason reason) {
   std::vector<ComputeRunCancellationSource> children;
   {
     std::lock_guard<std::mutex> lock(control_->mutex);
@@ -594,11 +602,10 @@ bool ComputeRequestCancellationSource::request_cancellation() {
       return false;
     }
     children = control_->child_sources;
-    control_->accepted_reason = ComputeRunCancellationReason::ExplicitRequest;
+    control_->accepted_reason = reason;
   }
   for (const ComputeRunCancellationSource& child : children) {
-    (void)child.request_cancellation(
-        ComputeRunCancellationReason::ExplicitRequest);
+    (void)child.request_cancellation(reason);
   }
   return true;
 }

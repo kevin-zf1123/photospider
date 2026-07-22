@@ -10,6 +10,7 @@
 
 #include "compute/compute_commit_policy.hpp"
 #include "compute/compute_run.hpp"
+#include "compute/compute_supersession.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -166,6 +167,14 @@ class ComputeService {
      */
     std::shared_ptr<compute::ComputeRequestCancellationSource>
         cancellation_source;
+
+    /**
+     * @brief Optional product-assigned canonical key/generation lineage.
+     * @note Kernel supplies this before staging/materialization. Direct private
+     * service callers may omit it and receive a local generation-one identity
+     * that grants no product supersession authority.
+     */
+    std::optional<compute::SupersessionIdentity> supersession;
   };
 
   /**
@@ -491,6 +500,8 @@ class ComputeService {
    * @param hp_run_lease Borrowed lifecycle lease for the HP child.
    * @param rt_run_lease Borrowed lifecycle lease for the RT child, or null for
    * GlobalHighPrecision.
+   * @param sibling_commit_gate Shared request-owned RT-first gate, required
+   * for realtime groups and null for HP-only requests.
    * @return Mutable HP or RT output selected by the intent.
    * @throws std::bad_alloc unchanged when coordination, dirty execution, cache,
    * or output storage exhausts memory.
@@ -504,7 +515,8 @@ class ComputeService {
   NodeOutput& compute_with_intent_impl(
       GraphModel& graph, const Request& request, compute::ComputeRun* hp_run,
       compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
-      const compute::ComputeRunLease* rt_run_lease);
+      const compute::ComputeRunLease* rt_run_lease,
+      std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate);
 
   /**
    * @brief Binds intent coordinator callbacks to concrete compute executors.
@@ -520,6 +532,8 @@ class ComputeService {
    * and commit coordination.
    * @param rt_run_lease Borrowed lifecycle lease for RT execution, sibling
    * cancellation, and commit coordination, or null for HP-only requests.
+   * @param sibling_commit_gate Shared request-owned RT-first gate, required
+   * for realtime groups and null for HP-only requests.
    * @return Mutable output selected by IntentUpdateCoordinator.
    * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
    * output storage exhausts memory.
@@ -534,7 +548,8 @@ class ComputeService {
       GraphModel& graph, const ExecutionStrategy& strategy,
       const Request& request, compute::ComputeRun* hp_run,
       compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
-      const compute::ComputeRunLease* rt_run_lease);
+      const compute::ComputeRunLease* rt_run_lease,
+      std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate);
 
   /** @brief Borrowed traversal service used by planning and dirty execution. */
   GraphTraversalService& traversal_;
