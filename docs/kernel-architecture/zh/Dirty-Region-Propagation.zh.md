@@ -1,8 +1,9 @@
 # 脏区传播与工作选择
 
 本文描述当前内核已经实现的 dirty-region 行为，并区分 graph-scoped dirty facts、request
-planning、task selection、scheduler filtering、output commit，以及截至 issue #73 已实现的
-cooperative Run-cancellation observation。拟议的 Macro retile 与自适应 coarsening 属于内核演进
+planning、task selection、scheduler filtering、output commit，以及截至 issue #74 已实现的
+cooperative Run-cancellation 与 latest-wins commit observation。拟议的 Macro retile 与自适应
+coarsening 属于内核演进
 路线图，而不是本文的当前行为契约。Dirty geometry
 路径与私有 clone/resize/channel/ROI processing contract 都由内核拥有；configured build 会选择
 OpenCV adapter 或标准库实现，因此 compute/runtime 代码不会直接声明 OpenCV。
@@ -171,7 +172,8 @@ callback，但不能取消已经运行的 callback。
 Source node execution 还会比较当前 dirty generation 与该 source 已提交的 generation。若 work 比
 committed source generation 更旧，则跳过并记录 trace；相同 generation 仍可能再次执行，downstream
 node 也不会进行该比较。这只是狭窄的 source-boundary stale guard，不是通用 revision validation、
-supersession、deadline handling 或 cooperative cancellation。
+supersession、deadline handling 或 cooperative cancellation。Issue #74 supersession 是独立的
+request-key 与 commit-generation 契约；它不会复用 dirty generation。
 
 Issue #73 增加了一条独立的 Run-owned cooperative 边界。Dirty preflight、source 与 downstream
 phase、node/tile/provider 进入与返回、dependency release，以及最终 commit 都会观察匹配 child
@@ -185,14 +187,15 @@ HP dirty task 把 output 暂存到 `HighPrecisionDirtyWriteBuffer`；RT dirty ta
 `RealtimeProxyWriteBuffer`。成功 request 会通过 intent-specific commit path，把 staged HP state
 提交到 `GraphModel`，或把 RT state 提交到 `RealtimeProxyGraph`。Standalone 非 realtime HP
 request 拥有一个 `ComputeRun`。每个 `RealTimeUpdate` 会在 preflight 前创建不同的 HP 与 RT child
-Run；两者捕获相同的强 Graph instance identity 与 authoritative revision，同时保留各自独立的
-domain、lease、phase、terminal 与 staging state。当前不会创建 mixed-domain Run 或最终
-policy-bearing `RunGroup`。
+Run，并将它们放入一个 request-owned `RunGroup`；两者捕获相同的强 Graph instance identity、
+authoritative revision 与 request supersession generation，同时保留各自独立的 domain、lease、
+phase、terminal 与 staging state。当前不会创建 mixed-domain Run。
 
 Kernel 的 product commit policy 会先物化 publication copy，随后在 graph-state work item 内检查：
-每个 child Run 已处于 `CommitPending`、拥有精确 staged Graph/proxy，并且仍匹配 live Graph identity
-与 revision。Stale child 不发布任何 Graph/proxy/cache output，并通过现有 `ComputeError` path 失败。
-该精确 revision predicate 会拒绝旧 work，但不会停止已经运行的 callback。
+每个 child Run 已处于 `CommitPending`、拥有精确 staged Graph/proxy，并且仍匹配 live Graph
+identity、revision 与 current supersession key/generation。Stale child 不发布任何
+Graph/proxy/cache output，并通过现有 `ComputeError` path 失败。这些精确 predicate 会拒绝旧 work，
+但不会停止已经运行的 callback。
 
 对于 `RealTimeUpdate`，RT 与 HP 是 sibling computation。RT sibling 可以先提交 proxy state；HP
 sibling 则在发布 authoritative HP state 前观察 sibling commit gate。该协调不会创建 HP-to-RT task
@@ -213,8 +216,8 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 - Macro dirty-key materialization 或动态 Micro/Macro coarsening；
 - sparse ROI set、dirty-area cap、time-window merge 或 adaptive batching；
 - 自动启动 compute 的 node-to-backend dirty subscription；
-- 最终 policy-bearing `RunGroup`、Issue #74 supersession、public 或 lifecycle-driven
-  cancellation，或对已经进入的 provider callback 进行 preemption。
+- public 或 lifecycle-driven cancellation、reserved-start admission，或对已经进入的 provider
+  callback 进行 preemption。
 
 当前 dirty geometry 在 Host request、graph state、ROI propagation、planning、snapshot、
 task/work-set、write-buffer 与 `NodeExecutor` 边界中都使用内核自有的 `PixelRect` 和

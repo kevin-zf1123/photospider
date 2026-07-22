@@ -463,25 +463,29 @@ multi-Run CPU service slice is now current under `src/lib/compute/`. Issue #70's
 complete resource admission and issue #71's built-in policy-aware ready store
 are current there as well. Issue #72's exact-revision staged commit and issue
 #73's private cooperative cancellation, Run-owned commit arbitration, and
-RT-denies-HP behavior are current too. `EmbeddedHostState` constructs the
+RT-denies-HP behavior are current too. Issue #74's request-owned realtime
+`RunGroup`, checked latest-wins generations, bounded ticket-backed coalescing,
+and current-generation commit predicate are also current. `EmbeddedHostState`
+constructs the
 process execution owner before Kernel, and Kernel injects it into request-local
-`ComputeService` instances without a static singleton. Request-level `RunGroup`
-and latest-wins supersession (#74), the scheduler ABI replacement (#75), and
-the final lifecycle fence/shutdown/telemetry work (#76) remain target layout.
+`ComputeService` instances without a static singleton. Reserved-start admission
+and the scheduler ABI replacement (#75), plus the final lifecycle
+fence/shutdown/telemetry work (#76), remain target layout.
 
 In that target:
 
 - `GraphRuntime` remains graph-scoped and owns Graph state, the graph-state lane,
-  revision capture/commit validation, stable graph-instance identity and
-  lifetime anchor, events, and platform/session metadata;
+  latest-wins coordinator, bounded compute-request lane, revision/generation
+  capture and commit validation, stable graph-instance identity and lifetime
+  anchor, events, and platform/session metadata;
 - the current `ComputeRun` shared control owns non-realtime HP Runs and the
   separate HP `Full`/RT `Interactive` child Runs of realtime calls, including
   descriptor/phase/terminal and cancellation state, the Run-owned one-shot
   commit contender, and corresponding full-plan/temporary or standalone dirty
   staging storage; scheduler-backed full HP work retains non-forgeable
-  read-only leases and composite task identity, while the remaining target adds
-  request-level grouping, supersession, and final lifecycle registration;
-- request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
+  read-only leases and composite task identity, while final lifecycle
+  registration remains a later target;
+- current request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
 - the current `ExecutionService` owns one fixed built-in CPU worker pool, one
@@ -747,9 +751,10 @@ headroom charge that follows exact root lifetime without changing final ledger
 authority or Issue #70's full-ledger legacy capacity. Issue #72's strong
 identity/revision staging and issue #73's private cooperative cancellation,
 exact-Run purge/drain, Run-owned commit contention, and RT-denies-HP contract
-are now current. #74 adds latest-wins supersession, #75 replaces the
-worker-owning ABI, and #76 closes registry, graph-close/process-shutdown, and
-telemetry invariants. The authoritative acyclic
+are now current. #74 now adds latest-wins supersession, realtime `RunGroup`, and
+current-generation commit authority; #75 replaces the worker-owning ABI, and
+#76 closes registry, graph-close/process-shutdown, and telemetry invariants. The
+authoritative acyclic
 dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 

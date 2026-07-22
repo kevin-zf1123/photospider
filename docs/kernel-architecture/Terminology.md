@@ -28,9 +28,9 @@ cache, traversal, inspection, and persistence services.
 
 **`GraphRuntime`**
 The per-graph resource container. It owns one `GraphModel`, one bounded
-graph-state lane, one bounded private compute-request lane, events, current
-schedulers, and platform runtime resources. It is not the owner of compute
-dependency planning.
+graph-state lane, one bounded private compute-request lane, one private
+supersession coordinator, events, current schedulers, and platform runtime
+resources. It is not the owner of compute dependency planning.
 
 **`GraphModel`**
 The in-memory graph state: nodes, topology adjacency, parameters, outputs,
@@ -45,13 +45,18 @@ ROI projection.
 
 **`GraphStateExecutor`**
 The per-graph exclusive access mechanism used by current graph-state operations
-and visible compute capture/commit transactions. It owns one worker and a FIFO
-queue of at most 64 waiting callbacks, excluding the at-most-one active
-callback. Full-queue submission blocks; close stops admission, drains prior
-work, and joins the worker. Concurrent closers wait for the durable completion
-generation they joined, even if failure recovery reopens the lane before they
-wake. It is separate from scheduler dispatch and its worker is not a scheduler
-worker slot.
+and visible compute capture/commit transactions. Its graph-state mode owns one
+worker and at most 64 waiting callbacks, excluding the at-most-one active
+callback. The private compute-request instance instead charges at most 64 total
+queued, running, or parked one-shot/ticket admissions; its active worker is not
+an uncharged sixty-fifth unit. A reserved continuation owns one persistent FIFO
+node from reservation through retirement, and wake/worker-tail handoff never
+self-submits or waits for capacity. Full-capacity admission blocks; close stops
+external admission/wake, drains prior one-shot and reserved-ticket work, and
+joins the worker. Concurrent closers wait for the durable completion generation
+they joined, even if failure recovery reopens the lane before they wake. The
+executor remains separate from scheduler dispatch and its worker is not a
+scheduler worker slot.
 
 **Graph document**
 The persisted representation used to create or update graph state. YAML is the
@@ -74,7 +79,19 @@ The private checked nonzero revision of compute-correctness state within one
 Graph instance. Scoped structural, document, cache, dirty, and lifecycle
 mutations advance it; compute snapshots and successful compute publication
 preserve it. Exact identity and revision equality is the current commit
-compatibility rule. Topology generation remains a separate planning cache key.
+compatibility rule. Product compute additionally requires the Run-captured
+supersession key and generation to remain exactly current. Topology generation
+remains a separate planning cache key.
+
+**`SupersessionKey` / `SupersessionGeneration`**
+The private latest-wins identity inside one live Graph. The key is target node
+plus canonical request intent: missing intent and explicit HP are the same
+lineage, while realtime is distinct. A checked nonzero graph-wide allocator
+gives every prepared candidate a strictly increasing generation and never
+wraps or reuses a value. Allocation is preparatory; graph-state publication is
+the current-generation linearization point. Each admitted key owns at most one
+reserved compute-lane ticket, one active/draining candidate, and one latest
+pending mailbox value.
 
 ## Compute Planning and Execution
 
@@ -95,7 +112,8 @@ The current private, request-owned execution record for one non-realtime HP
 domain or one realtime HP/RT child domain. Its immutable descriptor contains
 an opaque non-reused Run id, session label, strong Graph instance identity,
 authoritative `GraphRevision`, target, single-domain intent, matching
-full/interactive quality, and explicit QoS. Its shared control owns monotonic
+full/interactive quality, explicit QoS, and immutable request supersession
+identity. Its shared control owns monotonic
 phase, one exact terminal/commit arbiter, the stable first cancellation reason,
 and the full submission plan/temporary results or dirty HP staging required by
 its path. The Run mints a private weak-lifetime cancellation source; ordinary
@@ -103,12 +121,18 @@ its path. The Run mints a private weak-lifetime cancellation source; ordinary
 deadline and retain cleanup/commit-contender lifetime. Built-in CPU full,
 dirty, and preflight tasks execute owned callbacks through the fixed
 multi-Graph `ExecutionService` and publish failure only through a matching
-`(RunId, RunLocalTaskId)`. Realtime requests create independent HP and RT child
-Runs without a `RunGroup`; RT cancellation before proxy commit denies HP, while
-HP cancellation cannot roll back an already committed RT proxy. Latest-wins
-supersession and request-owned `RunGroup` (#74), the final lifecycle registry
-and close/shutdown wiring (#76), and public cancellation controls remain future
-work.
+`(RunId, RunLocalTaskId)`.
+
+**`RunGroup`**
+The current private request owner for one realtime HP/RT pair. It captures one
+realtime supersession identity, owns distinct HP Full and RT Interactive child
+Runs plus their observation leases, shares request-wide cancellation and the
+monotonic RT-first sibling gate, and deterministically aggregates resource
+failure, other failure, group/child cancellation, or success. RT cancellation
+or failure before proxy commit denies HP; child-only HP cancellation does not
+cancel RT; an already committed RT proxy is not rolled back by later HP or
+generation failure. It owns no child plan/dispatcher, worker, Graph state,
+resource mint, lifecycle registry, or public cancellation control.
 
 **`ComputeRunQos`**
 The private immutable scheduling inputs captured by a Run: an explicit
@@ -336,8 +360,12 @@ planning, cache, or scheduling semantics.
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution_service.hpp`
+- `src/lib/compute/compute_request_coordinator.hpp`
+- `src/lib/compute/compute_supersession.hpp`
+- `src/lib/compute/run_group.hpp`
 - `src/lib/runtime/resource_ledger.hpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_resource_ledger.cpp`
+- `tests/unit/test_compute_supersession.cpp`

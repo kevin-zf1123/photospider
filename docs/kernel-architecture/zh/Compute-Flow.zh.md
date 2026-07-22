@@ -20,8 +20,9 @@ CLI / TUI
 ```
 
 `Kernel` 拥有多图 API。`GraphRuntime` 拥有一个图模型、每图可见状态
-`GraphStateExecutor`、独立的有界串行 compute-request lane、事件服务、平台 context，以及每个
-intent 的一个 execution binding。Legacy binding 拥有 scheduler 实例；
+`GraphStateExecutor`、独立的有界串行 compute-request lane、每个 live Graph 的一个
+`ComputeRequestCoordinator`、事件服务、平台 context，以及每个 intent 的一个 execution
+binding。Legacy binding 拥有 scheduler 实例；
 内建 CPU binding 选择 ownerless process-service route。Embedded composition root 还会在
 Kernel 之前创建一个私有固定 CPU `ExecutionService`；Kernel 会把该 owner 注入每个
 request-local `ComputeService`。该 service 独占 Host 权威 resource ledger 与 policy-aware
@@ -82,18 +83,21 @@ ComputeService facade
   -> ready-task ExecutionService 或 legacy scheduler dispatch
 ```
 
-在上述任何 planning step 前，每次非 realtime HP service call 都会创建且只创建一个
-request-owned `ComputeRun`；realtime call 则创建不同的 HP 与 RT child Run。每个 Run 都捕获
-fresh opaque Run id、caller-visible session label、不复用的强 Graph instance identity、非零权威
-`GraphRevision`、target、单 domain intent、full 或 interactive quality 与显式 QoS。Topology
-generation 仍是独立的 task-shape cache key，不再充当 Run revision provenance。Sequential、
-legacy scheduler、内建 CPU 与 dirty 变体共享此边界。Full HP Run control 拥有 materialized plan
+在上述任何 planning step 前，coordinator 已为 request 分配 canonical `(target, intent)`
+supersession key 与经检查的 graph-wide generation。每次非 realtime HP service call 都会创建且
+只创建一个 request-owned `ComputeRun`；realtime call 则创建一个含独立 HP 与 RT child Run 的
+`RunGroup`。每个 child 都捕获 fresh opaque Run id、caller-visible session label、不复用的强
+Graph instance identity、非零权威 `GraphRevision`、target、单 domain intent、full 或
+interactive quality、显式 QoS 与不可变 supersession identity。Topology generation 仍是独立的
+task-shape cache key，不再充当 Run revision provenance。Sequential、legacy scheduler、内建 CPU
+与 dirty 变体共享此边界。Full HP Run control 拥有 materialized plan
 与 runner；每个真实 ready task 在 execution、dependency release、validation 与 commit 期间都会
 保留不可伪造的 Run lease 与 `(RunId, RunLocalTaskId)`。内建 CPU full HP、
 connected-parameter preflight 与 dirty HP/RT 会把 dependency-ready work 包装为 move-only
 `ReadyTaskSubmission`，并发送到固定 multi-Run service。Dirty 阶段使用 heap-owned context，
 因此没有 stack `TaskExecutor*` 跨越该边界。Serial、GPU 与 plugin route 保留 legacy scheduler
-callback/handle。Realtime child 独立 settle；确定性的目标 `RunGroup` settlement 仍是后续工作。
+callback/handle。Realtime child 通过 request-owned `RunGroup` settle；其稳定 control 拥有两个
+observation lease、RT-first gate、cancellation fan-out 与确定性 aggregate outcome。
 
 `FullTaskGraphExpander` 会把原始 graph 展开为一个 compute domain 的完整 node/tile task graph。
 它不依赖请求目标、cache 状态或 dirty snapshot。`NodeCacheTaskGraphPruner` 随后把该 graph
@@ -240,10 +244,13 @@ mutation、request snapshot capture、精确 commit predicate evaluation 与 no-
 mutation 可以推进 `GraphRevision`；旧 request 随后会在精确 revision predicate 处失败，而不会
 覆盖新 Graph。
 
-每个 runtime 还拥有一条有界串行 compute-request lane。同步、返回图像与异步 compute，以及
-scheduler inspection/replacement 都使用该 lane。它在不向 callback 暴露 live model 的前提下，
-保持 same-Graph request 顺序与 raw legacy scheduler-owner lifetime。即使 caller 销毁返回的
-future，该 lane 仍会保留已接受 work。不同 Graph runtime 彼此独立。
+每个 runtime 还拥有一条有界串行 compute-request lane。同步、返回图像与异步 compute 会通过
+coordinator publication；scheduler inspection/replacement 仍使用普通 one-shot submission。
+该 lane 精确计费 64 个 queued、running 或 parked 单元。每个 supersession key 会保留一个持久
+continuation ticket 与一个 latest pending mailbox；重复 publication 只替换该 pending value。
+现有 lane worker 是唯一的 logical active-request runner，每次 ticket turn 最多让一个 generation
+经过既有 Kernel/ComputeService path 执行；不会创建额外 background runner 或 generation thread。
+不同 Graph runtime 彼此独立，位于不同 live Graph instance 的相同 label 也不会互相 supersede。
 
 Required-session lifetime admission 仍会覆盖同步/异步 compute、required graph save、node-YAML
 replacement、ROI projection、timing inspection 与 all-cache clearing，直至完成 public
@@ -259,17 +266,20 @@ compute-request lane 内复制 name/statistics，不会让 raw scheduler pointer
 每条产品 compute path 现在都使用 staged output。Kernel 在同一 identity/revision 捕获完整 Graph
 与可选 RT proxy，关闭 snapshot 磁盘写入，并且只针对这些 snapshot 执行 sequential、
 scheduler-backed、dirty HP 与 RT work。本地 output validation 后，ComputeService 会把匹配 Run
-推进到 `CommitPending`。私有产品 commit policy 会验证精确 Run/staged/live identity 与 revision，
-执行符合条件的延迟 HP cache persistence，并在同一 graph-state work item 中交换完整可见状态。
+推进到 `CommitPending`。私有产品 commit policy 会验证精确 Run/staged/live identity、权威
+revision 与 current supersession key/generation，执行符合条件的延迟 HP cache persistence，并在
+同一 graph-state work item 中交换完整可见状态。
 只有该 transaction 成功后才会发布 Run success。
 
-这是截至 issue #73 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
+这是截至 issue #74 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
 realtime request 的两个 child Run；immutable deadline 会在有界 observation point 提议
 `DeadlineExceeded`，Run-owned terminal arbiter 则会排列 cancellation、failure 与 visible commit。
-这不是 preemptive 或 latest-wins execution；它不声称实现 issue #74 supersession、最终
-`RunLifecycleRegistry`、graph-lifetime lease、request-level `RunGroup` settlement，或 public
-Host/CLI/IPC cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent
-语义既不定义可见性，也不定义 cancellation authority。
+每个 Graph 的 latest-wins publication 会让精确 key 的最新 generation 成为权威、请求取消旧的
+active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。这是
+cooperative 而不是 preemptive execution；它不声称实现最终 `RunLifecycleRegistry`、
+graph-lifetime lease、reserved-start admission、provider preemption 或 public Host/CLI/IPC
+cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent 语义既不定义
+可见性，也不定义 cancellation authority。
 
 ## GlobalHighPrecision
 
@@ -305,14 +315,18 @@ value。该请求不会隐式表示全帧 RT 更新。
 `RealtimeProxyGraph`；HP 会通过 staged buffer 更新受影响 graph 工作的完整尺寸权威输出。
 如果 request 是 forced，HP sibling 会遵循与 Global HP dirty update 相同的 full-frame HP
 planning 规则；RT proxy work 仍然按 RT dirty plan 的局部范围执行。
-该请求会创建一个 full quality HP child Run 和一个 interactive quality RT child Run。当两个
+该请求会创建一个 `RunGroup`，其中包含一个 full quality HP child Run 和一个 interactive quality
+RT child Run。当两个
 物理 execution domain 都可用时，`IntentUpdateCoordinator` 会并发启动两个 sibling，先等待
 RT，并通过 sibling commit gate 保证 HP 只在经过 revision 验证的 RT proxy publication 成功后，
 才尝试自身独立的 Graph commit。
 内建 CPU child 共享固定 service；legacy route 使用各自的 intent scheduler。没有 parallel
 domain 时，同一批 callback 会按 RT 后 HP 的顺序 inline 执行。每个 child 只有在自身 visible
-commit 后才发布终态。有效 RT publication 后的 Graph mutation 可能让 HP sibling 变为 stale；
-RT 保持可见，而 HP 以 `ComputeError` 失败。目标 aggregate `RunGroup` policy 尚未实现。
+commit 后才发布终态；group 会在两个 child observation lease 都 settle 后才解析稳定 aggregate。
+有效 RT publication 后的 Graph mutation 可能让 HP sibling 变为 stale；RT 保持可见，而 HP 以
+`ComputeError` 失败。更新的 realtime generation 会取消两个旧 child，并拒绝旧 pending gate。
+如果旧 RT proxy 先完成 commit，它会保持可见，但旧 HP sibling 仍会在 current-generation
+predicate 失败。
 
 并发路径还会让两个 sibling 共享一个 request-owned 的 per-node synchronization object。它会保护
 同一节点的 live `Node` snapshot 与 format-neutral parameter resolution，但不会合并两个 domain plan：
@@ -400,8 +414,9 @@ ledger 耗尽时，`GraphErrc::ComputeError` 会通过 embedded Host 与 IPC sta
 
 - 同一份 request plan 同时提供顺序与并行执行语义；execution strategy 只改变机制，不改变
   topology 或 dirty 含义。
-- 一个非 realtime HP request 拥有一个 `ComputeRun`；realtime 从 planning 前的 descriptor
-  capture 到各自独立 terminal publication，拥有不同的 HP 与 RT child Run。HP Run 拥有
+- 一个非 realtime HP request 拥有一个 `ComputeRun`；realtime 拥有一个 `RunGroup`，其中包含从
+  planning 前 descriptor capture 到各自独立 terminal publication 与 aggregate settlement 的不同
+  HP 与 RT child Run。HP Run 拥有
   full-plan temporary result 或 dirty HP staging。每个内建 CPU callback 都保留匹配 child
   lease 与复合 task identity，但 Run 不拥有 Graph state、worker 或 dependency transition
   的语义。
@@ -416,25 +431,29 @@ ledger 耗尽时，`GraphErrc::ComputeError` 会通过 embedded Host 与 IPC sta
   provenance。Deadline 仍是 ordering input，并且会在 Run 到达 cooperative observation point 时
   触发 expiry。内建 ready publication、queue/dequeue、operation、dependency、phase 与 commit
   边界都会观察私有 Run cancellation；已经进入的 non-preemptible provider 可以完成，但其 staged
-  output 不能 commit。当前仍没有 supersession、public cancellation control 或 lifecycle
-  cancellation contract。
+  output 不能 commit。Current supersession generation 是独立 commit predicate，因此迟到的
+  cancellation 无法恢复 stale output。Public cancellation control 与 lifecycle cancellation 仍是
+  后续契约。
 
 这些拆分使 planning、physical dispatch 与 visible commit 可以独立测试。
 [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)约束当前
 graph-state/dispatch 区分。已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
 同时定义当前固定的多 Graph HP/RT service、独立 child Run、内建 policy ordering、
-lease/completion isolation、权威 revision-safe staging、RT-first 独立 commit gate 与 cooperative
-Run cancellation，以及后续确定性 `RunGroup` settlement、admitted-Run registry 与更广泛的
-lifecycle 所有权，而
-[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述剩余 supersession 与
-lifecycle 边界，但不会让这些后续切片成为当前流程的一部分。
+lease/completion isolation、权威 revision/generation-safe staging、RT-first 独立 commit gate、
+cooperative Run cancellation、确定性 `RunGroup` settlement 与 latest-wins supersession，以及后续
+admitted-Run registry 与更广泛的 lifecycle 所有权，而
+[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述剩余 scheduler-admission
+与 lifecycle 边界，但不会让这些后续切片成为当前流程的一部分。
 
 ## 实现与验证入口
 
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/compute_supersession.*`
+- `src/lib/compute/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/compute/run_group.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/intent_update_coordinator.*`

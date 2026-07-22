@@ -22,8 +22,10 @@ cancellation source, read-only lease/deadline observation, one terminal/commit
 arbiter, exact-Run queued purge, running drainage, dependent rejection, and
 RT-denies-HP cancellation. The commit policy owns no cancellation source; it
 retains a read-only lease and resolves the Run-owned contender inside the
-serialized publication transaction. Latest-wins supersession and request-level
-`RunGroup` (#74), the scheduler ABI replacement (#75), the final lifecycle
+serialized publication transaction. Issue #74 now adds request-level realtime
+`RunGroup`, checked per-Graph latest-wins generations, bounded ticket-backed
+coalescing on the existing compute-lane worker, and current-generation commit
+authority. The scheduler ABI replacement (#75), the final lifecycle
 registry/graph-close/process-shutdown/telemetry contract (#76), and public
 Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes
 this ADR only as the detailed
@@ -52,8 +54,9 @@ service, while cancellation and supersession remained outside that historical
 slice. Current software now implements Issue #73 cooperative cancellation as
 Run-owned terminal correctness: the service observes and purges/drains only the
 matching Run, while the graph-state transaction arbitrates cancellation against
-commit. Latest-wins supersession remains Issue #74 work; final lifecycle-driven
-graph-close/process-shutdown cancellation remains Issue #76 work.
+commit. Latest-wins supersession and request-level realtime grouping are now
+current Issue #74 behavior; final lifecycle-driven graph-close/process-shutdown
+cancellation remains Issue #76 work.
 
 Moving those schedulers to a global object without introducing a stable Run
 lifetime and host-owned resource accounting would only relocate the problem.

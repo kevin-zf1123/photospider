@@ -26,8 +26,9 @@ are authoritative; reader-oriented Chinese copies live under
 
 Issue #67 established one private, request-owned `ComputeRun` for each
 non-realtime HP request. Issue #69 extended current behavior so realtime
-requests create independent HP `Full` and RT `Interactive` child Runs without
-creating a `RunGroup`; built-in CPU submissions from those Runs and from
+requests create independent HP `Full` and RT `Interactive` child Runs; issue
+#74 now composes those children in one private request-owned `RunGroup` without
+creating a mixed-domain Run. Built-in CPU submissions from those Runs and from
 multiple Graphs share one fixed Host-composed `ExecutionService`. Each Run
 retains its descriptor, monotonic phase, exact terminal outcome, plan or dirty
 staging, stable `ComputeRunLease` values, and
@@ -44,14 +45,19 @@ roots and follows exact ledger root lifetime; Interactive and transitional
 legacy roots do not debit that class quota. Issue #72 makes strong non-reused
 Graph instance identity, checked nonzero authoritative `GraphRevision`,
 request-owned product snapshots, exact-revision staged publication, and the
-separate compute-request lane current. RT publishes before opening its sibling
-gate, and a later stale HP result cannot roll it back. Do not describe the
-remaining accepted targets as current: issue #73 cancellation, issue #74
-supersession, issue #75 policy-only scheduler ABI generation, and issue #76
-request-owned `RunGroup`, final `ExecutionService::RunLifecycleRegistry`,
-graph-close/process-shutdown fence, and final lifecycle/telemetry invariants
-remain future. The general `Value` model, heterogeneous executors, server
-control plane, and isolated plugin workers also remain later target work.
+separate compute-request lane current. Issue #73 adds private request
+cancellation, exact Run settlement, and the one-shot commit contender. Issue
+#74 adds per-live-Graph latest-wins supersession: missing intent canonicalizes
+to HP, every candidate receives a graph-wide checked generation, same-key
+pending work coalesces behind one reserved ticket, and exact generation joins
+instance/revision validation before visible commit. RT publishes before opening
+its `RunGroup` sibling gate, and later stale HP or failed newer work cannot roll
+back an already valid RT proxy. Do not describe the remaining accepted targets
+as current: issue #75 policy-only scheduler ABI generation and issue #76 final
+`ExecutionService::RunLifecycleRegistry`, graph-close/process-shutdown fence,
+and lifecycle/telemetry invariants remain future. The general `Value` model,
+heterogeneous executors, server control plane, and isolated plugin workers also
+remain later target work.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains
@@ -75,7 +81,8 @@ context document.
   built-in CPU full, dirty, and preflight completion is scoped by one stable
   Run lease and `(RunId, RunLocalTaskId)`; only legacy dirty scheduler routes
   retain their synchronous borrowed-handle path.
-- A target `RunGroup` coordinates results and lifecycle for independent HP/RT
-  Runs; it is not a mixed-domain Run or a cross-domain task graph.
+- A request-owned `RunGroup` coordinates results and cancellation for
+  independent HP/RT Runs; it is not a mixed-domain Run or a cross-domain task
+  graph.
 - A graph-lifetime lease protects a target Graph lifetime; it does not make
   `GraphRuntime` the owner of admitted Runs or their process registry.

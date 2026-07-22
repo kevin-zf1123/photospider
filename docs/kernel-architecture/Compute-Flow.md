@@ -22,8 +22,9 @@ CLI / TUI
 
 `Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, a
 per-graph visible-state `GraphStateExecutor`, a separate bounded serial
-compute-request lane, event service, platform context, and one execution
-binding per intent. Legacy bindings own scheduler instances;
+compute-request lane, one per-live-Graph `ComputeRequestCoordinator`, event
+service, platform context, and one execution binding per intent. Legacy
+bindings own scheduler instances;
 built-in CPU bindings select an ownerless process-service route. The embedded
 composition root also creates one private fixed CPU `ExecutionService` before
 Kernel. The service exclusively owns the Host-authoritative resource ledger
@@ -101,14 +102,17 @@ ComputeService facade
   -> ready-task ExecutionService or legacy scheduler dispatch
 ```
 
-Before any of those planning steps, each non-realtime HP service call creates
-exactly one request-owned `ComputeRun`; a realtime call creates separate HP and
-RT child Runs. Each captures a fresh opaque Run id, caller-visible session
+Before any of those planning steps, the coordinator has assigned the request a
+canonical `(target, intent)` supersession key and checked graph-wide generation.
+Each non-realtime HP service call creates exactly one request-owned
+`ComputeRun`; a realtime call creates one `RunGroup` with separate HP and RT
+child Runs. Each child captures a fresh opaque Run id, caller-visible session
 label, non-reused strong Graph instance identity, nonzero authoritative
 `GraphRevision`, target, single-domain intent, full or interactive quality,
-and explicit QoS. Topology generation remains a separate task-shape cache key
-and is not Run revision provenance. Sequential, legacy-scheduler, built-in CPU,
-and dirty variants share this boundary. Full HP Run control owns the
+explicit QoS, and the immutable supersession identity. Topology generation
+remains a separate task-shape cache key and is not Run revision provenance.
+Sequential, legacy-scheduler, built-in CPU, and dirty variants share this
+boundary. Full HP Run control owns the
 materialized plan and runner; every
 real ready task retains a non-forgeable Run lease and
 `(RunId, RunLocalTaskId)` through execution, dependency release, validation,
@@ -116,8 +120,9 @@ and commit. Built-in CPU full HP, connected-parameter preflight, and dirty
 HP/RT package dependency-ready work as move-only `ReadyTaskSubmission` values
 for the fixed multi-Run service. Dirty phases use heap-owned contexts, so no
 stack `TaskExecutor*` crosses that boundary. Serial, GPU, and plugin routes
-retain legacy scheduler callbacks/handles. Realtime children settle
-independently; deterministic target `RunGroup` settlement remains future work.
+retain legacy scheduler callbacks/handles. Realtime children settle through
+the request-owned `RunGroup`, whose stable control owns both observation leases,
+the RT-first gate, cancellation fan-out, and deterministic aggregate outcome.
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
 for one compute domain. It does not depend on the request target, cache state,
@@ -304,11 +309,16 @@ blocked; that request later fails its exact revision predicate instead of
 overwriting the newer Graph.
 
 Each runtime also owns a bounded serial compute-request lane. Synchronous,
-image-returning, and asynchronous compute use it, as do scheduler inspection
-and replacement. It preserves same-Graph request order and raw legacy
-scheduler-owner lifetime without exposing the live model to its callbacks.
-The lane retains accepted work even when its caller destroys the returned
-future. Unrelated Graph runtimes remain independent.
+image-returning, and asynchronous compute publish through the coordinator;
+scheduler inspection and replacement still use ordinary one-shot submissions.
+The lane charges exactly 64 total queued, running, or parked units. Each
+supersession key reserves one persistent continuation ticket and one latest
+pending mailbox; repeated publication replaces only that pending value. The
+existing lane worker is the sole logical active-request runner, and each ticket
+turn executes at most one generation through the existing Kernel/ComputeService
+path. It creates no extra background runner or generation thread. Unrelated
+Graph runtimes and equal labels in distinct live Graph instances remain
+independent.
 
 Required-session lifetime admission still covers synchronous and asynchronous
 compute, required graph save, node-YAML replacement, ROI projection, timing
@@ -330,17 +340,21 @@ Graph and optional RT proxy at one identity/revision, suppresses snapshot disk
 writes, and executes sequential, scheduler-backed, dirty HP, and RT work only
 against those snapshots. After local output validation, ComputeService advances
 the matching Run to `CommitPending`. A private product commit policy validates
-the exact Run/staged/live identity and revision, performs eligible deferred HP
-cache persistence, and swaps complete visible state in the same graph-state
-work item. It publishes Run success only after that transaction succeeds.
+the exact Run/staged/live identity, authoritative revision, and current
+supersession key/generation, performs eligible deferred HP cache persistence,
+and swaps complete visible state in the same graph-state work item. It publishes
+Run success only after that transaction succeeds.
 
-This is the current baseline through issue #73. A private request source can
+This is the current baseline through issue #74. A private request source can
 cooperatively cancel one HP Run or both current realtime child Runs; immutable
 deadlines propose `DeadlineExceeded` at bounded observation points, and the
 Run-owned terminal arbiter orders cancellation, failure, and visible commit.
-This is not preemptive or latest-wins execution. It does not claim issue #74
-supersession, the final `RunLifecycleRegistry`, a graph-lifetime lease,
-request-level `RunGroup` settlement, or public Host/CLI/IPC cancellation.
+Per-Graph latest-wins publication makes the newest generation authoritative for
+that exact key, requests cancellation of an older active owner, coalesces one
+pending owner, and still denies stale commit if cancellation arrives late.
+This is cooperative rather than preemptive execution. It does not claim the
+final `RunLifecycleRegistry`, a graph-lifetime lease, reserved-start admission,
+provider preemption, or public Host/CLI/IPC cancellation.
 Commit policy remains conceptually separate from `ComputeIntent`, because
 HP/RT intent semantics define neither visibility nor cancellation authority.
 
@@ -385,17 +399,22 @@ first and updates a low-resolution `RealtimeProxyGraph`; HP updates the
 full-size authoritative output for the affected graph work through a staged
 buffer. If the request is forced, the HP sibling follows the same full-frame HP
 planning rule as Global HP dirty update, while RT proxy work remains scoped to
-the RT dirty plan. The request creates one HP child Run with full quality and
-one RT child Run with interactive quality. When both physical execution domains
+the RT dirty plan. The request creates one `RunGroup` containing an HP child Run
+with full quality and an RT child Run with interactive quality. When both
+physical execution domains
 are available, `IntentUpdateCoordinator` starts both siblings concurrently,
 waits for RT first, and uses a sibling commit gate so HP can attempt its
 independent Graph commit only after revision-validated RT proxy publication
 succeeds. Built-in CPU children share the fixed
 service; legacy routes use their intent schedulers. Without parallel domains,
 the same callbacks run inline in RT-then-HP order. Each child publishes its own
-terminal outcome only after its visible commit. A Graph mutation after valid RT
-publication may make the HP sibling stale; RT remains visible while HP fails
-with `ComputeError`. The target aggregate `RunGroup` policy is not implemented.
+terminal outcome only after its visible commit, and the group resolves a stable
+aggregate only after both child observation leases settle. A Graph mutation
+after valid RT publication may make the HP sibling stale; RT remains visible
+while HP fails with `ComputeError`. A newer realtime generation cancels both
+older children and denies an older pending gate. If the old RT proxy committed
+first it remains visible, but the old HP sibling still fails the
+current-generation predicate.
 
 The concurrent path also shares one request-owned per-node synchronization
 object between the siblings. It protects live `Node` snapshot and
@@ -506,9 +525,10 @@ published.
 
 - One request plan supplies both sequential and parallel execution semantics;
   the execution strategy changes mechanics, not topology or dirty meaning.
-- One non-realtime HP request owns one `ComputeRun`; realtime owns separate HP
-  and RT child Runs from pre-planning descriptor capture through independent
-  terminal publication. HP Runs own full-plan temporary results or dirty HP
+- One non-realtime HP request owns one `ComputeRun`; realtime owns one
+  `RunGroup` with separate HP and RT child Runs from pre-planning descriptor
+  capture through independent terminal publication and aggregate settlement.
+  HP Runs own full-plan temporary results or dirty HP
   staging. Every built-in CPU callback retains a matching child lease and
   composite task identity, but a Run does not own Graph state, workers, or the
   meaning of dependency transitions.
@@ -527,27 +547,32 @@ published.
   observation point. Built-in ready publication, queue/dequeue, operation,
   dependency, phase, and commit boundaries observe private Run cancellation;
   entered non-preemptible providers may finish, but their staged output cannot
-  commit. There is no supersession, public cancellation control, or lifecycle
-  cancellation contract.
+  commit. The current supersession generation is an independent commit
+  predicate, so late cancellation cannot resurrect stale output. Public
+  cancellation control and lifecycle cancellation remain future contracts.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
 governs the current graph-state/dispatch distinction. The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-defines both the current fixed multi-Graph HP/RT service, independent child
-Runs, built-in policy ordering, lease/completion isolation, authoritative
-revision-safe staging, RT-first independent commit gate, and cooperative Run
-cancellation, plus the later deterministic `RunGroup` settlement, admitted-Run
-registry, and broader lifecycle ownership, while the
+defines the current fixed multi-Graph HP/RT service, independent child Runs,
+built-in policy ordering, lease/completion isolation, authoritative
+revision/generation-safe staging, RT-first independent commit gate,
+cooperative Run cancellation, deterministic `RunGroup` settlement, and
+latest-wins supersession, plus the later admitted-Run registry and broader
+lifecycle ownership, while the
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-describes the remaining supersession and lifecycle boundary without making
-those later slices part of the current flow.
+describes the remaining scheduler-admission and lifecycle boundary without
+making those later slices part of the current flow.
 
 ## Implementation and Validation Entry Points
 
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/compute_supersession.*`
+- `src/lib/compute/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/compute/run_group.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/intent_update_coordinator.*`

@@ -378,6 +378,42 @@ cmake --build build \
   --gtest_filter='SchedulerPluginLoaderTest.PublicSchedulerAbiIsExactlyVersionTwo'
 ```
 
+## Latest-wins supersession 验证
+
+Issue #74 把 latest-wins 与 realtime-group coverage 保留在长期维护的行为测试中。
+`test_compute_supersession` 负责缺失/显式 HP 的 canonical key 等价性、checked nonzero generation
+overflow、compute lane 精确 64 个总单元的 admission、persistent ticket FIFO/wake 行为、并发
+same-key ticket adoption、跨 target/intent/Graph isolation、close retirement、确定性的 18,000 与
+36,000 次 publication storm，以及 `RunGroup` cancellation/aggregate 规则。Stress case 会断言一个
+ticket、一个 logical active owner、至多一个 pending owner、被替换 owner 的精确 settlement，并且
+只有最终 current generation 保持 commit eligibility；它们不创建 background runner，也不依赖
+timing sleep。
+
+`test_kernel_contracts` 负责产品边界。它证明缺失 intent 与显式 HP 共用一个 key、最新 work 失败
+不会恢复更旧的 prepared commit、已经提交的旧 output 保持可见，以及 RT publication 前后发生的
+realtime supersession 都会拒绝旧 HP sibling，同时保留有效的旧 proxy。`test_compute_run` 覆盖不可变
+supersession identity，以及 child-local 与 group-wide cancellation。现有
+`test_compute_service_split`、`test_host_adapter` 与 `test_bad_alloc_boundaries` 继续作为 service、Host
+lifecycle 与 allocation-failure 边界的 focused regression companion。
+
+可用以下命令执行 focused supersession boundary：
+
+```bash
+cmake --build build \
+  --target test_compute_supersession test_kernel_contracts test_compute_run \
+  test_compute_service_split test_host_adapter test_bad_alloc_boundaries -j
+./build/tests/test_compute_supersession
+./build/tests/test_kernel_contracts
+./build/tests/test_compute_run
+./build/tests/test_compute_service_split
+./build/tests/test_host_adapter
+./build/tests/test_bad_alloc_boundaries
+```
+
+Installed Host、CLI、IPC version 1、operation plugin 与 scheduler plugin contract 均未改变。IPC
+继续拒绝 `compute.cancel` 并发布 `cancellable: false`；supersession 是私有 embedded-kernel 行为，
+不是新的 public control surface。
+
 以下 focused companion regression 负责其余边界：
 
 - `test_kernel_contracts` 驱动真实 `GraphIOService` stream 进入 post-write、post-flush 与

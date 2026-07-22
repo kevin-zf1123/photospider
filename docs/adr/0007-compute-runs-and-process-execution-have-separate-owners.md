@@ -2,14 +2,14 @@
 
 ## Status
 
-Accepted as the target architecture. Issues #70 through #73 are current software
+Accepted as the target architecture. Issues #70 through #74 are current software
 behavior for the CPU execution/resource and scheduling slice: the embedded
 composition root injects one fixed `ExecutionService`; built-in CPU HP, RT,
 connected-parameter preflight, and
 dirty source/downstream work crosses a move-only `ReadyTaskSubmission`
 boundary. Independent Runs from multiple Graphs may overlap, with Run-local
-completion, failure, trace, and Host state. Realtime requests create distinct
-HP and RT child Runs, but do not yet create the target `RunGroup`. Built-in CPU
+completion, failure, trace, and Host state. Realtime requests create one
+request-owned `RunGroup` with distinct HP and RT child Runs. Built-in CPU
 intent bindings are ownerless at `GraphRuntime`; serial, GPU, and plugin routes
 retain per-Graph schedulers. The service now exclusively owns one
 Host-authoritative `ResourceLedger`, atomically admits complete Run vectors,
@@ -28,9 +28,14 @@ dependent re-entry is rejected, and accepted cancellation cannot publish staged
 state. RT cancellation while the sibling gate is `Pending` denies HP commit and
 requests HP cancellation. Installed Host, CLI, and IPC v1 surfaces remain
 non-cancellable and IPC jobs continue to report `cancellable: false`.
-Latest-wins supersession (#74), the replacement policy-only scheduler ABI
-(#75), and `RunLifecycleRegistry` plus final close/shutdown/telemetry (#76)
-remain target behavior.
+Issue #74 adds checked per-Graph supersession generations, exact-key latest
+pending coalescing, one persistent continuation ticket per admitted key,
+stable supersession cancellation, current-generation commit authority, and
+deterministic `RunGroup` aggregate settlement. The existing bounded
+compute-request lane worker is the only logical active runner; no per-Graph
+background runner or per-generation thread is added. Reserved start and the
+replacement policy-only scheduler ABI (#75), plus `RunLifecycleRegistry` and
+final close/shutdown/telemetry (#76), remain target behavior.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -155,7 +160,7 @@ None is inferred from another.
 
 ### Monotonic state and one terminal outcome
 
-The phase progression, current for private Runs through Issue #73 and retained
+The phase progression, current for private Runs through Issue #74 and retained
 by the complete target, is:
 
 ```text
@@ -171,10 +176,9 @@ Exactly one terminal outcome is published:
 - `Succeeded`, only after validated visible commit or validated no-op success;
 - `Failed`, carrying the exact host-owned failure or exception category,
   including admission failure; or
-- `Cancelled`, carrying a stable reason. Current private #73 sources cover an
-  explicit request and an expired monotonic deadline; graph-close,
-  process-shutdown, and supersession source wiring remains assigned to #76 and
-  #74.
+- `Cancelled`, carrying a stable reason. Current private sources cover an
+  explicit request, an expired monotonic deadline, and issue #74 supersession;
+  graph-close and process-shutdown source wiring remains assigned to #76.
 
 Operation completion alone is not success. The dispatcher must finish
 dependency aggregation and the graph-state commit transaction must validate the
@@ -457,29 +461,29 @@ persistence failure resolves it as the exact Run failure. A later cancellation
 is a no-op. Failed validation discards staged output and cannot mutate visible
 Graph/proxy state or write deferred cache artifacts.
 
-The complete target extends that current predicate only with an `Open` registry
-graph row, a registered Run and valid graph-lifetime lease from #76, and a
-current supersession generation from #74.
+Issue #74 extends that current predicate with exact supersession key/generation
+equality against the live Graph coordinator. The remaining complete target adds
+an `Open` registry graph row plus a registered Run and valid graph-lifetime
+lease from #76.
 
 Revision compatibility is never inferred from equal topology or similar
 output. Any future compatible-revision optimization requires a new explicit
 decision.
 
-The #74 supersession target makes a newer generation current and requests
+The current #74 supersession path makes a newer generation current and requests
 cancellation of older matching Runs. It does not mutate their plans or reuse
 their identity. Non-preemptible work and external side effects may finish, but
 stale, cancelled, failed, or overdue output cannot commit.
 
-For a paired realtime request, the request-owned sibling gate is a monotonic
-three-state latch: `Pending`, `RtCommitted`, or `Denied`. In current software
-through Issue #73, validated RT publication transitions `Pending ->
-RtCommitted`, while RT failure or cancellation before publication transitions
-`Pending -> Denied`; cancellation also requests HP cancellation. `Denied` never
-reopens even if late RT work completes. The HP child applies independent
-revision, cancellation, terminal, and staged-output predicates, so a later
-stale or cancelled HP result does not roll back RT. Issue #74 adds the
-supersession-generation predicate, while #76 adds graph-closing and
-process-shutdown denial sources.
+For a paired realtime request, the request-owned `RunGroup` gate is a monotonic
+three-state latch: `Pending`, `RtCommitted`, or `Denied`. Validated RT
+publication transitions `Pending -> RtCommitted`, while RT failure,
+cancellation, or supersession before publication transitions `Pending ->
+Denied`; cancellation also requests HP cancellation. `Denied` never reopens
+even if late RT work completes. The HP child applies independent revision,
+generation, cancellation, terminal, and staged-output predicates, so a later
+stale or cancelled HP result does not roll back RT. Issue #76 adds
+graph-closing and process-shutdown denial sources.
 
 ### Close and shutdown scopes
 
@@ -538,8 +542,8 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract. Issues #66 through #73 are now
-implemented as current slices; #74 through #76 retain this target order. The
+This decision fixes the dependency contract. Issues #66 through #74 are now
+implemented as current slices; #75 and #76 retain this target order. The
 non-goal column records the historical boundary when each slice was delivered;
 it does not describe current repository state:
 
@@ -553,7 +557,7 @@ it does not describe current repository state:
 | #71 (current) | Interactive and throughput built-in policies | Plugin ABI migration, revision preference, cancellation, and supersession |
 | #72 (current) | `GraphRevision` capture and staged commit predicate | Cooperative cancellation |
 | #73 (current) | Queued/running/commit cancellation, joining #70 and #72 | Latest-wins policy |
-| #74 | Latest-wins supersession after #71 and #73 | Scheduler ABI replacement |
+| #74 (current) | Latest-wins supersession and realtime `RunGroup` after #71 and #73 | Scheduler ABI replacement |
 | #75 | Complete policy-generation ABI replacement after #71 | Permanent old/new adapter |
 | #76 | Graph close, process shutdown, telemetry, and final invariants after #69/#73/#74/#75 | New execution-domain capabilities |
 
@@ -661,11 +665,12 @@ static composition object.
 - Current behavior, including issue #69's fixed multi-Graph HP/RT CPU pool,
   issue #70's admission/ledger boundary, issue #71's policy-aware ready store,
   issue #72's strong Graph revision and staged publication boundary, and issue
-  #73's private cooperative cancellation and Run-owned commit arbitration,
-  remains authoritative in
+  #73's private cooperative cancellation and Run-owned commit arbitration, plus
+  issue #74's latest-wins generations, bounded ticket-backed coalescing,
+  current-generation commit predicate, and realtime `RunGroup`, remains
+  authoritative in
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md),
   [Compute Flow](../kernel-architecture/Compute-Flow.md), and
   [Scheduler Architecture](../kernel-architecture/Scheduler-Architecture.md);
-  #74 supersession, #75 scheduler ABI replacement, and #76 final
-  lifecycle/telemetry become current only after implementation and durable
-  verification.
+  #75 scheduler ABI replacement and #76 final lifecycle/telemetry become current
+  only after implementation and durable verification.

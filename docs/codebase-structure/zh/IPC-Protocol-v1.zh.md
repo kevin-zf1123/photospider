@@ -111,8 +111,11 @@ stable collection continuation 只读取其 frozen snapshot registry record。
 result、release 与 protected metadata-only image delivery。Image byte 会保留在 private
 artifact 中；terminal nonempty image result 只会在一个 stable delivery lease 下返回规定的
 artifact metadata。版本 1 不暴露 compute cancellation、`daemon.shutdown`、TCP、
-Windows named pipe、remote 或 multi-user access mode，也不暴露 `graph_cli --connect`。Process-global
-operation-plugin control 与有序 view 已可通过 daemon router boundary 和 installed typed Client
+Windows named pipe、remote 或 multi-user access mode，也不暴露 `graph_cli --connect`。
+Issue #74 的每个 Graph latest-wins supersession 仍只存在于私有 embedded Kernel path。它不会增加
+wire method 或 field，不会改变 daemon job worker 的 exactly-once Host call，也不会改变
+`cancellable: false`。
+Process-global operation-plugin control 与有序 view 已可通过 daemon router boundary 和 installed typed Client
 使用。Scheduler-plugin discovery/default 与 per-session scheduler inspection/replacement 同样
 通过匹配 typed Client call 提供。Bounded `events.drain` 与 `scheduler.trace` observation route
 复用现有 owned Host batch/page value。现有 `graph_cli` 继续创建 embedded Host，本地命令语义不变。

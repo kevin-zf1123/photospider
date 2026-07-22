@@ -192,8 +192,9 @@ sibling、聚合目标 `RunGroup`，也不会让 RT output 成为正式 HP cache
 materialized plan 与 temporary slot；dirty phase context 拥有复制后的 dependency state 与
 lease。Compute 在每条物理 route 上都保留 dependency/ready/completion 语义。
 
-`GraphRuntime` 拥有图状态、`GraphStateExecutor`、私有有界 compute-request lane、scheduler 注册、
-事件和平台资源。它不暴露通用 worker queue、task graph 或 completion-counter API。Visible
+`GraphRuntime` 拥有图状态、`GraphStateExecutor`、私有有界 compute-request lane、一个
+latest-wins request coordinator、scheduler 注册、事件和平台资源。它不暴露通用 worker queue、
+task graph 或 completion-counter API。Visible
 capture、mutation、commit validation 与 publication 使用 `GraphStateExecutor`；scheduler-backed
 operation execution 则在该 lane 之外使用 request-owned snapshot。Scheduler 实现只通过
 `SchedulerHostContext` 与 runtime 交互；`IScheduler` 与 `SchedulerTaskRuntime` 都不会直接拥有
@@ -202,8 +203,9 @@ runtime model。
 Compute-request lane 是 scheduler owner 的访问与 teardown boundary。对于一个 session，经由
 capture 的 runtime start、compute、scheduler name/statistics copy 与 scheduler replacement 不能
 重叠。Embedded close 会先发布 Host lifecycle marker，只等待该 marker 之前的同步 admission，
-然后在等待 async submission placeholder 前停止 compute-request admission。该 stop 会唤醒阻塞在
-该有界 FIFO 上的 producer；已经 admission 的 request callback 会在 graph-state 仍可用时排空，
+然后在等待 async submission placeholder 前停止 coordinator 与 compute-request admission。该 stop
+会唤醒阻塞在该有界容量上的 producer，并给已接受的 parked ticket 一个 close-owned retirement
+turn；已经 admission 的 request callback 会在 graph-state 仍可用时排空，
 随后排空 graph-state lane，之后 runtime stop 才能调用 scheduler lifecycle method。
 `get_scheduler()` 在内部可以返回 raw pointer，但 caller 必须在 compute-request callback 有效期间
 完成全部使用；active compute 释放该 owner 之前，replacement 不能发布新 owner 并销毁旧 owner。
@@ -279,8 +281,10 @@ reservation 恰好归还一次。
 默认 ledger 的 32 个 CPU slot 约束同时已准入的 service callback，以及 legacy
 内建/plugin planning 所代表的 worker。其他维度默认为 1 GiB retained memory、512 MiB scratch、
 65,536 个 ready entry 与 256 MiB ready byte。这些是 Host composition 上限，不是整个进程的
-thread 或 allocation 声明。`GraphStateExecutor` 与私有 compute-request executor 各自具有独立
-结构性上限：每条 lane、每个已加载 Graph 有一个 worker，最多有 64 个等待 callback。
+thread 或 allocation 声明。`GraphStateExecutor` lane 具有独立结构性上限：graph-state 为每个已
+加载 Graph 保留一个 worker 与最多 64 个等待 callback，而 compute-request 精确计费 64 个 queued、
+running 或 parked 的 one-shot/ticket 总单元。现有 compute-request worker 是唯一 logical
+active-request runner；supersession 不会增加 worker 或 background thread。
 默认 interactive headroom 是一个 CPU slot、64 MiB retained memory、32 MiB scratch、1,024 个
 ready entry 与 16 MiB ready byte。Throughput admission 受减去该 vector 后的 general ceiling
 限制，并且只把 active 内建 Throughput root reservation 原子计入该 ceiling。Interactive 与过渡期
@@ -417,8 +421,10 @@ completion isolation 会在稳定 lease 下使用 `(RunId, RunLocalTaskId)`。
 Issue #73 让私有 Run arbiter 拥有独立于 scheduler epoch 的 cancellation claimant。内建
 `ExecutionService` 会收到只针对该 Run 的 notification、关闭 ready admission、清除匹配 queued
 entry、拒绝 dependent re-entry，并等待 in-flight callback 排空。Sequential、dirty、preflight 与
-legacy callback 会在各自现有边界观察同一个 Run。Legacy scheduler 仍不暴露 cancel method；
-public control、supersession 与 lifecycle cancellation 仍属于后续工作。
+legacy callback 会在各自现有边界观察同一个 Run。Latest-wins supersession 已是每个 Graph、每个
+精确 key 的当前行为：它会请求取消 active owner 作为优化，而 current generation 仍是权威 commit
+predicate。Legacy scheduler 仍不暴露 cancel method；public control 与 lifecycle cancellation 仍属于
+后续工作。
 
 ## 可观测性
 

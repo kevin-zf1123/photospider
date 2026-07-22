@@ -2,8 +2,9 @@
 
 This document describes the dirty-region behavior implemented by the current
 kernel. It separates graph-scoped dirty facts, request planning, task selection,
-scheduler filtering, output commit, and the cooperative Run-cancellation
-observations implemented through issue #73. Proposed Macro retile and adaptive
+scheduler filtering, output commit, and the cooperative Run-cancellation and
+latest-wins commit observations implemented through issue #74. Proposed Macro
+retile and adaptive
 coarsening belong in the kernel evolution roadmap, not in this current-state
 contract. The dirty-geometry path and the private
 clone/resize/channel/ROI processing contract are kernel-owned. The configured
@@ -203,7 +204,8 @@ generation already committed for that source. Work older than the committed
 source generation is skipped and traced; equal generations may run again, and
 downstream nodes do not perform this comparison. This is a narrow stale-source
 guard, not general revision validation, supersession, deadline handling, or
-cooperative cancellation.
+cooperative cancellation. Issue #74 supersession is a separate request-key and
+commit-generation contract; it does not reuse dirty generation.
 
 Issue #73 adds a separate Run-owned cooperative boundary. Dirty preflight,
 source and downstream phases, node/tile/provider entry and return, dependency
@@ -219,18 +221,19 @@ HP dirty tasks stage output in `HighPrecisionDirtyWriteBuffer`; RT dirty tasks
 stage output in `RealtimeProxyWriteBuffer`. A successful request commits staged
 HP state to `GraphModel` or RT state to `RealtimeProxyGraph` through the
 intent-specific commit path. A standalone non-realtime HP request owns one
-`ComputeRun`. Each `RealTimeUpdate` creates distinct HP and RT child Runs before
-preflight; both capture the same strong Graph instance identity and
-authoritative revision while retaining independent domain, lease, phase,
-terminal, and staging state. No mixed-domain Run or final policy-bearing
-`RunGroup` is created.
+`ComputeRun`. Each `RealTimeUpdate` creates distinct HP and RT child Runs inside
+one request-owned `RunGroup` before preflight; both capture the same strong
+Graph instance identity, authoritative revision, and request supersession
+generation while retaining independent domain, lease, phase, terminal, and
+staging state. No mixed-domain Run is created.
 
 Kernel's product commit policy materializes publication copies and then checks
 that each child Run is `CommitPending`, owns the exact staged Graph/proxy, and
-still matches the live Graph identity and revision inside the graph-state work
-item. A stale child publishes no Graph/proxy/cache output and fails through the
-existing `ComputeError` path. This exact revision predicate rejects old work; it
-does not stop an already-running callback.
+still matches the live Graph identity, revision, and current supersession
+key/generation inside the graph-state work item. A stale child publishes no
+Graph/proxy/cache output and fails through the existing `ComputeError` path.
+These exact predicates reject old work; they do not stop an already-running
+callback.
 
 For a `RealTimeUpdate`, RT and HP are sibling computations. The RT sibling may
 commit proxy state first, while the HP sibling observes the sibling commit gate
@@ -255,9 +258,8 @@ The current implementation does not provide:
 - Macro dirty-key materialization or dynamic Micro/Macro coarsening;
 - sparse ROI sets, dirty-area caps, time-window merging, or adaptive batching;
 - a node-to-backend dirty subscription that automatically launches compute;
-- a final policy-bearing `RunGroup`, issue #74 supersession, public or
-  lifecycle-driven cancellation, or preemption of an already-entered provider
-  callback.
+- public or lifecycle-driven cancellation, reserved-start admission, or
+  preemption of an already-entered provider callback.
 
 Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
 across the Host request, graph state, ROI propagation, planning, snapshot,

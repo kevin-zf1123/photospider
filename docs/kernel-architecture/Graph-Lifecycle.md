@@ -10,13 +10,15 @@ adapters are current behavior.
 
 `Kernel` owns a map from graph names to `GraphRuntime` instances. Each runtime
 owns one `GraphModel`, one graph-state executor, one private compute-request
-executor, event and scheduler state, and platform runtime resources.
+executor, one latest-wins request coordinator, event and scheduler state, and
+platform runtime resources.
 
 ```text
 Kernel
   graph name -> GraphRuntime
                   -> GraphStateExecutor
                   -> compute-request lane
+                  -> ComputeRequestCoordinator
                   -> GraphModel
 ```
 
@@ -25,8 +27,10 @@ label, not a graph or runtime handle. Each live `GraphModel` additionally owns a
 private strong non-reused `GraphInstanceId` and checked nonzero
 `GraphRevision`. Visible capture, mutation, commit validation, and publication
 enter the graph-state lane. Long-running operation execution uses a
-request-owned snapshot outside it, while the compute-request lane serializes
-same-Graph compute and scheduler-owner access.
+request-owned snapshot outside it. The coordinator publishes checked
+supersession generations and coalesces one pending owner per exact key; the
+existing compute-request lane worker remains the only logical active runner
+while that lane also serializes scheduler-owner access.
 
 ## New Session Load
 
@@ -274,11 +278,13 @@ Embedded Host close first marks the session closing. New compute, scheduler,
 reload, required save, node-YAML replacement, ROI projection, timing
 inspection, and all-cache clearing admissions fail. The Host waits through
 caller-visible result/status translation for synchronous calls admitted before
-that marker while both runtime lanes remain open. Kernel then stops only the
-private compute-request lane's admission. Producers blocked on its full
-64-entry FIFO are awakened and rejected without requiring queue space. Only
-after that stop does the Host wait for async submission placeholders and
-caller-visible status publication.
+that marker while both runtime lanes remain open. Kernel first stops coordinator
+admission and then the private compute-request lane's admission. Producers
+blocked on its exact 64-total-unit capacity are awakened and rejected without
+requiring queue space. Parked ticket owners receive a close-owned turn so
+accepted pending/active state retires exactly once. Only after that stop does
+the Host wait for async submission placeholders and caller-visible status
+publication.
 
 Kernel next drains accepted request callbacks in FIFO order and joins the sole
 request worker while graph-state remains available for their capture and final
@@ -390,14 +396,16 @@ uses an unavailable adapter and returns `GraphErrc::Io`.
 The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 now governs the implemented strong Graph identity/revision, staged compute,
-exact commit predicate, cooperative Run cancellation, and separate
+exact revision/generation commit predicate, cooperative Run cancellation,
+latest-wins supersession, request-owned realtime `RunGroup`, and separate
 compute-request/graph-state lanes. Current graph close still drains accepted
 work, including physically active cancelled Runs, and is not a cancellation
 requester. The complete target still requires the future
 `ExecutionService`-owned admitted-Run registry, atomic
-Run-admission/Graph-close fence, issue #74 supersession, lifecycle-driven
-close/shutdown cancellation, and Run-group policy. This document does not claim
-those later capabilities.
+Run-admission/Graph-close fence, lifecycle-driven close/shutdown cancellation,
+and telemetry from issue #76. Reserved-start admission and the scheduler ABI
+replacement remain issue #75. This document does not claim those later
+capabilities.
 
 ## Implementation and Validation Entry Points
 

@@ -254,7 +254,8 @@ own copied dependency state and leases. Compute retains
 dependency/ready/completion semantics on every physical route.
 
 `GraphRuntime` owns graph state, the `GraphStateExecutor`, a private bounded
-compute-request lane, scheduler registration, events, and platform resources.
+compute-request lane, one latest-wins request coordinator, scheduler
+registration, events, and platform resources.
 It does not expose a general worker queue, task graph, or completion-counter
 API. Visible capture, mutation, commit validation, and publication use
 `GraphStateExecutor`; scheduler-backed operation execution uses a request-owned
@@ -266,8 +267,9 @@ The compute-request lane is the scheduler-owner access and teardown boundary.
 Runtime start through capture, compute, scheduler name/statistics copying, and
 scheduler replacement cannot overlap for one session. Embedded close publishes
 its Host lifecycle marker, waits only pre-marker synchronous admissions, and
-then stops compute-request admission before waiting for async submission
-placeholders. The stop wakes any producer blocked on that bounded FIFO;
+then stops coordinator and compute-request admission before waiting for async
+submission placeholders. The stop wakes any producer blocked on that bounded
+capacity and gives accepted parked tickets a close-owned retirement turn;
 admitted request callbacks drain while graph-state remains available, then the
 graph-state lane drains before runtime stop invokes scheduler lifecycle methods.
 `get_scheduler()` may return a raw pointer internally, but its caller finishes
@@ -368,9 +370,12 @@ The default ledger's 32 CPU slots bound simultaneous admitted service
 callbacks and workers represented by legacy built-in/plugin planning. Other
 dimensions default to 1 GiB retained memory, 512 MiB scratch, 65,536 ready
 entries, and 256 MiB ready bytes. These are Host-composition limits, not
-whole-process thread or allocation claims. `GraphStateExecutor` and the private
-compute-request executor each have a separate structural bound: one worker and
-at most 64 waiting callbacks per loaded Graph per lane.
+whole-process thread or allocation claims. `GraphStateExecutor` lanes have
+separate structural bounds: graph-state retains one worker plus at most 64
+waiting callbacks per loaded Graph, while compute-request charges exactly 64
+total queued, running, or parked one-shot/ticket units. The existing
+compute-request worker is the only logical active-request runner; supersession
+does not add another worker or background thread.
 The default interactive headroom is one CPU slot, 64 MiB retained memory,
 32 MiB scratch, 1,024 ready entries, and 16 MiB ready bytes. Throughput
 admission atomically charges only active built-in Throughput root reservations
@@ -551,8 +556,11 @@ of scheduler epoch. The built-in `ExecutionService` receives a Run-only
 notification, closes ready admission, purges matching queued entries, rejects
 dependent re-entry, and waits for in-flight callbacks to drain. Sequential,
 dirty, preflight, and legacy callbacks observe the same Run at their existing
-boundaries. Legacy schedulers still expose no cancel method; public control,
-supersession, and lifecycle cancellation remain later work.
+boundaries. Latest-wins supersession is current per Graph and exact key: it
+requests cancellation of the active owner as an optimization, while current
+generation remains the authoritative commit predicate. Legacy schedulers still
+expose no cancel method; public control and lifecycle cancellation remain later
+work.
 
 ## Observability
 

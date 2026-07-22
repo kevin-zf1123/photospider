@@ -495,6 +495,48 @@ cmake --build build \
   --gtest_filter='SchedulerPluginLoaderTest.PublicSchedulerAbiIsExactlyVersionTwo'
 ```
 
+## Latest-Wins Supersession Validation
+
+Issue #74 keeps latest-wins and realtime-group coverage in maintained behavior
+tests. `test_compute_supersession` owns canonical absent/explicit HP key
+equality, checked nonzero generation overflow, exact 64-total compute-lane
+admission, persistent ticket FIFO/wake behavior, concurrent same-key ticket
+adoption, cross-target/intent/Graph isolation, close retirement, deterministic
+18,000- and 36,000-publication storms, and `RunGroup` cancellation/aggregate
+rules. The stress cases assert one ticket, one logical active owner, at most one
+pending owner, exact displaced settlement, and only the final current generation
+remaining commit-eligible; they do not create a background runner or rely on
+timing sleeps.
+
+`test_kernel_contracts` owns the product boundary. It proves missing intent and
+explicit HP share one key, failed newest work does not resurrect an older
+prepared commit, already committed older output remains visible, and realtime
+supersession on both sides of RT publication denies the old HP sibling while
+preserving a valid old proxy. `test_compute_run` covers immutable supersession
+identity and child-local versus group-wide cancellation. Existing
+`test_compute_service_split`, `test_host_adapter`, and
+`test_bad_alloc_boundaries` remain focused regression companions for service,
+Host lifecycle, and allocation-failure boundaries.
+
+Run the focused supersession boundary with:
+
+```bash
+cmake --build build \
+  --target test_compute_supersession test_kernel_contracts test_compute_run \
+  test_compute_service_split test_host_adapter test_bad_alloc_boundaries -j
+./build/tests/test_compute_supersession
+./build/tests/test_kernel_contracts
+./build/tests/test_compute_run
+./build/tests/test_compute_service_split
+./build/tests/test_host_adapter
+./build/tests/test_bad_alloc_boundaries
+```
+
+The installed Host, CLI, IPC version 1, operation plugin, and scheduler plugin
+contracts are unchanged. IPC continues to reject `compute.cancel` and publish
+`cancellable: false`; supersession is a private embedded-kernel behavior, not a
+new public control surface.
+
 Focused companion regressions own the remaining boundaries:
 
 - `test_kernel_contracts` drives the real `GraphIOService` stream through

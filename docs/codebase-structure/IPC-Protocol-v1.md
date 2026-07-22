@@ -124,6 +124,9 @@ result returns only the specified artifact metadata under one stable delivery
 lease. Version 1 exposes no compute cancellation, `daemon.shutdown`, TCP,
 Windows named pipe, remote or multi-user access mode, or
 `graph_cli --connect`.
+Issue #74's per-Graph latest-wins supersession remains private to the embedded
+Kernel path. It adds no wire method or field, does not change the daemon job
+worker's exactly-once Host call, and does not change `cancellable: false`.
 Process-global operation-plugin control and sorted views are available at the
 daemon router boundary and through the installed typed Client.
 Scheduler-plugin discovery/defaults and per-session scheduler

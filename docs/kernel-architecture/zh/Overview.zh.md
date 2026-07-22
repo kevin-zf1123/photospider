@@ -220,11 +220,13 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `ps::ipc::Client` | Move-only direct client，为精确排序的 55-method version 1 inventory 提供 owned value；它验证 correlated result shape，且不暴露 raw JSON call。 |
 | `photospiderd` | Foreground local service，拥有一个 embedded Host 并串行化全部 Host call，同时独立服务 metadata 与 job polling。 |
 | daemon registry | 对 opaque session、compute job、stable collection snapshot、protected output 与 delivery lease 的 private bounded ownership；它们都不是 public backend handle。 |
-| `GraphRuntime` | 每图资源容器，包含模型、彼此独立且各有一个 worker/64 个等待任务的 graph-state 与 compute-request lane、固定容量 scheduler trace ring、调度器和平台 context。 |
+| `GraphRuntime` | 每图资源容器，包含模型、graph-state lane、精确 64 个总单元的 compute-request lane、一个 latest-wins coordinator、固定容量 scheduler trace ring、调度器和平台 context。 |
 | `GraphModel` | 图状态持有者：不复用的强 instance identity、经过检查的权威 revision、私有节点/拓扑存储、缓存根目录、计时数据、quiet/skip-save 标志，以及完整 compute snapshot/publication primitive。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
-| `ComputeRun` | 一个非 realtime HP domain 或一个 realtime HP/RT child domain 的私有 request owner。每个 Run 都拥有带精确 Graph identity/revision 的不可变 descriptor、单调 phase、一个 terminal arbiter、稳定 cooperative-cancellation reason，以及由共享 control 持有的 full-plan/temporary storage 或 dirty staging storage。内建 CPU full、dirty 与 preflight work 会通过固定的多 Graph service 保留稳定 lease 与复合 task identity。Request-owned `RunGroup`、public cancellation control 和最终 lifecycle registry 仍是后续工作。 |
+| `ComputeRequestCoordinator` | 每个 live Graph 的 latest-wins owner，负责 checked generation、精确 key 的 pending coalescing、每个 admitted key 的一个 persistent ticket、active cancellation notification，以及由现有 compute-lane worker 执行的精确 pending settlement。 |
+| `RunGroup` | Realtime request owner，负责不同的 HP Full 与 RT Interactive child Run、它们的 observation lease、shared cancellation source、RT-first gate 与确定性 aggregate outcome。 |
+| `ComputeRun` | 一个非 realtime HP domain 或一个 realtime HP/RT child domain 的私有 request owner。每个 Run 都拥有带精确 Graph identity/revision 与 supersession identity 的不可变 descriptor、单调 phase、一个 terminal arbiter、稳定 cooperative-cancellation reason，以及由共享 control 持有的 full-plan/temporary storage 或 dirty staging storage。内建 CPU full、dirty 与 preflight work 会通过固定的多 Graph service 保留稳定 lease 与复合 task identity。Public cancellation control 和最终 lifecycle registry 仍是后续工作。 |
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
 | `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
@@ -242,11 +244,13 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 
 1. REPL 命令调用 public `ps::Host` interface。
 2. embedded Host adapter 将 public value 转换为内部 `InteractionService` / `Kernel` request。
-3. `Kernel` 解析活跃的 `GraphRuntime`。
+3. `Kernel` 解析活跃的 `GraphRuntime`、规范化 supersession key、分配经检查的 graph-wide
+   generation，并通过 runtime coordinator 发布一个 latest pending candidate。
 4. `Kernel` 创建或使用 `ComputeService` 所需服务。
-5. 对于非 realtime HP，`ComputeService` 创建一个 `ComputeRun`；realtime request 则创建
-   独立的 HP `Full` 与 RT `Interactive` child Run，而不创建 `RunGroup`。每个 Run 都捕获
-   session label、强 Graph instance identity、权威 revision、target、intent、quality 与显式 QoS。
+5. 对于非 realtime HP，`ComputeService` 创建一个 `ComputeRun`；realtime request 则创建一个
+   `RunGroup`，其中包含独立的 HP `Full` 与 RT `Interactive` child Run。每个 child 都捕获 session
+   label、强 Graph instance identity、权威 revision、target、intent、quality、显式 QoS 与不可变
+   supersession key/generation。
 6. `ComputeService` 通过 `GraphTraversalService` 解析拓扑顺序。
 7. `ComputeService` 通过 `GraphCacheService` 检查内存和磁盘缓存。
 8. 脏区路径通过 `RoiPropagationService` 和 `GraphExtentResolver` 计算 ROI 需求和 HP 权威范围。
@@ -256,8 +260,9 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
     Full plan/temporary result 与 dirty staging 会由匹配 Run 持有到唯一 terminal publication。私有
     cancellation 会在 planning、queue、callback、dependency、phase 与 commit 边界被观察；已经
     进入的 non-preemptible provider 会排空，但不能授权 publication。
-11. Staged output 验证后，私有产品 commit policy 会验证精确 Run/staged/live identity 与
-    revision，并在 Run success 前通过一个 graph-state transaction 发布完整状态。
+11. Staged output 验证后，私有产品 commit policy 会验证精确 Run/staged/live identity、权威
+    revision 与 current supersession key/generation，并在 Run success 前通过一个 graph-state
+    transaction 发布完整状态。
 12. `GraphEventService` 记录每节点事件和计时数据。
 13. embedded Host adapter 将结果复制为 public Host value snapshot，CLI 再渲染这些 value。
 
@@ -432,13 +437,17 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `Kernel` 组合图级 service，不暴露可安装 API。
 - `ComputeService` 协调私有协作者，其模块边界是 `ps::Host` 后方的实现细节。
 - 当前 `ComputeRun` 拥有一个非 realtime HP domain 或一个 realtime HP/RT child domain。
-  其 descriptor 保留强 Graph instance identity 与权威 revision；topology generation 仍是独立
-  planning cache key。内建 CPU
+  Realtime `RunGroup` 拥有两个 child 的 observation lease、shared cancellation source、RT-first
+  gate 与 aggregate outcome。每个 child descriptor 保留强 Graph instance identity、权威 revision
+  与不可变 supersession identity；topology generation 仍是独立 planning cache key。内建 CPU
   full、dirty 与 preflight work 会在稳定 Run lease 下执行 owned callback，并按
   `(RunId, RunLocalTaskId)` 路由 failure；只有旧式 dirty scheduler route 仍保留同步
-  borrowed-handle 路径。一个私有 request source 会把显式 cancellation 扇出到当前 child Run，
-  同时每个 child 保留自己的 outcome 与 deadline。Realtime child 尚未由 request-owned
-  `RunGroup` 协调。
+  borrowed-handle 路径。一个私有 request source 会把稳定的首个 reason 扇出到两个 realtime
+  child Run，而 HP-only child cancellation 保持局部。
+- 每个 live Graph coordinator 拥有 checked graph-wide generation、每个精确 key 的一个 latest
+  pending mailbox 与 persistent continuation ticket，以及一个 logical active-runner marker。现有有界
+  compute-lane worker 执行每次 ticket turn；supersession 不创建 background runner 或额外 thread。
+  Commit 必须匹配 current generation，因此最新 generation 失败不会恢复旧 commit right。
 - `GraphTraversalService` 只拥有 topology query。
 - `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
@@ -482,8 +491,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   的强 Graph identity/revision、request-owned 产品 staging、精确 revision visible commit 与
   RT-first 独立 child publication 也是当前行为。Issue #73 的私有 cooperative Run cancellation、
   deadline observation、精确 queue/resource drainage 与 cancellation/commit arbitration 也是当前
-  行为；最终 `RunGroup`、Issue #74 supersession、Issue #75 替代用 scheduler-policy ABI、Issue
-  #76 lifecycle registry/close/shutdown fence 与 public cancellation control 仍是未来行为。
+  行为。Issue #74 的 request-owned `RunGroup`、checked latest-wins generation、有界 ticket-backed
+  coalescing 与 current-generation commit predicate 也已是当前行为。Issue #75 的 reserved start 与
+  替代用 scheduler-policy ABI、Issue #76 的 lifecycle registry/close/shutdown fence，以及 public
+  cancellation control 仍是未来行为。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

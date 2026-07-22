@@ -260,11 +260,13 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 55-method version 1 inventory; it validates correlated result shapes and exposes no raw JSON call. |
 | `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
 | daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
-| `GraphRuntime` | Per-graph resource container with model, separate one-worker/64-waiting-task graph-state and compute-request lanes, fixed-capacity scheduler trace ring, schedulers, and platform context. |
+| `GraphRuntime` | Per-graph resource container with model, graph-state lane, exact-64-total compute-request lane, one latest-wins coordinator, fixed-capacity scheduler trace ring, schedulers, and platform context. |
 | `GraphModel` | Graph state holder with a non-reused strong instance identity, checked authoritative revision, private node/topology storage, cache root, timing data, quiet/skip-save flags, and complete compute snapshot/publication primitives. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
-| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision, monotonic phase, one terminal arbiter, stable cooperative-cancellation reason, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. A request-owned `RunGroup`, public cancellation control, and the final lifecycle registry remain future. |
+| `ComputeRequestCoordinator` | Per-live-Graph latest-wins owner for checked generations, exact-key pending coalescing, one persistent ticket per admitted key, active cancellation notification, and exact pending settlement on the existing compute-lane worker. |
+| `RunGroup` | Realtime request owner for distinct HP Full and RT Interactive child Runs, their observation leases, shared cancellation source, RT-first gate, and deterministic aggregate outcome. |
+| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision and supersession identity, monotonic phase, one terminal arbiter, stable cooperative-cancellation reason, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. Public cancellation control and the final lifecycle registry remain future. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -283,12 +285,15 @@ Typical REPL compute flow:
 1. A REPL command calls the public `ps::Host` interface.
 2. The embedded Host adapter translates public values to internal
    `InteractionService` / `Kernel` requests.
-3. `Kernel` resolves the active `GraphRuntime`.
+3. `Kernel` resolves the active `GraphRuntime`, normalizes the supersession key,
+   allocates a checked graph-wide generation, and publishes one latest pending
+   candidate through the runtime coordinator.
 4. `Kernel` creates or uses services needed by `ComputeService`.
 5. For non-realtime HP, `ComputeService` creates one `ComputeRun`; a realtime
-   request creates independent HP `Full` and RT `Interactive` child Runs
-   without a `RunGroup`. Each captures session label, strong Graph instance
-   identity, authoritative revision, target, intent, quality, and explicit QoS.
+   request creates one `RunGroup` with independent HP `Full` and RT
+   `Interactive` child Runs. Each child captures session label, strong Graph
+   instance identity, authoritative revision, target, intent, quality, explicit
+   QoS, and the immutable supersession key/generation.
 6. `ComputeService` resolves topology order with `GraphTraversalService`.
 7. `ComputeService` checks memory and disk cache with `GraphCacheService`.
 8. Dirty-region paths use `RoiPropagationService` and `GraphExtentResolver`
@@ -302,8 +307,9 @@ Typical REPL compute flow:
     planning, queue, callback, dependency, phase, and commit boundaries;
     entered non-preemptible providers drain without authorizing publication.
 11. After staged output validation, the private product commit policy validates
-    the exact Run/staged/live identity and revision and publishes complete state
-    in one graph-state transaction before Run success.
+    the exact Run/staged/live identity, authoritative revision, and current
+    supersession key/generation, then publishes complete state in one
+    graph-state transaction before Run success.
 12. `GraphEventService` records per-node events and timing data.
 13. The embedded Host adapter copies results into public Host value snapshots,
     and the CLI renders those values.
@@ -535,15 +541,22 @@ Important current behavior:
 - `ComputeService` coordinates private collaborators; its module boundaries are
   implementation details behind `ps::Host`.
 - The current `ComputeRun` owns one non-realtime HP domain or one realtime
-  HP/RT child domain. Its descriptor retains strong Graph instance identity and
-  authoritative revision; topology generation remains a separate planning
-  cache key. Built-in CPU full, dirty, and preflight work
+  HP/RT child domain. A realtime `RunGroup` owns the pair's observation leases,
+  shared cancellation source, RT-first gate, and aggregate outcome. Each child
+  descriptor retains strong Graph instance identity, authoritative revision,
+  and immutable supersession identity; topology generation remains a separate
+  planning cache key. Built-in CPU full, dirty, and preflight work
   executes owned callbacks under stable Run leases and routes failure by
   `(RunId, RunLocalTaskId)`; only legacy dirty scheduler routes retain their
-  synchronous borrowed-handle path. One private request source fans explicit
-  cancellation into the current child Runs, while each child retains its own
-  outcome and deadline. Realtime children are not yet coordinated by a
-  request-owned `RunGroup`.
+  synchronous borrowed-handle path. One private request source fans its stable
+  first reason into both realtime child Runs, while HP-only child cancellation
+  remains local.
+- Each live Graph coordinator owns checked graph-wide generations, one latest
+  pending mailbox and persistent continuation ticket per exact key, and one
+  logical active-runner marker. The existing bounded compute-lane worker runs
+  each ticket turn; supersession creates no background runner or extra thread.
+  Current generation is required at commit, so a failed newest generation does
+  not restore an older commit right.
 - `GraphTraversalService` owns topology queries only.
 - `RoiPropagationService` and `GraphExtentResolver` own spatial propagation and
   HP-authoritative extent resolution.
@@ -603,10 +616,11 @@ Important current behavior:
   request-owned product staging, exact-revision visible commit, and independent
   RT-first child publication are current. Issue #73's private cooperative Run
   cancellation, deadline observation, exact queue/resource drainage, and
-  cancellation/commit arbitration are also current; the final `RunGroup`,
-  issue #74 supersession, issue #75 replacement scheduler-policy ABI, issue #76
-  lifecycle registry/close/shutdown fence, and public cancellation control
-  remain future.
+  cancellation/commit arbitration are also current. Issue #74's request-owned
+  `RunGroup`, checked latest-wins generations, bounded ticket-backed coalescing,
+  and current-generation commit predicate are current. Issue #75's reserved
+  start and replacement scheduler-policy ABI, issue #76's lifecycle
+  registry/close/shutdown fence, and public cancellation control remain future.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of
