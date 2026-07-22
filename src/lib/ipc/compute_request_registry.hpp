@@ -73,7 +73,9 @@ struct ComputeRequestId {
  * @throws std::bad_alloc when reference or callback storage is constructed.
  * @note Cleanup executes outside the compute-registry mutex on optional
  *       lease-aware release, eviction, TTL expiry, failed publication cleanup,
- *       or shutdown.
+ *       or shutdown. Worker-side eviction cleanup precedes its replacement
+ *       terminal snapshot, while failed-publication cleanup precedes that
+ *       request's failed terminal snapshot.
  */
 class ComputeOutputOwnership {
  public:
@@ -83,6 +85,10 @@ class ComputeOutputOwnership {
    * @param delivery_id Optional stable lease identity to release atomically
    *        with job ownership.
    * @throws Nothing; implementations must contain filesystem failures.
+   * @note The registry never holds its mutex while invoking an active callback,
+   *       so nonblocking registry lookups or releases may be re-entered.
+   *       Worker-thread callbacks must neither synchronously join that worker
+   *       nor wait for the current request's session admission release.
    */
   using Cleanup =
       std::function<void(const std::optional<std::string>& delivery_id)>;
@@ -157,6 +163,8 @@ class ComputeOutputOwnership {
    *        output-store critical section as job ownership.
    * @return Nothing.
    * @throws Nothing; callback failures are contained.
+   * @note Invocation follows the `Cleanup` re-entry and worker-lifecycle
+   *       constraints.
    */
   void reset(
       const std::optional<std::string>& delivery_id = std::nullopt) noexcept;
@@ -236,8 +244,9 @@ struct ComputeRequestRegistryLimits {
  * Submission first obtains a session job admission, atomically reserves all
  * record/queue storage, and only then publishes a Queued result. The worker
  * advances one record at a time, invokes exactly one matching typed executor,
- * publishes a complete terminal snapshot, and releases session admission
- * outside this registry's mutex. Active work is never evicted.
+ * detaches and cleans any capacity eviction before publishing the replacement
+ * terminal snapshot, and releases session admission outside this registry's
+ * mutex. Active work is never evicted.
  *
  * @throws std::bad_alloc when constructor storage or callbacks cannot be
  *         allocated.
@@ -421,8 +430,20 @@ class ComputeRequestRegistry {
 
   /**
    * @brief Runs the sole FIFO executor until stop is requested and drained.
+   *
+   * Each accepted record advances to Running under the registry mutex, invokes
+   * its typed Host/output boundary without that mutex, and prepares an exact
+   * outcome. Before the terminal commit, the worker detaches any required
+   * capacity eviction, completes its output cleanup without the mutex, and
+   * cleans abandoned local output after failures. It then captures terminal
+   * time, atomically publishes the complete replacement snapshot, and releases
+   * session admission after unlocking.
+   *
    * @return Nothing.
    * @throws Nothing; every accepted execution failure is contained as terminal.
+   * @note An eviction cleanup callback observes the evicted identity as absent
+   *       and its replacement as Running. Cleanup callbacks must obey the
+   *       nonblocking re-entry constraints documented by `Cleanup`.
    */
   void worker_loop() noexcept;
 

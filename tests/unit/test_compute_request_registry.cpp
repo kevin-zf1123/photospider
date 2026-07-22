@@ -847,6 +847,117 @@ TEST(ComputeRequestRegistryRetention, NeverExpiresActiveWork) {
 }
 
 TEST(ComputeRequestRegistryOutput,
+     EvictionCleanupPrecedesReplacementTerminalPublication) {
+  OpaqueSequence sessions_ids(1);
+  OpaqueSequence compute_ids(100);
+  SessionRegistry sessions([&] { return sessions_ids.next(); });
+  const IpcSessionId session =
+      activate_session(&sessions, "alpha", "private-alpha");
+  StepGate replacement_executor_gate;
+  StepGate cleanup_gate;
+  std::promise<void> cleanup_finished;
+  std::future<void> cleanup_finished_future = cleanup_finished.get_future();
+  std::atomic<bool> inspect_eviction{false};
+  std::atomic<bool> evicted_absent{false};
+  std::atomic<bool> replacement_found{false};
+  std::atomic<ComputeRequestState> replacement_state{
+      ComputeRequestState::Queued};
+  std::atomic<int> cleaned{0};
+  int published = 0;
+  ComputeRequestId evicted_id;
+  ComputeRequestId replacement_id;
+  ComputeRequestRegistry* registry_ptr = nullptr;
+  ComputeRequestRegistryLimits limits;
+  limits.terminal = 1;
+  ComputeRequestRegistry registry(
+      sessions, [](const HostComputeRequest&) { return ok_status(); },
+      [&](const HostComputeRequest& request) {
+        if (request.node.value == 2) {
+          replacement_executor_gate.enter_and_wait();
+        }
+        ImageBuffer image;
+        image.width = 1;
+        return Result<ImageBuffer>{ok_status(), std::move(image)};
+      },
+      [&](const ComputeRequestId&, ImageBuffer) {
+        const int sequence = ++published;
+        return ComputeOutputPublication{
+            ok_status(),
+            ComputeOutputOwnership(
+                "linearized-output-" + std::to_string(sequence),
+                [&, sequence](const std::optional<std::string>&) {
+                  const bool inspect =
+                      sequence == 1 &&
+                      inspect_eviction.load(std::memory_order_acquire);
+                  if (inspect) {
+                    const auto evicted = registry_ptr->status(evicted_id);
+                    evicted_absent.store(
+                        !evicted.status.ok &&
+                            evicted.status.code == kJobNotFoundCode,
+                        std::memory_order_release);
+                    const auto replacement =
+                        registry_ptr->status(replacement_id);
+                    replacement_found.store(replacement.status.ok,
+                                            std::memory_order_release);
+                    if (replacement.status.ok) {
+                      replacement_state.store(replacement.value.state,
+                                              std::memory_order_release);
+                    }
+                    cleanup_gate.enter_and_wait();
+                  }
+                  ++cleaned;
+                  if (inspect) {
+                    cleanup_finished.set_value();
+                  }
+                })};
+      },
+      limits, {}, [&] { return compute_ids.next(); });
+  registry_ptr = &registry;
+  ASSERT_TRUE(registry.start().ok);
+
+  const auto first =
+      registry.submit(session, request_for(1), ComputeResultMode::Image);
+  ASSERT_TRUE(first.status.ok);
+  evicted_id = first.value.compute_id;
+  ASSERT_EQ(wait_for_terminal(&registry, evicted_id).state,
+            ComputeRequestState::Succeeded);
+
+  const auto second =
+      registry.submit(session, request_for(2), ComputeResultMode::Image);
+  ASSERT_TRUE(second.status.ok);
+  replacement_id = second.value.compute_id;
+  const bool replacement_entered =
+      replacement_executor_gate.wait_until_entered();
+  EXPECT_TRUE(replacement_entered);
+  if (!replacement_entered) {
+    replacement_executor_gate.release();
+    return;
+  }
+  inspect_eviction.store(true, std::memory_order_release);
+  replacement_executor_gate.release();
+
+  const bool cleanup_entered = cleanup_gate.wait_until_entered();
+  EXPECT_TRUE(cleanup_entered);
+  if (cleanup_entered) {
+    const auto visible_replacement = registry.status(replacement_id);
+    EXPECT_TRUE(visible_replacement.status.ok);
+    if (visible_replacement.status.ok) {
+      EXPECT_EQ(visible_replacement.value.state, ComputeRequestState::Running);
+    }
+    EXPECT_TRUE(evicted_absent.load(std::memory_order_acquire));
+    EXPECT_TRUE(replacement_found.load(std::memory_order_acquire));
+    EXPECT_EQ(replacement_state.load(std::memory_order_acquire),
+              ComputeRequestState::Running);
+    EXPECT_EQ(cleaned.load(), 0);
+  }
+  cleanup_gate.release();
+  EXPECT_EQ(cleanup_finished_future.wait_for(2s), std::future_status::ready);
+  EXPECT_EQ(wait_for_terminal(&registry, replacement_id).state,
+            ComputeRequestState::Succeeded);
+  EXPECT_EQ(cleaned.load(), 1);
+}
+
+TEST(ComputeRequestRegistryOutput,
      CleansExactlyOnceOnEvictionReleaseAndExpiry) {
   OpaqueSequence sessions_ids(1);
   OpaqueSequence compute_ids(100);
