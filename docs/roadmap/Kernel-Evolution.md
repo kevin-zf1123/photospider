@@ -40,56 +40,53 @@ by [issue #42](https://github.com/kevin-zf1123/photospider/issues/42).
 [Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) established
 the initial scheduler-worker containment and
 [Issue #44](https://github.com/kevin-zf1123/photospider/issues/44) established
-the bounded graph-state lane. Issues #69 through #72 have since replaced the
-worker-only containment for built-in CPU execution with one Host-composed
-service, atomic resource vectors, policy-aware bounded ready storage, and
-revision-safe staged publication. Visible compute now captures complete
-request-owned state and executes outside graph-state; a second bounded serial
-lane preserves same-Graph compute and scheduler-owner lifetime. Legacy
-serial/GPU/plugin schedulers still own per-graph workers, queues, epochs, and
-policy. The current bounded contract:
+the bounded graph-state lane. Issues #69 through #75 have since replaced the
+worker-only containment and the worker-owning scheduler SDK with one
+Host-composed execution domain, atomic resource vectors, policy-aware bounded
+ready storage, revision-safe staged publication, pure-C policy generation, and
+Host-private execution routes. Visible compute captures complete request-owned
+state and executes outside graph-state; a second bounded serial lane preserves
+same-Graph request ordering without owning a physical executor. The current
+bounded contract:
 
-- accepts worker requests from zero through eight and resolves zero to
-  `min(max(1, hardware_concurrency()), 8)` before construction;
-- treats the resolved one-through-eight ABI v2 plugin value as a trusted hard
-  grant, rejects ABI v1, and provides no compatibility shim;
-- charges built-in serial and ownerless built-in CPU Graph bindings as zero,
-  registered plugins as the resolved CPU grant, and built-in
-  GPU/heterogeneous as that grant plus its potential device worker;
-- gives every embedded Host one ledger whose default CPU dimension is 32;
-  atomically admits legacy HP+RT CPU-slot demand and preserves old schedulers
-  when replacement cannot reserve candidate headroom;
-- admits each built-in CPU Run with a complete checked CPU,
-  retained-memory, scratch, ready-entry, and ready-byte vector, and sends
-  initial/dependent work through the same entry/byte-bounded store;
-- bills dispatch by work plus ready-byte quanta, maintains hierarchical
+- gives every embedded Host one shared CPU service and one ledger whose default
+  CPU dimension is 32, and admits every Run with a complete checked CPU,
+  retained-memory, scratch, ready-entry, and ready-byte vector;
+- sends initial and dependent work through the same entry/byte-bounded ready
+  store and exchanges ready authority for execution grants only at reserved
+  start;
+- maintains exactly one Interactive and one Throughput policy binding, applies
+  Host-authored class/frontier/fairness rules, and validates every built-in or
+  DSO decision against the immutable original snapshot and current Host state;
+- exposes policy plugins through the self-contained C11 ABI v1, while keeping
+  workers, queues, resources, Run/Graph state, and completion routes absent
+  from the ABI;
+- makes the first invalid plugin decision sticky for its exact binding
+  generation and falls back through the same trusted built-in selection path;
+- keeps `cpu`, `serial_debug`, and `gpu_pipeline` as closed private
+  execution-route ids; a Graph stores only copied route ids and generations,
+  never a physical worker, queue, plugin context, or policy binding;
+- bills starts by work plus ready-byte quanta, maintains hierarchical
   Graph/Run fairness, ages ready work, reserves interactive headroom, and
-  guarantees throughput progress after a bounded interactive burst;
-- releases move-only reservations exactly once after concrete scheduler
-  destruction, including load rollback, successful graph close, and Host
-  destruction; failed close retains the runtime and reservations for retry;
+  guarantees Throughput progress after a bounded Interactive burst;
 - replaces graph-state async-per-submit with one worker and a 64-waiting-task
   FIFO per Graph, applying blocking backpressure without dropping admitted
-  work;
-- gives every Graph a second lane with the same bound for compute/scheduler
-  lifetime, while graph-state remains the sole visible capture/mutation/commit
-  boundary;
+  work, and gives every Graph a second lane with the same bound for request
+  serialization;
 - assigns every live Graph a non-reused strong identity and checked nonzero
   revision, and publishes product snapshots only after exact equality; and
 - makes embedded close publish its Host marker, drain pre-marker synchronous
-  admissions, and stop compute-request admission before waiting for async
-  placeholders, so a full-FIFO producer cannot deadlock close; and
-- drains compute-request work while graph-state remains available, then drains
-  graph-state before scheduler teardown, while
-  durable close generations let old waiters finish if a failed scheduler stop
-  restarts both lanes in dependency order for retry.
+  admissions, stop compute-request admission before waiting for async
+  placeholders, drain compute-request work while graph-state remains
+  available, and then drain graph-state without tearing down a process-owned
+  execution route.
 
-The default 32 CPU slots cover admitted Run callbacks and accounted legacy
-scheduler-worker owners. Fixed `ExecutionService` threads are infrastructure.
+The default 32 CPU slots cover admitted Run execution grants. Fixed
+`ExecutionService` threads and its private route machinery are infrastructure.
 The ledger does not count graph-state or compute-request executors, which each
 have a separate one-worker-per-Graph bound; nor does it claim
 operation-internal threads, daemon/frontend workers, all OS threads, or
-undeclared device/I/O/plugin resources. Issue #70 replaces the former
+undeclared device/I/O/plugin-process resources. Issue #70 replaces the former
 worker-only counter completely:
 `ExecutionService` now owns the sole Host-authoritative ledger, admits each
 built-in CPU Run with one checked full-vector reservation before publication,
@@ -102,9 +99,11 @@ commit, and RT-first independent child publication. Issue #73 adds private
 cooperative cancellation, monotonic deadline observation, exact queued/running
 drainage, and cancellation/commit arbitration. Issue #74 adds request-level
 realtime `RunGroup`, checked per-Graph latest-wins generations, bounded
-ticket-backed coalescing, and current-generation commit authority. Reserved
-start and the replacement plugin policy ABI remain issue #75, and
-registry-owned close/shutdown cancellation remains issue #76.
+ticket-backed coalescing, and current-generation commit authority. Issue #75
+removes the scheduler SDK and adds pure-C policy ABI v1, atomic policy binding
+replacement, Host-authored frontier and fallback, sticky generation-local
+faults, reserved start, and private execution routes. Registry-owned
+close/shutdown cancellation remains issue #76.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
 is authoritative for the detailed target Run lifetime, owner boundaries,
 resource mint, close/shutdown scope, and delivery dependencies; it does not make
@@ -113,7 +112,8 @@ those objects current behavior.
 ## Architectural Principles
 
 1. `ps::Host` remains the only product seam outside the backend.
-2. Graph-state operations never become scheduler-dispatched compute work.
+2. Graph-state operations never enter the ready store, policy selection, or an
+   execution route as compute work.
 3. Compute planning owns topology, dependency, ROI, dirty selection, and ready
    detection; scheduling sees only immutable metadata for concrete ready work.
 4. Semantic intent, resource policy, and commit visibility remain separate.
@@ -144,7 +144,7 @@ flowchart TD
   subgraph EXEC["Process-owned ExecutionService"]
     ADMIT["AdmissionController"] --> LEDGER["ResourceLedger"]
     LEDGER --> READY["Host-owned ReadyTaskStore"]
-    READY --> POLICY["SchedulerPolicy"]
+    READY --> POLICY["Policy binding / pure-C policy ABI"]
     POLICY --> ROUTER["Resource router"]
     ROUTER --> CPU["CPU executor"]
     ROUTER --> DEVICE["DeviceExecutorRegistry"]
@@ -175,8 +175,9 @@ exclusive `GraphModel` mutation boundary, so one `ComputeRun` does not prevent
 the frontend from producing a newer revision. Issue #72 makes that minimum
 identity/revision staging behavior current, Issue #73 makes private Run
 cancellation and commit arbitration current, and Issue #74 makes request-level
-grouping plus supersession generation current. The diagram still includes later
-registry, reserved-start, device, I/O, and plugin target slices.
+grouping plus supersession generation current. Issue #75 makes policy
+generation, reserved start, and private execution routes current. The diagram
+still includes later registry, device, I/O, and isolated-plugin target slices.
 
 ## Run and Process Execution Domain Contract
 
@@ -187,7 +188,7 @@ detail.
 
 ### `ComputeRun`
 
-The current baseline through Issue #74 implements exactly one private Run
+The current baseline through Issue #75 implements exactly one private Run
 around every non-realtime HP service call. A realtime call instead creates one
 request-owned `RunGroup` with separate HP `Full` and RT `Interactive` child
 Runs. Each Run captures a process-lifetime opaque id, session label,
@@ -195,8 +196,8 @@ strong Graph instance identity, authoritative revision, target, intent,
 quality, and explicit QoS;
 owns monotonic phase and exact-once terminal state; and owns the corresponding
 full submission plan/temporary results or standalone dirty staging through
-shared control. Scheduler-backed full HP work retains stable non-forgeable
-leases, owns its runner, and routes task failure only through matching
+shared control. Full HP work retains stable non-forgeable leases, owns its
+runner, and routes task failure only through matching
 `(RunId, RunLocalTaskId)`. Built-in HP and RT CPU ready work, including dirty
 and preflight work, now crosses the injected multi-Run `ExecutionService`
 boundary as move-only submissions with heap-owned callback context. The
@@ -211,14 +212,15 @@ deadline and private request source at bounded planning, queue, callback,
 dependency, phase, and commit boundaries. Issue #74 adds each request's
 immutable supersession key/generation, request-wide realtime cancellation and
 aggregate settlement, one pending mailbox and persistent ticket per exact key,
-and current-generation commit validation. Public cancellation control,
-reserved-start admission, and lifecycle registry wiring remain subsequent
-slices.
+and current-generation commit validation. Issue #75 adds Host-authored policy
+frontiers, generation-scoped policy binding and fault state, reserved-start
+admission, and private execution routes. Public cancellation control and
+lifecycle registry wiring remain subsequent slices.
 
 The remainder of this section describes the complete accepted target.
 
 `ComputeRun` is the unit of compute identity and lifetime. It is distinct from
-`GraphRuntime`, a scheduler batch, and `ComputeIntent`.
+`GraphRuntime`, a policy selection snapshot, and `ComputeIntent`.
 
 A non-realtime HP request owns one Run. A request coordinating independently
 planned HP and RT siblings owns a request/run-group identity plus one child Run
@@ -304,21 +306,23 @@ grant. Dropping a caller observer does not implicitly cancel admitted work.
 
 ### Target `GraphRuntime`
 
-The current issue #72 `GraphRuntime` owns `GraphModel`, graph-scoped runtime
+The current issue #75 `GraphRuntime` owns `GraphModel`, graph-scoped runtime
 state, separate graph-state and compute-request lanes, monotonic
 `GraphRevision`, revision capture, serialized commit validation/publication,
 graph events, stable graph-instance identity, and platform/session metadata.
 The graph-lifetime anchor remains target behavior.
 
 It owns no Run, admitted-Run index, CPU/device/I/O/plugin worker, process ready
-store, process admission, `ResourceLedger`, `SchedulerPolicy`, or physical
-scheduler instance. A Run may hold a graph-lifetime lease without reversing that
-ownership.
+store, process admission, `ResourceLedger`, `PolicyRegistry`, policy binding,
+or physical execution route. It stores only copied HP and RT route ids and
+their nonzero generations. A Run may hold a graph-lifetime lease without
+reversing that ownership.
 
 The graph-state lane is held for immutable revision capture and validated
 visible commit, not for long-running planning/execution. The private
-compute-request lane currently serializes same-Graph compute and scheduler
-lifetime; the target registry/lifetime fence remains future behavior.
+compute-request lane currently serializes same-Graph requests without owning
+an executor or policy lifetime; the target registry/lifetime fence remains
+future behavior.
 
 ## Process Execution Domain
 
@@ -332,7 +336,7 @@ it before participating Kernels/Hosts and retains it until they stop Run
 admission and drain their Runs. Graph close does not stop the service; only
 process execution-domain shutdown does.
 
-The current baseline through Issue #74 realizes the shared CPU/resource,
+The current baseline through Issue #75 realizes the shared CPU/resource,
 policy, and staged-commit boundary:
 `EmbeddedHostState` creates one fixed-pool CPU service with explicit limits
 before Kernel, and Kernel injects it into request-local `ComputeService`
@@ -340,8 +344,9 @@ instances. Built-in CPU full HP, full RT, standalone dirty HP/RT, and preflight
 dispatch transfer immutable, lease-backed `ReadyTaskSubmission` values with
 owned callback context. The service executes multiple Runs concurrently and
 keeps each Run's completion, first failure, trace routing, and Host context
-isolated. Built-in CPU bindings are ownerless, while legacy scheduler routes
-remain available for serial, GPU, and plugin execution. The service exclusively
+isolated. Closed private routes provide serial-debug, shared-CPU, and
+GPU-pipeline execution without exposing their workers, queues, or completion
+adapters. The service exclusively
 owns one Host-authoritative ledger, atomically admits each complete Run vector
 before publication, requires initial and dependent ready work to enter the same
 bounded store with child grants, and releases every reservation/grant exactly
@@ -352,9 +357,11 @@ validation and staged product publication are current. Private cooperative Run
 cancellation closes matching ready admission, purges matching queued entries,
 rejects dependent re-entry, waits for in-flight callbacks, and arbitrates with
 commit. Per-Graph supersession now coalesces one pending owner per exact key and
-requires the current checked generation at commit, while public cancellation
-control, reserved-start admission, and the lifecycle registry remain future
-work.
+requires the current checked generation at commit. Host-authored policy
+frontiers, pure-C plugin selection, generation-local sticky fallback,
+allocation-free start commit, and ready-to-execution grant exchange are also
+current, while public cancellation control and the lifecycle registry remain
+future work.
 
 The final service owns physical CPU workers and later resource executors,
 bounded ready storage, Run/resource admission, policy-result validation,
@@ -401,12 +408,12 @@ exactly once. Current cancellation and later close/shutdown slices must
 preserve that contract. Capacity exhaustion and checked overflow fail without
 partial reservation, overcommit, or silent clamping.
 
-`SchedulerPolicy` is an internal comparison seam, not a physical executor or
-resource authority. The current interactive and throughput strategies rank
-immutable ready descriptors; the service-owned store retains every physical
-entry and Graph/Run fairness row. A strategy owns no worker, ready store, Run,
-Graph state, budget, reservation, grant/token, native device handle, executor,
-completion route, or lifecycle authority.
+Each policy binding is a comparison seam, not a physical executor or resource
+authority. The current Interactive and Throughput bindings rank immutable
+Host-authored candidate descriptors; the service-owned store retains every
+physical entry and Graph/Run fairness row. A policy owns no worker, ready
+store, Run, Graph state, budget, reservation, grant/token, native device
+handle, executor, completion route, or lifecycle authority.
 
 Issue #71 proves the seam with two real built-in policies and one shared route:
 
@@ -418,27 +425,29 @@ Issue #71 proves the seam with two real built-in policies and one shared route:
 - a ready entry ages after eight successful dispatches;
 - at most three consecutive interactive dispatches precede required
   throughput progress while throughput remains ready;
-- configured interactive headroom caps only active built-in Throughput root
-  reservations; Interactive and transitional Issue #70 legacy owners do not
-  debit that class quota, while the ledger retains final physical authority;
-  the Throughput charge follows exact root lifetime through deferred child
-  release; and
+- configured interactive headroom caps only active Throughput root
+  reservations; Interactive Runs do not debit that class quota, while the
+  ledger retains final physical authority; the Throughput charge follows exact
+  root lifetime through deferred child release; and
 - initial and dependent work use the same policy route, retaining Run rows
   across temporary emptiness.
 
 Latest-generation preference and exact-key coalescing are current from #74.
 Revision-safe commit is current from #72, cooperative cancellation is current
-from #73, and reserved start plus the replacement scheduler policy ABI remain
-#75.
+from #73, and pure-C policy ABI v1, generation-scoped bindings, Host-authored
+frontiers, validated fallback, reserved start, and private execution routes are
+current from #75.
 Larger quanta and device-utilization awareness remain later profile/device
 targets; issue #71 does not claim them.
 
-The current worker-owning scheduler ABI is transitional. The future policy ABI
-is a breaking replacement, not a permanent forwarding layer.
+The worker-owning scheduler ABI, SDK target, `IScheduler` hierarchy, and
+per-Graph physical owners have been removed completely. The pure-C policy ABI
+is the breaking replacement; no compatibility adapter or forwarding layer
+remains.
 
 The former worker-only budget has been removed completely rather than wrapped,
-renamed, or aliased. Worker-request resolution is now pure planning; all CPU
-admission authority for Runs and legacy scheduler owners comes from the one
+renamed, or aliased. Execution worker-count resolution is composition-root
+configuration only; all CPU admission authority for Runs comes from the one
 service-owned ledger.
 
 ### Revision, cancellation, and visible commit
@@ -455,7 +464,7 @@ mutate visible Graph/proxy state or write deferred cache artifacts.
 Issue #73 makes cancellation part of that current predicate. One private
 request source and immutable monotonic deadline contend through the same Run
 arbiter as failure and commit. Built-in ready entries are purged by exact Run
-identity, dependent re-entry is rejected, legacy plan/callback completion units
+identity, dependent re-entry is rejected, queued plan/callback completion units
 retire exactly once, and entered non-preemptible work drains without permitting
 staged publication. The accepted commit contender, exact predicate, eligible
 persistence, visible swap, and terminal resolution share one serialized
@@ -515,12 +524,12 @@ lease; late completion performs cleanup only.
 | [#72](https://github.com/kevin-zf1123/photospider/issues/72) | Current revision capture and staged commit predicate | #67 |
 | [#73](https://github.com/kevin-zf1123/photospider/issues/73) | Current queued/running/commit cancellation | #70, #72 |
 | [#74](https://github.com/kevin-zf1123/photospider/issues/74) | Current latest-wins supersession and realtime `RunGroup` | #71, #73 |
-| [#75](https://github.com/kevin-zf1123/photospider/issues/75) | Complete policy-generation ABI replacement | #71 |
+| [#75](https://github.com/kevin-zf1123/photospider/issues/75) | Current pure-C policy generation, Host frontier/fallback, reserved start, and private execution routes | #71 |
 | [#76](https://github.com/kevin-zf1123/photospider/issues/76) | Graph close, process shutdown, telemetry, final invariants | #69, #73, #74, #75 |
 
 The graph is acyclic. #72 was permitted after #67 in parallel with #68–#71;
-#75 may proceed after #71 in parallel with #73–#74. The table freezes ownership
-dependencies, not implementation algorithms.
+#75 was delivered after #71 alongside the #73–#74 line. The table freezes
+ownership dependencies, not implementation algorithms.
 
 ## Dependency-Neutral Kernel
 
@@ -550,8 +559,8 @@ planning, cache, or runtime interfaces. The current repository-owned CPU
 provider already follows the provider concurrency direction from
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md):
 it uses reentrant `cv::Mat` callbacks, fixes OpenCV internal CPU threading at
-one before publication, leaves outer parallelism to admitted scheduler
-workers, and keeps genuine shared backend synchronization provider-local. The
+one before publication, leaves outer parallelism to Host-admitted execution
+starts, and keeps genuine shared backend synchronization provider-local. The
 repository-owned operation algorithms, their OpenCV initialization, and their
 exception translation now live in a separately switchable provider module;
 the provider-disabled profile proves a stdlib-only v2 provider can supply and
@@ -641,12 +650,15 @@ quanta rather than raw task count.
 multi-tenant product uses a separate control plane, worker manager, constrained
 `photospider-worker` processes, and durable artifact store.
 
-The current operation and scheduler plugin interfaces also remain provisional
-C++ ABIs. Their C-linkage registrar symbol or numeric handshake gates only the
-expected interface generation; matching SDK/toolchain/runtime compatibility is
-still required for the C++ values, callbacks, objects, and vtables that cross
-the DSO. A stable replacement or isolated invocation protocol is a separate
-versioned migration, not a compatibility promise inferred from those gates.
+The current operation plugin interface remains a provisional C++ ABI. Its
+C-linkage registrar symbol and numeric handshake gate only the expected
+interface generation; matching SDK/toolchain/runtime compatibility is still
+required for the C++ values, callbacks, objects, and vtables that cross the
+DSO. Policy plugins instead use the exact-layout pure-C ABI v1 and receive only
+immutable scalar candidate snapshots, but they remain trusted in-process code.
+A future operation ABI replacement, policy ABI generation, or isolated
+invocation protocol is a separate versioned migration, not a compatibility or
+security promise inferred from the current gates.
 
 The `ExecutionService` sees isolated plugin execution through a
 `PluginInvocationExecutor`. A separate `PluginRuntimeSupervisor` owns worker
@@ -676,8 +688,8 @@ cross-process GPU handles require a later device/fence protocol.
    host-owned quotas.
 10. Terminal publication does not imply Run reclamation; all leases and grants
     must quiesce and release first.
-11. `(RunId, RunLocalTaskId)` is the completion identity; scheduler epoch is not
-    a Run identity.
+11. `(RunId, RunLocalTaskId)` is the completion identity; a policy-binding or
+    execution-route generation is not a Run identity.
 
 ## Dependency Ordering
 

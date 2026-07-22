@@ -1,13 +1,12 @@
 # Plugin ABI
 
-Photospider supports operation plugins and scheduler plugins. Operation plugins
-extend the process-owned `OpRegistry` through a host-provided registrar.
-Scheduler plugins provide `IScheduler` implementations through a numeric
-handshake. Both interfaces are current provisional C++ ABIs. Their C-linkage
-entrypoints gate symbol identity or interface generation; they do not turn the
-accepted values, callbacks, or objects into a stable C data ABI. The
-installable authoring contracts live only under
-`include/photospider/{plugin,scheduler}`.
+Photospider supports operation plugins and policy plugins. Operation plugins
+extend the process-owned `OpRegistry` through a Host-provided registrar and
+remain a provisional C++ ABI. Policy plugins rank immutable Host-admissible
+candidates through a versioned pure C ABI; they own no worker, queue, device,
+resource, Run, or Graph capability. The installable authoring contracts live
+only under `include/photospider/plugin/` and
+`include/photospider/policy/policy_plugin_api.h`.
 
 ## Operation Plugin ABI
 
@@ -131,7 +130,7 @@ This split supports the static-host direction:
 - Dynamic operation plugins receive registration callbacks from the host, so
   registry mutation stays in that process-owned instance.
 - `Photospider::operation_runtime` contains value-factory implementation only;
-  it contains no registry, loader, graph, scheduler, or compute state.
+  it contains no registry, loader, Graph, policy, execution, or compute state.
 - Plugin callback objects and plugin-instantiated return-value internals may
   still point into plugin code, so the process owner and copied value leases
   retain libraries until all such state has been destroyed.
@@ -216,7 +215,7 @@ bridge occurs before key, callback, or ownership publication and leaves the
 registry unchanged.
 
 Stable ownership is not an execution mutex. The first CPU device value and its
-HP compatibility bridge retain the same callback target, and scheduler or
+HP compatibility bridge retain the same callback target, and executor or
 reader snapshots may retain that same logical target as well. These paths may
 invoke it concurrently. The callback provider must therefore make the target
 reentrant or synchronize its shared mutable state. The registry serializes only
@@ -227,7 +226,7 @@ single-threaded execution from a shared operation key, device, or intent.
 Repository-owned CPU OpenCV providers implement that contract with immutable
 inputs, callback-local or task-owned `cv::Mat` state, and no process-wide outer
 operation mutex. The optional built-in provider fixes OpenCV internal CPU
-threading at one before callback publication, so scheduler grants own the outer
+threading at one before callback publication, so execution grants own the outer
 parallelism. Its provider-local fence converts OpenCV resource exhaustion to a
 fresh `std::bad_alloc` and all other `cv::Exception` values to host-owned
 `GraphError`. Building with
@@ -361,263 +360,237 @@ Built-in callback registration also belongs to the process owner. It runs at
 most once, before process-owner plugin publication; later Host seed calls only
 reconcile source labels and cannot replay built-ins over an active plugin
 replacement.
+## Policy Plugin ABI
 
-## Scheduler Plugin ABI
+A policy plugin exports exactly two functions declared by the self-contained
+C11/C++17 header:
 
-A scheduler plugin explicitly defines all seven required C exports:
-
-```text
-ps_scheduler_plugin_get_abi_version
-ps_scheduler_plugin_get_count
-ps_scheduler_plugin_get_name
-ps_scheduler_plugin_get_description
-ps_scheduler_plugin_create
-ps_scheduler_plugin_destroy
-ps_scheduler_plugin_get_version
+```c
+uint32_t ps_policy_plugin_get_abi_version(void);
+ps_policy_status_v1 ps_policy_plugin_get_api_v1(
+    ps_policy_plugin_api_v1 *out_api);
 ```
 
-Required exports:
+The numeric handshake returns `PS_POLICY_PLUGIN_ABI_VERSION`, currently one.
+Only after exact equality does the Host resolve `get_api_v1`. The API table
+contains four mandatory callbacks:
 
-| Export | Required | Meaning |
-| --- | --- | --- |
-| `get_abi_version` | Yes, first gate | Non-throwing numeric handshake with signature `uint32_t() noexcept`; it must return `PS_SCHEDULER_PLUGIN_ABI_VERSION`, currently `2`. ABI v1 is rejected with no compatibility path. |
-| `get_count` | Yes | Number of scheduler types in the plugin; it must be at least one. |
-| `get_name` | Yes | DSO-owned type name that remains stable during candidate staging; every index below count must return non-null, non-empty text, which the host copies. |
-| `get_description` | Yes | Human-readable type description at an index. |
-| `create` | Yes | Create a scheduler instance for a type from a resolved `num_workers` grant in `[1,8]`. `IScheduler` already publicly derives from `SchedulerTaskRuntime`. |
-| `destroy` | Yes | Destroy a plugin-created scheduler instance. |
-| `get_version` | Yes | Human-readable implementation version, called once and cached; it is not the compatibility gate. |
+| Callback | Responsibility |
+| --- | --- |
+| `get_metadata` | Return one copied type row for an index in `[0,type_count)`. |
+| `create` | Create one class-specific logical context. |
+| `select` | Select one candidate from an immutable original snapshot or abstain. |
+| `destroy` | Destroy one successfully created logical context exactly once. |
 
-Count, index, and worker-count values use fixed `uint32_t` widths. The
-installable SDK supplies the ABI constant, typed function-pointer aliases, and
-`PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT`; it deliberately supplies no declaration
-or single-scheduler implementation macro. Each DSO declares every export and
-therefore makes its lifecycle and visibility contract explicit.
+All statuses, classes, masks, decision kinds, structure kinds, flags, counts,
+sizes, and generations use fixed-width integer domains. The supported ABI
+profile requires eight-bit bytes, 32-bit `uint32_t`, 64-bit `uint64_t`,
+64-bit pointers, and eight-byte pointer/integer alignment. Compile-time
+assertions freeze every record's natural layout:
 
-ABI v2 changes the worker-count argument from an underspecified configuration
-value into a resolved nonzero hard grant. The Host validates `[1,8]` before
-calling `create`, reserves the full grant for the concrete instance lifetime,
-and never passes the automatic zero sentinel across this ABI. A plugin may own
-fewer worker threads than the grant but must not own more. This is a trusted
-in-process contract: the admission ledger cannot sandbox a hostile DSO or
-prevent it from creating unreported threads during load or outside the returned
-scheduler instance.
+| Record | Size | Alignment |
+| --- | ---: | ---: |
+| `ps_policy_string_view_v1` | 16 | 8 |
+| `ps_policy_type_metadata_v1` | 80 | 8 |
+| `ps_policy_create_args_v1` | 40 | 8 |
+| `ps_policy_candidate_v1` | 120 | 8 |
+| `ps_policy_selection_snapshot_v1` | 64 | 8 |
+| `ps_policy_decision_v1` | 48 | 8 |
+| `ps_policy_plugin_api_v1` | 80 | 8 |
 
-## Scheduler Plugin Load Transaction
+ABI v1 has no tail-extension rule. The Host requires exact sizes, structure
+kinds, field offsets, callback pointers, enum values, bounds, and zero-reserved
+storage. A packing pragma or unsupported target profile fails the header's
+layout assertions; a new record shape requires a new ABI generation.
 
-Loading one scheduler plugin is a strong transaction over the scheduler type
-map, type metadata, retained-library map, and ordered load diagnostics. The
-loader opens a POSIX candidate with `RTLD_NOW | RTLD_LOCAL`, resolves and calls
-only `ps_scheduler_plugin_get_abi_version`, and requires exact equality with
-the SDK value before resolving any other export. Missing or mismatched
-handshakes release the candidate with a structured diagnostic; implementation
-version, count, name, description, create, and destroy are not called and no
-candidate state is published. In particular, an ABI v1 library executes only
-the numeric handshake; no v1 adapter, forwarding owner, or compatibility
-registration is published.
+Type names are 1..128 lowercase ASCII bytes matching
+`[a-z][a-z0-9_.-]*`. Descriptions and implementation versions are copied,
+valid UTF-8 strings of at most 4,096 bytes. One DSO exposes 1..256 types and
+must not use the Host-reserved names `interactive` or `throughput`.
+Supported-class masks are nonzero subsets of the Interactive and Throughput
+bits.
 
-For a compatible candidate, the loader creates local shadow copies of all four
-containers. Results from the once-only implementation-version call, count,
-name, and description callbacks, duplicate/conflict diagnostics,
-registered-type bookkeeping, and the candidate `PluginHandle` are recorded
-only in those shadows. No candidate type can therefore become visible before
-its cached metadata and retained library are ready.
+The Host creates a separate logical context for each class binding, even when
+both bindings use the same DSO type. The create record contains only the class
+and nonzero binding generation. Successful null context is valid and still
+requires one destroy call. A failed create must return null and reclaim all
+partial plugin allocation.
 
-A compatible candidate is still rejected when count is zero, any in-range name
-is null or empty, or every valid name conflicts with an existing type. Such a
-rejection discards all candidate shadows, releases the candidate library, and
-appends one structured diagnostic without changing the prior diagnostic
-prefix. Conflicts remain recoverable when at least one valid non-conflicting
-type is available: that type, its metadata, the retained handle, and the staged
-conflict diagnostics commit together.
+A selection snapshot contains 1..4,096 exact-stride candidate records.
+Candidates contain only opaque identities and Host-authored scalar ranking
+metadata. Snapshot storage is borrowed and immutable until `select` returns;
+the plugin must not retain it. A selection echoes the exact binding and snapshot
+generations and names one unique candidate from the original snapshot.
+Abstention must return a zero candidate id. Neither form grants execution
+authority.
 
-If a discovery callback throws, the loader applies the same host-owned mapping
-as the operation callback fence while the candidate lease is live. If host
-metadata copy, diagnostic construction, or container allocation throws, that
-host-owned exception retains its type. In both cases the shadow state is
-destroyed before the candidate shared-library lifetime is released; the exact
-pre-call type, metadata, handle, and error prefixes remain active, and the same
-plugin path can be retried immediately. A complete candidate is published under
-the loader mutex by no-throw container swaps, with the retained handle swapped
-first. Library-open and missing-export failures still return false with one
-diagnostic, but that diagnostic append is itself staged and cannot partially
-alter the prior error sequence.
+C++ inclusion gives exports and callbacks C linkage plus `noexcept`; C11 uses
+the platform C calling convention. The Host still fences callback entry so an
+incorrect C++ DSO cannot export an exception object into Host state. Setup
+`OUT_OF_MEMORY` becomes a fresh Host `std::bad_alloc`; invalid or unsupported
+setup becomes `GraphErrc::InvalidParameter`; internal, unknown, or escaping
+setup failures become `GraphErrc::ComputeError`. Selection failures are
+classified as generation-local policy faults instead of unwinding through a
+Run.
 
-## Scheduler Instance Runtime Contract
+## Policy SDK Target and Linkage
 
-The scheduler plugin instance is a C++ object returned as `ps::IScheduler*`.
-`IScheduler` publicly derives from `SchedulerTaskRuntime`, so one object has
-exactly one lifecycle/runtime interface and creation performs no cross-DSO
-runtime type discovery.
+A policy plugin requests the `policy_sdk` package component and links
+`Photospider::policy_sdk`. This is an interface-only target carrying the
+installed include directory and C11/C++17 compile features. It does not link
+the static `photospider` product, operation runtime, OpenCV, a registry, an
+executor, or any worker-owning implementation.
 
-`IScheduler::attach` receives a borrowed public `SchedulerHostContext&`, never
-`GraphRuntime`. The context exposes only device-capability queries, task
-worker/epoch context set/clear, and trace publication. Its protected destructor
-prevents plugin-side deletion; the host keeps it alive from successful attach
-through shutdown and detach. A scheduler clears every retained context pointer
-during detach. Built-in and plugin schedulers therefore preserve TLS metrics
-and trace attribution without access to graph ownership or native Metal
-handles.
+The policy ABI deliberately contains no C++ standard-library value, exception,
+RTTI object, virtual interface, allocator owner, or Host callback. A compatible
+DSO may be authored in C11 or C++17 under the frozen 64-bit natural-layout
+profile. The ABI does not promise compatibility with a different pointer size,
+alignment model, calling convention, or future ABI generation.
 
-The host lifetime owner is a transparent runtime wrapper. It forwards
-`available_devices()` plus initial and worker-ready borrowed-`TaskHandle`
-batches, any-thread callback submission, completion wait, first-exception
-publication, completion-counter mutation, and trace publication directly to
-the plugin instance. Both handle-batch methods are pure virtual, so the SDK
-cannot split an atomic batch into per-item base fallbacks and thereby change
-ordering. Every returned device is validated against CPU, Metal, CUDA, and
-ASIC/NPU before host planning; an unknown enumerator becomes a host-owned
-`GraphError(InvalidParameter)`. `TaskExecutor` uses protected virtual
-destruction, so the plugin cannot delete the dispatcher-owned executor through
-its borrowed base pointer.
+`PHOTOSPIDER_POLICY_PLUGIN_EXPORT` selects the platform export visibility and
+`PS_POLICY_CALL` selects the declared calling convention. Plugins export only
+the exact two names. There is no scheduler SDK target, `IScheduler` base,
+scheduler factory, worker-count create argument, or compatibility shim.
 
-Plugin discovery, create, lifecycle, and runtime failures use the same
-host-owned exception mapping as operation callbacks while an explicit scheduler
-DSO lease is live. Host tasks are different: before a `TaskHandle` executor,
-any-thread callback, or non-null `set_exception` value enters plugin code, the
-owner preallocates an append-only identity slot. The relay records the original
-`exception_ptr` without allocation and uses bare `throw;`; plugin code therefore
-observes the original dynamic type, message, and object. When the same pointer
-later surfaces, the host recognizes it before plugin-failure normalization and
-rethrows it exactly. Recording and lookup allocate nothing, no plugin call holds
-the registry guard, rejected admission only marks its slots inactive, and the
-matching wait clears all slots. Registry clear swaps storage under the guard and
-destroys retired exception objects afterward, so an exception destructor may
-reenter scheduler APIs without deadlocking.
+## Policy Plugin Load Transaction
 
-This is part of the current transitional C++ ABI. Plugin authors derive only
-from `IScheduler` and implement its inherited runtime operations until a
-separately versioned pure C ABI replaces this boundary.
+`PolicyRegistry` is the process owner for immutable built-in and DSO type
+records. Loading one DSO follows this order:
 
-At instance creation the plugin receives the exact resolved grant that was
-planned and reserved. Automatic hardware detection has already produced a
-value from one through eight, and an explicit request remains exact. Repository
-examples validate the same range themselves: CPU and heterogeneous examples
-own exactly the grant, while the serial example owns no worker thread but is
-still charged the full plugin grant. The built-in GPU scheduler's separate
-grant-plus-one device-worker accounting is not part of the plugin ABI; a plugin
-has no unreported extra device-worker allowance.
+1. reject empty/NUL-containing paths and same-thread policy-callback mutation;
+2. normalize the absolute path and open it eagerly and locally;
+3. resolve and call only `ps_policy_plugin_get_abi_version`;
+4. require exact ABI equality, then resolve and call
+   `ps_policy_plugin_get_api_v1`;
+5. validate the complete exact-size API table;
+6. copy and validate every metadata row into a private map;
+7. under the registry lock, reject every visible-name conflict, stage the
+   complete next type/path containers, and publish both by swap.
 
-## Scheduler Instance Ownership
+Missing symbols, ABI mismatch, malformed API bytes, invalid UTF-8, invalid
+bounds/masks, reserved built-in names, duplicate rows, or visible conflicts
+publish no type and no path for that DSO. The candidate DSO lease remains live
+while its callbacks and borrowed metadata are inspected and while staged
+records are destroyed. Only completely copied Host-owned metadata becomes
+observable.
 
-Scheduler instances created by a plugin must be destroyed through that plugin's
-destroy function. The loader must not rely on default C++ deletion for
-plugin-created instances.
+The registry calls no DSO callback while holding its mutex. The version, API,
+metadata, create, select, and destroy boundaries are all marked as policy
+callback intervals. Read-only registry observation may reenter from a callback;
+same-thread load, scan, unload, binding creation, or service-level policy
+mutation is rejected before it can wait on a registry or binding lock.
 
-This rule avoids allocator, runtime, and dynamic-library boundary problems.
+`scan` preserves caller directory order, sorts matching DSO candidates within
+each directory, and invokes the same single-DSO transaction for each candidate.
+It is intentionally not a transaction over the whole scan: an earlier complete
+DSO remains published if a later filesystem or load operation fails.
 
-Immediately after a non-null create result, the loader installs a non-allocating
-stack guard containing the raw instance, destroy function, and shared library
-lifetime. The guard remains active through heap allocation of the host owner
-and copied type-name construction. If owner
-allocation or string copy throws `std::bad_alloc` (or any other construction
-exception), the guard calls plugin destroy exactly once and keeps the library
-mapped until that call returns. Ownership transfers only after the complete
-host owner has been constructed.
+## Policy Binding and Library Lifetime
 
-The completed host owner has a `noexcept` destructor. Destruction first clears
-its host-side raw/runtime pointers, then attempts `shutdown()` and `detach()`
-behind two independent catch-all fences. Failure in either lifecycle call,
-including `std::bad_alloc`, cannot skip the later stage. The owner then calls
-the plugin destroy export exactly once behind a third no-throw ABI fence. A
-throwing destroy export is not retried because the host cannot know whether the
-plugin already ended or partially ended the object lifetime. The shared library
-lifetime is released only after that single destroy attempt returns, so
-`shutdown`, `detach`, destroy, and any plugin-side destructor code all execute
-while the library remains mapped.
+A visible type record owns copied metadata, the validated API table, its
+zero-based row index, and a shared DSO lease. Binding preparation copies that
+record under the registry lock, releases the lock, invokes `create`, and
+constructs one immutable class/generation/context owner before service
+publication. Built-ins use the same binding, generation, first-fault, and
+decision-validation interfaces without a DSO callback.
 
-These catch-all suppression fences apply only to destructor fallback and
-raw-owner construction cleanup. Explicit `attach`, `start`, `shutdown`, and
-`detach` calls remain observable, but plugin-origin failures use the host-owned
-mapping above rather than exporting a DSO exception object. This distinction
-keeps the public lifecycle contract observable while preventing either an
-unmapped dynamic type or a hostile cleanup exception from reaching the host.
+Interactive and Throughput bindings are distinct contexts with independent
+nonzero generations. Replacement prepares the candidate outside the service
+publication lock. A failed create or publication leaves the active binding and
+generation unchanged. Successful publication retires the old shared binding;
+the final owner invokes its plugin `destroy` exactly once, without retry, and
+keeps the DSO mapped through the call. Destroy status and catchable failure are
+diagnostic-only in this no-throw retirement path. A successful null context is
+also destroyed once.
 
-Before every explicit `attach()` or `start()` attempt, the owner marks the
-matching detach or shutdown fallback as required. This happens before control
-enters the plugin: if a repeated attach/start publishes partial state and then
-throws, an earlier successful detach/shutdown cannot make the destructor skip
-the cleanup required by that failed retry.
+Each selection retains shared binding ownership for the full callback and
+validation interval. The Host initializes the complete snapshot and decision
+records, invokes the callback without registry, binding-state, ready-store,
+resource-ledger, Graph, or Run locks, and validates the returned decision
+against the immutable original call. A first invalid-plugin result is stored as
+a sticky fault on that exact binding generation. Concurrent later faults cannot
+replace it. Successful replacement starts with a new generation and no fault.
 
-The scheduler plugin library must remain loaded while any scheduler instance
-created by that plugin may still exist.
+Registry unload removes all DSO rows and path visibility atomically while
+preserving the two built-ins. Existing bindings retain their type records,
+callback table, contexts, and DSO leases and therefore remain valid until their
+last invocation and binding owner retire. This unload primitive is reserved for
+tests and process cleanup; it is not a public Host lifecycle command. The
+process registry itself intentionally has process lifetime.
 
-Factory construction wraps the completed plugin owner in a separate
-`ReservationOwnedScheduler`. That outer owner retains the exact grant after
-create, attach, start, and all runtime calls. `GraphRuntime` remains responsible
-for explicit shutdown and detach. On destruction, the outer owner first
-destroys the complete plugin owner—which performs its fenced lifecycle and
-matching destroy export while the DSO remains mapped—and only then releases the
-process reservation. Candidate construction failure returns only candidate
-capacity during replacement; graph-load rollback returns both unpublished
-intent reservations. A live or failed-close graph cannot release its grant
-early.
+An honest in-process callback that never returns can indefinitely retain its
+binding and DSO lease. The Host provides no timeout, forced unwind, destroy, or
+unload-progress guarantee across that boundary. Process-isolated plugin
+supervision is a separate architecture generation.
 
 ## Boundaries and Rationale
 
-Both current plugin ABIs are explicitly provisional. The operation entrypoint
-name rejects unsupported registration generations, but accepted registrar
-tables and callbacks remain C++. The scheduler numeric handshake rejects
-unknown interface generations before discovery or object creation, but the
-accepted interface still uses C symbol names around a C++ `ps::IScheduler*`
-and its vtable. The human-readable scheduler implementation version is
-diagnostic metadata only and never substitutes for the numeric handshake.
+The two current plugin boundaries intentionally have different compatibility
+profiles:
 
-For both interfaces, binary compatibility depends on the matching Photospider
-SDK and a compatible compiler, standard library, C++ ABI, allocator/runtime,
-exception model, and RTTI configuration. C linkage is an identity/generation
-gate, not a pure C data boundary or cross-toolchain stability guarantee.
+| Boundary | Data ABI | Authority |
+| --- | --- | --- |
+| Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
+| Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
-Shadow transactions prevent partial registry or type-map publication. DSO
-leases and matching destroy functions keep callback state and plugin-created
-instances inside the lifetime of their defining library. Those mechanisms make
-the provisional C++ boundary explicit rather than mistaking a C symbol for a
-stable C value ABI.
+The operation C-linkage entry name is an identity/generation gate, not a stable
+C data ABI. Binary compatibility still depends on the matching SDK, compiler,
+standard library, C++ ABI, allocator/runtime, exception model, and RTTI
+configuration.
+
+The policy boundary uses only fixed-width scalars, opaque `void *` context,
+borrowed immutable arrays, and C function pointers. Exact layout assertions and
+validation make the supported profile explicit, but do not sandbox a hostile
+DSO. A plugin still executes trusted native code in the Host process and can
+block, corrupt memory, allocate outside accounting, or create unreported
+threads. It simply receives no legitimate execution capability through the
+ABI.
+
+Shadow publication prevents partial operation-registry or policy-type-map
+visibility. DSO leases keep callback state and plugin-owned values or contexts
+inside the lifetime of their defining library. Matching operation restoration
+tokens and policy binding generations prevent a removed or replaced plugin from
+silently reclaiming current ownership.
+
 [ADR 0003](../adr/0003-process-owned-execution-resources.md) records the
-high-level process-owned execution direction. The detailed
-[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-requires a complete replacement of this worker-owning scheduler generation by
-a policy generation; no permanent compatibility shim preserves the old
-ownership model. The exact
+process-owned execution direction. [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+requires policy and execution to remain separate and forbids restoration of the
+old worker-owning scheduler boundary. The
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-records the delivery direction. The exact
-[server and plugin isolation target](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation)
-records the operation-isolation direction. Neither changes the current loader
-contracts described here.
+and [server and plugin isolation target](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation)
+record the follow-up direction.
 
 ## Compatibility Guidelines
 
-- Operation plugins should use the published registration APIs and public data
-  contracts.
-- Operation plugins must use `ps::plugin::OperationPluginRegistrar` and
+- Operation plugins use `ps::plugin::OperationPluginRegistrar` and export only
   `register_photospider_ops_v2`; v1 and the no-argument registration ABI are
   unsupported.
-- Operation plugins must not link `photospider` merely to share registry
-  state. Link `Photospider::operation_sdk`, adding
-  `Photospider::operation_opencv` only when the public OpenCV adapter is used.
-- Scheduler plugins derive from `IScheduler`, implement its inherited runtime
-  contract, and export the exact numeric handshake plus all six remaining
-  required functions.
-- Scheduler plugins must rebuild for ABI v2 and treat the Host-supplied
-  `num_workers` value in `[1,8]` as a hard maximum over all worker threads owned
-  by the instance. ABI v1 is not supported; repository examples also reject
-  invalid direct calls defensively.
-- The host should use plugin destroy for plugin-created scheduler instances.
-- No pure C operation or scheduler ABI compatibility is currently provided.
+- Operation plugins link `Photospider::operation_sdk`, adding
+  `Photospider::operation_opencv` only for the public OpenCV adapter. They do
+  not link the broad static product merely to share registry state.
+- Policy plugins include
+  `photospider/policy/policy_plugin_api.h`, request the `policy_sdk`
+  component, and link `Photospider::policy_sdk`.
+- Policy plugins export the exact two v1 symbols, fill exact-size records,
+  preserve every Host-initialized prefix/reserved field, and return only
+  declared status/enum values.
+- Policy callbacks retain no snapshot memory and treat every candidate id as
+  opaque. They never create workers or claim that selection starts work.
+- There is no operation v1 compatibility path, scheduler SDK, scheduler ABI,
+  `IScheduler` adapter, or execution-route plugin ABI.
 
 ## Implementation and Validation Entry Points
 
 - `include/photospider/plugin/plugin_api.hpp`
 - `include/photospider/plugin/op_contract.hpp`
-- `include/photospider/scheduler/scheduler.hpp`
-- `include/photospider/scheduler/scheduler_plugin_api.hpp`
+- `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/plugin/operation_host_adapter.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
-- `src/lib/scheduler/scheduler_plugin_loader.*`
+- `src/lib/policy/policy_registry.*`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_plugin_manager.cpp`
-- `tests/integration/test_scheduler_plugin_loader.cpp`
 - `tests/unit/test_op_registry_m31.cpp`
-- `tests/unit/test_scheduler_sdk_example.cpp`
+- `tests/unit/test_policy_registry.cpp`
+- `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

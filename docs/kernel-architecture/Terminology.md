@@ -29,8 +29,9 @@ cache, traversal, inspection, and persistence services.
 **`GraphRuntime`**
 The per-graph resource container. It owns one `GraphModel`, one bounded
 graph-state lane, one bounded private compute-request lane, one private
-supersession coordinator, events, current schedulers, and platform runtime
-resources. It is not the owner of compute dependency planning.
+supersession coordinator, copied HP/RT execution-route bindings, events,
+execution traces, and platform runtime resources. It is not the owner of
+compute dependency planning, policy contexts, or physical route workers.
 
 **`GraphModel`**
 The in-memory graph state: nodes, topology adjacency, parameters, outputs,
@@ -55,8 +56,8 @@ self-submits or waits for capacity. Full-capacity admission blocks; close stops
 external admission/wake, drains prior one-shot and reserved-ticket work, and
 joins the worker. Concurrent closers wait for the durable completion generation
 they joined, even if failure recovery reopens the lane before they wake. The
-executor remains separate from scheduler dispatch and its worker is not a
-scheduler worker slot.
+executor remains separate from ready dispatch; its worker is uncharged
+infrastructure, not a Run execution grant.
 
 **Graph document**
 The persisted representation used to create or update graph state. YAML is the
@@ -67,7 +68,7 @@ without treating a serialization library as graph state.
 The current behavior in which visible Graph capture, mutation, commit
 validation, and publication are serialized by one graph-state lane. Long-running
 compute operates on a request-owned snapshot outside that lane, while a separate
-compute-request lane serializes same-Graph compute and scheduler-owner access.
+compute-request lane serializes same-Graph compute and execution-route access.
 
 **`GraphInstanceId`**
 The private strong, nonzero, process-lifetime identity of one live Graph
@@ -97,9 +98,9 @@ pending mailbox value.
 
 **`ComputeIntent`**
 The semantic quality/update intent of a request. `GlobalHighPrecision` and
-`RealTimeUpdate` select planning and operation semantics and also select a
-per-graph scheduler-map route. The value is not passed as scheduler task
-metadata and does not define a thread pool, task priority, QoS, deadline,
+`RealTimeUpdate` select planning and operation semantics and one copied
+per-Graph private execution-route binding. The value is not passed to a policy
+as ordering authority and does not define a thread pool, task priority, QoS, deadline,
 fairness, cancellation mode, or commit policy.
 
 **`ComputeService`**
@@ -118,10 +119,10 @@ phase, one exact terminal/commit arbiter, the stable first cancellation reason,
 and the full submission plan/temporary results or dirty HP staging required by
 its path. The Run mints a private weak-lifetime cancellation source; ordinary
 `ComputeRunLease` values can only observe explicit cancellation or an expired
-deadline and retain cleanup/commit-contender lifetime. Built-in CPU full,
-dirty, and preflight tasks execute owned callbacks through the fixed
-multi-Graph `ExecutionService` and publish failure only through a matching
-`(RunId, RunLocalTaskId)`.
+deadline and retain cleanup/commit-contender lifetime. Full, dirty, and
+preflight tasks execute owned callbacks through the Host-owned
+`ExecutionService` and a closed private route, and publish failure only through
+a matching `(RunId, RunLocalTaskId)`.
 
 **`RunGroup`**
 The current private request owner for one realtime HP/RT pair. It captures one
@@ -154,13 +155,13 @@ create this shape.
 
 **`ComputePlan` / `ComputeTaskGraph`**
 The request-scoped static plan produced by pruning a full task graph to a target
-and dependency cone. It remains immutable while scheduler-visible tasks derived
+and dependency cone. It remains immutable while execution-visible tasks derived
 from it may execute.
 
 **`DirtyRegionSnapshot`**
 Graph-scoped ROI and lifecycle state that records dirty sources, affected
-regions, tiles, and edge mappings. It is not a compute task graph or scheduler
-queue.
+regions, tiles, and edge mappings. It is not a compute task graph, policy
+snapshot, ready store, or execution route.
 
 **`DirtyUpdateWorkSet`**
 The active task subset selected from an existing request plan by a dirty
@@ -178,55 +179,59 @@ full HP work, the request `ComputeRun` owns the `TaskSubmissionPlan` storage and
 temporary result slots while the dispatcher owns their dependency transitions
 and final result commit. Dirty executors reuse its source-first submission
 helper and own their staged commit through dirty write buffers. Built-in CPU
-full, dirty, and preflight paths push lease-backed owned submissions; only
-legacy dirty scheduler routes may still push borrowed task handles.
+full, dirty, and preflight paths push lease-backed owned submissions through the
+common ExecutionService boundary.
 
 **`ReadyTaskSubmission`**
 A move-only service submission whose compute dependencies are already
 satisfied. It owns immutable Run/task identity, a matching lease, an
-executable, a priority hint, and a trusted host resource declaration. Legacy
-schedulers may still receive borrowed handles or owned callbacks, but neither
-route receives `GraphModel`, a task graph, or dirty-propagation ownership.
+executable, a priority hint, and a trusted Host resource declaration.
+The Host-owned ready store, policy frontier, reserved-start transaction, and
+private route may observe only their respective bounded projections; none
+receives `GraphModel`, a task graph, or dirty-propagation ownership.
 
-## Scheduling, Cache, and Data
+## Policy, Execution, Cache, and Data
 
-**`IScheduler`**
-The current legacy scheduler interface. A serial, GPU, or plugin scheduler
-instance owns worker lifecycle, ready queues, batch/epoch state, and
-completion/exception publication for one per-graph intent route. Threaded
-implementations combine policy and physical resource ownership;
-`serial_debug` executes synchronously. Built-in CPU Graph bindings instead use
-the fixed Host-composed `ExecutionService` and own no `IScheduler`. The legacy
-interface remains current for those routes, but it is not the accepted final
-policy-only scheduler generation.
+**Policy**
+A built-in or pure-C ABI v1 selector that receives one immutable bounded
+candidate snapshot and returns one candidate id or abstains. A policy owns no
+worker, queue, ready entry, resource grant, Run, Graph, executor, completion
+route, logger, or lifecycle authority. Its borrowed snapshot is valid only for
+the duration of the callback.
 
-**`SchedulerPolicy`**
-The private, stateless comparison seam used by the current service. Its
-interactive and throughput implementations rank immutable ready descriptors;
-the service-owned store retains Graph/Run fairness state and physical entries.
-A policy owns no worker, ready entry, Run, Graph, budget, resource token,
-executor, completion route, or lifecycle authority. It is not the future
-replacement plugin ABI.
+**`PolicyClass` / policy binding**
+`Interactive` and `Throughput` are the two process service classes. One
+process-scoped binding per class owns a built-in or DSO context, a nonzero
+generation, an optional immutable first fault, and the DSO leases needed by
+metadata/context/invocations. Same-name replacement creates a new context and
+generation; both classes remain separate even when they name the same type.
 
-**Scheduler worker request**
-The configured pre-planning value. Zero means automatic and one through eight
-are exact; any larger value is invalid. Automatic resolution is
-`min(max(1, detected hardware concurrency), 8)`. The request is not yet a
-reservation or a count of running threads.
+**`PolicyRegistry`**
+The process registry of built-in and loaded pure-C policy types. A DSO is
+validated and published as one all-or-nothing transaction; unloading removes
+visibility while active metadata, bindings, contexts, and invocations retain
+independent DSO leases. It is not an execution-plugin registry.
 
-**Resolved worker grant**
-The nonzero one-through-eight value produced before scheduler construction. It
-is the built-in CPU worker ceiling and the ABI v2 `num_workers` hard ceiling for
-one trusted plugin instance. A plugin may own fewer worker threads but must not
-own more. It is distinct from the final process slot charge because a
-built-in GPU scheduler also charges its potential device worker and built-in
-`serial_debug` charges zero.
+**Host-authored frontier**
+The trusted candidate subset selected before any policy callback. Host state
+fixes the service class, startability, cancellation/route compatibility,
+eight-dispatch aging frontier, earliest finite Interactive deadline, minimum
+Graph/Run projected service scores, saturation escape, and stable enqueue
+order. A policy may choose only from the immutable original snapshot and cannot
+widen that frontier or mint work.
 
-**Scheduler worker slot**
-One conservative admission unit for a potential scheduler-owned physical
-worker. A slot may remain reserved when a device is unavailable or a conforming
-plugin creates fewer workers. It is not a ready callback, operation-internal
-thread, graph-state executor, daemon worker, or observed OS thread.
+**Execution worker request**
+The process configuration value for the fixed Host CPU pool. Zero means bounded
+automatic resolution and one through eight are exact. Once configured, zero or
+the equal positive value preserves the pool; a conflicting positive value is
+invalid. It is not a Run grant, a policy input, or a count of callbacks
+currently executing.
+
+**Private execution route**
+One of the closed Host implementation ids `cpu`, `serial_debug`, or
+`gpu_pipeline`. `GraphRuntime` stores only copied HP/RT ids and nonzero
+generations. The Host-owned `ExecutionService` owns physical workers/queues and
+route-specific in-flight state; routes cannot be scanned or loaded as plugins.
 
 **`ResourceVector`**
 A complete checked request or snapshot with independent CPU-slot,
@@ -261,21 +266,28 @@ authority is acquired or the entry is purged.
 **Resource reservation and grant**
 A reservation is the move-only RAII owner of one atomically admitted root
 vector; a grant is a move-only, non-forgeable child authority minted within
-that vector. Graph load atomically acquires an HP/RT legacy CPU-slot
-reservation pair before constructing either scheduler; replacement acquires
-one candidate reservation while the old owner remains live. A
-`ReservationOwnedScheduler` destroys its concrete scheduler before exact
-release. A Run root remains committed until every queued/executing child grant
-has ended. For a built-in Throughput Run, its non-authoritative class-quota
-charge has the same root lifetime; Interactive and legacy roots do not debit
-that quota.
+that vector. A Run root remains committed until every queued/executing child
+grant has ended. Ready-entry/byte grants cover queued submissions; reserved
+start exchanges the exact selected ready grant for CPU/retained/scratch
+execution grants. A Throughput Run's non-authoritative class-quota charge has
+the same root lifetime; Interactive roots do not debit that quota.
 
-**`SchedulerTaskRuntime`**
-The scheduler-owned push-only ready-task dispatch mechanism. It accepts initial
-and newly released ready batches; it does not pull from a plan, derive tasks,
-inspect graph topology, or commit graph state.
+**Reserved start**
+The Host-only transaction between policy selection and executor entry. A
+private `SelectionPin` identifies the exact ready entry/version; a
+`StartTransaction` stages resource grants, rechecks current Run/cancellation/
+route/fairness state, and then commits an allocation-free no-throw removal,
+service-accounting update, and callback transfer. A rejected or throwing
+pre-commit path changes no ready/fairness state and releases staged grants once.
 
-**`SchedulerTaskPriority`**
+**`ExecutionTaskRuntime`**
+The private push-only task/completion adapter used after a reserved start. It
+accepts initial and newly released ready work, publishes route worker/epoch
+attribution, and settles completion or the first exception. It does not pull
+from a plan, derive tasks, inspect Graph topology, rank candidates, mint
+resources, or commit Graph state. It is not an installed extension ABI.
+
+**`ExecutionTaskPriority`**
 The current independent `Normal` or `High` ready hint. It is orthogonal to
 `ComputeIntent`: HP and RT dirty source batches both use `High`, while their
 downstream groups use `Normal`. In the service policy store it is not an
@@ -283,11 +295,11 @@ absolute priority: within the service class already selected by inter-class
 arbitration, aging can select an older normal-hint entry through a continuing
 high-hint stream.
 
-**Scheduler epoch**
-A scheduler-local nonzero batch identity used to reject stale queued work and
-ignore stale completion publication. Zero is compatibility work. It is not a
-dirty generation, graph revision, Run identity, deadline, or cooperative
-cancellation token.
+**Execution epoch**
+A private nonzero route/runtime batch identity used for attribution and stale
+completion isolation after Host admission. It is not a policy generation,
+binding generation, dirty generation, Graph revision, Run identity, deadline,
+or cooperative cancellation token.
 
 **HP cache**
 `cached_output_high_precision`, the only authoritative reusable in-memory
@@ -321,45 +333,47 @@ predecessor. Public operation contracts use Photospider values.
 **Adapter**
 A narrow translation at an external library, transport, or product edge. An
 adapter converts representations without becoming the owner of graph,
-planning, cache, or scheduling semantics.
+planning, cache, policy, or physical-execution semantics.
 
 ## Terms That Must Remain Distinct
 
-- `ComputeIntent` is not scheduler priority or commit policy.
-- Dirty generation is not scheduler epoch.
+- `ComputeIntent` is not `PolicyClass`, execution priority, QoS, or commit
+  policy.
+- Dirty generation is not execution epoch, policy binding generation, or route
+  generation.
 - A graph-state operation is not a compute task.
 - `DirtyRegionSnapshot` is not `ComputeTaskGraph`.
 - A ready task is not a task graph.
 - HP cache is not RT proxy state.
 - `ImageBuffer` is not the
   [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
-- A worker request is not a resolved grant, and a grant is not necessarily the
-  final scheduler slot charge.
-- A reserved scheduler worker slot is not proof of one currently running
-  thread.
+- An execution worker request is not a Run reservation or child grant.
+- A policy candidate id or decision is not execution authority; only a
+  committed reserved-start transaction may enter a private route.
+- A policy binding generation is not a route generation, snapshot generation,
+  Run id, or supersession generation.
 - A `ResourceVector` is not a worker pool, observed allocation total, or a
   license to guess undeclared device/I/O/plugin dimensions.
 - A root reservation is not an executing callback; a child grant is not
   transferable outside its ledger-created ownership path.
-- A legacy per-graph `IScheduler` is neither the current Host-composed built-in
-  CPU `ExecutionService` nor the
-  [target policy-only scheduler generation](../roadmap/Kernel-Evolution.md#process-execution-domain);
-  the current service boundary and remaining lifecycle constraints are fixed
-  by
-  [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md).
+- A policy owns ordering only; a private execution route owns physical entry
+  only; a Run owns request correctness and settlement; the Host owns validation
+  and resource authority.
 
 ## Implementation and Validation Entry Points
 
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
 - `include/photospider/core/image_buffer.hpp`
-- `include/photospider/scheduler/scheduler.hpp`
+- `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`
 - `src/lib/graph/graph_state_executor.hpp`
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution_service.hpp`
+- `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/policy/policy_registry.hpp`
 - `src/lib/compute/compute_request_coordinator.hpp`
 - `src/lib/compute/compute_supersession.hpp`
 - `src/lib/compute/run_group.hpp`
@@ -368,4 +382,5 @@ planning, cache, or scheduling semantics.
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_resource_admission.cpp`
 - `tests/unit/test_resource_ledger.cpp`
+- `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_compute_supersession.cpp`

@@ -73,7 +73,7 @@ Plugin and runtime outputs:
 | local daemon | `build/bin/photospiderd` | macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON` |
 | backend libraries | `build/lib` | base build |
 | operation plugins | `build/plugins` | when their targets are built |
-| scheduler plugins | `build/schedulers` | when their targets are built |
+| policy plugins | `build/policies` | when their targets are built |
 | test binaries | `build/tests` | with `BUILD_TESTING=ON` |
 
 ## 2. Command-Line Mode
@@ -148,11 +148,12 @@ stable inode.
 
 The installed C++17 target `Photospider::photospider_ipc_client` exposes the
 move-only `ps::ipc::Client` and complete `create_ipc_host(socket_path)` adapter.
-The Client provides the exact 55 typed version 1 methods for daemon identity,
+The Client provides the exact 60 typed version 2 methods for daemon identity,
 graph/inspection, polling compute and protected image metadata, bounded
-events/traces, cache, operation plugins, and schedulers. Graph loads retain the
-caller's safe Host session name as request metadata but return a separate opaque
-daemon session id; disconnecting the client does not close that session.
+events/traces, cache, operation plugins, process policy, and private execution
+routes. Graph loads retain the caller's safe Host session name as request
+metadata but return a separate opaque daemon session id; disconnecting the
+client does not close that session.
 
 An IPC-only CMake consumer selects the installed component explicitly:
 
@@ -177,24 +178,22 @@ Extension DSOs use separate installed components:
 find_package(Photospider CONFIG REQUIRED COMPONENTS operation_sdk)
 target_link_libraries(my_operation PRIVATE Photospider::operation_sdk)
 
-find_package(Photospider CONFIG REQUIRED COMPONENTS scheduler_sdk)
-target_link_libraries(my_scheduler PRIVATE Photospider::scheduler_sdk)
+find_package(Photospider CONFIG REQUIRED COMPONENTS policy_sdk)
+target_link_libraries(my_policy PRIVATE Photospider::policy_sdk)
 ```
 
 `operation_sdk` contains the v2 `ps::plugin` contracts and transitively links
 the no-external-dependency `operation_runtime` image factories. An adapter user
 requests `operation_opencv`, which discovers only OpenCV `core`; algorithm-
-specific modules remain the plugin's responsibility. `scheduler_sdk` carries
-only installed ABI-v2 headers and C++17. Operation DSOs export
-`register_photospider_ops_v2`; scheduler DSOs must return scheduler ABI version
-2 from `ps_scheduler_plugin_get_abi_version() noexcept` before metadata or
-creation. ABI v1 is rejected without an adapter. Every ABI-v2 `create` call
-receives a resolved one-through-eight hard worker grant; a trusted in-process
-plugin may own fewer worker threads but must not own more. Neither SDK exposes
-mutable graph/runtime owners, and the old source-tree extension include paths
-are unsupported without forwarders.
+specific modules remain the plugin's responsibility. `policy_sdk` is a
+dependency-neutral C11/C++17 header-only contract. Policy DSOs export
+`ps_policy_plugin_get_abi_version` and `ps_policy_plugin_get_api_v1`; callbacks
+receive only bounded immutable ranking snapshots and return one candidate id or
+an abstention. They receive no worker, queue, resource grant, Graph, Run, or
+lifecycle capability. The operation SDK likewise exposes no mutable backend
+owner, and old source-tree extension includes have no forwarding compatibility.
 
-The IPC Host implements all 53 current non-destructor Host virtuals through
+The IPC Host implements all 58 current non-destructor Host virtuals through
 short-lived typed connections. Compute submits once, polls immediately and then
 at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;
 owned async workers are stopped, woken, interrupted, completed as Transport
@@ -213,7 +212,7 @@ Across embedded and IPC calls, the sole status vocabulary distinguishes
 on domain/code/name rather than diagnostic text. The
 daemon retains at most 64 active jobs, 256 terminal jobs, 64 image artifacts,
 one GiB of artifact bytes with a 512-MiB per-artifact ceiling, 8,192 compute
-events per session, and 65,536 scheduler-trace entries per session. Event
+events per session, and 65,536 execution-trace entries per session. Event
 drains are destructive pages of at most 1,024 entries; trace pages are
 non-destructive pages of at most 4,096 entries, and every frame is capped at
 16 MiB. Issue #73 adds private cooperative cancellation inside the embedded
@@ -223,7 +222,7 @@ Windows transport, and `graph_cli --connect` therefore remain unavailable, and
 daemon jobs continue to report `cancellable:false`. The CLI options and REPL
 commands in this manual remain local embedded-Host behavior and do not
 auto-connect to a daemon. See
-`docs/codebase-structure/IPC-Protocol-v1.md` for framing, errors, polling,
+`docs/codebase-structure/IPC-Protocol-v2.md` for framing, errors, polling,
 output security, socket selection, and lifecycle details.
 
 ## 3. REPL Mode
@@ -332,34 +331,50 @@ discard edits, and open the selected node in `$EDITOR`.
 The config editor edits the active `CliConfig` fields and can save or apply the
 current values depending on `config_save_behavior`.
 
-## 8. Scheduler Commands
+## 8. Policy And Execution Commands
 
-Use `scheduler` to inspect or change per-graph schedulers:
+Use `policy` to inspect process policy bindings and load authority-free ranking
+plugins:
 
 ```text
-scheduler list
-scheduler get [hp|rt|all]
-scheduler set <hp|rt> <type>
-scheduler scan [dir]
-scheduler load <path>
-scheduler plugins
+policy list
+policy get [interactive|throughput|all]
+policy set <interactive|throughput> <type>
+policy set all <interactive-type> <throughput-type>
+policy scan [directory]
+policy load <path>
+policy plugins
 ```
 
-Built-in scheduler types:
+Built-in policy types are `interactive` and `throughput`. A policy ranks only
+work already admitted by the Host; it does not own workers, queues, resources,
+Graph state, or execution routes.
+
+Use `execution` to inspect or replace the current session's private physical
+routes:
+
+```text
+execution list
+execution get [hp|rt|all]
+execution set <hp|rt> <type>
+execution set all <hp-type> <rt-type>
+```
+
+Execution routes are fixed Host implementation values, not plugins:
 
 | Type | Description |
 | --- | --- |
-| `cpu_work_stealing` | Multi-threaded CPU scheduler with work stealing. |
-| `serial_debug` | Single-threaded scheduler useful for debugging. |
-| `gpu_pipeline` | Heterogeneous scheduler with GPU/CPU routing. |
-| `heterogeneous` | Alias for `gpu_pipeline`. |
+| `cpu` | Shared Host-owned CPU execution service. |
+| `serial_debug` | Single-threaded private route useful for debugging. |
+| `gpu_pipeline` | Private GPU/CPU pipeline route. |
 
 Example:
 
 ```text
-scheduler get
-scheduler set hp serial_debug
-scheduler scan build/schedulers
+policy get all
+policy scan build/policies
+execution get all
+execution set hp serial_debug
 ```
 
 ## 9. Benchmark Commands
@@ -389,7 +404,7 @@ as-is, so local entries such as `cache_precision`, `plugin_dirs`, or
 | --- | --- | --- |
 | `cache_root_dir` | `cache` | Shared disk cache root; each loaded graph uses `<cache_root_dir>/<graph_name>`. |
 | `plugin_dirs` | `[build/plugins]` | Operation plugin search paths. |
-| `scheduler_dirs` | `[build/schedulers]` | Scheduler plugin search paths. |
+| `policy_dirs` | `[build/policies]` | Policy plugin search paths. |
 | `cache_precision` | `int8` | Disk cache image precision. |
 | `history_size` | `1000` | REPL history length. |
 | `default_print_mode` | `full` | Default `print` mode. |
@@ -405,40 +420,31 @@ as-is, so local entries such as `cache_precision`, `plugin_dirs`, or
 | `default_compute_args` | empty | Default flags appended to `compute` when none are provided. |
 | `switch_after_load` | `true` | Make a graph loaded interactively in the REPL the active session; ordered top-level action targeting is unaffected. |
 | `session_warning` | `true` | Warn before overwriting session content. |
-| `scheduler_hp_type` | `cpu_work_stealing` | Default HP scheduler: built-in `cpu_work_stealing`, `serial_debug`, `gpu_pipeline`, `heterogeneous`, or a loaded plugin scheduler name. |
-| `scheduler_rt_type` | `cpu_work_stealing` | Default kernel RT intent scheduler using the same supported values; this does not enable CLI RT commands. |
-| `scheduler_worker_count` | `0` | CPU/plugin worker grant: `0` resolves to `min(max(1, hardware_concurrency()), 8)`; `1..8` stays exact. Other values are invalid. |
+| `policy_interactive_type` | `interactive` | Process policy type for latency-sensitive ready work. |
+| `policy_throughput_type` | `throughput` | Process policy type for background ready work. |
+| `execution_hp_type` | `cpu` | Private route captured by future HP graph sessions. |
+| `execution_rt_type` | `cpu` | Private route captured by future RT graph sessions; this does not enable CLI RT commands. |
+| `execution_worker_count` | `0` | Host CPU worker request: `0` resolves automatically; `1..8` stays exact. Other values are invalid. |
 
-When the CLI loads a config file, it first copies these scheduler defaults into
-`Kernel::SchedulerConfig`, then scans configured plugin directories before any
-graph load. Scheduler type strings are resolved when a graph creates its
-scheduler instances during graph load, or later through `scheduler set <hp|rt>
-<type>`, so newly loaded graphs can still use plugin-provided scheduler types
-discovered during startup.
+At startup the CLI scans `policy_dirs`, applies both process policy bindings as
+one transaction, and applies future-session execution defaults. Policy types
+may come from built-ins or successfully loaded policy DSOs. Execution routes
+are the fixed `cpu`, `gpu_pipeline`, and `serial_debug` vocabulary and cannot be
+loaded from a DSO. Every removed `scheduler_*` key is rejected rather than
+translated.
 
 The YAML loader and config editor reject negative, malformed, and greater-than-
-eight worker values instead of clamping them. Applying scheduler defaults is a
-single transaction: rejection leaves the previously active future-graph
-defaults unchanged. The same worker request is planned separately for each
-graph's HP and RT schedulers. Built-in `serial_debug` charges zero slots;
-`cpu_work_stealing` and ABI-v2 plugins charge the resolved grant; built-in
-`gpu_pipeline`/`heterogeneous` also charges one potential device worker. All
-embedded Hosts and Kernels in the process share a fixed 32-slot scheduler
-capacity, which is not a config key.
+eight worker values instead of clamping them. The Host fixes one process CPU
+pool on first configuration/use; zero or an equal request preserves it, while a
+different positive request is rejected. Existing Graph sessions keep their
+captured HP/RT route ids when future defaults change. `execution set` replaces
+only the selected current-session route and does not construct a plugin owner.
 
-Accepting config does not reserve slots. A later graph load returns a Graph
-`ComputeError` if its complete HP/RT pair does not fit. `scheduler set` also
-requires temporary capacity for the candidate while the old scheduler remains
-active; failure leaves the old scheduler installed. Successful graph close or
-Host destruction returns its retained slots, while a failed close retains them
-for retry.
-
-Scheduler plugin discovery and scheduler selection are separate phases.
-`scheduler plugins` reports plugins scanned from `scheduler_dirs`; it does not
-mean the current graph is using that scheduler. `scheduler get all` reports the
-actual HP/RT scheduler instances for the current graph. To use a scanned plugin,
-name it with `scheduler_hp_type` or `scheduler_rt_type` before graph load, or
-run `scheduler set <hp|rt> <type>` for the current graph.
+`policy plugins` reports DSO labels scanned from `policy_dirs`; `policy get all`
+reports the actual Interactive/Throughput binding types and generations.
+`execution get all` reports copied HP/RT route information for the current
+Graph session. These observations expose no context, executor, queue, or DSO
+lease.
 
 `cache_root_dir` is applied before graph load as well. Relative values are
 resolved from the current working directory, and the graph cache root becomes
@@ -503,7 +509,7 @@ cmake --build build --target photospider_ipc_client \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|ExecutionTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonPolicy|IpcDaemonExecution|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Run registered CTest tests:
@@ -515,6 +521,6 @@ ctest --output-on-failure --test-dir build
 Run a specific test executable:
 
 ```bash
-cmake --build build --target test_scheduler -j
-./build/tests/test_scheduler
+cmake --build build --target test_policy_registry -j
+./build/tests/test_policy_registry
 ```

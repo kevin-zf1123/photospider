@@ -2,40 +2,44 @@
 
 ## Status
 
-Accepted as the target architecture. Issues #70 through #74 are current software
-behavior for the CPU execution/resource and scheduling slice: the embedded
-composition root injects one fixed `ExecutionService`; built-in CPU HP, RT,
-connected-parameter preflight, and
-dirty source/downstream work crosses a move-only `ReadyTaskSubmission`
-boundary. Independent Runs from multiple Graphs may overlap, with Run-local
-completion, failure, trace, and Host state. Realtime requests create one
-request-owned `RunGroup` with distinct HP and RT child Runs. Built-in CPU
-intent bindings are ownerless at `GraphRuntime`; serial, GPU, and plugin routes
-retain per-Graph schedulers. The service now exclusively owns one
-Host-authoritative `ResourceLedger`, atomically admits complete Run vectors,
-and routes initial/dependent work through policy-aware, entry/byte-bounded ready
-storage. Private interactive and throughput strategies now enforce work/byte
-billing, Graph/Run fairness, deadline preference, aging, headroom, and bounded
-throughput progress without owning workers or resource authority. Product
-compute now captures request-owned Graph/proxy snapshots, executes outside the
-graph-state lane, and publishes only after exact strong Graph identity and
-authoritative revision validation. A private compute-request lane serializes
-same-Graph compute and scheduler lifetime, and RT publication is independent of
-a later stale HP result. Issue #73 adds private cooperative Run cancellation:
-explicit requests and monotonic deadlines contend with failure and a Run-owned
-commit contender; matching queued work is purged, entered work drains,
-dependent re-entry is rejected, and accepted cancellation cannot publish staged
-state. RT cancellation while the sibling gate is `Pending` denies HP commit and
-requests HP cancellation. Installed Host, CLI, and IPC v1 surfaces remain
-non-cancellable and IPC jobs continue to report `cancellable: false`.
-Issue #74 adds checked per-Graph supersession generations, exact-key latest
-pending coalescing, one persistent continuation ticket per admitted key,
-stable supersession cancellation, current-generation commit authority, and
+Accepted as the target architecture. Issues #70 through #75 are current software
+behavior for the CPU execution/resource, policy, and private-route slice: the
+embedded composition root injects one fixed `ExecutionService`; built-in CPU
+HP, RT, connected-parameter preflight, and dirty source/downstream work crosses
+a move-only `ReadyTaskSubmission` boundary. Independent Runs from multiple
+Graphs may overlap, with Run-local completion, failure, trace, and Host state.
+Realtime requests create one request-owned `RunGroup` with distinct HP and RT
+child Runs. `GraphRuntime` stores only copied HP/RT route ids and nonzero
+generations; no Graph owns a physical worker, queue, policy context, or plugin
+DSO lifetime. The service exclusively owns one Host-authoritative
+`ResourceLedger`, atomically admits complete Run vectors, and routes
+initial/dependent work through an entry/byte-bounded ready store. One
+Interactive and one Throughput policy binding rank immutable Host-authored
+frontiers with work/byte billing, Graph/Run fairness, deadline preference,
+aging, headroom, and bounded Throughput progress without owning workers or
+resource authority. Product compute captures request-owned Graph/proxy
+snapshots, executes outside the graph-state lane, and publishes only after exact
+strong Graph identity and authoritative revision validation. A private
+compute-request lane serializes same-Graph requests without owning an executor
+or policy lifetime, and RT publication is independent of a later stale HP
+result. Issue #73 adds private cooperative Run cancellation: explicit requests
+and monotonic deadlines contend with failure and a Run-owned commit contender;
+matching queued work is purged, entered work drains, dependent re-entry is
+rejected, and accepted cancellation cannot publish staged state. RT
+cancellation while the sibling gate is `Pending` denies HP commit and requests
+HP cancellation. Installed Host, CLI, and IPC protocol v2 surfaces remain
+non-cancellable and IPC jobs continue to report `cancellable: false`. Issue #74
+adds checked per-Graph supersession generations, exact-key latest pending
+coalescing, one persistent continuation ticket per admitted key, stable
+supersession cancellation, current-generation commit authority, and
 deterministic `RunGroup` aggregate settlement. The existing bounded
 compute-request lane worker is the only logical active runner; no per-Graph
-background runner or per-generation thread is added. Reserved start and the
-replacement policy-only scheduler ABI (#75), plus `RunLifecycleRegistry` and
-final close/shutdown/telemetry (#76), remain target behavior.
+background runner or per-generation thread is added. Issue #75 removes the
+worker-owning scheduler SDK/ABI and adds pure-C policy ABI v1, atomic
+generation-scoped binding replacement, Host-authored frontier and fallback,
+sticky generation-local faults, reserved start, and closed private execution
+routes. `RunLifecycleRegistry` and final close/shutdown/telemetry (#76) remain
+target behavior.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -44,21 +48,20 @@ force.
 
 ## Context
 
-The current implementation retains one execution binding per intent in each
-`GraphRuntime`. Serial, GPU, and plugin bindings own transitional `IScheduler`
-instances whose interfaces combine workers, ready queues, epochs, completion,
-exception publication, and ordering policy. Built-in CPU bindings instead
-select the process-service slice delivered by Issues #70 through #73 without
-allocating a Graph-owned
-scheduler or carrying a per-Graph worker grant.
+The current implementation retains one copied execution-route binding per
+intent in each `GraphRuntime`. The closed `cpu`, `serial_debug`, and
+`gpu_pipeline` route ids name private Host implementations; `GraphRuntime`
+owns none of their workers, ready queues, generations, completion adapters,
+exception publication, or ordering policy. Policy binding is process/service
+state, not Graph state.
 
 The explicitly injected service owns a direct fixed CPU worker pool. It freezes
 one resolved `[1,8]` count before first CPU use, accepts multiple active Runs,
 uses a policy-aware entry/byte-bounded ready store, and keeps completion, first
 exception, in-flight drainage, trace Host, and settlement isolated per Run.
-Its private ledger owns immutable composition limits and shared authority for
-both Run vectors and legacy Graph-owned scheduler CPU-slot reservations. Fixed
-service threads remain infrastructure rather than a pool-lifetime charge.
+Its private ledger owns immutable composition limits and authority for complete
+Run vectors. Fixed service threads and private route machinery remain
+infrastructure rather than a Run-lifetime charge.
 
 `ComputeRun` shared control owns the plan or dirty staging, temporary results,
 and stable leases. Every built-in CPU ready task retains a non-forgeable Run
@@ -66,12 +69,12 @@ lease and `(RunId, RunLocalTaskId)`; a matching identity gates failure
 publication. Full HP uses Run-owned `TaskSubmissionPlan` callbacks. Dirty HP,
 RT, and connected-parameter preflight materialize heap-owned contexts and
 move-only `ReadyTaskSubmission` values so no stack `TaskExecutor*` crosses the
-service boundary. Legacy dirty scheduler routes still borrow `TaskHandle`
-values only across their synchronous batch wait.
+service boundary. All three private routes use the same ready-store, policy,
+reserved-start, Run-lease, and completion path.
 
 ADR 0003 chose the direction—request-owned `ComputeRun`, process-owned
-`ExecutionService`, host-owned `ResourceLedger`, and policy-only
-`SchedulerPolicy`—but did not decide:
+`ExecutionService`, host-owned `ResourceLedger`, and policy-only comparison
+seams—but did not decide:
 
 - whether one HP/RT request has one Run or multiple domain Runs;
 - how paired RT/HP outcomes, sibling cancellation, commit ordering, and caller
@@ -163,7 +166,7 @@ None is inferred from another.
 
 ### Monotonic state and one terminal outcome
 
-The phase progression, current for private Runs through Issue #74 and retained
+The phase progression, current for private Runs through Issue #75 and retained
 by the complete target, is:
 
 ```text
@@ -280,19 +283,20 @@ path may not bypass fairness, cancellation, or Run isolation.
 | --- | --- | --- |
 | Request / `RunGroup` | group identity, child observation leases, sibling gate, cancellation fan-out, aggregate outcome/error selection, caller promise | child plans/dispatchers/terminal arbiters, cross-domain dependencies, Graph state, process workers, resource reservations |
 | Request / `ComputeRun` | Run identity, immutable inputs, request plan and dispatcher state, staged/temporary output, exception/cancellation/terminal state, Run reservations, commit policy, Run telemetry | Graph state, process workers, ready-store policy, resource mint authority |
-| `GraphRuntime` | `GraphModel`, graph-scoped state, graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit validation/publication, graph events, stable graph-instance identity, graph-lifetime anchor, platform/session metadata | Runs, admitted-Run indexes, CPU/device/I/O/plugin workers, process ready store, admission, `ResourceLedger`, `SchedulerPolicy`, physical schedulers |
+| `GraphRuntime` | `GraphModel`, graph-scoped state, graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit validation/publication, graph events, stable graph-instance identity, copied HP/RT route ids and generations, graph-lifetime anchor, platform/session metadata | Runs, admitted-Run indexes, CPU/device/I/O/plugin workers, process ready store, admission, `ResourceLedger`, `PolicyRegistry`, policy bindings, physical execution routes |
 | `ExecutionService::RunLifecycleRegistry` | one process admission fence, service accepting/stopping state, graph-indexed open/closing admission rows, pending admission candidates, graph-indexed admitted `RunLease` entries, and process-wide Run enumeration | Run plans, dispatchers, terminal arbitration, staged output, Graph state, resource minting, execution policy |
-| Process `ExecutionService` | the lifecycle registry, physical CPU workers and later resource executors, policy-aware bounded ready storage, policy state, Run/resource admission, policy-result validation, execution exception fences, completion routing | task planning/dependencies, Graph/document persistence, cache authority, dirty propagation, visible commit, Graph state |
+| Process `ExecutionService` | the lifecycle registry, physical CPU workers and later resource executors, private serial-debug/GPU routes, policy-aware bounded ready storage, policy-binding state, Run/resource admission, policy-result validation, reserved start, execution exception fences, completion routing | task planning/dependencies, Graph/document persistence, cache authority, dirty propagation, visible commit, Graph state |
 | `ResourceLedger` | checked composition limits, transactional reservations, validated child grants, exact-once release accounting | ordering policy, task dependencies, Graph state, third-party token delegation |
-| `SchedulerPolicy` | ranking immutable ready descriptors within service-owned policy state | workers, physical ready store, Runs, Graph state, budget, reservations/grants/tokens, native device handles, executors, completion or lifecycle authority |
+| Process `PolicyRegistry` | immutable built-in/DSO policy type records, validated pure-C callback tables, registry visibility, DSO leases | service bindings/contexts, ready work, workers, resources, Graph/Run state, completion or lifecycle authority |
+| Policy binding | ranking immutable Host-authored candidate descriptors within service-owned binding state | workers, physical ready store, Runs, Graph state, budget, reservations/grants/tokens, native device handles, executors, completion or lifecycle authority |
 
 The product composition root now constructs and injects the current CPU-only
 `ExecutionService`; it is not a static singleton. Tests create and destroy
-isolated domains. Kernel scheduler configuration freezes its worker count once
-before first built-in CPU use; equal or zero follow-up requests are idempotent,
-while a conflicting positive request is rejected. Graph load, replacement,
-Run submission, and dirty phases never resize the pool. The current active-Run
-map isolates execution settlement, but is not the target graph-indexed
+isolated domains. Composition-root execution configuration resolves and freezes
+its worker count; policy plugins cannot request, grant, or resize that pool.
+Graph load, route replacement, Run submission, and dirty phases never resize
+the pool. The current active-Run map isolates execution settlement, but is not
+the target graph-indexed
 `RunLifecycleRegistry` or an admission/shutdown fence.
 
 The root constructs the service before injected Kernels/Hosts and keeps it
@@ -382,18 +386,17 @@ reserved, or represented by fake nonzero values in the current ledger:
 Admission validates one checked resource vector transactionally and returns a
 complete Run reservation or nothing. Trusted service code suballocates
 ready-entry/byte and CPU/memory/scratch child grants within that reservation.
-The service charges only active built-in Throughput root reservations against
+The service charges only active Throughput root reservations against
 the general ceiling after configured interactive headroom is subtracted.
-Interactive Runs and transitional Issue #70 legacy scheduler owners do not
-debit this class quota, but the ledger still authorizes every reservation and
-grant and remains the sole physical-capacity authority. Throughput quota check,
-ledger reservation, and class charge are one serialized transaction. The
+Interactive Runs do not debit this class quota, but the ledger still authorizes
+every reservation and grant and remains the sole physical-capacity authority.
+Throughput quota check, ledger reservation, and class charge are one serialized transaction. The
 non-authoritative class charge is removed only at exact physical root release,
 including when live child grants defer that release.
 
 Current success, callback failure, construction rollback, worker failure,
-legacy Graph close, and owner destruction release each reservation/grant
-exactly once. A Run reservation cannot release while child grants remain live.
+Graph close, and Host destruction release each reservation/grant exactly once.
+A Run reservation cannot release while child grants remain live.
 Checked overflow or capacity exhaustion never overcommits, partially reserves,
 or silently clamps. Synchronous documented allocation exhaustion remains
 `std::bad_alloc`; asynchronous failure is captured by the exact Run failure
@@ -402,36 +405,43 @@ same invariant; the later #76 lifecycle-registry slice must continue to preserve
 it.
 
 The former worker-only counter is completely removed rather than wrapped,
-renamed, aliased, or retained as a second authority. Pure worker-count
-resolution remains a non-owning planning helper; all scheduler-owner admission
-uses the `ExecutionService` ledger.
+renamed, aliased, or retained as a second authority. Execution worker-count
+resolution is composition-root configuration only; all Run admission uses the
+`ExecutionService` ledger.
 
-### Policy-only scheduler generation
+### Policy generation and private execution routes
 
-The current private `InteractiveSchedulerPolicy` and
-`ThroughputSchedulerPolicy` are stateless comparison strategies over immutable
-ready descriptors. `ExecutionService` owns the physical ready store and all
-fairness rows. It charges each dispatch
+`ExecutionService` owns exactly one Interactive and one Throughput policy
+binding plus every physical ready entry and fairness row. It charges each start
 `work_units + ceil(complete_ready_grant_bytes / 4096)`, charges each Graph's
 selected-class accumulator the raw cost, and charges each immutable-class Run
-row `ceil(cost / weight)`. Interactive ordering first prefers an earlier
-present monotonic deadline; throughput ordering is weighted and deterministic.
-Stable enqueue sequence is the final tie break. Service history in one class
-cannot change Graph selection in the other class.
-
-A ready item ages after eight successful service dispatches. While throughput
-work remains ready, no more than three consecutive interactive dispatches may
-precede required throughput progress; that bound takes precedence over aging.
+row `ceil(cost / weight)`. It chooses the class, exposes at most one lane head
+per live Run, applies age/deadline/projected-service frontiers, and permits at
+most three consecutive Interactive starts while Throughput remains startable.
 Initial and newly released dependent work enter this same route, and Run rows
 persist across temporary emptiness until final retirement. QoS class, deadline,
 and weight are explicit descriptor inputs and are not inferred from intent,
 quality, or maximum parallelism.
 
-The strategies own no worker, ready entry, token, grant, reservation, budget,
-executor, Run, Graph, completion route, or lifecycle authority. Issue #75 will
-replace the current worker-owning scheduler ABI as one complete breaking
-migration. That replacement will not adapt `IScheduler`, forward old
-worker-count grants, or retain a permanent compatibility shim.
+Built-in and DSO policies use the same Host-authored frontier and decision
+validation path. A DSO policy receives only an immutable scalar candidate
+snapshot through the self-contained C11 policy ABI v1 and may select one
+original candidate or abstain. It owns no worker, ready entry, token, grant,
+reservation, budget, executor, Run, Graph, completion route, or lifecycle
+authority. The Host retries an obsolete valid decision at most twice and then
+uses the same-class built-in choice. A first invalid DSO decision is sticky for
+the exact binding generation; successful replacement creates a fresh nonzero
+generation and clears that fault.
+
+A selected candidate is not execution authority. Reserved start rechecks the
+exact ready entry and route, stages grants with no-throw ownership, and commits
+entry removal, ready-to-execution grant exchange, fairness/burst accounting,
+in-flight state, and callback transfer before any executor callback begins.
+The closed `cpu`, `serial_debug`, and `gpu_pipeline` routes keep their
+workers, queues, devices, and completion adapters private. The worker-owning
+scheduler ABI, SDK target, `IScheduler` hierarchy, and per-Graph physical
+owners were removed as one complete breaking migration without an adapter,
+forwarding API, or old worker-count grant.
 
 ### Revision, staged commit, cancellation, and supersession
 
@@ -441,7 +451,8 @@ correctness, while every live Graph has a strong non-reused instance identity.
 A Run captures both before planning and product work uses request-owned
 Graph/proxy snapshots. The graph-state lane is held for capture and validated
 visible publication, not for long-running planning/execution; the private
-compute-request lane serializes same-Graph compute and scheduler-owner access.
+compute-request lane serializes same-Graph requests without owning executor or
+policy state.
 Issue #73 makes private cancellation and commit-terminal arbitration part of
 this current boundary.
 
@@ -507,17 +518,16 @@ Target Graph close (#76):
    release;
 6. removes the empty registry row, stops and drains the private per-Graph
    compute-request lane while graph-state finalization remains available, then
-   stops and drains the graph-state lane, stops scheduler owners, and destroys
-   graph state; and
+   stops and drains the graph-state lane and destroys graph state without
+   stopping any process-owned execution route; and
 7. leaves `ExecutionService` and unrelated Graph Runs running.
 
-Issue #72's current pre-registry close already preserves that local two-lane
+Issue #75's current pre-registry close already preserves that local two-lane
 ordering: request admission stops first, accepted request work drains while
-graph-state remains open, graph-state drains second, and scheduler stop begins
-last. If scheduler stop fails, graph-state is recreated before the request lane
-so the retained Graph can reopen safely. Issue #76 must compose its registry
-fence with this ordering or explicitly supersede it; the target steps above do
-not restore the old single-lane close model. Issue #73 preserves drainage of an
+graph-state remains open, and graph-state drains second. Graph destruction does
+not stop the process-owned routes. Issue #76 must compose its registry fence
+with this ordering or explicitly supersede it; the target steps above do not
+restore the old single-lane close model. Issue #73 preserves drainage of an
 already-cancelled private Run through quiescence and exact release, but does not
 make Graph close a cancellation requester.
 
@@ -545,8 +555,8 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract. Issues #66 through #74 are now
-implemented as current slices; #75 and #76 retain this target order. The
+This decision fixes the dependency contract. Issues #66 through #75 are now
+implemented as current slices; #76 retains this target order. The
 non-goal column records the historical boundary when each slice was delivered;
 it does not describe current repository state:
 
@@ -561,11 +571,11 @@ it does not describe current repository state:
 | #72 (current) | `GraphRevision` capture and staged commit predicate | Cooperative cancellation |
 | #73 (current) | Queued/running/commit cancellation, joining #70 and #72 | Latest-wins policy |
 | #74 (current) | Latest-wins supersession and realtime `RunGroup` after #71 and #73 | Scheduler ABI replacement |
-| #75 | Complete policy-generation ABI replacement after #71 | Permanent old/new adapter |
+| #75 (current) | Pure-C policy generation, Host frontier/fallback, reserved start, and private execution routes after #71 | Permanent old/new adapter |
 | #76 | Graph close, process shutdown, telemetry, and final invariants after #69/#73/#74/#75 | New execution-domain capabilities |
 
 The dependency graph is acyclic. #72 was permitted after #67 in parallel with
-#68–#71; #75 may proceed after #71 in parallel with #73–#74. Current-state
+#68–#71; #75 was delivered after #71 alongside the #73–#74 line. Current-state
 documentation changes only when each additional implementation and its
 long-lived behavioral tests land.
 
@@ -583,7 +593,7 @@ long-lived behavioral tests land.
   reclaimed, so tests and telemetry must distinguish terminal from quiescent.
 - Exact revision equality is conservative and may discard reusable work. Any
   relaxation requires an explicit later decision and proof.
-- The scheduler ABI migration is deliberately breaking.
+- The completed scheduler-to-policy ABI migration is deliberately breaking.
 - Device, I/O, general-data, plugin-isolation, and server-control-plane details
   can evolve without changing the ready-task or resource-authority boundary.
 
@@ -636,7 +646,7 @@ Rejected because that removed transitional counter had the wrong resource
 model, hidden process-static ownership, and no Run, queue, memory, scratch,
 device, I/O, or plugin-process authority.
 
-### Let SchedulerPolicy mint grants
+### Let policy callbacks mint grants
 
 Rejected because an untrusted or defective strategy could overcommit resources
 and evade exact-release accounting.
@@ -668,13 +678,15 @@ static composition object.
   records the durable target and delivery dependency order.
 - Current behavior, including issue #69's fixed multi-Graph HP/RT CPU pool,
   issue #70's admission/ledger boundary, issue #71's policy-aware ready store,
-  issue #72's strong Graph revision and staged publication boundary, and issue
-  #73's private cooperative cancellation and Run-owned commit arbitration, plus
+  issue #72's strong Graph revision and staged publication boundary, issue
+  #73's private cooperative cancellation and Run-owned commit arbitration,
   issue #74's latest-wins generations, bounded ticket-backed coalescing,
-  current-generation commit predicate, and realtime `RunGroup`, remains
+  current-generation commit predicate and realtime `RunGroup`, and issue #75's
+  pure-C policy ABI, Host-authored frontier/fallback, reserved start, and
+  private execution routes, remains
   authoritative in
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md),
   [Compute Flow](../kernel-architecture/Compute-Flow.md), and
-  [Scheduler Architecture](../kernel-architecture/Scheduler-Architecture.md);
-  #75 scheduler ABI replacement and #76 final lifecycle/telemetry become current
-  only after implementation and durable verification.
+  [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md);
+  #76 final lifecycle/telemetry becomes current only after implementation and
+  durable verification.

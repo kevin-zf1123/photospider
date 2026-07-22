@@ -58,7 +58,7 @@ may support more than one lens, but each fact has one primary home:
 | --- | --- | --- |
 | Terminology | What do current names and states mean, and which concepts must remain distinct? | [Terminology](Terminology.md) and [Data Model](Data-Model.md) |
 | Behavior | What can a caller observe during graph lifecycle, compute, cache, and dirty-region work? | [Graph Lifecycle](Graph-Lifecycle.md), [Compute Flow](Compute-Flow.md), [Cache Model](Cache-Model.md), and [Dirty Region Propagation](Dirty-Region-Propagation.md) |
-| Implementation | Which current modules own the behavior, and what is the call or dispatch path? | [Overview](Overview.md), [Compute Boundaries](Compute-Boundaries.md), and [Scheduler Architecture](Scheduler-Architecture.md) |
+| Implementation | Which current modules own the behavior, and what is the call or dispatch path? | [Overview](Overview.md), [Compute Boundaries](Compute-Boundaries.md), and [Policy and Execution Architecture](Policy-and-Execution-Architecture.md) |
 | Boundaries | Which values, ownership rules, invariants, limitations, and failure surfaces may consumers rely on? | [ImageBuffer Memory Contract](ImageBuffer-Memory-Contract.md), [Plugin ABI](Plugin-ABI.md), and [Compute Boundaries](Compute-Boundaries.md) |
 | Rationale | Why is the current mechanism separated this way, and which durable decisions constrain it? | Rationale sections in the current documents and the governing [ADRs](../adr/) |
 

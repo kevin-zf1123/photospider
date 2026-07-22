@@ -2,8 +2,9 @@
 
 This document describes the dirty-region behavior implemented by the current
 kernel. It separates graph-scoped dirty facts, request planning, task selection,
-scheduler filtering, output commit, and the cooperative Run-cancellation and
-latest-wins commit observations implemented through issue #74. Proposed Macro
+policy/ready-store selection, private-route execution, output commit, and the
+cooperative Run-cancellation/latest-wins observations implemented through
+issue #75. Proposed Macro
 retile and adaptive
 coarsening belong in the kernel evolution roadmap, not in this current-state
 contract. The dirty-geometry path and the private
@@ -25,7 +26,8 @@ locally inside providers or algorithms at actual matrix or algorithm calls.
 
 **Dirty generation** is the value stored in a `DirtyRegionSnapshot` and copied
 into selected task metadata. It identifies dirty inspection and source-commit
-state. It is not a graph revision, a `ComputeRun`, or a scheduler batch epoch.
+state. It is not a graph revision, a `ComputeRun`, or a private-route batch
+epoch.
 
 **Dirty domain** is either `HighPrecision` (HP full-resolution coordinates) or
 `RealTime` (RT proxy coordinates for execution records). HP and RT are separate
@@ -35,7 +37,7 @@ Ownership is divided as follows:
 
 | Owner | Current responsibility | Does not own |
 | --- | --- | --- |
-| `DirtyControlLane` | Apply explicit begin/update/end source events on the serialized graph-state path and derive wake/cutoff hints | Compute tasks or scheduler queues |
+| `DirtyControlLane` | Apply explicit begin/update/end source events on the serialized graph-state path and derive wake/cutoff hints | Compute tasks, ready-store entries, or execution routes |
 | `DirtyRegionPlanner` | Build HP or RT request snapshots and update lifecycle snapshots | Worker execution or result commit |
 | `DirtyRegionSnapshotBuilder` | Normalize source ROIs and materialize snapshot-only Micro tile or monolithic records | Graph traversal or compute requests |
 | `RoiPropagationService` | Compute operator-specific forward inspection and backward demand projections | Graph topology ownership |
@@ -79,8 +81,9 @@ snapshots. A snapshot contains value records, not graph or task pointers:
 - `per_node_dirty_rois` and `actual_dirty_rois`;
 - edge-level ROI mappings.
 
-It intentionally excludes dependency counters, ready queues, scheduler queues,
-task reference counts, resource policy, cancellation state, and commit policy.
+It intentionally excludes dependency counters, ready-store entries, policy
+snapshots/bindings, task reference counts, resource grants, cancellation state,
+and commit policy.
 The snapshot is an inspection/execution input, not an undo log or durable event
 history.
 
@@ -193,18 +196,20 @@ validates that required source outputs exist in the relevant staged or committed
 store, then submits the initially ready downstream group. Dependency completion
 releases additional ready downstream work.
 
-The two initial groups are separate scheduler batches and receive scheduler-
-owned epochs. Although dirty generation is present in request/task metadata, the
-current source-first dispatch does not pass that generation as the scheduler
-epoch. Scheduler epoch filtering can discard stale queued callbacks for its own
-active batch; it does not cancel a callback that is already running.
+The two initial groups are separate `ExecutionService` phase admissions and
+receive independent private route/runtime epochs for attribution and batch
+lifetime. Although dirty generation is present in request/task metadata, the
+source-first dispatcher does not pass that generation as execution authority.
+The Host revalidates current candidate/Run state before reserved start and can
+purge queued work for the exact cancelled Run; no mechanism preempts a callback
+that has already entered a provider.
 
 Source node execution additionally compares its dirty generation with the
 generation already committed for that source. Work older than the committed
 source generation is skipped and traced; equal generations may run again, and
 downstream nodes do not perform this comparison. This is a narrow stale-source
 guard, not general revision validation, supersession, deadline handling, or
-cooperative cancellation. Issue #74 supersession is a separate request-key and
+cooperative cancellation. Supersession is a separate request-key and
 commit-generation contract; it does not reuse dirty generation.
 
 Issue #73 adds a separate Run-owned cooperative boundary. Dirty preflight,
@@ -213,7 +218,7 @@ release, and final commit observe the matching child lease. Explicit requests
 and expired monotonic deadlines use the same terminal arbiter. An operation
 already entered may finish, but cancellation closes later publication and the
 request-owned staging is discarded. These checks do not turn dirty generation
-or scheduler epoch into cancellation authority.
+or route/runtime epoch into cancellation authority.
 
 ## Staging and Commit
 
@@ -242,13 +247,13 @@ HP-to-RT task edge and does not make RT output an authoritative HP cache. It is
 not a cross-domain atomic transaction: an HP failure after a successful RT
 commit does not roll the proxy commit back.
 
-Before scheduler-backed siblings start, `ComputeService` creates one
+Before private-route sibling phases start, `ComputeService` creates one
 request-owned per-node synchronization object and shares it with both domains.
 Only live `Node` snapshot/`ParameterMap` resolution and short staging sections
 for the same node are serialized; different nodes and operation execution
-remain concurrent. The owner survives sibling failure cleanup and scheduler
-drain, then is destroyed with that request. It is not retained by `GraphModel`,
-`GraphRuntime`, or process-wide state.
+remain concurrent. The owner survives sibling failure cleanup and private-route
+callback drainage, then is destroyed with that request. It is not retained
+by `GraphModel`, `GraphRuntime`, or process-wide state.
 
 ## Boundaries and Rationale
 
@@ -258,8 +263,9 @@ The current implementation does not provide:
 - Macro dirty-key materialization or dynamic Micro/Macro coarsening;
 - sparse ROI sets, dirty-area caps, time-window merging, or adaptive batching;
 - a node-to-backend dirty subscription that automatically launches compute;
-- public or lifecycle-driven cancellation, reserved-start admission, or
-  preemption of an already-entered provider callback.
+- public or lifecycle-driven cancellation, or preemption of an already-entered
+  provider callback. Dirty work does use the current policy and reserved-start
+  admission path.
 
 Current dirty geometry uses kernel-owned `PixelRect` and `PixelSize` values
 across the Host request, graph state, ROI propagation, planning, snapshot,
@@ -273,8 +279,9 @@ copy without OpenCV discovery.
 
 Keeping dirty facts, static task shape, ready dispatch, and staged commit as
 separate values prevents ROI updates from rewriting topology or transferring
-graph ownership into a scheduler queue. The explicit limitations above bound
-what generation and epoch checks can currently guarantee.
+graph ownership into a policy snapshot, ready store, or private execution
+route. The explicit limitations above bound what generation and epoch checks
+can currently guarantee.
 
 ## Implementation and Validation Entry Points
 
@@ -294,7 +301,8 @@ what generation and epoch checks can currently guarantee.
 - `src/lib/compute/tiled_input_normalizer.cpp`
 - `src/lib/compute/node_executor.cpp`
 - `src/lib/graph/roi_propagation_service.cpp`
-- `tests/integration/test_scheduler.cpp`
+- `tests/integration/test_resource_admission.cpp`
+- `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`

@@ -1,7 +1,7 @@
 # Codebase Structure Direction
 
 This document records Photospider's current public header/Host seam, static
-product, role-owned source layout, implemented version 1 daemon/IPC slice, and
+product, role-owned source layout, implemented version 2 daemon/IPC slice, and
 the completed extension-SDK/internal-target split. Current-state claims and future work are
 distinguished explicitly below.
 
@@ -21,12 +21,12 @@ The goals are:
 The current repository now has the public Host seam, installable static
 product, migrated CLI application tree, role-owned backend source tree,
 explicit production-plugin homes, unit/integration test ownership, and the
-macOS/Linux version 1 daemon/IPC graph, inspection, polling-compute, protected
+macOS/Linux version 2 daemon/IPC graph, inspection, polling-compute, protected
 image-output, bounded event/trace observation, and process-global operation-
 plugin router behavior. The installed typed IPC Client now exposes owned calls
-for the exact 55-method surface, validates every typed result, and aggregates
+for the exact 60-method surface, validates every typed result, and aggregates
 stable cursor pages into complete Host-shaped values. The installed IPC-backed
-Host now implements all 53 current non-destructor Host virtuals through typed
+Host now implements all 58 current non-destructor Host virtuals through typed
 short-lived connections, joined asynchronous polling, and deterministic stop
 ordering. Image mode currently performs strict same-user regular-file
 revalidation while its delivery lease protects result-to-open, creates a
@@ -42,16 +42,18 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_core_internal` | Build-only core values, private conversion, and registry helper. | Role-owned sources are also folded into the static product. |
 | `photospider_graph_internal` | Build-only `GraphModel` and graph-service helper. | `GraphModel` remains private under `src/lib/graph`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation v2 loader, adapter, and lifetime helper. | It is not exported. |
-| `photospider_scheduler_internal` | Build-only scheduler planning/factory, ABI-v2 loader, built-in implementation, pure worker-limit planning, scheduler reservation owner, and shared ledger primitive. | The `ResourceLedger` implementation is compiled here, but each composition-root `ExecutionService` owns its sole Host-authoritative instance. |
-| `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, runtime, dirty-region, and interaction helper. | Runs remain private; built-in CPU work and legacy scheduler owners share the fixed multi-Run service ledger. |
+| `photospider_policy_internal` | Build-only pure-C policy DSO registry/loader, built-in types, bindings, contexts, faults, and DSO leases. | It owns ordering contexts only; it owns no worker, queue, grant, Run, Graph, or execution route. |
+| `photospider_execution_internal` | Build-only private physical-execution accounting primitive. | `ResourceLedger` is compiled here; each composition-root `ExecutionService` owns its sole Host-authoritative instance. |
+| `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, policy-aware ready store, reserved-start transaction, private route execution, runtime, and dirty-region helpers. | Runs and physical route mechanisms remain private. |
+| `photospider_host_internal` | Build-only embedded Host adapter and Kernel facade closure. | It is not exported and exposes no private execution owner to consumers. |
 | `photospider_operation_runtime` | Installable static image-buffer factory implementation. | It has no external package or back-link to the operation SDK. |
 | `photospider_operation_sdk` | Installable operation v2 interface SDK. | It transitively carries `operation_runtime`, so it is the sole ordinary plugin link target. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
-| `photospider_scheduler_sdk` | Installable scheduler ABI-v2 interface SDK. | It carries only the public include root and C++17 requirement; plugins receive a resolved `[1,8]` hard grant. |
+| `photospider_policy_sdk` | Installable dependency-neutral pure-C policy ABI v1 SDK. | It carries one C11/C++17-compatible header and no execution/runtime dependency. |
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/` and two role-owned benchmark service translation units. | The benchmark sources belong only to this non-installable helper and the complete CLI closure; they are absent from the installable `photospider` static product. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
-| `photospider_ipc_client` | Installable static typed Unix IPC client and complete Host adapter. | Implements typed owned calls for all 55 version 1 methods plus `create_ipc_host` for all 53 current non-destructor Host virtuals; it does not link the backend or expose JSON/POSIX types. |
+| `photospider_ipc_client` | Installable static typed Unix IPC client and complete Host adapter. | Implements typed owned calls for all 60 version 2 methods plus `create_ipc_host` for all 58 current non-destructor Host virtuals; it does not link the backend or expose JSON/POSIX types. |
 | `photospider_ipc_server_internal` | Non-installable router, registry, and bounded Unix listener. | Serializes every Host call and intentionally remains outside the package export. |
 | `photospiderd` | Installed foreground process shell under `apps/photospiderd/`. | Owns one embedded Host, self-pipe signal policy, protected socket, and deterministic cleanup. |
 
@@ -92,46 +94,31 @@ Resolved seam tightening in the current branch:
   or graph-state access explicitly include the internal-only
   `tests/support/kernel_test_access.hpp` helper and route those calls through
   `ps::testing::KernelTestAccess`.
-- Graph, compute, runtime, Host, plugin, scheduler, benchmark, and adapter
+- Graph, compute, runtime, Host, plugin, policy, execution, benchmark, and adapter
   implementation files and private headers now live under role-owned
   `src/lib/**` directories. Internal targets compile with the private
   `src/lib/` root, while the installable public header inventory remains
   limited to `include/photospider/**`.
-- The current issue #69–#73 Run/service/commit implementation lives under
-  `src/lib/compute/{compute_run,execution_service}.*`, while the shared
-  accounting primitive lives under `src/lib/runtime/resource_ledger.*`.
-  `Kernel` supplies
-  session identity and explicit default QoS to the private request and injects
-  the composition-root CPU service. `ComputeService` creates one Run for each
-  non-realtime HP call and separate HP `Full` plus RT `Interactive` child Runs
-  for realtime calls. Shared Run control owns the corresponding full-plan/
-  temporary or standalone dirty staging storage, private cancellation state,
-  and exact terminal/commit arbitration. Built-in CPU HP/RT full, dirty, and
-  preflight work transfers
-  move-only, lease-backed submissions with owned callback context to the fixed
-  multi-Run service. Each Run is admitted with one checked complete vector;
-  initial and dependent work enters the same policy-aware entry/byte-bounded
-  ready store under child grants, which workers exchange for execution grants.
-  Each ready item pays checked work-unit plus 4-KiB byte-quanta cost. Private
-  stateless Interactive and Throughput strategies use class-local Graph cost,
-  weight-normalized Run cost within each Run's immutable class, stable aging
-  after eight successful dispatches, and a three-Interactive burst bound while
-  Throughput work is ready. Configurable protected headroom caps only active
-  built-in Throughput root reservations. Interactive and transitional Issue
-  #70 legacy roots do not debit that class quota, while the same service ledger
-  remains final physical authority; a Throughput charge follows its root until
-  all child grants release. Issue #72 contributes request-owned staging and the
-  exact-revision graph-state commit transaction. Issue #73 contributes a
-  private request cancellation source, read-only lease/deadline observation,
-  exact-Run ready purge, running drainage, dependent suppression, and the
-  Run-owned commit contender. Legacy routes retain owned callbacks and obtain
-  CPU reservations from that ledger. No
-  installed header, Host value, operation ABI, or scheduler ABI names these
-  private objects.
-- Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
+- The issue #69–#75 Run/policy/execution implementation lives under
+  `src/lib/compute/`, `src/lib/policy/`, and `src/lib/execution/`, while the
+  shared accounting primitive lives under
+  `src/lib/runtime/resource_ledger.*`. `Kernel` injects the Host-owned
+  `ExecutionService`; `ComputeService` creates one Run for each non-realtime HP
+  call and separate HP `Full` plus RT `Interactive` child Runs for realtime
+  calls. Full, dirty, preflight, initial, and dependency-released work crosses
+  one bounded ready store as move-only lease-backed submissions. The Host fixes
+  the service class and trusted frontier, invokes one built-in or pure-C policy
+  binding, validates the decision, and commits a resource exchange before one
+  of the closed `cpu`, `serial_debug`, or `gpu_pipeline` routes starts. Graphs
+  retain only copied route ids/generations. Policy bindings retain their own
+  contexts, nonzero generations, immutable first faults, and DSO leases but no
+  physical authority. No installed Host value or operation ABI names these
+  private objects; the installed policy ABI exposes only immutable scalar
+  ranking snapshots.
+- Dirty-region diagnostics, compute planning diagnostics, and execution trace
   diagnostics are available through copied Host value snapshots. Public headers
   no longer need to name the backend graph/runtime/service/planning types or
-  concrete scheduler classes to expose those diagnostics.
+  physical route classes to expose those diagnostics.
 - The configured CLI application surface now lives under `apps/graph_cli/`:
   `main.cpp`, private headers, implementation sources, command help resources,
   root configuration code, REPL/TUI, autocomplete, and terminal helpers. Its
@@ -141,18 +128,19 @@ Resolved seam tightening in the current branch:
   the non-installable `photospider_cli_common`/CLI closure and are not folded
   into the installable `photospider` static product. The old top-level CLI homes
   are not compatibility surfaces.
-- Repository-owned operation and scheduler plugins now live under
-  `plugins/ops/` and `plugins/schedulers/`; test-only DSOs remain fixtures.
+- Repository-owned operation and policy plugins now live under
+  `plugins/ops/` and `plugins/policies/`; test-only DSOs remain fixtures.
   Maintained test translation units are classified under `tests/unit/` and
   `tests/integration/`, with explicit fixture, support, and manual-verification
   roles. Obsolete issue replay/result orchestration has been removed.
 - Operation plugins compile against public `ps::plugin` v2 snapshots and a
   host registrar without `Node`, `GraphModel`, `OpRegistry`, YAML, or private
-  cache ownership. Scheduler plugins compile against inherited `IScheduler`,
-  `SchedulerHostContext`, and the ABI-v2 handshake-gated SDK without
-  `GraphRuntime` or concrete built-in scheduler headers. ABI v1 is rejected;
-  ABI v2 receives a resolved one-through-eight hard worker grant and remains a
-  trusted in-process contract rather than an isolation boundary.
+  cache ownership. Policy plugins compile against the self-contained C11
+  `policy_plugin_api.h`; exact ABI v1 records expose immutable bounded scalar
+  candidates and no executor, allocation service, resource grant, Run, Graph,
+  completion route, or logger. Both are trusted in-process contracts rather
+  than isolation boundaries, but only the operation interface remains a
+  provisional C++ ABI.
 
 ## External Interface Rule
 
@@ -175,7 +163,7 @@ External code should not include or name these implementation concepts:
 - `DirtyControlLane`
 - `ComputePlan`
 - `FullTaskGraph`
-- concrete scheduler classes such as `CpuWorkStealingScheduler`
+- `PolicyRegistry`, `ExecutionTaskRuntime`, or concrete private route classes
 - graph cache/traversal/io service classes
 
 External code may depend on stable value contracts:
@@ -184,14 +172,14 @@ External code may depend on stable value contracts:
 - compute request options
 - error/result values
 - graph and node inspection snapshots
-- scheduler status and trace snapshots
+- policy binding and execution trace snapshots
 - dirty-region inspection views
 - image and tile buffer contracts
 - plugin operation registration contracts
 
 This keeps `InteractionService` as a deeper backend module behind the public
 `ps::Host` seam: frontends get graph lifecycle, compute, inspection, events,
-scheduler configuration, and plugin control without learning the implementation
+policy/execution configuration, and plugin control without learning the implementation
 topology behind them.
 
 ## Target Public Headers
@@ -225,10 +213,8 @@ include/photospider/plugin/
   node_view.hpp
   opencv_adapter.hpp
 
-include/photospider/scheduler/
-  scheduler.hpp
-  scheduler_task_runtime.hpp
-  scheduler_plugin_api.hpp
+include/photospider/policy/
+  policy_plugin_api.h
 
 include/photospider/ipc/
   client.hpp
@@ -248,7 +234,7 @@ Header rules:
 - Public headers should prefer value objects, opaque handles, small references,
   and request/result structs.
 - OpenCV appears only in the opt-in `plugin/opencv_adapter.hpp` contract;
-  operation SDK, scheduler SDK, Host, core, and IPC headers do not require it.
+  operation SDK, policy SDK, Host, core, and IPC headers do not require it.
   No public header exposes yaml-cpp. `ImageBuffer` remains a public value
   contract.
 - CLI, benchmark, and test-only headers are not public install headers.
@@ -262,7 +248,7 @@ include/photospider/
   core/
   host/
   plugin/
-  scheduler/
+  policy/
   ipc/
 
 src/lib/
@@ -272,7 +258,8 @@ src/lib/
   runtime/
   host/
   plugin/
-  scheduler/
+  policy/
+  execution/
   benchmark/
   adapters/
     opencv/
@@ -291,7 +278,7 @@ apps/
 
 plugins/
   ops/
-  schedulers/
+  policies/
 
 tests/
   unit/
@@ -301,20 +288,17 @@ tests/
   verification/
 ```
 
-All existing backend, plugin, maintained test, and version 1 IPC code now uses
+All existing backend, plugin, maintained test, and version 2 IPC code now uses
 this layout. Issue #36 created `src/lib/ipc/`, `include/photospider/ipc/`, and
 `apps/photospiderd/` together with real daemon behavior. Issue #38 completed the
-final `include/photospider/{plugin,scheduler}/` contracts, moved full private
-types to role-owned homes, and removed all eight transitional extension headers
-without shims or duplicates. Issue #70 keeps pure worker-request resolution and
-concrete instance planning under `src/lib/scheduler/`, but places the sole
-Host-authoritative ledger and move-only reservation/grant implementation under
-`src/lib/runtime/`. Issue #71 keeps its built-in policy strategies and bounded
-policy store private under `src/lib/compute/`. Issue #72 keeps exact-revision
-product commit split between the private compute policy and graph-state lane;
-issue #73 keeps cancellation sources, leases, observations, and commit
-contenders private under `src/lib/compute/`. None of those implementation
-owners becomes a public Host, SDK, or IPC type.
+operation extension contract and removed all eight transitional extension
+headers without shims or duplicates. Issue #75 removes the worker-owning
+scheduler SDK and adds the one-header `include/photospider/policy/` pure-C
+contract. Policy registry/loading lives under `src/lib/policy/`; private
+route/runtime contracts live under `src/lib/execution/`; the policy-aware store
+and reserved-start logic remain under `src/lib/compute/`; and the sole
+Host-authoritative ledger implementation remains under `src/lib/runtime/`.
+None of those private implementation owners becomes a public Host or IPC type.
 
 Naming rules:
 
@@ -335,21 +319,23 @@ Current target shape:
 | --- | --- | --- | --- |
 | `photospider_core_internal` | Static | No | Core values, image buffer, graph errors, low-level helpers. |
 | `photospider_graph_internal` | Static | No | `GraphModel`, graph IO, traversal, cache, inspection implementation. |
-| `photospider_compute_internal` | Static | No | Compute planning, dirty-region state, dispatcher, scheduler interaction. |
+| `photospider_compute_internal` | Static | No | Compute planning, dirty-region state, dispatcher, policy-aware ready store, reserved start, and private-route execution. |
 | `photospider_plugin_host_internal` | Static | No | Host-side dynamic plugin loading and lifetime ownership. |
-| `photospider_scheduler_internal` | Static | No | Built-in schedulers, ABI-v2 loader, factory/worker-limit planning, scheduler reservation ownership, and the shared `ResourceLedger` primitive. |
+| `photospider_policy_internal` | Static | No | Pure-C policy registry/loader, built-ins, bindings, contexts, faults, and DSO leases. |
+| `photospider_execution_internal` | Static | No | Private physical-execution accounting and `ResourceLedger` implementation. |
+| `photospider_host_internal` | Static | No | Embedded Host adapter and Kernel facade closure. |
 | `photospider_operation_runtime` | Static | Yes | Public image-buffer factories with no external-package dependency or SDK back-link. |
 | `photospider_operation_sdk` | Interface | Yes | Operation v2 headers and transitive `operation_runtime` link. |
 | `photospider_operation_opencv` | Static | Yes | Opt-in public OpenCV adapter with only OpenCV `core`. |
-| `photospider_scheduler_sdk` | Interface | Yes | Scheduler ABI-v2 headers, resolved `[1,8]` plugin grant contract, and C++17 usage requirement only. |
+| `photospider_policy_sdk` | Interface | Yes | One dependency-neutral pure-C ABI v1 header with C11/C++17 usage requirements. |
 | `photospider` / `libphotospider` | Static | Yes | Public static library for in-process frontends. |
 | `photospider_ipc_client` | Static | Yes | Client-side IPC adapter for daemon frontends. |
 | `photospider_cli_common` | Static | No | CLI command parser, REPL, TUI, autocomplete, and the two CLI-only benchmark service translation units; none enter the installable static product. |
 | `graph_cli` | Executable | No | Basic interactive frontend. |
-| `photospider_ipc_server_internal` | Static | No | Version 1 router, session/admission registry, joined compute-request registry, protected listener, and worker lifecycle. |
+| `photospider_ipc_server_internal` | Static | No | Version 2 router, session/admission registry, joined compute-request registry, protected listener, and worker lifecycle. |
 | `photospiderd` | Executable | Yes | Foreground daemon that owns one embedded `ps::Host` and the IPC server. |
 | operation plugins | Shared | Optional | Dynamically loaded operation extensions. |
-| scheduler plugins | Shared | Optional | Dynamically loaded scheduler extensions. |
+| policy plugins | Shared | Optional | Pure-C policy-only ranking extensions. |
 
 Target dependency direction:
 
@@ -360,10 +346,11 @@ graph TD
     graph_internal["photospider_graph_internal"] --> libphotospider
     compute["photospider_compute_internal"] --> libphotospider
     plugin_host["photospider_plugin_host_internal"] --> libphotospider
-    scheduler["photospider_scheduler_internal"] --> libphotospider
+    policy["photospider_policy_internal"] --> libphotospider
+    execution["photospider_execution_internal"] --> libphotospider
     operation_sdk["Photospider::operation_sdk"] --> operation_runtime["Photospider::operation_runtime"]
     operation_opencv["Photospider::operation_opencv"] --> operation_sdk
-    scheduler_sdk["Photospider::scheduler_sdk"] --> scheduler_plugins["scheduler plugins"]
+    policy_sdk["Photospider::policy_sdk"] --> policy_plugins["policy plugins"]
     operation_sdk --> operation_plugins["operation plugins"]
     ipc_client["photospider_ipc_client STATIC"] --> future_frontend["future daemon frontend"]
     libphotospider --> graph_cli
@@ -411,9 +398,9 @@ CMake rules:
   `yaml-cpp` types. `${CMAKE_DL_LIBS}` adds the platform dynamic-loader library
   only where CMake requires one.
 - Package components are `embedded`, `ipc_client`, `operation_sdk`,
-  `operation_runtime`, `operation_opencv`, and `scheduler_sdk`. Omitting
+  `operation_runtime`, `operation_opencv`, and `policy_sdk`. Omitting
   components uses `embedded` and preserves the dependency behavior above.
-  `scheduler_sdk`, `operation_sdk`, and `operation_runtime` resolve no external
+  `policy_sdk`, `operation_sdk`, and `operation_runtime` resolve no external
   package; `operation_opencv` resolves only OpenCV `core`; an explicit required
   `ipc_client` component resolves only Threads; an optional `embedded`
   component becomes not-found when its backend dependencies are unavailable
@@ -429,7 +416,7 @@ CMake rules:
   `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT` and remain separate from the static
   product boundary.
 - FTXUI and `photospider_cli_common` are CLI-only dependencies and are not part
-  of the embedded package export. Operation and scheduler plugin DSOs remain
+  of the embedded package export. Operation and policy plugin DSOs remain
   runtime extension artifacts rather than dependencies of
   `Photospider::photospider`.
 - `apps/graph_cli/include/graph_cli/**` is a private application include tree.
@@ -444,15 +431,13 @@ CMake rules:
 - Operation plugins should not link to a broad shared backend merely to reach
   registry symbols. The current implementation uses host-provided
   `ps::plugin::OperationPluginRegistrar` callbacks and the versioned
-  `register_photospider_ops_v2` entry. Scheduler plugins use the exact ABI-v2
-  numeric handshake before discovery, receive a resolved `[1,8]` hard worker
-  grant, and attach only through `SchedulerHostContext`. ABI v1 has no adapter
-  or compatibility registration. Both current interfaces remain provisional
-  C++ ABIs: the C-linkage entrypoint/handshake gates identity or generation,
-  while C++ values, callbacks, class/vtable objects, allocator/runtime,
-  exceptions, and RTTI still require the matching SDK and a compatible
-  toolchain. A future pure C plugin ABI remains a separate versioned
-  compatibility change.
+  `register_photospider_ops_v2` entry; this remains a provisional C++ ABI.
+  Policy plugins link only `Photospider::policy_sdk` and export exactly
+  `ps_policy_plugin_get_abi_version` plus `ps_policy_plugin_get_api_v1`.
+  Their exact natural-layout records and callbacks form a C11 pure-C ABI;
+  policy code receives no worker grant, executor, Run, Graph, allocator, or
+  completion route. The removed scheduler SDK has no adapter, alias, forwarding
+  header, or compatibility registration.
 
 ## Target Process-Execution Composition Boundary
 
@@ -468,9 +453,10 @@ RT-denies-HP behavior are current too. Issue #74's request-owned realtime
 and current-generation commit predicate are also current. `EmbeddedHostState`
 constructs the
 process execution owner before Kernel, and Kernel injects it into request-local
-`ComputeService` instances without a static singleton. Reserved-start admission
-and the scheduler ABI replacement (#75), plus the final lifecycle
-fence/shutdown/telemetry work (#76), remain target layout.
+`ComputeService` instances without a static singleton. Issue #75's process
+policy bindings, pure-C ABI, Host-authored frontier, reserved-start admission,
+and closed private execution routes are current. Only the final lifecycle
+fence/shutdown/telemetry work (#76) remains target layout.
 
 In that target:
 
@@ -482,14 +468,15 @@ In that target:
   separate HP `Full`/RT `Interactive` child Runs of realtime calls, including
   descriptor/phase/terminal and cancellation state, the Run-owned one-shot
   commit contender, and corresponding full-plan/temporary or standalone dirty
-  staging storage; scheduler-backed full HP work retains non-forgeable
+  staging storage; all full HP work retains non-forgeable
   read-only leases and composite task identity, while final lifecycle
   registration remains a later target;
 - current request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
-- the current `ExecutionService` owns one fixed built-in CPU worker pool, one
-  Host-authoritative ledger, a policy-aware entry/byte-bounded ready store,
+- the current `ExecutionService` owns one fixed CPU worker pool, private
+  `serial_debug` and `gpu_pipeline` behavior, one Host-authoritative ledger, a
+  policy-aware entry/byte-bounded ready store,
   checked full-vector Run admission, work/byte cost, class-local Graph and
   weighted-Run fairness, stable aging, a three-Interactive burst bound,
   Throughput-owned protected-headroom accounting with exact root lifetime,
@@ -497,27 +484,25 @@ In that target:
   completion, first-failure, trace, and Host-context routing. It also observes
   accepted Run cancellation, purges only that Run's queued entries, rejects
   dependent re-entry, and waits for running callbacks to drain. Interactive
-  and transitional Issue #70 legacy roots do not debit the Throughput class
-  quota; later slices extend the service with general resource execution and
-  the final lifecycle fence without moving ledger authority;
+  roots do not debit the Throughput class quota. Every Graph stores only copied
+  route ids/generations, while every route uses the common policy and
+  reserved-start boundary;
 - its private `RunLifecycleRegistry` supplies the single process admission/
   graph-close/process-shutdown fence, pending-candidate tracking,
   graph-indexed registry-held `RunLease` entries, and process enumeration without
   owning Run plans, dispatchers, terminal state, Graph state, or resource tokens;
 - the internal host-authoritative `ResourceLedger` is the only reservation and
   grant mint; and
-- the current private, stateless `SchedulerPolicy` strategies rank work only;
-  Interactive considers explicit deadlines before the class-local fairness
-  scores for the selected class, while Throughput uses its own class-local
-  scores directly. A policy owns no worker, queue, token, native resource, Run,
-  or Graph state. A replacement scheduler-policy ABI remains future work.
+- the current process policy registry owns built-in and pure-C DSO types. One
+  binding per `PolicyClass` owns its context, nonzero generation, immutable
+  first fault, and DSO leases. Host state selects the service class and trusted
+  frontier; a policy ranks immutable scalar descriptors only and owns no
+  worker, queue, token, native resource, Run, Graph, or start authority.
 
-This ownership target does not select a new source directory, build target, or
-plugin ABI shape for future policy/general-resource slices. Those choices
-belong to their corresponding implementation work. The former worker-only
-budget has already been removed as a complete migration without a wrapper,
-alias, or duplicate authority. The current worker-owning scheduler SDK remains
-until its separately scheduled ABI replacement.
+The former worker-only budget and worker-owning scheduler SDK are removed as
+complete migrations without wrappers, aliases, duplicate authority, or stale
+installed headers. Future general-resource or isolation slices must extend the
+private Host boundary without reintroducing execution authority into policy.
 
 ## Daemon Shape
 
@@ -535,13 +520,13 @@ Process responsibilities:
 
 - create and own one embedded `ps::Host`
 - expose ping/version, graph load/close/list, and graph/node/dependency-tree
-  inspection through the installed typed version 1 client
+  inspection through the installed typed version 2 client
 - accept the documented typed graph reload/save/clear, node YAML, node-list,
   cache, dirty lifecycle, ROI, timing, last-IO, and last-error requests and
   route each through exactly one matching Host call
 - own bounded polling compute jobs and materialize successful nonempty image
   results as protected metadata-only artifacts with stable delivery leases
-- route bounded destructive compute-event drains and non-destructive scheduler
+- route bounded destructive compute-event drains and non-destructive execution
   trace pages directly through the matching Host observation APIs
 - enforce per-user directory/socket permissions and safe live/stale handling
 - translate SIGINT/SIGTERM through a self-pipe and perform deterministic worker,
@@ -555,7 +540,7 @@ flow through the same host interface used by in-process frontends.
 Recommended runtime diagram:
 
 The GUI branch is an available future consumer shape. The dashed CLI branch is
-direction only: version 1 does not implement `graph_cli --connect`, and current
+direction only: version 2 does not implement `graph_cli --connect`, and current
 CLI construction remains embedded.
 
 ```mermaid
@@ -580,11 +565,11 @@ graph and compute semantics.
 
 ## IPC Protocol Direction
 
-The exact maintained version 1 wire, typed client, opaque-session, socket, and
-shutdown contract is `IPC-Protocol-v1.md`; this section places that implemented
+The exact maintained version 2 wire, typed client, opaque-session, socket, and
+shutdown contract is `IPC-Protocol-v2.md`; this section places that implemented
 slice in the longer migration direction.
 
-Implemented version 1 transport:
+Implemented version 2 transport:
 
 - Unix domain socket on macOS/Linux.
 - IPC is disabled outside macOS/Linux; named pipes remain later Windows work.
@@ -606,9 +591,9 @@ Implemented version 1 transport:
   scalar parent identity makes stable rename/recreation fail closed, and Active
   cleanup unlinks before listener close. Portable POSIX cannot make the final pathname
   revalidation and unlink atomic against a same-uid writer; the authoritative
-  boundary is documented in `IPC-Protocol-v1.md`.
+  boundary is documented in `IPC-Protocol-v2.md`.
 
-Implemented version 1 protocol:
+Implemented version 2 protocol:
 
 - Four-byte big-endian bounded length followed by UTF-8 JSON object text.
 - Every request has required integer `protocol_version`, nonempty bounded id,
@@ -626,14 +611,15 @@ Method groups and current wire availability:
 
 | Group | Example methods | Notes |
 | --- | --- | --- |
-| daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. `daemon.version.methods` returns the exact sorted 55-method inventory. The installed typed Client exposes owned calls for every advertised method and has no raw-JSON call. |
+| daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. `daemon.version.methods` returns the exact sorted 60-method inventory. The installed typed Client exposes owned calls for every advertised method and has no raw-JSON call. |
 | graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save`, `graph.clear`, `graph.node_yaml.get`, `graph.node_yaml.set` | Implemented through Host. Status-only mutations use `result:{}`; clearing model state preserves the opaque session mapping. |
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | Implemented through copied Host values. Full-value collections use stable bounded cursor pages; node/ROI/dirty/current-planning values remain indivisible direct results. Host order and duplicates are preserved. |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
 | compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values; states are exactly `queued`, `running`, `succeeded`, and `failed`, and every job reports `cancellable:false`. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
-| scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Defaults accept only exact `worker_count` values in `[0,8]`; the router rejects malformed or larger values before Host access, while the connected typed Client rejects larger values before writing a frame. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. The embedded Host composes one non-remotely-configurable `ExecutionService` whose default ledger has 32 CPU slots; Run callbacks and legacy scheduler owners share that authority. The installed typed Client exposes every route, aggregates type/plugin snapshots, and validates bounded non-destructive trace pages without retaining scheduler/plugin ownership. |
-| plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. The installed typed Client exposes every route, decodes exact reports, and aggregates key-sorted stable views; disconnecting a Client does not unload a successful process-owned DSO. |
+| policy | `policy.types`, `policy.description`, `policy.scan`, `policy.load`, `policy.loaded_plugins`, `policy.configure_defaults`, `policy.info`, `policy.replace` | Process-scoped pure-C type discovery/loading and Interactive/Throughput bindings. The Client aggregates stable type/plugin pages and validates copied binding/fault snapshots; disconnecting a Client does not retire process-owned DSO state. |
+| execution | `execution.types`, `execution.description`, `execution.configure_defaults`, `execution.info`, `execution.replace`, `execution.trace` | Closed-vocabulary private route control. Defaults accept `worker_count` in `[0,8]`; info/replacement is session-scoped and serialized with same-Graph compute/close. Trace remains bounded and non-destructive. No route plugin or physical owner crosses IPC. |
+| plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Operation-plugin control is implemented only through matching Host calls and advertised in the exact 60-method inventory. The installed typed Client exposes every route, decodes exact reports, and aggregates key-sorted stable views; disconnecting a Client does not unload a successful process-owned DSO. |
 | events | `events.drain` | Bounded destructive event draining is routed through Host and exposed by the installed typed Client as one strictly validated, non-retried Host event batch. |
 
 Image payload rule:
@@ -733,28 +719,16 @@ Frontend-boundary, physical-layout, daemon, typed Client, and complete IPC Host
 steps 1-8 are present in the current repository without changing `ps::Host` as
 the sole public seam.
 
-Issue #43 added a bounded migration gate around the per-Graph scheduler model,
-and Issue #69 added one fixed `ExecutionService` pool for built-in CPU HP/RT
-full, dirty, and preflight work from multiple Graphs. Issue #70 now replaces
-the former process-static worker counter completely. Each embedded Host
-composes one service-owned ledger with explicit limits; its built-in CPU Runs
-and legacy serial/GPU/plugin scheduler owners share atomic CPU admission.
-Graph load reserves legacy HP/RT scheduler pairs atomically, replacement holds
-old reservations until candidate publication, and scheduler destruction
-precedes exact release. Built-in CPU Runs reserve complete checked CPU,
-retained-memory, scratch, ready-entry, and ready-byte vectors before
-publication; their initial and dependent work share one entry/byte-bounded
-policy store. Issue #71 now adds private stateless Interactive and Throughput
-strategies, checked work/byte cost, class-local Graph/weighted-Run fairness,
-stable aging, a three-Interactive burst bound, and a Throughput-owned protected
-headroom charge that follows exact root lifetime without changing final ledger
-authority or Issue #70's full-ledger legacy capacity. Issue #72's strong
-identity/revision staging and issue #73's private cooperative cancellation,
-exact-Run purge/drain, Run-owned commit contention, and RT-denies-HP contract
-are now current. #74 now adds latest-wins supersession, realtime `RunGroup`, and
-current-generation commit authority; #75 replaces the worker-owning ABI, and
-#76 closes registry, graph-close/process-shutdown, and telemetry invariants. The
-authoritative acyclic
+Issues #69–#74 establish Host-owned multi-Run execution, complete resource
+vectors, bounded ready storage/fairness, exact-revision staging, cooperative
+cancellation, latest-wins supersession, and realtime `RunGroup` ownership.
+Issue #75 is now current: it removes every per-Graph scheduler owner and the
+worker-owning SDK, adds process policy bindings plus a pure-C policy ABI,
+reduces candidates through a Host-authored frontier, commits starts through a
+resource-safe transaction, and routes all work through closed private
+execution ids. Graph load/replacement now copies route values only. Issue #76
+still closes lifecycle registry, graph-close/process-shutdown, and telemetry
+invariants. The authoritative acyclic
 dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 
@@ -770,7 +744,7 @@ dependency table is in the
      `plugin/opencv_adapter.hpp` with exactly the declared
      `Photospider::operation_opencv` usage requirements. The aggregate target
      requires both, so optional OpenCV dependencies cannot mask accidental
-     coupling in core, Host, IPC, operation-SDK, or scheduler headers.
+     coupling in core, Host, IPC, operation-SDK, or policy headers.
    - `include/photospider/public_boundary.hpp` remains a marker header for the
      installable include root. Stable value contracts live under
      `include/photospider/core/`.
@@ -804,10 +778,10 @@ dependency table is in the
    cleanup behavior.
 7. **Completed task-4.4 IPC Host adapter, artifact, and package slices:** The
    installable typed client
-   exposes owned calls for all 55 methods, strictly validates common and
+   exposes owned calls for all 60 methods, strictly validates common and
    method-specific result shapes, performs each status or mutation RPC once,
    aggregates all private stable cursor pages, and preserves output/delivery
-   lease metadata. `create_ipc_host(socket_path)` implements all 53 current
+   lease metadata. `create_ipc_host(socket_path)` implements all 58 current
    non-destructor Host virtuals with fresh typed connections for ordinary calls
    and joined workers for async compute. Polling starts immediately, then waits
    10/20/40/80/160/320/500 ms with a 500-ms cap and no synchronous total
@@ -822,8 +796,8 @@ dependency table is in the
    package gate compiles every public header, then independently configures an
    IPC-only external consumer with `COMPONENTS ipc_client` and backend package
    discovery disabled. That consumer covers every Client lifecycle symbol,
-   exact unique inventories of all 55 typed Client calls, `create_ipc_host`,
-   and all 53 Host virtual references; the export admits only
+   exact unique inventories of all 60 typed Client calls, `create_ipc_host`,
+   and all 58 Host virtual references; the export admits only
    `Threads::Threads`. Its installed IPC-header gate positively permits only
    the current C++ standard-library include set and installed `photospider/`
    public includes, and explicitly rejects raw JSON, socket-address/descriptor,
@@ -832,20 +806,19 @@ dependency table is in the
    Public Host/CLI/IPC cancellation remains unavailable; the current private
    backend cancellation source and cooperative Run control do not enter this
    installed surface.
-8. **Completed plugin-boundary work:** Issue #38 tightened both extension SDKs,
-   and issue #43 advanced the scheduler contract to ABI v2.
+8. **Completed extension-boundary work:** Issue #38 tightened the operation SDK,
+   and issue #75 replaced the scheduler SDK with the policy SDK.
    - Operation plugins use v2 host-independent snapshots and a host-provided
-     registrar; scheduler plugins use the inherited minimal runtime,
-     `SchedulerHostContext`, a first-call numeric ABI handshake, and the
-     resolved `[1,8]` hard grant. ABI v1 has no compatibility path.
+     registrar. Policy plugins use exact natural-layout C ABI v1 records with
+     metadata/create/select/destroy callbacks and receive no execution resource.
    - The eight old headers and five old internal helper target names are absent
      without compatibility wrappers or aliases. Installed external consumers
      build both DSOs from package SDKs and execute them through an embedded Host.
    - Durable integration coverage also runs one external-operation,
-     external-scheduler, and compute chain through the in-tree embedded Host,
+     external-policy, and compute chain through the in-tree embedded Host,
      the real `photospiderd` IPC process, and a real `graph_cli` process. The
-     operation-produced ROI and scheduler fixture gate prove invocation rather
-     than discovery alone.
+     operation-produced ROI plus copied policy binding/generation prove
+     invocation and configuration rather than discovery alone.
 
 ## Verification Expectations
 
@@ -861,20 +834,20 @@ For any implementation change following this document:
   `graph_cli` remains an embedded/local regression target.
 - Keep the embedded Host, real daemon IPC, and `GraphCliPluginComputeSmoke`
   paths as long-lived runtime tests. Each loads the lifecycle operation v2 DSO
-  and destroy-count scheduler DSO, selects the external HP scheduler, and runs
-  parallel compute. The Host and daemon paths inspect the resulting `11x7`
-  absolute ROI; the daemon and CLI paths also require the scheduler fixture's
-  `compute_gate_wait`/`compute_gate_release` events. The CLI smoke additionally
-  requires its printed active scheduler name and post-compute ROI. Its config,
+  and pure-C policy DSO, binds both policy classes to the external type, selects
+  a private CPU route, and runs parallel compute. The paths inspect the resulting
+  `11x7` absolute ROI and copied policy/route state. The CLI smoke additionally
+  requires its printed binding generations, active execution route, and
+  post-compute ROI. Its config,
   graph, cache, trace, FIFO, and history home are transient build-tree content,
   never overlay or issue-specific evidence.
 - For static package work, keep the package consumer smoke test in CTest because
   it executes the real producer build/install, external find-package,
   public-header compile/link/run, installed export/dependency, platform, and
-  multi-configuration boundaries. It also builds operation and scheduler DSOs
+  multi-configuration boundaries. It also builds operation and policy DSOs
   using only installed SDK targets, then makes an embedded Host load both,
-  select the external scheduler, submit work, and compute through the external
-  operation. It evaluates those invariants in memory,
+  bind the external policy, select a private execution route, submit work, and
+  compute through the external operation. It evaluates those invariants in memory,
   streams commands and failure details to stdout/stderr for CTest to capture,
   and uses only transient install and consumer work directories below the build
   tree. It does not produce expected/actual/compare/summary reports and must not
@@ -945,7 +918,7 @@ For any implementation change following this document:
 
 ## Open Decisions
 
-This decision remains future work outside version 1; current `graph_cli`
+This decision remains future work outside version 2; current `graph_cli`
 construction is always embedded and does not probe or auto-connect to a daemon:
 - Whether `graph_cli` should default to local in-process mode forever, or should
   auto-connect to `photospiderd` when a daemon socket exists.
