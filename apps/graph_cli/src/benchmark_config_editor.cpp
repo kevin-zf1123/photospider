@@ -29,7 +29,7 @@
  * Config：input_op_type、main_op_type、output_op_type、width、height、chain_length、num_outputs
  *   - Execution Config：runs、threads、parallel
  *   -
- * Statistics：total_time、typical_time、thread_count、io_time、scheduler_overhead
+ * Statistics：total_time、typical_time、thread_count、io_time、execution_overhead
  */
 
 #include "graph_cli/benchmark_config_editor.hpp"
@@ -757,7 +757,7 @@ class BenchmarkConfigEditor {
 
   const std::vector<std::string> statistics_options_ = {
       "total_time", "typical_time", "thread_count", "io_time",
-      "scheduler_overhead"};
+      "execution_overhead"};
   std::map<std::string, bool> statistics_checked_map_;
 
   Component session_list_ = Renderer([] { return text(""); });

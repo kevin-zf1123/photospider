@@ -16,7 +16,7 @@ namespace ps {
  *
  * The service owns no graph state. It reads and mutates cache-related fields on
  * GraphModel and Node, saves formal HP outputs to configured cache files, loads
- * disk cache entries back into HP outputs or temporary scheduler slots, and
+ * disk cache entries back into HP outputs or temporary execution slots, and
  * synchronizes stale disk files with current HP cache authority.
  *
  * @note Disk-cache load wrappers keep their historical bool return contract:
@@ -172,7 +172,7 @@ class GraphCacheService {
    * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
    * failures are recorded through GraphModel's locked disk-cache diagnostic API
    * and reported as false.
-   * @note Used by scheduler worker paths that stage outputs outside the
+   * @note Used by execution worker paths that stage outputs outside the
    * formal HP cache before committing.
    */
   bool try_load_from_disk_cache_into(GraphModel& graph, const Node& node,

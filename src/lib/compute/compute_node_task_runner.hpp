@@ -12,8 +12,8 @@
 #include "benchmark/benchmark_types.hpp"
 #include "compute/node_executor.hpp"
 #include "compute/task_graph_planning.hpp"
+#include "execution/execution_task_runtime.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
 class GraphCacheService;
@@ -30,10 +30,10 @@ class ComputeRunLease;
  * The context packages graph services, dense plan indexes, temporary result
  * slots, resolved operations, and timing sinks for one dispatcher execute()
  * call. It has no ownership fields; all referenced objects must outlive the
- * scheduler tasks that use the runner.
+ * execution tasks that use the runner.
  *
  * @note The struct is copied into NodeTaskRunner by reference. The owning
- * submission plan must wait for scheduler completion before destroying any
+ * submission plan must wait for runtime completion before destroying any
  * referenced vectors or services.
  */
 struct NodeTaskRunnerContext {
@@ -46,8 +46,8 @@ struct NodeTaskRunnerContext {
   /** @brief Event sink for computed and disk-cache node events. */
   GraphEventService& events;
 
-  /** @brief Scheduler runtime used for tile trace events. */
-  SchedulerTaskRuntime& task_runtime;
+  /** @brief Execution runtime used for tile trace events. */
+  ExecutionTaskRuntime& task_runtime;
 
   /** @brief Shared timing collector updated under timing_mutex. */
   TimingCollector& timing_results;
@@ -86,7 +86,7 @@ struct NodeTaskRunnerContext {
    * @brief Optional borrowed Run lease used only for cooperative observations.
    * @note The plan must not retain a lease strongly because the Run owns the
    * plan. Product dispatch keeps this pointed-to lifecycle lease alive through
-   * synchronous scheduler settlement.
+   * synchronous execution settlement.
    */
   const ComputeRunLease* run_lease = nullptr;
 };
@@ -112,7 +112,7 @@ class NodeTaskRunner {
    * @param context Borrowed graph, service, timing, plan, and option state.
    * @throws Nothing directly.
    * @note The constructor stores references only. Callers must keep every
-   * referenced object alive until scheduler completion.
+   * referenced object alive until runtime completion.
    */
   explicit NodeTaskRunner(NodeTaskRunnerContext context);
 
@@ -129,8 +129,8 @@ class NodeTaskRunner {
    * @note Cancellation prevents provider entry at the initial boundary. A
    * provider already executing remains non-preemptible except at tiled
    * callbacks and is observed again by its enclosing task route. This method
-   * is called from scheduler worker closures and therefore leaves exception
-   * transport to SchedulerTaskRuntime.
+   * is called from execution worker closures and therefore leaves exception
+   * transport to ExecutionTaskRuntime.
    */
   void run_node(int node_idx);
 
@@ -245,7 +245,7 @@ class NodeTaskRunner {
    * @return Default configuration for monolithic operations, otherwise
    * metadata-derived tile sizing plus a per-tile observation callback.
    * @throws std::bad_alloc if copied callback or metadata storage allocates.
-   * @throws GraphError or scheduler trace exceptions when the installed
+   * @throws GraphError or execution trace exceptions when the installed
    * callback later observes cancellation or logs tile execution.
    * @note The callback observes cancellation before logging and before the
    * provider enters each tile; it borrows this runner through synchronous
@@ -276,8 +276,8 @@ class NodeTaskRunner {
   /** @brief Borrowed event sink for node execution status. */
   GraphEventService& events_;
 
-  /** @brief Borrowed scheduler runtime used for tile trace events. */
-  SchedulerTaskRuntime& task_runtime_;
+  /** @brief Borrowed execution runtime used for tile trace events. */
+  ExecutionTaskRuntime& task_runtime_;
 
   /** @brief Shared timing collector updated only while timing_mutex_ is held.
    */

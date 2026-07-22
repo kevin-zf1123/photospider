@@ -247,14 +247,14 @@ PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
 /**
  * @brief Builds the explicit default QoS consumed by built-in CPU Runs.
  *
- * @param use_parallel_executor Whether the request selects scheduler-backed
+ * @param use_parallel_executor Whether the request selects route-backed
  * execution.
  * @return Throughput QoS with no deadline, weight one, and a sequential
  * maximum-parallelism cap only for inline execution.
  * @throws Nothing.
- * @note Built-in CPU ExecutionService routes apply this throughput class,
- * weight, and absent deadline. Inline and legacy scheduler routes retain their
- * existing execution behavior; intent and quality never reclassify the value.
+ * @note ExecutionService routes apply this throughput class, weight, and absent
+ * deadline. Inline work retains its existing execution behavior; intent and
+ * quality never reclassify the value.
  */
 compute::ComputeRunQos make_default_compute_run_qos(
     bool use_parallel_executor) {
@@ -274,7 +274,7 @@ compute::ComputeRunQos make_default_compute_run_qos(
  * ROI, stable session identity, explicit default Run QoS, and any private
  * request cancellation authority.
  * @throws std::bad_alloc if copying the cache precision string allocates.
- * @note Quiet mode, skip-save, and scheduler selection stay in the internal
+ * @note Quiet mode, skip-save, and route selection stay in the internal
  * Kernel boundary because they belong to GraphRuntime orchestration. The graph
  * name is copied only as immutable ComputeRun identity.
  */
@@ -662,7 +662,7 @@ bool Kernel::compute(const ComputeRequest& request) {
  *         failures.
  * @throws std::bad_alloc if compute execution or catch-path LastError
  *         construction exhausts memory.
- * @note The private compute-request lane retains same-Graph and scheduler-owner
+ * @note The private compute-request lane retains same-Graph and route-binding
  *       serialization. Snapshot capture and commit use graph-state, while
  *       operation work does not hold that lane. Other compute exceptions map
  *       to false and LastError.

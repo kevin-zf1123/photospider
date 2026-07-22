@@ -127,20 +127,20 @@ std::string read_document(const std::filesystem::path& path) {
 }
 
 /**
- * @brief Configures no-worker schedulers for document-only Host tests.
+ * @brief Configures no-worker execution routes for document-only Host tests.
  *
  * @param host Embedded Host under test.
  * @return Nothing.
- * @throws std::runtime_error If Host rejects the deterministic scheduler.
- * @note The serial scheduler declares zero CPU slots in the
+ * @throws std::runtime_error If Host rejects the deterministic execution route.
+ * @note The serial execution route declares zero CPU slots in the
  *       `ExecutionService`-owned Host `ResourceLedger` while preserving the
  *       real Kernel graph-load lifecycle.
  */
 void configure_document_host(Host& host) {
-  HostSchedulerConfig config;
+  HostExecutionConfig config;
   config.hp_type = "serial_debug";
   config.rt_type = "serial_debug";
-  const VoidResult configured = host.configure_scheduler_defaults(config);
+  const VoidResult configured = host.configure_execution_defaults(config);
   if (!configured.status.ok) {
     throw std::runtime_error("failed to configure graph document Host: " +
                              configured.status.message);

@@ -26,21 +26,21 @@ class StabilizedDirtyParameters;
 /**
  * @brief Borrowed execution context shared by HP and RT dirty node executors.
  *
- * The context groups graph access, optional scheduler runtime, event recording,
+ * The context groups graph access, optional execution runtime, event recording,
  * dirty-source membership, and generation metadata for one dirty update. It is
  * an aggregate so call sites can construct it without introducing a long
  * constructor parameter list.
  *
- * @note All references are borrowed for scheduler callbacks created by the
+ * @note All references are borrowed for execution callbacks created by the
  * owning dirty update executor. The context must not outlive the prepared
- * dirty plan, transaction synchronization owner, or scheduler wait for that
+ * dirty plan, transaction synchronization owner, or runtime wait for that
  * generation.
  */
 struct DirtyNodeExecutionContext {
   /** @brief Graph used for dependency lookup, tiled execution, and commits. */
   GraphModel& graph;
 
-  /** @brief Optional runtime for scheduler trace and stale-generation events.
+  /** @brief Optional runtime for execution trace and stale-generation events.
    */
   GraphRuntime* runtime;
 
@@ -93,7 +93,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param hp_write_buffer Request-local HP output buffer committed by the
    * owning HighPrecisionDirtyExecutor after dirty work completes.
    * @throws Nothing directly.
-   * @note All references are borrowed and must outlive scheduler callbacks
+   * @note All references are borrowed and must outlive execution callbacks
    * created for the same dirty generation.
    */
   HighPrecisionDirtyNodeExecutor(
@@ -172,7 +172,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param hp_buffer Request-local destination buffer.
    * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
-   * @note Scheduler tile trace events are emitted before execution to mirror
+   * @note Execution tile trace events are emitted before execution to mirror
    * the previous combined dirty executor. A supplied lifecycle lease is
    * observed before every tile callback enters provider work.
    */
@@ -277,7 +277,7 @@ class RealTimeDirtyNodeExecutor {
    * @param rt_write_buffer Request-local RT output buffer committed to
    * RealtimeProxyGraph after all dirty tasks complete.
    * @throws Nothing directly.
-   * @note References are borrowed and must outlive scheduler callbacks created
+   * @note References are borrowed and must outlive execution callbacks created
    * for the same dirty generation.
    */
   RealTimeDirtyNodeExecutor(DirtyNodeExecutionContext context,
@@ -403,7 +403,7 @@ class RealTimeDirtyNodeExecutor {
    * @param rt_buffer Destination RT proxy buffer.
    * @return Nothing.
    * @throws GraphError or operation exceptions from NodeExecutor.
-   * @note Scheduler tile trace events are emitted after tiled execution, as in
+   * @note Execution tile trace events are emitted after tiled execution, as in
    * the previous combined dirty executor. A supplied lifecycle lease is
    * observed before every tile callback enters provider work.
    */

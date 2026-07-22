@@ -30,7 +30,7 @@ namespace ps::ipc::internal {
  *       JSON envelope. Empty `session_id` denotes a process-global method.
  */
 struct CollectionSnapshotBinding {
-  /** @brief Exact version 1 method name. */
+  /** @brief Exact version 2 method name. */
   std::string method;
 
   /** @brief Frozen opaque session id, or empty for a global method. */

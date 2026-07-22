@@ -163,7 +163,7 @@ void DownsampleExecutor::execute_one(const Request& request) {
   events_.push(node.id, node.name, "downsample", 0.0);
 
   if (runtime_) {
-    runtime_->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE, node.id);
+    runtime_->log_event(GraphRuntime::ExecutionEvent::EXECUTE_TILE, node.id);
   }
 }
 
@@ -252,7 +252,7 @@ void DownsampleExecutor::commit_rt_metadata(
 /** @copydoc DownsampleExecutor::log_stale_generation */
 void DownsampleExecutor::log_stale_generation(int node_id) const {
   if (runtime_) {
-    runtime_->log_event(GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION,
+    runtime_->log_event(GraphRuntime::ExecutionEvent::SKIP_STALE_GENERATION,
                         node_id);
   }
 }

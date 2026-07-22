@@ -6,14 +6,14 @@
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
+#include "execution/execution_task_runtime.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
 class GraphTraversalService;
 class GraphCacheService;
 class GraphEventService;
-class SchedulerHostContext;
+class ExecutionHostContext;
 }  // namespace ps
 
 namespace ps::compute {
@@ -23,19 +23,19 @@ class ExecutionService;
 
 /**
  * @brief Dispatches the GlobalHighPrecision compute task graph through a
- * SchedulerTaskRuntime.
+ * ExecutionTaskRuntime.
  *
  * ComputeTaskDispatcher owns the execution bridge between the compute-service
- * planning layer and the scheduler runtime. For one request it asks the
+ * planning layer and the execution runtime. For one request it asks the
  * caller-owned ComputeRun to build and retain the cache-pruned task graph and
  * owned runner, acquires a dispatcher/commit lease, releases dependency-ready
- * work as scheduler-owned callbacks with composite Run-local identity,
+ * work as runtime-owned callbacks with composite Run-local identity,
  * collects worker outputs in Run-owned temporary slots, and serializes final
- * GraphModel cache mutation after the scheduler drains.
+ * GraphModel cache mutation after execution drains.
  *
  * The dispatcher does not choose scheduling policy. Thread ownership, worker
  * queues, task prioritization, and exception capture remain responsibilities
- * of the supplied SchedulerTaskRuntime. It also does not implement the
+ * of the supplied ExecutionTaskRuntime. It also does not implement the
  * real-time dirty-region planner; dirty update callers only reuse the static
  * source-first submission helper below.
  *
@@ -101,12 +101,12 @@ class ComputeTaskDispatcher {
    * @brief Executes one cache-pruned GlobalHighPrecision plan.
    *
    * The method validates the target node, optionally clears timing and planned
-   * high-precision caches, builds scheduler tasks, waits for scheduler
+   * high-precision caches, builds executable tasks, waits for runtime
    * completion, commits temporary outputs into GraphModel under the graph
    * mutex, writes configured disk caches, and returns the target output.
    *
    * @param graph Graph whose nodes and runtime cache state are computed.
-   * @param task_runtime Scheduler runtime that receives initial and
+   * @param task_runtime Execution runtime that receives initial and
    * dependency-ready tasks.
    * @param request Immutable execution options for this dispatch.
    * @param run Request observer that retains the plan and mints leases for
@@ -122,17 +122,17 @@ class ComputeTaskDispatcher {
    * telemetry, or result storage exhausts memory.
    * @note Worker tasks do not mutate GraphModel caches directly. They publish
    * temporary results, and execute() serializes final cache ownership after the
-   * scheduler drains. Cancellation is observed before planning, publication,
+   * runtime drains. Cancellation is observed before planning, publication,
    * phase changes, result commit, and return; cancellation observed before
    * those boundaries suppresses dependent publication and final Graph cache
    * commit. A monolithic provider already entered is non-preemptible, while
    * tiled providers observe between tiles. Full-HP callbacks own Run leases and
    * carry
    * `(ComputeRunId, ComputeRunLocalTaskId)` identity; they contain no borrowed
-   * TaskExecutor pointer. The current graph/scheduler lifetime and visible
-   * commit still require synchronous wait.
+   * ExecutionTaskExecutor pointer. The current graph/runtime lifetime and
+   * visible commit still require synchronous wait.
    */
-  NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
+  NodeOutput& execute(GraphModel& graph, ExecutionTaskRuntime& task_runtime,
                       const ComputeDispatchRequest& request, ComputeRun& run,
                       const ComputeRunLease& lifecycle_lease);
 
@@ -159,7 +159,8 @@ class ComputeTaskDispatcher {
    * Graph cache commit.
    */
   NodeOutput& execute(GraphModel& graph, ExecutionService& execution_service,
-                      SchedulerHostContext& host,
+                      ExecutionHostContext& host,
+                      const std::string& execution_type,
                       const ComputeDispatchRequest& request, ComputeRun& run,
                       const ComputeRunLease& lifecycle_lease);
 
@@ -170,28 +171,29 @@ class ComputeTaskDispatcher {
    * priority and waited to completion. The optional before_downstream callback
    * then validates the source boundary on the caller thread. Finally, initial
    * downstream handles are submitted as a normal-priority dependency batch and
-   * waited until scheduler dependency release drains the full downstream count.
+   * waited until runtime dependency release drains the full downstream count.
    *
-   * @param task_runtime Scheduler runtime used by the dirty-update caller.
+   * @param task_runtime Execution runtime used by the dirty-update caller.
    * @param source_handles Ready dirty source task handles to submit first.
-   * @param source_task_count Total source task count tracked by the scheduler.
+   * @param source_task_count Total source task count tracked by the runtime.
    * @param initial_downstream_handles Initial downstream handles whose
    * dependencies are already satisfied after source completion.
    * @param downstream_task_count Total downstream dirty task count tracked by
-   * the scheduler.
+   * the runtime.
    * @param before_downstream Optional callback for source-boundary validation.
    * @return Nothing.
-   * @throws Rethrows any scheduler, task, or callback exception.
+   * @throws Rethrows any runtime, task, or callback exception.
    * @throws std::bad_alloc unchanged when handle submission, dependency, or
    * callback storage exhausts memory.
    * @note Production HP and RT dirty executors use this overload so
-   * source-first scheduler submission remains a ComputeTaskDispatcher boundary
-   * while dirty executors own only plan-specific TaskExecutor construction.
+   * source-first runtime submission remains a ComputeTaskDispatcher boundary
+   * while dirty executors own only plan-specific ExecutionTaskExecutor
+   * construction.
    */
   static void submit_dirty_ready_tasks_source_first(
-      SchedulerTaskRuntime& task_runtime,
-      std::vector<TaskHandle>&& source_handles, int source_task_count,
-      std::vector<TaskHandle>&& initial_downstream_handles,
+      ExecutionTaskRuntime& task_runtime,
+      std::vector<ExecutionTaskHandle>&& source_handles, int source_task_count,
+      std::vector<ExecutionTaskHandle>&& initial_downstream_handles,
       int downstream_task_count,
       std::function<void()> before_downstream = nullptr);
 
@@ -210,7 +212,7 @@ class ComputeTaskDispatcher {
    * @brief Shares full-HP planning, runner setup, and commit across routes.
    *
    * @param graph Graph whose plan and final cache state are mutated.
-   * @param task_runtime Legacy scheduler or injected ready-submission runtime
+   * @param task_runtime Injected ready-submission runtime
    * used by the Run-owned node runner and completion routes.
    * @param execution_service Non-null only for the migrated CPU service route.
    * @param host Non-null active trace target only for the service route.
@@ -220,20 +222,18 @@ class ComputeTaskDispatcher {
    * selected physical route.
    * @return Mutable committed target output.
    * @throws GraphError or standard exceptions from planning, execution,
-   * service/scheduler settlement, cache, telemetry, or commit.
+   * service/runtime settlement, cache, telemetry, or commit.
    * @note The optional route pointers select only physical dispatch; every
    * semantic planning and visible commit stage is shared. Cooperative
    * observations bracket planning, dispatch, phase transitions, and final
    * result commit so cancellation that wins before commit leaves temporary
    * outputs unpublished.
    */
-  NodeOutput& execute_impl(GraphModel& graph,
-                           SchedulerTaskRuntime& task_runtime,
-                           ExecutionService* execution_service,
-                           SchedulerHostContext* host,
-                           const ComputeDispatchRequest& request,
-                           ComputeRun& run,
-                           const ComputeRunLease& lifecycle_lease);
+  NodeOutput& execute_impl(
+      GraphModel& graph, ExecutionTaskRuntime& task_runtime,
+      ExecutionService* execution_service, ExecutionHostContext* host,
+      const std::string* execution_type, const ComputeDispatchRequest& request,
+      ComputeRun& run, const ComputeRunLease& lifecycle_lease);
 
   /** @brief Borrowed traversal service used to build target execution order. */
   GraphTraversalService& traversal_;

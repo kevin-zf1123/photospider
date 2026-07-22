@@ -101,8 +101,8 @@ class ComputeService {
    * legacy HP-only path, while a populated intent delegates to
    * IntentUpdateCoordinator with dirty_roi forwarded unchanged.
    *
-   * @note The request does not own GraphModel, GraphRuntime, schedulers, or
-   * cache entries. Every created Run snapshots graph_identity and qos before
+   * @note The request does not own GraphModel, GraphRuntime, workers, routes,
+   * or cache entries. Every created Run snapshots graph_identity and qos before
    * planning: one Run for a standalone HP request and one immutable copy in
    * each HP/RT child of a realtime request. All graph mutation happens inside
    * the compute call selected by compute() or compute_parallel().
@@ -137,8 +137,8 @@ class ComputeService {
      * @note Current Kernel callers use Throughput, weight one, no deadline, and
      * an optional sequential parallelism cap. Built-in CPU ExecutionService
      * routes apply the explicit class, deadline, and weight without inferring
-     * from intent or quality; inline and legacy routes retain their existing
-     * execution behavior.
+     * from intent or quality; inline work retains its existing execution
+     * behavior.
      */
     compute::ComputeRunQos qos;
 
@@ -194,13 +194,13 @@ class ComputeService {
      * @brief Runtime providing bindings and observation, or null for inline
      * work.
      *
-     * @note Legacy routes borrow Graph-owned scheduler pools through this
-     * runtime. An ownerless built-in CPU binding instead dispatches through the
-     * injected process ExecutionService.
+     * @note The runtime owns only copied route bindings and execution
+     * observations. Every queued route dispatches through the injected process
+     * ExecutionService.
      */
     GraphRuntime* runtime = nullptr;
 
-    /** @brief Whether full non-dirty work should use scheduler dispatch. */
+    /** @brief Whether full non-dirty work should use queued route dispatch. */
     bool use_parallel_executor = false;
   };
 
@@ -214,9 +214,9 @@ class ComputeService {
    * @param execution_service Explicit process CPU execution owner.
    * @throws Nothing directly; referenced services must already be valid.
    * @note ComputeService does not own the supplied services and must not
-   * outlive them. Built-in CPU full, dirty, and RT paths share the injected
-   * execution service; inline work and legacy plugin/GPU/serial routes may
-   * execute without it.
+   * outlive them. All queued CPU, GPU-pipeline, and serial-debug paths share
+   * the injected execution service; only explicit inline work executes without
+   * it.
    */
   ComputeService(GraphTraversalService& traversal, GraphCacheService& cache,
                  GraphEventService& events,
@@ -248,8 +248,8 @@ class ComputeService {
    * exhausts memory.
    * @note A request without intent uses the legacy GlobalHighPrecision
    * recursive path. Intent-aware requests are coordinated inline without a
-   * scheduler runtime. Cancellation that wins before the Run commit contender
-   * prevents product-visible staged publication; an already entered
+   * queued execution runtime. Cancellation that wins before the Run commit
+   * contender prevents product-visible staged publication; an already entered
    * monolithic provider remains non-preemptible until it returns.
    */
   NodeOutput& compute(GraphModel& graph, const Request& request);
@@ -260,19 +260,18 @@ class ComputeService {
    * @param graph Graph whose node caches, timing, and inspection state are
    * read and mutated.
    * @param runtime Runtime providing Graph lifecycle, intent bindings, and
-   * worker-facing observation. Legacy bindings expose Graph-owned schedulers;
-   * ownerless built-in CPU bindings use the injected ExecutionService.
+   * worker-facing observation. Every supported binding uses the injected
+   * ExecutionService for physical execution.
    * @param request Target, cache, telemetry, intent, and dirty ROI options.
    * @return Mutable output selected by the request. HP outputs are owned by
    * graph node state; RT dirty outputs are owned by the runtime proxy graph.
-   * @throws GraphError for scheduler lookup, validation, planning, dispatch, or
+   * @throws GraphError for route lookup, validation, planning, dispatch, or
    * missing output failures, including private cancellation translated to
    * `GraphErrc::ComputeError`; may propagate operation-specific exceptions.
    * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
    * cache, telemetry, or result storage exhausts memory.
    * @note Dirty RT updates create separate HP and RT child Runs. Built-in CPU
-   * routes submit both children to the fixed process ExecutionService, while
-   * plugin, GPU, and serial routes retain their Graph-owned schedulers. The
+   * routes submit both children to the fixed process ExecutionService. The
    * staged dirty commit path starts RT before HP, waits for RT proxy commit
    * before HP graph commit, and returns the RT proxy output. Kernel callers
    * must enter this method from GraphStateExecutor so execution-bound work
@@ -359,11 +358,12 @@ class ComputeService {
    * storage exhausts memory.
    * @throws GraphError for dirty planning, dispatch, operation, or target
    * validation failures; std::bad_optional_access for an unvalidated request.
-   * @note The executor owns phase locking and scheduler lifetime. The optional
-   * gate is shared only for the active RealTimeUpdate request. A realtime HP
-   * sibling uses its own child Run; no mixed-domain Run is created. Accepted
-   * cancellation suppresses later provider/dependent work and leaves partial
-   * request-owned staging for outer cleanup rather than visible publication.
+   * @note The executor owns phase locking and request-local execution lifetime.
+   * The optional gate is shared only for the active RealTimeUpdate request. A
+   * realtime HP sibling uses its own child Run; no mixed-domain Run is created.
+   * Accepted cancellation suppresses later provider/dependent work and leaves
+   * partial request-owned staging for outer cleanup rather than visible
+   * publication.
    */
   NodeOutput& compute_high_precision_update(
       GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
@@ -441,8 +441,8 @@ class ComputeService {
    * @brief Executes legacy sequential HP compute after plan inspection.
    *
    * @param graph Graph whose planned HP cone is computed.
-   * @param request Target, cache, and telemetry options without scheduler
-   * ownership.
+   * @param request Target, cache, and telemetry options without queued route
+   * execution.
    * @param run Request-owned HP descriptor and terminal/storage owner.
    * @param run_lease Retained lifecycle lease observed by recursive nodes and
    * tiled-provider boundaries.
@@ -466,19 +466,19 @@ class ComputeService {
    *
    * @param graph Graph whose target HP output is computed.
    * @param runtime Runtime providing the GlobalHighPrecision binding and
-   * worker-facing observation. The binding may be ownerless for built-in CPU
-   * service execution or expose a borrowed legacy scheduler.
+   * worker-facing observation. The copied binding selects one private route in
+   * the injected process ExecutionService.
    * @param request Full HP target, cache, and telemetry options.
    * @param run Request observer for leased plan, runner, callback, temporary
    * output, exception, and lifecycle state.
    * @param run_lease Retained lifecycle lease copied into dispatcher and
    * accepted callback ownership.
    * @return Mutable target HP output owned by graph cache.
-   * @throws GraphError for scheduler, planning, execution, cache, or output
+   * @throws GraphError for route, planning, execution, cache, or output
    * failures.
-   * @throws std::bad_alloc unchanged when scheduler, plan, operation, cache,
+   * @throws std::bad_alloc unchanged when dispatch, plan, operation, cache,
    * telemetry, or Run storage exhausts memory.
-   * @note Full-HP scheduler callbacks retain stable Run leases and composite
+   * @note Full-HP ready callbacks retain stable Run leases and composite
    * task identity. The dispatcher still waits synchronously because graph
    * lifetime and visible commit decoupling remain later work. Cancellation
    * closes matching queued/dependent publication, drains running callbacks,
@@ -535,13 +535,13 @@ class ComputeService {
    * @param sibling_commit_gate Shared request-owned RT-first gate, required
    * for realtime groups and null for HP-only requests.
    * @return Mutable output selected by IntentUpdateCoordinator.
-   * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
+   * @throws std::bad_alloc unchanged when callback, dispatch, dirty, cache, or
    * output storage exhausts memory.
    * @throws GraphError for invalid intent, missing runtime, planning,
-   * operation, scheduler, or output failures.
+   * operation, route, or output failures.
    * @note Callback captures, the optional sibling gate, and concurrent per-node
-   * synchronization are request-local; scheduler and proxy graph ownership
-   * remain with strategy/runtime/service. Explicit full HP callbacks reuse the
+   * synchronization are request-local; physical execution and proxy graph
+   * ownership remain with service/runtime. Explicit full HP callbacks reuse the
    * supplied outer Run. Realtime callbacks settle separate HP and RT children.
    */
   NodeOutput& compute_intent_update_impl(

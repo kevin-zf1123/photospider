@@ -15,8 +15,8 @@ namespace ps {
 class GraphEventService;
 class GraphRuntime;
 class GraphTraversalService;
-class SchedulerHostContext;
-class SchedulerTaskRuntime;
+class ExecutionHostContext;
+class ExecutionTaskRuntime;
 }  // namespace ps
 
 namespace ps::compute {
@@ -210,9 +210,10 @@ class StabilizedDirtyParameters {
   friend std::shared_ptr<const StabilizedDirtyParameters>
   stabilize_connected_dirty_parameters(GraphModel&, GraphTraversalService&, int,
                                        uint64_t, uint64_t,
-                                       SchedulerTaskRuntime*, ExecutionService*,
-                                       SchedulerHostContext*, ComputeRun*,
-                                       const ComputeRunLease*);
+                                       ExecutionTaskRuntime*, ExecutionService*,
+                                       ExecutionHostContext*, ComputeRun*,
+                                       const ComputeRunLease*,
+                                       const std::string&);
 
   /** @brief Generation shared by every domain of one dirty request. */
   uint64_t request_generation_ = 0;
@@ -256,7 +257,7 @@ class StabilizedDirtyParameters {
  * @param target_node_id Dirty request target.
  * @param request_generation Non-zero identity reserved for the whole request.
  * @param topology_generation Topology identity captured with the generation.
- * @param task_runtime Optional HP scheduler runtime. When supplied, every
+ * @param task_runtime Optional HP execution runtime. When supplied, every
  * preflight node is opened as a high-priority single-handle initial batch and
  * its matching completion wait drains before the next topological node.
  * @param execution_service Optional process CPU service used instead of
@@ -285,10 +286,11 @@ std::shared_ptr<const StabilizedDirtyParameters>
 stabilize_connected_dirty_parameters(
     GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
     uint64_t request_generation, uint64_t topology_generation,
-    SchedulerTaskRuntime* task_runtime = nullptr,
+    ExecutionTaskRuntime* task_runtime = nullptr,
     ExecutionService* execution_service = nullptr,
-    SchedulerHostContext* host = nullptr, ComputeRun* run = nullptr,
-    const ComputeRunLease* run_lease = nullptr);
+    ExecutionHostContext* host = nullptr, ComputeRun* run = nullptr,
+    const ComputeRunLease* run_lease = nullptr,
+    const std::string& execution_type = "cpu");
 
 /**
  * @brief Immutable options for one dirty update executor call.
@@ -368,9 +370,9 @@ struct DirtyUpdateRequest {
    * @brief Optional per-node critical sections shared by HP/RT siblings.
    *
    * @note `ComputeService` supplies one transaction-scoped owner only when a
-   * scheduler-backed RealTimeUpdate will run HP and RT concurrently. Each
+   * route-backed RealTimeUpdate will run HP and RT concurrently. Each
    * executor creates an independent local owner when this pointer is null.
-   * Shared ownership lasts through sibling failure cleanup and scheduler drain;
+   * Shared ownership lasts through sibling failure cleanup and execution drain;
    * the object is never retained by a Graph or process-wide service. Every
    * process-service phase charges its complete Host-visible storage; concurrent
    * siblings therefore reserve the same shared object conservatively in both
@@ -391,7 +393,7 @@ struct DirtyUpdateRequest {
  * delegates one fully validated request at a time.
  *
  * @note Planning/inspection and final validation take graph_mutex_, while
- * scheduler execution runs outside the outer graph lock and relies on
+ * queued execution runs outside the outer graph lock and relies on
  * transaction-local per-node critical sections. Concurrent HP/RT siblings
  * share those sections only for the same RealTimeUpdate transaction.
  */
@@ -414,11 +416,11 @@ class HighPrecisionDirtyExecutor {
    * @param graph Graph whose dirty state and HP caches are updated.
    * @param proxy_graph Runtime-owned RT proxy graph that receives optional
    * GlobalHighPrecision downsample output.
-   * @param runtime Optional runtime used to dispatch scheduler tasks and record
+   * @param runtime Optional runtime used to select routes and record
    * trace events. A null runtime executes source and downstream work inline.
    * @param request Dirty update options inherited from ComputeService.
    * @param run Optional request-owned HP Run. GlobalHighPrecision and
-   * scheduler-backed realtime HP children supply it so staging and service
+   * route-backed realtime HP children supply it so staging and service
    * submissions remain Run-scoped.
    * @param execution_service Optional process CPU service selected by the
    * runtime route. It requires non-null runtime and run.
@@ -426,12 +428,12 @@ class HighPrecisionDirtyExecutor {
    * planning, provider, tile, downsample, and commit boundaries.
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
-   * dispatch, scheduler submission, target output validation, or a cooperative
+   * dispatch, execution submission, target output validation, or a cooperative
    * cancellation boundary fails.
    * @throws std::bad_alloc unchanged when planning, task, cache, proxy, or
    * output storage exhausts memory.
    * @note The method is phase-split: planning/reset and final validation are
-   * serialized with graph_mutex_, but scheduler task execution is not wrapped
+   * serialized with graph_mutex_, but queued task execution is not wrapped
    * by the outer graph lock. Forced HP dirty requests must already have a valid
    * target HP extent because they recompute the full frame instead of
    * preserving pixels from the old HP cache. A supplied Run receives exactly
@@ -486,7 +488,7 @@ class HighPrecisionDirtyExecutor {
  *
  * The executor owns the RT dirty update flow that used to live directly in
  * ComputeService: RT dirty-region planning, compute-task pruning, source-first
- * scheduler submission, RT/HP operation fallback resolution, proxy buffer
+ * execution submission, RT/HP operation fallback resolution, proxy buffer
  * allocation, tiled or monolithic ROI execution, and RT ROI/version commits.
  *
  * @note RT output is committed to RealtimeProxyGraph and is never promoted to
@@ -510,7 +512,7 @@ class RealTimeDirtyExecutor {
    *
    * @param graph Graph used for topology, parameters, and HP fallback output.
    * @param proxy_graph Runtime-owned RT proxy graph receiving staged output.
-   * @param runtime Optional runtime used to dispatch scheduler tasks and record
+   * @param runtime Optional runtime used to select routes and record
    * trace events. A null runtime executes all work inline.
    * @param request Dirty update options inherited from ComputeService.
    * @param run Optional RT child Run required for process-service routing.
@@ -520,7 +522,7 @@ class RealTimeDirtyExecutor {
    * planning, provider, tile, and proxy-commit boundaries.
    * @return Mutable real-time target output stored in the proxy graph.
    * @throws GraphError when planning, dependency resolution, operation
-   * dispatch, scheduler submission, target output validation, or a cooperative
+   * dispatch, execution submission, target output validation, or a cooperative
    * cancellation boundary fails.
    * @throws std::bad_alloc unchanged when planning, task, proxy, or output
    * storage exhausts memory.

@@ -15,13 +15,13 @@ namespace ps::compute {
  * @brief Dense runtime dependency state for a pruned ComputeTaskGraph.
  *
  * TaskDependencyState converts PlannedTask dependency_task_ids into compact
- * scheduler counters and dependent adjacency lists. It owns only per-dispatch
+ * execution counters and dependent adjacency lists. It owns only per-dispatch
  * runtime bookkeeping; the immutable ComputeTaskGraph remains owned by the
  * submission plan.
  *
  * @note The state is not thread-safe for topology mutation. Worker threads may
  * call release_dependents() after tasks are built, while the owning
- * TaskSubmissionPlan keeps the object alive until scheduler completion.
+ * TaskSubmissionPlan keeps the object alive until execution completion.
  */
 class TaskDependencyState {
  public:

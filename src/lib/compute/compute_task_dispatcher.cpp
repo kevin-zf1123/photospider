@@ -1,9 +1,11 @@
 #include "compute/compute_task_dispatcher.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -67,12 +69,12 @@ void ComputeTaskDispatcher::clear_timing_results(GraphModel& graph) {
  * @brief Submits dirty task handles through dispatcher-owned source-first
  * ordering.
  *
- * @param task_runtime Scheduler runtime receiving the dirty task batches.
+ * @param task_runtime Execution runtime receiving the dirty task batches.
  * @param source_handles Dirty source handles submitted and drained first.
- * @param source_task_count Total source tasks tracked by scheduler completion.
+ * @param source_task_count Total source tasks tracked by runtime completion.
  * @param initial_downstream_handles First downstream handles released after
  * the source boundary.
- * @param downstream_task_count Total downstream tasks tracked by scheduler
+ * @param downstream_task_count Total downstream tasks tracked by runtime
  * completion.
  * @param before_downstream Optional boundary validation callback.
  * @return Nothing.
@@ -80,16 +82,16 @@ void ComputeTaskDispatcher::clear_timing_results(GraphModel& graph) {
  * @throws std::bad_alloc unchanged when handle submission, dependency, or
  * callback storage exhausts memory.
  * @note The helper centralizes production dirty source-first submission while
- * dirty executors retain their request-local TaskExecutor ownership.
+ * dirty executors retain their request-local ExecutionTaskExecutor ownership.
  */
 void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
-    SchedulerTaskRuntime& task_runtime,
-    std::vector<TaskHandle>&& source_handles, int source_task_count,
-    std::vector<TaskHandle>&& initial_downstream_handles,
+    ExecutionTaskRuntime& task_runtime,
+    std::vector<ExecutionTaskHandle>&& source_handles, int source_task_count,
+    std::vector<ExecutionTaskHandle>&& initial_downstream_handles,
     int downstream_task_count, std::function<void()> before_downstream) {
   task_runtime.submit_initial_task_handles(std::move(source_handles),
                                            source_task_count,
-                                           SchedulerTaskPriority::High);
+                                           ExecutionTaskPriority::High);
   task_runtime.wait_for_completion();
 
   if (before_downstream) {
@@ -98,7 +100,7 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
     } catch (...) {
       auto error = std::current_exception();
       try {
-        task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
+        task_runtime.log_event(ExecutionTraceAction::RethrowException, -1);
       } catch (...) {
       }
       try {
@@ -111,20 +113,20 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
 
   task_runtime.submit_initial_task_handles(
       std::move(initial_downstream_handles), downstream_task_count,
-      SchedulerTaskPriority::Normal);
+      ExecutionTaskPriority::Normal);
   task_runtime.wait_for_completion();
 }
 
 /**
- * @brief Executes one high-precision dispatch through the scheduler runtime.
+ * @brief Executes one high-precision dispatch through the execution runtime.
  *
  * @param graph GraphModel whose target output is computed.
- * @param task_runtime Scheduler runtime used for this dispatch.
+ * @param task_runtime Execution runtime used for this dispatch.
  * @param request Per-call dispatch options.
  * @param run Request observer that mints a dispatcher lease retaining plan,
  * runner, callback, exception, and output state through commit.
  * @param lifecycle_lease Retained request lease observed and copied into
- * scheduler callback ownership.
+ * runtime callback ownership.
  * @return Mutable high-precision output stored on the target graph node.
  * @throws GraphError for missing targets, missing final output, compute
  * failures, or scheduling failures; may also propagate operation/cache
@@ -134,17 +136,17 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @note The function binds the Run-owned worker runner before submission,
  * waits for owned callbacks and their dependent releases, then commits
  * Run-owned temp outputs under graph_mutex_. Every full-HP callback reaches the
- * runner through a composite identity and a matching lease; the scheduler
+ * runner through a composite identity and a matching lease; the execution
  * runtime remains borrowed through the current synchronous wait. Cooperative
  * observations bracket planning, dispatch, phase transitions, and result
  * commit; cancellation that wins before commit leaves temp outputs unpublished.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
-    GraphModel& graph, SchedulerTaskRuntime& task_runtime,
+    GraphModel& graph, ExecutionTaskRuntime& task_runtime,
     const ComputeDispatchRequest& request, ComputeRun& run,
     const ComputeRunLease& lifecycle_lease) {
-  return execute_impl(graph, task_runtime, nullptr, nullptr, request, run,
-                      lifecycle_lease);
+  return execute_impl(graph, task_runtime, nullptr, nullptr, nullptr, request,
+                      run, lifecycle_lease);
 }
 
 /**
@@ -167,10 +169,11 @@ NodeOutput& ComputeTaskDispatcher::execute(
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, ExecutionService& execution_service,
-    SchedulerHostContext& host, const ComputeDispatchRequest& request,
-    ComputeRun& run, const ComputeRunLease& lifecycle_lease) {
+    ExecutionHostContext& host, const std::string& execution_type,
+    const ComputeDispatchRequest& request, ComputeRun& run,
+    const ComputeRunLease& lifecycle_lease) {
   return execute_impl(graph, execution_service, &execution_service, &host,
-                      request, run, lifecycle_lease);
+                      &execution_type, request, run, lifecycle_lease);
 }
 
 /**
@@ -193,10 +196,10 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * monolithic provider already entered remains non-preemptible.
  */
 NodeOutput& ComputeTaskDispatcher::execute_impl(
-    GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-    ExecutionService* execution_service, SchedulerHostContext* host,
-    const ComputeDispatchRequest& request, ComputeRun& run,
-    const ComputeRunLease& lifecycle_lease) {
+    GraphModel& graph, ExecutionTaskRuntime& task_runtime,
+    ExecutionService* execution_service, ExecutionHostContext* host,
+    const std::string* execution_type, const ComputeDispatchRequest& request,
+    ComputeRun& run, const ComputeRunLease& lifecycle_lease) {
   observe_dispatch_cancellation(lifecycle_lease);
   const int node_id = request.node_id;
   auto& timing_results = graph.timing_results;
@@ -219,8 +222,15 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
 
   ComputeRunLease dispatcher_lease = lifecycle_lease;
   observe_dispatch_cancellation(dispatcher_lease);
+  std::vector<Device> available_devices = task_runtime.available_devices();
+  if (execution_type != nullptr && *execution_type == "gpu_pipeline" &&
+      host != nullptr && host->is_device_available(Device::GPU_METAL) &&
+      std::find(available_devices.begin(), available_devices.end(),
+                Device::GPU_METAL) == available_devices.end()) {
+    available_devices.insert(available_devices.begin(), Device::GPU_METAL);
+  }
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal_, node_id, task_runtime.available_devices());
+      graph, traversal_, node_id, std::move(available_devices));
   if (request.force_recache) {
     clear_planned_high_precision_caches(graph, graph_mutex,
                                         plan.execution_order());
@@ -252,12 +262,12 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
     observe_dispatch_cancellation(dispatcher_lease);
   }
   if (execution_service != nullptr) {
-    if (host == nullptr) {
+    if (host == nullptr || execution_type == nullptr) {
       throw std::logic_error(
-          "ExecutionService dispatch requires a host context.");
+          "ExecutionService dispatch requires host and route context.");
     }
-    dispatch_planned_tasks(graph, *execution_service, *host, node_id, plan,
-                           dispatcher_lease);
+    dispatch_planned_tasks(graph, *execution_service, *host, *execution_type,
+                           node_id, plan, dispatcher_lease);
   } else {
     dispatch_planned_tasks(graph, task_runtime, node_id, plan,
                            dispatcher_lease);

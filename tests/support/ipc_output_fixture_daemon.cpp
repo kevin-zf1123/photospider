@@ -562,15 +562,15 @@ void configure_observations(ps::testing::IpcHostSpy* host) {
   second.next_sequence = 3;
   host->set_compute_event_batches({std::move(first), std::move(second)});
 
-  ps::SchedulerTracePage trace;
+  ps::ExecutionTracePage trace;
   trace.events = {
-      ps::SchedulerTraceEventSnapshot{
+      ps::ExecutionTraceEventSnapshot{
           1, 11, ps::NodeId{-1}, -1,
-          ps::HostSchedulerTraceAction::AssignInitial, 101},
-      ps::SchedulerTraceEventSnapshot{
-          2, 12, ps::NodeId{2}, 3, ps::HostSchedulerTraceAction::Execute, 102}};
+          ps::HostExecutionTraceAction::AssignInitial, 101},
+      ps::ExecutionTraceEventSnapshot{
+          2, 12, ps::NodeId{2}, 3, ps::HostExecutionTraceAction::Execute, 102}};
   trace.next_sequence = 2;
-  host->set_scheduler_trace_page(std::move(trace));
+  host->set_execution_trace_page(std::move(trace));
 }
 
 }  // namespace

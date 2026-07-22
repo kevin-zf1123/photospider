@@ -181,20 +181,20 @@ class KernelTestAccess {
   }
 
   /**
-   * @brief Clears the runtime scheduler trace for a loaded graph.
+   * @brief Clears the runtime execution trace for a loaded graph.
    *
    * @param kernel Kernel whose runtime trace should be reset.
    * @param name Graph name to resolve.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note Production callers can read copied scheduler trace values through
+   * @note Production callers can read copied execution trace values through
    * public `ps::Host`; clearing trace remains a test-only setup operation.
    */
-  static void clear_scheduler_trace(Kernel& kernel, const std::string& name) {
-    runtime(kernel, name).clear_scheduler_log();
+  static void clear_execution_trace(Kernel& kernel, const std::string& name) {
+    runtime(kernel, name).clear_execution_trace();
   }
 
   /**
-   * @brief Copies the runtime scheduler trace for a loaded graph.
+   * @brief Copies the runtime execution trace for a loaded graph.
    *
    * @param kernel Kernel whose runtime trace should be read.
    * @param name Graph name to resolve.
@@ -204,13 +204,13 @@ class KernelTestAccess {
    * @throws std::runtime_error when the graph is not loaded.
    * @throws std::invalid_argument for invalid bounds or a future cursor.
    * @throws std::bad_alloc if bounded page allocation fails.
-   * @note Prefer `ps::Host::scheduler_trace()` for frontend-visible value-level
+   * @note Prefer `ps::Host::execution_trace()` for frontend-visible value-level
    * assertions. This helper exposes no unbounded production getter.
    */
-  static GraphRuntime::SchedulerEventPage scheduler_trace(
+  static GraphRuntime::ExecutionEventPage execution_trace(
       Kernel& kernel, const std::string& name, uint64_t after_sequence = 0,
-      std::size_t limit = kSchedulerTraceMaxLimit) {
-    return runtime(kernel, name).scheduler_trace_page(after_sequence, limit);
+      std::size_t limit = kExecutionTraceMaxLimit) {
+    return runtime(kernel, name).execution_trace_page(after_sequence, limit);
   }
 };
 

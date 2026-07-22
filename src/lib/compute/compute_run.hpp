@@ -19,7 +19,7 @@
 namespace ps {
 class GraphModel;
 class GraphTraversalService;
-class SchedulerTaskRuntime;
+class ExecutionTaskRuntime;
 }  // namespace ps
 
 namespace ps::compute {
@@ -40,7 +40,7 @@ class ComputeRun;
  *
  * @throws Nothing for copy, comparison, and value access.
  * @note Value zero is reserved as invalid and is never minted. The current
- * process-lifetime sequence is ownership-neutral: it owns no worker, scheduler,
+ * process-lifetime sequence is ownership-neutral: it owns no worker, queue,
  * Graph, Run lifecycle, or resource policy.
  */
 class ComputeRunId {
@@ -102,7 +102,7 @@ class ComputeRunId {
  * values without sharing execution or completion state.
  *
  * @throws Nothing for construction, comparison, and value access.
- * @note This private backend value is not a scheduler epoch, worker id, graph
+ * @note This private backend value is not an execution epoch, worker id, graph
  * node id, or process-global task identity.
  */
 class ComputeRunLocalTaskId {
@@ -162,7 +162,7 @@ class ComputeRunLocalTaskId {
  * must separately retain the matching ComputeRunLease.
  *
  * @throws Nothing for construction and comparison.
- * @note Scheduler batch epochs cannot substitute for this identity.
+ * @note Execution batch epochs cannot substitute for this identity.
  */
 class ComputeRunTaskIdentity {
  public:
@@ -410,7 +410,7 @@ class ComputeRunDescriptor {
    * @return Canonical request key and graph-wide generation.
    * @throws Nothing.
    * @note This value is independent from this descriptor's RunId, child
-   * intent, GraphRevision, and scheduler epoch.
+   * intent, GraphRevision, and execution epoch.
    */
   const SupersessionIdentity& supersession() const noexcept {
     return supersession_;
@@ -474,10 +474,10 @@ enum class ComputeRunPhase {
   /** @brief ComputeService accepted this single-domain HP or RT child. */
   Admitted,
 
-  /** @brief Scheduler-backed ready work is about to be submitted. */
+  /** @brief Route-backed ready work is about to be submitted. */
   Queued,
 
-  /** @brief Inline or scheduler-backed operation work is active. */
+  /** @brief Inline or route-backed operation work is active. */
   Running,
 
   /** @brief Staged output is ready for current visible commit. */
@@ -575,7 +575,7 @@ using ComputeRunMonotonicClock =
  * @note The first accepted reason publishes `Cancelled`; repeated requests,
  * requests after failure/success, and requests after a commit contender is
  * accepted are idempotent no-ops. This private type is not installed or exposed
- * through Host, CLI, IPC, operation, or scheduler contracts.
+ * through Host, CLI, IPC, operation, or Policy ABI contracts.
  */
 class ComputeRunCancellationSource {
  public:
@@ -705,7 +705,7 @@ class ComputeRequestCancellationSource final {
  *
  * @throws Nothing from movement and destruction.
  * @note The registration is used by ExecutionService and realtime sibling
- * coordination only; scheduler ABI callbacks are unchanged.
+ * coordination only; it never crosses the installed Policy ABI.
  */
 class ComputeRunCancellationRegistration final {
  public:
@@ -883,7 +883,7 @@ class ComputeRunCommitContender final {
  *
  * A lease is minted only by ComputeRun::acquire_lease() and remains bound to
  * that Run for its complete lifetime. Copying retains another active lease;
- * moving transfers one active lease without changing the count. Scheduler
+ * moving transfers one active lease without changing the count. Ready-task
  * callbacks use the lease to route composite task identity into the matching
  * Run-owned plan.
  *
@@ -891,7 +891,7 @@ class ComputeRunCommitContender final {
  * valid mutex cannot be locked.
  * @note Destruction is non-throwing, publishes no terminal outcome, and never
  * requests cancellation. This type is private backend API, not an installed
- * Host or scheduler-plugin contract.
+ * Host or Policy ABI contract.
  */
 class ComputeRunLease {
  public:
@@ -900,7 +900,7 @@ class ComputeRunLease {
    *
    * @param other Existing non-forgeable lease.
    * @throws Nothing.
-   * @note Copying is required by scheduler-owned std::function callbacks.
+   * @note Copying is required by execution-service std::function callbacks.
    */
   ComputeRunLease(const ComputeRunLease& other) noexcept;
 
@@ -1065,32 +1065,32 @@ class ComputeRunLease {
    * @brief Executes one registered task through the matching Run-owned plan.
    *
    * @param identity Composite task identity carried by an accepted callback.
-   * @param task_runtime Scheduler runtime used for trace, ready submission, and
+   * @param task_runtime Execution runtime used for trace, ready submission, and
    * completion accounting.
-   * @param callback_owns_completion Whether a legacy exact-once token, rather
+   * @param callback_owns_completion Whether a runtime exact-once token, rather
    * than this lease route, owns retirement of the callback's pre-counted unit.
    * @return Nothing.
    * @throws std::invalid_argument when identity does not match this lease or a
    * registered local task.
    * @throws std::system_error if the control mutex cannot be locked.
-   * @throws Exceptions propagated by Run-owned plan execution, scheduler
+   * @throws Exceptions propagated by Run-owned plan execution, execution
    * completion accounting, dependent-callback submission, or matching failure
    * publication.
    * @note A matching accepted callback whose Run is already terminal releases
    * its previously counted completion unit without entering plan execution. An
    * active valid task releases that unit only through successful plan
    * execution; an execution exception is passed to this Run's failure publisher
-   * before unchanged rethrow to scheduler transport. If that publication
+   * before unchanged rethrow to execution transport. If that publication
    * throws, its exception propagates instead.
    */
   void execute_task(const ComputeRunTaskIdentity& identity,
-                    SchedulerTaskRuntime& task_runtime,
+                    ExecutionTaskRuntime& task_runtime,
                     bool callback_owns_completion = false);
 
   /**
-   * @brief Runs the full-HP scheduler bootstrap through this lease.
+   * @brief Runs the full-HP execution bootstrap through this lease.
    *
-   * @param task_runtime Active scheduler batch receiving initial owned
+   * @param task_runtime Active execution batch receiving initial owned
    * callbacks and completion accounting.
    * @return Nothing.
    * @throws GraphError or standard exceptions from ready discovery,
@@ -1100,7 +1100,7 @@ class ComputeRunLease {
    * Otherwise the bootstrap unit is released only after every initial callback
    * is accepted; an exception is published to this Run and rethrown.
    */
-  void execute_bootstrap(SchedulerTaskRuntime& task_runtime);
+  void execute_bootstrap(ExecutionTaskRuntime& task_runtime);
 
  private:
   friend class ComputeRun;
@@ -1147,9 +1147,10 @@ class ComputeRunLease {
  * @throws std::overflow_error when process-lifetime Run identities are
  * exhausted.
  * @throws std::bad_alloc when descriptor or storage ownership cannot allocate.
- * @note Built-in CPU full/dirty HP and RT work uses stable leases and composite
- * task identity through ExecutionService. Legacy dirty schedulers retain the
- * synchronously drained borrowed-handle path. Realtime transactions own
+ * @note Full/dirty HP and RT work uses stable leases and composite task
+ * identity through ExecutionService. The private injected runtime retains the
+ * synchronously drained borrowed-handle path for repository-internal callers.
+ * Realtime transactions own
  * separate current HP and RT child Runs.
  */
 class ComputeRun {

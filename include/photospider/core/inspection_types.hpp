@@ -12,11 +12,11 @@
 
 /**
  * @file inspection_types.hpp
- * @brief Stable graph, node, scheduler, and dirty-region inspection snapshots.
+ * @brief Stable graph, node, execution, and dirty-region inspection snapshots.
  *
  * The snapshot values in this header are designed for frontend display and
  * future IPC serialization. They carry copied scalar/string/container data and
- * do not expose mutable backend graph, runtime, planner, scheduler, or
+ * do not expose mutable backend Graph, runtime, planner, policy, executor, or
  * service objects.
  */
 
@@ -48,7 +48,7 @@ struct NodeId {
  * @brief Copied debug metadata for one node output.
  *
  * @throws Nothing for value operations except string allocation on mutation.
- * @note This is observational metadata; it must not be used as scheduler
+ * @note This is observational metadata; it must not be used as execution
  *       synchronization state.
  */
 struct DebugMetadataSnapshot {
@@ -159,7 +159,7 @@ struct GraphInspectionView {
  * @brief Dirty-region compute domain represented by inspection records.
  *
  * @throws Nothing.
- * @note This is a public snapshot label, not an internal scheduler queue id.
+ * @note This is a public snapshot label, not an internal execution queue id.
  */
 enum class DirtyDomain {
   /** @brief Full-resolution high-precision domain. */
@@ -192,7 +192,7 @@ enum class DirtySourceLifecycleState {
  *
  * @throws Nothing.
  * @note The value describes diagnostic propagation provenance only; it is not a
- *       scheduler dependency direction or mutable graph edge handle.
+ *       task dependency direction or mutable Graph edge handle.
  */
 enum class DirtyEdgeDirection {
   /** @brief Dirty source ROI projected downstream to affected output. */
@@ -229,7 +229,7 @@ struct DirtySourceSnapshot {
  * @brief Dirty tile record copied for frontend inspection.
  *
  * @throws Nothing.
- * @note Tile coordinates are domain-local and do not expose scheduler task
+ * @note Tile coordinates are domain-local and do not expose execution task
  *       handles or dependency counters.
  */
 struct DirtyTileSnapshot {
@@ -260,7 +260,7 @@ struct DirtyTileSnapshot {
  *
  * @throws Nothing.
  * @note This is diagnostic planning state. It does not expose task ownership,
- *       scheduler queues, or mutable node output buffers.
+ *       execution queues, or mutable node output buffers.
  */
 struct DirtyMonolithicRegionSnapshot {
   /** @brief Node whose output region is dirty. */
@@ -311,7 +311,7 @@ struct DirtyEdgeMappingSnapshot {
  * @brief Dirty-region snapshot copied from the kernel for inspection.
  *
  * @throws Nothing for value operations except vector allocation on mutation.
- * @note This snapshot excludes ready queues, scheduler ownership, task
+ * @note This snapshot excludes ready queues, execution ownership, task
  *       reference counts, and mutable graph runtime state.
  */
 struct DirtyRegionInspectionSnapshot {
@@ -402,7 +402,7 @@ struct ComputePlanningInspectionSnapshot {
   /** @brief Target node requested by the caller. */
   NodeId target_node;
 
-  /** @brief True when the caller requested scheduler-backed execution. */
+  /** @brief True when the caller requested parallel private execution. */
   bool parallel = false;
 
   /** @brief Graph topology generation used for expansion reuse. */
@@ -449,31 +449,6 @@ struct ComputePlanningInspectionSnapshot {
 
   /** @brief Prefix sample of planned task diagnostics. */
   std::vector<ComputePlanningTaskSnapshot> task_sample;
-};
-
-/**
- * @brief Snapshot of scheduler-facing status for a compute intent.
- *
- * @throws Nothing for value operations except string allocation on mutation.
- * @note Counts are observational and may be stale immediately after the
- *       snapshot is produced.
- */
-struct SchedulerStatusSnapshot {
-  /** @brief Compute intent served by the scheduler instance. */
-  ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
-
-  /** @brief Human-readable scheduler implementation name. */
-  std::string scheduler_name;
-
-  /** @brief Number of queued tasks observed when the snapshot was captured. */
-  size_t queued_tasks = 0;
-
-  /** @brief Number of running tasks observed when the snapshot was captured. */
-  size_t running_tasks = 0;
-
-  /** @brief Number of completed tasks observed when the snapshot was captured.
-   */
-  size_t completed_tasks = 0;
 };
 
 }  // namespace ps

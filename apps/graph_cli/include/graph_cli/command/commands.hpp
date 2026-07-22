@@ -329,16 +329,16 @@ void print_help_traversal(const CliConfig& config);
 
 // config
 /**
- * @brief Edits CLI configuration and applies scheduler defaults to Host.
+ * @brief Edits CLI configuration and applies policy/execution defaults.
  * @param iss Borrowed command stream; ignored.
- * @param svc Borrowed Host receiving accepted scheduler defaults.
+ * @param svc Borrowed Host receiving accepted policy/execution defaults.
  * @param current_graph Borrowed session state; not modified.
  * @param modified Borrowed modification state; not modified.
  * @param config Mutable configuration owned by the REPL.
  * @return True after the editor exits.
  * @throws std::bad_alloc if editor or Host-result storage cannot allocate.
- * @throws std::runtime_error if Host rejects accepted scheduler defaults.
- * @note Host scheduler defaults change only after the editor accepts valid
+ * @throws std::runtime_error if Host rejects accepted policy or route defaults.
+ * @note Host defaults change only after the editor accepts valid
  * changes. `process_command` reports ordinary Host rejection and continues.
  */
 bool handle_config(std::istringstream& iss, ps::Host& svc,
@@ -566,26 +566,50 @@ bool handle_exit(std::istringstream& iss, ps::Host& svc,
  */
 void print_help_exit(const CliConfig& config);
 
-// scheduler
 /**
- * @brief Inspects, loads, scans, and configures Host scheduler state.
- * @param iss Scheduler subcommand and its arguments.
- * @param svc Borrowed Host used for scheduler registry/session operations.
- * @param current_graph Active session label for intent-specific operations.
- * @param modified Borrowed graph-modification state; not modified.
- * @param config Scheduler directories and default scheduler settings.
- * @return True after success, help, validation, or Host status failure.
- * @throws std::bad_alloc if parsing, plugin snapshots, or output allocates.
- * @note Host owns scheduler plugins and workers; CLI retains no handles.
+ * @brief Inspects and mutates process policy bindings and policy DSOs.
+ * @param iss Policy subcommand and arguments.
+ * @param svc Borrowed Host policy owner.
+ * @param current_graph Active session label; unused by process policy calls.
+ * @param modified Graph modification state; not modified.
+ * @param config Policy scan directories.
+ * @return True after handling the command.
+ * @throws std::bad_alloc when parsing, Host values, or output allocate.
+ * @note The CLI retains no registry, context, callback, or DSO handle.
  */
-bool handle_scheduler(std::istringstream& iss, ps::Host& svc,
-                      std::string& current_graph, bool& modified,
-                      CliConfig& config);
+bool handle_policy(std::istringstream& iss, ps::Host& svc,
+                   std::string& current_graph, bool& modified,
+                   CliConfig& config);
+
 /**
- * @brief Prints maintained help for `scheduler`.
+ * @brief Prints maintained help for `policy`.
  * @param config Borrowed CLI configuration; currently unused.
  * @return Nothing.
  * @throws std::bad_alloc if help path or output storage cannot allocate.
- * @note No Host, graph, cache, or lifecycle state changes.
+ * @note Reads the maintained policy help resource without Host access.
  */
-void print_help_scheduler(const CliConfig& config);
+void print_help_policy(const CliConfig& config);
+
+/**
+ * @brief Inspects and replaces private per-session execution routes.
+ * @param iss Execution subcommand and arguments.
+ * @param svc Borrowed Host execution owner.
+ * @param current_graph Active session label.
+ * @param modified Graph modification state; not modified.
+ * @param config Borrowed CLI configuration for help rendering.
+ * @return True after handling the command.
+ * @throws std::bad_alloc when parsing, Host values, or output allocate.
+ * @note The CLI receives copied route values and never owns an executor.
+ */
+bool handle_execution(std::istringstream& iss, ps::Host& svc,
+                      std::string& current_graph, bool& modified,
+                      CliConfig& config);
+
+/**
+ * @brief Prints maintained help for `execution`.
+ * @param config Borrowed CLI configuration; currently unused.
+ * @return Nothing.
+ * @throws std::bad_alloc if help path or output storage cannot allocate.
+ * @note Reads the maintained execution help resource without Host access.
+ */
+void print_help_execution(const CliConfig& config);

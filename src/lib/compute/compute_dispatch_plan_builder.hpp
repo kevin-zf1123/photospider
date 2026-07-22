@@ -19,7 +19,7 @@ namespace ps::compute {
  * and records the resulting plan for graph inspection.
  *
  * @note The builder borrows GraphTraversalService and never stores graph
- * pointers. The returned ComputePlan is immutable scheduler input for the
+ * pointers. The returned ComputePlan is immutable execution input for the
  * active dispatch.
  */
 class ComputeDispatchPlanBuilder {
@@ -34,7 +34,7 @@ class ComputeDispatchPlanBuilder {
   explicit ComputeDispatchPlanBuilder(GraphTraversalService& traversal);
 
   /**
-   * @brief Builds and records one GlobalHighPrecision scheduler plan.
+   * @brief Builds and records one GlobalHighPrecision execution plan.
    *
    * @param graph GraphModel containing the target node and runtime cache state.
    * @param node_id Target node id for the compute request.

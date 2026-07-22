@@ -185,11 +185,11 @@ class ConfigEditor : public TuiEditor {
  private:
   void SyncModelToUiState() {
     plugin_dirs_str_ = original_config_.plugin_dirs;
-    scheduler_dirs_str_ = original_config_.scheduler_dirs;
+    policy_dirs_str_ = original_config_.policy_dirs;
     active_config_path_buffer_ = original_config_.loaded_config_path;
     history_size_buffer_ = std::to_string(original_config_.history_size);
-    scheduler_worker_count_buffer_ =
-        std::to_string(original_config_.scheduler_worker_count);
+    execution_worker_count_buffer_ =
+        std::to_string(original_config_.execution_worker_count);
     auto find_index = [](const std::vector<std::string>& v,
                          const std::string& val) {
       for (size_t i = 0; i < v.size(); ++i)
@@ -273,18 +273,18 @@ class ConfigEditor : public TuiEditor {
   /**
    * @brief Applies editable TUI values to the owned configuration snapshot.
    * @return True when every editor field is valid and model synchronization
-   * completes; false when scheduler worker-count validation rejects the field.
+   * completes; false when execution worker-count validation rejects the field.
    * @throws std::bad_alloc if string, vector, or stream storage cannot
    * allocate.
-   * @note Scheduler worker text is validated before any synchronization in
+   * @note Execution worker text is validated before any synchronization in
    * this function. Invalid text publishes an editor diagnostic, retains the
    * previous worker count, and prevents apply/write from reporting success.
    */
   bool SyncUiStateToModel() {
-    int scheduler_worker_count = 0;
+    int execution_worker_count = 0;
     try {
-      scheduler_worker_count =
-          parse_cli_scheduler_worker_count(scheduler_worker_count_buffer_);
+      execution_worker_count =
+          parse_cli_execution_worker_count(execution_worker_count_buffer_);
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const std::invalid_argument& error) {
@@ -293,7 +293,7 @@ class ConfigEditor : public TuiEditor {
     }
 
     original_config_.plugin_dirs = plugin_dirs_str_;
-    original_config_.scheduler_dirs = scheduler_dirs_str_;
+    original_config_.policy_dirs = policy_dirs_str_;
     original_config_.loaded_config_path = active_config_path_buffer_;
     try {
       original_config_.history_size = std::stoi(history_size_buffer_);
@@ -317,7 +317,7 @@ class ConfigEditor : public TuiEditor {
         config_save_entries_[selected_config_save_idx_];
     original_config_.editor_save_behavior =
         editor_save_entries_[selected_editor_save_idx_];
-    original_config_.scheduler_worker_count = scheduler_worker_count;
+    original_config_.execution_worker_count = execution_worker_count;
 
     // Compose traversal defaults from UI state
     {
@@ -429,9 +429,13 @@ class ConfigEditor : public TuiEditor {
                    &selected_path_mode_idx_);
     add_radio_line("default_cache_clear_arg", &cache_clear_entries_,
                    &selected_cache_clear_idx_);
-    add_line("scheduler_hp_type", &original_config_.scheduler_hp_type);
-    add_line("scheduler_rt_type", &original_config_.scheduler_rt_type);
-    add_line("scheduler_worker_count", &scheduler_worker_count_buffer_);
+    add_line("policy_interactive_type",
+             &original_config_.policy_interactive_type);
+    add_line("policy_throughput_type",
+             &original_config_.policy_throughput_type);
+    add_line("execution_hp_type", &original_config_.execution_hp_type);
+    add_line("execution_rt_type", &original_config_.execution_rt_type);
+    add_line("execution_worker_count", &execution_worker_count_buffer_);
 
     for (size_t i = 0; i < plugin_dirs_str_.size(); ++i) {
       auto del_fn = [this, i] {
@@ -453,26 +457,26 @@ class ConfigEditor : public TuiEditor {
     editable_lines_.push_back(
         {"(Plugin Dirs)", nullptr, false, nullptr, nullptr, add_fn, nullptr});
 
-    // Scheduler directories
-    for (size_t i = 0; i < scheduler_dirs_str_.size(); ++i) {
+    // Policy directories
+    for (size_t i = 0; i < policy_dirs_str_.size(); ++i) {
       auto del_fn = [this, i] {
-        scheduler_dirs_str_.erase(scheduler_dirs_str_.begin() + i);
+        policy_dirs_str_.erase(policy_dirs_str_.begin() + i);
         RebuildLineView();
         selected_ =
             std::min(static_cast<int>(editable_lines_.size()) - 1, selected_);
       };
-      editable_lines_.push_back({"scheduler_dirs[" + std::to_string(i) + "]",
-                                 &scheduler_dirs_str_[i], false, nullptr,
-                                 nullptr, nullptr, del_fn});
+      editable_lines_.push_back({"policy_dirs[" + std::to_string(i) + "]",
+                                 &policy_dirs_str_[i], false, nullptr, nullptr,
+                                 nullptr, del_fn});
     }
-    auto add_scheduler_fn = [this] {
-      scheduler_dirs_str_.push_back("<new_path>");
+    auto add_policy_fn = [this] {
+      policy_dirs_str_.push_back("<new_path>");
       RebuildLineView();
       selected_ = editable_lines_.size() - 2;
       EnterEditMode();
     };
-    editable_lines_.push_back({"(Scheduler Dirs)", nullptr, false, nullptr,
-                               nullptr, add_scheduler_fn, nullptr});
+    editable_lines_.push_back({"(Policy Dirs)", nullptr, false, nullptr,
+                               nullptr, add_policy_fn, nullptr});
   }
   void EnterEditMode() {
     if (selected_ >= static_cast<int>(editable_lines_.size())) {
@@ -627,7 +631,7 @@ class ConfigEditor : public TuiEditor {
   int dummy_radio_selected_idx_ = 0;
   std::string active_config_path_buffer_;
   std::string history_size_buffer_;
-  std::string scheduler_worker_count_buffer_;
+  std::string execution_worker_count_buffer_;
   int selected_cache_precision_idx_ = 0;
   int selected_print_mode_idx_ = 0;
   int selected_ops_list_mode_idx_ = 0;
@@ -637,7 +641,7 @@ class ConfigEditor : public TuiEditor {
   int selected_config_save_idx_ = 0;
   int selected_editor_save_idx_ = 0;
   std::vector<std::string> plugin_dirs_str_;
-  std::vector<std::string> scheduler_dirs_str_;
+  std::vector<std::string> policy_dirs_str_;
   std::vector<std::string> cache_precision_entries_ = {"int8", "int16"};
   std::vector<std::string> print_mode_entries_ = {"full", "simplified"};
   std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin",

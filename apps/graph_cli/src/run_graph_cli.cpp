@@ -39,8 +39,8 @@ bool arguments_request_help(int argc, char** argv) noexcept {
 }
 
 /**
- * @brief Scans configured directories for scheduler plugins before graph load.
- * @param host Borrowed Host that owns loaded scheduler plugin handles.
+ * @brief Scans configured directories for policy plugins before graph load.
+ * @param host Borrowed Host that owns loaded policy plugin handles.
  * @param config CLI value snapshot containing directories to scan.
  * @return Nothing.
  * @throws std::bad_alloc If path copying, plugin discovery, or Host result
@@ -49,10 +49,9 @@ bool arguments_request_help(int argc, char** argv) noexcept {
  * remains status-only and graph loading decides whether a configured type is
  * available.
  */
-void load_configured_scheduler_plugins(ps::Host& host,
-                                       const CliConfig& config) {
-  if (!config.scheduler_dirs.empty()) {
-    (void)host.scheduler_scan(config.scheduler_dirs);
+void load_configured_policy_plugins(ps::Host& host, const CliConfig& config) {
+  if (!config.policy_dirs.empty()) {
+    (void)host.policy_scan(config.policy_dirs);
   }
 }
 
@@ -115,9 +114,9 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
     std::string config_to_load =
         custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
-    apply_cli_scheduler_defaults(svc, config);
     (void)svc.plugins_load(config.plugin_dirs);
-    load_configured_scheduler_plugins(svc, config);
+    load_configured_policy_plugins(svc, config);
+    apply_cli_policy_execution_defaults(svc, config);
     std::string current_graph;
 
     bool did_any_action = false;

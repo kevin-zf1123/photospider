@@ -13,12 +13,12 @@ namespace ps::compute {
  * The key consists only of target node id and authoritative request intent.
  * Missing optional intent is normalized before construction, so legacy and
  * explicit high-precision requests share one lineage while realtime remains a
- * peer lineage. Quality, QoS, revision, child intent, and scheduler state do
+ * peer lineage. Quality, QoS, revision, child intent, and execution state do
  * not participate.
  *
  * @throws std::invalid_argument for a negative target or unsupported intent.
  * @note This private value is not installed and is distinct from Graph, Run,
- * dirty, topology, and scheduler identities.
+ * dirty, topology, and execution identities.
  */
 class SupersessionKey {
  public:
@@ -73,7 +73,7 @@ class SupersessionKey {
  * @brief Checked nonzero graph-wide supersession generation value.
  * @throws std::invalid_argument when constructed from zero.
  * @note Ordering is meaningful only inside one live Graph supersession domain.
- * It is not GraphRevision, RunId, topology/dirty generation, or scheduler
+ * It is not GraphRevision, RunId, topology/dirty generation, or execution
  * epoch.
  */
 class SupersessionGeneration {

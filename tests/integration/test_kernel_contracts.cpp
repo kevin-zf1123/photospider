@@ -407,7 +407,7 @@ void write_missing_op_graph(const std::filesystem::path& path) {
  * directory creation or file writing.
  * @throws std::bad_alloc if YAML text construction cannot allocate.
  * @note The source has explicit dimensions so planned parallel dispatch emits
- * a deterministic single monolithic scheduler task. The optional cache entry
+ * a deterministic single monolithic execution task. The optional cache entry
  * resolves to `<cache-root>/1/blocking-output.png`.
  */
 void write_blocking_source_graph(const std::filesystem::path& path,
@@ -4352,26 +4352,26 @@ TEST(ComputeContracts, RealtimeCommitSurvivesStaleHighPrecisionSibling) {
 #endif
 
 /**
- * @brief Verifies scheduler info and replacement wait for active compute.
+ * @brief Verifies execution info and replacement wait for active compute.
  *
- * @throws Nothing when both scheduler calls remain pending until the blocking
+ * @throws Nothing when both execution calls remain pending until the blocking
  * compute releases the graph-state serialization boundary.
- * @note SerialDebugScheduler executes the blocking operation on its caller.
- * Without graph-state serialization, replacement could destroy that scheduler
- * while one of its member calls is still on the stack.
+ * @note The serial-debug route executes the blocking operation on its caller.
+ * Graph-state serialization keeps route observation and ownerless replacement
+ * coherent with that active request.
  */
-TEST(ComputeContracts, SchedulerObservationAndReplacementWaitForCompute) {
+TEST(ComputeContracts, ExecutionObservationAndReplacementWaitForCompute) {
   register_contract_ops();
-  const std::string graph_name = "contract_scheduler_lifetime";
-  const auto root = clean_temp_path("photospider-contract-scheduler-life-root");
-  const auto yaml_path = temp_path("photospider-contract-scheduler-life.yaml");
+  const std::string graph_name = "contract_execution_lifetime";
+  const auto root = clean_temp_path("photospider-contract-execution-life-root");
+  const auto yaml_path = temp_path("photospider-contract-execution-life.yaml");
   write_blocking_source_graph(yaml_path);
 
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
-  ASSERT_TRUE(kernel.replace_scheduler(
+  ASSERT_TRUE(kernel.replace_execution(
       graph_name, ComputeIntent::GlobalHighPrecision, "serial_debug"));
 
   std::promise<void> release_compute;
@@ -4393,22 +4393,22 @@ TEST(ComputeContracts, SchedulerObservationAndReplacementWaitForCompute) {
     reset_blocking_contract_source();
     (void)kernel.close_graph(graph_name);
     std::filesystem::remove_all(root);
-    FAIL() << "blocking scheduler compute did not start";
+    FAIL() << "blocking execution-route compute did not start";
   }
 
   std::promise<void> info_entered;
   auto info_entered_future = info_entered.get_future();
   auto info_future = std::async(std::launch::async, [&] {
     info_entered.set_value();
-    return kernel.get_scheduler_info(graph_name,
+    return kernel.get_execution_info(graph_name,
                                      ComputeIntent::GlobalHighPrecision);
   });
   std::promise<void> replace_entered;
   auto replace_entered_future = replace_entered.get_future();
   auto replace_future = std::async(std::launch::async, [&] {
     replace_entered.set_value();
-    return kernel.replace_scheduler(
-        graph_name, ComputeIntent::GlobalHighPrecision, "cpu_work_stealing");
+    return kernel.replace_execution(graph_name,
+                                    ComputeIntent::GlobalHighPrecision, "cpu");
   });
 
   EXPECT_EQ(info_entered_future.wait_for(std::chrono::seconds(2)),
@@ -4428,14 +4428,14 @@ TEST(ComputeContracts, SchedulerObservationAndReplacementWaitForCompute) {
   const auto observed_info = info_future.get();
   ASSERT_TRUE(observed_info.has_value());
   EXPECT_TRUE(observed_info->first == "serial_debug" ||
-              observed_info->first == "CpuWorkStealingScheduler");
+              observed_info->first == "cpu");
   EXPECT_FALSE(observed_info->second.empty());
   EXPECT_TRUE(replace_future.get());
 
   const auto final_info =
-      kernel.get_scheduler_info(graph_name, ComputeIntent::GlobalHighPrecision);
+      kernel.get_execution_info(graph_name, ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(final_info.has_value());
-  EXPECT_EQ(final_info->first, "CpuWorkStealingScheduler");
+  EXPECT_EQ(final_info->first, "cpu");
 
   reset_blocking_contract_source();
   EXPECT_TRUE(kernel.close_graph(graph_name));
@@ -4592,7 +4592,7 @@ TEST(ComputeContracts, CancelledComputeStillDrainsBeforeGraphClose) {
  * execute.
  * @note The private compute-request lane owns the accepted callback after its
  * caller destroys the future. Close must drain that callback before releasing
- * Graph, graph-state, or scheduler ownership.
+ * Graph, graph-state, or execution ownership.
  */
 TEST(ComputeContracts, DroppedAsyncFutureRemainsOwnedUntilCloseDrain) {
   register_contract_ops();
@@ -4649,7 +4649,7 @@ TEST(ComputeContracts, DroppedAsyncFutureRemainsOwnedUntilCloseDrain) {
  * @throws Nothing when an accepted compute stays queued with the runtime
  * stopped until the preceding graph-state task releases, then starts and
  * completes normally.
- * @note This directly guards the scheduler start/info/replace/close lifetime
+ * @note This directly guards the execution start/info/replace/close lifetime
  * rule: compute submission itself must not call GraphRuntime::start() outside
  * the serialization boundary.
  */

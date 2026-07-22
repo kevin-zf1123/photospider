@@ -9,11 +9,19 @@
 #include <vector>
 
 #include "compute/compute_run.hpp"
-#include "photospider/scheduler/scheduler_task_runtime.hpp"
+#include "execution/execution_task_runtime.hpp"
 #include "runtime/resource_ledger.hpp"
 
 namespace ps {
-class SchedulerHostContext;
+class ExecutionHostContext;
+enum class PolicyClass;
+struct HostPolicyConfig;
+struct PolicyInfoSnapshot;
+
+namespace policy {
+class PolicyBinding;
+class PolicyRegistry;
+}  // namespace policy
 
 namespace testing {
 
@@ -32,16 +40,15 @@ namespace ps::compute {
 /**
  * @brief Private composition-root limits for one CPU execution domain.
  *
- * This source-tree type replaces the removed installed
- * `kSchedulerWorkerProcessMax` policy constant. It carries every ledger
- * dimension explicitly and converts to the authority-neutral `ResourceVector`
- * only when constructing the private service.
+ * This source-tree type carries every ledger dimension explicitly and converts
+ * to the authority-neutral `ResourceVector` only when constructing the private
+ * service.
  *
  * @throws Nothing for aggregate construction and conversion.
- * @note This is not an installed scheduler API or scheduler ABI surface.
+ * @note This is not an installed policy API or execution extension surface.
  */
 struct ExecutionResourceLimits final {
-  /** @brief Concurrent Run and legacy-owner CPU execution rights. */
+  /** @brief Concurrent Run CPU execution rights. */
   std::uint64_t cpu_slots = 0U;
 
   /** @brief Host-owned retained-memory capacity. */
@@ -61,9 +68,8 @@ struct ExecutionResourceLimits final {
    *
    * Throughput Runs must leave this component-wise subset available.
    * Explicitly Interactive Runs may consume it only after the ordinary ledger
-   * transaction validates complete remaining capacity. Transitional legacy
-   * scheduler owners predate these Run policy classes and continue to use the
-   * full ledger limits established by Issue #70.
+   * transaction validates complete remaining capacity. Other private resource
+   * owners continue to use the full ledger limits established by Issue #70.
    *
    * @note This value is an admission ceiling, not a reservation or token.
    * Zero preserves the full ledger limit for every service class.
@@ -300,7 +306,7 @@ class ReadyTaskMetadata final {
   /** @brief Copied policy inputs that mint no resource authority. */
   ComputeRunQos qos_;
 
-  /** @brief Planned node id used only for scheduler trace publication. */
+  /** @brief Planned node id used only for execution-trace publication. */
   int trace_node_id_ = -1;
 
   /** @brief Whether this task was in the initial dependency-ready set. */
@@ -337,7 +343,7 @@ class ReadyTaskSubmission final {
    */
   using Executable = std::function<void(ComputeRunLease& lease,
                                         const ComputeRunTaskIdentity& identity,
-                                        SchedulerTaskRuntime& task_runtime)>;
+                                        ExecutionTaskRuntime& task_runtime)>;
 
   /**
    * @brief Creates one dependency-ready owned submission.
@@ -358,7 +364,7 @@ class ReadyTaskSubmission final {
   ReadyTaskSubmission(
       ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
       bool is_initial_ready, Executable executable,
-      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+      ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
       ReadyTaskResourceDemand resource_demand = default_resource_demand());
 
   /**
@@ -426,7 +432,7 @@ class ReadyTaskSubmission final {
    * fairness or service class. The dispatcher must already have established
    * readiness, and explicit Run QoS selects the built-in policy.
    */
-  SchedulerTaskPriority priority() const noexcept { return priority_; }
+  ExecutionTaskPriority priority() const noexcept { return priority_; }
 
   /**
    * @brief Returns the immutable trusted-host resource declaration.
@@ -452,7 +458,7 @@ class ReadyTaskSubmission final {
    * converted into a fabricated task exception. The submission and runtime
    * must remain alive until this call returns.
    */
-  void execute(SchedulerTaskRuntime& task_runtime);
+  void execute(ExecutionTaskRuntime& task_runtime);
 
  private:
   friend class ExecutionService;
@@ -470,26 +476,25 @@ class ReadyTaskSubmission final {
   Executable executable_;
 
   /** @brief Private ready-queue hint that carries no dependency authority. */
-  SchedulerTaskPriority priority_ = SchedulerTaskPriority::Normal;
+  ExecutionTaskPriority priority_ = ExecutionTaskPriority::Normal;
 
   /** @brief Immutable host-authored resources checked at Run admission. */
   ReadyTaskResourceDemand resource_demand_;
 };
 
 /**
- * @brief Private scheduler runtime that admits only ready submission values.
+ * @brief Private execution runtime that admits only ready submission values.
  *
  * TaskSubmissionPlan uses this extension after dependency-ready detection.
- * Generic scheduler ABI paths never see it, and no installed scheduler vtable
- * changes.
+ * No installed extension ABI can construct or retain this source-tree value.
  *
  * @throws Concrete implementations define synchronization and allocation
  * failures.
  * @note Inherited raw callback and borrowed-handle entry points remain present
- * only to implement `SchedulerTaskRuntime`; the current ExecutionService
+ * only to implement `ExecutionTaskRuntime`; the current ExecutionService
  * rejects them.
  */
-class ReadyTaskSubmissionRuntime : public SchedulerTaskRuntime {
+class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
  public:
   /**
    * @brief Releases a private ready-submission runtime.
@@ -525,7 +530,7 @@ class ReadyTaskSubmissionRuntime : public SchedulerTaskRuntime {
  *
  * @throws std::bad_alloc or std::system_error from explicit execution setup.
  * @note This private source-tree service is explicitly composed and injected;
- * it is not a singleton, public Host API, or scheduler plugin ABI.
+ * it is not a singleton, public Host API, or execution plugin ABI.
  */
 class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
@@ -560,7 +565,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::invalid_argument if the request exceeds eight.
    * @throws std::bad_alloc or std::system_error if pool construction fails.
    * @note The fixed pool is infrastructure. Individual Runs reserve CPU
-   * execution rights and legacy scheduler owners reserve their own slots.
+   * execution rights and other private owners reserve their own slots.
    */
   explicit ExecutionService(unsigned int worker_count);
 
@@ -638,30 +643,95 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   std::string get_stats() const;
 
   /**
-   * @brief Atomically reserves one legacy scheduler owner CPU vector.
-   * @param worker_slots Conservative scheduler plan charge.
-   * @return Move-only ledger reservation, or `std::nullopt` when capacity is
-   * unavailable.
-   * @throws std::bad_alloc or std::system_error from ledger admission.
-   * @note Serial's zero-slot reservation remains active and move-only. Legacy
-   * owners predate Run policy classification and use the full ledger limits;
-   * interactive headroom partitions only Interactive and Throughput Runs.
+   * @brief Copies canonical types from the process policy registry.
+   * @return Lexically sorted built-in and DSO policy names.
+   * @throws std::bad_alloc or `std::system_error` from copied observation.
    */
-  std::optional<ResourceLedger::Reservation>
-  try_reserve_legacy_scheduler_workers(unsigned int worker_slots);
+  std::vector<std::string> policy_available_types() const;
 
   /**
-   * @brief Atomically reserves independent HP and RT scheduler owner vectors.
-   * @param hp_worker_slots Conservative HP owner charge.
-   * @param rt_worker_slots Conservative RT owner charge.
-   * @return Two owners committed all-or-none, or `std::nullopt`.
-   * @throws std::bad_alloc or std::system_error from ledger admission.
-   * @note Both legacy owners use the full ledger limits atomically;
-   * interactive headroom partitions only Interactive and Throughput Runs.
+   * @brief Copies one process policy type description.
+   * @param type_name Canonical registered type name.
+   * @return Bounded Host-owned description.
+   * @throws GraphError with `NotFound` when unavailable.
+   * @throws std::bad_alloc when copied storage exhausts memory.
    */
-  std::optional<ResourceLedger::ReservationPair>
-  try_reserve_legacy_scheduler_worker_pair(unsigned int hp_worker_slots,
-                                           unsigned int rt_worker_slots);
+  std::string policy_description(const std::string& type_name) const;
+
+  /**
+   * @brief Scans caller-ordered directories for complete policy DSOs.
+   * @param directories Directory paths processed in caller order.
+   * @return Number of complete DSOs atomically published.
+   * @throws The exact policy registry scan errors.
+   */
+  std::size_t policy_scan(const std::vector<std::string>& directories);
+
+  /**
+   * @brief Loads one policy DSO transaction.
+   * @param path Nonempty candidate library path.
+   * @return Nothing after all-or-none publication.
+   * @throws The exact policy registry load errors.
+   */
+  void policy_load(const std::string& path);
+
+  /**
+   * @brief Copies visible policy DSO labels.
+   * @return Globally nondecreasing Host-owned paths.
+   * @throws std::bad_alloc or `std::system_error` from copied observation.
+   */
+  std::vector<std::string> policy_loaded_plugins() const;
+
+  /**
+   * @brief Atomically replaces both class bindings.
+   * @param config Canonical Interactive and Throughput type names.
+   * @return Nothing after one nonallocating two-binding publication.
+   * @throws GraphError for invalid/unsupported/create/generation failure.
+   * @throws std::bad_alloc for Host or synchronous plugin setup OOM.
+   * @note Both contexts are prepared without the service/store/ledger/Run lock.
+   * Failure preserves both published bindings and generations.
+   */
+  void configure_policy_defaults(const HostPolicyConfig& config);
+
+  /**
+   * @brief Copies one class binding and immutable first fault.
+   * @param policy_class Interactive or Throughput.
+   * @return Complete process execution-domain policy snapshot.
+   * @throws GraphError for an invalid enum and `std::bad_alloc` while copying.
+   */
+  PolicyInfoSnapshot policy_info(PolicyClass policy_class) const;
+
+  /**
+   * @brief Replaces exactly one class binding.
+   * @param policy_class Interactive or Throughput.
+   * @param type Canonical registered type supporting the class.
+   * @return Nothing after a nonallocating binding publication.
+   * @throws GraphError or `std::bad_alloc` from validation/preparation.
+   * @note Success advances to a unique nonzero generation even for equal type.
+   */
+  void replace_policy(PolicyClass policy_class, const std::string& type);
+
+  /**
+   * @brief Returns the fixed private physical route vocabulary.
+   * @return Exactly `cpu`, `gpu_pipeline`, `serial_debug` in lexical order.
+   * @throws std::bad_alloc when result storage exhausts memory.
+   */
+  static std::vector<std::string> available_execution_types();
+
+  /**
+   * @brief Copies one private route description.
+   * @param type_name Exact private route name.
+   * @return Host-owned display text.
+   * @throws GraphError with `NotFound` for an unknown or removed alias.
+   */
+  static std::string execution_description(const std::string& type_name);
+
+  /**
+   * @brief Tests the exact private route vocabulary without allocation.
+   * @param type_name Candidate route string.
+   * @return True only for `cpu`, `gpu_pipeline`, or `serial_debug`.
+   * @throws Nothing.
+   */
+  static bool is_execution_type(const std::string& type_name) noexcept;
 
   /**
    * @brief Copies non-authoritative resource diagnostics.
@@ -680,7 +750,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::invalid_argument for a nonpositive task count.
    * @throws std::logic_error before fixed worker configuration.
    * @throws GraphError when any structural aggregation overflows.
-   * @note This diagnostic mints no authority. `execute_cpu_run()` uses the same
+   * @note This diagnostic mints no authority. `execute_run()` uses the same
    * calculation before ledger admission, and initial/dependent queue entries
    * use the same resulting per-task envelope. Ordering-only work units and
    * interactive headroom do not change this diagnostic resource vector.
@@ -690,10 +760,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       CpuRunResourceDemand run_resource_demand) const;
 
   /**
-   * @brief Executes one complete ready-only CPU Run synchronously.
+   * @brief Executes one complete ready-only Run on a private physical route.
    *
    * @param host Active Graph runtime observation context, borrowed only until
    * the settled wait finishes.
+   * @param execution_type Exact private route selected by the Graph binding.
    * @param initial_submissions Dispatcher-discovered initial ready values from
    * one Run; their values move into QueueEntry ownership and the caller-side
    * vector backing is retired before publication.
@@ -720,10 +791,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * that vector nor its backing spans the settlement wait. No Graph, plan,
    * dependency, result, or commit object enters this method.
    */
-  void execute_cpu_run(SchedulerHostContext& host,
-                       std::vector<ReadyTaskSubmission> initial_submissions,
-                       int total_task_count,
-                       CpuRunResourceDemand run_resource_demand = {});
+  void execute_run(ExecutionHostContext& host,
+                   const std::string& execution_type,
+                   std::vector<ReadyTaskSubmission> initial_submissions,
+                   int total_task_count,
+                   CpuRunResourceDemand run_resource_demand = {});
 
   /** @copydoc ReadyTaskSubmissionRuntime::submit_ready_submission */
   void submit_ready_submission(ReadyTaskSubmission submission) override;
@@ -744,9 +816,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::logic_error unconditionally.
    * @note Migrated work must enter as `ReadyTaskSubmission`.
    */
-  void submit_initial_task_handles(std::vector<TaskHandle>&& handles,
+  void submit_initial_task_handles(std::vector<ExecutionTaskHandle>&& handles,
                                    int total_task_count,
-                                   SchedulerTaskPriority priority) override;
+                                   ExecutionTaskPriority priority) override;
 
   /**
    * @brief Rejects borrowed task handles released by workers.
@@ -757,8 +829,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note Dispatcher dependents re-enter as `ReadyTaskSubmission`.
    */
   void submit_ready_task_handles_from_worker(
-      std::vector<TaskHandle>&& handles,
-      SchedulerTaskPriority priority) override;
+      std::vector<ExecutionTaskHandle>&& handles,
+      ExecutionTaskPriority priority) override;
 
   /**
    * @brief Rejects anonymous raw callback submission.
@@ -771,14 +843,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * lease ownership in `ReadyTaskSubmission`.
    */
   void submit_ready_task_any_thread(
-      Task&& task, SchedulerTaskPriority priority,
+      Task&& task, ExecutionTaskPriority priority,
       std::optional<std::uint64_t> epoch) override;
 
   /**
    * @brief Rejects unscoped generic completion waits.
    * @return Nothing.
    * @throws std::logic_error unconditionally.
-   * @note `execute_cpu_run()` owns the caller-side wait for one explicit Run;
+   * @note `execute_run()` owns the caller-side wait for one explicit Run;
    * a generic wait has no unambiguous Run state in the multi-Run domain.
    */
   void wait_for_completion() override;
@@ -817,7 +889,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @return Nothing.
    * @throws std::logic_error outside a service worker callback.
    */
-  void log_event(SchedulerTraceAction action, int node_id) override;
+  void log_event(ExecutionTraceAction action, int node_id) override;
 
  private:
   friend class ::ps::testing::ExecutionServiceTestAccess;
@@ -829,13 +901,13 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   struct QueueEntry;
 
   /** @brief Authority-free strategy for one explicit QoS service class. */
-  class SchedulerPolicy;
+  class BuiltinPolicy;
 
   /** @brief Deadline-aware strategy allowed to consume protected headroom. */
-  class InteractiveSchedulerPolicy;
+  class InteractiveBuiltinPolicy;
 
   /** @brief Weighted deterministic strategy confined to general capacity. */
-  class ThroughputSchedulerPolicy;
+  class ThroughputBuiltinPolicy;
 
   /** @brief Policy-aware entry/byte-bounded owner of all ready entries. */
   class BoundedReadyStore;
@@ -845,6 +917,24 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /** @brief Checked root vector and uniform child-grant envelopes. */
   struct CpuRunAdmissionEstimate;
+
+  /**
+   * @brief Test-only decision at the reserved-start rollback boundary.
+   * @param context Opaque repository-test state.
+   * @param candidate_id Nonzero ready-entry identity retained by the pin.
+   * @param entry_version Nonzero nonreused entry version retained by the pin.
+   * @param route_generation Immutable Run route generation retained by the pin.
+   * @param execution_resources Exact child grant staged for this start.
+   * @return True to abort this attempt as obsolete before every route, ready,
+   * fairness, or in-flight mutation; false to continue production commit.
+   * @throws Nothing; observers must be allocation-free and noexcept.
+   * @note The bridge definition lives under tests/support. Production leaves
+   * this pointer null, and no public or installed API exposes the seam.
+   */
+  using ReservedStartRollbackObserver =
+      bool (*)(void* context, std::uint64_t candidate_id,
+               std::uint64_t entry_version, std::uint64_t route_generation,
+               const ResourceVector& execution_resources) noexcept;
 
   /**
    * @brief Test-only observer invoked at the initial-storage retirement seam.
@@ -1026,8 +1116,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Copies the built-in Throughput admission charge for repository
    * tests.
-   * @return Exact active Throughput root vectors, excluding Interactive and
-   * transitional legacy reservations.
+   * @return Exact active Throughput root vectors, excluding Interactive
+   * reservations.
    * @throws std::system_error when private accounting locking fails.
    * @note This private diagnostic mints no authority and is exposed only
    * through `ExecutionServiceTestAccess`, never an installed API.
@@ -1060,6 +1150,19 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * that can invoke the observer.
    */
   void* initial_submission_storage_observer_context_ = nullptr;
+
+  /**
+   * @brief Optional repository-test callback after child-grant staging.
+   * @note A true result exercises normal RAII grant rollback before any
+   * observable start mutation. Production composition leaves this null.
+   */
+  ReservedStartRollbackObserver reserved_start_rollback_observer_ = nullptr;
+
+  /**
+   * @brief Opaque context paired with the reserved-start observer.
+   * @note The private bridge guarantees lifetime through the observed Run.
+   */
+  void* reserved_start_rollback_observer_context_ = nullptr;
 
   /** @brief Current service-worker Run context, null outside callbacks. */
   static thread_local RunState* tls_run_state_;

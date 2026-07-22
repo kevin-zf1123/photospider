@@ -29,13 +29,13 @@ namespace {
 /** @brief Operation type used by the benchmark worker-control fixture. */
 constexpr char kBenchmarkProbeType[] = "benchmark_worker_probe";
 
-/** @brief Blocking source subtype used to expose physical scheduler workers. */
+/** @brief Blocking source subtype used to expose physical execution workers. */
 constexpr char kBenchmarkProbeSourceSubtype[] = "source";
 
 /** @brief Non-blocking sink subtype joining every independent source. */
 constexpr char kBenchmarkProbeSinkSubtype[] = "sink";
 
-/** @brief Number of independent sources available to the probe scheduler. */
+/** @brief Number of independent sources available to the execution probe. */
 constexpr int kBenchmarkProbeSourceCount = 16;
 
 /** @brief Node id of the sink targeted by benchmark execution. */
@@ -133,7 +133,7 @@ class CallbackConcurrencyGate final {
    * @throws std::system_error if synchronization fails.
    * @throws std::bad_alloc if thread-identity storage cannot grow.
    * @note Active counts bracket the registered callback body reached through
-   *       the product scheduler.
+   *       the private product execution route.
    */
   void enter_and_wait() {
     enter_and_block();
@@ -206,7 +206,7 @@ class CallbackConcurrencyGate final {
 
   /**
    * @brief Counts distinct physical callback threads in the current phase.
-   * @return Number of unique scheduler thread identities.
+   * @return Number of unique execution-worker thread identities.
    * @throws std::system_error if mutex locking fails.
    * @throws std::bad_alloc if snapshot storage cannot allocate.
    */
@@ -501,7 +501,7 @@ void write_benchmark_probe_graph(const std::filesystem::path& path) {
 /**
  * @brief Builds one custom benchmark config targeting the probe sink.
  * @param yaml_path Absolute source Graph path.
- * @param worker_count Exact benchmark scheduler request.
+ * @param worker_count Exact benchmark execution-worker request.
  * @return Enabled single-run parallel benchmark configuration.
  * @throws std::bad_alloc if string copies allocate.
  */
@@ -520,7 +520,7 @@ BenchmarkSessionConfig make_probe_benchmark_config(
 
 /**
  * @brief Builds an auto-generated tiled curve benchmark configuration.
- * @param worker_count Exact benchmark scheduler request.
+ * @param worker_count Exact benchmark execution-worker request.
  * @return Single-run configuration with enough 256-pixel tiles for eight
  *         workers.
  * @throws std::bad_alloc if string assignment exhausts memory.
@@ -595,11 +595,11 @@ void write_curve_output_graph(const std::filesystem::path& path) {
 }
 
 /**
- * @brief Computes one deterministic curve image with an exact worker grant.
- * @param host Seeded public Host used for scheduler configuration and compute.
+ * @brief Computes one deterministic curve image with an exact worker count.
+ * @param host Seeded public Host used for execution configuration and compute.
  * @param root Temporary root owning source, session, and cache paths.
  * @param yaml_path Deterministic Graph source path.
- * @param worker_count Exact HP and RT CPU scheduler grant.
+ * @param worker_count Exact process execution worker count.
  * @param session Unique graph session label.
  * @return Owned public image snapshot retained after graph close.
  * @throws std::bad_alloc if request, Host, or image storage exhausts memory.
@@ -611,12 +611,12 @@ ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
                                 const std::filesystem::path& yaml_path,
                                 unsigned int worker_count,
                                 const std::string& session) {
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = "cpu_work_stealing";
-  scheduler_config.rt_type = "cpu_work_stealing";
-  scheduler_config.worker_count = worker_count;
+  HostExecutionConfig execution_config;
+  execution_config.hp_type = "cpu";
+  execution_config.rt_type = "cpu";
+  execution_config.worker_count = worker_count;
   const VoidResult configured =
-      host.configure_scheduler_defaults(scheduler_config);
+      host.configure_execution_defaults(execution_config);
   if (!configured.status.ok) {
     throw std::runtime_error("failed to configure deterministic curve Graph: " +
                              configured.status.message);
@@ -662,7 +662,7 @@ ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
  *         GoogleTest records mismatches and setup exceptions fail the test.
  * @note The Host boundary record and benchmark result must share the same
  *       value from one resolution. The verdict does not repeat hardware
- *       detection or depend on scheduler construction resolving a zero.
+ *       detection or depend on route construction resolving a zero.
  */
 TEST(OpenCvOperationConcurrency,
      BenchmarkAutoThreadsPublishResolvedGrantToHost) {
@@ -680,7 +680,7 @@ TEST(OpenCvOperationConcurrency,
       host.invocations();
   const auto configured = std::find_if(
       invocations.begin(), invocations.end(), [](const auto& call) {
-        return call.method == "scheduler.configure_defaults";
+        return call.method == "execution.configure_defaults";
       });
   const auto loaded = std::find_if(
       invocations.begin(), invocations.end(),
@@ -692,10 +692,10 @@ TEST(OpenCvOperationConcurrency,
   EXPECT_EQ(std::count_if(invocations.begin(), invocations.end(),
                           [](const auto& call) {
                             return call.method ==
-                                   "scheduler.configure_defaults";
+                                   "execution.configure_defaults";
                           }),
             1);
-  EXPECT_EQ(configured->text, "cpu_work_stealing\ncpu_work_stealing");
+  EXPECT_EQ(configured->text, "cpu\ncpu");
   EXPECT_GT(configured->worker_count, 0U);
   EXPECT_LE(configured->worker_count, 8U);
   EXPECT_EQ(configured->worker_count,
@@ -703,17 +703,17 @@ TEST(OpenCvOperationConcurrency,
 }
 
 /**
- * @brief Proves benchmark thread input controls real scheduler callbacks.
+ * @brief Proves benchmark thread input controls real execution callbacks.
  *
  * @throws Nothing when product behavior satisfies the contract; GoogleTest
  *         records mismatches and C++ setup exceptions fail the test.
  * @note Each requested grant is reached exactly while the grant-plus-one
  *       observation remains bounded, so the verdict does not use workload
- *       timing or scheduler display statistics. Every grant uses a fresh Host
+ *       timing or route display statistics. Every grant uses a fresh Host
  *       because one Host's issue #69 CPU pool freezes its resolved count.
  */
 TEST(OpenCvOperationConcurrency,
-     BenchmarkThreadsConfigureExactHostSchedulerWorkers) {
+     BenchmarkThreadsConfigureExactHostExecutionWorkers) {
   ensure_benchmark_probe_registered();
   ScopedBenchmarkTempDir temp("photospider_benchmark_worker_control");
   const std::filesystem::path yaml_path = temp.root() / "probe.yaml";

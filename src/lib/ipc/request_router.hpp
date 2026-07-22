@@ -19,7 +19,7 @@ namespace ps::ipc::internal {
  * store policies with their monotonic clocks and opaque-id sources. Empty
  * callbacks retain each component's production default. This is a private
  * composition contract for the daemon server and deterministic process
- * fixtures; it is not installed or represented on the version 1 wire.
+ * fixtures; it is not installed or represented on the version 2 wire.
  *
  * @throws std::bad_alloc when copied callback storage cannot be allocated.
  * @note Callbacks must satisfy the thread-safety and non-throwing constraints
@@ -57,7 +57,7 @@ struct RequestRouterRuntimeDependencies {
 };
 
 /**
- * @brief Validates one OutputStore delivery for version 1 encoding.
+ * @brief Validates one OutputStore delivery for version 2 encoding.
  * @param delivery Revalidated metadata and lease candidate.
  * @param expected_output_reference Private job reference that selected the
  *        OutputStore record.
@@ -73,7 +73,7 @@ bool valid_output_delivery_for_wire(
     const std::string& expected_output_reference) noexcept;
 
 /**
- * @brief Routes version 1 requests through one daemon-owned Host.
+ * @brief Routes version 2 requests through one daemon-owned Host.
  *
  * Envelope/parameter validation and immutable daemon metadata do not acquire
  * the Host mutex. Every actual Host method call is serialized through the one
@@ -100,7 +100,7 @@ class RequestRouter {
    * @throws std::runtime_error if instance-id entropy fails.
    * @note Collection snapshot registry, OutputStore, and compute registry are
    *       constructed stopped. Capability advertisement and pre-dispatch
-   *       admission share the exact 55-method table in the private protocol
+   *       admission share the exact 60-method table in the private protocol
    *       codec.
    */
   RequestRouter(Host& host, std::string service_version);
@@ -143,13 +143,13 @@ class RequestRouter {
    * @brief Validates and routes one complete framed JSON request payload.
    *
    * @param payload Exact JSON bytes from one valid-sized frame.
-   * @return Bounded version 1 response payload with correlated id or JSON null
+   * @return Bounded version 2 response payload with correlated id or JSON null
    *         when no valid id can be recovered.
    * @throws std::bad_alloc if even bounded response construction cannot
    *         allocate; the connection boundary then closes only that client.
    * @note No Host call occurs for malformed envelopes, unadvertised methods,
    *       unsupported advertised routes, or invalid params. The exact
-   *       55-method table gates all route families before dispatch, while
+   *       60-method table gates all route families before dispatch, while
    *       independent family matchers leave an advertised-but-unimplemented
    *       method observable as `method_not_found` for contract verification.
    *       A `graph.load` reservation is removed before any
@@ -166,14 +166,14 @@ class RequestRouter {
    *       only result-time missing or identity-mismatched artifacts become the
    *       top-level `artifact_not_found` error. Lease-aware release remains
    *       available after concurrent terminal-record removal. Event drains
-   *       and scheduler trace pages validate their exact bounds before one
+   *       and policy trace pages validate their exact bounds before one
    *       serialized Host call; they never use collection snapshot storage.
    *       Process-global plugin mutations likewise use one serialized Host
    *       call, while plugin views reserve, sort, measure, and freeze one
    *       stable snapshot before their first Host call result is published;
    *       continuations never resolve a session or reenter Host. Global
-   *       scheduler discovery/control follows the same Host-only boundary;
-   *       scheduler type/plugin lists use stable sorted snapshots, while
+   *       policy discovery/control follows the same Host-only boundary;
+   *       policy type/plugin lists use stable sorted snapshots, while
    *       per-session information/replacement uses opaque admission and the
    *       common Host mutex shared with compute execution.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
@@ -263,7 +263,7 @@ class RequestRouter {
    * @brief Routes graph load and close lifecycle methods.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 1 method name.
+   * @param method Exact version 2 method name.
    * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for graph load/close, or `std::nullopt` when the
    *         method belongs to another router family.
@@ -285,7 +285,7 @@ class RequestRouter {
    * @brief Routes one graph-state control or diagnostic Host method.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 1 method name.
+   * @param method Exact version 2 method name.
    * @param routed_params Internal adapter borrowing the structurally valid
    *        params object whose known fields have not yet been method-validated.
    * @return Complete response payload when `method` belongs to this family, or
@@ -293,7 +293,7 @@ class RequestRouter {
    * @throws std::bad_alloc if validation, Host result copying, or response
    *         construction cannot allocate.
    * @throws std::invalid_argument if a successful Host returns a malformed
-   *         public value that cannot be represented on version 1.
+   *         public value that cannot be represented on version 2.
    * @throws Whatever the matching Host method propagates; `route()` preserves
    *         resource exhaustion and maps other standard exceptions to daemon
    *         `internal_error`.
@@ -436,7 +436,7 @@ class RequestRouter {
    * @throws std::bad_alloc if Host/result/error allocation fails.
    * @throws Whatever the matching Host projection propagates.
    * @note Preserves node order and rectangle axes under one serialized Host
-   *       call and performs no cache or scheduler access.
+   *       call and performs no cache or policy access.
    */
   std::optional<std::string> route_session_roi_method(
       const std::string& id, const std::string& method,
@@ -463,7 +463,7 @@ class RequestRouter {
    * @brief Routes stable collection and remaining inspection methods.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 1 method name.
+   * @param method Exact version 2 method name.
    * @param routed_params Internal adapter borrowing the structurally valid
    *        params object.
    * @return Complete response when this family recognizes `method`, or
@@ -709,7 +709,7 @@ class RequestRouter {
    * @brief Routes bounded polling compute-job lifecycle methods.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 1 compute-job method name.
+   * @param method Exact version 2 compute-job method name.
    * @param routed_params Internal adapter borrowing the structurally valid
    *        params object.
    * @return Complete response when this family recognizes `method`, or
@@ -756,7 +756,7 @@ class RequestRouter {
    * @brief Routes process-global operation-plugin control and copied views.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 1 operation-plugin method name.
+   * @param method Exact version 2 operation-plugin method name.
    * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.
@@ -772,7 +772,7 @@ class RequestRouter {
    *       bounded snapshot quota before exactly one Host call, sorts by public
    *       key, and freezes the copied result. Continuations use only that
    *       frozen cursor record and never call Host. This private route does not
-   *       change the separately maintained exact 55-method advertisement.
+   *       change the separately maintained exact 60-method advertisement.
    */
   std::optional<std::string> route_plugin_method(
       const std::string& id, const std::string& method,
@@ -822,10 +822,10 @@ class RequestRouter {
                                       StableCollectionRequest request);
 
   /**
-   * @brief Routes scheduler discovery, configuration, and session control.
+   * @brief Routes policy discovery, configuration, and session control.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact version 1 scheduler method name other than trace.
+   * @param method Exact version 2 policy method name other than trace.
    * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.
@@ -841,17 +841,17 @@ class RequestRouter {
    *       continuations call no Host method. Information and replacement
    *       validate all known values before opaque-session admission and then
    *       invoke exactly one Host method under `host_mutex_`. Mutations are
-   *       never retried. `scheduler.trace` remains in the bounded observation
+   *       never retried. `policy.trace` remains in the bounded observation
    *       route and retains its existing non-destructive sequence semantics.
    */
-  std::optional<std::string> route_scheduler_method(
+  std::optional<std::string> route_policy_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 
   /**
-   * @brief Routes non-session scheduler discovery/configuration methods.
+   * @brief Routes non-session policy discovery/configuration methods.
    * @param id Valid correlated request id.
-   * @param method Exact recognized scheduler method.
+   * @param method Exact recognized policy method.
    * @param routed_params Internal adapter borrowing structural params.
    * @return Complete response, or `std::nullopt` for session/list methods.
    * @throws std::bad_alloc if validation, Host values, or encoding allocate.
@@ -860,12 +860,12 @@ class RequestRouter {
    * @note Each handled method invokes one process-global Host operation under
    *       `host_mutex_` and no mutation is retried.
    */
-  std::optional<std::string> route_scheduler_global_method(
+  std::optional<std::string> route_policy_global_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 
   /**
-   * @brief Routes one scheduler-type description lookup.
+   * @brief Routes one policy-type description lookup.
    * @param id Valid correlated request id.
    * @param routed_params Internal adapter borrowing structural params.
    * @return Complete description response or validation/Host error.
@@ -874,11 +874,11 @@ class RequestRouter {
    * @throws Whatever the Host description operation propagates.
    * @note Validates type text before exactly one serialized Host call.
    */
-  std::string route_scheduler_description_method(
+  std::string route_policy_description_method(
       const std::string& id, const RoutedParams& routed_params);
 
   /**
-   * @brief Routes scheduler scan or explicit plugin load.
+   * @brief Routes policy scan or explicit plugin load.
    * @param id Valid correlated request id.
    * @param method Exact scan/load method.
    * @param routed_params Internal adapter borrowing structural params.
@@ -889,12 +889,12 @@ class RequestRouter {
    * @note Validates every input before one serialized process-global mutation
    *       and never retries after ambiguous failure.
    */
-  std::string route_scheduler_plugin_method(const std::string& id,
-                                            const std::string& method,
-                                            const RoutedParams& routed_params);
+  std::string route_policy_plugin_method(const std::string& id,
+                                         const std::string& method,
+                                         const RoutedParams& routed_params);
 
   /**
-   * @brief Routes scheduler default configuration.
+   * @brief Routes policy default configuration.
    * @param id Valid correlated request id.
    * @param routed_params Internal adapter borrowing structural params.
    * @return Complete mutation response or validation/Host error.
@@ -905,27 +905,27 @@ class RequestRouter {
    *       before acquiring `host_mutex_` or making one serialized Host
    *       mutation. The mutation is never retried.
    */
-  std::string route_scheduler_defaults_method(
-      const std::string& id, const RoutedParams& routed_params);
+  std::string route_policy_defaults_method(const std::string& id,
+                                           const RoutedParams& routed_params);
 
   /**
-   * @brief Routes per-session scheduler information and replacement.
+   * @brief Routes per-session policy information and replacement.
    * @param id Valid correlated request id.
-   * @param method Exact recognized scheduler method.
+   * @param method Exact recognized policy method.
    * @param routed_params Internal adapter borrowing structural params.
    * @return Complete response, or `std::nullopt` for global/list methods.
    * @throws std::bad_alloc if validation, admission, or encoding allocates.
-   * @throws std::invalid_argument for mismatched successful scheduler info.
+   * @throws std::invalid_argument for mismatched successful policy info.
    * @throws Whatever the matching Host operation propagates.
    * @note Validates before opaque-session admission, then makes exactly one
    *       serialized Host call shared with compute execution.
    */
-  std::optional<std::string> route_scheduler_session_method(
+  std::optional<std::string> route_policy_binding_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 
   /**
-   * @brief Reads one scheduler-list continuation from a frozen snapshot.
+   * @brief Reads one policy-list continuation from a frozen snapshot.
    * @param id Valid correlated request id.
    * @param request Validated method/page/binding values.
    * @return Complete bounded continuation response.
@@ -934,11 +934,11 @@ class RequestRouter {
    * @note Performs no Host call or reservation and releases final-page
    *       ownership through the snapshot registry.
    */
-  std::string route_scheduler_continuation(
-      const std::string& id, const StableCollectionRequest& request);
+  std::string route_policy_continuation(const std::string& id,
+                                        const StableCollectionRequest& request);
 
   /**
-   * @brief Calls Host once and publishes one first scheduler-list page.
+   * @brief Calls Host once and publishes one first policy-list page.
    * @param id Valid correlated request id.
    * @param request Validated method/page/binding values.
    * @return Complete bounded first-page response.
@@ -948,14 +948,56 @@ class RequestRouter {
    * @note Reserves quota before one serialized Host call, sorts labels, then
    *       measures and publishes the stable snapshot transactionally.
    */
-  std::string route_scheduler_first_page(const std::string& id,
+  std::string route_policy_first_page(const std::string& id,
+                                      StableCollectionRequest request);
+
+  /**
+   * @brief Routes execution discovery, defaults, and per-session controls.
+   * @param id Valid correlated request id.
+   * @param method Exact protocol-v2 execution method other than trace.
+   * @param routed_params Internal adapter borrowing structurally valid params.
+   * @return Complete response, or null when the method is not in this family.
+   * @throws std::bad_alloc if validation, Host copying, or encoding allocates.
+   * @throws std::invalid_argument for malformed successful Host values.
+   * @throws Whatever the matching Host operation propagates.
+   * @note Closed route literals validate before session lookup or Host access;
+   *       every handled request invokes at most one Host operation.
+   */
+  std::optional<std::string> route_execution_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Reads one execution-type continuation from a frozen snapshot.
+   * @param id Valid correlated request id.
+   * @param request Validated continuation and binding.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if page copying or encoding allocates.
+   * @throws std::invalid_argument for an invalid retained route.
+   * @note Performs no Host call or live route discovery.
+   */
+  std::string route_execution_continuation(
+      const std::string& id, const StableCollectionRequest& request);
+
+  /**
+   * @brief Calls Host once and publishes one execution-type first page.
+   * @param id Valid correlated request id.
+   * @param request Validated first-page request and binding.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if reservation, Host copying, or encoding allocates.
+   * @throws std::invalid_argument for unknown, duplicate, or malformed routes.
+   * @throws Whatever `Host::execution_available_types()` propagates.
+   * @note The complete copied value is sorted, validated, and frozen before
+   *       cursor publication.
+   */
+  std::string route_execution_first_page(const std::string& id,
                                          StableCollectionRequest request);
 
   /**
-   * @brief Routes bounded compute events and scheduler trace observations.
+   * @brief Routes bounded compute events and policy trace observations.
    *
    * @param id Valid request id correlated with the response.
-   * @param method Exact `events.drain` or `scheduler.trace` method name.
+   * @param method Exact `events.drain` or `policy.trace` method name.
    * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.
@@ -968,7 +1010,7 @@ class RequestRouter {
    * @note All known params are validated before session resolution. Each call
    *       holds one session admission and invokes exactly one matching Host
    *       operation under `host_mutex_`. Compute-event drains are destructive
-   *       only inside Host; scheduler traces are non-destructive. Neither path
+   *       only inside Host; policy traces are non-destructive. Neither path
    *       reserves a stable collection snapshot or advertises a new method.
    */
   std::optional<std::string> route_observation_method(

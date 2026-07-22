@@ -324,7 +324,7 @@ void record_disk_cache_load_result(GraphModel& graph,
  * @param consume_output Callable that accepts a NodeOutput rvalue on hit.
  * @return true when the attempt was a disk-cache hit; false otherwise.
  * @throws Exceptions from `consume_output` or diagnostic storage.
- * @note The template keeps assignment into node HP cache and scheduler temp
+ * @note The template keeps assignment into node HP cache and execution temp
  * output slots unified without exposing output ownership in GraphModel.
  */
 template <typename OutputConsumer>

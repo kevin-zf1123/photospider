@@ -14,7 +14,7 @@ class DirtySiblingCommitGate;
  * @brief Pure coordination decision for one compute intent request.
  *
  * @throws Nothing for construction and scalar value access.
- * @note The value owns no Run, scheduler, service, callback, or graph state.
+ * @note The value owns no Run, worker, service, callback, or graph state.
  */
 struct IntentUpdateDecision {
   /** @brief Intent being coordinated. */

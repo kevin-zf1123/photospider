@@ -7,6 +7,7 @@
 #include <optional>
 #include <queue>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -37,7 +38,7 @@ namespace {
 
 /**
  * @brief Rejects a dirty/preflight boundary after accepted Run cancellation.
- * @param run Optional request observer for inline/legacy callers.
+ * @param run Optional request observer for inline/private callers.
  * @param run_lease Preferred retained lifecycle lease for product callers.
  * @return Nothing while no explicit/deadline cancellation has won.
  * @throws GraphError with ComputeError after cancellation.
@@ -62,9 +63,9 @@ void observe_dirty_run_or_throw(ComputeRun* run,
 /**
  * @brief Advances an optional dirty-domain Run to executable phase.
  *
- * @param run Child or standalone Run, or null for legacy callers.
+ * @param run Child or standalone Run, or null for direct private callers.
  * @param run_lease Preferred borrowed lifecycle lease for product callers.
- * @param queued Whether work crosses a scheduler/service queue.
+ * @param queued Whether work crosses an execution-service queue.
  * @return Nothing.
  * @throws std::logic_error when the Run was not admitted or has already
  * reached commit/terminal state.
@@ -179,7 +180,7 @@ void run_planned_dirty_task(GraphRuntime* runtime, EntryMap& plan,
     execute_node(task.node_id, entry_it->second, task);
   } catch (...) {
     if (runtime) {
-      runtime->log_event(GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION,
+      runtime->log_event(GraphRuntime::ExecutionEvent::RETHROW_EXCEPTION,
                          task.node_id);
     }
     throw;
@@ -193,7 +194,7 @@ void run_planned_dirty_task(GraphRuntime* runtime, EntryMap& plan,
  * @return Shared owner of per-node snapshot and staging critical sections.
  * @throws std::bad_alloc if mutex allocation fails.
  * @note The returned owner remains local unless ComputeService supplied one
- * transaction-wide object to both HP and RT siblings. It owns no scheduler
+ * transaction-wide object to both HP and RT siblings. It owns no execution
  * state, output buffer, or commit policy.
  */
 std::shared_ptr<DirtyNodeSynchronization> make_dirty_node_synchronization(
@@ -207,36 +208,37 @@ std::shared_ptr<DirtyNodeSynchronization> make_dirty_node_synchronization(
 }
 
 /**
- * @brief Exposes one connected-parameter preflight callback as a scheduler
+ * @brief Exposes one connected-parameter preflight callback as an execution
  * task handle.
  *
  * @tparam RunTask Request-local callback type.
  * @throws Nothing during construction; run_task() documents invocation and
- * scheduler-publication exceptions.
- * @note The executor borrows its callback and scheduler runtime. It must remain
+ * runtime-publication exceptions.
+ * @note The executor borrows its callback and execution runtime. It must remain
  * alive until the matching wait_for_completion() call returns or throws.
  */
 template <typename RunTask>
-class PreflightTaskExecutor final : public TaskExecutor {
+class PreflightExecutionTaskExecutor final : public ExecutionTaskExecutor {
  public:
   /**
-   * @brief Binds one preflight callback to its scheduler completion contract.
+   * @brief Binds one preflight callback to its runtime completion contract.
    * @param run_task Callback that computes and stages one producer node.
    * @param task_runtime Runtime receiving trace and completion publication.
-   * @param node_id Graph node id used in scheduler trace events.
+   * @param node_id Graph node id used in execution trace events.
    * @throws Nothing.
    */
-  PreflightTaskExecutor(RunTask& run_task, SchedulerTaskRuntime& task_runtime,
-                        int node_id)
+  PreflightExecutionTaskExecutor(RunTask& run_task,
+                                 ExecutionTaskRuntime& task_runtime,
+                                 int node_id)
       : run_task_(run_task), task_runtime_(task_runtime), node_id_(node_id) {}
 
   /**
-   * @brief Executes the sole preflight task and settles scheduler accounting.
+   * @brief Executes the sole preflight task and settles runtime accounting.
    * @param task_id Must be zero for this single-task executor.
    * @return Nothing.
    * @throws GraphError when task_id is invalid.
    * @throws The exact callback, trace, or completion-publication exception.
-   * @note Rethrow tracing is best-effort so a hostile scheduler log hook cannot
+   * @note Rethrow tracing is best-effort so a hostile trace hook cannot
    * replace the authoritative task exception or prevent batch completion.
    */
   void run_task(int task_id) override {
@@ -245,12 +247,12 @@ class PreflightTaskExecutor final : public TaskExecutor {
                        "Connected-parameter preflight task id is invalid");
     }
     try {
-      task_runtime_.log_event(SchedulerTraceAction::Execute, node_id_);
+      task_runtime_.log_event(ExecutionTraceAction::Execute, node_id_);
       run_task_();
       task_runtime_.dec_tasks_to_complete();
     } catch (...) {
       try {
-        task_runtime_.log_event(SchedulerTraceAction::RethrowException,
+        task_runtime_.log_event(ExecutionTraceAction::RethrowException,
                                 node_id_);
       } catch (...) {
       }
@@ -261,9 +263,9 @@ class PreflightTaskExecutor final : public TaskExecutor {
  private:
   /** @brief Borrowed request-local preflight callback. */
   RunTask& run_task_;
-  /** @brief Borrowed scheduler runtime for the active initial batch. */
-  SchedulerTaskRuntime& task_runtime_;
-  /** @brief Node id reported in scheduler trace events. */
+  /** @brief Borrowed execution runtime for the active initial batch. */
+  ExecutionTaskRuntime& task_runtime_;
+  /** @brief Node id reported in execution trace events. */
   int node_id_ = -1;
 };
 
@@ -619,9 +621,9 @@ std::shared_ptr<const StabilizedDirtyParameters>
 stabilize_connected_dirty_parameters(
     GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
     uint64_t request_generation, uint64_t topology_generation,
-    SchedulerTaskRuntime* task_runtime, ExecutionService* execution_service,
-    SchedulerHostContext* host, ComputeRun* run,
-    const ComputeRunLease* run_lease) {
+    ExecutionTaskRuntime* task_runtime, ExecutionService* execution_service,
+    ExecutionHostContext* host, ComputeRun* run,
+    const ComputeRunLease* run_lease, const std::string& execution_type) {
   observe_dirty_run_or_throw(run, run_lease);
   if (execution_service != nullptr &&
       (task_runtime != nullptr || host == nullptr || run == nullptr)) {
@@ -798,13 +800,13 @@ stabilize_connected_dirty_parameters(
       auto service_callback = [owned_preflight, node_id](
                                   ComputeRunLease& callback_lease,
                                   const ComputeRunTaskIdentity&,
-                                  SchedulerTaskRuntime& service_runtime) {
+                                  ExecutionTaskRuntime& service_runtime) {
         try {
           if (callback_lease.observe_cancellation().has_value()) {
             service_runtime.dec_tasks_to_complete();
             return;
           }
-          service_runtime.log_event(SchedulerTraceAction::Execute, node_id);
+          service_runtime.log_event(ExecutionTraceAction::Execute, node_id);
           (*owned_preflight)();
           if (callback_lease.observe_cancellation().has_value()) {
             service_runtime.dec_tasks_to_complete();
@@ -813,7 +815,7 @@ stabilize_connected_dirty_parameters(
           service_runtime.dec_tasks_to_complete();
         } catch (...) {
           try {
-            service_runtime.log_event(SchedulerTraceAction::RethrowException,
+            service_runtime.log_event(ExecutionTraceAction::RethrowException,
                                       node_id);
           } catch (...) {
           }
@@ -839,17 +841,18 @@ stabilize_connected_dirty_parameters(
       std::vector<ReadyTaskSubmission> submissions;
       submissions.emplace_back(std::move(lease), identity, node_id, true,
                                std::move(service_callback),
-                               SchedulerTaskPriority::High, task_demand);
-      execution_service->execute_cpu_run(
-          *host, std::move(submissions), 1,
+                               ExecutionTaskPriority::High, task_demand);
+      execution_service->execute_run(
+          *host, execution_type, std::move(submissions), 1,
           CpuRunResourceDemand{shared_demand.bytes(), task_demand});
       observe_dirty_run_or_throw(run, run_lease);
     } else if (task_runtime) {
-      PreflightTaskExecutor<decltype(execute_preflight_node)> executor(
+      PreflightExecutionTaskExecutor<decltype(execute_preflight_node)> executor(
           execute_preflight_node, *task_runtime, node_id);
-      std::vector<TaskHandle> handles{TaskHandle{&executor, 0, node_id}};
+      std::vector<ExecutionTaskHandle> handles{
+          ExecutionTaskHandle{&executor, 0, node_id}};
       task_runtime->submit_initial_task_handles(std::move(handles), 1,
-                                                SchedulerTaskPriority::High);
+                                                ExecutionTaskPriority::High);
       task_runtime->wait_for_completion();
       observe_dirty_run_or_throw(run, run_lease);
     } else {
@@ -936,7 +939,7 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  *
  * @param graph Graph whose HP dirty state and cache are updated.
  * @param proxy_graph RT proxy graph receiving optional downsample refresh.
- * @param runtime Optional scheduler/trace owner; null executes work inline.
+ * @param runtime Optional route/trace owner; null executes work inline.
  * @param request Dirty target, ROI, cache, telemetry, and sibling-gate options.
  * @param run Optional standalone or realtime-child HP Run that owns staging,
  * task leases, and lifecycle state.
@@ -947,10 +950,10 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * @return Mutable target HP output owned by graph.
  * @throws std::bad_alloc unchanged when planning, task, cache, staging,
  * telemetry, or output storage exhausts memory.
- * @throws GraphError for planning, dependency, operation, scheduler, commit, or
+ * @throws GraphError for planning, dependency, operation, dispatch, commit, or
  * target validation failures, including checked shared-resource estimation
  * and accepted cancellation at a cooperative boundary.
- * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
+ * @note Planning and commit hold graph_mutex_ while queued service work runs
  * outside that lock. Both standalone and realtime-child HP staging are
  * Run-owned. Per-node synchronization is request-local for standalone HP work
  * and shared only with the matching RT sibling when supplied by
@@ -1083,6 +1086,11 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   source_first_request.runtime = runtime;
   source_first_request.intent = ComputeIntent::GlobalHighPrecision;
   source_first_request.execution_service = execution_service;
+  if (runtime != nullptr) {
+    source_first_request.execution_type =
+        runtime->execution_route(ComputeIntent::GlobalHighPrecision)
+            .execution_type;
+  }
   source_first_request.host = runtime;
   source_first_request.run = run;
   source_first_request.run_lease = run_lease;
@@ -1189,7 +1197,7 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  *
  * @param graph Graph supplying topology, parameters, and HP fallback output.
  * @param proxy_graph RT proxy graph receiving the staged result.
- * @param runtime Optional scheduler/trace owner; null executes work inline.
+ * @param runtime Optional route/trace owner; null executes work inline.
  * @param request Dirty target, ROI, cache, and telemetry options.
  * @param run Optional RT child Run owning task leases and lifecycle state.
  * @param execution_service Optional fixed process CPU service used for owned
@@ -1199,10 +1207,10 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  * @return Mutable target RT output owned by proxy_graph.
  * @throws std::bad_alloc unchanged when planning, task, proxy, staging,
  * telemetry, or output storage exhausts memory.
- * @throws GraphError for planning, dependency, operation, scheduler, commit, or
+ * @throws GraphError for planning, dependency, operation, dispatch, commit, or
  * target validation failures, including checked shared-resource estimation
  * and accepted cancellation at a cooperative boundary.
- * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
+ * @note Planning and commit hold graph_mutex_ while queued service work runs
  * outside that lock. RT output never becomes formal reusable GraphModel cache.
  * Each process-service phase charges the complete per-node synchronization
  * owner; a shared HP/RT sibling object is therefore conservatively present in
@@ -1317,6 +1325,10 @@ NodeOutput& RealTimeDirtyExecutor::execute(
   source_first_request.runtime = runtime;
   source_first_request.intent = ComputeIntent::RealTimeUpdate;
   source_first_request.execution_service = execution_service;
+  if (runtime != nullptr) {
+    source_first_request.execution_type =
+        runtime->execution_route(ComputeIntent::RealTimeUpdate).execution_type;
+  }
   source_first_request.host = runtime;
   source_first_request.run = run;
   source_first_request.run_lease = run_lease;

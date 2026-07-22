@@ -22,7 +22,7 @@ namespace ps::compute {
  * PlannedTaskKind distinguishes whole-node compatibility work, tiled work, and
  * monolithic operator work after graph expansion. The kind describes planner
  * output only; actual execution resources are selected later by the dispatcher
- * and SchedulerTaskRuntime.
+ * and ExecutionTaskRuntime.
  *
  * @note HP and RT task kinds are interpreted inside their own DirtyDomain and
  * must not be connected across domains.
@@ -68,7 +68,7 @@ struct PlannedDependency {
 /**
  * @brief Executable task entry produced by graph planning.
  *
- * PlannedTask is the immutable planning record that later becomes a scheduler
+ * PlannedTask is the immutable planning record that later becomes an execution
  * closure or dirty work-set member. It contains the node, domain, ROI, tile
  * coordinates, dirty metadata, and upstream task ids required by the dispatcher
  * to submit work in dependency order.
@@ -143,7 +143,7 @@ struct PlannedNodeWork {
  *
  * ComputeTaskGraph stores executable tasks, node-level dependency metadata,
  * and initial task ids derived from dependency_task_ids. It is immutable after
- * scheduler closures are built for a dispatch.
+ * execution closures are built for a dispatch.
  *
  * @note Runtime dependency counters and ready queues are intentionally absent;
  * those belong to dispatcher submission state.
@@ -253,7 +253,7 @@ struct ComputeRequest {
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
   /** @brief Target graph node id requested by the caller. */
   int target_node_id = -1;
-  /** @brief Whether the caller intends scheduler-backed execution. */
+  /** @brief Whether the caller intends route-backed execution. */
   bool parallel = false;
   /** @brief Optional dirty ROI used by dirty update callers. */
   std::optional<PixelRect> dirty_roi;
@@ -264,7 +264,7 @@ struct ComputeRequest {
  *
  * ComputePlan records the target request, node execution order, per-node work,
  * and task graph used by sequential, parallel, and dirty update execution. It
- * is the stable topology contract for one request while scheduler runtime
+ * is the stable topology contract for one request while execution runtime
  * state is built separately.
  *
  * @note The latest plan remains value-type diagnostic data. Repeated
@@ -276,7 +276,7 @@ struct ComputePlan {
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
   /** @brief Target node id from the request. */
   int target_node_id = -1;
-  /** @brief Whether the caller intended scheduler-backed execution. */
+  /** @brief Whether the caller intended route-backed execution. */
   bool parallel = false;
   /** @brief Original traversal order for the request target. */
   std::vector<int> execution_order;
@@ -297,14 +297,14 @@ struct ComputePlan {
  * on-demand deep inspection.
  *
  * @note The summary is value-type diagnostic data. Keeping a shared_plan
- * pointer is optional and must not be used by schedulers for runtime state.
+ * pointer is optional and must not be used by workers for runtime state.
  */
 struct ComputePlanSummary {
   /** @brief Compute intent represented by the summarized plan. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
   /** @brief Target node id from the request. */
   int target_node_id = -1;
-  /** @brief Whether the caller intended scheduler-backed execution. */
+  /** @brief Whether the caller intended route-backed execution. */
   bool parallel = false;
   /** @brief Graph topology generation used by full graph cache key. */
   uint64_t topology_generation = 0;

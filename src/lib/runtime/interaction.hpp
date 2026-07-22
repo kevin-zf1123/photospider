@@ -64,13 +64,13 @@ class InteractionService {
    * @param config_path Optional session configuration source.
    * @param cache_root_dir Optional external cache-root directory.
    * @return Loaded graph label, or nullopt only for a duplicate session name.
-   * @throws GraphError with exact scheduler, IO, representation/schema,
+   * @throws GraphError with exact execution, IO, representation/schema,
    *         topology, or unexpected-internal failure categories before Graph
    *         publication.
    * @throws std::bad_alloc If Kernel load or error translation exhausts
    *         memory.
-   * @note Kernel plans and atomically admits both scheduler intents before
-   *       constructing either candidate. This final embedded boundary keeps
+   * @note Kernel validates both execution routes before Graph publication.
+   *       This final embedded boundary keeps
    *       GraphError unchanged, maps filesystem failures to Io, and maps other
    *       exceptions to Unknown without adding fallback or partial
    *       publication. The injected reader owns representation classification.
@@ -104,7 +104,7 @@ class InteractionService {
    * @throws std::logic_error if invoked from the target lane worker.
    * @throws std::overflow_error if the close-generation counter is exhausted.
    * @throws std::system_error if executor lifecycle synchronization fails.
-   * @note The runtime and scheduler remain owned by Kernel. Embedded Host calls
+   * @note The runtime remains owned by Kernel. Embedded Host calls
    *       this after publishing its close marker and draining pre-marker
    *       synchronous admissions, but before waiting on pre-registered async
    *       placeholders.
@@ -115,12 +115,12 @@ class InteractionService {
 
   /**
    * @brief Completes graph close after Host admission drainage.
-   * @param name Graph session whose lanes and schedulers must be torn down.
+   * @param name Graph session whose lanes and state must be torn down.
    * @return True when the runtime existed and was removed; false when absent.
-   * @throws Any executor or scheduler lifecycle failure propagated by Kernel.
+   * @throws Any executor or runtime lifecycle failure propagated by Kernel.
    * @note Kernel drains the already-stopped compute-request lane, then closes
-   *       graph-state before scheduler shutdown. A scheduler stop failure
-   *       reopens graph-state and compute-request workers before rethrow.
+   *       graph-state before runtime removal. A stop failure reopens
+   * graph-state and compute-request workers before rethrow.
    */
   bool cmd_close_graph(const std::string& name) {
     return kernel_.close_graph(name);
@@ -370,7 +370,7 @@ class InteractionService {
   }
 
   /**
-   * @brief Reads one bounded non-destructive scheduler-trace page.
+   * @brief Reads one bounded non-destructive execution-trace page.
    * @param graph Loaded graph/session name.
    * @param after_sequence Exclusive sequence cursor.
    * @param limit Maximum trace entries to copy.
@@ -380,9 +380,9 @@ class InteractionService {
    * @note All page metadata comes from the runtime's single locked
    *       observation point.
    */
-  std::optional<GraphRuntime::SchedulerEventPage> cmd_scheduler_trace(
+  std::optional<GraphRuntime::ExecutionEventPage> cmd_execution_trace(
       const std::string& graph, uint64_t after_sequence, std::size_t limit) {
-    return kernel_.scheduler_trace(graph, after_sequence, limit);
+    return kernel_.execution_trace(graph, after_sequence, limit);
   }
   std::optional<std::string> cmd_dirty_region_snapshot_debug(
       const std::string& graph) {
@@ -594,21 +594,46 @@ class InteractionService {
     return kernel_.get_metal_device(graph);
   }
 
-  // [M3.5] Scheduler information
-  // Get all available scheduler types (built-in + plugins)
-  std::vector<std::string> cmd_scheduler_available_types() const;
+  /** @copydoc Kernel::policy_available_types */
+  std::vector<std::string> cmd_policy_available_types() const;
 
-  // Get description for a scheduler type
-  std::string cmd_scheduler_description(const std::string& type_name) const;
+  /** @copydoc Kernel::policy_description */
+  std::string cmd_policy_description(const std::string& type_name) const;
 
-  // Scan and load scheduler plugins from directories
-  size_t cmd_scheduler_scan(const std::vector<std::string>& dirs);
+  /** @copydoc Kernel::policy_scan */
+  std::size_t cmd_policy_scan(const std::vector<std::string>& dirs);
 
-  // Load a single scheduler plugin
-  bool cmd_scheduler_load(const std::string& path);
+  /** @copydoc Kernel::policy_load */
+  void cmd_policy_load(const std::string& path);
 
-  // Get list of loaded scheduler plugins
-  std::vector<std::string> cmd_scheduler_loaded_plugins() const;
+  /** @copydoc Kernel::policy_loaded_plugins */
+  std::vector<std::string> cmd_policy_loaded_plugins() const;
+
+  /** @copydoc Kernel::configure_policy_defaults */
+  void cmd_configure_policy_defaults(const HostPolicyConfig& config);
+
+  /** @copydoc Kernel::policy_info */
+  PolicyInfoSnapshot cmd_policy_info(PolicyClass policy_class) const;
+
+  /** @copydoc Kernel::replace_policy */
+  void cmd_replace_policy(PolicyClass policy_class, const std::string& type);
+
+  /** @copydoc Kernel::execution_available_types */
+  std::vector<std::string> cmd_execution_available_types() const;
+
+  /** @copydoc Kernel::execution_description */
+  std::string cmd_execution_description(const std::string& type_name) const;
+
+  /** @copydoc Kernel::set_execution_config */
+  void cmd_configure_execution_defaults(const Kernel::ExecutionConfig& config);
+
+  /** @copydoc Kernel::get_execution_info */
+  std::optional<std::pair<std::string, std::string>> cmd_execution_info(
+      const std::string& graph, ComputeIntent intent);
+
+  /** @copydoc Kernel::replace_execution */
+  bool cmd_replace_execution(const std::string& graph, ComputeIntent intent,
+                             const std::string& type);
 
  private:
   Kernel& kernel_;

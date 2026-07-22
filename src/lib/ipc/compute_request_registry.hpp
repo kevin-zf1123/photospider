@@ -56,7 +56,7 @@ enum class ComputeResultMode {
  * @brief Opaque daemon-global identity for one private compute record.
  *
  * @throws std::bad_alloc when copied storage cannot be allocated.
- * @note Version 1 values use the same 32-lowercase-hex shape as other opaque
+ * @note Version 2 values use the same 32-lowercase-hex shape as other opaque
  *       identities, but this type is not interchangeable with a session id.
  */
 struct ComputeRequestId {
@@ -210,7 +210,7 @@ struct ComputeRequestSnapshot {
   /** @brief Current forward-only lifecycle state. */
   ComputeRequestState state = ComputeRequestState::Queued;
 
-  /** @brief Version 1 jobs cannot be cancelled. */
+  /** @brief Version 2 jobs cannot be cancelled. */
   bool cancellable = false;
 
   /** @brief Exact immutable nested status after terminal publication. */

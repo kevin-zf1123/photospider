@@ -30,8 +30,8 @@ enum class DirtyControlEvent {
  * @brief Snapshot and dispatch hints produced by one dirty control transition.
  *
  * @throws std::bad_alloc when copied snapshot storage cannot allocate.
- * @note The value owns no graph or scheduler state. Dispatch consumers decide
- *       how to act on the hints after the graph-scoped transition completes.
+ * @note The value owns no graph or execution-runtime state. Dispatch consumers
+ * decide how to act on the hints after the graph-scoped transition completes.
  */
 struct DirtyControlLaneResult {
   /** @brief Immutable-by-convention snapshot after the transition. */
@@ -84,7 +84,7 @@ class DirtyControlLane {
    * @throws GraphError for a missing node or invalid ROI.
    * @throws std::bad_alloc when planner or snapshot storage cannot allocate.
    * @note Geometry remains `PixelRect`; this layer performs no provider
-   *       conversion or scheduler submission.
+   *       conversion or execution submission.
    */
   DirtyControlLaneResult begin_dirty_source(GraphModel& graph, int node_id,
                                             DirtyDomain domain,
@@ -100,7 +100,7 @@ class DirtyControlLane {
    * @throws GraphError for a missing node or invalid ROI.
    * @throws std::bad_alloc when planner or snapshot storage cannot allocate.
    * @note The resulting snapshot may conservatively merge multiple source
-   *       facts without transferring graph ownership to a scheduler.
+   *       facts without transferring graph ownership to an execution runtime.
    */
   DirtyControlLaneResult update_dirty_source(GraphModel& graph, int node_id,
                                              DirtyDomain domain,

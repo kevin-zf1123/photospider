@@ -14,7 +14,7 @@ namespace ps {
  *
  * BenchmarkService 通过 Host frontend seam 加载临时 graph、执行 compute、
  * 读取 timing/inspection/IO telemetry，并把多次运行聚合为
- * BenchmarkResult。它不持有 backend compute、graph model 或 scheduler
+ * BenchmarkResult。它不持有 backend compute、graph model 或 execution
  * 对象，调用者负责保证传入 Host 在 BenchmarkService 生命周期内有效。
  *
  * @throws std::bad_alloc from non-destructor methods when configuration,
@@ -48,7 +48,7 @@ class BenchmarkService {
    *         malformed.
    * @note Before graph load, the zero-through-eight request is resolved once.
    *       Both future HP and RT defaults then receive the same nonzero CPU
-   *       work-stealing grant reported by the result; the Host never receives
+   *       execution grant reported by the result; the Host never receives
    *       the zero automatic-selection sentinel. Temporary graph sessions are
    *       named `__benchmark_temp` and closed after each run.
    */

@@ -115,7 +115,7 @@ void fill_entropy(std::array<unsigned char, 16>* bytes) {
 }
 
 /**
- * @brief One stable version 1 failure code/name mapping.
+ * @brief One stable version 2 failure code/name mapping.
  *
  * @throws Nothing.
  * @note Domains are part of the identity because numeric codes overlap.
@@ -123,14 +123,14 @@ void fill_entropy(std::array<unsigned char, 16>* bytes) {
 struct KnownErrorMapping {
   /** @brief Owning public failure domain. */
   OperationErrorDomain domain;
-  /** @brief Stable signed version 1 numeric code. */
+  /** @brief Stable signed version 2 numeric code. */
   std::int32_t code;
-  /** @brief Stable lowercase version 1 name. */
+  /** @brief Stable lowercase version 2 name. */
   std::string_view name;
 };
 
 /**
- * @brief Complete current version 1 protocol, graph, and daemon mappings.
+ * @brief Complete current version 2 protocol, graph, and daemon mappings.
  *
  * @throws Nothing; this is immutable compile-time metadata.
  * @note Both numeric codes and stable names are strict within their domain.
@@ -295,6 +295,33 @@ constexpr std::array<std::pair<ComputeIntent, std::string_view>, 2>
     }};  // NOLINT(whitespace/indent_namespace)
 
 /**
+ * @brief Complete protocol-v2 policy-class label table.
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note Policy class is independent from compute intent and execution route.
+ */
+constexpr std::array<std::pair<PolicyClass, std::string_view>, 2>
+    kPolicyClassLabels{{
+        {PolicyClass::Interactive, "interactive"},
+        {PolicyClass::Throughput, "throughput"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete protocol-v2 sticky policy-fault label table.
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public reasons require an atomic protocol and contract-test update.
+ */
+constexpr std::array<std::pair<PolicyFaultReason, std::string_view>, 6>
+    kPolicyFaultReasonLabels{{
+        {PolicyFaultReason::Abstained, "abstained"},
+        {PolicyFaultReason::CallbackStatus, "callback_status"},
+        {PolicyFaultReason::CallbackException, "callback_exception"},
+        {PolicyFaultReason::MalformedDecision, "malformed_decision"},
+        {PolicyFaultReason::GenerationMismatch, "generation_mismatch"},
+        {PolicyFaultReason::CandidateOutsideSnapshot,
+         "candidate_outside_snapshot"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
  * @brief Complete current dirty-domain label table.
  *
  * @throws Nothing; this is immutable compile-time metadata.
@@ -361,26 +388,26 @@ constexpr std::array<std::pair<HostDependencyTreeScope, std::string_view>, 2>
     }};  // NOLINT(whitespace/indent_namespace)
 
 /**
- * @brief Complete current scheduler-trace-action label table.
+ * @brief Complete current execution-trace-action label table.
  *
  * @throws Nothing; this is immutable compile-time metadata.
  * @note New public enum values require an atomic codec and contract-test
  * update.
  */
-constexpr std::array<std::pair<HostSchedulerTraceAction, std::string_view>, 9>
-    kSchedulerTraceActionLabels{{
-        {HostSchedulerTraceAction::AssignInitial, "assign_initial"},
-        {HostSchedulerTraceAction::Execute, "execute"},
-        {HostSchedulerTraceAction::ExecuteTile, "execute_tile"},
-        {HostSchedulerTraceAction::ExecuteDirtySource, "execute_dirty_source"},
-        {HostSchedulerTraceAction::ExecuteDirtyDownstreamNode,
+constexpr std::array<std::pair<HostExecutionTraceAction, std::string_view>, 9>
+    kExecutionTraceActionLabels{{
+        {HostExecutionTraceAction::AssignInitial, "assign_initial"},
+        {HostExecutionTraceAction::Execute, "execute"},
+        {HostExecutionTraceAction::ExecuteTile, "execute_tile"},
+        {HostExecutionTraceAction::ExecuteDirtySource, "execute_dirty_source"},
+        {HostExecutionTraceAction::ExecuteDirtyDownstreamNode,
          "execute_dirty_downstream_node"},
-        {HostSchedulerTraceAction::ExecuteDirtyDownstreamTile,
+        {HostExecutionTraceAction::ExecuteDirtyDownstreamTile,
          "execute_dirty_downstream_tile"},
-        {HostSchedulerTraceAction::SkipStaleGeneration,
+        {HostExecutionTraceAction::SkipStaleGeneration,
          "skip_stale_generation"},
-        {HostSchedulerTraceAction::RethrowException, "rethrow_exception"},
-        {HostSchedulerTraceAction::Unknown, "unknown"},
+        {HostExecutionTraceAction::RethrowException, "rethrow_exception"},
+        {HostExecutionTraceAction::Unknown, "unknown"},
     }};  // NOLINT(whitespace/indent_namespace)
 
 /**
@@ -414,7 +441,7 @@ constexpr std::array<std::pair<Device, std::string_view>, 4> kDeviceLabels{{
 }};
 
 /**
- * @brief Rejects a returned string that cannot enter a version 1 value.
+ * @brief Rejects a returned string that cannot enter a version 2 value.
  *
  * @param value Public value bytes to validate before JSON construction.
  * @param maximum_bytes Inclusive field-specific UTF-8 byte limit.
@@ -430,7 +457,7 @@ void require_bounded_text(std::string_view value, std::size_t maximum_bytes,
                           const char* field) {
   if (value.size() > maximum_bytes) {
     throw std::length_error(std::string(field) +
-                            " exceeds its version 1 UTF-8 bound");
+                            " exceeds its version 2 UTF-8 bound");
   }
   if (!valid_utf8(value)) {
     throw std::invalid_argument(std::string(field) + " is not valid UTF-8");
@@ -453,7 +480,7 @@ void require_bounded_entries(std::size_t size, std::size_t maximum_entries,
                              const char* field) {
   if (size > maximum_entries) {
     throw std::length_error(std::string(field) +
-                            " exceeds its version 1 entry bound");
+                            " exceeds its version 2 entry bound");
   }
 }
 
@@ -468,7 +495,7 @@ void require_bounded_entries(std::size_t size, std::size_t maximum_entries,
  *
  * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
  * @throws std::length_error once the proven lower bound exceeds the 16 MiB
- *         version 1 frame payload limit.
+ *         version 2 frame payload limit.
  * @note Every addition checks `bytes > limit - used` before arithmetic, so
  *       adversarial nested collection counts cannot wrap `std::size_t`.
  */
@@ -486,7 +513,7 @@ class SuccessFrameSizePreflight final {
    */
   SuccessFrameSizePreflight(std::string_view request_id, const char* value_name)
       : value_name_(value_name) {
-    add_literal(R"({"protocol_version":1,"id":)");
+    add_literal(R"({"protocol_version":2,"id":)");
     add_json_string(request_id);
     add_literal(R"(,"result":)");
   }
@@ -603,12 +630,12 @@ class SuccessFrameSizePreflight final {
    * @return Nothing.
    * @throws std::bad_alloc if the rejection diagnostic cannot be allocated.
    * @throws std::length_error if the contribution cannot fit in the remaining
-   *         version 1 payload budget.
+   *         version 2 payload budget.
    */
   void add_bytes(std::size_t bytes) {
     if (bytes > kMaximumFramePayloadBytes - used_bytes_) {
       throw std::length_error(std::string(value_name_) +
-                              " cannot fit one version 1 response frame");
+                              " cannot fit one version 2 response frame");
     }
     used_bytes_ += bytes;
   }
@@ -621,7 +648,7 @@ class SuccessFrameSizePreflight final {
 };
 
 /**
- * @brief Encodes one finite double or the version 1 null sentinel.
+ * @brief Encodes one finite double or the version 2 null sentinel.
  *
  * @param value Public floating-point value.
  * @return JSON number for finite input, otherwise JSON null.
@@ -644,7 +671,7 @@ uint64_t observation_sequence_successor(uint64_t sequence) noexcept {
 }
 
 /**
- * @brief Decodes one version 1 floating-point field.
+ * @brief Decodes one version 2 floating-point field.
  *
  * @param value JSON number or null.
  * @param output Receives a finite number or quiet NaN for null.
@@ -814,7 +841,7 @@ Json encode_space(const SpatialSnapshot& space) {
  *
  * @param value Candidate spatial object.
  * @param space Receives the copied public snapshot.
- * @return True when extents, ROI, scales, and matrices follow version 1.
+ * @return True when extents, ROI, scales, and matrices follow version 2.
  * @throws Nothing.
  */
 bool decode_space(const Json& value, SpatialSnapshot* space) {
@@ -1179,7 +1206,7 @@ Json encode_edge(const HostGraphEdgeSnapshot& edge) {
                        "edge.to_input_name");
   Json kind;
   if (!encode_enum(edge.kind, &kind)) {
-    throw std::invalid_argument("graph edge kind has no version 1 label");
+    throw std::invalid_argument("graph edge kind has no version 2 label");
   }
   return Json{{"from_node_id", edge.from_node.value},
               {"to_node_id", edge.to_node.value},
@@ -1286,6 +1313,24 @@ bool valid_utf8(std::string_view value) noexcept {
     offset += scalar_bytes;
   }
   return true;
+}
+
+/** @copydoc valid_policy_type */
+bool valid_policy_type(std::string_view value) noexcept {
+  if (value.empty() || value.size() > kPolicyTypeMaxBytes ||
+      value.front() < 'a' || value.front() > 'z') {
+    return false;
+  }
+  return std::all_of(value.begin() + 1, value.end(), [](char character) {
+    return (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9') || character == '_' ||
+           character == '.' || character == '-';
+  });
+}
+
+/** @copydoc valid_execution_type */
+bool valid_execution_type(std::string_view value) noexcept {
+  return value == "cpu" || value == "gpu_pipeline" || value == "serial_debug";
 }
 
 /** @copydoc valid_opaque_id */
@@ -1613,50 +1658,100 @@ Json encode_plugin_source_row(std::string_view key, std::string_view source) {
   return Json{{"key", std::move(encoded_key)}, {"source", std::string(source)}};
 }
 
-/** @copydoc encode_scheduler_type */
-Json encode_scheduler_type(std::string_view type) {
-  require_bounded_text(type, kShortTextMaxBytes, "scheduler type");
-  if (type.empty()) {
-    throw std::invalid_argument("scheduler type must be nonempty");
+/** @copydoc encode_policy_type */
+Json encode_policy_type(std::string_view type) {
+  if (!valid_policy_type(type)) {
+    throw std::invalid_argument("policy type is not canonical");
   }
   return Json(std::string(type));
 }
 
-/** @copydoc encode_scheduler_plugin_label */
-Json encode_scheduler_plugin_label(std::string_view label) {
-  require_bounded_text(label, kPathTextMaxBytes, "scheduler plugin label");
+/** @copydoc encode_policy_plugin_label */
+Json encode_policy_plugin_label(std::string_view label) {
+  require_bounded_text(label, kPathTextMaxBytes, "policy plugin label");
   if (label.empty()) {
-    throw std::invalid_argument("scheduler plugin label must be nonempty");
+    throw std::invalid_argument("policy plugin label must be nonempty");
   }
   return Json(std::string(label));
 }
 
-/** @copydoc encode_scheduler_description */
-Json encode_scheduler_description(std::string_view type,
-                                  std::string_view description) {
-  Json encoded_type = encode_scheduler_type(type);
-  require_bounded_text(description, kPathTextMaxBytes, "scheduler description");
+/** @copydoc encode_policy_description */
+Json encode_policy_description(std::string_view type,
+                               std::string_view description) {
+  Json encoded_type = encode_policy_type(type);
+  require_bounded_text(description, kPathTextMaxBytes, "policy description");
   return Json{{"type", std::move(encoded_type)},
               {"description", std::string(description)}};
 }
 
-/** @copydoc encode_scheduler_info */
-Json encode_scheduler_info(const IpcSessionId& session_id,
-                           const SchedulerInfoSnapshot& snapshot) {
+/** @copydoc encode_policy_info */
+Json encode_policy_info(const PolicyInfoSnapshot& snapshot) {
+  Json policy_class;
+  if (!encode_enum(snapshot.policy_class, &policy_class) ||
+      !valid_policy_type(snapshot.policy_type) ||
+      snapshot.binding_generation == 0) {
+    throw std::invalid_argument("policy info contains an invalid binding");
+  }
+  Json fault = nullptr;
+  if (snapshot.fault) {
+    Json reason;
+    const bool callback_status_reason =
+        snapshot.fault->reason == PolicyFaultReason::CallbackStatus;
+    if (!encode_enum(snapshot.fault->reason, &reason) ||
+        callback_status_reason != snapshot.fault->callback_status.has_value()) {
+      throw std::invalid_argument(
+          "policy info fault has an invalid callback-status relation");
+    }
+    require_bounded_text(snapshot.fault->message, kPathTextMaxBytes,
+                         "policy fault message");
+    Json callback_status = nullptr;
+    if (snapshot.fault->callback_status) {
+      callback_status = *snapshot.fault->callback_status;
+    }
+    fault = Json{{"reason", std::move(reason)},
+                 {"callback_status", std::move(callback_status)},
+                 {"message", snapshot.fault->message}};
+  }
+  return Json{{"policy_class", std::move(policy_class)},
+              {"policy_type", snapshot.policy_type},
+              {"binding_generation", snapshot.binding_generation},
+              {"fault", std::move(fault)}};
+}
+
+/** @copydoc encode_execution_type */
+Json encode_execution_type(std::string_view type) {
+  if (!valid_execution_type(type)) {
+    throw std::invalid_argument("execution type is not a known route");
+  }
+  return Json(std::string(type));
+}
+
+/** @copydoc encode_execution_description */
+Json encode_execution_description(std::string_view type,
+                                  std::string_view description) {
+  Json encoded_type = encode_execution_type(type);
+  require_bounded_text(description, kPathTextMaxBytes, "execution description");
+  return Json{{"type", std::move(encoded_type)},
+              {"description", std::string(description)}};
+}
+
+/** @copydoc encode_execution_info */
+Json encode_execution_info(const IpcSessionId& session_id,
+                           const ExecutionInfoSnapshot& snapshot) {
   if (!valid_opaque_id(session_id.value)) {
     throw std::invalid_argument(
-        "scheduler info has an invalid opaque session id");
+        "execution info has an invalid opaque session id");
   }
   Json intent;
   if (!encode_enum(snapshot.intent, &intent)) {
-    throw std::invalid_argument("scheduler info has an unknown intent");
+    throw std::invalid_argument("execution info has an unknown intent");
   }
-  Json scheduler_name = encode_scheduler_type(snapshot.scheduler_name);
+  Json execution_type = encode_execution_type(snapshot.execution_type);
   require_bounded_text(snapshot.stats, kPathTextMaxBytes,
-                       "scheduler statistics");
+                       "execution statistics");
   return Json{{"session_id", session_id.value},
               {"intent", std::move(intent)},
-              {"scheduler_name", std::move(scheduler_name)},
+              {"execution_type", std::move(execution_type)},
               {"stats", snapshot.stats}};
 }
 
@@ -1777,67 +1872,67 @@ Json encode_compute_event_batch(const IpcSessionId& session_id,
               {"dropped_count", batch.dropped_count}};
 }
 
-/** @copydoc encode_scheduler_trace_page */
-Json encode_scheduler_trace_page(const IpcSessionId& session_id,
+/** @copydoc encode_execution_trace_page */
+Json encode_execution_trace_page(const IpcSessionId& session_id,
                                  uint64_t after_sequence,
-                                 const SchedulerTracePage& page,
+                                 const ExecutionTracePage& page,
                                  std::size_t requested_limit) {
   if (!valid_opaque_id(session_id.value)) {
     throw std::invalid_argument(
-        "scheduler-trace page has an invalid opaque session id");
+        "execution-trace page has an invalid opaque session id");
   }
-  if (requested_limit < kSchedulerTraceMinLimit ||
-      requested_limit > kSchedulerTraceMaxLimit) {
+  if (requested_limit < kExecutionTraceMinLimit ||
+      requested_limit > kExecutionTraceMaxLimit) {
     throw std::invalid_argument(
-        "scheduler-trace page has an invalid requested limit");
+        "execution-trace page has an invalid requested limit");
   }
-  require_bounded_entries(page.events.size(), kSchedulerTraceMaxLimit,
-                          "scheduler-trace page.events");
+  require_bounded_entries(page.events.size(), kExecutionTraceMaxLimit,
+                          "execution-trace page.events");
   if (page.events.size() > requested_limit) {
     throw std::invalid_argument(
-        "scheduler-trace page exceeds the requested limit");
+        "execution-trace page exceeds the requested limit");
   }
 
   uint64_t previous_sequence = after_sequence;
-  for (const SchedulerTraceEventSnapshot& event : page.events) {
+  for (const ExecutionTraceEventSnapshot& event : page.events) {
     Json action;
     if (event.sequence == 0 ||
         event.sequence == kObservationSequenceExhausted ||
         event.sequence <= previous_sequence || event.node.value < -1 ||
         event.worker_id < -1 || !encode_enum(event.action, &action)) {
       throw std::invalid_argument(
-          "scheduler-trace page contains an invalid event");
+          "execution-trace page contains an invalid event");
     }
     previous_sequence = event.sequence;
   }
   if (page.has_more &&
       (page.events.empty() || page.events.size() != requested_limit)) {
     throw std::invalid_argument(
-        "scheduler-trace page has inconsistent has_more metadata");
+        "execution-trace page has inconsistent has_more metadata");
   }
   if (page.next_sequence == kObservationSequenceExhausted) {
     if (page.has_more ||
         (!page.events.empty() &&
          page.events.back().sequence != kObservationSequenceExhausted - 1)) {
       throw std::invalid_argument(
-          "scheduler-trace exhausted sentinel is inconsistent");
+          "execution-trace exhausted sentinel is inconsistent");
     }
   } else if (!page.events.empty()) {
     if (page.next_sequence != page.events.back().sequence) {
       throw std::invalid_argument(
-          "scheduler-trace next_sequence is not its last event");
+          "execution-trace next_sequence is not its last event");
     }
   } else if (page.next_sequence != after_sequence || page.has_more) {
     throw std::invalid_argument(
-        "empty scheduler-trace page did not preserve its cursor");
+        "empty execution-trace page did not preserve its cursor");
   }
 
   Json events = Json::array();
-  for (const SchedulerTraceEventSnapshot& event : page.events) {
+  for (const ExecutionTraceEventSnapshot& event : page.events) {
     Json action;
     if (!encode_enum(event.action, &action)) {
       throw std::invalid_argument(
-          "scheduler-trace page contains an unknown action");
+          "execution-trace page contains an unknown action");
     }
     events.push_back(Json{{"sequence", event.sequence},
                           {"epoch", event.epoch},
@@ -1957,6 +2052,26 @@ bool decode_enum(const Json& value, ComputeIntent* output) noexcept {
   return decode_enum_from_table(value, kComputeIntentLabels, output);
 }
 
+/** @copydoc encode_enum(PolicyClass,Json*) */
+bool encode_enum(PolicyClass value, Json* output) {
+  return encode_enum_from_table(value, kPolicyClassLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,PolicyClass*) */
+bool decode_enum(const Json& value, PolicyClass* output) noexcept {
+  return decode_enum_from_table(value, kPolicyClassLabels, output);
+}
+
+/** @copydoc encode_enum(PolicyFaultReason,Json*) */
+bool encode_enum(PolicyFaultReason value, Json* output) {
+  return encode_enum_from_table(value, kPolicyFaultReasonLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,PolicyFaultReason*) */
+bool decode_enum(const Json& value, PolicyFaultReason* output) noexcept {
+  return decode_enum_from_table(value, kPolicyFaultReasonLabels, output);
+}
+
 /** @copydoc encode_enum(DirtyDomain,Json*) */
 bool encode_enum(DirtyDomain value, Json* output) {
   return encode_enum_from_table(value, kDirtyDomainLabels, output);
@@ -2008,14 +2123,14 @@ bool decode_enum(const Json& value, HostDependencyTreeScope* output) noexcept {
   return decode_enum_from_table(value, kDependencyTreeScopeLabels, output);
 }
 
-/** @copydoc encode_enum(HostSchedulerTraceAction,Json*) */
-bool encode_enum(HostSchedulerTraceAction value, Json* output) {
-  return encode_enum_from_table(value, kSchedulerTraceActionLabels, output);
+/** @copydoc encode_enum(HostExecutionTraceAction,Json*) */
+bool encode_enum(HostExecutionTraceAction value, Json* output) {
+  return encode_enum_from_table(value, kExecutionTraceActionLabels, output);
 }
 
-/** @copydoc decode_enum(const Json&,HostSchedulerTraceAction*) */
-bool decode_enum(const Json& value, HostSchedulerTraceAction* output) noexcept {
-  return decode_enum_from_table(value, kSchedulerTraceActionLabels, output);
+/** @copydoc decode_enum(const Json&,HostExecutionTraceAction*) */
+bool decode_enum(const Json& value, HostExecutionTraceAction* output) noexcept {
+  return decode_enum_from_table(value, kExecutionTraceActionLabels, output);
 }
 
 /** @copydoc encode_enum(DataType,Json*) */
@@ -2320,13 +2435,13 @@ bool decode_node(const Json& value, NodeInspectionView* node,
        parameter != value["parameters"].end(); ++parameter) {
     if (parameter.key().size() > kShortTextMaxBytes ||
         !valid_utf8(parameter.key())) {
-      *message = "node parameter key exceeds the version 1 bound";
+      *message = "node parameter key exceeds the version 2 bound";
       return false;
     }
     std::string parameter_value;
     if (!decode_bounded_string(parameter.value(), kLargeTextMaxBytes,
                                &parameter_value)) {
-      *message = "node parameter value exceeds the version 1 bound";
+      *message = "node parameter value exceeds the version 2 bound";
       return false;
     }
     decoded.parameters.emplace(parameter.key(), std::move(parameter_value));
@@ -2337,7 +2452,7 @@ bool decode_node(const Json& value, NodeInspectionView* node,
     std::string source_label;
     if (!decode_bounded_string(value["source_label"], kLargeTextMaxBytes,
                                &source_label)) {
-      *message = "node source_label exceeds the version 1 bound";
+      *message = "node source_label exceeds the version 2 bound";
       return false;
     }
     decoded.source_label = std::move(source_label);
@@ -2432,7 +2547,7 @@ Json encode_dependency_tree(const IpcSessionId& session_id,
   }
   Json scope;
   if (!encode_enum(tree.scope, &scope)) {
-    throw std::invalid_argument("dependency-tree scope has no version 1 label");
+    throw std::invalid_argument("dependency-tree scope has no version 2 label");
   }
   Json roots = Json::array();
   for (NodeId node : tree.root_nodes) {
@@ -2480,7 +2595,7 @@ bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,
   if (!decode_opaque_id(value["session_id"], &session_id) ||
       !valid_bounded_array(value["root_node_ids"], kGeneralPageMaxEntries) ||
       !valid_bounded_array(value["entries"], kGeneralPageMaxEntries)) {
-    *message = "dependency tree identity or arrays exceed version 1 bounds";
+    *message = "dependency tree identity or arrays exceed version 2 bounds";
     return false;
   }
   HostDependencyTreeSnapshot decoded;

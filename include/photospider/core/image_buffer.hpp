@@ -12,7 +12,7 @@
  * @brief Current image payload, tile-view, and minimal CPU primitive contracts.
  *
  * These values describe image memory, device location, and borrowed tile
- * regions without exposing graph, compute-service, scheduler, adapter, OpenCV,
+ * regions without exposing Graph, compute-service, executor, adapter, OpenCV,
  * or YAML implementation ownership. They do not define a generic graph value
  * or N-dimensional tensor model.
  */

@@ -1,62 +1,96 @@
-// InteractionService implementation
-// Non-trivial methods that require additional includes
-
 #include "runtime/interaction.hpp"
 
-#include <set>
+#include <cstddef>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "scheduler/scheduler_factory.hpp"
-#include "scheduler/scheduler_plugin_loader.hpp"
+#include "photospider/host/host.hpp"
 
 namespace ps {
 
-std::vector<std::string> InteractionService::cmd_scheduler_available_types()
-    const {  // NOLINT(whitespace/indent_namespace)
-  std::set<std::string> types_set;
+namespace {
 
-  // Built-in types from SchedulerFactory
-  for (const auto& t : SchedulerFactory::supported_types()) {
-    types_set.insert(t);
-  }
+/** @brief Local shorthand for lists returned by discovery commands. */
+using StringList = std::vector<std::string>;
 
-  // Plugin-provided types from SchedulerPluginLoader
-  auto& loader = SchedulerPluginLoader::instance();
-  for (const auto& t : loader.get_registered_types()) {
-    types_set.insert(t);
-  }
+}  // namespace
 
-  return std::vector<std::string>(types_set.begin(), types_set.end());
+/** @copydoc InteractionService::cmd_policy_available_types */
+StringList InteractionService::cmd_policy_available_types() const {
+  return kernel_.policy_available_types();
 }
 
-std::string InteractionService::cmd_scheduler_description(
+/** @copydoc InteractionService::cmd_policy_description */
+std::string InteractionService::cmd_policy_description(
     const std::string& type_name) const {
-  // First check built-in
-  if (SchedulerFactory::is_supported(type_name)) {
-    return SchedulerFactory::description(type_name);
-  }
-
-  // Then check plugin loader
-  auto& loader = SchedulerPluginLoader::instance();
-  return loader.get_description(type_name);
+  return kernel_.policy_description(type_name);
 }
 
-size_t InteractionService::cmd_scheduler_scan(
+/** @copydoc InteractionService::cmd_policy_scan */
+std::size_t InteractionService::cmd_policy_scan(
     const std::vector<std::string>& dirs) {
-  auto& loader = SchedulerPluginLoader::instance();
-  return loader.scan_and_load(dirs);
+  return kernel_.policy_scan(dirs);
 }
 
-bool InteractionService::cmd_scheduler_load(const std::string& path) {
-  auto& loader = SchedulerPluginLoader::instance();
-  return loader.load_plugin(path);
+/** @copydoc InteractionService::cmd_policy_load */
+void InteractionService::cmd_policy_load(const std::string& path) {
+  kernel_.policy_load(path);
 }
 
-std::vector<std::string> InteractionService::cmd_scheduler_loaded_plugins()
-    const {  // NOLINT(whitespace/indent_namespace)
-  auto& loader = SchedulerPluginLoader::instance();
-  return loader.list_loaded_plugins();
+/** @copydoc InteractionService::cmd_policy_loaded_plugins */
+std::vector<std::string> InteractionService::cmd_policy_loaded_plugins() const {
+  return kernel_.policy_loaded_plugins();
+}
+
+/** @copydoc InteractionService::cmd_configure_policy_defaults */
+void InteractionService::cmd_configure_policy_defaults(
+    const HostPolicyConfig& config) {
+  kernel_.configure_policy_defaults(config);
+}
+
+/** @copydoc InteractionService::cmd_policy_info */
+PolicyInfoSnapshot InteractionService::cmd_policy_info(
+    PolicyClass policy_class) const {
+  return kernel_.policy_info(policy_class);
+}
+
+/** @copydoc InteractionService::cmd_replace_policy */
+void InteractionService::cmd_replace_policy(PolicyClass policy_class,
+                                            const std::string& type) {
+  kernel_.replace_policy(policy_class, type);
+}
+
+/** @copydoc InteractionService::cmd_execution_available_types */
+StringList InteractionService::cmd_execution_available_types() const {
+  return kernel_.execution_available_types();
+}
+
+/** @copydoc InteractionService::cmd_execution_description */
+std::string InteractionService::cmd_execution_description(
+    const std::string& type_name) const {
+  return kernel_.execution_description(type_name);
+}
+
+/** @copydoc InteractionService::cmd_configure_execution_defaults */
+void InteractionService::cmd_configure_execution_defaults(
+    const Kernel::ExecutionConfig& config) {
+  kernel_.set_execution_config(config);
+}
+
+/** @copydoc InteractionService::cmd_execution_info */
+std::optional<std::pair<std::string, std::string>>
+InteractionService::cmd_execution_info(const std::string& graph,
+                                       ComputeIntent intent) {
+  return kernel_.get_execution_info(graph, intent);
+}
+
+/** @copydoc InteractionService::cmd_replace_execution */
+bool InteractionService::cmd_replace_execution(const std::string& graph,
+                                               ComputeIntent intent,
+                                               const std::string& type) {
+  return kernel_.replace_execution(graph, intent, type);
 }
 
 }  // namespace ps

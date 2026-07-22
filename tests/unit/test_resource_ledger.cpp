@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "runtime/resource_ledger.hpp"
-#include "scheduler/scheduler_worker_limits.hpp"
 
 namespace ps {
 namespace {
@@ -185,23 +184,6 @@ ResourceVector one_dimension(std::size_t dimension, std::uint64_t value) {
       throw std::out_of_range("invalid test resource dimension");
   }
   return resources;
-}
-
-/**
- * @brief Verifies bounded automatic worker resolution remains independent.
- * @throws Nothing when pure planning matches its fixed request contract.
- */
-TEST(SchedulerWorkerCountResolution, AutomaticAndExplicitRequestsStayBounded) {
-  EXPECT_EQ(resolve_scheduler_worker_count(0U, 0U), 1U);
-  EXPECT_EQ(resolve_scheduler_worker_count(0U, 1U), 1U);
-  EXPECT_EQ(
-      resolve_scheduler_worker_count(0U, kSchedulerWorkerRequestMax + 17U),
-      kSchedulerWorkerRequestMax);
-  EXPECT_EQ(resolve_scheduler_worker_count(kSchedulerWorkerRequestMax, 1U),
-            kSchedulerWorkerRequestMax);
-  EXPECT_THROW(
-      (void)resolve_scheduler_worker_count(kSchedulerWorkerRequestMax + 1U, 1U),
-      std::invalid_argument);
 }
 
 /**

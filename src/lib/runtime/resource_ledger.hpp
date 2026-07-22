@@ -22,7 +22,7 @@ namespace ps {
  * @note This value is a request/snapshot, not an authority-bearing token.
  */
 struct ResourceVector final {
-  /** @brief Concurrent CPU callback or conservative scheduler-owner slots. */
+  /** @brief Concurrent execution callback slots. */
   std::uint64_t cpu_slots = 0U;
 
   /** @brief Host bytes retained while admitted callbacks may be in flight. */

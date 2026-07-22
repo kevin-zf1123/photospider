@@ -39,7 +39,7 @@ namespace ps::ipc::internal {
 namespace {
 
 /**
- * @brief Maximum number of active connection workers in version 1.
+ * @brief Maximum number of active connection workers in version 2.
  *
  * @throws Nothing.
  * @note Excess accepted connections are closed without spawning a thread.
@@ -1242,7 +1242,7 @@ std::string default_socket_path() {
     const std::filesystem::path root(xdg_runtime);
     if (root.is_absolute() && protected_directory(root)) {
       const std::string candidate =
-          (root / "photospider" / "photospiderd-v1.sock").string();
+          (root / "photospider" / "photospiderd-v2.sock").string();
       if (socket_path_fits(candidate)) {
         return candidate;
       }
@@ -1251,7 +1251,7 @@ std::string default_socket_path() {
   const std::filesystem::path root =
       std::filesystem::path("/tmp") /
       ("photospider-" + std::to_string(::geteuid()));
-  const std::string fallback = (root / "photospiderd-v1.sock").string();
+  const std::string fallback = (root / "photospiderd-v2.sock").string();
   if (!socket_path_fits(fallback)) {
     throw std::runtime_error("default daemon socket path exceeds sun_path");
   }

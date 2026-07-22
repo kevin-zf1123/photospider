@@ -67,7 +67,7 @@ std::string node_context(const GraphModel& graph, int node_id) {
  * @param detail Original exception detail.
  * @return Exception pointer carrying GraphErrc::ComputeError.
  * @throws std::bad_alloc if the wrapped error string cannot be allocated.
- * @note Worker tasks use this helper before rethrowing so scheduler exception
+ * @note Worker tasks use this helper before rethrowing so runtime exception
  * capture receives a stable, graph-aware error category.
  */
 std::exception_ptr compute_failure(const GraphModel& graph, int node_id,
@@ -218,7 +218,7 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
  * @throws GraphError directly when pre-entry cancellation is observed, or
  * wrapping other standard and unknown failures, including provider exceptions
  * derived from std::exception.
- * @note Resource exhaustion retains its type for scheduler/future transport;
+ * @note Resource exhaustion retains its type for runtime/future transport;
  * cancellation occurs before node lookup and therefore intentionally has no
  * node-context wrapper. All later recoverable failures retain the existing
  * node-context diagnostic contract.
@@ -250,7 +250,7 @@ void NodeTaskRunner::run_node(int node_idx) {
  * exceptions derived from std::exception.
  * @note Cancellation occurs before task lookup and intentionally has no task
  * context. Tile tasks execute directly and observe every provider tile; node
- * and monolithic tasks delegate to run_node(), while scheduler transport
+ * and monolithic tasks delegate to run_node(), while execution transport
  * remains outside this runner.
  */
 void NodeTaskRunner::run_task(int task_id) {
@@ -536,7 +536,7 @@ TiledExecutionConfig NodeTaskRunner::tiled_config_for(
   }
   tiled_config.on_tile = [this, node_id = target_node.id](const PixelRect&) {
     observe_runner_cancellation(run_lease_);
-    task_runtime_.log_event(SchedulerTraceAction::ExecuteTile, node_id);
+    task_runtime_.log_event(ExecutionTraceAction::ExecuteTile, node_id);
   };
   return tiled_config;
 }

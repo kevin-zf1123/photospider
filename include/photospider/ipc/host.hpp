@@ -11,7 +11,7 @@
  * @brief Installed complete IPC-backed Photospider Host factory.
  *
  * The factory exposes the existing frontend Host contract over the protected
- * local version 1 daemon protocol. Transport, polling workers, artifact files,
+ * local version 2 daemon protocol. Transport, polling workers, artifact files,
  * and JSON/socket implementation details remain private to the client product.
  */
 
@@ -21,7 +21,7 @@ namespace ps::ipc {
  * @brief Creates a complete Host backed by one local daemon socket path.
  *
  * Every current non-destructor `Host` virtual delegates to the corresponding
- * typed version 1 Client primitive. Ordinary calls use independent short-lived
+ * typed version 2 Client primitive. Ordinary calls use independent short-lived
  * connections. Compute calls compose daemon jobs through submit, polling,
  * terminal result, and best-effort release without automatic resubmission.
  * Graph load/reload/save calls resolve nonempty relative Host paths against

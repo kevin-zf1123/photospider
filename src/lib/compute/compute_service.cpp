@@ -52,7 +52,7 @@ namespace ps {
  * @brief Constructs the internal compute orchestrator from borrowed services.
  *
  * @param traversal Traversal service used by planning and dirty execution.
- * @param cache Cache service used by sequential and scheduler HP paths.
+ * @param cache Cache service used by sequential and queued HP paths.
  * @param events Event sink used by compute and dirty telemetry.
  * @param execution_service Explicit process CPU execution owner.
  * @throws Nothing directly.
@@ -142,7 +142,7 @@ ComputeIntent planning_intent_for_request(
  * @brief Builds a planning-layer request from a ComputeService request.
  *
  * @param request Service request carrying target node, intent, and dirty ROI.
- * @param use_parallel_executor Whether the caller selected scheduler-backed
+ * @param use_parallel_executor Whether the caller selected route-backed
  * execution for this service call.
  * @return Narrow compute::ComputeRequest used by task graph planning.
  * @throws Nothing directly.
@@ -553,7 +553,7 @@ void commit_real_time_if_requested(const compute::ComputeRunLease& run_lease,
  * this wrapper.
  * @param request_cancellation Request coordinator that attaches private
  * cancellation authority before admission.
- * @param execute Sequential, full scheduler, or standalone dirty HP callback.
+ * @param execute Sequential, full route, or standalone dirty HP callback.
  * @param commit Commit-policy callback invoked only after CommitPending.
  * @return Mutable target output returned by execute.
  * @throws Rethrows the exact callback exception after publishing Run failure.
@@ -715,7 +715,7 @@ NodeOutput& execute_request_owned_realtime_runs(compute::RunGroup& run_group,
  * @throws GraphError when a cycle, missing dependency, missing operation, disk
  * cache failure, compute failure, or accepted cancellation occurs.
  * @note This method is used only by the sequential HP path and HP callbacks
- * that explicitly select sequential execution. Scheduler-backed dispatch does
+ * that explicitly select sequential execution. Route-backed dispatch does
  * not call this method as a compatibility fallback. The resolved input-size
  * hint retains its existing Graph state behavior, while runtime parameters and
  * other operation-facing state remain request-local. Observations surround
@@ -861,7 +861,7 @@ NodeOutput& ComputeService::compute_internal(
  * @param graph Graph whose HP dirty state and cache are updated.
  * @param proxy_graph RT proxy graph that may receive GlobalHighPrecision
  * downsample output after HP commit.
- * @param strategy Execution strategy that may supply a scheduler runtime.
+ * @param strategy Execution strategy that may supply route observation.
  * @param request Request carrying target, cache, telemetry, and dirty ROI.
  * @param sibling_commit_gate Optional RealTimeUpdate gate that delays HP graph
  * commit until RT proxy commit succeeds.
@@ -873,7 +873,7 @@ NodeOutput& ComputeService::compute_internal(
  * @return Mutable target HP output stored in the graph.
  * @throws std::bad_alloc unchanged when dirty planning, task, cache, or output
  * storage exhausts memory.
- * @throws GraphError from dirty planning, execution, scheduler dispatch, or
+ * @throws GraphError from dirty planning, execution-service dispatch, or
  * target output validation; std::bad_optional_access if dirty_roi is missing
  * before coordinator validation.
  * @note This method intentionally contains no node-level dirty execution logic;
@@ -891,22 +891,12 @@ NodeOutput& ComputeService::compute_high_precision_update(
     compute::ComputeRun* run, const compute::ComputeRunLease* run_lease) {
   compute::ExecutionService* cpu_service = nullptr;
   if (strategy.use_parallel_executor) {
-    if (!strategy.runtime) {
+    if (!strategy.runtime || !run || !execution_service_.is_configured()) {
       throw GraphError(GraphErrc::ComputeError,
-                       "Parallel HP dirty compute requires a runtime.");
+                       "Parallel HP dirty compute requires runtime, Run, and "
+                       "configured ExecutionService.");
     }
-    const GraphRuntime::SchedulerExecutionRoute route =
-        strategy.runtime->get_scheduler_execution_route(
-            ComputeIntent::GlobalHighPrecision);
-    if (route.domain ==
-        GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService) {
-      if (!run || !execution_service_.is_configured()) {
-        throw GraphError(
-            GraphErrc::ComputeError,
-            "HP process-service route requires a configured service and Run.");
-      }
-      cpu_service = &execution_service_;
-    }
+    cpu_service = &execution_service_;
   }
   compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
   return executor.execute(
@@ -921,7 +911,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
  *
  * @param graph Graph used for topology, parameters, and HP fallback output.
  * @param proxy_graph RT proxy graph whose low-resolution state is updated.
- * @param strategy Execution strategy that may supply a scheduler runtime.
+ * @param strategy Execution strategy that may supply route observation.
  * @param request Request carrying target, cache, telemetry, and dirty ROI.
  * @param stabilized_parameters Optional immutable connected-parameter snapshot.
  * @param node_synchronization Optional per-node critical sections shared with
@@ -932,7 +922,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
  * @return Mutable target RT output stored in the proxy graph.
  * @throws std::bad_alloc unchanged when dirty planning, task, proxy, or output
  * storage exhausts memory.
- * @throws GraphError from dirty planning, execution, scheduler dispatch, or
+ * @throws GraphError from dirty planning, execution-service dispatch, or
  * target output validation; std::bad_optional_access if dirty_roi is missing
  * before coordinator validation.
  * @note RT dirty output stays outside GraphModel and does not become reusable
@@ -950,22 +940,12 @@ NodeOutput& ComputeService::compute_real_time_update(
     compute::ComputeRun* run, const compute::ComputeRunLease* run_lease) {
   compute::ExecutionService* cpu_service = nullptr;
   if (strategy.use_parallel_executor) {
-    if (!strategy.runtime) {
+    if (!strategy.runtime || !run || !execution_service_.is_configured()) {
       throw GraphError(GraphErrc::ComputeError,
-                       "Parallel RT dirty compute requires a runtime.");
+                       "Parallel RT dirty compute requires runtime, Run, and "
+                       "configured ExecutionService.");
     }
-    const GraphRuntime::SchedulerExecutionRoute route =
-        strategy.runtime->get_scheduler_execution_route(
-            ComputeIntent::RealTimeUpdate);
-    if (route.domain ==
-        GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService) {
-      if (!run || !execution_service_.is_configured()) {
-        throw GraphError(
-            GraphErrc::ComputeError,
-            "RT process-service route requires a configured service and Run.");
-      }
-      cpu_service = &execution_service_;
-    }
+    cpu_service = &execution_service_;
   }
   compute::RealTimeDirtyExecutor executor(traversal_, events_);
   return executor.execute(
@@ -1008,8 +988,8 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
  * @brief Executes one full execution-bound HP request through its Run.
  *
  * @param graph Graph being computed.
- * @param runtime Graph runtime that publishes the HP execution binding:
- * ownerless process CPU service or an owned legacy scheduler.
+ * @param runtime Graph runtime that publishes the HP route binding and receives
+ * execution observations.
  * @param request Full HP target, cache, and telemetry options.
  * @param run Request observer for leased plan, runner, callback, temporary
  * result, exception, and lifecycle state.
@@ -1018,12 +998,12 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
  * @return Mutable target HP output stored in the graph.
  * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
  * cache, telemetry, Run storage, or result storage exhausts memory.
- * @throws GraphError from scheduler lookup, task dispatch, cache access, or
+ * @throws GraphError from route lookup, task dispatch, cache access, or
  * missing target output, including accepted cancellation.
- * @note Built-in CPU planning routes ready submissions through the injected
- * ExecutionService; plugin, GPU, and serial planning retain the Graph-owned
- * scheduler path. Both routes synchronously settle while full-HP callbacks own
- * Run leases and composite identity without borrowed TaskExecutor pointers.
+ * @note Every supported physical route uses the injected fixed process
+ * ExecutionService. Dispatch settles synchronously while full-HP callbacks own
+ * Run leases and composite identity without borrowed ExecutionTaskExecutor
+ * pointers.
  * Cancellation observed before the matching boundaries suppresses dependent
  * release and final cache commit; built-in CPU also removes only the matching
  * Run's queued entries after accepted cancellation.
@@ -1032,17 +1012,11 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(
     GraphModel& graph, GraphRuntime& runtime, const Request& request,
     compute::ComputeRun& run, const compute::ComputeRunLease& run_lease) {
   compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
-  const GraphRuntime::SchedulerExecutionRoute execution_route =
-      runtime.get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
-  if (execution_route.domain ==
-      GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService) {
-    return executor.execute(graph, execution_service_, runtime,
-                            make_dispatch_request(request), run, run_lease);
-  }
-  IScheduler& scheduler = compute::ensure_running_scheduler(
-      runtime, ComputeIntent::GlobalHighPrecision);
-  return executor.execute(graph, scheduler, make_dispatch_request(request), run,
-                          run_lease);
+  const GraphRuntime::ExecutionRouteBinding route =
+      runtime.execution_route(ComputeIntent::GlobalHighPrecision);
+  return executor.execute(graph, execution_service_, runtime,
+                          route.execution_type, make_dispatch_request(request),
+                          run, run_lease);
 }
 
 /**
@@ -1050,14 +1024,14 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(
  * domain boundary.
  *
  * @param graph Graph being computed.
- * @param runtime Graph runtime that publishes each intent's execution binding:
- * ownerless process CPU service or an owned legacy scheduler.
+ * @param runtime Graph runtime that publishes each intent's route binding and
+ * receives execution observations.
  * @param request Service request carrying target, cache, telemetry, intent,
  * dirty ROI, graph identity, and QoS.
  * @return Mutable target output selected by the request.
  * @throws std::bad_alloc unchanged when Run construction, planning, task
  * dispatch, operation, cache, telemetry, or result storage exhausts memory.
- * @throws GraphError from scheduler lookup, planning, task dispatch, dirty
+ * @throws GraphError from route lookup, planning, task dispatch, dirty
  * execution, cache access, missing target output, or private cancellation.
  * @note Every non-realtime HP request creates exactly one Run before planning.
  * RealTimeUpdate creates one request-owned RunGroup with separate HP and RT
@@ -1110,7 +1084,7 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
  * @brief Coordinates intent semantics and binds ComputeService callbacks.
  *
  * @param graph Graph being computed.
- * @param strategy Runtime and scheduler-backed execution policy.
+ * @param strategy Runtime and route-backed execution policy.
  * @param request Intent-aware request carrying target, cache, telemetry, and
  * optional dirty ROI.
  * @param hp_run Request-owned HP Run. Realtime requests supply their HP child.
@@ -1121,9 +1095,9 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
  * @param rt_run_lease Borrowed lifecycle lease for RT execution, sibling
  * cancellation, and commit coordination, or null for HP-only requests.
  * @return Mutable output selected by IntentUpdateCoordinator.
- * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
+ * @throws std::bad_alloc unchanged when callback, dispatch, dirty, cache, or
  * output storage exhausts memory.
- * @throws GraphError from intent validation, callback execution, scheduler
+ * @throws GraphError from intent validation, callback execution, route
  * lookup, missing target output, or accepted child cancellation.
  * @note The coordinator owns HP/RT dual-path semantics; ComputeService only
  * supplies the concrete execution callbacks. Explicit GlobalHighPrecision
@@ -1155,58 +1129,26 @@ NodeOutput& ComputeService::compute_intent_update_impl(
                      "RealTimeUpdate requires separate HP and RT child Runs.");
   }
 
-  IScheduler* hp_scheduler = nullptr;
-  IScheduler* rt_scheduler = nullptr;
-  bool hp_uses_process_service = false;
-  bool rt_uses_process_service = false;
+  std::string hp_execution_type = "cpu";
+  std::string rt_execution_type = "cpu";
+  bool uses_process_service = false;
   bool can_submit_concurrently = false;
   if (strategy.use_parallel_executor) {
-    if (!strategy.runtime) {
+    if (!strategy.runtime || !execution_service_.is_configured()) {
       throw GraphError(GraphErrc::ComputeError,
-                       "Parallel intent compute requires a runtime.");
+                       "Parallel intent compute requires runtime and a "
+                       "configured ExecutionService.");
     }
-
-    const GraphRuntime::SchedulerExecutionRoute hp_route =
-        strategy.runtime->get_scheduler_execution_route(
-            ComputeIntent::GlobalHighPrecision);
-    hp_uses_process_service =
-        hp_route.domain ==
-        GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService;
-    if (hp_uses_process_service) {
-      if (!execution_service_.is_configured()) {
-        throw GraphError(
-            GraphErrc::ComputeError,
-            "HP process-service route requires a configured service.");
-      }
-    } else {
-      hp_scheduler = &compute::ensure_running_scheduler(
-          *strategy.runtime, ComputeIntent::GlobalHighPrecision);
-    }
-
+    uses_process_service = true;
+    hp_execution_type =
+        strategy.runtime->execution_route(ComputeIntent::GlobalHighPrecision)
+            .execution_type;
     if (intent == ComputeIntent::RealTimeUpdate) {
-      const GraphRuntime::SchedulerExecutionRoute rt_route =
-          strategy.runtime->get_scheduler_execution_route(
-              ComputeIntent::RealTimeUpdate);
-      rt_uses_process_service =
-          rt_route.domain ==
-          GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService;
-      if (rt_uses_process_service) {
-        if (!execution_service_.is_configured()) {
-          throw GraphError(
-              GraphErrc::ComputeError,
-              "RT process-service route requires a configured service.");
-        }
-      } else {
-        rt_scheduler = &compute::ensure_running_scheduler(
-            *strategy.runtime, ComputeIntent::RealTimeUpdate);
-      }
-      const bool hp_available =
-          hp_uses_process_service ||
-          (hp_scheduler != nullptr && hp_scheduler->is_running());
-      const bool rt_available =
-          rt_uses_process_service ||
-          (rt_scheduler != nullptr && rt_scheduler->is_running());
-      can_submit_concurrently = hp_available && rt_available;
+      rt_execution_type =
+          strategy.runtime->execution_route(ComputeIntent::RealTimeUpdate)
+              .execution_type;
+      can_submit_concurrently = hp_execution_type != "serial_debug" &&
+                                rt_execution_type != "serial_debug";
     }
   }
 
@@ -1215,14 +1157,12 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization;
   if (request.dirty_roi && request.dirty_roi->width > 0 &&
       request.dirty_roi->height > 0) {
-    SchedulerTaskRuntime* preflight_runtime = nullptr;
+    ExecutionTaskRuntime* preflight_runtime = nullptr;
     compute::ExecutionService* preflight_service = nullptr;
-    SchedulerHostContext* preflight_host = nullptr;
-    if (hp_uses_process_service) {
+    ExecutionHostContext* preflight_host = nullptr;
+    if (uses_process_service) {
       preflight_service = &execution_service_;
       preflight_host = strategy.runtime;
-    } else if (strategy.use_parallel_executor) {
-      preflight_runtime = hp_scheduler;
     }
     uint64_t request_generation = 0;
     uint64_t topology_generation = 0;
@@ -1239,7 +1179,7 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     stabilized_parameters = compute::stabilize_connected_dirty_parameters(
         graph, traversal_, request.node_id, request_generation,
         topology_generation, preflight_runtime, preflight_service,
-        preflight_host, hp_run, hp_run_lease);
+        preflight_host, hp_run, hp_run_lease, hp_execution_type);
   }
 
   compute::RealtimeProxyGraph& rt_proxy_graph =
@@ -1302,7 +1242,7 @@ NodeOutput& ComputeService::compute_intent_update_impl(
               make_dirty_update_request(
                   silent_request, true, sibling_commit_gate,
                   stabilized_parameters, node_synchronization),
-              hp_run, hp_uses_process_service ? &execution_service_ : nullptr,
+              hp_run, uses_process_service ? &execution_service_ : nullptr,
               hp_run_lease);
         },
         [&](const compute::ComputeRunLease& commit_lease) {
@@ -1360,10 +1300,10 @@ NodeOutput& ComputeService::compute_intent_update_impl(
  * or output storage exhausts memory.
  * @throws GraphError from intent validation or execution.
  * @note Dirty HP and RT callbacks still use the dirty executors, but run node
- * work inline because no scheduler runtime is available. The realtime path
- * receives separate HP and RT child Runs without a mixed-domain owner.
+ * work inline because no queued execution runtime is available. The realtime
+ * path receives separate HP and RT child Runs without a mixed-domain owner.
  * Cooperative observations still bracket inline providers and commit even
- * though no scheduler queue exists.
+ * though no execution queue exists.
  */
 NodeOutput& ComputeService::compute_with_intent_impl(
     GraphModel& graph, const Request& request, compute::ComputeRun* hp_run,

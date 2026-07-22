@@ -259,7 +259,7 @@ class RoiAccumulator {
  *
  * @throws std::bad_alloc when the ROI map or pending queue grows.
  * @note The frontier stores node ids and value-type PixelRect records only; it
- * never stores GraphModel pointers or scheduler/runtime state.
+ * never stores GraphModel pointers or execution-runtime state.
  */
 class RoiFrontier {
  public:

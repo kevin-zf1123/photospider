@@ -58,7 +58,7 @@ struct BenchmarkResult {
   std::string benchmark_name;  // 测试会话名称, e.g., "small_square_blur"
   std::string op_name;  // 核心测试的操作, e.g., "image_process:gaussian_blur"
   int width = 0, height = 0;
-  /** @brief Resolved scheduler worker grant used by this benchmark run. */
+  /** @brief Resolved process execution-worker count for this benchmark run. */
   int num_threads = 1;
 
   // --- 原始数据 ---
@@ -68,7 +68,9 @@ struct BenchmarkResult {
   double total_duration_ms = 0.0;          // 从调用 compute 到返回的总时间
   double typical_execution_time_ms = 0.0;  // 典型计算时间 (去除异常值后)
   double io_duration_ms = 0.0;             // (未来填充) 磁盘IO总耗时
-  double scheduler_overhead_ms = 0.0;      // (未来填充) 调度器开销
+  /** @brief Reserved process execution-routing overhead metric in milliseconds.
+   */
+  double execution_overhead_ms = 0.0;
 
   // 用于导出：每次运行匹配主操作(op_name)的总执行时间列表（毫秒）。
   // 这是一维分布，供分析 typical_execution_time_ms 时参考。
@@ -122,11 +124,11 @@ struct BenchmarkSessionConfig {
   std::string yaml_path;
 
   /**
-   * @brief Product scheduler and repetition controls for this session.
+   * @brief Product execution and repetition controls for this session.
    * @throws Nothing for value construction; string-free fields do not
    *         allocate.
-   * @note Worker selection is applied to future Host graph schedulers before
-   *       each benchmark run.
+   * @note Worker selection is applied to the process execution service before
+   * each benchmark run.
    */
   struct ExecutionConfig {
     /**
@@ -135,7 +137,7 @@ struct BenchmarkSessionConfig {
      */
     int runs = 10;
     /**
-     * @brief Scheduler worker request from zero through eight.
+     * @brief Process execution-worker request from zero through eight.
      * @details Zero resolves to bounded hardware concurrency in `[1,8]`;
      * positive values remain exact.
      * @default 0
@@ -143,7 +145,7 @@ struct BenchmarkSessionConfig {
     int threads = 0;
 
     /**
-     * @brief Whether compute dispatch uses the graph's parallel scheduler.
+     * @brief Whether compute dispatch uses the parallel execution service.
      * @default true
      */
     bool parallel = true;

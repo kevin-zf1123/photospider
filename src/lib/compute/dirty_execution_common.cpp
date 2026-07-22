@@ -49,26 +49,12 @@ std::uint64_t DirtyNodeSynchronization::retained_memory_bytes() const {
   return estimate.bytes();
 }
 
-/** @copydoc ensure_running_scheduler */
-IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
-                                     ComputeIntent intent) {
-  IScheduler* scheduler = runtime.get_scheduler(intent);
-  if (!scheduler) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "No scheduler registered for requested compute intent.");
-  }
-  if (!scheduler->is_running()) {
-    scheduler->start();
-  }
-  return *scheduler;
-}
-
 /** @copydoc DirtyReadyTaskContext::DirtyReadyTaskContext */
 DirtyReadyTaskContext::DirtyReadyTaskContext(
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
     const std::vector<int>& active_task_ids, std::function<void(int)> run_task,
     std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
-    bool release_dependents, SchedulerTaskPriority priority)
+    bool release_dependents, ExecutionTaskPriority priority)
     : compute_plan_(compute_plan),
       selection_(selection
                      ? std::optional<DirtyTaskSelectionOverlay>(*selection)
@@ -156,7 +142,7 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
         std::move(submission_lease), identity, task.node_id, initial_ready,
         [self](ComputeRunLease& lease,
                const ComputeRunTaskIdentity& accepted_identity,
-               SchedulerTaskRuntime& task_runtime) {
+               ExecutionTaskRuntime& task_runtime) {
           self->execute(lease, accepted_identity, task_runtime);
         },
         priority_,
@@ -169,7 +155,7 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
 /** @copydoc DirtyReadyTaskContext::execute */
 void DirtyReadyTaskContext::execute(ComputeRunLease& lease,
                                     const ComputeRunTaskIdentity& identity,
-                                    SchedulerTaskRuntime& task_runtime) {
+                                    ExecutionTaskRuntime& task_runtime) {
   if (identity.run_id() != lease.descriptor().id() ||
       identity.run_id() != lease_.descriptor().id()) {
     throw std::invalid_argument(
@@ -219,7 +205,7 @@ void DirtyReadyTaskContext::execute(ComputeRunLease& lease,
     task_runtime.dec_tasks_to_complete();
   } catch (...) {
     try {
-      task_runtime.log_event(SchedulerTraceAction::RethrowException,
+      task_runtime.log_event(ExecutionTraceAction::RethrowException,
                              task.node_id);
     } catch (...) {
     }
@@ -316,11 +302,11 @@ void log_dirty_node_execution(GraphRuntime* runtime, int node_id,
   if (!runtime) {
     return;
   }
-  runtime->log_event(GraphRuntime::SchedulerEvent::EXECUTE, node_id);
+  runtime->log_event(GraphRuntime::ExecutionEvent::EXECUTE, node_id);
   runtime->log_event(
       dirty_source
-          ? GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE
-          : GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE,
+          ? GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_SOURCE
+          : GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE,
       node_id);
 }
 
@@ -331,7 +317,7 @@ bool should_skip_stale_dirty_source(GraphRuntime* runtime, int node_id,
     return false;
   }
   if (runtime) {
-    runtime->log_event(GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION,
+    runtime->log_event(GraphRuntime::ExecutionEvent::SKIP_STALE_GENERATION,
                        node_id);
   }
   return true;

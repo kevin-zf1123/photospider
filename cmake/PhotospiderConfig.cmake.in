@@ -8,7 +8,7 @@ set(Photospider_ipc_client_FOUND @PHOTOSPIDER_BUILD_IPC@)
 set(Photospider_operation_sdk_FOUND TRUE)
 set(Photospider_operation_runtime_FOUND TRUE)
 set(Photospider_operation_opencv_FOUND @PHOTOSPIDER_ENABLE_OPENCV@)
-set(Photospider_scheduler_sdk_FOUND TRUE)
+set(Photospider_policy_sdk_FOUND TRUE)
 set(Photospider_opencv_enabled @PHOTOSPIDER_ENABLE_OPENCV@)
 set(Photospider_yaml_enabled @PHOTOSPIDER_ENABLE_YAML@)
 
@@ -28,8 +28,8 @@ if(Photospider_FIND_COMPONENTS)
         set(_Photospider_component_error
             "Photospider was built without the ipc_client component")
       endif()
-    elseif(_Photospider_component STREQUAL "scheduler_sdk")
-      # Header-only scheduler contracts require no external package.
+    elseif(_Photospider_component STREQUAL "policy_sdk")
+      # The pure-C policy ABI header requires no external package.
     elseif(_Photospider_component STREQUAL "operation_sdk" OR
            _Photospider_component STREQUAL "operation_runtime")
       # Standard-library contracts and image allocation require no package.

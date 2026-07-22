@@ -253,7 +253,7 @@ class GraphModel {
    * @param result Value-type diagnostic produced by GraphCacheService.
    * @return Nothing.
    * @throws std::bad_alloc if the by-value diagnostic copy cannot allocate.
-   * @note Disk-cache diagnostics are updated from scheduler worker paths, so
+   * @note Disk-cache diagnostics are updated from execution worker paths, so
    * they use one encapsulated no-throw mutex instead of graph_mutex_ or
    * timing_mutex_. Shared storage is reachable only through the diagnostic
    * store, and replacement is no-throw after argument preparation.
@@ -478,7 +478,7 @@ class GraphModel {
    * The store serializes record, snapshot, clear, clone, and staged-publication
    * exchange. Its no-throw mutex preserves GraphModel's no-throw publication
    * phase without holding a diagnostic lock across filesystem, cache,
-   * scheduler, callback, lane, ledger, or other Graph-lock operations. Each
+   * execution, callback, lane, ledger, or other Graph-lock operations. Each
    * store is owned directly by exactly one live or staged GraphModel and has no
    * detached lifetime or independently shared state.
    *

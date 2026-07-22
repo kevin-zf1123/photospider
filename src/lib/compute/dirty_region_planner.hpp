@@ -121,7 +121,7 @@ struct RealTimeDirtyPlan {
  * execution and inspection.
  *
  * @note The planner mutates only dirty-generation/snapshot state on GraphModel;
- * it does not execute node work, own scheduler queues, or promote RT output to
+ * it does not execute node work, own execution queues, or promote RT output to
  * HP cache authority.
  */
 class DirtyRegionPlanner {

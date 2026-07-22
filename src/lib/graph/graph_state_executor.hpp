@@ -209,7 +209,7 @@ class GraphStateExecutor {
    *       accepting lane to draining, wakes producers blocked on the bounded
    *       FIFO, and leaves already admitted work owned by the sole worker.
    *       Concurrent and repeated calls are idempotent. The owning lifecycle
-   *       must later call `close_and_drain()` before model or scheduler
+   *       must later call `close_and_drain()` before model or execution
    *       teardown.
    */
   void stop_admission();
@@ -232,7 +232,7 @@ class GraphStateExecutor {
   void close_and_drain();
 
   /**
-   * @brief Recreates the sole worker after scheduler shutdown aborts close.
+   * @brief Recreates the sole worker after runtime shutdown aborts close.
    * @return Nothing.
    * @throws std::logic_error if called from this lane worker or before the
    *         prior worker has reached the fully joined `Closed` state.
@@ -240,7 +240,7 @@ class GraphStateExecutor {
    * @note Calling this while already accepting is idempotent. The method is a
    *       narrow Kernel close-rollback operation, not a general public restart
    *       facility; it never restores discarded tasks because close drained all
-   *       prior admissions before scheduler shutdown began. Completion of the
+   *       prior admissions before runtime shutdown began. Completion of the
    *       joined generation remains recorded so its delayed close waiters do
    *       not wait on this replacement worker.
    */

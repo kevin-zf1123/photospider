@@ -28,7 +28,7 @@ namespace {
  * @return Fresh non-zero opaque id value.
  * @throws std::overflow_error before the atomic sequence would wrap or reuse a
  * value.
- * @note This ownership-neutral atomic owns no scheduler, worker, Graph, Run
+ * @note This ownership-neutral atomic owns no queue, worker, Graph, Run
  * lifecycle, or resource policy.
  */
 uint64_t mint_compute_run_id_value() {
@@ -1268,13 +1268,13 @@ std::optional<ComputeRunCommitContender> ComputeRunLease::try_claim_commit()
  * @brief Routes one accepted callback into its matching Run-owned plan.
  *
  * @param identity Composite task identity carried by the callback.
- * @param task_runtime Active scheduler runtime.
- * @param callback_owns_completion Whether a legacy exact-once token owns the
+ * @param task_runtime Active execution runtime.
+ * @param callback_owns_completion Whether a runtime exact-once token owns the
  * pre-counted callback unit instead of this lease route.
  * @return Nothing.
  * @throws std::invalid_argument for mismatched or unregistered identity.
  * @throws std::system_error if the control mutex cannot be locked.
- * @throws Exceptions propagated by Run-owned plan execution, scheduler
+ * @throws Exceptions propagated by Run-owned plan execution, execution
  * completion accounting, dependent-callback submission, or matching failure
  * publication.
  * @note A matching accepted callback observed after terminal publication
@@ -1283,7 +1283,7 @@ std::optional<ComputeRunCommitContender> ComputeRunLease::try_claim_commit()
  * rethrow; an exception from that publication propagates instead.
  */
 void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
-                                   SchedulerTaskRuntime& task_runtime,
+                                   ExecutionTaskRuntime& task_runtime,
                                    bool callback_owns_completion) {
   (void)observe_cancellation();
   TaskSubmissionPlan* plan = nullptr;
@@ -1323,7 +1323,7 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
 /**
  * @brief Executes initial-ready discovery and submission under this lease.
  *
- * @param task_runtime Active scheduler batch initialized by the dispatcher.
+ * @param task_runtime Active execution batch initialized by the dispatcher.
  * @return Nothing.
  * @throws GraphError or standard exceptions from plan bootstrap and runtime.
  * @note An accepted bootstrap observed after terminal publication releases its
@@ -1331,7 +1331,7 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
  * failures publish directly to this Run because bootstrap has no planned local
  * task identity.
  */
-void ComputeRunLease::execute_bootstrap(SchedulerTaskRuntime& task_runtime) {
+void ComputeRunLease::execute_bootstrap(ExecutionTaskRuntime& task_runtime) {
   (void)observe_cancellation();
   TaskSubmissionPlan* plan = nullptr;
   bool skip_terminal_run = false;

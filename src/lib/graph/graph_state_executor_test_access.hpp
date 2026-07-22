@@ -101,7 +101,7 @@ void notify_graph_state_executor_test_hook(
  * @note The executor invokes this only after a join owner publishes `Closed`
  *       and releases its lifecycle mutex, but before it notifies close waiters.
  *       A test callback may re-enter `restart_after_close_failure()` to force
- *       the legal overlap that production scheduler-stop rollback can create.
+ *       the legal overlap that production runtime-stop rollback can create.
  *       Tests serialize installation and keep context alive through every
  *       affected close.
  */

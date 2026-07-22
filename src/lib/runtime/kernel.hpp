@@ -37,6 +37,10 @@
 
 namespace ps {
 
+enum class PolicyClass;
+struct HostPolicyConfig;
+struct PolicyInfoSnapshot;
+
 namespace testing {
 
 /**
@@ -45,7 +49,7 @@ namespace testing {
  * KernelTestAccess is declared here only so Kernel can friend it. The
  * definition lives under tests/support and is not part of the Host API.
  * Frontends use `ps::Host`; the embedded Host adapter alone may translate Host
- * requests to Kernel operations such as inspect_graph, scheduler_trace,
+ * requests to Kernel operations such as inspect_graph, execution_trace,
  * compute, and compute_async. Neither path exposes runtime ownership details.
  *
  * @note This forward declaration intentionally exposes no operations.
@@ -56,7 +60,7 @@ class KernelTestAccess;
 
 /**
  * @brief Internal multi-graph coordinator for lifecycle, graph-state commands,
- * compute, scheduler access, and plugin management.
+ * compute, execution-route access, policy access, and plugin management.
  *
  * Kernel owns one GraphRuntime per graph name and keeps its internal adapter
  * contract stable while delegating graph IO, traversal, inspection, cache, ROI,
@@ -66,8 +70,8 @@ class KernelTestAccess;
  * mutation, commit predicates, and publication run through each runtime's
  * GraphStateExecutor. Operation execution uses request-owned snapshots outside
  * that lane, while a private compute-request lane serializes same-Graph compute
- * and scheduler-owner access. Schedulers receive ready task callbacks; they do
- * not own graph-state operation dispatch.
+ * and route-binding access. The Host-lifetime ExecutionService receives ready
+ * task callbacks but never owns graph-state operation dispatch.
  *
  * @note Historically quiet inspection/cache methods retain bool or
  * std::optional failure handling. Required Host mutation/projection paths keep
@@ -169,7 +173,7 @@ class Kernel {
   /**
    * @brief Execution-mode controls for one Kernel compute request.
    *
-   * ExecutionOptions separates scheduler and graph-output quiet-mode choices
+   * ExecutionOptions separates execution and graph-output quiet-mode choices
    * from cache and telemetry options. It is copied into async futures, so the
    * embedded adapter and backend callers should treat it as immutable once the
    * request is submitted.
@@ -178,7 +182,7 @@ class Kernel {
    * applied to the graph model around the compute call.
    */
   struct ComputeExecutionOptions {
-    /** @brief Whether the request should use scheduler-backed execution. */
+    /** @brief Whether the request should use queued execution-service work. */
     bool parallel = false;
 
     /** @brief Whether graph output should be quiet during this request. */
@@ -226,7 +230,7 @@ class Kernel {
     /** @brief Cache precision, recache, disk-cache, and save controls. */
     ComputeCacheOptions cache;
 
-    /** @brief Scheduler and quiet-mode execution controls. */
+    /** @brief Route-service and quiet-mode execution controls. */
     ComputeExecutionOptions execution;
 
     /** @brief Timing and benchmark recording controls. */
@@ -267,29 +271,22 @@ class Kernel {
    * @param cache_root_dir Optional external cache-root directory.
    * @return Loaded graph name, or nullopt only when the name is already
    *         published or loses the final map-insertion race.
-   * @throws std::bad_alloc if path, runtime, scheduler, graph, or diagnostic
+   * @throws std::bad_alloc if path, runtime, route, graph, or diagnostic
    *         allocation exhausts memory.
-   * @throws GraphError with `GraphErrc::InvalidParameter` when either complete
-   *         scheduler intent cannot be planned, becomes unavailable, or a
-   *         legacy plan returns no scheduler instance before installation;
-   *         `GraphErrc::ComputeError` when the Host ledger cannot admit the
-   *         aggregate legacy scheduler pair;
-   *         `GraphErrc::Io` for explicit-source or session filesystem failure;
+   * @throws GraphError with `GraphErrc::Io` for explicit-source or session
+   *         filesystem failure;
    *         `GraphErrc::InvalidYaml` for syntax/schema rejection;
    *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
    *         rejection; and `GraphErrc::Unknown` for unexpected
    *         document-ingestion failures.
-   * @throws std::exception for scheduler/runtime startup failures not
+   * @throws std::exception for execution-service/runtime startup failures not
    *         classified by Kernel; InteractionService normalizes them before
    *         the embedded Host boundary.
-   * @note Scheduler planning completes before document ingestion. The first
-   *       built-in CPU selection may configure and start the Kernel-lifetime
-   *       ExecutionService even if this Graph load later fails, but the fixed
-   *       pool is uncharged infrastructure and retains no ledger reservation.
-   *       An unpublished runtime, every legacy scheduler candidate and
-   *       reservation, and session publication still roll back transactionally;
-   *       built-in CPU routes create no per-Graph scheduler owner. An empty
-   *       yaml_path loads existing
+   * @note The first graph load configures the Kernel-lifetime ExecutionService
+   *       even if later document ingestion fails; its fixed workers are
+   *       process infrastructure and retain no per-Graph reservation. The
+   *       unpublished runtime and session publication still roll back
+   *       transactionally. An empty yaml_path loads existing
    *       `<root_dir>/<name>/content.yaml` or intentionally publishes an empty
    *       graph; a nonempty source is explicit and never falls back. Complete
    *       document validation precedes map insertion. The return label is
@@ -313,11 +310,11 @@ class Kernel {
    * @throws std::overflow_error if the close-generation counter is exhausted.
    * @throws std::system_error if executor lifecycle synchronization fails.
    * @note This is the non-destructive first phase of embedded Host close. It
-   *       preserves the graph map entry, scheduler owners, model, accepted
+   *       preserves the graph map entry, route bindings, model, accepted
    *       request-lane work, graph-state admission, and LastError state while
    *       waking producers blocked by the full request FIFO. Graph-state stays
    *       open so accepted compute can commit. `close_graph()` performs the
-   *       later request-drain, graph-state drain, and scheduler-stop phase
+   *       later request-drain and graph-state drain phase
    * after Host-level admitted callers and async publication have settled.
    */
   bool stop_graph_admission(const std::string& name);
@@ -332,7 +329,7 @@ class Kernel {
    *         is thrown when the graph name is unknown.
    * @note Close first drains and joins the compute-request lane while
    *       graph-state remains available for accepted commits. It then stops,
-   *       drains, and joins graph-state before scheduler shutdown. Embedded
+   *       drains, and joins graph-state before runtime destruction. Embedded
    *       Host first rejects new calls and drains pre-marker synchronous
    *       admissions, calls `stop_graph_admission()`, then waits for async
    *       scheduling/status publication before invoking this method. The
@@ -627,7 +624,7 @@ class Kernel {
                                                         std::size_t limit);
 
   /**
-   * @brief Reads one bounded non-destructive scheduler-trace page.
+   * @brief Reads one bounded non-destructive execution-trace page.
    * @param name Loaded graph/session name.
    * @param after_sequence Exclusive sequence cursor.
    * @param limit Maximum trace entries to copy.
@@ -638,7 +635,7 @@ class Kernel {
    *       Runtime exceptions propagate unchanged; only a missing graph is
    *       represented by `std::nullopt`.
    */
-  std::optional<GraphRuntime::SchedulerEventPage> scheduler_trace(
+  std::optional<GraphRuntime::ExecutionEventPage> execution_trace(
       const std::string& name, uint64_t after_sequence, std::size_t limit);
   std::optional<std::string> dirty_region_snapshot_debug(
       const std::string& name);
@@ -698,7 +695,7 @@ class Kernel {
    * @throws std::bad_alloc when graph-state submission, planning, snapshot
    *         copying, or LastError construction exhausts memory.
    * @note The complete transition runs as one serialized graph-state work
-   *       item; it does not submit scheduler work itself.
+   *       item; it does not submit physical execution work itself.
    */
   std::optional<compute::DirtyControlLaneResult> begin_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain,
@@ -759,7 +756,7 @@ class Kernel {
    * @throws std::bad_alloc when graph-state submission, planning, snapshot
    *         copying, or LastError construction exhausts memory.
    * @note cutoff_after_downstream is derived only after serialized snapshot
-   *       rebuilding; this facade does not own a scheduler queue.
+   *       rebuilding; this facade does not own an execution queue.
    */
   std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain);
@@ -837,30 +834,132 @@ class Kernel {
   id get_metal_device(const std::string& name);
 
   /**
-   * @brief Scheduler planning defaults captured for future Graph loads.
+   * @brief Copies canonical policy types visible to this process domain.
+   * @return Lexically sorted built-in and DSO policy type names.
+   * @throws std::bad_alloc or std::system_error when observation storage or
+   *         synchronization fails.
+   * @note The copied values contain no registry, callback, context, or DSO
+   *       ownership capability.
+   */
+  std::vector<std::string> policy_available_types() const;
+
+  /**
+   * @brief Copies the description for one canonical policy type.
+   * @param type_name Canonical registered policy type name.
+   * @return Bounded Host-owned description text.
+   * @throws GraphError with `GraphErrc::NotFound` when the type is absent.
+   * @throws std::bad_alloc when copied storage exhausts memory.
+   * @note The returned text remains valid after later registry mutation.
+   */
+  std::string policy_description(const std::string& type_name) const;
+
+  /**
+   * @brief Scans caller-ordered directories for policy ABI-v1 DSOs.
+   * @param directories Directory strings processed in caller order.
+   * @return Number of complete DSOs atomically published by this scan.
+   * @throws GraphError using the policy loader's exact recoverable category.
+   * @throws std::bad_alloc for Host or synchronous plugin allocation failure.
+   * @note Each DSO is one all-or-nothing registry transaction; successful
+   *       earlier DSOs remain visible if a later candidate fails.
+   */
+  std::size_t policy_scan(const std::vector<std::string>& directories);
+
+  /**
+   * @brief Loads one policy ABI-v1 DSO as a registry transaction.
+   * @param path Nonempty dynamic-library path.
+   * @return Nothing after complete publication.
+   * @throws GraphError using the policy loader's exact error mapping.
+   * @throws std::bad_alloc for Host or synchronous plugin allocation failure.
+   * @note No policy type is visible until every exported row validates.
+   */
+  void policy_load(const std::string& path);
+
+  /**
+   * @brief Copies currently visible policy DSO labels.
+   * @return Globally nondecreasing Host-owned path labels.
+   * @throws std::bad_alloc or std::system_error while copying observation
+   *         state.
+   * @note Labels are diagnostic values, not native handles or leases.
+   */
+  std::vector<std::string> policy_loaded_plugins() const;
+
+  /**
+   * @brief Atomically replaces both process policy-class bindings.
+   * @param config Canonical Interactive and Throughput defaults.
+   * @return Nothing after both new generations are published together.
+   * @throws GraphError for invalid, unsupported, callback, or generation
+   *         failure.
+   * @throws std::bad_alloc when candidate preparation exhausts memory.
+   * @note Failure preserves both current bindings and their generations.
+   */
+  void configure_policy_defaults(const HostPolicyConfig& config);
+
+  /**
+   * @brief Copies one process policy binding and its immutable first fault.
+   * @param policy_class Interactive or Throughput.
+   * @return Complete Host-owned binding snapshot.
+   * @throws GraphError with `InvalidParameter` for an invalid enum value.
+   * @throws std::bad_alloc when copied observation storage exhausts memory.
+   * @note Read-only observation is permitted from a policy callback.
+   */
+  PolicyInfoSnapshot policy_info(PolicyClass policy_class) const;
+
+  /**
+   * @brief Replaces exactly one process policy-class binding.
+   * @param policy_class Interactive or Throughput.
+   * @param type Canonical type supporting the requested class.
+   * @return Nothing after the new nonzero generation is published.
+   * @throws GraphError for invalid, unsupported, callback, or generation
+   *         failure.
+   * @throws std::bad_alloc when candidate preparation exhausts memory.
+   * @note Same-name replacement still advances generation and retires the old
+   *       context exactly once.
+   */
+  void replace_policy(PolicyClass policy_class, const std::string& type);
+
+  /**
+   * @brief Private execution defaults captured for future Graph loads.
    *
-   * @throws std::bad_alloc If constructing or copying scheduler type storage
+   * @throws std::bad_alloc If constructing or copying route storage
    * exhausts memory.
    * @note Selecting built-in CPU may resolve and start the fixed service pool
-   * while defaults are stored. Pool workers are uncharged infrastructure. Type
-   * availability and legacy Graph-owned aggregate capacity are validated by
-   * transactional Graph load. Existing runtimes retain their installed
-   * bindings.
+   * while defaults are stored. Pool workers are uncharged infrastructure.
+   * Route vocabulary is validated before publication, and existing runtimes
+   * retain their installed bindings.
    */
-  struct SchedulerConfig {
-    /** @brief Scheduler type planned for global high-precision compute. */
-    std::string hp_type = "cpu_work_stealing";
+  struct ExecutionConfig {
+    /** @brief Private route for global high-precision compute. */
+    std::string hp_type = "cpu";
 
-    /** @brief Scheduler type planned for real-time dirty-region updates. */
-    std::string rt_type = "cpu_work_stealing";
+    /** @brief Private route for real-time dirty-region updates. */
+    std::string rt_type = "cpu";
 
     /**
-     * @brief CPU/plugin worker request shared by both intent plans.
+     * @brief Process execution worker request shared by both intent routes.
      * @note Zero selects bounded automatic resolution; positive values must be
-     * no greater than `kSchedulerWorkerRequestMax` at public boundaries.
+     * no greater than `kExecutionWorkerRequestMax` at public boundaries.
      */
     unsigned int worker_count = 0;
   };
+
+  /**
+   * @brief Copies the complete private execution-route vocabulary.
+   * @return Exactly `cpu`, `gpu_pipeline`, and `serial_debug` in lexical
+   * order.
+   * @throws std::bad_alloc when result storage exhausts memory.
+   * @note Routes are fixed process implementation values, not plugins.
+   */
+  std::vector<std::string> execution_available_types() const;
+
+  /**
+   * @brief Copies the description for one private execution route.
+   * @param type_name Exact route name.
+   * @return Host-owned display text.
+   * @throws GraphError with `GraphErrc::NotFound` when the route is unknown.
+   * @throws std::bad_alloc when result storage exhausts memory.
+   * @note The removed scheduler names and `heterogeneous` alias are rejected.
+   */
+  std::string execution_description(const std::string& type_name) const;
 
   /**
    * @brief Stores future Graph defaults and freezes CPU workers when selected.
@@ -870,22 +969,19 @@ class Kernel {
    * the already fixed injected service count.
    * @throws std::invalid_argument If the resolved fixed worker count exceeds
    * the composition-root CPU limit.
-   * @throws std::bad_alloc or std::system_error If scheduler type copying or
+   * @throws std::bad_alloc or std::system_error If route copying or
    * first fixed-pool construction fails.
    * @note A configuration selecting built-in CPU freezes and starts the one
    * injected service pool owned for this Kernel, but does not mint a pool
-   * ledger reservation. Legacy-only defaults remain mutable until a CPU route
-   * is first selected by configuration, load, or replacement. After that
-   * point, later zero/equal requests preserve the pool and a conflicting
-   * positive request is rejected. Graph load and replacement never resize a
-   * configured pool. Scheduler type availability and legacy-owner ledger
-   * rejection still occurs transactionally during later load; existing Graph
-   * bindings remain unchanged.
+   * ledger reservation. All supported routes share that fixed worker domain.
+   * Later zero/equal requests preserve the pool and a conflicting positive
+   * request is rejected. Graph load and replacement never resize a configured
+   * pool; existing Graph bindings remain unchanged.
    */
-  void set_scheduler_config(const SchedulerConfig& config);
+  void set_execution_config(const ExecutionConfig& config);
 
   /**
-   * @brief Returns current future-Graph scheduler planning defaults.
+   * @brief Returns current future-Graph execution defaults.
    * @return Borrowed immutable configuration valid until the next setter call
    * or Kernel destruction.
    * @throws Nothing.
@@ -893,42 +989,36 @@ class Kernel {
    * load always performs fresh planning before pair admission. Once the CPU
    * service is configured, worker_count contains its resolved fixed count.
    */
-  const SchedulerConfig& get_scheduler_config() const;
+  const ExecutionConfig& get_execution_config() const;
 
   /**
-   * @brief Replaces one session scheduler through a strong owner transaction.
+   * @brief Replaces one session execution route through an ownerless
+   * transaction.
    * @param name Graph session name.
-   * @param intent Compute intent whose scheduler is replaced.
-   * @param type Registered scheduler type name.
-   * @return True after candidate publication; false when the Graph or
-   * scheduler type is absent, a current plugin factory returns null, or a
-   * non-Graph lifecycle failure is handled.
-   * @throws GraphError With `GraphErrc::ComputeError` when the Host ledger
-   * cannot reserve candidate headroom.
-   * @throws std::bad_alloc if scheduler creation or request-lane submission
-   *         exhausts memory.
-   * @note Built-in CPU replacement publishes an ownerless service
-   * binding and reserves no per-Graph workers. Legacy planning,
-   * single-candidate reservation, construction, preparation, and publication
-   * occur inside the compute-request lane while the old binding remains usable.
-   * Capacity or preparation failure therefore cannot displace it.
-   * Candidate/plugin GraphError remains a handled false result outside budget
-   * exhaustion.
+   * @param intent Compute intent whose route is replaced.
+   * @param type Exact private execution route name.
+   * @return True after publication; false for a missing Graph, unknown route,
+   * or handled request-lane lifecycle failure.
+   * @throws std::bad_alloc if copied route or request-lane storage exhausts
+   * memory.
+   * @note Validation precedes a nonzero generation update serialized with
+   * same-Graph compute requests. The transaction constructs no plugin, worker
+   * owner, route adapter, or resource reservation.
    */
-  bool replace_scheduler(const std::string& name, ComputeIntent intent,
+  bool replace_execution(const std::string& name, ComputeIntent intent,
                          const std::string& type);
 
   /**
-   * @brief Copies one coherent scheduler information snapshot.
+   * @brief Copies one coherent execution-route information snapshot.
    * @param name Graph session name.
-   * @param intent Compute intent whose scheduler is inspected.
-   * @return Owned scheduler name/statistics, or nullopt when unavailable.
+   * @param intent Compute intent whose route is inspected.
+   * @return Owned route name/statistics, or nullopt when unavailable.
    * @throws std::bad_alloc if request-lane submission or copied text allocation
    *         fails.
    * @note Inspection uses the same compute-request serialization boundary as
-   *       compute and replacement; no scheduler pointer escapes the callback.
+   *       compute and replacement; no executor pointer escapes the callback.
    */
-  std::optional<std::pair<std::string, std::string>> get_scheduler_info(
+  std::optional<std::pair<std::string, std::string>> get_execution_info(
       const std::string& name, ComputeIntent intent);
 
  private:
@@ -1038,7 +1128,7 @@ class Kernel {
    * @return Optional operation result, or nullopt when the graph is missing or
    * the operation throws a recoverable failure.
    * @throws std::bad_alloc if the const runtime operation exhausts memory.
-   * @note Used by const inspection APIs such as scheduler metadata queries.
+   * @note Used by const inspection APIs that need copied runtime values.
    */
   template <typename Fn>
   auto with_runtime(GraphName name, Fn&& op) const -> ConstRuntimeResult<Fn> {
@@ -1098,7 +1188,7 @@ class Kernel {
    *         exhausts memory.
    * @note This helper preserves the facade contract for graph-state commands:
    * they remain serialized by GraphStateExecutor and are not routed through
-   * scheduler task runtimes.
+   * physical execution workers.
    */
   template <typename Fn>
   auto with_graph_state(const std::string& name, Fn&& op)
@@ -1308,7 +1398,7 @@ class Kernel {
    * @brief Captures, executes, and revision-commits one Kernel compute request.
    *
    * @param runtime Runtime supplying the visible graph-state lane, staged RT
-   * proxy source, event service, and serialized scheduler binding lifetime.
+   * proxy source, event service, and serialized route-binding lifetime.
    * @param request Kernel request already retained by the compute-request lane.
    * @param committed_output Optional destination for an owned copy of the exact
    * staged target output after visible commit succeeds.
@@ -1317,53 +1407,19 @@ class Kernel {
    * validation, persistence, or exact revision commit fails.
    * @throws std::bad_alloc if snapshot, policy, request, or output state
    * allocation fails.
-   * @throws std::exception for scheduler and operation failures propagated by
+   * @throws std::exception for execution and operation failures propagated by
    * ComputeService.
    * @note Capture and final publication use GraphStateExecutor; operation work
    * uses only request-owned Graph/proxy snapshots outside that lane. When
    * committed_output is non-null, the copy is taken from that same staged
    * domain before its lifetime ends, so an ordinary graph-state mutation cannot
    * interleave between commit and result capture. The caller must already hold
-   * the runtime's compute-request lane so scheduler owners cannot be inspected
+   * the runtime's compute-request lane so route bindings cannot be inspected
    * or replaced concurrently.
    */
   void execute_staged_compute_request(GraphRuntime& runtime,
                                       const ComputeRequest& request,
                                       NodeOutput* committed_output = nullptr);
-
-  /**
-   * @brief Atomically installs HP/RT execution bindings on an unpublished
-   * runtime.
-   *
-   * The method plans both intents, fixes the shared CPU service when either
-   * plan selects built-in CPU, and replans with that resolved grant. It then
-   * reserves only the aggregate legacy-owner capacity, constructs only legacy
-   * scheduler candidates, and attaches either an ownerless process-service
-   * route or the matching scheduler owner for each intent. Successful
-   * installation clears stale diagnostics.
-   *
-   * @param name Graph/session label whose stale LastError is cleared only
-   *             after both candidates are installed.
-   * @param runtime Unpublished runtime that receives both execution bindings
-   * and only the legacy scheduler owners selected by planning.
-   * @return Nothing.
-   * @throws GraphError with `GraphErrc::InvalidParameter` when either type is
-   *         unsupported, a planned plugin becomes unavailable, or its factory
-   *         returns no scheduler instance.
-   * @throws GraphError with `GraphErrc::ComputeError` when Host-ledger
-   *         capacity cannot admit the aggregate legacy intent plans.
-   * @throws std::invalid_argument or std::overflow_error for invalid planning
-   *         inputs, a conflicting fixed worker request, or arithmetic.
-   * @throws std::bad_alloc or std::system_error if fixed-pool or scheduler
-   *         construction fails.
-   * @throws Any other scheduler construction or attach failure unchanged.
-   * @note Every exceptional exit occurs before Graph-map publication. Local
-   *       legacy candidates and the unpublished runtime release all transferred
-   *       and untransferred reservations through RAII. Built-in CPU bindings
-   *       never construct or charge a per-Graph scheduler owner.
-   */
-  void setup_schedulers_for_runtime(const std::string& name,
-                                    GraphRuntime& runtime);
 
   /**
    * @brief Graph-name map owning every runtime and both admitted serial lanes.
@@ -1380,7 +1436,7 @@ class Kernel {
    * @note The mutex is independent of per-graph GraphStateExecutor instances
    *       because asynchronous computes for different sessions may publish
    *       diagnostics concurrently. It is never held while graph-state or
-   *       scheduler work executes.
+   *       execution-service work executes.
    */
   mutable std::mutex last_error_mutex_;
 
@@ -1420,8 +1476,8 @@ class Kernel {
    */
   std::shared_ptr<compute::ExecutionService> execution_service_;
 
-  // [M3.4] 调度器配置
-  SchedulerConfig scheduler_config_;
+  /** @brief Future-Graph private route and process-worker defaults. */
+  ExecutionConfig execution_config_;
 };
 
 }  // namespace ps

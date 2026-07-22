@@ -43,11 +43,11 @@ struct HostComputeCacheOptions {
  * @brief Execution controls for one Host compute request.
  *
  * @throws Nothing.
- * @note `parallel` selects the scheduler-backed path where supported, while
+ * @note `parallel` selects the private execution path where supported, while
  *       `quiet` suppresses graph output for this request only.
  */
 struct HostComputeExecutionOptions {
-  /** @brief Whether scheduler-backed execution should be requested. */
+  /** @brief Whether parallel private execution should be requested. */
   bool parallel = false;
 
   /** @brief Whether graph output should be quiet during this request. */
@@ -84,7 +84,7 @@ struct HostComputeRequest {
   /** @brief Cache precision and persistence controls. */
   HostComputeCacheOptions cache;
 
-  /** @brief Scheduler and quiet-mode controls. */
+  /** @brief Private execution and quiet-mode controls. */
   HostComputeExecutionOptions execution;
 
   /** @brief Timing and telemetry controls. */

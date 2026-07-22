@@ -14,7 +14,7 @@ class GraphCacheService;
 namespace ps::compute {
 
 /**
- * @brief Serializes side effects after scheduler worker tasks finish.
+ * @brief Serializes side effects after execution worker tasks finish.
  *
  * ComputeResultCommitter owns the post-dispatch mutation phase that workers
  * deliberately avoid: timing total calculation, GraphModel high-precision

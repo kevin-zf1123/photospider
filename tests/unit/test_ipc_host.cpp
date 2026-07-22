@@ -862,10 +862,11 @@ TEST(IpcHostDispatch, ResolvesRelativeSavePathAgainstCallerWorkingDirectory) {
 }
 
 /**
- * @brief Exercises all 53 Host virtuals through the real typed IPC stack.
+ * @brief Exercises all current Host operations through the typed IPC stack.
  *
  * The test loads one opaque session, invokes every graph, compute, diagnostic,
- * inspection, dirty, observation, cache, plugin, and scheduler operation, and
+ * inspection, dirty, observation, cache, plugin, policy, and execution
+ * operations, and
  * compares the backend spy's exact Host-entry multiset. Compute and plugin
  * conveniences intentionally share their documented wire/Host primitive.
  *
@@ -886,11 +887,16 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
   node.type = "fixture";
   node.subtype = "source";
   backend.set_inspected_node(node);
-  SchedulerInfoSnapshot scheduler_info;
-  scheduler_info.intent = ComputeIntent::GlobalHighPrecision;
-  scheduler_info.scheduler_name = "serial";
-  scheduler_info.stats = "idle";
-  backend.set_scheduler_info(scheduler_info);
+  PolicyInfoSnapshot policy_info;
+  policy_info.policy_class = PolicyClass::Interactive;
+  policy_info.policy_type = "interactive";
+  policy_info.binding_generation = 1;
+  backend.set_policy_info(policy_info);
+  ExecutionInfoSnapshot execution_info;
+  execution_info.intent = ComputeIntent::GlobalHighPrecision;
+  execution_info.execution_type = "cpu";
+  execution_info.stats = "idle";
+  backend.set_execution_info(execution_info);
 
   RunningServer server(backend, socket_path);
   std::unique_ptr<Host> host = create_ipc_host(socket_path);
@@ -957,7 +963,7 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
       host->end_dirty_source(session, NodeId{7}, DirtyDomain::HighPrecision)
           .status.ok);
   EXPECT_TRUE(host->drain_compute_events(session, 1).status.ok);
-  EXPECT_TRUE(host->scheduler_trace(session, 0, 1).status.ok);
+  EXPECT_TRUE(host->execution_trace(session, 0, 1).status.ok);
 
   EXPECT_TRUE(host->clear_cache(session).status.ok);
   EXPECT_TRUE(host->clear_drive_cache(session).status.ok);
@@ -975,21 +981,30 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
   EXPECT_TRUE(host->ops_combined_keys().status.ok);
   EXPECT_TRUE(host->ops_combined_sources().status.ok);
 
-  EXPECT_TRUE(host->scheduler_available_types().status.ok);
-  EXPECT_TRUE(host->scheduler_description("serial").status.ok);
-  EXPECT_TRUE(host->scheduler_scan(dirs).status.ok);
+  EXPECT_TRUE(host->policy_available_types().status.ok);
+  EXPECT_TRUE(host->policy_description("interactive").status.ok);
+  EXPECT_TRUE(host->policy_scan(dirs).status.ok);
   EXPECT_TRUE(
-      host->scheduler_load((temp.path() / "scheduler.so").string()).status.ok);
-  EXPECT_TRUE(host->scheduler_loaded_plugins().status.ok);
-  HostSchedulerConfig config;
-  config.hp_type = "serial";
-  config.rt_type = "serial";
-  config.worker_count = 2;
-  EXPECT_TRUE(host->configure_scheduler_defaults(config).status.ok);
-  EXPECT_TRUE(host->scheduler_info(session, ComputeIntent::GlobalHighPrecision)
+      host->policy_load((temp.path() / "policy.so").string()).status.ok);
+  EXPECT_TRUE(host->policy_loaded_plugins().status.ok);
+  HostPolicyConfig policy_config;
+  policy_config.interactive_type = "interactive";
+  policy_config.throughput_type = "throughput";
+  EXPECT_TRUE(host->configure_policy_defaults(policy_config).status.ok);
+  EXPECT_TRUE(host->policy_info(PolicyClass::Interactive).status.ok);
+  EXPECT_TRUE(
+      host->replace_policy(PolicyClass::Interactive, "interactive").status.ok);
+  EXPECT_TRUE(host->execution_available_types().status.ok);
+  EXPECT_TRUE(host->execution_description("cpu").status.ok);
+  HostExecutionConfig execution_config;
+  execution_config.hp_type = "cpu";
+  execution_config.rt_type = "cpu";
+  execution_config.worker_count = 2;
+  EXPECT_TRUE(host->configure_execution_defaults(execution_config).status.ok);
+  EXPECT_TRUE(host->execution_info(session, ComputeIntent::GlobalHighPrecision)
                   .status.ok);
-  EXPECT_TRUE(host->replace_scheduler(
-                      session, ComputeIntent::GlobalHighPrecision, "serial")
+  EXPECT_TRUE(host->replace_execution(session,
+                                      ComputeIntent::GlobalHighPrecision, "cpu")
                   .status.ok);
   EXPECT_TRUE(host->close_graph(session).status.ok);
 
@@ -1033,7 +1048,7 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
       "dirty.update",
       "dirty.end",
       "events.drain",
-      "scheduler.trace",
+      "execution.trace",
       "cache.clear_all",
       "cache.clear_drive",
       "cache.clear_memory",
@@ -1047,14 +1062,19 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
       "plugins.ops_sources",
       "plugins.ops_combined_keys",
       "plugins.ops_combined_sources",
-      "scheduler.types",
-      "scheduler.description",
-      "scheduler.scan",
-      "scheduler.load",
-      "scheduler.loaded_plugins",
-      "scheduler.configure_defaults",
-      "scheduler.info",
-      "scheduler.replace",
+      "policy.types",
+      "policy.description",
+      "policy.scan",
+      "policy.load",
+      "policy.loaded_plugins",
+      "policy.configure_defaults",
+      "policy.info",
+      "policy.replace",
+      "execution.types",
+      "execution.description",
+      "execution.configure_defaults",
+      "execution.info",
+      "execution.replace",
       "graph.close"};
   const std::map<std::string, std::size_t> expected_counts = {
       {"cache.cache_all_nodes", 1},
@@ -1071,6 +1091,12 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
       {"dirty.end", 1},
       {"dirty.update", 1},
       {"events.drain", 1},
+      {"execution.configure_defaults", 1},
+      {"execution.description", 1},
+      {"execution.info", 1},
+      {"execution.replace", 1},
+      {"execution.trace", 1},
+      {"execution.types", 1},
       {"graph.clear", 1},
       {"graph.close", 1},
       {"graph.list", 1},
@@ -1098,16 +1124,15 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
       {"plugins.ops_sources", 1},
       {"plugins.seed_builtins", 1},
       {"plugins.unload_all", 1},
-      {"scheduler.configure_defaults", 1},
-      {"scheduler.description", 1},
-      {"scheduler.info", 1},
-      {"scheduler.load", 1},
-      {"scheduler.loaded_plugins", 1},
-      {"scheduler.replace", 1},
-      {"scheduler.scan", 1},
-      {"scheduler.trace", 1},
-      {"scheduler.types", 1}};
-  EXPECT_EQ(invocations.size(), 53U);
+      {"policy.configure_defaults", 1},
+      {"policy.description", 1},
+      {"policy.info", 1},
+      {"policy.load", 1},
+      {"policy.loaded_plugins", 1},
+      {"policy.replace", 1},
+      {"policy.scan", 1},
+      {"policy.types", 1}};
+  EXPECT_EQ(invocations.size(), 58U);
   EXPECT_EQ(actual_methods, expected_methods);
   EXPECT_EQ(actual_counts, expected_counts);
 

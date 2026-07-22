@@ -30,12 +30,11 @@
 #include "compute/execution_service.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "core/image_buffer_processing.hpp"
+#include "execution/execution_task_runtime.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "photospider/core/graph_error.hpp"
-#include "photospider/scheduler/scheduler.hpp"
-#include "photospider/scheduler/scheduler_task_runtime.hpp"
 #include "providers/configured_image_artifact_codec.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
@@ -547,10 +546,10 @@ class ScopedResourceRuntimeDirectory final {
  * @throws std::logic_error for borrowed work, missing batch initialization,
  * completion overflow/underflow, or a nonzero count after callback drainage.
  * @throws The exact first callback exception from wait_for_completion().
- * @note This fixture models scheduler completion ownership only; it owns no
+ * @note This fixture models execution completion ownership only; it owns no
  * worker, epoch filter, graph state, or operation implementation.
  */
-class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
+class CompletionTrackingRuntime final : public ExecutionTaskRuntime {
  public:
   /**
    * @brief Starts a fresh completion batch from the required empty handle set.
@@ -563,8 +562,8 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
    * @note Starting a batch clears queued callbacks and all per-batch state.
    */
   void submit_initial_task_handles(
-      std::vector<TaskHandle>&& handles, int total_task_count,
-      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+      std::vector<ExecutionTaskHandle>&& handles, int total_task_count,
+      ExecutionTaskPriority priority = ExecutionTaskPriority::Normal) override {
     (void)priority;
     if (!handles.empty() || total_task_count != 0) {
       throw std::logic_error(
@@ -587,8 +586,8 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
    * @note Empty input is accepted as a no-op for interface completeness.
    */
   void submit_ready_task_handles_from_worker(
-      std::vector<TaskHandle>&& handles,
-      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+      std::vector<ExecutionTaskHandle>&& handles,
+      ExecutionTaskPriority priority = ExecutionTaskPriority::Normal) override {
     (void)priority;
     if (!handles.empty()) {
       throw std::logic_error(
@@ -609,7 +608,7 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
    */
   void submit_ready_task_any_thread(
       Task&& task,
-      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+      ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
       std::optional<std::uint64_t> epoch = std::nullopt) override {
     (void)priority;
     (void)epoch;
@@ -674,7 +673,7 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
    * @param delta Positive unit count.
    * @return Nothing.
    * @throws std::logic_error for a missing batch or integer overflow.
-   * @note Nonpositive input is a no-op, matching current scheduler behavior.
+   * @note Nonpositive input is a no-op, matching current execution behavior.
    */
   void inc_tasks_to_complete(int delta) override {
     if (delta <= 0) {
@@ -711,17 +710,17 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
   /**
    * @brief Records whether planned operation execution was entered.
    *
-   * @param action Stable scheduler trace action.
+   * @param action Stable execution trace action.
    * @param node_id Backend node id, unused by this fixture.
    * @return Nothing.
    * @throws Nothing.
    * @note Assignment traces are intentionally excluded from the execution
    * count.
    */
-  void log_event(SchedulerTraceAction action, int node_id) noexcept override {
+  void log_event(ExecutionTraceAction action, int node_id) noexcept override {
     (void)node_id;
-    if (action == SchedulerTraceAction::Execute ||
-        action == SchedulerTraceAction::ExecuteTile) {
+    if (action == ExecutionTraceAction::Execute ||
+        action == ExecutionTraceAction::ExecuteTile) {
       ++planned_execution_events_;
     }
   }
@@ -818,17 +817,17 @@ class CompletionTrackingRuntime final : public SchedulerTaskRuntime {
  * remain noexcept; trace recording failures are retained as an explicit test
  * signal.
  */
-class ExecutionServiceHost final : public SchedulerHostContext {
+class ExecutionServiceHost final : public ExecutionHostContext {
  public:
   /**
-   * @brief Complete immutable scheduler trace tuple observed by one Host.
+   * @brief Complete immutable execution trace tuple observed by one Host.
    *
    * @throws Nothing for scalar value construction and movement.
    * @note Epoch is the opaque ComputeRunId value forwarded by ExecutionService.
    */
   struct TraceEvent final {
-    /** @brief Scheduler action forwarded by the active service worker. */
-    SchedulerTraceAction action = SchedulerTraceAction::AssignInitial;
+    /** @brief Execution action forwarded by the active service worker. */
+    ExecutionTraceAction action = ExecutionTraceAction::AssignInitial;
 
     /** @brief Graph-local diagnostic node id supplied by the ready task. */
     int node_id = -1;
@@ -842,7 +841,7 @@ class ExecutionServiceHost final : public SchedulerHostContext {
 
   /**
    * @brief Reports the fixture's only physical capability.
-   * @param device Capability requested by the CPU scheduler.
+   * @param device Capability requested by the CPU execution service.
    * @return True only for CPU.
    * @throws Nothing.
    */
@@ -852,8 +851,8 @@ class ExecutionServiceHost final : public SchedulerHostContext {
 
   /**
    * @brief Records one worker-context entry.
-   * @param worker_id CPU worker id, ignored after validation by scheduler.
-   * @param epoch Active nonzero scheduler epoch.
+   * @param worker_id CPU worker id, ignored after service validation.
+   * @param epoch Active nonzero execution epoch.
    * @return Nothing.
    * @throws Nothing.
    */
@@ -873,15 +872,15 @@ class ExecutionServiceHost final : public SchedulerHostContext {
   }
 
   /**
-   * @brief Records one forwarded scheduler trace.
+   * @brief Records one forwarded execution trace.
    * @param action Trace action copied from the service CPU runtime.
    * @param node_id Planned node id.
    * @param worker_id Active CPU worker id.
-   * @param epoch Active scheduler epoch.
+   * @param epoch Active execution epoch.
    * @return Nothing.
    * @throws Nothing.
    */
-  void log_event(SchedulerTraceAction action, int node_id, int worker_id,
+  void log_event(ExecutionTraceAction action, int node_id, int worker_id,
                  std::uint64_t epoch) noexcept override {
     try {
       std::lock_guard<std::mutex> lock(trace_mutex_);
@@ -889,7 +888,7 @@ class ExecutionServiceHost final : public SchedulerHostContext {
     } catch (...) {
       trace_recording_failed_.store(true, std::memory_order_relaxed);
     }
-    if (action == SchedulerTraceAction::AssignInitial) {
+    if (action == ExecutionTraceAction::AssignInitial) {
       const ComputeRunCancellationSource* source =
           cancel_on_assignment_.exchange(nullptr, std::memory_order_acq_rel);
       if (source != nullptr) {
@@ -966,7 +965,7 @@ class ExecutionServiceHost final : public SchedulerHostContext {
   /** @brief Serializes concurrent trace publication and snapshot copying. */
   mutable std::mutex trace_mutex_;
 
-  /** @brief Complete scheduler traces forwarded to this Host proxy. */
+  /** @brief Complete execution traces forwarded to this Host proxy. */
   std::vector<TraceEvent> trace_events_;
 
   /** @brief Whether noexcept trace observation lost any event. */
@@ -1134,7 +1133,7 @@ RetainedSubmissionObservation observe_retained_submission(
 ReadyTaskSubmission make_counted_ready_submission(
     ComputeRunLease lease, uint64_t local_task_id, int trace_node_id,
     std::atomic_int& entered,
-    SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+    ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
     ReadyTaskResourceDemand resource_demand =
         ReadyTaskSubmission::default_resource_demand()) {
   const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
@@ -1142,7 +1141,7 @@ ReadyTaskSubmission make_counted_ready_submission(
       std::move(lease), identity, trace_node_id, true,
       [&entered](ComputeRunLease& retained_lease,
                  const ComputeRunTaskIdentity& retained_identity,
-                 SchedulerTaskRuntime& runtime) {
+                 ExecutionTaskRuntime& runtime) {
         if (retained_lease.descriptor().id() != retained_identity.run_id()) {
           throw std::logic_error(
               "Counted submission observed a mismatched retained Run.");
@@ -1208,7 +1207,7 @@ bool wait_for_resource_reservation(const ExecutionService& service,
  *
  * @throws Nothing for default construction and movement.
  * @note Field order destroys the asynchronous completion first, so Host and
- * Run ownership remain alive until `execute_cpu_run()` has returned.
+ * Run ownership remain alive until `execute_run()` has returned.
  * Callback-borrowed stack state must be declared before this owner, while any
  * gate release guard must be declared after it, so exceptional unwinding
  * releases gates, joins the Run, and only then destroys borrowed state.
@@ -1255,7 +1254,7 @@ static_assert(std::is_nothrow_move_assignable_v<AsyncPolicyRun>,
  * @throws std::bad_alloc from Run, Host, vector, callback, or future storage.
  * @throws std::future_error from asynchronous state construction.
  * @throws std::system_error when asynchronous launch fails.
- * @note The helper launches one real `execute_cpu_run()` call. It does not
+ * @note The helper launches one real `execute_run()` call. It does not
  * bypass admission, ready grants, policy selection, worker dispatch, or Run
  * settlement.
  */
@@ -1278,14 +1277,14 @@ AsyncPolicyRun launch_ordered_policy_run(
         std::move(lease), identity, marker, true,
         [&execution_order, &execution_order_mutex, marker](
             ComputeRunLease&, const ComputeRunTaskIdentity&,
-            SchedulerTaskRuntime& runtime) {
+            ExecutionTaskRuntime& runtime) {
           {
             std::lock_guard<std::mutex> lock(execution_order_mutex);
             execution_order.push_back(marker);
           }
           runtime.dec_tasks_to_complete();
         },
-        SchedulerTaskPriority::Normal, resource_demand);
+        ExecutionTaskPriority::Normal, resource_demand);
   }
 
   ExecutionServiceHost* host_pointer = host.get();
@@ -1294,8 +1293,8 @@ AsyncPolicyRun launch_ordered_policy_run(
   std::future<void> completion = std::async(
       std::launch::async, [&service, host_pointer, ready = std::move(ready),
                            task_count, run_demand]() mutable {
-        service.execute_cpu_run(*host_pointer, std::move(ready), task_count,
-                                run_demand);
+        service.execute_run(*host_pointer, "cpu", std::move(ready), task_count,
+                            run_demand);
       });
   return AsyncPolicyRun{std::move(host), std::move(run), std::move(completion)};
 }
@@ -1327,19 +1326,20 @@ AsyncPolicyRun launch_blocking_policy_run(
   ready.emplace_back(
       std::move(lease), identity, 0, true,
       [&entered, release](ComputeRunLease&, const ComputeRunTaskIdentity&,
-                          SchedulerTaskRuntime& runtime) {
+                          ExecutionTaskRuntime& runtime) {
         entered.set_value();
         release.wait();
         runtime.dec_tasks_to_complete();
       },
-      SchedulerTaskPriority::Normal, resource_demand);
+      ExecutionTaskPriority::Normal, resource_demand);
 
   ExecutionServiceHost* host_pointer = host.get();
   const CpuRunResourceDemand run_demand{0U, resource_demand};
   std::future<void> completion = std::async(
       std::launch::async,
       [&service, host_pointer, ready = std::move(ready), run_demand]() mutable {
-        service.execute_cpu_run(*host_pointer, std::move(ready), 1, run_demand);
+        service.execute_run(*host_pointer, "cpu", std::move(ready), 1,
+                            run_demand);
       });
   return AsyncPolicyRun{std::move(host), std::move(run), std::move(completion)};
 }
@@ -1357,7 +1357,7 @@ AsyncPolicyRun launch_blocking_policy_run(
  * @throws std::bad_alloc from Run, Host, callback, vector, or future storage.
  * @throws std::future_error from asynchronous state construction.
  * @throws std::system_error when asynchronous launch fails.
- * @note The outer future waits before calling `execute_cpu_run()`, so one
+ * @note The outer future waits before calling `execute_run()`, so one
  * release exposes concurrent policy admission rather than merely concurrent
  * callback execution.
  */
@@ -1375,12 +1375,12 @@ AsyncPolicyRun launch_concurrent_blocking_policy_run(
       std::move(lease), identity, 0, true,
       [&entered, callback_release](ComputeRunLease&,
                                    const ComputeRunTaskIdentity&,
-                                   SchedulerTaskRuntime& runtime) {
+                                   ExecutionTaskRuntime& runtime) {
         entered.fetch_add(1, std::memory_order_release);
         callback_release.wait();
         runtime.dec_tasks_to_complete();
       },
-      SchedulerTaskPriority::Normal, resource_demand);
+      ExecutionTaskPriority::Normal, resource_demand);
 
   ExecutionServiceHost* host_pointer = host.get();
   const CpuRunResourceDemand run_demand{0U, resource_demand};
@@ -1388,9 +1388,60 @@ AsyncPolicyRun launch_concurrent_blocking_policy_run(
       std::launch::async, [&service, host_pointer, ready = std::move(ready),
                            run_demand, admission_start]() mutable {
         admission_start.wait();
-        service.execute_cpu_run(*host_pointer, std::move(ready), 1, run_demand);
+        service.execute_run(*host_pointer, "cpu", std::move(ready), 1,
+                            run_demand);
       });
   return AsyncPolicyRun{std::move(host), std::move(run), std::move(completion)};
+}
+
+/**
+ * @brief Builds one dependent policy-test task that publishes the next link.
+ *
+ * @param lease Matching Run lease transferred into the current submission.
+ * @param index Zero-based marker and task identity for the current link.
+ * @param task_count Positive total number of links in the chain.
+ * @param resource_demand Uniform trusted demand for every link.
+ * @param execution_order Shared callback-order destination.
+ * @param execution_order_mutex Serializes marker publication.
+ * @return One ready submission whose callback publishes at most one successor.
+ * @throws std::invalid_argument for an empty chain or out-of-range index.
+ * @throws std::bad_alloc from submission/callback ownership.
+ * @note Successors enter the ready store only after the preceding start has
+ * advanced the class dispatch counter. This creates genuinely younger
+ * competitors for dispatch-aging tests instead of prepublishing peers with
+ * the same age.
+ */
+ReadyTaskSubmission make_dependent_policy_chain_submission(
+    ComputeRunLease lease, std::uint64_t index, std::uint64_t task_count,
+    ReadyTaskResourceDemand resource_demand, std::vector<int>& execution_order,
+    std::mutex& execution_order_mutex) {
+  if (task_count == 0U || index >= task_count ||
+      index > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("Policy chain task index is invalid.");
+  }
+  const ComputeRunTaskIdentity identity = lease.task_identity(index);
+  const int marker = static_cast<int>(index);
+  return ReadyTaskSubmission(
+      std::move(lease), identity, marker, index == 0U,
+      [index, task_count, resource_demand, &execution_order,
+       &execution_order_mutex](ComputeRunLease& retained_lease,
+                               const ComputeRunTaskIdentity&,
+                               ExecutionTaskRuntime& runtime) {
+        {
+          std::lock_guard<std::mutex> lock(execution_order_mutex);
+          execution_order.push_back(static_cast<int>(index));
+        }
+        if (index + 1U < task_count) {
+          auto& ready_runtime =
+              dynamic_cast<ReadyTaskSubmissionRuntime&>(runtime);
+          ready_runtime.submit_ready_submission(
+              make_dependent_policy_chain_submission(
+                  retained_lease, index + 1U, task_count, resource_demand,
+                  execution_order, execution_order_mutex));
+        }
+        runtime.dec_tasks_to_complete();
+      },
+      ExecutionTaskPriority::Normal, resource_demand);
 }
 
 /**
@@ -1647,7 +1698,7 @@ class MovePreservingDirtyCallableHolder final {
 };
 
 /**
- * @brief Captures one real execute_cpu_run initial-storage retirement event.
+ * @brief Captures one real execute_run initial-storage retirement event.
  *
  * @throws Nothing from construction or observation.
  * @note The callback stores ordinary fields before publishing
@@ -1817,8 +1868,8 @@ ResourceVector independently_estimate_large_dirty_phase_resources(
       compute_plan, nullptr, phase_task_ids,
       std::function<void(int)>(LargeDirtyPhaseTask(task_probe)), callable_bytes,
       run.acquire_lease(), !source_phase,
-      source_phase ? SchedulerTaskPriority::High
-                   : SchedulerTaskPriority::Normal);
+      source_phase ? ExecutionTaskPriority::High
+                   : ExecutionTaskPriority::Normal);
   std::vector<ReadyTaskSubmission> submissions =
       context->make_submissions(phase_task_ids, true);
 
@@ -2073,8 +2124,8 @@ void expect_service_only_envelope_executes(const std::string& graph_identity,
   std::vector<ReadyTaskSubmission> submissions;
   submissions.push_back(
       make_counted_ready_submission(run.acquire_lease(), 0U, 1, entered));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(submissions), 1,
-                                          CpuRunResourceDemand{}));
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(submissions), 1,
+                                      CpuRunResourceDemand{}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -2119,8 +2170,8 @@ void expect_pending_entry_interval(const std::string& graph_identity,
   std::vector<ReadyTaskSubmission> lower_ready;
   lower_ready.push_back(
       make_counted_ready_submission(lower_run.acquire_lease(), 0U, 1, entered));
-  EXPECT_NO_THROW(lower_service.execute_cpu_run(
-      lower_host, std::move(lower_ready), 1,
+  EXPECT_NO_THROW(lower_service.execute_run(
+      lower_host, "cpu", std::move(lower_ready), 1,
       CpuRunResourceDemand{current_shared_bytes, {}}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(lower_service.resource_snapshot().reserved, ResourceVector{});
@@ -2130,8 +2181,8 @@ void expect_pending_entry_interval(const std::string& graph_identity,
   rejected_ready.push_back(make_counted_ready_submission(
       rejected_run.acquire_lease(), 0U, 1, entered));
   EXPECT_THROW(
-      lower_service.execute_cpu_run(
-          lower_host, std::move(rejected_ready), 1,
+      lower_service.execute_run(
+          lower_host, "cpu", std::move(rejected_ready), 1,
           CpuRunResourceDemand{current_shared_bytes + missing_entry_bytes, {}}),
       GraphError);
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
@@ -2143,8 +2194,8 @@ void expect_pending_entry_interval(const std::string& graph_identity,
   std::vector<ReadyTaskSubmission> complete_ready;
   complete_ready.push_back(make_counted_ready_submission(
       complete_run.acquire_lease(), 0U, 1, entered));
-  EXPECT_NO_THROW(complete_service.execute_cpu_run(
-      complete_host, std::move(complete_ready), 1,
+  EXPECT_NO_THROW(complete_service.execute_run(
+      complete_host, "cpu", std::move(complete_ready), 1,
       CpuRunResourceDemand{current_shared_bytes + missing_entry_bytes, {}}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 2);
   EXPECT_EQ(complete_service.resource_snapshot().reserved, ResourceVector{});
@@ -2208,7 +2259,7 @@ void expect_resource_dimension_rejection_and_recovery(
   for (int task_index = 0; task_index < rejected_task_count; ++task_index) {
     rejected_ready.push_back(make_counted_ready_submission(
         rejected_run.acquire_lease(), static_cast<std::uint64_t>(task_index),
-        task_index + 1, entered, SchedulerTaskPriority::Normal,
+        task_index + 1, entered, ExecutionTaskPriority::Normal,
         rejected_demand));
   }
   const CpuRunResourceDemand rejected_run_demand{0U, rejected_demand};
@@ -2237,8 +2288,8 @@ void expect_resource_dimension_rejection_and_recovery(
 
   bool rejected = false;
   try {
-    service.execute_cpu_run(host, std::move(rejected_ready),
-                            rejected_task_count, rejected_run_demand);
+    service.execute_run(host, "cpu", std::move(rejected_ready),
+                        rejected_task_count, rejected_run_demand);
   } catch (const GraphError& error) {
     rejected = true;
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
@@ -2256,10 +2307,10 @@ void expect_resource_dimension_rejection_and_recovery(
   std::vector<ReadyTaskSubmission> recovery_ready;
   recovery_ready.push_back(make_counted_ready_submission(
       recovery_run.acquire_lease(), 0U, 2, entered,
-      SchedulerTaskPriority::Normal, kRecoveryDemand));
+      ExecutionTaskPriority::Normal, kRecoveryDemand));
   EXPECT_NO_THROW(
-      service.execute_cpu_run(host, std::move(recovery_ready), 1,
-                              CpuRunResourceDemand{0U, kRecoveryDemand}));
+      service.execute_run(host, "cpu", std::move(recovery_ready), 1,
+                          CpuRunResourceDemand{0U, kRecoveryDemand}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -2940,7 +2991,7 @@ TEST(ReadyTaskSubmission,
   EXPECT_THROW((void)ReadyTaskSubmission(
                    first_lease, second_identity, 71, true,
                    [](ComputeRunLease&, const ComputeRunTaskIdentity&,
-                      SchedulerTaskRuntime&) {}),
+                      ExecutionTaskRuntime&) {}),
                std::invalid_argument);
 }
 
@@ -2961,12 +3012,12 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
   std::vector<ReadyTaskSubmission> first_ready;
   first_ready.push_back(
       make_counted_ready_submission(first.acquire_lease(), 0, 61, entered));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(first_ready), 1));
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(first_ready), 1));
 
   std::vector<ReadyTaskSubmission> second_ready;
   second_ready.push_back(
       make_counted_ready_submission(second.acquire_lease(), 0, 62, entered));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(second_ready), 1));
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(second_ready), 1));
 
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 2);
   EXPECT_EQ(host.context_entries(), 2);
@@ -3001,54 +3052,6 @@ TEST(ExecutionService, RejectsEveryNonCpuRunDimensionAndRecoversExactly) {
 }
 
 /**
- * @brief Verifies scheduler-owner CPU reservations block Runs atomically.
- *
- * @return Nothing.
- * @throws std::bad_alloc or std::system_error from isolated service setup.
- * @note Releasing the sole legacy reservation restores the exact CPU slot and
- * permits an otherwise identical Run without changing fixed worker
- * infrastructure.
- */
-TEST(ExecutionService, SharesCpuAdmissionWithLegacyOwnerAndRecoversExactly) {
-  constexpr ReadyTaskResourceDemand kDemand{1U, 1U, 1U};
-  ExecutionResourceLimits limits = ExecutionService::default_resource_limits();
-  limits.cpu_slots = 1U;
-  limits.interactive_headroom = {};
-  ExecutionService service(1U, limits);
-  ExecutionServiceHost host;
-  auto legacy = service.try_reserve_legacy_scheduler_workers(1U);
-  ASSERT_TRUE(legacy.has_value());
-
-  std::atomic_int entered{0};
-  ComputeRun rejected_run(make_test_submission("cpu-owner-rejected", 1U, 1));
-  std::vector<ReadyTaskSubmission> rejected_ready;
-  rejected_ready.push_back(make_counted_ready_submission(
-      rejected_run.acquire_lease(), 0U, 1, entered,
-      SchedulerTaskPriority::Normal, kDemand));
-  try {
-    service.execute_cpu_run(host, std::move(rejected_ready), 1,
-                            CpuRunResourceDemand{0U, kDemand});
-    FAIL() << "Expected shared CPU admission rejection.";
-  } catch (const GraphError& error) {
-    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
-  }
-  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
-  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{1U});
-
-  legacy.reset();
-  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-  ComputeRun recovery_run(make_test_submission("cpu-owner-recovery", 2U, 2));
-  std::vector<ReadyTaskSubmission> recovery_ready;
-  recovery_ready.push_back(make_counted_ready_submission(
-      recovery_run.acquire_lease(), 0U, 2, entered,
-      SchedulerTaskPriority::Normal, kDemand));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(recovery_ready), 1,
-                                          CpuRunResourceDemand{0U, kDemand}));
-  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
-  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-}
-
-/**
  * @brief Verifies checked whole-Run multiplication rejects overflow.
  *
  * @return Nothing.
@@ -3068,13 +3071,13 @@ TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
   std::vector<ReadyTaskSubmission> overflow_ready;
   overflow_ready.push_back(make_counted_ready_submission(
       overflow_run.acquire_lease(), 0U, 1, entered,
-      SchedulerTaskPriority::Normal, kOverflowDemand));
+      ExecutionTaskPriority::Normal, kOverflowDemand));
   overflow_ready.push_back(make_counted_ready_submission(
       overflow_run.acquire_lease(), 1U, 2, entered,
-      SchedulerTaskPriority::Normal, kOverflowDemand));
+      ExecutionTaskPriority::Normal, kOverflowDemand));
   try {
-    service.execute_cpu_run(host, std::move(overflow_ready), 2,
-                            CpuRunResourceDemand{0U, kOverflowDemand});
+    service.execute_run(host, "cpu", std::move(overflow_ready), 2,
+                        CpuRunResourceDemand{0U, kOverflowDemand});
     FAIL() << "Expected checked Run resource overflow.";
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
@@ -3088,10 +3091,10 @@ TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
   std::vector<ReadyTaskSubmission> recovery_ready;
   recovery_ready.push_back(make_counted_ready_submission(
       recovery_run.acquire_lease(), 0U, 2, entered,
-      SchedulerTaskPriority::Normal, kRecoveryDemand));
+      ExecutionTaskPriority::Normal, kRecoveryDemand));
   EXPECT_NO_THROW(
-      service.execute_cpu_run(host, std::move(recovery_ready), 1,
-                              CpuRunResourceDemand{0U, kRecoveryDemand}));
+      service.execute_run(host, "cpu", std::move(recovery_ready), 1,
+                          CpuRunResourceDemand{0U, kRecoveryDemand}));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -3114,7 +3117,7 @@ TEST(ExecutionService, SeparatesSharedConcurrentAndLogicalTaskResources) {
   std::atomic_int entered{0};
   ReadyTaskSubmission representative =
       make_counted_ready_submission(run.acquire_lease(), 0U, 1, entered,
-                                    SchedulerTaskPriority::Normal, kTaskDemand);
+                                    ExecutionTaskPriority::Normal, kTaskDemand);
 
   const ResourceVector zero_adapter = service.estimate_cpu_run_resources(
       representative, 5, CpuRunResourceDemand{});
@@ -3200,7 +3203,7 @@ TEST(ExecutionService,
  * @throws Standard Run, submission, vector, or callback allocation exceptions
  * from fixture setup.
  * @note This focused helper check does not replace the production-path test
- * below, which proves execute_cpu_run invokes the boundary at the required
+ * below, which proves execute_run invokes the boundary at the required
  * point.
  */
 TEST(ExecutionService, ReleaseHelperRetiresInitialSubmissionStorage) {
@@ -3227,7 +3230,7 @@ TEST(ExecutionService, ReleaseHelperRetiresInitialSubmissionStorage) {
  * @return Nothing.
  * @throws Standard Run, service, future, or callback setup exceptions.
  * @note The production observer runs after QueueEntry/grant staging and the
- * empty-vector swap. The sole callback then blocks, keeping execute_cpu_run in
+ * empty-vector swap. The sole callback then blocks, keeping execute_run in
  * settlement while the test verifies the original nonzero backing is gone.
  * Deleting or moving the production release after this observation leaves a
  * nonzero released capacity and fails this regression.
@@ -3254,7 +3257,7 @@ TEST(ExecutionService,
                             &observer_visible_before_callback, &observation](
                                ComputeRunLease& retained_lease,
                                const ComputeRunTaskIdentity& retained_identity,
-                               SchedulerTaskRuntime& runtime) {
+                               ExecutionTaskRuntime& runtime) {
     observer_visible_before_callback.store(
         retained_lease.descriptor().id() == retained_identity.run_id() &&
             observation.observation_count.load(std::memory_order_acquire) == 1,
@@ -3269,15 +3272,15 @@ TEST(ExecutionService,
   submissions.reserve(8U);
   submissions.emplace_back(std::move(lease), identity, 1, true,
                            std::move(blocking_callback),
-                           SchedulerTaskPriority::Normal, task_demand);
+                           ExecutionTaskPriority::Normal, task_demand);
   ASSERT_EQ(submissions.size(), 1U);
   ASSERT_GE(submissions.capacity(), 8U);
 
   auto run_future = std::async(
       std::launch::async,
       [&service, &host, ready = std::move(submissions), task_demand]() mutable {
-        service.execute_cpu_run(host, std::move(ready), 1,
-                                CpuRunResourceDemand{0U, task_demand});
+        service.execute_run(host, "cpu", std::move(ready), 1,
+                            CpuRunResourceDemand{0U, task_demand});
       });
   ScopedPromiseRelease release_guard(release_callback);
   ASSERT_EQ(callback_entered_future.wait_for(std::chrono::seconds(2)),
@@ -3356,7 +3359,7 @@ TEST(DirtyExecutionCommon,
         return std::make_shared<DirtyReadyTaskContext>(
             compute_plan, nullptr, task_ids,
             std::move(transferred_holder).release_for_context(), callable_bytes,
-            run.acquire_lease(), true, SchedulerTaskPriority::Normal);
+            run.acquire_lease(), true, ExecutionTaskPriority::Normal);
       });
 
   EXPECT_TRUE(factory_observed_preserved_source);
@@ -3670,8 +3673,8 @@ TEST(ExecutionServiceProductResources,
   EXPECT_EQ(with_adapter.ready_entries, service_only.ready_entries);
   EXPECT_EQ(with_adapter.ready_bytes, service_only.ready_bytes);
 
-  EXPECT_THROW(dispatch_planned_tasks(graph, small_service, small_host, 101,
-                                      small_plan, small_lease),
+  EXPECT_THROW(dispatch_planned_tasks(graph, small_service, small_host, "cpu",
+                                      101, small_plan, small_lease),
                GraphError);
   EXPECT_EQ(g_resource_product_operation_calls.load(std::memory_order_relaxed),
             0);
@@ -3709,8 +3712,8 @@ TEST(ExecutionServiceProductResources,
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Running));
   ComputeRunLease large_lease = large_run.acquire_lease();
-  EXPECT_NO_THROW(dispatch_planned_tasks(graph, large_service, large_host, 101,
-                                         large_plan, large_lease));
+  EXPECT_NO_THROW(dispatch_planned_tasks(graph, large_service, large_host,
+                                         "cpu", 101, large_plan, large_lease));
   EXPECT_EQ(g_resource_product_operation_calls.load(std::memory_order_relaxed),
             1);
   EXPECT_EQ(large_host.context_entries(), 1);
@@ -3877,15 +3880,15 @@ TEST(ExecutionServiceProductResources,
           sizeof(std::reference_wrapper<GraphModel>) +
           sizeof(std::reference_wrapper<HighPrecisionDirtyWriteBuffer>) +
           sizeof(std::reference_wrapper<std::atomic_int>))),
-      run.acquire_lease(), false, SchedulerTaskPriority::High);
+      run.acquire_lease(), false, ExecutionTaskPriority::High);
   std::vector<ReadyTaskSubmission> source_submissions =
       source_context->make_submissions({0}, true);
   const std::uint64_t source_missing_bytes =
       hp_buffer.missing_entry_retained_memory_bytes(graph, {kSourceNodeId});
   ExecutionService source_service(1U);
   ExecutionServiceHost source_host;
-  EXPECT_NO_THROW(source_service.execute_cpu_run(
-      source_host, std::move(source_submissions), 1,
+  EXPECT_NO_THROW(source_service.execute_run(
+      source_host, "cpu", std::move(source_submissions), 1,
       source_context->run_resource_demand(source_missing_bytes)));
   EXPECT_EQ(source_calls.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(source_service.resource_snapshot().reserved, ResourceVector{});
@@ -3916,7 +3919,7 @@ TEST(ExecutionServiceProductResources,
       },
       owned_callable_retained_memory_bytes(static_cast<std::uint64_t>(
           sizeof(std::reference_wrapper<std::atomic_int>))),
-      run.acquire_lease(), false, SchedulerTaskPriority::Normal);
+      run.acquire_lease(), false, ExecutionTaskPriority::Normal);
   const CpuRunResourceDemand downstream_demand =
       downstream_context->run_resource_demand(missing_downstream_bytes);
   RetainedMemoryEstimator expected_downstream_shared(
@@ -3942,8 +3945,8 @@ TEST(ExecutionServiceProductResources,
   ExecutionService lower_service(1U, execution_limits(omitted_existing_entry));
   ExecutionServiceHost lower_host;
   EXPECT_THROW(
-      lower_service.execute_cpu_run(
-          lower_host, std::move(representative_submissions),
+      lower_service.execute_run(
+          lower_host, "cpu", std::move(representative_submissions),
           static_cast<int>(downstream_task_ids.size()), downstream_demand),
       GraphError);
   EXPECT_EQ(downstream_calls.load(std::memory_order_relaxed), 0);
@@ -3953,8 +3956,8 @@ TEST(ExecutionServiceProductResources,
   ExecutionServiceHost complete_host;
   std::vector<ReadyTaskSubmission> complete_submissions =
       downstream_context->make_submissions(downstream_task_ids, true);
-  EXPECT_NO_THROW(complete_service.execute_cpu_run(
-      complete_host, std::move(complete_submissions),
+  EXPECT_NO_THROW(complete_service.execute_run(
+      complete_host, "cpu", std::move(complete_submissions),
       static_cast<int>(downstream_task_ids.size()), downstream_demand));
   EXPECT_EQ(downstream_calls.load(std::memory_order_relaxed), 2);
   EXPECT_EQ(complete_service.resource_snapshot().reserved, ResourceVector{});
@@ -4171,22 +4174,22 @@ TEST(ExecutionService, BoundsInitialReadyStoreAndPreservesPriorityOrdering) {
   ready.emplace_back(
       std::move(normal_lease), normal_identity, 1, true,
       [&execution_order](ComputeRunLease&, const ComputeRunTaskIdentity&,
-                         SchedulerTaskRuntime& runtime) {
+                         ExecutionTaskRuntime& runtime) {
         execution_order.push_back(1);
         runtime.dec_tasks_to_complete();
       },
-      SchedulerTaskPriority::Normal, kDemand);
+      ExecutionTaskPriority::Normal, kDemand);
   ready.emplace_back(
       std::move(high_lease), high_identity, 2, true,
       [&execution_order, &high_entered, high_release](
           ComputeRunLease&, const ComputeRunTaskIdentity&,
-          SchedulerTaskRuntime& runtime) {
+          ExecutionTaskRuntime& runtime) {
         execution_order.push_back(2);
         high_entered.set_value();
         high_release.wait();
         runtime.dec_tasks_to_complete();
       },
-      SchedulerTaskPriority::High, kDemand);
+      ExecutionTaskPriority::High, kDemand);
 
   const CpuRunResourceDemand run_demand{0U, kDemand};
   ExecutionService probe(1U);
@@ -4198,7 +4201,7 @@ TEST(ExecutionService, BoundsInitialReadyStoreAndPreservesPriorityOrdering) {
   run_future = std::async(
       std::launch::async,
       [&service, &host, ready = std::move(ready), run_demand]() mutable {
-        service.execute_cpu_run(host, std::move(ready), 2, run_demand);
+        service.execute_run(host, "cpu", std::move(ready), 2, run_demand);
       });
   ASSERT_EQ(high_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
@@ -4246,7 +4249,7 @@ TEST(ExecutionService, BoundsDependentReentryAndReleasesRootExactly) {
       std::move(initial_lease), initial_identity, 1, true,
       [&entered, &dependent_queued, initial_release, kDemand](
           ComputeRunLease& retained_lease, const ComputeRunTaskIdentity&,
-          SchedulerTaskRuntime& runtime) {
+          ExecutionTaskRuntime& runtime) {
         auto& ready_runtime =
             dynamic_cast<ReadyTaskSubmissionRuntime&>(runtime);
         const ComputeRunTaskIdentity dependent_identity =
@@ -4254,17 +4257,17 @@ TEST(ExecutionService, BoundsDependentReentryAndReleasesRootExactly) {
         ready_runtime.submit_ready_submission(ReadyTaskSubmission(
             retained_lease, dependent_identity, 2, false,
             [&entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
-                       SchedulerTaskRuntime& dependent_runtime) {
+                       ExecutionTaskRuntime& dependent_runtime) {
               entered.fetch_add(1, std::memory_order_relaxed);
               dependent_runtime.dec_tasks_to_complete();
             },
-            SchedulerTaskPriority::Normal, kDemand));
+            ExecutionTaskPriority::Normal, kDemand));
         dependent_queued.set_value();
         initial_release.wait();
         entered.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      SchedulerTaskPriority::Normal, kDemand);
+      ExecutionTaskPriority::Normal, kDemand);
 
   const CpuRunResourceDemand run_demand{0U, kDemand};
   ExecutionService probe(1U);
@@ -4276,7 +4279,7 @@ TEST(ExecutionService, BoundsDependentReentryAndReleasesRootExactly) {
   run_future = std::async(
       std::launch::async,
       [&service, &host, ready = std::move(ready), run_demand]() mutable {
-        service.execute_cpu_run(host, std::move(ready), 2, run_demand);
+        service.execute_run(host, "cpu", std::move(ready), 2, run_demand);
       });
   ASSERT_EQ(dependent_queued_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
@@ -4381,7 +4384,7 @@ TEST(ExecutionServicePolicy, ChargesExactReadyByteQuantumBoundaries) {
       graph_identity, 1U, 0, ComputeRunQosClass::Throughput));
   ReadyTaskSubmission representative = make_counted_ready_submission(
       representative_run.acquire_lease(), 0U, 0, representative_entered,
-      SchedulerTaskPriority::Normal, kBaseDemand);
+      ExecutionTaskPriority::Normal, kBaseDemand);
   const ResourceVector base_resources = service.estimate_cpu_run_resources(
       representative, 1, CpuRunResourceDemand{0U, kBaseDemand});
   ASSERT_GT(base_resources.ready_bytes, 0U);
@@ -4808,9 +4811,9 @@ TEST(ExecutionServicePolicy, PrefersPresentDeadlineOverAbsentDeadlines) {
  * @return Nothing.
  * @throws Standard Run, service, future, or synchronization exceptions from
  * the real one-worker execution path.
- * @note Ten cheap Runs would ordinarily precede the high-work Run. After eight
- * successful target dispatches, every surviving candidate is aged and stable
- * enqueue order advances the expensive Run at the ninth target selection.
+ * @note A cheap dependent chain publishes each successor after its predecessor
+ * starts. The expensive waiter is therefore the only candidate that reaches
+ * age eight and must advance at the ninth target selection.
  */
 TEST(ExecutionServicePolicy, AgesExpensiveWaiterAfterEightDispatches) {
   constexpr ReadyTaskResourceDemand kCheapDemand{1U, 1U, 1U, 1U};
@@ -4825,7 +4828,7 @@ TEST(ExecutionServicePolicy, AgesExpensiveWaiterAfterEightDispatches) {
   std::mutex execution_order_mutex;
   AsyncPolicyRun blocker;
   std::vector<AsyncPolicyRun> targets;
-  targets.reserve(11U);
+  targets.reserve(2U);
   ScopedPromiseRelease release_guard(release_blocker);
 
   blocker = launch_blocking_policy_run(
@@ -4841,16 +4844,25 @@ TEST(ExecutionServicePolicy, AgesExpensiveWaiterAfterEightDispatches) {
                              ComputeRunQosClass::Throughput),
       {99}, kExpensiveDemand, execution_order, execution_order_mutex));
   ASSERT_TRUE(wait_for_ready_task_count(service, 1U));
-  for (int index = 0; index < 10; ++index) {
-    targets.push_back(launch_ordered_policy_run(
-        service,
-        make_policy_submission("aging-graph",
-                               static_cast<std::uint64_t>(index + 3), index,
-                               ComputeRunQosClass::Throughput),
-        {index}, kCheapDemand, execution_order, execution_order_mutex));
-    ASSERT_TRUE(wait_for_ready_task_count(
-        service, static_cast<std::uint64_t>(index + 2)));
-  }
+
+  auto chain_host = std::make_unique<ExecutionServiceHost>();
+  auto chain_run = std::make_unique<ComputeRun>(make_policy_submission(
+      "aging-chain", 3U, 0, ComputeRunQosClass::Throughput));
+  std::vector<ReadyTaskSubmission> chain_ready;
+  chain_ready.push_back(make_dependent_policy_chain_submission(
+      chain_run->acquire_lease(), 0U, 10U, kCheapDemand, execution_order,
+      execution_order_mutex));
+  ExecutionServiceHost* chain_host_pointer = chain_host.get();
+  std::future<void> chain_completion =
+      std::async(std::launch::async, [&service, chain_host_pointer,
+                                      chain_ready = std::move(chain_ready),
+                                      kCheapDemand]() mutable {
+        service.execute_run(*chain_host_pointer, "cpu", std::move(chain_ready),
+                            10, CpuRunResourceDemand{0U, kCheapDemand});
+      });
+  targets.push_back(AsyncPolicyRun{std::move(chain_host), std::move(chain_run),
+                                   std::move(chain_completion)});
+  ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
 
   EXPECT_TRUE(release_guard.release());
   expect_policy_runs_settle(targets);
@@ -4861,7 +4873,9 @@ TEST(ExecutionServicePolicy, AgesExpensiveWaiterAfterEightDispatches) {
   EXPECT_EQ(execution_order[8], 99);
   EXPECT_EQ(
       std::count(execution_order.begin(), execution_order.begin() + 8, 99), 0);
-  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_EQ(execution_order[9], 8);
+  EXPECT_EQ(execution_order[10], 9);
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
 }
 
 /**
@@ -4911,23 +4925,23 @@ TEST(ExecutionServicePolicy, AgesNormalLaneThroughHighPriorityStream) {
         std::move(lease), identity, marker, true,
         [&execution_order, &execution_order_mutex, marker](
             ComputeRunLease&, const ComputeRunTaskIdentity&,
-            SchedulerTaskRuntime& runtime) {
+            ExecutionTaskRuntime& runtime) {
           {
             std::lock_guard<std::mutex> lock(execution_order_mutex);
             execution_order.push_back(marker);
           }
           runtime.dec_tasks_to_complete();
         },
-        normal_entry ? SchedulerTaskPriority::Normal
-                     : SchedulerTaskPriority::High,
+        normal_entry ? ExecutionTaskPriority::Normal
+                     : ExecutionTaskPriority::High,
         kDemand);
   }
   ExecutionServiceHost* target_host_pointer = target_host.get();
   std::future<void> target_completion = std::async(
       std::launch::async, [&service, target_host_pointer,
                            ready = std::move(ready), kDemand]() mutable {
-        service.execute_cpu_run(*target_host_pointer, std::move(ready), 10,
-                                CpuRunResourceDemand{0U, kDemand});
+        service.execute_run(*target_host_pointer, "cpu", std::move(ready), 10,
+                            CpuRunResourceDemand{0U, kDemand});
       });
   targets.push_back(AsyncPolicyRun{std::move(target_host),
                                    std::move(target_run),
@@ -5097,7 +5111,7 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
                                               ComputeRunQosClass::Throughput));
   ReadyTaskSubmission representative = make_counted_ready_submission(
       probe_run.acquire_lease(), 0U, 1, probe_entered,
-      SchedulerTaskPriority::Normal, kDemand);
+      ExecutionTaskPriority::Normal, kDemand);
   const ResourceVector required = probe.estimate_cpu_run_resources(
       representative, 1, CpuRunResourceDemand{0U, kDemand});
   const std::optional<ResourceVector> doubled =
@@ -5169,29 +5183,16 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   std::vector<ReadyTaskSubmission> rejected_ready;
   rejected_ready.push_back(make_counted_ready_submission(
       rejected_run.acquire_lease(), 0U, 4, rejected_entered,
-      SchedulerTaskPriority::Normal, kDemand));
+      ExecutionTaskPriority::Normal, kDemand));
   try {
     ExecutionServiceHost rejected_host;
-    service.execute_cpu_run(rejected_host, std::move(rejected_ready), 1,
-                            CpuRunResourceDemand{0U, kDemand});
+    service.execute_run(rejected_host, "cpu", std::move(rejected_ready), 1,
+                        CpuRunResourceDemand{0U, kDemand});
     FAIL() << "Expected throughput headroom rejection.";
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
   }
   EXPECT_EQ(rejected_entered.load(std::memory_order_relaxed), 0);
-  EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
-
-  ASSERT_EQ(required.cpu_slots, 1U);
-  auto legacy = service.try_reserve_legacy_scheduler_workers(1U);
-  ASSERT_TRUE(legacy.has_value());
-  ResourceVector with_legacy = required;
-  ++with_legacy.cpu_slots;
-  EXPECT_EQ(service.resource_snapshot().reserved, with_legacy);
-  legacy.reset();
   EXPECT_EQ(service.resource_snapshot().reserved, required);
   EXPECT_EQ(
       testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
@@ -5244,7 +5245,7 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
                                               ComputeRunQosClass::Throughput));
   ReadyTaskSubmission representative = make_counted_ready_submission(
       probe_run.acquire_lease(), 0U, 1, probe_entered,
-      SchedulerTaskPriority::Normal, kDemand);
+      ExecutionTaskPriority::Normal, kDemand);
   const ResourceVector required = probe.estimate_cpu_run_resources(
       representative, 1, CpuRunResourceDemand{0U, kDemand});
   const std::optional<ResourceVector> doubled =
@@ -5379,7 +5380,7 @@ TEST(ExecutionServicePolicy, RetainsPolicyHistoryAcrossDependentReentry) {
       std::move(chain_lease), chain_identity, 10, true,
       [&execution_order, &execution_order_mutex, kDemand](
           ComputeRunLease& retained_lease, const ComputeRunTaskIdentity&,
-          SchedulerTaskRuntime& runtime) {
+          ExecutionTaskRuntime& runtime) {
         {
           std::lock_guard<std::mutex> lock(execution_order_mutex);
           execution_order.push_back(10);
@@ -5392,24 +5393,24 @@ TEST(ExecutionServicePolicy, RetainsPolicyHistoryAcrossDependentReentry) {
             retained_lease, dependent_identity, 11, false,
             [&execution_order, &execution_order_mutex](
                 ComputeRunLease&, const ComputeRunTaskIdentity&,
-                SchedulerTaskRuntime& dependent_runtime) {
+                ExecutionTaskRuntime& dependent_runtime) {
               {
                 std::lock_guard<std::mutex> lock(execution_order_mutex);
                 execution_order.push_back(11);
               }
               dependent_runtime.dec_tasks_to_complete();
             },
-            SchedulerTaskPriority::Normal, kDemand));
+            ExecutionTaskPriority::Normal, kDemand));
         runtime.dec_tasks_to_complete();
       },
-      SchedulerTaskPriority::Normal, kDemand);
+      ExecutionTaskPriority::Normal, kDemand);
   ExecutionServiceHost* chain_host_pointer = chain_host.get();
   std::future<void> chain_completion =
       std::async(std::launch::async, [&service, chain_host_pointer,
                                       chain_ready = std::move(chain_ready),
                                       kDemand]() mutable {
-        service.execute_cpu_run(*chain_host_pointer, std::move(chain_ready), 2,
-                                CpuRunResourceDemand{0U, kDemand});
+        service.execute_run(*chain_host_pointer, "cpu", std::move(chain_ready),
+                            2, CpuRunResourceDemand{0U, kDemand});
       });
   targets.push_back(AsyncPolicyRun{std::move(chain_host), std::move(chain_run),
                                    std::move(chain_completion)});
@@ -5447,7 +5448,7 @@ TEST(ExecutionServicePolicy, SaturatesGraphCounterWithoutWrapping) {
       saturated_graph, 1U, 0, ComputeRunQosClass::Throughput));
   ReadyTaskSubmission representative = make_counted_ready_submission(
       representative_run.acquire_lease(), 0U, 0, representative_entered,
-      SchedulerTaskPriority::Normal, kBaseDemand);
+      ExecutionTaskPriority::Normal, kBaseDemand);
   const ResourceVector base_resources = service.estimate_cpu_run_resources(
       representative, 1, CpuRunResourceDemand{0U, kBaseDemand});
   ASSERT_GT(base_resources.ready_bytes, 0U);
@@ -5523,7 +5524,7 @@ TEST(ExecutionServicePolicy, SaturatesRunCounterAcrossDependentReentry) {
       graph_identity, 1U, 0, ComputeRunQosClass::Throughput));
   ReadyTaskSubmission representative = make_counted_ready_submission(
       representative_run.acquire_lease(), 0U, 0, representative_entered,
-      SchedulerTaskPriority::Normal, kBaseDemand);
+      ExecutionTaskPriority::Normal, kBaseDemand);
   const ResourceVector base_resources = service.estimate_cpu_run_resources(
       representative, 1, CpuRunResourceDemand{0U, kBaseDemand});
   ASSERT_GT(base_resources.ready_bytes, 0U);
@@ -5567,7 +5568,7 @@ TEST(ExecutionServicePolicy, SaturatesRunCounterAcrossDependentReentry) {
        saturated_initial_release, &execution_order, &execution_order_mutex,
        maximum_cost_demand](ComputeRunLease& retained_lease,
                             const ComputeRunTaskIdentity&,
-                            SchedulerTaskRuntime& runtime) {
+                            ExecutionTaskRuntime& runtime) {
         saturated_entered.set_value();
         publish_dependent_gate.wait();
         auto& ready_runtime =
@@ -5578,27 +5579,27 @@ TEST(ExecutionServicePolicy, SaturatesRunCounterAcrossDependentReentry) {
             retained_lease, dependent_identity, 1, false,
             [&execution_order, &execution_order_mutex](
                 ComputeRunLease&, const ComputeRunTaskIdentity&,
-                SchedulerTaskRuntime& dependent_runtime) {
+                ExecutionTaskRuntime& dependent_runtime) {
               {
                 std::lock_guard<std::mutex> lock(execution_order_mutex);
                 execution_order.push_back(1);
               }
               dependent_runtime.dec_tasks_to_complete();
             },
-            SchedulerTaskPriority::Normal, maximum_cost_demand));
+            ExecutionTaskPriority::Normal, maximum_cost_demand));
         dependent_published.set_value();
         saturated_initial_release.wait();
         runtime.dec_tasks_to_complete();
       },
-      SchedulerTaskPriority::Normal, maximum_cost_demand);
+      ExecutionTaskPriority::Normal, maximum_cost_demand);
   ExecutionServiceHost* saturated_host_pointer = saturated_host.get();
   std::future<void> saturated_completion = std::async(
       std::launch::async, [&service, saturated_host_pointer,
                            saturated_ready = std::move(saturated_ready),
                            maximum_cost_demand]() mutable {
-        service.execute_cpu_run(*saturated_host_pointer,
-                                std::move(saturated_ready), 2,
-                                CpuRunResourceDemand{0U, maximum_cost_demand});
+        service.execute_run(*saturated_host_pointer, "cpu",
+                            std::move(saturated_ready), 2,
+                            CpuRunResourceDemand{0U, maximum_cost_demand});
       });
   saturated =
       AsyncPolicyRun{std::move(saturated_host), std::move(saturated_run),
@@ -5669,11 +5670,11 @@ TEST(ExecutionServicePolicy, UnwindsPolicyCostOverflowWithoutAffectingPeer) {
   std::vector<ReadyTaskSubmission> overflow_ready;
   overflow_ready.push_back(make_counted_ready_submission(
       overflow_run.acquire_lease(), 0U, 2, overflow_entered,
-      SchedulerTaskPriority::Normal, kOverflowDemand));
+      ExecutionTaskPriority::Normal, kOverflowDemand));
   try {
     ExecutionServiceHost overflow_host;
-    service.execute_cpu_run(overflow_host, std::move(overflow_ready), 1,
-                            CpuRunResourceDemand{0U, kOverflowDemand});
+    service.execute_run(overflow_host, "cpu", std::move(overflow_ready), 1,
+                        CpuRunResourceDemand{0U, kOverflowDemand});
     FAIL() << "Expected checked policy service-cost overflow.";
   } catch (const GraphError& error) {
     EXPECT_EQ(error.code(), GraphErrc::ComputeError);
@@ -5706,7 +5707,7 @@ TEST(ExecutionServicePolicy, UnwindsPolicyCostOverflowWithoutAffectingPeer) {
  * @throws std::future_error when test synchronization state is invalid.
  * @throws std::system_error when async launch or synchronization fails.
  * @note The first callback blocks after entering its worker. The second caller
- * signals immediately before calling `execute_cpu_run()`. With two fixed
+ * signals immediately before calling `execute_run()`. With two fixed
  * service workers, the second Run must enter and settle while the first Run
  * remains blocked, proving there is no whole-service Run gate. Both Runs reuse
  * local task id zero; each Host must observe only its matching Run/node/epoch.
@@ -5732,7 +5733,7 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   first_ready.emplace_back(std::move(first_lease), first_identity, 63, true,
                            [&first_entered, first_release](
                                ComputeRunLease&, const ComputeRunTaskIdentity&,
-                               SchedulerTaskRuntime& runtime) {
+                               ExecutionTaskRuntime& runtime) {
                              first_entered.set_value();
                              first_release.wait();
                              runtime.dec_tasks_to_complete();
@@ -5747,7 +5748,7 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   second_ready.emplace_back(
       std::move(second_lease), second_identity, 64, true,
       [&second_entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
-                        SchedulerTaskRuntime& runtime) {
+                        ExecutionTaskRuntime& runtime) {
         second_entered.store(true, std::memory_order_release);
         runtime.dec_tasks_to_complete();
       });
@@ -5758,7 +5759,7 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
   first_future = std::async(
       std::launch::async,
       [&service, &first_host, ready = std::move(first_ready)]() mutable {
-        service.execute_cpu_run(first_host, std::move(ready), 1);
+        service.execute_run(first_host, "cpu", std::move(ready), 1);
       });
   ASSERT_EQ(first_entered.get_future().wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
@@ -5769,7 +5770,7 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
       std::launch::async, [&service, &second_host, &second_call_started,
                            ready = std::move(second_ready)]() mutable {
         second_call_started.set_value();
-        service.execute_cpu_run(second_host, std::move(ready), 1);
+        service.execute_run(second_host, "cpu", std::move(ready), 1);
       });
 
   const std::future_status second_call_status =
@@ -5808,13 +5809,13 @@ TEST(ExecutionService, OverlapsIndependentConcurrentRunIntervals) {
       second_host.trace_events();
   ASSERT_EQ(first_traces.size(), 1U);
   ASSERT_EQ(second_traces.size(), 1U);
-  EXPECT_EQ(first_traces.front().action, SchedulerTraceAction::AssignInitial);
+  EXPECT_EQ(first_traces.front().action, ExecutionTraceAction::AssignInitial);
   EXPECT_EQ(first_traces.front().node_id, 63);
   EXPECT_GE(first_traces.front().worker_id, 0);
   EXPECT_LT(first_traces.front().worker_id, 2);
   EXPECT_EQ(first_traces.front().epoch, first.descriptor().id().value());
   EXPECT_NE(first_traces.front().epoch, second.descriptor().id().value());
-  EXPECT_EQ(second_traces.front().action, SchedulerTraceAction::AssignInitial);
+  EXPECT_EQ(second_traces.front().action, ExecutionTraceAction::AssignInitial);
   EXPECT_EQ(second_traces.front().node_id, 64);
   EXPECT_GE(second_traces.front().worker_id, 0);
   EXPECT_LT(second_traces.front().worker_id, 2);
@@ -5884,7 +5885,7 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
       [&active_children, &both_entered, release, &hp_observation_promise](
           ComputeRunLease& retained_lease,
           const ComputeRunTaskIdentity& retained_identity,
-          SchedulerTaskRuntime& runtime) {
+          ExecutionTaskRuntime& runtime) {
         hp_observation_promise.set_value(observe_retained_submission(
             kHpTraceNodeId, retained_lease, retained_identity));
         const int active =
@@ -5907,7 +5908,7 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
       [&active_children, &both_entered, release, &rt_observation_promise](
           ComputeRunLease& retained_lease,
           const ComputeRunTaskIdentity& retained_identity,
-          SchedulerTaskRuntime& runtime) {
+          ExecutionTaskRuntime& runtime) {
         rt_observation_promise.set_value(observe_retained_submission(
             kRtTraceNodeId, retained_lease, retained_identity));
         const int active =
@@ -5926,12 +5927,12 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
   hp_future =
       std::async(std::launch::async,
                  [&service, &host, ready = std::move(hp_ready)]() mutable {
-                   service.execute_cpu_run(host, std::move(ready), 1);
+                   service.execute_run(host, "cpu", std::move(ready), 1);
                  });
   rt_future =
       std::async(std::launch::async,
                  [&service, &host, ready = std::move(rt_ready)]() mutable {
-                   service.execute_cpu_run(host, std::move(ready), 1);
+                   service.execute_run(host, "cpu", std::move(ready), 1);
                  });
 
   const std::future_status both_entered_status =
@@ -5988,7 +5989,7 @@ TEST(ExecutionService, DistinguishesRealtimeHpAndRtChildEpochsOnOneHost) {
   std::size_t hp_marker_count = 0U;
   std::size_t rt_marker_count = 0U;
   for (const ExecutionServiceHost::TraceEvent& trace : traces) {
-    EXPECT_EQ(trace.action, SchedulerTraceAction::AssignInitial);
+    EXPECT_EQ(trace.action, ExecutionTraceAction::AssignInitial);
     EXPECT_GE(trace.worker_id, 0);
     EXPECT_LT(trace.worker_id, 2);
     if (trace.node_id == kHpTraceNodeId) {
@@ -6066,7 +6067,7 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
       std::move(failing_lease), failing_identity, 65, true,
       [&failing_entered, failing_release, failure](
           ComputeRunLease&, const ComputeRunTaskIdentity&,
-          SchedulerTaskRuntime&) {
+          ExecutionTaskRuntime&) {
         failing_entered.set_value();
         failing_release.wait();
         std::rethrow_exception(failure);
@@ -6078,7 +6079,7 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   peer_ready.emplace_back(std::move(peer_lease), peer_identity, 66, true,
                           [&peer_entered, peer_release](
                               ComputeRunLease&, const ComputeRunTaskIdentity&,
-                              SchedulerTaskRuntime& runtime) {
+                              ExecutionTaskRuntime& runtime) {
                             peer_entered.set_value();
                             peer_release.wait();
                             runtime.dec_tasks_to_complete();
@@ -6091,12 +6092,12 @@ TEST(ExecutionService, IsolatesConcurrentRunFailureFromActivePeer) {
   failing_future = std::async(
       std::launch::async,
       [&service, &failing_host, ready = std::move(failing_ready)]() mutable {
-        service.execute_cpu_run(failing_host, std::move(ready), 1);
+        service.execute_run(failing_host, "cpu", std::move(ready), 1);
       });
   peer_future = std::async(
       std::launch::async,
       [&service, &peer_host, ready = std::move(peer_ready)]() mutable {
-        service.execute_cpu_run(peer_host, std::move(ready), 1);
+        service.execute_run(peer_host, "cpu", std::move(ready), 1);
       });
 
   const std::future_status failing_entered_status =
@@ -6186,7 +6187,7 @@ TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
   mixed.push_back(
       make_counted_ready_submission(second.acquire_lease(), 0, 72, entered));
 
-  EXPECT_THROW(service.execute_cpu_run(host, std::move(mixed), 2),
+  EXPECT_THROW(service.execute_run(host, "cpu", std::move(mixed), 2),
                std::invalid_argument);
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(host.context_entries(), 0);
@@ -6215,7 +6216,7 @@ TEST(ExecutionServiceCancellation,
 
   ASSERT_TRUE(source.request_cancellation(
       ComputeRunCancellationReason::ExplicitRequest));
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(ready), 1));
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(ready), 1));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(host.context_entries(), 0);
   EXPECT_EQ(host.context_exits(), 0);
@@ -6229,7 +6230,9 @@ TEST(ExecutionServiceCancellation,
  * drainage failures.
  * @throws Allocation, service, or synchronization exceptions from setup.
  * @note The Host hook runs after the worker counts the task in flight. The
- * submission executable must remain unentered and all grants must still drain.
+ * submission executable must remain unentered. Caller settlement may precede
+ * destruction of the worker's final local Run owner, so the ledger is polled
+ * until that owner releases the root reservation.
  */
 TEST(ExecutionServiceCancellation,
      CancellationAfterDequeueSuppressesExecutableAndDrainsExactly) {
@@ -6243,14 +6246,14 @@ TEST(ExecutionServiceCancellation,
   ready.push_back(
       make_counted_ready_submission(run.acquire_lease(), 0U, 72, entered));
 
-  EXPECT_NO_THROW(service.execute_cpu_run(host, std::move(ready), 1));
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(ready), 1));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(host.context_entries(), 1);
   EXPECT_EQ(host.context_exits(), 1);
   EXPECT_FALSE(host.trace_recording_failed());
   ASSERT_TRUE(run.terminal_outcome().has_value());
   EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
-  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
 }
 
 /**
@@ -6284,7 +6287,7 @@ TEST(ExecutionServiceCancellation,
   peer_ready.emplace_back(peer_lease, peer_lease.task_identity(0U), 73, true,
                           [&peer_entered, peer_release](
                               ComputeRunLease&, const ComputeRunTaskIdentity&,
-                              SchedulerTaskRuntime& runtime) {
+                              ExecutionTaskRuntime& runtime) {
                             peer_entered.set_value();
                             peer_release.wait();
                             runtime.dec_tasks_to_complete();
@@ -6310,14 +6313,14 @@ TEST(ExecutionServiceCancellation,
   peer_future = std::async(
       std::launch::async,
       [&service, &peer_host, ready = std::move(peer_ready)]() mutable {
-        service.execute_cpu_run(peer_host, std::move(ready), 1);
+        service.execute_run(peer_host, "cpu", std::move(ready), 1);
       });
   ASSERT_EQ(peer_entered.get_future().wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   target_future = std::async(
       std::launch::async,
       [&service, &target_host, ready = std::move(target_ready)]() mutable {
-        service.execute_cpu_run(target_host, std::move(ready), 2);
+        service.execute_run(target_host, "cpu", std::move(ready), 2);
       });
   ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
   ASSERT_TRUE(wait_for_resource_reservation(service, *combined_required));
@@ -6369,7 +6372,7 @@ TEST(ExecutionServiceCancellation,
       initial_lease, initial_lease.task_identity(0U), 75, true,
       [&initial_entered, release, &dependent_entered](
           ComputeRunLease& retained_lease, const ComputeRunTaskIdentity&,
-          SchedulerTaskRuntime& runtime) {
+          ExecutionTaskRuntime& runtime) {
         initial_entered.set_value();
         release.wait();
         auto* ready_runtime =
@@ -6385,7 +6388,7 @@ TEST(ExecutionServiceCancellation,
             std::move(dependent_lease), dependent_identity, 76, false,
             [&dependent_entered](ComputeRunLease&,
                                  const ComputeRunTaskIdentity&,
-                                 SchedulerTaskRuntime& dependent_runtime) {
+                                 ExecutionTaskRuntime& dependent_runtime) {
               dependent_entered.fetch_add(1, std::memory_order_relaxed);
               dependent_runtime.dec_tasks_to_complete();
             }));
@@ -6397,7 +6400,7 @@ TEST(ExecutionServiceCancellation,
   run_future =
       std::async(std::launch::async,
                  [&service, &host, ready = std::move(ready)]() mutable {
-                   service.execute_cpu_run(host, std::move(ready), 2);
+                   service.execute_run(host, "cpu", std::move(ready), 2);
                  });
   ASSERT_EQ(initial_entered.get_future().wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
@@ -6443,7 +6446,7 @@ TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
   ready.emplace_back(lease, identity, 81, true,
                      [failure](ComputeRunLease& retained_lease,
                                const ComputeRunTaskIdentity& retained_identity,
-                               SchedulerTaskRuntime&) {
+                               ExecutionTaskRuntime&) {
                        (void)retained_lease.publish_task_failure(
                            retained_identity, failure);
                        std::rethrow_exception(failure);
@@ -6451,7 +6454,7 @@ TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
 
   std::exception_ptr observed;
   try {
-    service.execute_cpu_run(host, std::move(ready), 1);
+    service.execute_run(host, "cpu", std::move(ready), 1);
     FAIL() << "Expected service worker failure.";
   } catch (...) {
     observed = std::current_exception();
@@ -6466,21 +6469,21 @@ TEST(ExecutionService, PreservesExactFailureForMatchingRegisteredTask) {
 }
 
 /**
- * @brief Verifies generic scheduler lanes cannot bypass ready-only admission.
+ * @brief Verifies private execution lanes cannot bypass ready-only admission.
  *
- * @note This is a private implementation contract and changes no installed
- * SchedulerTaskRuntime vtable.
+ * @note This is a private implementation contract; no public or plugin vtable
+ *       is involved.
  */
 TEST(ExecutionService, RejectsBorrowedHandlesAndAnonymousCallbacks) {
   ExecutionService service;
   EXPECT_THROW(
-      service.submit_initial_task_handles({}, 0, SchedulerTaskPriority::Normal),
+      service.submit_initial_task_handles({}, 0, ExecutionTaskPriority::Normal),
       std::logic_error);
   EXPECT_THROW(service.submit_ready_task_handles_from_worker(
-                   {}, SchedulerTaskPriority::Normal),
+                   {}, ExecutionTaskPriority::Normal),
                std::logic_error);
   EXPECT_THROW(service.submit_ready_task_any_thread(
-                   [] {}, SchedulerTaskPriority::Normal, std::nullopt),
+                   [] {}, ExecutionTaskPriority::Normal, std::nullopt),
                std::logic_error);
 }
 
@@ -6489,7 +6492,7 @@ TEST(ExecutionService, RejectsBorrowedHandlesAndAnonymousCallbacks) {
  *
  * @return Nothing; GoogleTest assertions report callback entry, ledger, or
  * staged-publication failures.
- * @throws Allocation, registry, scheduler, or synchronization exceptions from
+ * @throws Allocation, registry, execution, or synchronization exceptions from
  * fixture setup and execution.
  * @note In the return branch, an injected deadline expires at the first
  * observation after source A returns and before dependency release. In the
@@ -6614,7 +6617,7 @@ TEST(ComputeRunCancellation,
 }
 
 /**
- * @brief Verifies a terminal accepted task retires its counted scheduler unit.
+ * @brief Verifies a terminal accepted task retires its counted execution unit.
  *
  * @note The owned callback is accepted before failure publication and invoked
  * by the runtime afterward. Zero execution traces and an untouched temporary

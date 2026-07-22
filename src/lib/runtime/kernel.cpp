@@ -1,12 +1,12 @@
 /**
  * @file kernel.cpp
- * @brief Implements Kernel graph lifecycle and scheduler bootstrap methods.
+ * @brief Implements Kernel Graph lifecycle and execution-default methods.
  *
  * The broader Kernel facade is split by responsibility across
  * kernel_compute.cpp, kernel_io_cache_facade.cpp,
  * kernel_inspection_facade.cpp, kernel_dirty_roi_facade.cpp, and
- * kernel_scheduler_facade.cpp. This file keeps ownership setup for graph
- * runtimes, graph listing/closing, Metal device access, and scheduler
+ * kernel_execution_facade.cpp. This file keeps ownership setup for Graph
+ * runtimes, Graph listing/closing, Metal device access, and execution
  * configuration so the internal adapter-to-Kernel contract remains unchanged
  * while the implementation no longer concentrates every backend wrapper in one
  * translation unit. Public frontend calls enter through `ps::Host` and the
@@ -26,7 +26,7 @@
 
 #include "compute/execution_service.hpp"
 #include "photospider/core/graph_error.hpp"
-#include "scheduler/scheduler_factory.hpp"
+#include "photospider/host/host.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 #include "runtime/kernel_required_target_test_access.hpp"
 #endif
@@ -149,6 +149,46 @@ id Kernel::get_metal_device(const std::string& name) {
   return it->second->get_metal_device();
 }
 
+/** @copydoc Kernel::policy_available_types */
+std::vector<std::string> Kernel::policy_available_types() const {
+  return execution_service_->policy_available_types();
+}
+
+/** @copydoc Kernel::policy_description */
+std::string Kernel::policy_description(const std::string& type_name) const {
+  return execution_service_->policy_description(type_name);
+}
+
+/** @copydoc Kernel::policy_scan */
+std::size_t Kernel::policy_scan(const std::vector<std::string>& directories) {
+  return execution_service_->policy_scan(directories);
+}
+
+/** @copydoc Kernel::policy_load */
+void Kernel::policy_load(const std::string& path) {
+  execution_service_->policy_load(path);
+}
+
+/** @copydoc Kernel::policy_loaded_plugins */
+std::vector<std::string> Kernel::policy_loaded_plugins() const {
+  return execution_service_->policy_loaded_plugins();
+}
+
+/** @copydoc Kernel::configure_policy_defaults */
+void Kernel::configure_policy_defaults(const HostPolicyConfig& config) {
+  execution_service_->configure_policy_defaults(config);
+}
+
+/** @copydoc Kernel::policy_info */
+PolicyInfoSnapshot Kernel::policy_info(PolicyClass policy_class) const {
+  return execution_service_->policy_info(policy_class);
+}
+
+/** @copydoc Kernel::replace_policy */
+void Kernel::replace_policy(PolicyClass policy_class, const std::string& type) {
+  execution_service_->replace_policy(policy_class, type);
+}
+
 /** @copydoc Kernel::load_graph */
 std::optional<std::string> Kernel::load_graph(
     const std::string& name, const std::string& root_dir,
@@ -175,9 +215,18 @@ std::optional<std::string> Kernel::load_graph(
     effective_cache_root = std::filesystem::path(cache_root_dir) / name;
   }
 
-  GraphRuntime::Info info{name, std::filesystem::path(root_dir) / name,
-                          effective_yaml_path, config_path,
-                          effective_cache_root};
+  if (!execution_service_->is_configured()) {
+    execution_service_->configure_worker_count(execution_config_.worker_count);
+    execution_config_.worker_count = execution_service_->worker_count();
+  }
+  GraphRuntime::Info info;
+  info.name = name;
+  info.root = std::filesystem::path(root_dir) / name;
+  info.yaml = effective_yaml_path;
+  info.config = config_path;
+  info.cache_root = effective_cache_root;
+  info.hp_execution_type = execution_config_.hp_type;
+  info.rt_execution_type = execution_config_.rt_type;
   auto runtime = std::make_unique<GraphRuntime>(info);
   try {
     std::filesystem::create_directories(info.root);
@@ -213,7 +262,6 @@ std::optional<std::string> Kernel::load_graph(
                          "': " + error.what());
   }
 
-  setup_schedulers_for_runtime(name, *runtime);
   runtime->start();
 
   const auto final_yaml_to_load = info.root / "content.yaml";
@@ -276,107 +324,31 @@ std::vector<std::string> Kernel::list_graphs() const {
   return names;
 }
 
-/** @copydoc Kernel::set_scheduler_config */
-void Kernel::set_scheduler_config(const SchedulerConfig& config) {
-  SchedulerConfig candidate = config;
-  const std::optional<SchedulerPlan> hp_plan =
-      SchedulerFactory::plan(candidate.hp_type, candidate.worker_count);
-  const std::optional<SchedulerPlan> rt_plan =
-      SchedulerFactory::plan(candidate.rt_type, candidate.worker_count);
-  const bool selects_process_cpu =
-      (hp_plan.has_value() && hp_plan->is_builtin_cpu()) ||
-      (rt_plan.has_value() && rt_plan->is_builtin_cpu());
-  if (execution_service_->is_configured() || selects_process_cpu) {
-    execution_service_->configure_worker_count(candidate.worker_count);
-    candidate.worker_count = execution_service_->worker_count();
+/** @copydoc Kernel::set_execution_config */
+void Kernel::set_execution_config(const ExecutionConfig& config) {
+  ExecutionConfig candidate = config;
+  if (!compute::ExecutionService::is_execution_type(candidate.hp_type) ||
+      !compute::ExecutionService::is_execution_type(candidate.rt_type) ||
+      candidate.worker_count > kExecutionWorkerRequestMax) {
+    throw std::invalid_argument("Invalid execution defaults.");
   }
-  scheduler_config_ = std::move(candidate);
+  execution_service_->configure_worker_count(candidate.worker_count);
+  candidate.worker_count = execution_service_->worker_count();
+  execution_config_ = std::move(candidate);
 }
 
-const Kernel::SchedulerConfig& Kernel::get_scheduler_config() const {
-  return scheduler_config_;
+const Kernel::ExecutionConfig& Kernel::get_execution_config() const {
+  return execution_config_;
 }
 
-/** @copydoc Kernel::setup_schedulers_for_runtime */
-void Kernel::setup_schedulers_for_runtime(const std::string& name,
-                                          GraphRuntime& runtime) {
-  std::optional<SchedulerPlan> hp_plan = SchedulerFactory::plan(
-      scheduler_config_.hp_type, scheduler_config_.worker_count);
-  std::optional<SchedulerPlan> rt_plan = SchedulerFactory::plan(
-      scheduler_config_.rt_type, scheduler_config_.worker_count);
-  if (!hp_plan.has_value()) {
-    throw GraphError(
-        GraphErrc::InvalidParameter,
-        "unsupported HP scheduler type '" + scheduler_config_.hp_type + "'");
-  }
-  if (!rt_plan.has_value()) {
-    throw GraphError(
-        GraphErrc::InvalidParameter,
-        "unsupported RT scheduler type '" + scheduler_config_.rt_type + "'");
-  }
-  if (hp_plan->is_builtin_cpu() || rt_plan->is_builtin_cpu()) {
-    execution_service_->configure_worker_count(scheduler_config_.worker_count);
-    scheduler_config_.worker_count = execution_service_->worker_count();
-    hp_plan = SchedulerFactory::plan(scheduler_config_.hp_type,
-                                     scheduler_config_.worker_count);
-    rt_plan = SchedulerFactory::plan(scheduler_config_.rt_type,
-                                     scheduler_config_.worker_count);
-    if (!hp_plan.has_value() || !rt_plan.has_value()) {
-      throw GraphError(
-          GraphErrc::InvalidParameter,
-          "scheduler type became unavailable during fixed CPU planning");
-    }
-  }
+/** @copydoc Kernel::execution_available_types */
+std::vector<std::string> Kernel::execution_available_types() const {
+  return compute::ExecutionService::available_execution_types();
+}
 
-  std::optional<ResourceLedger::ReservationPair> reservations =
-      execution_service_->try_reserve_legacy_scheduler_worker_pair(
-          hp_plan->is_builtin_cpu() ? 0U : hp_plan->reservation_slots(),
-          rt_plan->is_builtin_cpu() ? 0U : rt_plan->reservation_slots());
-  if (!reservations.has_value()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Host resource ledger cannot admit the configured HP "
-                     "and RT scheduler pair");
-  }
-
-  std::unique_ptr<IScheduler> hp_scheduler;
-  if (!hp_plan->is_builtin_cpu()) {
-    hp_scheduler =
-        SchedulerFactory::create(*hp_plan, std::move(reservations->first));
-    if (hp_scheduler == nullptr) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "HP scheduler type '" + scheduler_config_.hp_type +
-                           "' became unavailable or returned no scheduler "
-                           "instance during Graph load");
-    }
-  }
-
-  std::unique_ptr<IScheduler> rt_scheduler;
-  if (!rt_plan->is_builtin_cpu()) {
-    rt_scheduler =
-        SchedulerFactory::create(*rt_plan, std::move(reservations->second));
-    if (rt_scheduler == nullptr) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "RT scheduler type '" + scheduler_config_.rt_type +
-                           "' became unavailable or returned no scheduler "
-                           "instance during Graph load");
-    }
-  }
-
-  GraphRuntime::SchedulerExecutionRoute hp_execution_route;
-  if (hp_plan->is_builtin_cpu()) {
-    hp_execution_route.domain =
-        GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService;
-  }
-  GraphRuntime::SchedulerExecutionRoute rt_execution_route;
-  if (rt_plan->is_builtin_cpu()) {
-    rt_execution_route.domain =
-        GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService;
-  }
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::move(hp_scheduler), hp_execution_route);
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler),
-                        rt_execution_route);
-  clear_last_error(name);
+/** @copydoc Kernel::execution_description */
+std::string Kernel::execution_description(const std::string& type_name) const {
+  return compute::ExecutionService::execution_description(type_name);
 }
 
 }  // namespace ps

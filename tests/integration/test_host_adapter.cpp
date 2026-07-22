@@ -1,15 +1,8 @@
 #include <gtest/gtest.h>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -35,15 +28,12 @@
 #include "graph/graph_state_executor_test_access.hpp"
 #endif
 #include "photospider/host/host.hpp"
-#include "photospider/scheduler/scheduler_task_runtime.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/graph_runtime.hpp"  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
     defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING) && \
     defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "runtime/kernel_required_target_test_access.hpp"
 #endif
-#include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
-#include "scheduler/serial_debug_scheduler.hpp"  // NOLINT(build/include_subdir)
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
 
@@ -51,9 +41,9 @@
 #define PS_TEST_OP_PLUGIN_DIR "build/test_plugins"
 #endif
 
-#ifndef PS_TEST_SCHEDULER_PLUGIN_PATH
-#define PS_TEST_SCHEDULER_PLUGIN_PATH \
-  "build/test_schedulers/libdestroy_count_scheduler_plugin.dylib"
+#ifndef PS_TEST_POLICY_PLUGIN_PATH
+#define PS_TEST_POLICY_PLUGIN_PATH \
+  "build/test_policies/libtest_policy_plugin.dylib"
 #endif
 
 namespace ps {
@@ -726,14 +716,6 @@ bool wait_for_atomic_size_at_least(const std::atomic<std::size_t>& value,
 }
 #endif
 
-/** @brief Environment key selecting scheduler fixture lifecycle failures. */
-constexpr const char* kSchedulerFailureEnvironment =  // NOLINT
-    "PS_DESTROY_COUNT_SCHEDULER_FAILURE";             // NOLINT
-
-/** @brief Scheduler type exported by the deterministic close-failure fixture.
- */
-constexpr const char* kDestroyCountSchedulerType = "destroy_count_test";
-
 /**
  * @brief Configures one deterministic blocking Host operation invocation.
  *
@@ -1052,104 +1034,6 @@ class ScopedTempDir {
 };
 
 /**
- * @brief Temporarily sets one scheduler-fixture environment value.
- *
- * @throws std::bad_alloc if the key or previous value cannot be copied.
- * @throws std::runtime_error if the platform environment update fails.
- * @note Tests using this helper are process-serial because environment values
- *       are global. Destruction restores the exact prior value best-effort.
- */
-class ScopedEnvironmentValue final {
- public:
-  /**
-   * @brief Saves the current value and installs one fixture selection.
-   * @param name Environment key copied for this guard's lifetime.
-   * @param value New value visible to the scheduler plugin.
-   * @throws std::bad_alloc if owned strings cannot be allocated.
-   * @throws std::runtime_error if the environment cannot be updated.
-   */
-  ScopedEnvironmentValue(const char* name, const std::string& value)
-      : name_(name) {
-    if (const char* previous = std::getenv(name)) {
-      previous_ = std::string(previous);
-    }
-    set(value);
-  }
-
-  /**
-   * @brief Restores the saved environment state without hiding test failures.
-   * @throws Nothing; platform restoration failures are suppressed.
-   */
-  ~ScopedEnvironmentValue() noexcept {
-    try {
-      if (previous_) {
-        set(*previous_);
-      } else {
-        clear();
-      }
-    } catch (...) {
-    }
-  }
-
-  /**
-   * @brief Prevents duplicate restoration ownership.
-   * @param other Guard that remains the sole restoration owner.
-   * @throws Nothing because construction is unavailable.
-   */
-  ScopedEnvironmentValue(const ScopedEnvironmentValue& other) = delete;
-
-  /**
-   * @brief Prevents replacing one active environment guard.
-   * @param other Guard whose environment key remains unchanged.
-   * @return No value because assignment is unavailable.
-   * @throws Nothing because assignment is unavailable.
-   */
-  ScopedEnvironmentValue& operator=(const ScopedEnvironmentValue& other) =
-      delete;
-
- private:
-  /**
-   * @brief Installs a new value for the owned key.
-   * @param value Value to publish process-wide.
-   * @return Nothing.
-   * @throws std::runtime_error if the platform call fails.
-   */
-  void set(const std::string& value) {
-#if defined(_WIN32)
-    if (_putenv_s(name_.c_str(), value.c_str()) != 0) {
-      throw std::runtime_error("_putenv_s failed");
-    }
-#else
-    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
-      throw std::runtime_error("setenv failed");
-    }
-#endif
-  }
-
-  /**
-   * @brief Removes the owned environment key.
-   * @return Nothing.
-   * @throws std::runtime_error if the platform call fails.
-   */
-  void clear() {
-#if defined(_WIN32)
-    if (_putenv_s(name_.c_str(), "") != 0) {
-      throw std::runtime_error("_putenv_s clear failed");
-    }
-#else
-    if (unsetenv(name_.c_str()) != 0) {
-      throw std::runtime_error("unsetenv failed");
-    }
-#endif
-  }
-
-  /** @brief Environment key retained through restoration. */
-  std::string name_;
-  /** @brief Previous value, or nullopt when the key was absent. */
-  std::optional<std::string> previous_;
-};
-
-/**
  * @brief Writes a single-node Host adapter test graph.
  *
  * @param path YAML file path to create.
@@ -1314,305 +1198,14 @@ std::filesystem::path override_lifecycle_plugin_dir() {
 }
 
 /**
- * @brief Returns the deterministic scheduler lifecycle fixture library path.
- *
- * @return Platform-specific path below the CMake test scheduler directory.
- * @throws std::bad_alloc if path or filename construction cannot allocate.
- * @note The existing fixture can throw from real scheduler shutdown while
- *       retaining running state, allowing a later close retry to prove that
- *       shutdown is attempted again.
+ * @brief Returns the deterministic policy ABI fixture library path.
+ * @return Platform-specific file injected by the active CMake build.
+ * @throws std::bad_alloc if path construction cannot allocate.
+ * @note The fixture exports one `fixture_policy` type for both policy classes.
  */
-std::filesystem::path destroy_count_scheduler_plugin_path() {
-  return std::filesystem::path(PS_TEST_SCHEDULER_PLUGIN_PATH);
+std::filesystem::path policy_plugin_path() {
+  return std::filesystem::path(PS_TEST_POLICY_PLUGIN_PATH);
 }
-
-/**
- * @brief Owns fixture lifecycle exports resolved from the exact plugin path.
- *
- * @throws std::runtime_error when the library or a required export cannot be
- *         opened.
- * @note The diagnostic handle remains open while the Host loader owns its own
- *       mapping, then closes independently after all counter reads finish.
- */
-class SchedulerFixtureExports final {
- public:
-  /**
-   * @brief Opens one scheduler fixture and resolves reset/shutdown counters.
-   * @param path Complete platform-specific library path injected by CMake.
-   * @throws std::runtime_error when opening or symbol lookup fails.
-   */
-  explicit SchedulerFixtureExports(const std::filesystem::path& path) {
-#if defined(_WIN32)
-    handle_ = LoadLibrary(path.string().c_str());
-    if (handle_ != nullptr) {
-      reset_counts_ = reinterpret_cast<void (*)()>(
-          GetProcAddress(handle_, "ps_test_scheduler_reset_counts"));
-      shutdown_count_ = reinterpret_cast<int (*)()>(
-          GetProcAddress(handle_, "ps_test_scheduler_shutdown_count"));
-    }
-#else
-    handle_ = dlopen(path.string().c_str(), RTLD_LAZY);
-    if (handle_ != nullptr) {
-      reset_counts_ = reinterpret_cast<void (*)()>(
-          dlsym(handle_, "ps_test_scheduler_reset_counts"));
-      shutdown_count_ = reinterpret_cast<int (*)()>(
-          dlsym(handle_, "ps_test_scheduler_shutdown_count"));
-    }
-#endif
-    if (handle_ == nullptr || reset_counts_ == nullptr ||
-        shutdown_count_ == nullptr) {
-      close();
-      throw std::runtime_error(
-          "failed to resolve scheduler lifecycle fixture exports: " +
-          path.string());
-    }
-  }
-
-  /** @brief Closes the diagnostic library handle. @throws Nothing. */
-  ~SchedulerFixtureExports() noexcept { close(); }
-
-  /**
-   * @brief Prevents two owners from closing the same diagnostic handle.
-   * @param other Owner that retains the native library handle.
-   * @throws Nothing because construction is unavailable.
-   */
-  SchedulerFixtureExports(const SchedulerFixtureExports& other) = delete;
-
-  /**
-   * @brief Prevents replacing diagnostic-handle ownership.
-   * @param other Owner whose handle remains unchanged.
-   * @return No value because assignment is unavailable.
-   * @throws Nothing because assignment is unavailable.
-   */
-  SchedulerFixtureExports& operator=(const SchedulerFixtureExports& other) =
-      delete;
-
-  /**
-   * @brief Resets fixture counters while no scheduler instance is active.
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void reset_counts() const noexcept { reset_counts_(); }
-
-  /**
-   * @brief Returns the number of explicit scheduler shutdown calls.
-   * @return Current fixture shutdown count.
-   * @throws Nothing.
-   */
-  int shutdown_count() const noexcept { return shutdown_count_(); }
-
- private:
-  /**
-   * @brief Releases the native diagnostic handle when present.
-   * @return Nothing.
-   * @throws Nothing; platform close failures are intentionally contained.
-   */
-  void close() noexcept {
-#if defined(_WIN32)
-    if (handle_ != nullptr) {
-      FreeLibrary(handle_);
-      handle_ = nullptr;
-    }
-#else
-    if (handle_ != nullptr) {
-      dlclose(handle_);
-      handle_ = nullptr;
-    }
-#endif
-  }
-
-#if defined(_WIN32)
-  /** @brief Native Windows dynamic-library handle. */
-  HMODULE handle_ = nullptr;
-#else
-  /** @brief Native POSIX dynamic-library handle. */
-  void* handle_ = nullptr;
-#endif
-  /** @brief Fixture counter reset export. */
-  void (*reset_counts_)() = nullptr;
-  /** @brief Fixture shutdown counter export. */
-  int (*shutdown_count_)() = nullptr;
-};
-
-/**
- * @brief Clears process-global scheduler plugins on every test exit.
- *
- * @throws Nothing.
- * @note Declare this guard before the Host owner. Reverse destruction then
- *       destroys Host graph runtimes first and clears loader mappings second.
- */
-class ScopedSchedulerPluginCleanup final {
- public:
-  /**
-   * @brief Clears stale scheduler plugin state before a fixture test begins.
-   * @throws Nothing; cleanup failures are suppressed for assertion safety.
-   */
-  ScopedSchedulerPluginCleanup() noexcept { clear(); }
-
-  /**
-   * @brief Clears scheduler state after later-declared Host destruction.
-   * @throws Nothing; cleanup failures are contained.
-   */
-  ~ScopedSchedulerPluginCleanup() noexcept { clear(); }
-
- private:
-  /**
-   * @brief Clears plugin mappings and diagnostics behind a no-throw fence.
-   * @return Nothing.
-   * @throws Nothing; loader failures are caught and suppressed.
-   */
-  static void clear() noexcept {
-    try {
-      SchedulerPluginLoader::instance().clear_plugins();
-      SchedulerPluginLoader::instance().clear_errors();
-    } catch (...) {
-    }
-  }
-
- public:
-  /**
-   * @brief Prevents duplicate process-global cleanup ownership.
-   * @param other Guard that remains responsible for cleanup.
-   * @throws Nothing because construction is unavailable.
-   */
-  ScopedSchedulerPluginCleanup(const ScopedSchedulerPluginCleanup& other) =
-      delete;
-
-  /**
-   * @brief Prevents replacing process-global cleanup ownership.
-   * @param other Guard whose cleanup responsibility remains unchanged.
-   * @return No value because assignment is unavailable.
-   * @throws Nothing because assignment is unavailable.
-   */
-  ScopedSchedulerPluginCleanup& operator=(
-      const ScopedSchedulerPluginCleanup& other) = delete;
-};
-
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
-/**
- * @brief Delegates scheduling while observing shutdown versus lane-stop order.
- * @throws Whatever the delegated `SerialDebugScheduler` operation throws.
- * @note The test owns this scheduler through `GraphRuntime`. Borrowed atomic
- *       observations outlive runtime destruction and are touched only by the
- *       externally serialized scheduler lifecycle path.
- */
-class LaneOrderObservingScheduler final : public IScheduler {
- public:
-  /**
-   * @brief Binds lifecycle observations to stable test-owned atomics.
-   * @param worker_stopped_events Lane-stop count published by the test hook.
-   * @param shutdown_called Set true when scheduler shutdown begins.
-   * @param shutdown_after_lane_stopped Set from the lane-stop count at
-   * shutdown.
-   * @throws Nothing.
-   */
-  LaneOrderObservingScheduler(
-      const std::atomic<std::uint64_t>& worker_stopped_events,
-      std::atomic<bool>& shutdown_called,
-      std::atomic<bool>& shutdown_after_lane_stopped) noexcept
-      : worker_stopped_events_(worker_stopped_events),
-        shutdown_called_(shutdown_called),
-        shutdown_after_lane_stopped_(shutdown_after_lane_stopped) {}
-
-  /** @brief Releases delegated scheduler state. @throws Nothing. */
-  ~LaneOrderObservingScheduler() noexcept override = default;
-
-  /** @copydoc SchedulerTaskRuntime::available_devices */
-  std::vector<Device> available_devices() const override {
-    return delegate_.available_devices();
-  }
-
-  /** @copydoc IScheduler::attach */
-  void attach(SchedulerHostContext& host) override { delegate_.attach(host); }
-
-  /** @copydoc IScheduler::detach */
-  void detach() override { delegate_.detach(); }
-
-  /** @copydoc IScheduler::start */
-  void start() override { delegate_.start(); }
-
-  /**
-   * @brief Records lane-stop ordering, then delegates scheduler shutdown.
-   * @return Nothing.
-   * @throws Whatever `SerialDebugScheduler::shutdown` throws.
-   * @note Acquire loads observe the executor callback's release publications.
-   */
-  void shutdown() override {
-    bool first_shutdown = false;
-    if (shutdown_called_.compare_exchange_strong(first_shutdown, true,
-                                                 std::memory_order_acq_rel,
-                                                 std::memory_order_acquire)) {
-      shutdown_after_lane_stopped_.store(
-          worker_stopped_events_.load(std::memory_order_acquire) > 0,
-          std::memory_order_release);
-    }
-    delegate_.shutdown();
-  }
-
-  /** @copydoc IScheduler::name */
-  std::string name() const override { return "lane_order_observer"; }
-
-  /** @copydoc IScheduler::get_stats */
-  std::string get_stats() const override { return delegate_.get_stats(); }
-
-  /** @copydoc IScheduler::is_running */
-  bool is_running() const override { return delegate_.is_running(); }
-
-  /** @copydoc SchedulerTaskRuntime::submit_initial_task_handles */
-  void submit_initial_task_handles(std::vector<TaskHandle>&& handles,
-                                   int total_task_count,
-                                   SchedulerTaskPriority priority) override {
-    delegate_.submit_initial_task_handles(std::move(handles), total_task_count,
-                                          priority);
-  }
-
-  /** @copydoc SchedulerTaskRuntime::submit_ready_task_handles_from_worker */
-  void submit_ready_task_handles_from_worker(
-      std::vector<TaskHandle>&& handles,
-      SchedulerTaskPriority priority) override {
-    delegate_.submit_ready_task_handles_from_worker(std::move(handles),
-                                                    priority);
-  }
-
-  /** @copydoc SchedulerTaskRuntime::submit_ready_task_any_thread */
-  void submit_ready_task_any_thread(
-      Task&& task, SchedulerTaskPriority priority,
-      std::optional<std::uint64_t> epoch) override {
-    delegate_.submit_ready_task_any_thread(std::move(task), priority, epoch);
-  }
-
-  /** @copydoc SchedulerTaskRuntime::wait_for_completion */
-  void wait_for_completion() override { delegate_.wait_for_completion(); }
-
-  /** @copydoc SchedulerTaskRuntime::set_exception */
-  void set_exception(std::exception_ptr error) override {
-    delegate_.set_exception(std::move(error));
-  }
-
-  /** @copydoc SchedulerTaskRuntime::inc_tasks_to_complete */
-  void inc_tasks_to_complete(int delta) override {
-    delegate_.inc_tasks_to_complete(delta);
-  }
-
-  /** @copydoc SchedulerTaskRuntime::dec_tasks_to_complete */
-  void dec_tasks_to_complete() override { delegate_.dec_tasks_to_complete(); }
-
-  /** @copydoc SchedulerTaskRuntime::log_event */
-  void log_event(SchedulerTraceAction action, int node_id) override {
-    delegate_.log_event(action, node_id);
-  }
-
- private:
-  /** @brief Lane-stop counter borrowed from the installed executor hook. */
-  const std::atomic<std::uint64_t>& worker_stopped_events_;
-  /** @brief Test-owned publication that shutdown has begun. */
-  std::atomic<bool>& shutdown_called_;
-  /** @brief Test-owned snapshot of ordering at shutdown entry. */
-  std::atomic<bool>& shutdown_after_lane_stopped_;
-  /** @brief Complete scheduler behavior delegated by this observer. */
-  SerialDebugScheduler delegate_;
-};
-#endif
 
 /**
  * @brief Writes a graph backed by the dynamically loaded lifecycle operation.
@@ -3009,32 +2602,25 @@ TEST(EmbeddedHostAdapter,
 #endif
 
 /**
- * @brief Proves runtime destruction drains dropped-future work before scheduler
- *        teardown.
+ * @brief Proves runtime destruction drains dropped-future graph-state work.
  * @return Nothing; GoogleTest assertions report premature destruction or
  *         teardown-order failures.
  * @throws std::bad_alloc, std::system_error, or filesystem exceptions if the
- *         runtime, scheduler, task, or synchronization fixture cannot start.
+ *         runtime, task, or synchronization fixture cannot start.
  * @note The graph-state future is intentionally discarded. Only runtime-owned
  *       lane lifecycle can keep the task alive and join it before shutdown.
  */
 TEST(GraphStateExecutorLane,
-     RuntimeDestructionDrainsDiscardedFutureBeforeSchedulerShutdown) {
+     RuntimeDestructionDrainsDiscardedFutureBeforeLaneTeardown) {
   ScopedTempDir temp("photospider_graph_state_runtime_teardown_test");
   GraphStateExecutorLaneState lane_state;
   ScopedGraphStateExecutorTestHook lane_hook(lane_state);
-  std::atomic<bool> shutdown_called{false};
-  std::atomic<bool> shutdown_after_lane_stopped{false};
 
   GraphRuntime::Info info;
   info.name = "graph_state_runtime_teardown";
   info.root = temp.root() / "session";
   info.cache_root = temp.root() / "cache";
   auto runtime = std::make_unique<GraphRuntime>(info);
-  runtime->set_scheduler(ComputeIntent::GlobalHighPrecision,
-                         std::make_unique<LaneOrderObservingScheduler>(
-                             lane_state.worker_stopped_events, shutdown_called,
-                             shutdown_after_lane_stopped));
 
   OneShotSignal release_task;
   const std::shared_future<void> task_release = release_task.future();
@@ -3066,39 +2652,28 @@ TEST(GraphStateExecutorLane,
       std::async(std::launch::async, [&runtime] { runtime.reset(); });
   const std::future_status pending =
       destruction.wait_for(std::chrono::milliseconds(100));
-  const bool shutdown_seen_before_release =
-      shutdown_called.load(std::memory_order_acquire);
-  const bool ordered_before_release =
-      shutdown_after_lane_stopped.load(std::memory_order_acquire);
 
   release_task.signal();
   destruction.get();
 
   EXPECT_EQ(pending, std::future_status::timeout);
-  EXPECT_FALSE(shutdown_seen_before_release);
-  EXPECT_FALSE(ordered_before_release);
-  EXPECT_TRUE(shutdown_called.load(std::memory_order_acquire));
-  EXPECT_TRUE(shutdown_after_lane_stopped.load(std::memory_order_acquire));
   EXPECT_GE(lane_state.worker_stopped_events.load(std::memory_order_acquire),
             1u);
 }
 
 /**
- * @brief Proves explicit Kernel close joins the lane before scheduler shutdown.
- * @return Nothing; GoogleTest assertions report load, close, or first-shutdown
- *         ordering failures.
+ * @brief Proves explicit Kernel close joins the graph-state lane.
+ * @return Nothing; GoogleTest assertions report load, close, or lane teardown
+ *         failures.
  * @throws std::bad_alloc, std::system_error, GraphError, or filesystem
- *         exceptions if Kernel/runtime/scheduler setup fails.
- * @note The scheduler records only its first shutdown entry so the later
- *       destructor cleanup cannot mask an earlier stop performed on the lane
- *       worker.
+ *         exceptions if Kernel/runtime setup fails.
+ * @note The executor hook publishes worker-stop only after the close-owned lane
+ *       has drained and joined.
  */
-TEST(GraphStateExecutorLane, KernelCloseJoinsLaneBeforeSchedulerShutdown) {
+TEST(GraphStateExecutorLane, KernelCloseJoinsGraphStateLane) {
   ScopedTempDir temp("photospider_graph_state_kernel_close_order_test");
   GraphStateExecutorLaneState lane_state;
   ScopedGraphStateExecutorTestHook lane_hook(lane_state);
-  std::atomic<bool> shutdown_called{false};
-  std::atomic<bool> shutdown_after_lane_stopped{false};
 
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   const std::string graph_name = "graph_state_kernel_close_order";
@@ -3106,16 +2681,7 @@ TEST(GraphStateExecutorLane, KernelCloseJoinsLaneBeforeSchedulerShutdown) {
       kernel.load_graph(graph_name, (temp.root() / "sessions").string(), "", "",
                         (temp.root() / "cache").string());
   ASSERT_TRUE(loaded.has_value());
-  GraphRuntime& runtime =
-      testing::KernelTestAccess::runtime(kernel, graph_name);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<LaneOrderObservingScheduler>(
-                            lane_state.worker_stopped_events, shutdown_called,
-                            shutdown_after_lane_stopped));
-
   ASSERT_TRUE(kernel.close_graph(graph_name));
-  EXPECT_TRUE(shutdown_called.load(std::memory_order_acquire));
-  EXPECT_TRUE(shutdown_after_lane_stopped.load(std::memory_order_acquire));
   EXPECT_GE(lane_state.worker_stopped_events.load(std::memory_order_acquire),
             1u);
 }
@@ -3231,20 +2797,19 @@ TEST(EmbeddedHostAdapter,
   auto dirty = host->dirty_region_snapshot(session);
   ASSERT_TRUE(dirty.status.ok) << dirty.status.message;
 
-  auto scheduler_types = host->scheduler_available_types();
-  ASSERT_TRUE(scheduler_types.status.ok) << scheduler_types.status.message;
-  EXPECT_TRUE(contains_string(scheduler_types.value, "serial_debug"));
+  auto execution_types = host->execution_available_types();
+  ASSERT_TRUE(execution_types.status.ok) << execution_types.status.message;
+  EXPECT_TRUE(contains_string(execution_types.value, "serial_debug"));
 
-  auto replaced = host->replace_scheduler(
+  auto replaced = host->replace_execution(
       session, ComputeIntent::GlobalHighPrecision, "serial_debug");
   ASSERT_TRUE(replaced.status.ok) << replaced.status.message;
 
-  auto scheduler_info =
-      host->scheduler_info(session, ComputeIntent::GlobalHighPrecision);
-  ASSERT_TRUE(scheduler_info.status.ok) << scheduler_info.status.message;
-  EXPECT_EQ(scheduler_info.value.scheduler_name, "serial_debug");
-  EXPECT_NE(scheduler_info.value.stats.find("SerialDebugScheduler"),
-            std::string::npos);
+  auto execution_info =
+      host->execution_info(session, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(execution_info.status.ok) << execution_info.status.message;
+  EXPECT_EQ(execution_info.value.execution_type, "serial_debug");
+  EXPECT_FALSE(execution_info.value.stats.empty());
 
   HostComputeRequest trace_request = make_compute_request(session);
   trace_request.cache.force_recache = true;
@@ -3253,56 +2818,56 @@ TEST(EmbeddedHostAdapter,
   auto trace_compute = host->compute(trace_request);
   ASSERT_TRUE(trace_compute.status.ok) << trace_compute.status.message;
 
-  auto invalid_trace_limit = host->scheduler_trace(session, 0, 0);
+  auto invalid_trace_limit = host->execution_trace(session, 0, 0);
   EXPECT_FALSE(invalid_trace_limit.status.ok);
   EXPECT_EQ(checked_graph_error_code(invalid_trace_limit.status),
             GraphErrc::InvalidParameter);
 
-  auto missing_trace = host->scheduler_trace(
-      GraphSessionId{"missing-trace-session"}, 0, kSchedulerTraceMaxLimit);
+  auto missing_trace = host->execution_trace(
+      GraphSessionId{"missing-trace-session"}, 0, kExecutionTraceMaxLimit);
   EXPECT_FALSE(missing_trace.status.ok);
   EXPECT_EQ(missing_trace.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(checked_graph_error_code(missing_trace.status),
             GraphErrc::NotFound);
 
-  auto scheduler_trace =
-      host->scheduler_trace(session, 0, kSchedulerTraceMaxLimit);
-  ASSERT_TRUE(scheduler_trace.status.ok) << scheduler_trace.status.message;
-  ASSERT_FALSE(scheduler_trace.value.events.empty());
-  EXPECT_GT(scheduler_trace.value.events.front().sequence, 0u);
-  EXPECT_LT(scheduler_trace.value.events.back().sequence,
+  auto execution_trace =
+      host->execution_trace(session, 0, kExecutionTraceMaxLimit);
+  ASSERT_TRUE(execution_trace.status.ok) << execution_trace.status.message;
+  ASSERT_FALSE(execution_trace.value.events.empty());
+  EXPECT_GT(execution_trace.value.events.front().sequence, 0u);
+  EXPECT_LT(execution_trace.value.events.back().sequence,
             kObservationSequenceExhausted);
 
-  auto repeated_scheduler_trace =
-      host->scheduler_trace(session, 0, kSchedulerTraceMaxLimit);
-  ASSERT_TRUE(repeated_scheduler_trace.status.ok)
-      << repeated_scheduler_trace.status.message;
-  ASSERT_EQ(repeated_scheduler_trace.value.events.size(),
-            scheduler_trace.value.events.size());
-  EXPECT_EQ(repeated_scheduler_trace.value.events.front().sequence,
-            scheduler_trace.value.events.front().sequence);
+  auto repeated_execution_trace =
+      host->execution_trace(session, 0, kExecutionTraceMaxLimit);
+  ASSERT_TRUE(repeated_execution_trace.status.ok)
+      << repeated_execution_trace.status.message;
+  ASSERT_EQ(repeated_execution_trace.value.events.size(),
+            execution_trace.value.events.size());
+  EXPECT_EQ(repeated_execution_trace.value.events.front().sequence,
+            execution_trace.value.events.front().sequence);
 
-  auto future_trace = host->scheduler_trace(
-      session, kObservationSequenceExhausted - 1, kSchedulerTraceMaxLimit);
+  auto future_trace = host->execution_trace(
+      session, kObservationSequenceExhausted - 1, kExecutionTraceMaxLimit);
   EXPECT_FALSE(future_trace.status.ok);
   EXPECT_EQ(future_trace.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(checked_graph_error_code(future_trace.status),
             GraphErrc::InvalidParameter);
 
-  auto premature_terminal_trace = host->scheduler_trace(
-      session, kObservationSequenceExhausted, kSchedulerTraceMaxLimit);
+  auto premature_terminal_trace = host->execution_trace(
+      session, kObservationSequenceExhausted, kExecutionTraceMaxLimit);
   EXPECT_FALSE(premature_terminal_trace.status.ok);
   EXPECT_EQ(premature_terminal_trace.status.domain,
             OperationErrorDomain::Graph);
   EXPECT_EQ(checked_graph_error_code(premature_terminal_trace.status),
             GraphErrc::InvalidParameter);
 
-  auto description = host->scheduler_description("serial_debug");
+  auto description = host->execution_description("serial_debug");
   ASSERT_TRUE(description.status.ok) << description.status.message;
-  EXPECT_NE(description.value.find("Single-threaded"), std::string::npos);
+  EXPECT_NE(description.value.find("Deterministic"), std::string::npos);
 
   auto missing_description =
-      host->scheduler_description("missing_scheduler_type");
+      host->execution_description("missing_execution_type");
   EXPECT_FALSE(missing_description.status.ok);
   EXPECT_EQ(missing_description.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(checked_graph_error_code(missing_description.status),
@@ -3329,173 +2894,6 @@ TEST(EmbeddedHostAdapter,
 
   auto close = host->close_graph(session);
   EXPECT_TRUE(close.status.ok) << close.status.message;
-}
-
-/**
- * @brief Verifies scheduler shutdown failure preserves a retryable Host
- * session.
- *
- * @throws Nothing when the fixture, Host status mapping, and cleanup behave as
- *         specified; GoogleTest records any mismatch.
- * @note The first close throws while the fixture remains running. The plugin
- * owner normalizes that runtime failure to ComputeError; the Host must reopen
- * both runtime execution lanes, retain the graph, and invoke shutdown again
- * after injection is removed.
- */
-TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
-  register_host_adapter_ops();
-  ScopedTempDir temp("photospider_host_adapter_close_failure_test");
-  ScopedSchedulerPluginCleanup scheduler_cleanup;
-  auto host = create_embedded_host();
-  ASSERT_NE(host, nullptr);
-
-  const std::filesystem::path plugin_path =
-      destroy_count_scheduler_plugin_path();
-  ASSERT_TRUE(std::filesystem::exists(plugin_path))
-      << "scheduler close-failure fixture was not built: " << plugin_path;
-  SchedulerFixtureExports fixture(plugin_path);
-  fixture.reset_counts();
-  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
-  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
-
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = kDestroyCountSchedulerType;
-  scheduler_config.rt_type = "serial_debug";
-  const VoidResult configured =
-      host->configure_scheduler_defaults(scheduler_config);
-  ASSERT_TRUE(configured.status.ok) << configured.status.message;
-
-  const GraphSessionId session =
-      load_test_graph(*host, temp.root(), "close_failure_retry_graph");
-  GraphStateExecutorLaneState lane_state;
-  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
-  HostComputeRequest stale_error_request = make_compute_request(session);
-  stale_error_request.node = NodeId{99};
-  const Result<ImageBuffer> stale_compute =
-      host->compute_and_get_image(stale_error_request);
-  ASSERT_FALSE(stale_compute.status.ok);
-  const OperationStatus last_error_before_failure = host->last_error(session);
-  ASSERT_FALSE(last_error_before_failure.ok);
-
-  {
-    ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
-                                   "shutdown_runtime_error");
-    const VoidResult failed_close = host->close_graph(session);
-    EXPECT_FALSE(failed_close.status.ok);
-    EXPECT_EQ(failed_close.status.domain, OperationErrorDomain::Graph);
-    EXPECT_EQ(checked_graph_error_code(failed_close.status),
-              GraphErrc::ComputeError);
-    EXPECT_EQ(failed_close.status.name, "compute_error");
-    EXPECT_NE(failed_close.status.message.find("fixture shutdown failure"),
-              std::string::npos);
-    EXPECT_EQ(fixture.shutdown_count(), 1);
-    EXPECT_EQ(lane_state.worker_stopped_events.load(std::memory_order_acquire),
-              2u);
-    EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 2u);
-    EXPECT_LE(lane_state.max_worker_threads.load(std::memory_order_acquire),
-              1u);
-  }
-
-  const Result<std::vector<GraphSessionId>> after_failure = host->list_graphs();
-  ASSERT_TRUE(after_failure.status.ok) << after_failure.status.message;
-  ASSERT_EQ(after_failure.value.size(), 1u);
-  EXPECT_EQ(after_failure.value.front().value, session.value);
-
-  const Result<SchedulerInfoSnapshot> admitted_after_failure =
-      host->scheduler_info(session, ComputeIntent::GlobalHighPrecision);
-  ASSERT_TRUE(admitted_after_failure.status.ok)
-      << admitted_after_failure.status.message;
-  EXPECT_EQ(admitted_after_failure.value.scheduler_name,
-            kDestroyCountSchedulerType);
-  const OperationStatus last_error_after_failure = host->last_error(session);
-  EXPECT_EQ(last_error_after_failure.ok, last_error_before_failure.ok);
-  EXPECT_EQ(last_error_after_failure.domain, last_error_before_failure.domain);
-  EXPECT_EQ(last_error_after_failure.code, last_error_before_failure.code);
-  EXPECT_EQ(last_error_after_failure.name, last_error_before_failure.name);
-  EXPECT_EQ(last_error_after_failure.message,
-            last_error_before_failure.message);
-
-  const VoidResult retry_close = host->close_graph(session);
-  EXPECT_TRUE(retry_close.status.ok) << retry_close.status.message;
-  EXPECT_EQ(fixture.shutdown_count(), 2);
-  EXPECT_EQ(lane_state.worker_stopped_events.load(std::memory_order_acquire),
-            4u);
-  EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 2u);
-
-  const Result<std::vector<GraphSessionId>> after_retry = host->list_graphs();
-  ASSERT_TRUE(after_retry.status.ok) << after_retry.status.message;
-  EXPECT_TRUE(after_retry.value.empty());
-  const OperationStatus last_error_after_retry = host->last_error(session);
-  EXPECT_TRUE(last_error_after_retry.ok) << last_error_after_retry.message;
-
-  const VoidResult missing_close = host->close_graph(session);
-  EXPECT_FALSE(missing_close.status.ok);
-  EXPECT_EQ(checked_graph_error_code(missing_close.status),
-            GraphErrc::NotFound);
-}
-
-/**
- * @brief Verifies a shutdown GraphError::NotFound cannot masquerade as absence.
- *
- * @throws Nothing when close remapping, graph retention, and retry hold;
- *         GoogleTest records any mismatch.
- * @note Only Kernel's explicit false result denotes an absent graph. A
- * scheduler GraphError::NotFound is remapped to Unknown and keeps the session
- * loaded.
- */
-TEST(EmbeddedHostAdapter,
-     CloseShutdownGraphNotFoundMapsUnknownAndRetainsGraph) {
-  register_host_adapter_ops();
-  ScopedTempDir temp("photospider_host_adapter_close_graph_error_test");
-  ScopedSchedulerPluginCleanup scheduler_cleanup;
-  auto host = create_embedded_host();
-  ASSERT_NE(host, nullptr);
-
-  const std::filesystem::path plugin_path =
-      destroy_count_scheduler_plugin_path();
-  ASSERT_TRUE(std::filesystem::exists(plugin_path))
-      << "scheduler close-failure fixture was not built: " << plugin_path;
-  SchedulerFixtureExports fixture(plugin_path);
-  fixture.reset_counts();
-  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
-  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
-
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = kDestroyCountSchedulerType;
-  scheduler_config.rt_type = "serial_debug";
-  const VoidResult configured =
-      host->configure_scheduler_defaults(scheduler_config);
-  ASSERT_TRUE(configured.status.ok) << configured.status.message;
-
-  const GraphSessionId session =
-      load_test_graph(*host, temp.root(), "close_graph_error_retry_graph");
-  {
-    ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
-                                   "shutdown_graph_not_found");
-    const VoidResult failed_close = host->close_graph(session);
-    EXPECT_FALSE(failed_close.status.ok);
-    EXPECT_EQ(checked_graph_error_code(failed_close.status),
-              GraphErrc::Unknown);
-    EXPECT_EQ(failed_close.status.name, "unknown");
-    EXPECT_NE(failed_close.status.message.find(
-                  "fixture shutdown graph-not-found failure"),
-              std::string::npos);
-    EXPECT_EQ(fixture.shutdown_count(), 1);
-  }
-
-  const Result<std::vector<GraphSessionId>> retained = host->list_graphs();
-  ASSERT_TRUE(retained.status.ok) << retained.status.message;
-  ASSERT_EQ(retained.value.size(), 1u);
-  EXPECT_EQ(retained.value.front().value, session.value);
-
-  const Result<SchedulerInfoSnapshot> admitted =
-      host->scheduler_info(session, ComputeIntent::GlobalHighPrecision);
-  ASSERT_TRUE(admitted.status.ok) << admitted.status.message;
-  EXPECT_EQ(admitted.value.scheduler_name, kDestroyCountSchedulerType);
-
-  const VoidResult retry = host->close_graph(session);
-  EXPECT_TRUE(retry.status.ok) << retry.status.message;
-  EXPECT_EQ(fixture.shutdown_count(), 2);
 }
 
 TEST(EmbeddedHostAdapter,
@@ -4120,96 +3518,6 @@ TEST(EmbeddedHostAdapter, ThreeConcurrentClosesSerializeEveryWaiter) {
 }
 
 /**
- * @brief Verifies a waiter retries after the owner consumes a one-shot failure.
- *
- * @throws Nothing when the owner returns normalized ComputeError and the waiter
- * closes the retained graph; GoogleTest records any mismatch.
- * @note The process-scoped fixture fails only its first shutdown invocation, so
- *       no environment mutation races the two close attempts.
- */
-TEST(EmbeddedHostAdapter, ConcurrentCloseRetriesAfterEarlierShutdownFailure) {
-  register_host_adapter_ops();
-  ScopedTempDir temp("photospider_host_adapter_concurrent_close_failure_test");
-  ScopedSchedulerPluginCleanup scheduler_cleanup;
-  auto host = create_embedded_host();
-  ASSERT_NE(host, nullptr);
-
-  const std::filesystem::path plugin_path =
-      destroy_count_scheduler_plugin_path();
-  ASSERT_TRUE(std::filesystem::exists(plugin_path));
-  SchedulerFixtureExports fixture(plugin_path);
-  fixture.reset_counts();
-  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
-  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
-
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = kDestroyCountSchedulerType;
-  scheduler_config.rt_type = "serial_debug";
-  ASSERT_TRUE(host->configure_scheduler_defaults(scheduler_config).status.ok);
-
-  const GraphSessionId session = load_test_graph(
-      *host, temp.root(), "concurrent_close_failure_graph", "blocking_source");
-  std::promise<void> release_compute;
-  configure_host_blocking_source(release_compute.get_future().share());
-  HostComputeRequest request = make_compute_request(session);
-  request.execution.parallel = true;
-  request.cache.force_recache = true;
-  auto compute_future = std::async(
-      std::launch::async, [&host, request] { return host->compute(request); });
-  if (!wait_for_host_blocking_source(std::chrono::seconds(2))) {
-    release_compute.set_value();
-    (void)compute_future.get();
-    reset_host_blocking_source();
-    FAIL() << "blocking synchronous Host compute did not start";
-  }
-
-  ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
-                                 "shutdown_runtime_error_once");
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  EmbeddedLifecycleEventState close_events;
-  ScopedEmbeddedLifecycleTestHook close_hook(close_events);
-#endif
-  auto owner = std::async(std::launch::async, [&host, session] {
-    return host->close_graph(session);
-  });
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_atomic_event_count(close_events.marker_claimed, 1,
-                                   std::chrono::seconds(2))) {
-    release_compute.set_value();
-    (void)compute_future.get();
-    (void)owner.get();
-    reset_host_blocking_source();
-    FAIL() << "owner close did not claim the session marker";
-  }
-#endif
-
-  auto waiter = std::async(std::launch::async,
-                           [&] { return host->close_graph(session); });
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_atomic_event_count(close_events.duplicate_about_to_wait, 1,
-                                   std::chrono::seconds(2))) {
-    release_compute.set_value();
-    (void)compute_future.get();
-    (void)owner.get();
-    (void)waiter.get();
-    reset_host_blocking_source();
-    FAIL() << "second close did not enter duplicate-marker wait";
-  }
-#endif
-
-  release_compute.set_value();
-  EXPECT_TRUE(compute_future.get().status.ok);
-  const VoidResult owner_result = owner.get();
-  EXPECT_FALSE(owner_result.status.ok);
-  EXPECT_EQ(checked_graph_error_code(owner_result.status),
-            GraphErrc::ComputeError);
-  const VoidResult waiter_result = waiter.get();
-  EXPECT_TRUE(waiter_result.status.ok) << waiter_result.status.message;
-  EXPECT_EQ(fixture.shutdown_count(), 2);
-  reset_host_blocking_source();
-}
-
-/**
  * @brief Verifies overlapping failures for one session keep distinct statuses.
  *
  * @throws Nothing when both public futures preserve their work-item-owned
@@ -4456,22 +3764,22 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
   EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
 }
 
-TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
+TEST(EmbeddedHostAdapter, ReplaceExecutionReturnsNotFoundForMissingSession) {
   register_host_adapter_ops();
-  ScopedTempDir temp("photospider_host_adapter_scheduler_missing_test");
+  ScopedTempDir temp("photospider_host_adapter_execution_missing_test");
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
 
-  auto missing = host->replace_scheduler(
-      GraphSessionId{"missing_scheduler_graph"},
+  auto missing = host->replace_execution(
+      GraphSessionId{"missing_execution_graph"},
       ComputeIntent::GlobalHighPrecision, "serial_debug");
   EXPECT_FALSE(missing.status.ok);
   EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
 
   const GraphSessionId session =
-      load_test_graph(*host, temp.root(), "closed_scheduler_graph");
-  auto invalid_type = host->replace_scheduler(
-      session, ComputeIntent::GlobalHighPrecision, "missing_scheduler_type");
+      load_test_graph(*host, temp.root(), "closed_execution_graph");
+  auto invalid_type = host->replace_execution(
+      session, ComputeIntent::GlobalHighPrecision, "missing_execution_type");
   EXPECT_FALSE(invalid_type.status.ok);
   EXPECT_EQ(checked_graph_error_code(invalid_type.status),
             GraphErrc::InvalidParameter);
@@ -4479,7 +3787,7 @@ TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
   auto close = host->close_graph(session);
   ASSERT_TRUE(close.status.ok) << close.status.message;
 
-  auto closed = host->replace_scheduler(
+  auto closed = host->replace_execution(
       session, ComputeIntent::GlobalHighPrecision, "serial_debug");
   EXPECT_FALSE(closed.status.ok);
   EXPECT_EQ(checked_graph_error_code(closed.status), GraphErrc::NotFound);
@@ -5187,27 +4495,27 @@ TEST(EmbeddedHostAdapter,
   EXPECT_EQ(edge_mapping->to_roi.height, 64);
 
   auto trace =
-      host->scheduler_trace(request.session, 0, kSchedulerTraceMaxLimit);
+      host->execution_trace(request.session, 0, kExecutionTraceMaxLimit);
   ASSERT_TRUE(trace.status.ok) << trace.status.message;
   const bool executed_dirty_source = std::any_of(
       trace.value.events.begin(), trace.value.events.end(),
-      [](const SchedulerTraceEventSnapshot& event) {
+      [](const ExecutionTraceEventSnapshot& event) {
         return event.node.value == 1 &&
-               event.action == HostSchedulerTraceAction::ExecuteDirtySource;
+               event.action == HostExecutionTraceAction::ExecuteDirtySource;
       });
   const bool executed_dirty_downstream = std::any_of(
       trace.value.events.begin(), trace.value.events.end(),
-      [](const SchedulerTraceEventSnapshot& event) {
+      [](const ExecutionTraceEventSnapshot& event) {
         return event.node.value == 2 &&
                event.action ==
-                   HostSchedulerTraceAction::ExecuteDirtyDownstreamNode;
+                   HostExecutionTraceAction::ExecuteDirtyDownstreamNode;
       });
   const bool executed_dirty_downstream_tile = std::any_of(
       trace.value.events.begin(), trace.value.events.end(),
-      [](const SchedulerTraceEventSnapshot& event) {
+      [](const ExecutionTraceEventSnapshot& event) {
         return event.node.value == 2 &&
                event.action ==
-                   HostSchedulerTraceAction::ExecuteDirtyDownstreamTile;
+                   HostExecutionTraceAction::ExecuteDirtyDownstreamTile;
       });
   EXPECT_TRUE(executed_dirty_source);
   EXPECT_TRUE(executed_dirty_downstream);
@@ -5368,24 +4676,24 @@ TEST(EmbeddedHostAdapter, DirtySourceFailuresPreserveStatusCodes) {
             GraphErrc::InvalidParameter);
 }
 
-TEST(EmbeddedHostAdapter, SchedulerScanLoadAndPluginUnloadUseStatusValues) {
+TEST(EmbeddedHostAdapter, PolicyScanAndOperationPluginUseStatusValues) {
   register_host_adapter_ops();
-  ScopedTempDir temp("photospider_host_adapter_scheduler_test");
+  ScopedTempDir temp("photospider_host_adapter_policy_test");
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
 
-  const auto scheduler_dir = temp.root() / "schedulers";
-  std::filesystem::create_directories(scheduler_dir);
+  const auto policy_dir = temp.root() / "policies";
+  std::filesystem::create_directories(policy_dir);
 
-  auto scan = host->scheduler_scan({scheduler_dir.string()});
+  auto scan = host->policy_scan({policy_dir.string()});
   ASSERT_TRUE(scan.status.ok) << scan.status.message;
 
   auto bad_load =
-      host->scheduler_load((temp.root() / "missing_scheduler.so").string());
+      host->policy_load((temp.root() / "missing_policy.so").string());
   EXPECT_FALSE(bad_load.status.ok);
   EXPECT_EQ(checked_graph_error_code(bad_load.status), GraphErrc::Io);
 
-  auto loaded = host->scheduler_loaded_plugins();
+  auto loaded = host->policy_loaded_plugins();
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
 
   const auto plugin_dir = lifecycle_plugin_dir();
@@ -5428,47 +4736,52 @@ TEST(EmbeddedHostAdapter, SchedulerScanLoadAndPluginUnloadUseStatusValues) {
 }
 
 /**
- * @brief Exercises external operation and scheduler DSOs through embedded Host
+ * @brief Exercises external operation and policy DSOs through embedded Host
  * compute.
  *
  * @return Nothing; GoogleTest records assertion failures.
- * @throws Nothing when plugin discovery, graph ownership, scheduler selection,
+ * @throws Nothing when plugin discovery, graph ownership, policy selection,
  *         and production compute behavior match their public status contracts;
  *         GoogleTest records any mismatch.
- * @note The lifecycle operation and destroy-count scheduler are both loaded
- *       through public Host methods. Parallel HP compute must therefore cross
- *       the real v2 operation adapter and inherited scheduler task runtime.
+ * @note The lifecycle operation and pure-C policy fixture are both loaded
+ *       through public Host methods. Parallel HP compute crosses the real v2
+ *       operation adapter and the Host-owned execution service.
  */
 TEST(EmbeddedHostAdapter,
-     ExternalOperationAndSchedulerPluginsDriveParallelCompute) {
+     ExternalOperationAndPolicyPluginsDriveParallelCompute) {
   ScopedTempDir temp("photospider_host_external_plugin_compute_test");
-  ScopedSchedulerPluginCleanup scheduler_cleanup;
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
   ScopedHostPluginCleanup operation_cleanup(*host);
 
   const std::filesystem::path operation_dir = lifecycle_plugin_dir();
-  const std::filesystem::path scheduler_path =
-      destroy_count_scheduler_plugin_path();
+  const std::filesystem::path policy_path = policy_plugin_path();
   ASSERT_TRUE(std::filesystem::is_directory(operation_dir));
-  ASSERT_TRUE(std::filesystem::is_regular_file(scheduler_path));
+  ASSERT_TRUE(std::filesystem::is_regular_file(policy_path));
 
   const auto operation_report =
       host->plugins_load_report({operation_dir.string()});
   ASSERT_TRUE(operation_report.status.ok) << operation_report.status.message;
   ASSERT_TRUE(contains_string(operation_report.value.new_op_keys,
                               "plugin_lifecycle:op"));
-  const VoidResult scheduler_load =
-      host->scheduler_load(scheduler_path.string());
-  ASSERT_TRUE(scheduler_load.status.ok) << scheduler_load.status.message;
+  const VoidResult policy_load = host->policy_load(policy_path.string());
+  ASSERT_TRUE(policy_load.status.ok) << policy_load.status.message;
 
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = kDestroyCountSchedulerType;
-  scheduler_config.rt_type = "serial_debug";
-  scheduler_config.worker_count = 1;
-  const VoidResult configured =
-      host->configure_scheduler_defaults(scheduler_config);
-  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+  HostPolicyConfig policy_config;
+  policy_config.interactive_type = "fixture_policy";
+  policy_config.throughput_type = "fixture_policy";
+  const VoidResult policy_configured =
+      host->configure_policy_defaults(policy_config);
+  ASSERT_TRUE(policy_configured.status.ok) << policy_configured.status.message;
+
+  HostExecutionConfig execution_config;
+  execution_config.hp_type = "cpu";
+  execution_config.rt_type = "serial_debug";
+  execution_config.worker_count = 1U;
+  const VoidResult execution_configured =
+      host->configure_execution_defaults(execution_config);
+  ASSERT_TRUE(execution_configured.status.ok)
+      << execution_configured.status.message;
 
   GraphLoadRequest load;
   load.session = GraphSessionId{"external_plugin_compute"};
@@ -5479,10 +4792,16 @@ TEST(EmbeddedHostAdapter,
   const auto loaded = host->load_graph(load);
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
 
-  const auto scheduler =
-      host->scheduler_info(load.session, ComputeIntent::GlobalHighPrecision);
-  ASSERT_TRUE(scheduler.status.ok) << scheduler.status.message;
-  EXPECT_EQ(scheduler.value.scheduler_name, kDestroyCountSchedulerType);
+  const auto policy = host->policy_info(PolicyClass::Throughput);
+  ASSERT_TRUE(policy.status.ok) << policy.status.message;
+  EXPECT_EQ(policy.value.policy_type, "fixture_policy");
+  EXPECT_GT(policy.value.binding_generation, 0U);
+  EXPECT_FALSE(policy.value.fault.has_value());
+
+  const auto execution =
+      host->execution_info(load.session, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(execution.status.ok) << execution.status.message;
+  EXPECT_EQ(execution.value.execution_type, "cpu");
 
   HostComputeRequest request = make_compute_request(load.session);
   request.execution.parallel = true;

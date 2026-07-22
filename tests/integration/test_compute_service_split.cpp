@@ -47,8 +47,6 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
-#include "scheduler/cpu_work_stealing_scheduler.hpp"
-#include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
 
@@ -58,7 +56,7 @@ namespace {
 /**
  * @brief Counts real tile invocations for the disk-cache guard regression.
  *
- * @note The counter is reset by the focused test before scheduler submission.
+ * @note The counter is reset by the focused test before execution submission.
  * Any positive value means at least one tile executed after a whole-node disk
  * cache hit should have satisfied the node.
  */
@@ -137,7 +135,7 @@ std::atomic_int g_host_preparation_rt_target_calls{0};
 
 /**
  * @brief Optional request source cancelled by the host-preparation provider.
- * @note Atomic shared ownership lets the scheduler callback safely retain the
+ * @note Atomic shared ownership lets the execution callback safely retain the
  * source while its synchronous owning test clears the process-global hook.
  */
 std::shared_ptr<compute::ComputeRequestCancellationSource>
@@ -149,7 +147,7 @@ std::shared_ptr<compute::ComputeRequestCancellationSource>
  * contract.
  *
  * @note The sentinel is intentionally stable so the test can distinguish the
- * operator's message from scheduler and Kernel context added around it.
+ * operator's message from execution and Kernel context added around it.
  */
 constexpr auto kOpFailureMessage = "split runtime parallel operation failure";
 
@@ -242,486 +240,6 @@ class ScopedHostPreparationCancellationSource final {
   /** @brief Prevents reassignment of the process-global hook owner. */
   ScopedHostPreparationCancellationSource& operator=(
       const ScopedHostPreparationCancellationSource&) = delete;
-};
-
-/**
- * @brief Test scheduler whose installed instance always fails lifecycle start.
- *
- * @throws std::runtime_error from start(); every dispatch method rejects use
- * because no successful start can make the scheduler runnable.
- * @note The fixture isolates ComputeService preflight ordering. Attach/detach
- * remain valid so GraphRuntime can own and clean up the candidate normally.
- */
-class StartFailingScheduler final : public IScheduler {
- public:
-  /** @brief Releases the detached test scheduler without throwing. */
-  ~StartFailingScheduler() noexcept override = default;
-
-  /**
-   * @brief Borrows the runtime host context.
-   * @param host Context retained until detach().
-   * @throws Nothing.
-   */
-  void attach(SchedulerHostContext& host) noexcept override { host_ = &host; }
-
-  /** @brief Clears the borrowed host context without throwing. */
-  void detach() noexcept override { host_ = nullptr; }
-
-  /**
-   * @brief Fails every lifecycle start attempt deterministically.
-   * @throws std::runtime_error unconditionally.
-   */
-  void start() override {
-    throw std::runtime_error("intent scheduler start failure");
-  }
-
-  /** @brief Performs idempotent failed-start cleanup without throwing. */
-  void shutdown() noexcept override {}
-
-  /** @brief Returns the stable fixture name. */
-  std::string name() const override { return "start_failing"; }
-
-  /** @brief Returns the stable fixture lifecycle diagnostic. */
-  std::string get_stats() const override { return "running=false"; }
-
-  /** @brief Reports that start never succeeded. */
-  bool is_running() const noexcept override { return false; }
-
-  /** @brief Reports the otherwise valid CPU capability set. */
-  std::vector<Device> available_devices() const override {
-    return {Device::CPU};
-  }
-
-  /** @brief Rejects initial work because lifecycle start failed. */
-  void submit_initial_task_handles(std::vector<TaskHandle>&&, int,
-                                   SchedulerTaskPriority) override {
-    throw std::logic_error("start-failing scheduler cannot submit work");
-  }
-
-  /** @brief Rejects worker-ready handles because lifecycle start failed. */
-  void submit_ready_task_handles_from_worker(std::vector<TaskHandle>&&,
-                                             SchedulerTaskPriority) override {
-    throw std::logic_error("start-failing scheduler cannot submit work");
-  }
-
-  /** @brief Rejects any-thread work because lifecycle start failed. */
-  void submit_ready_task_any_thread(Task&&, SchedulerTaskPriority,
-                                    std::optional<std::uint64_t>) override {
-    throw std::logic_error("start-failing scheduler cannot submit work");
-  }
-
-  /** @brief Rejects completion waits because no batch can exist. */
-  void wait_for_completion() override {
-    throw std::logic_error("start-failing scheduler has no active batch");
-  }
-
-  /** @brief Rejects exception publication because no batch can exist. */
-  void set_exception(std::exception_ptr) override {
-    throw std::logic_error("start-failing scheduler has no active batch");
-  }
-
-  /** @brief Rejects task-count growth because no batch can exist. */
-  void inc_tasks_to_complete(int) override {
-    throw std::logic_error("start-failing scheduler has no active batch");
-  }
-
-  /** @brief Rejects task completion because no batch can exist. */
-  void dec_tasks_to_complete() override {
-    throw std::logic_error("start-failing scheduler has no active batch");
-  }
-
-  /**
-   * @brief Ignores tracing because no callback can enter.
-   * @param action Unused trace action.
-   * @param node_id Unused node id.
-   * @throws Nothing.
-   */
-  void log_event(SchedulerTraceAction action, int node_id) noexcept override {
-    (void)action;
-    (void)node_id;
-  }
-
- private:
-  /** @brief Borrowed host context retained only to exercise lifecycle cleanup.
-   */
-  SchedulerHostContext* host_ = nullptr;
-};
-
-/**
- * @brief Scheduler fixture that accepts only owned callbacks for full HP work.
- *
- * The fixture establishes batch accounting through an empty borrowed-handle
- * batch, queues every owned callback without executing it in the submission
- * method, and drains callbacks only from wait_for_completion(). It therefore
- * proves the real ComputeService path transfers callback ownership beyond the
- * original submission frame.
- *
- * @throws std::logic_error for non-empty borrowed handles, invalid lifecycle,
- * or unbalanced completion accounting.
- * @note The fixture is single-batch and test-local. A mutex protects callbacks
- * added recursively while wait_for_completion() is draining.
- */
-class LeaseCallbackScheduler final : public IScheduler {
- public:
-  /** @brief Releases queued callbacks and their Run leases without throwing. */
-  ~LeaseCallbackScheduler() noexcept override = default;
-
-  /**
-   * @brief Attaches the borrowed runtime host context.
-   *
-   * @param host Context retained until detach().
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void attach(SchedulerHostContext& host) noexcept override { host_ = &host; }
-
-  /**
-   * @brief Clears the borrowed runtime host context.
-   *
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void detach() noexcept override { host_ = nullptr; }
-
-  /**
-   * @brief Starts callback admission.
-   *
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void start() noexcept override { running_ = true; }
-
-  /**
-   * @brief Stops callback admission and releases queued callbacks.
-   *
-   * @return Nothing.
-   * @throws Nothing.
-   * @note GraphRuntime invokes shutdown only after the synchronous product test
-   * has completed its batch.
-   */
-  void shutdown() noexcept override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    running_ = false;
-    callbacks_.clear();
-    next_callback_ = 0;
-  }
-
-  /**
-   * @brief Returns the stable fixture scheduler name.
-   *
-   * @return Owned diagnostic name.
-   * @throws std::bad_alloc if string allocation fails.
-   */
-  std::string name() const override { return "lease_callback"; }
-
-  /**
-   * @brief Returns completion accounting for diagnostics.
-   *
-   * @return Owned stable fixture text.
-   * @throws std::bad_alloc if string allocation fails.
-   */
-  std::string get_stats() const override { return "owned-callback-only"; }
-
-  /**
-   * @brief Reports whether callback admission is running.
-   *
-   * @return true between start() and shutdown().
-   * @throws Nothing.
-   */
-  bool is_running() const noexcept override { return running_; }
-
-  /**
-   * @brief Reports the CPU capability used by the split operation fixtures.
-   *
-   * @return Single CPU device label.
-   * @throws std::bad_alloc if vector allocation fails.
-   */
-  std::vector<Device> available_devices() const override {
-    return {Device::CPU};
-  }
-
-  /**
-   * @brief Establishes a fresh batch only from an empty handle vector.
-   *
-   * @param handles Borrowed handles, required to be empty.
-   * @param total_task_count Required zero initial count.
-   * @param priority Ignored priority for the empty epoch marker.
-   * @return Nothing.
-   * @throws std::logic_error when lifecycle, handles, or count are invalid.
-   * @note A non-empty vector increments the observed violation counter before
-   * rejection.
-   */
-  void submit_initial_task_handles(std::vector<TaskHandle>&& handles,
-                                   int total_task_count,
-                                   SchedulerTaskPriority priority) override {
-    (void)priority;
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_) {
-      throw std::logic_error("lease callback scheduler is not running");
-    }
-    if (!handles.empty()) {
-      ++nonempty_borrowed_batches_;
-      throw std::logic_error(
-          "full HP product path submitted borrowed task handles");
-    }
-    if (total_task_count != 0) {
-      throw std::logic_error(
-          "empty lease callback batch requires zero task count");
-    }
-    callbacks_.clear();
-    next_callback_ = 0;
-    tasks_to_complete_ = 0;
-    first_exception_ = nullptr;
-    batch_initialized_ = true;
-    ++empty_epoch_batches_;
-  }
-
-  /**
-   * @brief Rejects non-empty worker-ready borrowed handle batches.
-   *
-   * @param handles Borrowed handles that must be empty.
-   * @param priority Ignored for an empty vector.
-   * @return Nothing.
-   * @throws std::logic_error when any borrowed handle is supplied.
-   */
-  void submit_ready_task_handles_from_worker(
-      std::vector<TaskHandle>&& handles,
-      SchedulerTaskPriority priority) override {
-    (void)priority;
-    if (!handles.empty()) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      ++nonempty_borrowed_batches_;
-      throw std::logic_error(
-          "full HP dependent path submitted borrowed task handles");
-    }
-  }
-
-  /**
-   * @brief Queues an owned callback without executing it in this frame.
-   *
-   * @param task Callback whose ownership transfers to the fixture queue.
-   * @param priority Ignored deterministic fixture priority.
-   * @param epoch Ignored because the fixture has one active batch.
-   * @return Nothing.
-   * @throws std::logic_error when no active batch exists.
-   * @throws std::bad_alloc if callback queue growth fails.
-   * @note Every accepted callback executes later from wait_for_completion().
-   */
-  void submit_ready_task_any_thread(
-      Task&& task, SchedulerTaskPriority priority,
-      std::optional<std::uint64_t> epoch) override {
-    (void)priority;
-    (void)epoch;
-    if (!task) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_ || !batch_initialized_) {
-      throw std::logic_error("lease callback scheduler has no active batch");
-    }
-    callbacks_.push_back(std::move(task));
-    ++owned_callbacks_submitted_;
-  }
-
-  /**
-   * @brief Drains every owned callback after its submission call returned.
-   *
-   * @return Nothing when completion accounting reaches zero.
-   * @throws The exact first callback exception.
-   * @throws std::logic_error when completion accounting is unbalanced.
-   * @note Callbacks may append dependent callbacks while the drain is active.
-   */
-  void wait_for_completion() override {
-    ++wait_calls_;
-    for (;;) {
-      Task callback;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (first_exception_ || next_callback_ >= callbacks_.size()) {
-          break;
-        }
-        callback = std::move(callbacks_.at(next_callback_));
-        ++next_callback_;
-      }
-      try {
-        callback();
-        ++callbacks_executed_after_submission_;
-      } catch (...) {
-        set_exception(std::current_exception());
-      }
-    }
-
-    std::exception_ptr failure;
-    int remaining = 0;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      failure = first_exception_;
-      remaining = tasks_to_complete_;
-      callbacks_.clear();
-      next_callback_ = 0;
-    }
-    if (failure) {
-      std::rethrow_exception(failure);
-    }
-    if (remaining != 0) {
-      throw std::logic_error(
-          "lease callback scheduler completion count did not reach zero");
-    }
-  }
-
-  /**
-   * @brief Stores the first non-null callback exception.
-   *
-   * @param error Exact exception identity to retain.
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void set_exception(std::exception_ptr error) noexcept override {
-    if (!error) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!first_exception_) {
-      first_exception_ = std::move(error);
-    }
-  }
-
-  /**
-   * @brief Adds positive completion units to the active batch.
-   *
-   * @param delta Positive task-count increment.
-   * @return Nothing.
-   * @throws std::logic_error when no batch exists or count would overflow.
-   */
-  void inc_tasks_to_complete(int delta) override {
-    if (delta <= 0) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!batch_initialized_) {
-      throw std::logic_error(
-          "lease callback scheduler has no completion batch");
-    }
-    if (tasks_to_complete_ > std::numeric_limits<int>::max() - delta) {
-      throw std::logic_error(
-          "lease callback scheduler completion count overflow");
-    }
-    tasks_to_complete_ += delta;
-  }
-
-  /**
-   * @brief Releases one completion unit.
-   *
-   * @return Nothing.
-   * @throws std::logic_error when the completion count is already zero.
-   */
-  void dec_tasks_to_complete() override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (tasks_to_complete_ <= 0) {
-      throw std::logic_error(
-          "lease callback scheduler completion count underflow");
-    }
-    --tasks_to_complete_;
-  }
-
-  /**
-   * @brief Accepts scheduler trace events without adding test synchronization.
-   *
-   * @param action Stable trace action.
-   * @param node_id Backend node id.
-   * @return Nothing.
-   * @throws Nothing.
-   */
-  void log_event(SchedulerTraceAction action, int node_id) noexcept override {
-    (void)action;
-    (void)node_id;
-  }
-
-  /**
-   * @brief Returns observed non-empty borrowed batch violations.
-   *
-   * @return Number of rejected non-empty borrowed submissions.
-   * @throws Nothing.
-   */
-  int nonempty_borrowed_batches() const noexcept {
-    return nonempty_borrowed_batches_;
-  }
-
-  /**
-   * @brief Returns accepted empty epoch batch count.
-   *
-   * @return Number of empty batch initializations.
-   * @throws Nothing.
-   */
-  int empty_epoch_batches() const noexcept { return empty_epoch_batches_; }
-
-  /**
-   * @brief Returns owned callback submission count.
-   *
-   * @return Bootstrap plus planned ready callbacks accepted by the queue.
-   * @throws Nothing.
-   */
-  int owned_callbacks_submitted() const noexcept {
-    return owned_callbacks_submitted_;
-  }
-
-  /**
-   * @brief Returns callbacks executed only after submission returned.
-   *
-   * @return Number of callbacks drained by wait_for_completion().
-   * @throws Nothing.
-   */
-  int callbacks_executed_after_submission() const noexcept {
-    return callbacks_executed_after_submission_;
-  }
-
-  /**
-   * @brief Returns batch wait count.
-   *
-   * @return Number of wait_for_completion() calls.
-   * @throws Nothing.
-   */
-  int wait_calls() const noexcept { return wait_calls_; }
-
- private:
-  /** @brief Borrowed host context retained only for lifecycle fidelity. */
-  SchedulerHostContext* host_ = nullptr;
-
-  /** @brief Protects callback queue, count, and exception state. */
-  mutable std::mutex mutex_;
-
-  /** @brief Owned callbacks that retain Run leases until drain/retirement. */
-  std::vector<Task> callbacks_;
-
-  /** @brief Next callback index selected by wait_for_completion(). */
-  std::size_t next_callback_ = 0;
-
-  /** @brief First exact callback exception, if any. */
-  std::exception_ptr first_exception_;
-
-  /** @brief Current bootstrap plus planned task completion units. */
-  int tasks_to_complete_ = 0;
-
-  /** @brief Whether one empty initial batch established completion state. */
-  bool batch_initialized_ = false;
-
-  /** @brief Whether lifecycle currently accepts callback submission. */
-  bool running_ = false;
-
-  /** @brief Number of rejected non-empty borrowed handle submissions. */
-  int nonempty_borrowed_batches_ = 0;
-
-  /** @brief Number of accepted empty epoch batches. */
-  int empty_epoch_batches_ = 0;
-
-  /** @brief Number of owned callback submissions. */
-  int owned_callbacks_submitted_ = 0;
-
-  /** @brief Number of callbacks executed from wait, after submit returned. */
-  int callbacks_executed_after_submission_ = 0;
-
-  /** @brief Number of completion waits used by the product path. */
-  int wait_calls_ = 0;
 };
 
 Node make_node(int id, std::string type, std::string subtype) {
@@ -2479,62 +1997,6 @@ TEST(ComputeRunProductPath, HpAndRealtimeChildrenValidateBeforePlanning) {
                std::invalid_argument);
 }
 
-/**
- * @brief Proves the real full-HP service path transfers leased owned callbacks.
- *
- * @note The fixture rejects every non-empty borrowed handle and executes each
- * callback only from wait_for_completion(), after its submission method has
- * returned. Successful target output therefore requires
- * ComputeService -> ComputeTaskDispatcher -> SchedulerTaskRuntime to preserve
- * Run state through owned callback leases.
- */
-TEST(ComputeRunProductPath,
-     FullHpUsesLeaseBackedCallbacksAfterSubmissionFrameReturns) {
-  register_split_ops();
-  ScopedTestDirectory runtime_directory("cache/compute-run-lease-product-path");
-  GraphRuntime::Info info;
-  info.name = "compute-run-lease-product-path";
-  info.root = runtime_directory.path();
-  info.cache_root = runtime_directory.path() / "cache";
-  GraphRuntime runtime(info);
-  auto scheduler = std::make_unique<LeaseCallbackScheduler>();
-  LeaseCallbackScheduler* scheduler_observer = scheduler.get();
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::move(scheduler));
-  runtime.start();
-
-  GraphModel& graph = runtime.model();
-  Node source = make_node(1, "split_plan", "source");
-  source.parameters["width"] = 32;
-  source.parameters["height"] = 16;
-  graph.add_node(source);
-  graph.validate_topology();
-
-  GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
-                          testing::make_yaml_cache_metadata_codec()};
-  GraphEventService events;
-  compute::ExecutionService execution_service;
-  ComputeService service(traversal, cache, events, execution_service);
-  ComputeService::Request request;
-  request.node_id = 1;
-  request.graph_identity = info.name;
-  request.cache.precision = "float32";
-  request.cache.disable_disk_cache = true;
-
-  NodeOutput& output = service.compute_parallel(graph, runtime, request);
-
-  EXPECT_EQ(output.image_buffer.width, 32);
-  EXPECT_EQ(output.image_buffer.height, 16);
-  EXPECT_EQ(scheduler_observer->nonempty_borrowed_batches(), 0);
-  EXPECT_EQ(scheduler_observer->empty_epoch_batches(), 1);
-  EXPECT_GE(scheduler_observer->owned_callbacks_submitted(), 2)
-      << "one bootstrap plus at least one planned task callback";
-  EXPECT_EQ(scheduler_observer->callbacks_executed_after_submission(),
-            scheduler_observer->owned_callbacks_submitted());
-  EXPECT_EQ(scheduler_observer->wait_calls(), 1);
-}
-
 TEST(ComputeServiceSplit,
      DirtyConnectedKernelStabilizesThreeToTwentyOneToThree) {
   register_split_ops();
@@ -2783,10 +2245,10 @@ TEST(ComputeServiceSplit,
     info.root = "cache/" + info.name;
     info.cache_root = info.root / "cache";
     GraphRuntime runtime(info);
-    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                          std::make_unique<SerialDebugScheduler>());
-    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                          std::make_unique<SerialDebugScheduler>());
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                    "serial_debug");
+    runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                    "serial_debug");
     runtime.start();
     GraphModel& graph = runtime.model();
     populate_host_preparation_failure_graph(graph);
@@ -2794,7 +2256,7 @@ TEST(ComputeServiceSplit,
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    compute::ExecutionService execution_service;
+    compute::ExecutionService execution_service(1U);
     ComputeService service(traversal, cache, events, execution_service);
     ComputeService::Request request;
     request.node_id = 2;
@@ -2961,9 +2423,9 @@ TEST(ComputeServiceSplit,
  *
  * @return Nothing; GoogleTest assertions report dependent entry, publication,
  * or terminal-translation failures for HP and paired HP/RT requests.
- * @throws Setup, scheduler, graph, allocation, or image-adaptation exceptions
+ * @throws Setup, execution, graph, allocation, or image-adaptation exceptions
  * when the fixture itself cannot execute.
- * @note The legacy serial scheduler runs source preflight. Its provider
+ * @note The serial-debug execution route runs source preflight. Its provider
  * requests cancellation immediately before return, so the parameter callback,
  * HP/RT target tiles, inspection publication, Graph caches, and RT proxy must
  * remain unchanged after bounded synchronous settlement.
@@ -2984,10 +2446,10 @@ TEST(ComputeServiceCancellation,
     info.root = root.path();
     info.cache_root = root.path() / "cache";
     GraphRuntime runtime(info);
-    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                          std::make_unique<SerialDebugScheduler>());
-    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                          std::make_unique<SerialDebugScheduler>());
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                    "serial_debug");
+    runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                    "serial_debug");
     runtime.start();
     GraphModel& graph = runtime.model();
     populate_host_preparation_failure_graph(graph);
@@ -2995,7 +2457,7 @@ TEST(ComputeServiceCancellation,
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    compute::ExecutionService execution_service;
+    compute::ExecutionService execution_service(1U);
     ComputeService service(traversal, cache, events, execution_service);
     ComputeService::Request request;
     request.node_id = 2;
@@ -3096,93 +2558,7 @@ TEST(ComputeServiceCancellation,
 }
 
 TEST(ComputeServiceSplit,
-     MissingParallelHpSchedulerDoesNotReserveGenerationOrEnterPreflight) {
-  register_split_ops();
-  g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
-  GraphRuntime::Info info;
-  info.name = "split-missing-hp-preflight-scheduler";
-  info.root = "cache/split-missing-hp-preflight-scheduler";
-  info.cache_root = "cache/split-missing-hp-preflight-scheduler/cache";
-  GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                        std::make_unique<SerialDebugScheduler>());
-  runtime.start();
-  GraphModel& graph = runtime.model();
-  populate_dynamic_blur_graph(graph);
-  const uint64_t generation_before = graph.dirty_generation_counter;
-  GraphTraversalService traversal;
-  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
-                          testing::make_yaml_cache_metadata_codec()};
-  GraphEventService events;
-  compute::ExecutionService execution_service;
-  ComputeService service(traversal, cache, events, execution_service);
-  ComputeService::Request request;
-  request.node_id = 2;
-  request.intent = ComputeIntent::RealTimeUpdate;
-  request.dirty_roi = (PixelRect{1, 1, 2, 2});
-  request.cache.disable_disk_cache = true;
-  EXPECT_THROW(service.compute_parallel(graph, runtime, request), GraphError);
-  EXPECT_EQ(graph.dirty_generation_counter, generation_before);
-  EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 0);
-  runtime.stop();
-}
-
-TEST(ComputeServiceSplit,
-     SchedulerStartFailureDoesNotReserveGenerationOrEnterPreflight) {
-  register_split_ops();
-  for (const ComputeIntent failing_intent :
-       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
-    SCOPED_TRACE(failing_intent == ComputeIntent::GlobalHighPrecision ? "HP"
-                                                                      : "RT");
-    g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
-    GraphRuntime::Info info;
-    info.name = failing_intent == ComputeIntent::GlobalHighPrecision
-                    ? "split-failing-hp-preflight-scheduler"
-                    : "split-failing-rt-preflight-scheduler";
-    info.root = "cache/" + info.name;
-    info.cache_root = info.root / "cache";
-    GraphRuntime runtime(info);
-    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                          failing_intent == ComputeIntent::GlobalHighPrecision
-                              ? std::unique_ptr<IScheduler>(
-                                    std::make_unique<StartFailingScheduler>())
-                              : std::unique_ptr<IScheduler>(
-                                    std::make_unique<SerialDebugScheduler>()));
-    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                          failing_intent == ComputeIntent::RealTimeUpdate
-                              ? std::unique_ptr<IScheduler>(
-                                    std::make_unique<StartFailingScheduler>())
-                              : std::unique_ptr<IScheduler>(
-                                    std::make_unique<SerialDebugScheduler>()));
-    GraphModel& graph = runtime.model();
-    populate_dynamic_blur_graph(graph);
-    const std::uint64_t generation_before = graph.dirty_generation_counter;
-    GraphTraversalService traversal;
-    GraphCacheService cache{providers::make_configured_image_artifact_codec(),
-                            testing::make_yaml_cache_metadata_codec()};
-    GraphEventService events;
-    compute::ExecutionService execution_service;
-    ComputeService service(traversal, cache, events, execution_service);
-    ComputeService::Request request;
-    request.node_id = 2;
-    request.intent = ComputeIntent::RealTimeUpdate;
-    request.dirty_roi = (PixelRect{1, 1, 2, 2});
-    request.cache.disable_disk_cache = true;
-
-    EXPECT_THROW((void)service.compute_parallel(graph, runtime, request),
-                 std::runtime_error);
-    EXPECT_EQ(graph.dirty_generation_counter, generation_before);
-    EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 0);
-    EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
-    EXPECT_FALSE(graph.node(2).cached_output_high_precision.has_value());
-    EXPECT_FALSE(graph.node(3).cached_output_high_precision.has_value());
-    EXPECT_EQ(runtime.realtime_proxy_graph().find_output(2), nullptr);
-    runtime.stop();
-  }
-}
-
-TEST(ComputeServiceSplit,
-     SchedulerBackedRtRequestStabilizesDataOnlyProducerExactlyOnce) {
+     ExecutionBackedRtRequestStabilizesDataOnlyProducerExactlyOnce) {
   register_split_ops();
   g_dynamic_parameter_fail.store(false, std::memory_order_release);
   g_dynamic_blur_ksize.store(3, std::memory_order_release);
@@ -3191,10 +2567,10 @@ TEST(ComputeServiceSplit,
   info.root = "cache/split-parallel-data-only-preflight";
   info.cache_root = "cache/split-parallel-data-only-preflight/cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<SerialDebugScheduler>());
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                        std::make_unique<SerialDebugScheduler>());
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
+  runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                  "serial_debug");
   runtime.start();
   GraphModel& graph = runtime.model();
   populate_dynamic_blur_graph(graph);
@@ -3202,7 +2578,7 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  compute::ExecutionService execution_service;
+  compute::ExecutionService execution_service(1U);
   ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
@@ -3219,7 +2595,7 @@ TEST(ComputeServiceSplit,
   });
   ASSERT_EQ(compute_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready)
-      << "initial TaskHandle preflight batch must not lose work at epoch zero";
+      << "initial execution preflight batch must not lose work";
   ASSERT_NE(compute_future.get(), nullptr);
   EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 1);
   ASSERT_GE(graph.recent_dirty_region_snapshots.size(), 2u);
@@ -3229,7 +2605,7 @@ TEST(ComputeServiceSplit,
 }
 
 TEST(ComputeServiceSplit,
-     SchedulerPreflightFailureRetryStartsFreshBatchWithoutHanging) {
+     ExecutionPreflightFailureRetryStartsFreshBatchWithoutHanging) {
   register_split_ops();
   g_dynamic_parameter_fail.store(false, std::memory_order_release);
   g_dynamic_blur_ksize.store(3, std::memory_order_release);
@@ -3239,10 +2615,10 @@ TEST(ComputeServiceSplit,
   info.root = "cache/split-preflight-failure-retry";
   info.cache_root = "cache/split-preflight-failure-retry/cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<SerialDebugScheduler>());
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                        std::make_unique<SerialDebugScheduler>());
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
+  runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                  "serial_debug");
   runtime.start();
   GraphModel& graph = runtime.model();
   populate_dynamic_blur_graph(graph);
@@ -3250,7 +2626,7 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  compute::ExecutionService execution_service;
+  compute::ExecutionService execution_service(1U);
   ComputeService service(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 2;
@@ -3267,7 +2643,7 @@ TEST(ComputeServiceSplit,
     return &service.compute_parallel(graph, runtime, request);
   });
   ASSERT_EQ(failed.wait_for(std::chrono::seconds(2)), std::future_status::ready)
-      << "a failed preflight TaskHandle batch must settle its wait";
+      << "a failed execution preflight batch must settle its wait";
   EXPECT_THROW((void)failed.get(), GraphError);
   EXPECT_EQ(graph.node(2).hp_version, target_version_before);
 
@@ -3278,7 +2654,7 @@ TEST(ComputeServiceSplit,
   });
   ASSERT_EQ(retried.wait_for(std::chrono::seconds(2)),
             std::future_status::ready)
-      << "retry must open a fresh scheduler epoch after prior failure";
+      << "retry must open a fresh execution batch after prior failure";
   NodeOutput* output = retried.get();
   ASSERT_NE(output, nullptr);
   EXPECT_GT(output->image_buffer.width, 0);
@@ -3397,8 +2773,8 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   info.root = "cache/split-force-recache-task-graph-cache";
   info.cache_root = "cache/split-force-recache-task-graph-cache/cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<SerialDebugScheduler>());
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
   runtime.start();
 
   GraphModel& graph = runtime.model();
@@ -3415,7 +2791,7 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  compute::ExecutionService execution_service;
+  compute::ExecutionService execution_service(1U);
   ComputeService compute(traversal, cache, events, execution_service);
 
   ComputeService::Request request;
@@ -3531,8 +2907,7 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   info.root = root;
   info.cache_root = root / "cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<CpuWorkStealingScheduler>(8));
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
   runtime.start();
 
   GraphModel& graph = runtime.model();
@@ -3555,7 +2930,7 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   graph.mutate_node_runtime_state(
       1, [](auto& state) { state.cached_output_high_precision.reset(); });
 
-  compute::ExecutionService execution_service;
+  compute::ExecutionService execution_service(1U);
   ComputeService compute(traversal, cache, events, execution_service);
   ComputeService::Request request;
   request.node_id = 1;
@@ -4229,18 +3604,18 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-hp-parity");
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
-  Kernel::SchedulerConfig scheduler_config;
-  scheduler_config.worker_count = 2;
-  kernel.set_scheduler_config(scheduler_config);
+  Kernel::ExecutionConfig execution_config;
+  execution_config.worker_count = 2;
+  kernel.set_execution_config(execution_config);
   InteractionService interaction(kernel);
   constexpr char kGraphName[] = "split_hp_parity";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
                   .has_value());
   const auto service_route =
       testing::KernelTestAccess::runtime(kernel, kGraphName)
-          .get_scheduler_execution_route(ComputeIntent::GlobalHighPrecision);
-  EXPECT_EQ(service_route.domain,
-            GraphRuntime::SchedulerExecutionRoute::Domain::ProcessCpuService);
+          .execution_route(ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(service_route.execution_type, "cpu");
+  EXPECT_GT(service_route.generation, 0U);
 
   GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
   Node source = make_node(1, "split_plan", "source");
@@ -4265,7 +3640,7 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   const uint64_t sequential_hp_version = graph.node(2).hp_version;
   EXPECT_GT(sequential_hp_version, 0u);
 
-  testing::KernelTestAccess::clear_scheduler_trace(kernel, kGraphName);
+  testing::KernelTestAccess::clear_execution_trace(kernel, kGraphName);
   request.execution.parallel = true;
   auto parallel = interaction.cmd_compute_and_get_image(request);
   ASSERT_TRUE(parallel.has_value());
@@ -4277,12 +3652,12 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   EXPECT_GT(parallel_summary.task_count, 0u);
   EXPECT_GT(parallel_summary.tile_task_count, 0u);
   EXPECT_LE(parallel_summary.tile_task_count, parallel_summary.task_count);
-  const auto scheduler_events =
-      testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
-  EXPECT_TRUE(std::any_of(scheduler_events.events.begin(),
-                          scheduler_events.events.end(), [](const auto& event) {
+  const auto execution_events =
+      testing::KernelTestAccess::execution_trace(kernel, kGraphName);
+  EXPECT_TRUE(std::any_of(execution_events.events.begin(),
+                          execution_events.events.end(), [](const auto& event) {
                             return event.action ==
-                                   GraphRuntime::SchedulerEvent::EXECUTE_TILE;
+                                   GraphRuntime::ExecutionEvent::EXECUTE_TILE;
                           }));
   EXPECT_GT(graph.node(2).hp_version, sequential_hp_version);
   const cv::Mat sequential_matrix = toCvMat(*sequential);
@@ -4300,9 +3675,9 @@ TEST(KernelComputeRuntimeSplit,
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-async-inline-dirty");
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
-  Kernel::SchedulerConfig scheduler_config;
-  scheduler_config.worker_count = 2;
-  kernel.set_scheduler_config(scheduler_config);
+  Kernel::ExecutionConfig execution_config;
+  execution_config.worker_count = 2;
+  kernel.set_execution_config(execution_config);
   InteractionService interaction(kernel);
   constexpr char kGraphName[] = "split_async_inline_dirty";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
@@ -4395,9 +3770,9 @@ TEST(KernelComputeRuntimeSplit,
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-parallel-error");
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
-  Kernel::SchedulerConfig scheduler_config;
-  scheduler_config.worker_count = 2;
-  kernel.set_scheduler_config(scheduler_config);
+  Kernel::ExecutionConfig execution_config;
+  execution_config.worker_count = 2;
+  kernel.set_execution_config(execution_config);
   InteractionService interaction(kernel);
   constexpr char kGraphName[] = "split_parallel_error";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
@@ -4425,12 +3800,12 @@ TEST(KernelComputeRuntimeSplit,
   const auto error = interaction.cmd_last_error(kGraphName);
   ASSERT_TRUE(error.has_value());
   EXPECT_NE(error->message.find(kOpFailureMessage), std::string::npos);
-  const auto scheduler_events =
-      testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
+  const auto execution_events =
+      testing::KernelTestAccess::execution_trace(kernel, kGraphName);
   EXPECT_TRUE(std::any_of(
-      scheduler_events.events.begin(), scheduler_events.events.end(),
+      execution_events.events.begin(), execution_events.events.end(),
       [](const auto& event) {
-        return event.action == GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION;
+        return event.action == GraphRuntime::ExecutionEvent::RETHROW_EXCEPTION;
       }));
 }
 

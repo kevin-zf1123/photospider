@@ -8,7 +8,7 @@
 namespace ps {
 
 /**
- * @brief One operation or scheduler plugin load failure.
+ * @brief One operation plugin load failure.
  *
  * @note `path` is the attempted plugin path whenever the loader can determine
  * it; `message` contains platform loader, missing-symbol, or registration

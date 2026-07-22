@@ -37,7 +37,8 @@ COMMAND_SUFFIXES = (
     "compute",
     "save",
     "exit",
-    "scheduler",
+    "policy",
+    "execution",
 )
 COMMAND_FUNCTIONS = tuple(f"handle_{suffix}" for suffix in COMMAND_SUFFIXES)
 HELP_FUNCTIONS = tuple(f"print_help_{suffix}" for suffix in COMMAND_SUFFIXES)
@@ -63,11 +64,11 @@ REQUIRED_BLOCK_COMMANDS = {"brief", "return", "throws", "note"}
 CALLABLE_DECL_KINDS = {"FunctionDecl", "CXXMethodDecl"}
 CLI_TARGET_NAMES = ("photospider_cli_common", "graph_cli")
 EXPECTED_CLI_TARGET_SOURCE_COUNTS = {
-    "photospider_cli_common": 59,
+    "photospider_cli_common": 60,
     "graph_cli": 1,
 }
-EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 60
-EXPECTED_AUDITED_SOURCE_COUNT = 60
+EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 61
+EXPECTED_AUDITED_SOURCE_COUNT = 61
 REQUIRED_EXTENDED_DOXYGEN_SOURCES = (
     "apps/graph_cli/src/dependency_tree_formatter.cpp",
     "apps/graph_cli/src/do_traversal.cpp",
@@ -1706,8 +1707,8 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
       Host/bad-alloc/lifetime checks.
     @throws OSError If a maintained CLI file cannot be read.
     @note These focused human-review proxies complement, but do not replace, the
-      compiler AST's structural Doxygen validation. Scheduler-default Doxygen
-      follows its canonical ``cli_config.cpp`` definition, while
+      compiler AST's structural Doxygen validation. Policy/execution-default
+      Doxygen follows its canonical ``cli_config.cpp`` definition, while
       ``run_graph_cli`` remains a separate boundary. ``InteractionService`` is
       a permanently unsupported frontend dependency, so this terminology guard
       remains useful after the application-layout migration is complete.
@@ -1812,8 +1813,8 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
             for source, function_name in (
                 (cli_config_source, "write_config_to_file"),
                 (cli_config_source, "load_or_create_config"),
-                (cli_config_source, "apply_cli_scheduler_defaults"),
-                (cli_run_source, "load_configured_scheduler_plugins"),
+                (cli_config_source, "apply_cli_policy_execution_defaults"),
+                (cli_run_source, "load_configured_policy_plugins"),
                 (cli_run_source, "run_graph_cli"),
                 (graph_cli_source, "main"),
             )
@@ -1868,15 +1869,15 @@ def make_expected() -> dict[str, Any]:
 
     return {
         "declarations": {
-            "expected_count": 56,
-            "observed_count": 56,
+            "expected_count": 58,
+            "observed_count": 58,
             "missing": [],
             "incomplete": [],
             "compiler_queries_pass": True,
         },
         "definitions": {
-            "expected_count": 56,
-            "observed_count": 56,
+            "expected_count": 58,
+            "observed_count": 58,
             "missing": [],
             "missing_bodies": [],
             "missing_compiler_comments": [],

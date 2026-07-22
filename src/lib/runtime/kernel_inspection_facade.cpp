@@ -207,14 +207,14 @@ std::optional<ComputeEventBatch> Kernel::drain_compute_events(
   return it->second->drain_compute_events_now(limit);
 }
 
-/** @copydoc Kernel::scheduler_trace */
-std::optional<GraphRuntime::SchedulerEventPage> Kernel::scheduler_trace(
+/** @copydoc Kernel::execution_trace */
+std::optional<GraphRuntime::ExecutionEventPage> Kernel::execution_trace(
     const std::string& name, uint64_t after_sequence, std::size_t limit) {
   auto it = graphs_.find(name);
   if (it == graphs_.end()) {
     return std::nullopt;
   }
-  return it->second->scheduler_trace_page(after_sequence, limit);
+  return it->second->execution_trace_page(after_sequence, limit);
 }
 
 std::optional<std::string> Kernel::dirty_region_snapshot_debug(

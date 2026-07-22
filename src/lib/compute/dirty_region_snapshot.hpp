@@ -144,7 +144,7 @@ struct DirtyMonolithicRegion {
  * @brief ROI mapping recorded for one dirty propagation edge.
  *
  * @note Edge mappings are inspection/provenance data for dirty planning. They
- * are not runtime dependency counters or scheduler queue records.
+ * are not runtime dependency counters or execution queue records.
  */
 struct DirtyEdgeMapping {
   /** @brief Upstream node id for the mapping. */
@@ -170,7 +170,7 @@ struct DirtyEdgeMapping {
  * tiles, monolithic records, per-node ROIs, and edge mappings from those facts.
  *
  * @note The snapshot intentionally excludes runtime dependency counters, task
- * reference counts, ready queues, scheduler queues, and scheduler policy.
+ * reference counts, ready queues, execution queues, and execution policy.
  */
 struct DirtyRegionSnapshot {
   /** @brief Dirty generation represented by this snapshot. */

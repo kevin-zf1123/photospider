@@ -108,7 +108,7 @@ struct SpatialContext {
 /**
  * @brief Private execution diagnostics attached to one node output.
  * @throws std::bad_alloc when copied device-label storage cannot allocate.
- * @note Diagnostics are informational and own no scheduler/runtime state.
+ * @note Diagnostics are informational and own no execution-runtime state.
  */
 struct DebugMeta {
   /** @brief Worker id that produced the output, or -1 when unknown. */
@@ -557,12 +557,12 @@ inspect_op_registry_device_ownership_for_testing(
 /**
  * @brief Describes an operation implementation's preferred tile granularity.
  *
- * The scheduler and operator selection paths use this metadata as a hint when
+ * Execution and operator selection paths use this metadata as a hint when
  * choosing between micro-tiled, macro-tiled, and monolithic execution styles.
  *
  * @throws Nothing. This value type performs no work by itself.
  * @note The preference does not allocate tile state, change cache ownership, or
- *       force a scheduler to choose a specific execution backend.
+ *       force an execution route to choose a specific backend.
  */
 enum class TileSizePreference {
   /** @brief No tile-size preference or not applicable to monolithic work. */
@@ -617,7 +617,7 @@ struct OpMetadata {
  *         invocation.
  * @note Registry locking does not serialize callback execution. Providers must
  *       make shared callback state reentrant or synchronize that state because
- *       schedulers and independent snapshots may invoke it concurrently.
+ *       execution workers and independent snapshots may invoke it concurrently.
  */
 using MonolithicOpFunc = std::function<NodeOutput(
     const Node& node, const std::vector<const NodeOutput*>& image_inputs)>;
@@ -641,8 +641,8 @@ using MonolithicOpFunc = std::function<NodeOutput(
  * data returned by adapter views must still be treated as read-only by
  * convention when sourced from InputTile. Registry locking does not serialize
  * callback execution; providers must make shared callback state reentrant or
- * synchronize it because schedulers and independent snapshots may invoke the
- * same logical target concurrently.
+ * synchronize it because execution workers and independent snapshots may invoke
+ * the same logical target concurrently.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
 using TileOpFunc =
@@ -755,8 +755,8 @@ enum class PropagationContractStatus {
  * @brief Owns one callable implementation and its scheduling metadata.
  *
  * The registry stores these values in per-operation device lists and returns
- * copied snapshots to schedulers. A callable copied from a dynamic plugin also
- * retains the callback wrapper's shared library lease.
+ * copied snapshots to execution workers. A callable copied from a dynamic
+ * plugin also retains the callback wrapper's shared library lease.
  *
  * @throws std::bad_alloc when copying callable storage cannot allocate.
  * @throws Any exception raised while copying the callable target.
@@ -1530,7 +1530,7 @@ class OpRegistry {
    *
    * @param type Operation type, such as `"image_process"`.
    * @param subtype Operation subtype, such as `"gaussian_blur"`.
-   * @param available_devices Devices exposed by the active scheduler runtime.
+   * @param available_devices Devices exposed by the active execution runtime.
    * @param intent Compute path selecting the HP or RT priority policy.
    * @return Copied selected implementation, or nullopt when the key is missing
    * or no implementation can run on an available device.
@@ -1556,7 +1556,7 @@ class OpRegistry {
    *
    * @param type Operation type, such as `"image_process"`.
    * @param subtype Operation subtype, such as `"gaussian_blur"`.
-   * @param available_devices Devices exposed by the active scheduler runtime.
+   * @param available_devices Devices exposed by the active execution runtime.
    * @param intent Compute path selecting the HP or RT priority policy.
    * @param candidate_filter Optional predicate; returning false removes the
    * candidate before registry ordering is applied.

@@ -260,9 +260,9 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
     observe_dirty_node_cancellation(run_lease_);
   };
   if (runtime_) {
-    runtime_->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE, node.id);
+    runtime_->log_event(GraphRuntime::ExecutionEvent::EXECUTE_TILE, node.id);
     runtime_->log_event(
-        GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, node.id);
+        GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, node.id);
   }
   NodeExecutor::execute_tiled_into(graph_, node, tile_fn, image_inputs_ready,
                                    hp_buffer, config);
@@ -552,9 +552,9 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
   NodeExecutor::execute_tiled_into(graph_, node, tile_fn, image_inputs_ready,
                                    rt_buffer, config);
   if (runtime_) {
-    runtime_->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE, node.id);
+    runtime_->log_event(GraphRuntime::ExecutionEvent::EXECUTE_TILE, node.id);
     runtime_->log_event(
-        GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, node.id);
+        GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, node.id);
   }
 }
 

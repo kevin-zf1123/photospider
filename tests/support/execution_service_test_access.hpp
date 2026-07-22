@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "compute/execution_service.hpp"
@@ -11,10 +12,25 @@ namespace ps::testing {
  * @brief Test-only access to deterministic ExecutionService staging cleanup.
  *
  * @note This private support header is compiled only by repository tests. It
- * exposes no Host, scheduler, plugin, or installed-library API.
+ * exposes no Host, Policy ABI, plugin, or installed-library API.
  */
 class ExecutionServiceTestAccess final {
  public:
+  /**
+   * @brief Repository-test callback after one execution grant is staged.
+   * @param context Opaque fixture state that outlives the observed Run.
+   * @param candidate_id Nonzero ready-entry identity retained by the pin.
+   * @param entry_version Nonzero nonreused entry version retained by the pin.
+   * @param route_generation Immutable Run route generation retained by the pin.
+   * @param execution_resources Exact staged child-grant resources.
+   * @return True to force pre-commit rollback; false to continue the start.
+   * @throws Nothing.
+   */
+  using ReservedStartRollbackObserver =
+      bool (*)(void* context, std::uint64_t candidate_id,
+               std::uint64_t entry_version, std::uint64_t route_generation,
+               const ResourceVector& execution_resources) noexcept;
+
   /**
    * @brief Repository-test callback for one production retirement boundary.
    * @param context Opaque fixture state that outlives the observed Run.
@@ -74,9 +90,38 @@ class ExecutionServiceTestAccess final {
   }
 
   /**
+   * @brief Installs one observer on an isolated reserved-start boundary.
+   * @param service Private service whose next starts are observed.
+   * @param observer Allocation-free decision callback, or null to disable.
+   * @param context Opaque callback context, or null when disabling.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Installation and clearing happen outside concurrent configuration;
+   * the observer itself runs while the private pool and Run locks are held.
+   */
+  static void set_reserved_start_rollback_observer(
+      compute::ExecutionService& service,
+      ReservedStartRollbackObserver observer, void* context) noexcept {
+    service.reserved_start_rollback_observer_context_ = context;
+    service.reserved_start_rollback_observer_ = observer;
+  }
+
+  /**
+   * @brief Clears the reserved-start observer after the observed Run settles.
+   * @param service Isolated service whose observer is removed.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void clear_reserved_start_rollback_observer(
+      compute::ExecutionService& service) noexcept {
+    service.reserved_start_rollback_observer_ = nullptr;
+    service.reserved_start_rollback_observer_context_ = nullptr;
+  }
+
+  /**
    * @brief Copies active built-in Throughput reservation charges.
    * @param service Isolated service under test.
-   * @return Exact class-owned vector excluding Interactive and legacy owners.
+   * @return Exact class-owned vector excluding Interactive owners.
    * @throws std::system_error when private accounting locking fails.
    * @note This is a non-authoritative test diagnostic; the ledger snapshot
    * remains the physical-capacity source of truth.

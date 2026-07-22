@@ -249,7 +249,7 @@ struct EmbeddedHostState {
    * @brief One admitted synchronous session-scoped Host operation.
    *
    * @throws Nothing for destruction.
-   * @note The entry contains no borrowed scheduler or graph pointer; it only
+   * @note The entry contains no borrowed route or graph pointer; it only
    *       keeps close from destroying the session until the complete admitted
    *       Host call, including Kernel execution and public status/value
    *       translation, has finished.
@@ -268,7 +268,7 @@ struct EmbeddedHostState {
    * @throws Nothing for destruction.
    * @note Tokens are movable and release exactly one table entry. The token is
    *       held through the complete admitted Host call but never holds the
-   *       lifecycle mutex while runtime, graph-state, or scheduler work is
+   *       lifecycle mutex while runtime, graph-state, or execution work is
    *       coordinated.
    */
   class SessionAdmissionToken {
@@ -389,8 +389,8 @@ struct EmbeddedHostState {
    * @throws std::bad_alloc if backend ownership allocation fails.
    * @note ExecutionService is composed first with private source-tree
    * `ExecutionResourceLimits`; fixed pool workers are uncharged infrastructure.
-   * This private policy is not an installed replacement for the removed
-   * scheduler limit constant. Kernel retains the same service owner, and
+   * This private policy is not part of the installed configuration ABI.
+   * Kernel retains the same service owner, and
    * InteractionService borrows only the completed Kernel.
    */
   EmbeddedHostState(std::shared_ptr<const ImageArtifactCodec> image_codec,
@@ -457,7 +457,7 @@ struct EmbeddedHostState {
    * @note The lifecycle mutex is released before return. The caller keeps the
    *       token alive through the complete Kernel call and exact public
    *       status/value translation. The token is a logical lifetime admission;
-   *       runtime startup and graph-state or scheduler coordination occur only
+   *       runtime startup and graph-state or route coordination occur only
    *       after the lifecycle mutex has been released. BUILD_TESTING publishes
    *       a non-blocking admission event only after the entry is installed and
    *       while the lifecycle mutex still establishes total event order.
@@ -505,10 +505,10 @@ struct EmbeddedHostState {
   /**
    * @brief Pre-registers and schedules backend async compute for close safety.
    *
-   * @tparam Scheduler Callable returning an optional future with the exact
+   * @tparam Submitter Callable returning an optional future with the exact
    *         backend async result.
    * @param session Session whose runtime will be captured by backend work.
-   * @param scheduler Backend scheduling callable executed without the Host
+   * @param submitter Backend submission callable executed without the Host
    *        lifecycle mutex.
    * @return Registration containing a tracked shared future, or
    * `scheduled=false`.
@@ -520,15 +520,15 @@ struct EmbeddedHostState {
    *         session's published close marker becomes `scheduled=false`.
    * @note Phase one reserves a placeholder under `lifecycle_mutex_`; phase two
    *       releases that mutex before entering the bounded graph-state lane.
-   *       Close therefore observes every in-flight scheduler, can publish its
+   *       Close therefore observes every in-flight submitter, can publish its
    *       marker, and can stop lane admission to wake a full-queue producer.
    *       The placeholder remains incomplete until scheduling either publishes
    *       the shared future or removes the entry. No post-submit Host
    * allocation is required to establish runtime ownership.
    */
-  template <typename Scheduler>
+  template <typename Submitter>
   AsyncComputeRegistration schedule_and_track_async_compute(
-      const GraphSessionId& session, Scheduler&& scheduler) {
+      const GraphSessionId& session, Submitter&& submitter) {
     static_assert(
         noexcept(
             std::declval<std::future<Kernel::AsyncComputeResult>&>().share()),
@@ -549,7 +549,7 @@ struct EmbeddedHostState {
 
     std::shared_future<Kernel::AsyncComputeResult> shared_future;
     try {
-      auto future = scheduler();
+      auto future = submitter();
       if (!future) {
         remove_async_compute_tracking(id);
         return AsyncComputeRegistration{};
@@ -738,7 +738,7 @@ struct EmbeddedHostState {
    *         accepted backend result has reached its caller-visible promise.
    * @throws std::system_error if lifecycle synchronization fails.
    * @note Kernel lane admission must already be stopped. Rejected in-flight
-   *       schedulers remove their placeholders and wake this waiter;
+   *       submitters remove their placeholders and wake this waiter;
    *       backend-accepted work remains tracked through status publication.
    *       Completed status workers are joined without holding
    *       `lifecycle_mutex_`.
@@ -870,14 +870,14 @@ struct EmbeddedHostState {
    * @brief Returns whether a synchronous operation still uses one session.
    *
    * @param session Session label to search.
-   * @return True while an admitted compute, image compute, scheduler-info,
-   *         scheduler-replacement, reload, required-save, node-YAML
+   * @return True while an admitted compute, image compute, route inspection,
+   *         route replacement, reload, required-save, node-YAML
    *         replacement, ROI projection, timing, or all-cache-clear call has
    *         not finished public translation.
    * @throws Nothing.
    * @note Caller must hold lifecycle_mutex_. Close waits for these admissions
    *       before entering Kernel::close_graph(), so the runtime map entry and
-   *       scheduler owner remain alive for the complete admitted call.
+   *       route binding remain alive for the complete admitted call.
    */
   bool has_active_session_admission_locked(
       const GraphSessionId& session) const noexcept {
@@ -1229,12 +1229,12 @@ VoidResult guarded_void(const char* operation, GraphErrc fallback_code,
  *         only when Kernel reports that no graph map entry exists.
  * @param fn Close body to execute after Host admission coordination.
  * @return Callable result, the exact recoverable Graph/filesystem category, or
- *         Graph Unknown for scheduler NotFound and otherwise
+ *         Graph Unknown for shutdown-time NotFound and otherwise
  *         unclassified exceptions raised while stopping an existing runtime.
  * @throws std::bad_alloc when backend execution or status construction exhausts
  *         memory.
  * @note Unlike generic guards, this boundary deliberately remaps even a caught
- *       GraphError::NotFound because scheduler shutdown cannot prove absence.
+ *       GraphError::NotFound because runtime shutdown cannot prove absence.
  */
 template <typename Fn>
 VoidResult guarded_graph_close(Fn&& fn) {
@@ -1691,55 +1691,55 @@ TimingSnapshot to_public_timing(const TimingCollector& timing) {
 }
 
 /**
- * @brief Converts backend scheduler action into a public action label.
+ * @brief Converts a backend execution action into its public action label.
  *
- * @param action Backend scheduler action.
- * @return Public scheduler trace action.
+ * @param action Backend execution action.
+ * @return Public execution-trace action.
  * @throws Nothing.
  */
-HostSchedulerTraceAction to_public_scheduler_action(
-    GraphRuntime::SchedulerEvent::Action action) {
+HostExecutionTraceAction to_public_execution_action(
+    GraphRuntime::ExecutionEvent::Action action) {
   switch (action) {
-    case GraphRuntime::SchedulerEvent::ASSIGN_INITIAL:
-      return HostSchedulerTraceAction::AssignInitial;
-    case GraphRuntime::SchedulerEvent::EXECUTE:
-      return HostSchedulerTraceAction::Execute;
-    case GraphRuntime::SchedulerEvent::EXECUTE_TILE:
-      return HostSchedulerTraceAction::ExecuteTile;
-    case GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE:
-      return HostSchedulerTraceAction::ExecuteDirtySource;
-    case GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE:
-      return HostSchedulerTraceAction::ExecuteDirtyDownstreamNode;
-    case GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE:
-      return HostSchedulerTraceAction::ExecuteDirtyDownstreamTile;
-    case GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION:
-      return HostSchedulerTraceAction::SkipStaleGeneration;
-    case GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION:
-      return HostSchedulerTraceAction::RethrowException;
+    case GraphRuntime::ExecutionEvent::ASSIGN_INITIAL:
+      return HostExecutionTraceAction::AssignInitial;
+    case GraphRuntime::ExecutionEvent::EXECUTE:
+      return HostExecutionTraceAction::Execute;
+    case GraphRuntime::ExecutionEvent::EXECUTE_TILE:
+      return HostExecutionTraceAction::ExecuteTile;
+    case GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_SOURCE:
+      return HostExecutionTraceAction::ExecuteDirtySource;
+    case GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE:
+      return HostExecutionTraceAction::ExecuteDirtyDownstreamNode;
+    case GraphRuntime::ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE:
+      return HostExecutionTraceAction::ExecuteDirtyDownstreamTile;
+    case GraphRuntime::ExecutionEvent::SKIP_STALE_GENERATION:
+      return HostExecutionTraceAction::SkipStaleGeneration;
+    case GraphRuntime::ExecutionEvent::RETHROW_EXCEPTION:
+      return HostExecutionTraceAction::RethrowException;
   }
-  return HostSchedulerTraceAction::Unknown;
+  return HostExecutionTraceAction::Unknown;
 }
 
 /**
- * @brief Converts one bounded backend scheduler page into public snapshots.
+ * @brief Converts one bounded backend execution page into public snapshots.
  *
- * @param backend_page Backend scheduler events and locked metadata.
- * @return Public scheduler trace page preserving sequence metadata.
+ * @param backend_page Backend execution events and locked metadata.
+ * @return Public execution-trace page preserving sequence metadata.
  * @throws std::bad_alloc if vector allocation fails.
  * @note The conversion is non-destructive and cannot exceed the already
  *       validated backend page bound.
  */
-SchedulerTracePage to_public_scheduler_trace_page(
-    const GraphRuntime::SchedulerEventPage& backend_page) {
-  SchedulerTracePage page;
+ExecutionTracePage to_public_execution_trace_page(
+    const GraphRuntime::ExecutionEventPage& backend_page) {
+  ExecutionTracePage page;
   page.events.reserve(backend_page.events.size());
   for (const auto& event : backend_page.events) {
-    SchedulerTraceEventSnapshot snapshot;
+    ExecutionTraceEventSnapshot snapshot;
     snapshot.sequence = event.sequence;
     snapshot.epoch = event.epoch;
     snapshot.node = NodeId{event.node_id};
     snapshot.worker_id = event.worker_id;
-    snapshot.action = to_public_scheduler_action(event.action);
+    snapshot.action = to_public_execution_action(event.action);
     snapshot.timestamp_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             event.timestamp.time_since_epoch())
@@ -2085,8 +2085,8 @@ class EmbeddedHost final : public Host {
    * @brief Loads one graph through the embedded backend.
    *
    * @param request Public graph load request.
-   * @return Loaded session id, duplicate/scheduler InvalidParameter,
-   *         resource-ledger ComputeError, explicit-source/session-path Io,
+   * @return Loaded session id, duplicate/route InvalidParameter,
+   *         execution-service ComputeError, explicit-source/session-path Io,
    *         syntax/schema InvalidYaml, topology MissingDependency/Cycle, or
    *         Unknown for an unexpected internal failure.
    * @throws std::bad_alloc on allocation failure.
@@ -2097,7 +2097,7 @@ class EmbeddedHost final : public Host {
    *       validation happen before Graph-map insertion. The backend
    *       preallocates its return label before publication and this adapter
    *       moves that label into the result, so every failure leaves no newly
-   *       published session or scheduler reservation.
+   *       published session or per-Graph execution ownership.
    */
   Result<GraphSessionId> load_graph(const GraphLoadRequest& request) override {
     return guarded_result<GraphSessionId>(
@@ -2131,7 +2131,7 @@ class EmbeddedHost final : public Host {
    *       close-marker starvation without rejecting accepted synchronous work.
    *       Every backend-accepted async promise is made caller-visible and its
    *       status worker is joined before backend close drains the request lane,
-   *       closes graph-state, and stops schedulers. A shutdown failure
+   *       closes graph-state, and destroys the runtime. A shutdown failure
    * recreates both workers before the adapter clears the marker, so the session
    * may be retried.
    */
@@ -3167,37 +3167,37 @@ class EmbeddedHost final : public Host {
   }
 
   /**
-   * @brief Reads scheduler trace events for a graph session.
+   * @brief Reads execution trace events for a graph session.
    *
    * @param session Session to inspect.
    * @param after_sequence Exclusive sequence cursor.
    * @param limit Maximum number of trace entries to copy.
-   * @return Public bounded scheduler trace page, or a failed status.
+   * @return Public bounded execution trace page, or a failed status.
    * @throws std::bad_alloc on allocation failure.
    * @note Invalid bounds fail before graph lookup. Trace events are copied
-   *       non-destructively and do not expose scheduler queues.
+   *       non-destructively and expose no physical queues.
    */
-  Result<SchedulerTracePage> scheduler_trace(const GraphSessionId& session,
+  Result<ExecutionTracePage> execution_trace(const GraphSessionId& session,
                                              uint64_t after_sequence,
                                              std::size_t limit) override {
-    return guarded_result<SchedulerTracePage>(
-        "scheduler_trace", GraphErrc::InvalidParameter, [&] {
-          if (limit < kSchedulerTraceMinLimit ||
-              limit > kSchedulerTraceMaxLimit) {
-            return failure_result<SchedulerTracePage>(
+    return guarded_result<ExecutionTracePage>(
+        "execution_trace", GraphErrc::InvalidParameter, [&] {
+          if (limit < kExecutionTraceMinLimit ||
+              limit > kExecutionTraceMaxLimit) {
+            return failure_result<ExecutionTracePage>(
                 GraphErrc::InvalidParameter,
-                "scheduler-trace limit must be between " +
-                    std::to_string(kSchedulerTraceMinLimit) + " and " +
-                    std::to_string(kSchedulerTraceMaxLimit));
+                "execution-trace limit must be between " +
+                    std::to_string(kExecutionTraceMinLimit) + " and " +
+                    std::to_string(kExecutionTraceMaxLimit));
           }
-          auto page = state_->interaction.cmd_scheduler_trace(
+          auto page = state_->interaction.cmd_execution_trace(
               session.value, after_sequence, limit);
           if (!page) {
-            return failure_result<SchedulerTracePage>(
+            return failure_result<ExecutionTracePage>(
                 GraphErrc::NotFound,
-                "scheduler trace not available for session: " + session.value);
+                "execution trace not available for session: " + session.value);
           }
-          return success_result(to_public_scheduler_trace_page(*page));
+          return success_result(to_public_execution_trace_page(*page));
         });
   }
 
@@ -3454,182 +3454,149 @@ class EmbeddedHost final : public Host {
         });
   }
 
-  /**
-   * @brief Lists available scheduler type names.
-   *
-   * @return Scheduler type names, or a failed status.
-   * @throws std::bad_alloc on allocation failure.
-   * @note Built-in and plugin-provided scheduler names are copied.
-   */
-  Result<std::vector<std::string>> scheduler_available_types() const override {
+  /** @copydoc Host::policy_available_types */
+  Result<std::vector<std::string>> policy_available_types() const override {
     return guarded_result<std::vector<std::string>>(
-        "scheduler_available_types", GraphErrc::Unknown, [&] {
+        "policy_available_types", GraphErrc::Unknown, [&] {
           return success_result(
-              state_->interaction.cmd_scheduler_available_types());
+              state_->interaction.cmd_policy_available_types());
         });
   }
 
-  /**
-   * @brief Reads a scheduler description.
-   *
-   * @param type_name Scheduler type name.
-   * @return Description text, or NotFound when the scheduler type is
-   * unavailable.
-   * @throws std::bad_alloc on allocation failure.
-   * @note The adapter checks the available type list before calling the backend
-   *       description helper because that helper has a display fallback string.
-   */
-  Result<std::string> scheduler_description(
+  /** @copydoc Host::policy_description */
+  Result<std::string> policy_description(
       const std::string& type_name) const override {
     return guarded_result<std::string>(
-        "scheduler_description", GraphErrc::NotFound, [&] {
-          const auto types =
-              state_->interaction.cmd_scheduler_available_types();
-          if (std::find(types.begin(), types.end(), type_name) == types.end()) {
-            return failure_result<std::string>(
-                GraphErrc::NotFound, "scheduler type not found: " + type_name);
-          }
+        "policy_description", GraphErrc::NotFound, [&] {
           return success_result(
-              state_->interaction.cmd_scheduler_description(type_name));
+              state_->interaction.cmd_policy_description(type_name));
         });
   }
 
-  /**
-   * @brief Scans directories for scheduler plugins.
-   *
-   * @param dirs Directories to scan.
-   * @return Number of loaded scheduler types, or a failed status.
-   * @throws std::bad_alloc on allocation failure.
-   * @note Plugin load exceptions are normalized to Host status values.
-   */
-  Result<size_t> scheduler_scan(const std::vector<std::string>& dirs) override {
-    return guarded_result<size_t>("scheduler_scan", GraphErrc::Io, [&] {
-      return success_result(state_->interaction.cmd_scheduler_scan(dirs));
+  /** @copydoc Host::policy_scan */
+  Result<std::size_t> policy_scan(
+      const std::vector<std::string>& dirs) override {
+    return guarded_result<std::size_t>("policy_scan", GraphErrc::Io, [&] {
+      return success_result(state_->interaction.cmd_policy_scan(dirs));
     });
   }
 
-  /**
-   * @brief Loads one scheduler plugin.
-   *
-   * @param path Dynamic library path.
-   * @return Success or failure status.
-   * @throws std::bad_alloc on allocation failure.
-   * @note Failed loads return Io status instead of throwing through Host.
-   */
-  VoidResult scheduler_load(const std::string& path) override {
-    return guarded_void("scheduler_load", GraphErrc::Io, [&] {
-      if (!state_->interaction.cmd_scheduler_load(path)) {
-        return failure_void(GraphErrc::Io,
-                            "failed to load scheduler plugin: " + path);
-      }
+  /** @copydoc Host::policy_load */
+  VoidResult policy_load(const std::string& path) override {
+    return guarded_void("policy_load", GraphErrc::Io, [&] {
+      state_->interaction.cmd_policy_load(path);
       return success_void();
     });
   }
 
-  /**
-   * @brief Lists loaded scheduler plugin labels.
-   *
-   * @return Plugin labels, or a failed status.
-   * @throws std::bad_alloc on allocation failure.
-   * @note Labels are diagnostic strings copied from backend state.
-   */
-  Result<std::vector<std::string>> scheduler_loaded_plugins() const override {
+  /** @copydoc Host::policy_loaded_plugins */
+  Result<std::vector<std::string>> policy_loaded_plugins() const override {
     return guarded_result<std::vector<std::string>>(
-        "scheduler_loaded_plugins", GraphErrc::Unknown, [&] {
+        "policy_loaded_plugins", GraphErrc::Unknown, [&] {
           return success_result(
-              state_->interaction.cmd_scheduler_loaded_plugins());
+              state_->interaction.cmd_policy_loaded_plugins());
         });
   }
 
-  /**
-   * @brief Applies scheduler defaults for subsequently loaded graph sessions.
-   *
-   * @param config Public scheduler default values.
-   * @return Success, or InvalidParameter when the worker request exceeds the
-   *         public hard maximum.
-   * @throws std::bad_alloc if scheduler type strings allocate while copied.
-   * @note Validation precedes candidate construction and the single Kernel
-   *       assignment. Existing runtime schedulers and previously accepted
-   *       future-session defaults remain unchanged on rejection.
-   */
-  VoidResult configure_scheduler_defaults(
-      const HostSchedulerConfig& config) override {
+  /** @copydoc Host::configure_policy_defaults */
+  VoidResult configure_policy_defaults(
+      const HostPolicyConfig& config) override {
     return guarded_void(
-        "configure_scheduler_defaults", GraphErrc::InvalidParameter, [&] {
-          if (config.worker_count > kSchedulerWorkerRequestMax) {
-            return failure_void(GraphErrc::InvalidParameter,
-                                "scheduler worker count exceeds the maximum "
-                                "of " +
-                                    std::to_string(kSchedulerWorkerRequestMax));
-          }
-          Kernel::SchedulerConfig backend_config;
-          backend_config.hp_type = config.hp_type;
-          backend_config.rt_type = config.rt_type;
-          backend_config.worker_count = config.worker_count;
-          state_->kernel.set_scheduler_config(backend_config);
+        "configure_policy_defaults", GraphErrc::InvalidParameter, [&] {
+          state_->interaction.cmd_configure_policy_defaults(config);
           return success_void();
         });
   }
 
-  /**
-   * @brief Reads scheduler information for a graph intent.
-   *
-   * @param session Session to inspect.
-   * @param intent Compute intent served by the scheduler.
-   * @return Scheduler info snapshot, or a failed status.
-   * @throws std::bad_alloc on allocation failure.
-   * @note One lifecycle admission protects the complete Kernel call against
-   *       close. Kernel copies name/stats under the graph-state boundary shared
-   *       with compute and replacement; no scheduler pointer escapes.
-   */
-  Result<SchedulerInfoSnapshot> scheduler_info(
+  /** @copydoc Host::policy_info */
+  Result<PolicyInfoSnapshot> policy_info(
+      PolicyClass policy_class) const override {
+    return guarded_result<PolicyInfoSnapshot>(
+        "policy_info", GraphErrc::InvalidParameter, [&] {
+          return success_result(
+              state_->interaction.cmd_policy_info(policy_class));
+        });
+  }
+
+  /** @copydoc Host::replace_policy */
+  VoidResult replace_policy(PolicyClass policy_class,
+                            const std::string& type) override {
+    return guarded_void("replace_policy", GraphErrc::InvalidParameter, [&] {
+      state_->interaction.cmd_replace_policy(policy_class, type);
+      return success_void();
+    });
+  }
+
+  /** @copydoc Host::execution_available_types */
+  Result<std::vector<std::string>> execution_available_types() const override {
+    return guarded_result<std::vector<std::string>>(
+        "execution_available_types", GraphErrc::Unknown, [&] {
+          return success_result(
+              state_->interaction.cmd_execution_available_types());
+        });
+  }
+
+  /** @copydoc Host::execution_description */
+  Result<std::string> execution_description(
+      const std::string& type_name) const override {
+    return guarded_result<std::string>(
+        "execution_description", GraphErrc::NotFound, [&] {
+          return success_result(
+              state_->interaction.cmd_execution_description(type_name));
+        });
+  }
+
+  /** @copydoc Host::configure_execution_defaults */
+  VoidResult configure_execution_defaults(
+      const HostExecutionConfig& config) override {
+    return guarded_void(
+        "configure_execution_defaults", GraphErrc::InvalidParameter, [&] {
+          if (config.worker_count > kExecutionWorkerRequestMax) {
+            return failure_void(
+                GraphErrc::InvalidParameter,
+                "execution worker count exceeds the maximum of " +
+                    std::to_string(kExecutionWorkerRequestMax));
+          }
+          Kernel::ExecutionConfig backend_config;
+          backend_config.hp_type = config.hp_type;
+          backend_config.rt_type = config.rt_type;
+          backend_config.worker_count = config.worker_count;
+          state_->interaction.cmd_configure_execution_defaults(backend_config);
+          return success_void();
+        });
+  }
+
+  /** @copydoc Host::execution_info */
+  Result<ExecutionInfoSnapshot> execution_info(
       const GraphSessionId& session, ComputeIntent intent) const override {
-    return guarded_result<SchedulerInfoSnapshot>(
-        "scheduler_info", GraphErrc::NotFound, [&] {
+    return guarded_result<ExecutionInfoSnapshot>(
+        "execution_info", GraphErrc::NotFound, [&] {
           auto admission = state_->try_admit_session_operation(session);
           if (!admission) {
-            return failure_result<SchedulerInfoSnapshot>(
+            return failure_result<ExecutionInfoSnapshot>(
                 GraphErrc::NotFound,
                 "graph session is closing: " + session.value);
           }
           const auto info =
-              state_->kernel.get_scheduler_info(session.value, intent);
+              state_->interaction.cmd_execution_info(session.value, intent);
           if (!info) {
-            return failure_result<SchedulerInfoSnapshot>(
+            return failure_result<ExecutionInfoSnapshot>(
                 GraphErrc::NotFound,
-                "scheduler info not available for session: " + session.value);
+                "execution info not available for session: " + session.value);
           }
-          SchedulerInfoSnapshot snapshot;
+          ExecutionInfoSnapshot snapshot;
           snapshot.intent = intent;
-          snapshot.scheduler_name = info->first;
+          snapshot.execution_type = info->first;
           snapshot.stats = info->second;
           return success_result(std::move(snapshot));
         });
   }
 
-  /**
-   * @brief Replaces the scheduler for one graph intent.
-   *
-   * @param session Session to update.
-   * @param intent Compute intent whose scheduler is replaced.
-   * @param type Scheduler type name.
-   * @return Success, NotFound for a missing or closed session, or
-   *         InvalidParameter for an unavailable/null scheduler type or handled
-   *         candidate failure, or ComputeError when process capacity cannot
-   *         reserve candidate headroom.
-   * @throws std::bad_alloc on allocation failure.
-   * @note One lifecycle admission covers session validation through status
-   *       mapping. Kernel performs plan, single reservation, construction, and
-   *       strong replacement under the graph-state boundary shared with
-   *       compute/info/close. The Host session pre-check reserves NotFound for
-   *       lifecycle absence, while guarded GraphError mapping preserves only
-   *       resource exhaustion without releasing the prior owner; other
-   *       candidate failures keep the established InvalidParameter result.
-   */
-  VoidResult replace_scheduler(const GraphSessionId& session,
+  /** @copydoc Host::replace_execution */
+  VoidResult replace_execution(const GraphSessionId& session,
                                ComputeIntent intent,
                                const std::string& type) override {
-    return guarded_void("replace_scheduler", GraphErrc::InvalidParameter, [&] {
+    return guarded_void("replace_execution", GraphErrc::InvalidParameter, [&] {
       auto admission = state_->try_admit_session_operation(session);
       if (!admission) {
         return failure_void(GraphErrc::NotFound,
@@ -3639,10 +3606,11 @@ class EmbeddedHost final : public Host {
         return failure_void(GraphErrc::NotFound,
                             "graph session not found: " + session.value);
       }
-      if (!state_->kernel.replace_scheduler(session.value, intent, type)) {
+      if (!state_->interaction.cmd_replace_execution(session.value, intent,
+                                                     type)) {
         return failure_void(
             GraphErrc::InvalidParameter,
-            "failed to replace scheduler for session: " + session.value);
+            "failed to replace execution route for session: " + session.value);
       }
       return success_void();
     });

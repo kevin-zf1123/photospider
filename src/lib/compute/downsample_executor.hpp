@@ -55,7 +55,7 @@ class DownsampleExecutor {
    *
    * @param graph Graph containing committed HP node cache state.
    * @param proxy_graph RT proxy graph receiving downsampled output.
-   * @param runtime Optional runtime used only for scheduler trace events.
+   * @param runtime Optional runtime used only for execution trace events.
    * @param events Event service that receives downsample status events.
    * @param run_lease Optional borrowed HP lifecycle lease used for cooperative
    * cancellation observations between requests and before proxy publication.
@@ -188,11 +188,11 @@ class DownsampleExecutor {
                           int hp_version);
 
   /**
-   * @brief Emits a stale-generation scheduler trace event when possible.
+   * @brief Emits a stale-generation execution trace event when possible.
    *
    * @param node_id Node whose request was skipped.
    * @throws Any exception propagated by GraphRuntime::log_event.
-   * @note A null runtime intentionally suppresses scheduler trace output.
+   * @note A null runtime intentionally suppresses execution trace output.
    */
   void log_stale_generation(int node_id) const;
 

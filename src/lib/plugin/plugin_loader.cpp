@@ -613,8 +613,8 @@ std::shared_ptr<void> make_library_lifetime(void* handle) {
  * symbol lookup. Moving or copying the wrapper itself is intentionally
  * disabled; users pass around `shared_ptr<void>` lifetimes instead.
  *
- * @note This helper is local to the operation plugin loader because the
- * scheduler plugin loader has additional instance-destruction requirements.
+ * @note This helper is local to the operation plugin loader and never loads
+ * installed Policy ABI libraries, whose lifecycle belongs to PolicyRegistry.
  */
 class DynamicLibrary final {
  public:

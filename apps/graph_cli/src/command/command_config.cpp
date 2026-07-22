@@ -11,7 +11,7 @@ bool handle_config(std::istringstream& /*iss*/, ps::Host& svc,
                    std::string& /*current_graph*/, bool& /*modified*/,
                    CliConfig& config) {
   if (run_config_editor(config)) {
-    apply_cli_scheduler_defaults(svc, config);
+    apply_cli_policy_execution_defaults(svc, config);
   }
   return true;
 }

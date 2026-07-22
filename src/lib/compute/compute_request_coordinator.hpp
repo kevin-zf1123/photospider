@@ -22,7 +22,7 @@ namespace ps::compute {
  * The coordinator allocates graph-wide generations, owns one bounded lineage
  * row/mailbox per admitted key, and runs at most one materialized request at a
  * time through the existing compute-request lane worker. It owns no OS thread,
- * ExecutionService worker, scheduler, Run plan, staging Graph, resource grant,
+ * ExecutionService worker, Run plan, staging Graph, resource grant,
  * graph-lifetime lease, or issue #76 registry.
  *
  * @throws std::bad_alloc when rows, callbacks, or candidate ownership allocate.

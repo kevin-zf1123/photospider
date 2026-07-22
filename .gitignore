@@ -85,8 +85,7 @@ feedback/
 !plugins/ops/**/*.cpp
 !plugins/ops/**/*.hpp
 !plugins/ops/**/*.mm
-!plugins/schedulers/*_example_plugin.cpp
-!plugins/schedulers/sdk_example_scheduler.hpp
+!plugins/policies/*.c
 
 # External libraries (FTXUI etc.)
 !extern/
@@ -103,7 +102,9 @@ feedback/
 !tests/
 !tests/**/
 !tests/**/*.cpp
+!tests/**/*.c
 !tests/**/*.hpp
+!tests/**/*.h
 !tests/**/*.py
 !tests/fixtures/graphs/*.yaml
 tests/results/

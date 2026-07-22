@@ -24,7 +24,7 @@ namespace {
  *
  * @param graph GraphModel used for node lookup.
  * @param node_id Node id being reported.
- * @return Human-readable scheduler error context.
+ * @return Human-readable dispatch error context.
  * @throws std::bad_alloc if string construction fails.
  * @note Missing nodes are reported by id only.
  */
@@ -37,20 +37,20 @@ std::string node_context(const GraphModel& graph, int node_id) {
 }
 
 /**
- * @brief Creates a scheduler-stage GraphError exception pointer.
+ * @brief Creates a dispatch-stage GraphError exception pointer.
  *
  * @param graph GraphModel used to enrich the node label.
  * @param node_id Node whose dependent release failed.
- * @param detail Original scheduling exception detail.
+ * @param detail Original dispatch exception detail.
  * @return Exception pointer carrying GraphErrc::ComputeError.
  * @throws std::bad_alloc if the wrapped diagnostic cannot allocate.
- * @note This preserves scheduler-stage context without relabeling
+ * @note This preserves dispatch-stage context without relabeling
  * std::bad_alloc.
  */
-std::exception_ptr scheduling_failure(const GraphModel& graph, int node_id,
-                                      const std::string& detail) {
+std::exception_ptr dispatch_failure(const GraphModel& graph, int node_id,
+                                    const std::string& detail) {
   return std::make_exception_ptr(
-      GraphError(GraphErrc::ComputeError, "Scheduling stage after " +
+      GraphError(GraphErrc::ComputeError, "Dispatch stage after " +
                                               node_context(graph, node_id) +
                                               " failed: " + detail));
 }
@@ -72,7 +72,7 @@ bool implementation_shape_compatible(const OpImplementation& impl,
  * @brief Chooses a shape-compatible per-device implementation for HP compute.
  *
  * @param node Graph node whose operation is being resolved.
- * @param available_devices Devices exposed by the scheduler runtime.
+ * @param available_devices Devices exposed by the execution runtime.
  * @param require_tiled Whether the task graph requires TileOpFunc.
  * @return Selected operation variant, or nullopt.
  * @throws std::bad_alloc if registry candidate storage allocates
@@ -105,7 +105,7 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
  * @note wait_for_completion() is attempted only when set_exception() accepted
  * the failure, avoiding a wait on a runtime that rejected exception transport.
  */
-void settle_rejected_bootstrap(SchedulerTaskRuntime& task_runtime,
+void settle_rejected_bootstrap(ExecutionTaskRuntime& task_runtime,
                                const std::exception_ptr& failure) noexcept {
   bool exception_published = false;
   try {
@@ -125,13 +125,13 @@ void settle_rejected_bootstrap(SchedulerTaskRuntime& task_runtime,
 }  // namespace
 
 /**
- * @brief Builds one Run-owned full HP scheduler submission plan.
+ * @brief Builds one Run-owned full HP execution submission plan.
  *
  * @param run_id Opaque namespace of the owning Run.
  * @param graph Graph used for planning and operation resolution.
  * @param traversal Traversal service used by plan construction.
  * @param node_id Requested target node.
- * @param available_devices Scheduler-exposed device labels.
+ * @param available_devices Execution-runtime device labels.
  * @throws GraphError or standard exceptions from planning and allocation.
  */
 TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
@@ -155,42 +155,43 @@ TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
   }
 }
 
-/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::transfer_to_callback */
-bool TaskSubmissionPlan::LegacyCompletionRecord::
+/** @copydoc TaskSubmissionPlan::RuntimeCompletionRecord::transfer_to_callback
+ */
+bool TaskSubmissionPlan::RuntimeCompletionRecord::
     transfer_to_callback() noexcept {
   std::uint8_t expected =
-      static_cast<std::uint8_t>(LegacyCompletionOwner::Plan);
+      static_cast<std::uint8_t>(RuntimeCompletionOwner::Plan);
   return owner_.compare_exchange_strong(
-      expected, static_cast<std::uint8_t>(LegacyCompletionOwner::Callback),
+      expected, static_cast<std::uint8_t>(RuntimeCompletionOwner::Callback),
       std::memory_order_acq_rel, std::memory_order_acquire);
 }
 
-/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::retire_plan_owned */
-void TaskSubmissionPlan::LegacyCompletionRecord::retire_plan_owned() noexcept {
+/** @copydoc TaskSubmissionPlan::RuntimeCompletionRecord::retire_plan_owned */
+void TaskSubmissionPlan::RuntimeCompletionRecord::retire_plan_owned() noexcept {
   std::uint8_t expected =
-      static_cast<std::uint8_t>(LegacyCompletionOwner::Plan);
+      static_cast<std::uint8_t>(RuntimeCompletionOwner::Plan);
   if (owner_.compare_exchange_strong(
-          expected, static_cast<std::uint8_t>(LegacyCompletionOwner::Retired),
+          expected, static_cast<std::uint8_t>(RuntimeCompletionOwner::Retired),
           std::memory_order_acq_rel, std::memory_order_acquire)) {
     retire_runtime();
   }
 }
 
-/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::retire_callback_owned
+/** @copydoc TaskSubmissionPlan::RuntimeCompletionRecord::retire_callback_owned
  */
-void TaskSubmissionPlan::LegacyCompletionRecord::
+void TaskSubmissionPlan::RuntimeCompletionRecord::
     retire_callback_owned() noexcept {
   std::uint8_t expected =
-      static_cast<std::uint8_t>(LegacyCompletionOwner::Callback);
+      static_cast<std::uint8_t>(RuntimeCompletionOwner::Callback);
   if (owner_.compare_exchange_strong(
-          expected, static_cast<std::uint8_t>(LegacyCompletionOwner::Retired),
+          expected, static_cast<std::uint8_t>(RuntimeCompletionOwner::Retired),
           std::memory_order_acq_rel, std::memory_order_acquire)) {
     retire_runtime();
   }
 }
 
-/** @copydoc TaskSubmissionPlan::LegacyCompletionRecord::retire_runtime */
-void TaskSubmissionPlan::LegacyCompletionRecord::retire_runtime() noexcept {
+/** @copydoc TaskSubmissionPlan::RuntimeCompletionRecord::retire_runtime */
+void TaskSubmissionPlan::RuntimeCompletionRecord::retire_runtime() noexcept {
   try {
     if (runtime_ == nullptr) {
       std::terminate();
@@ -221,14 +222,14 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       static_cast<std::uint64_t>(submitted_initial_task_ids_.size()));
   estimate.add_objects<std::atomic<std::uint8_t>>(
       static_cast<std::uint64_t>(task_execution_states_.capacity()));
-  estimate.add_objects<std::shared_ptr<LegacyCompletionRecord>>(
-      static_cast<std::uint64_t>(legacy_completion_records_.capacity()));
-  estimate.add_objects<LegacyCompletionRecord>(
-      static_cast<std::uint64_t>(legacy_completion_records_.size()));
+  estimate.add_objects<std::shared_ptr<RuntimeCompletionRecord>>(
+      static_cast<std::uint64_t>(runtime_completion_records_.capacity()));
+  estimate.add_objects<RuntimeCompletionRecord>(
+      static_cast<std::uint64_t>(runtime_completion_records_.size()));
   estimate.add_objects<void*>(
-      static_cast<std::uint64_t>(legacy_completion_records_.size()));
+      static_cast<std::uint64_t>(runtime_completion_records_.size()));
   estimate.add_objects<void*>(
-      static_cast<std::uint64_t>(legacy_completion_records_.size()));
+      static_cast<std::uint64_t>(runtime_completion_records_.size()));
   if (task_runner_) {
     estimate.add_bytes(task_runner_->retained_memory_bytes());
   }
@@ -249,7 +250,7 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
  *
  * @return Initial composite identities in this Run namespace.
  * @throws GraphError when no initial identity exists for a nonempty plan.
- * @throws std::overflow_error when task count exceeds scheduler accounting.
+ * @throws std::overflow_error when task count exceeds runtime accounting.
  * @throws std::bad_alloc or std::out_of_range from ready discovery.
  */
 std::vector<ComputeRunTaskIdentity>
@@ -267,7 +268,7 @@ TaskSubmissionPlan::initial_ready_identities() {
   }
   if (size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::overflow_error(
-        "Full HP task count exceeds scheduler completion range.");
+        "Full HP task count exceeds runtime completion range.");
   }
   return initial_identities;
 }
@@ -297,7 +298,7 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
   return ReadyTaskSubmission(lease, identity, trace_node_id, is_initial_ready,
                              [](ComputeRunLease& ready_lease,
                                 const ComputeRunTaskIdentity& ready_identity,
-                                SchedulerTaskRuntime& task_runtime) {
+                                ExecutionTaskRuntime& task_runtime) {
                                ready_lease.execute_task(ready_identity,
                                                         task_runtime);
                              });
@@ -359,30 +360,30 @@ bool TaskSubmissionPlan::contains_task_identity(
 }
 
 /**
- * @brief Submits all initial ready identities as scheduler-owned callbacks.
+ * @brief Submits all initial ready identities as runtime-owned callbacks.
  *
  * @param lease Matching Run lease copied into callbacks.
- * @param task_runtime Active scheduler batch.
+ * @param task_runtime Active execution batch.
  * @return Nothing.
  * @throws GraphError when no initial identity exists for a nonempty plan.
- * @throws std::overflow_error when planned count exceeds scheduler integer
+ * @throws std::overflow_error when planned count exceeds runtime integer
  * accounting.
- * @throws std::bad_alloc or scheduler exceptions from submission.
+ * @throws std::bad_alloc or runtime exceptions from submission.
  * @note Cancellation closes the publication gate and retires every completion
  * unit not yet transferred to a materialized callback. The caller retains the
  * separate bootstrap completion unit.
  */
 void TaskSubmissionPlan::submit_initial_ready_tasks(
-    const ComputeRunLease& lease, SchedulerTaskRuntime& task_runtime) {
+    const ComputeRunLease& lease, ExecutionTaskRuntime& task_runtime) {
   const std::vector<ComputeRunTaskIdentity> initial_identities =
       initial_ready_identities();
 
-  if (!initialize_legacy_completion_ledger(lease, task_runtime)) {
+  if (!initialize_runtime_completion_ledger(lease, task_runtime)) {
     return;
   }
   log_initial_assignments(task_runtime);
   for (const ComputeRunTaskIdentity& identity : initial_identities) {
-    (void)publish_legacy_callback(lease, identity, task_runtime);
+    (void)publish_runtime_callback(lease, identity, task_runtime);
   }
 }
 
@@ -412,7 +413,7 @@ TaskSubmissionPlan::make_initial_ready_submissions(
  *
  * @param identity Matching composite task identity.
  * @param lease Lease copied into dependent callbacks.
- * @param task_runtime Active scheduler runtime.
+ * @param task_runtime Active execution runtime.
  * @return Nothing.
  * @throws std::invalid_argument when identity mismatches.
  * @throws std::logic_error when a duplicate callback enters.
@@ -425,7 +426,7 @@ TaskSubmissionPlan::make_initial_ready_submissions(
  */
 void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
                                       const ComputeRunLease& lease,
-                                      SchedulerTaskRuntime& task_runtime) {
+                                      ExecutionTaskRuntime& task_runtime) {
   if (!contains_task_identity(identity)) {
     throw std::invalid_argument(
         "Task identity does not belong to this Run submission plan.");
@@ -452,9 +453,9 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
   }
 
   const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_id);
-  const SchedulerTraceAction execute_action =
-      task.kind == PlannedTaskKind::Tile ? SchedulerTraceAction::ExecuteTile
-                                         : SchedulerTraceAction::Execute;
+  const ExecutionTraceAction execute_action =
+      task.kind == PlannedTaskKind::Tile ? ExecutionTraceAction::ExecuteTile
+                                         : ExecutionTraceAction::Execute;
   task_runtime.log_event(execute_action, task.node_id);
   try {
     task_runner_->run_task(task_id);
@@ -471,7 +472,7 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
         static_cast<std::uint8_t>(TaskExecutionState::Failed),
         std::memory_order_release);
     try {
-      task_runtime.log_event(SchedulerTraceAction::RethrowException,
+      task_runtime.log_event(ExecutionTraceAction::RethrowException,
                              task.node_id);
     } catch (...) {
     }
@@ -532,7 +533,7 @@ void TaskSubmissionPlan::resolve_operations() {
  */
 void TaskSubmissionPlan::release_dependents(
     int current_task_id, int current_node_id, const ComputeRunLease& lease,
-    SchedulerTaskRuntime& task_runtime) {
+    ExecutionTaskRuntime& task_runtime) {
   try {
     (void)lease.observe_cancellation();
     if (lease.terminal_outcome().has_value()) {
@@ -548,49 +549,49 @@ void TaskSubmissionPlan::release_dependents(
       if (ready_runtime != nullptr) {
         (void)publish_service_submission(lease, identity, *ready_runtime);
       } else {
-        (void)publish_legacy_callback(lease, identity, task_runtime);
+        (void)publish_runtime_callback(lease, identity, task_runtime);
       }
     }
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::out_of_range& error) {
-    std::rethrow_exception(scheduling_failure(
+    std::rethrow_exception(dispatch_failure(
         graph_, current_node_id, "out_of_range: " + std::string(error.what())));
   } catch (const std::exception& error) {
     std::rethrow_exception(
-        scheduling_failure(graph_, current_node_id, error.what()));
+        dispatch_failure(graph_, current_node_id, error.what()));
   } catch (...) {
     std::rethrow_exception(
-        scheduling_failure(graph_, current_node_id, "unknown exception"));
+        dispatch_failure(graph_, current_node_id, "unknown exception"));
   }
 }
 
-/** @copydoc TaskSubmissionPlan::initialize_legacy_completion_ledger */
-bool TaskSubmissionPlan::initialize_legacy_completion_ledger(
-    const ComputeRunLease& lease, SchedulerTaskRuntime& task_runtime) {
+/** @copydoc TaskSubmissionPlan::initialize_runtime_completion_ledger */
+bool TaskSubmissionPlan::initialize_runtime_completion_ledger(
+    const ComputeRunLease& lease, ExecutionTaskRuntime& task_runtime) {
   (void)lease.observe_cancellation();
   std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
-  if (legacy_completion_initialized_) {
+  if (runtime_completion_initialized_) {
     throw std::logic_error(
-        "TaskSubmissionPlan legacy completion ledger is already initialized.");
+        "TaskSubmissionPlan runtime completion ledger is already initialized.");
   }
   if (publication_closed_ || lease.terminal_outcome().has_value()) {
     publication_closed_ = true;
     return false;
   }
 
-  std::vector<std::shared_ptr<LegacyCompletionRecord>> records;
+  std::vector<std::shared_ptr<RuntimeCompletionRecord>> records;
   records.reserve(size());
   for (std::size_t index = 0U; index < size(); ++index) {
-    records.push_back(std::make_shared<LegacyCompletionRecord>(task_runtime));
+    records.push_back(std::make_shared<RuntimeCompletionRecord>(task_runtime));
   }
   task_runtime.inc_tasks_to_complete(static_cast<int>(size()));
-  legacy_completion_records_ = std::move(records);
-  legacy_completion_initialized_ = true;
+  runtime_completion_records_ = std::move(records);
+  runtime_completion_initialized_ = true;
 
   if (lease.terminal_outcome().has_value()) {
     publication_closed_ = true;
-    for (const auto& record : legacy_completion_records_) {
+    for (const auto& record : runtime_completion_records_) {
       record->retire_plan_owned();
     }
     return false;
@@ -598,27 +599,27 @@ bool TaskSubmissionPlan::initialize_legacy_completion_ledger(
   return true;
 }
 
-/** @copydoc TaskSubmissionPlan::publish_legacy_callback */
-bool TaskSubmissionPlan::publish_legacy_callback(
+/** @copydoc TaskSubmissionPlan::publish_runtime_callback */
+bool TaskSubmissionPlan::publish_runtime_callback(
     const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
-    SchedulerTaskRuntime& task_runtime) {
+    ExecutionTaskRuntime& task_runtime) {
   (void)lease.observe_cancellation();
   std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
   if (publication_closed_ || lease.terminal_outcome().has_value()) {
     return false;
   }
-  if (!legacy_completion_initialized_) {
+  if (!runtime_completion_initialized_) {
     throw std::logic_error(
-        "Legacy callback publication requires an initialized completion "
+        "Runtime callback publication requires an initialized completion "
         "ledger.");
   }
   const std::size_t task_index =
       static_cast<std::size_t>(identity.local_task_id().value());
-  const std::shared_ptr<LegacyCompletionRecord>& record =
-      legacy_completion_records_.at(task_index);
-  auto token = std::make_shared<LegacyCompletionToken>(record);
+  const std::shared_ptr<RuntimeCompletionRecord>& record =
+      runtime_completion_records_.at(task_index);
+  auto token = std::make_shared<RuntimeCompletionToken>(record);
   ComputeRunLease callback_lease = lease;
-  SchedulerTaskRuntime::Task callback = [lease = std::move(callback_lease),
+  ExecutionTaskRuntime::Task callback = [lease = std::move(callback_lease),
                                          identity, &task_runtime,
                                          token]() mutable {
     try {
@@ -659,7 +660,7 @@ void TaskSubmissionPlan::close_publication() noexcept {
       return;
     }
     publication_closed_ = true;
-    for (const auto& record : legacy_completion_records_) {
+    for (const auto& record : runtime_completion_records_) {
       record->retire_plan_owned();
     }
   } catch (...) {
@@ -728,7 +729,7 @@ void TaskSubmissionPlan::append_zero_dependency_tasks(
  * @throws Exceptions from task_runtime.log_event().
  */
 void TaskSubmissionPlan::log_initial_assignments(
-    SchedulerTaskRuntime& task_runtime) const {
+    ExecutionTaskRuntime& task_runtime) const {
   for (int task_id : submitted_initial_task_ids_) {
     if (task_id < 0 || task_id >= static_cast<int>(size())) {
       continue;
@@ -736,13 +737,13 @@ void TaskSubmissionPlan::log_initial_assignments(
     const int node_id = compute_plan_.task_graph.tasks[task_id].node_id;
     if (std::find(execution_order_.begin(), execution_order_.end(), node_id) !=
         execution_order_.end()) {
-      task_runtime.log_event(SchedulerTraceAction::AssignInitial, node_id);
+      task_runtime.log_event(ExecutionTraceAction::AssignInitial, node_id);
     }
   }
 }
 
 /**
- * @brief Establishes one scheduler epoch and submits a leased bootstrap.
+ * @brief Establishes one execution epoch and submits a leased bootstrap.
  *
  * @param graph Graph used to validate empty-plan target output.
  * @param task_runtime Runtime receiving the empty epoch batch and callbacks.
@@ -751,18 +752,19 @@ void TaskSubmissionPlan::log_initial_assignments(
  * @param dispatcher_lease Lease copied into bootstrap callback.
  * @return Nothing.
  * @throws GraphError for an invalid empty plan.
- * @throws Scheduler or task exceptions unchanged.
- * @note The only TaskHandle batch is empty; full HP work uses owned callbacks.
+ * @throws Execution-runtime or task exceptions unchanged.
+ * @note The only ExecutionTaskHandle batch is empty; full HP work uses owned
+ * callbacks.
  */
 void dispatch_planned_tasks(GraphModel& graph,
-                            SchedulerTaskRuntime& task_runtime, int node_id,
+                            ExecutionTaskRuntime& task_runtime, int node_id,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
     if (!graph.node(node_id).cached_output_high_precision.has_value()) {
       throw GraphError(
           GraphErrc::ComputeError,
-          "Planned dispatch produced no scheduler tasks for node " +
+          "Planned dispatch produced no executable tasks for node " +
               std::to_string(node_id) +
               " and the target has no reusable high-precision output.");
     }
@@ -800,14 +802,15 @@ void dispatch_planned_tasks(GraphModel& graph,
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,
-                            SchedulerHostContext& host, int node_id,
+                            ExecutionHostContext& host,
+                            const std::string& execution_type, int node_id,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
     if (!graph.node(node_id).cached_output_high_precision.has_value()) {
       throw GraphError(
           GraphErrc::ComputeError,
-          "Planned dispatch produced no scheduler tasks for node " +
+          "Planned dispatch produced no executable tasks for node " +
               std::to_string(node_id) +
               " and the target has no reusable high-precision output.");
     }
@@ -819,9 +822,9 @@ void dispatch_planned_tasks(GraphModel& graph,
   const CpuRunResourceDemand resource_demand{
       dispatcher_lease.retained_memory_bytes(),
       ReadyTaskSubmission::default_resource_demand()};
-  execution_service.execute_cpu_run(host, std::move(initial_submissions),
-                                    static_cast<int>(plan.size()),
-                                    resource_demand);
+  execution_service.execute_run(host, execution_type,
+                                std::move(initial_submissions),
+                                static_cast<int>(plan.size()), resource_demand);
 }
 
 }  // namespace ps::compute

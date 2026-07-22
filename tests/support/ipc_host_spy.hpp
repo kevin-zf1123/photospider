@@ -62,8 +62,11 @@ struct IpcHostInvocation {
   /** @brief Compute intent argument, when present. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
 
-  /** @brief Exact scheduler worker-count argument, when present. */
+  /** @brief Exact execution worker-count argument, when present. */
   unsigned int worker_count = 0;
+
+  /** @brief Policy-class argument, when present. */
+  PolicyClass policy_class = PolicyClass::Interactive;
 
   /** @brief Exact graph-load request, when the method is `graph.load`. */
   GraphLoadRequest load_request;
@@ -337,60 +340,93 @@ class IpcHostSpy final : public Host {
   }
 
   /**
-   * @brief Configures the copied `scheduler.types` Host result.
-   * @param types Complete Host-returned scheduler type list.
+   * @brief Configures the copied `policy.types` Host result.
+   * @param types Complete Host-returned policy type list.
    * @return Nothing.
    * @throws std::bad_alloc if copied type storage cannot allocate.
    * @note Router tests may provide arbitrary order to verify stable sorting.
    */
-  void set_scheduler_types(std::vector<std::string> types) {
+  void set_policy_types(std::vector<std::string> types) {
     std::lock_guard<std::mutex> lock(mutex_);
-    scheduler_types_ = std::move(types);
+    policy_types_ = std::move(types);
   }
 
   /**
-   * @brief Configures the copied `scheduler.description` Host result.
+   * @brief Configures the copied `policy.description` Host result.
    * @param description Complete description returned on success.
    * @return Nothing.
    * @throws std::bad_alloc if copied text storage cannot allocate.
    */
-  void set_scheduler_description(std::string description) {
+  void set_policy_description(std::string description) {
     std::lock_guard<std::mutex> lock(mutex_);
-    scheduler_description_ = std::move(description);
+    policy_description_ = std::move(description);
   }
 
   /**
-   * @brief Configures the exact `scheduler.scan` loaded-type count.
+   * @brief Configures the exact `policy.scan` loaded-DSO count.
    * @param count Public Host count returned on success.
    * @return Nothing.
    * @throws Nothing.
    */
-  void set_scheduler_scan_count(std::size_t count) noexcept {
+  void set_policy_scan_count(std::size_t count) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    scheduler_scan_count_ = count;
+    policy_scan_count_ = count;
   }
 
   /**
-   * @brief Configures the copied `scheduler.loaded_plugins` Host result.
+   * @brief Configures the copied `policy.loaded_plugins` Host result.
    * @param labels Complete Host-returned diagnostic label list.
    * @return Nothing.
    * @throws std::bad_alloc if copied label storage cannot allocate.
    * @note Router tests may provide arbitrary order to verify stable sorting.
    */
-  void set_scheduler_loaded_plugins(std::vector<std::string> labels) {
+  void set_policy_loaded_plugins(std::vector<std::string> labels) {
     std::lock_guard<std::mutex> lock(mutex_);
-    scheduler_loaded_plugins_ = std::move(labels);
+    policy_loaded_plugins_ = std::move(labels);
   }
 
   /**
-   * @brief Configures the copied `scheduler.info` Host result.
-   * @param info Complete public scheduler information snapshot.
+   * @brief Configures the copied `policy.info` Host result.
+   * @param info Complete public policy information snapshot.
    * @return Nothing.
    * @throws std::bad_alloc if copied text storage cannot allocate.
    */
-  void set_scheduler_info(SchedulerInfoSnapshot info) {
+  void set_policy_info(PolicyInfoSnapshot info) {
     std::lock_guard<std::mutex> lock(mutex_);
-    scheduler_info_ = std::move(info);
+    policy_info_ = std::move(info);
+  }
+
+  /**
+   * @brief Configures the copied `execution.types` Host result.
+   * @param types Complete Host-returned execution route list.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied route storage cannot allocate.
+   */
+  void set_execution_types(std::vector<std::string> types) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    execution_types_ = std::move(types);
+  }
+
+  /**
+   * @brief Configures the copied `execution.description` Host result.
+   * @param description Complete description returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied text storage cannot allocate.
+   */
+  void set_execution_description(std::string description) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    execution_description_ = std::move(description);
+  }
+
+  /**
+   * @brief Configures the copied `execution.info` Host result.
+   * @param info Complete public execution information snapshot.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied text storage cannot allocate.
+   */
+  void set_execution_info(ExecutionInfoSnapshot info) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    execution_info_ = std::move(info);
   }
 
   /**
@@ -424,16 +460,16 @@ class IpcHostSpy final : public Host {
   }
 
   /**
-   * @brief Configures the copied `scheduler.trace` Host result.
+   * @brief Configures the copied `execution.trace` Host result.
    * @param page Exact bounded non-destructive page returned by the spy.
    * @return Nothing.
    * @throws std::bad_alloc if copied trace vector storage allocates.
    * @note Repeated calls return copies of the same configured page until a
    *       test replaces it, matching non-destructive observation semantics.
    */
-  void set_scheduler_trace_page(SchedulerTracePage page) {
+  void set_execution_trace_page(ExecutionTracePage page) {
     std::lock_guard<std::mutex> lock(mutex_);
-    scheduler_trace_page_ = std::move(page);
+    execution_trace_page_ = std::move(page);
   }
 
   /**
@@ -821,16 +857,16 @@ class IpcHostSpy final : public Host {
     return {std::move(status), compute_event_batch_};
   }
 
-  /** @copydoc Host::scheduler_trace */
-  Result<SchedulerTracePage> scheduler_trace(const GraphSessionId& session,
+  /** @copydoc Host::execution_trace */
+  Result<ExecutionTracePage> execution_trace(const GraphSessionId& session,
                                              uint64_t after_sequence,
                                              std::size_t limit) override {
     IpcHostInvocation invocation =
-        session_invocation("scheduler.trace", session);
+        session_invocation("execution.trace", session);
     invocation.first_node.value = static_cast<int>(limit);
     invocation.text = std::to_string(after_sequence);
     record(std::move(invocation));
-    return configured_result("scheduler.trace", scheduler_trace_page_);
+    return configured_result("execution.trace", execution_trace_page_);
   }
 
   /** @copydoc Host::clear_cache */
@@ -921,74 +957,117 @@ class IpcHostSpy final : public Host {
                              ops_combined_sources_);
   }
 
-  /** @copydoc Host::scheduler_available_types */
-  Result<std::vector<std::string>> scheduler_available_types() const override {
-    record(method_invocation("scheduler.types"));
-    return configured_result("scheduler.types", scheduler_types_);
+  /** @copydoc Host::policy_available_types */
+  Result<std::vector<std::string>> policy_available_types() const override {
+    record(method_invocation("policy.types"));
+    return configured_result("policy.types", policy_types_);
   }
 
-  /** @copydoc Host::scheduler_description */
-  Result<std::string> scheduler_description(
+  /** @copydoc Host::policy_description */
+  Result<std::string> policy_description(
       const std::string& type_name) const override {
-    IpcHostInvocation invocation = method_invocation("scheduler.description");
+    IpcHostInvocation invocation = method_invocation("policy.description");
     invocation.text = type_name;
     record(std::move(invocation));
-    return configured_result("scheduler.description", scheduler_description_);
+    return configured_result("policy.description", policy_description_);
   }
 
-  /** @copydoc Host::scheduler_scan */
-  Result<size_t> scheduler_scan(const std::vector<std::string>& dirs) override {
-    IpcHostInvocation invocation = method_invocation("scheduler.scan");
+  /** @copydoc Host::policy_scan */
+  Result<size_t> policy_scan(const std::vector<std::string>& dirs) override {
+    IpcHostInvocation invocation = method_invocation("policy.scan");
     invocation.texts = dirs;
     record(std::move(invocation));
-    return configured_result("scheduler.scan", scheduler_scan_count_);
+    return configured_result("policy.scan", policy_scan_count_);
   }
 
-  /** @copydoc Host::scheduler_load */
-  VoidResult scheduler_load(const std::string& path) override {
-    IpcHostInvocation invocation = method_invocation("scheduler.load");
+  /** @copydoc Host::policy_load */
+  VoidResult policy_load(const std::string& path) override {
+    IpcHostInvocation invocation = method_invocation("policy.load");
     invocation.text = path;
     record(std::move(invocation));
-    return {status_for("scheduler.load")};
+    return {status_for("policy.load")};
   }
 
-  /** @copydoc Host::scheduler_loaded_plugins */
-  Result<std::vector<std::string>> scheduler_loaded_plugins() const override {
-    record(method_invocation("scheduler.loaded_plugins"));
-    return configured_result("scheduler.loaded_plugins",
-                             scheduler_loaded_plugins_);
+  /** @copydoc Host::policy_loaded_plugins */
+  Result<std::vector<std::string>> policy_loaded_plugins() const override {
+    record(method_invocation("policy.loaded_plugins"));
+    return configured_result("policy.loaded_plugins", policy_loaded_plugins_);
   }
 
-  /** @copydoc Host::configure_scheduler_defaults */
-  VoidResult configure_scheduler_defaults(
-      const HostSchedulerConfig& config) override {
+  /** @copydoc Host::configure_policy_defaults */
+  VoidResult configure_policy_defaults(
+      const HostPolicyConfig& config) override {
     IpcHostInvocation invocation =
-        method_invocation("scheduler.configure_defaults");
+        method_invocation("policy.configure_defaults");
+    invocation.text = config.interactive_type + "\n" + config.throughput_type;
+    record(std::move(invocation));
+    return {status_for("policy.configure_defaults")};
+  }
+
+  /** @copydoc Host::policy_info */
+  Result<PolicyInfoSnapshot> policy_info(
+      PolicyClass policy_class) const override {
+    IpcHostInvocation invocation = method_invocation("policy.info");
+    invocation.policy_class = policy_class;
+    record(std::move(invocation));
+    return configured_result("policy.info", policy_info_);
+  }
+
+  /** @copydoc Host::replace_policy */
+  VoidResult replace_policy(PolicyClass policy_class,
+                            const std::string& type) override {
+    IpcHostInvocation invocation = method_invocation("policy.replace");
+    invocation.policy_class = policy_class;
+    invocation.text = type;
+    record(std::move(invocation));
+    return {status_for("policy.replace")};
+  }
+
+  /** @copydoc Host::execution_available_types */
+  Result<std::vector<std::string>> execution_available_types() const override {
+    record(method_invocation("execution.types"));
+    return configured_result("execution.types", execution_types_);
+  }
+
+  /** @copydoc Host::execution_description */
+  Result<std::string> execution_description(
+      const std::string& type_name) const override {
+    IpcHostInvocation invocation = method_invocation("execution.description");
+    invocation.text = type_name;
+    record(std::move(invocation));
+    return configured_result("execution.description", execution_description_);
+  }
+
+  /** @copydoc Host::configure_execution_defaults */
+  VoidResult configure_execution_defaults(
+      const HostExecutionConfig& config) override {
+    IpcHostInvocation invocation =
+        method_invocation("execution.configure_defaults");
     invocation.text = config.hp_type + "\n" + config.rt_type;
     invocation.worker_count = config.worker_count;
     record(std::move(invocation));
-    return {status_for("scheduler.configure_defaults")};
+    return {status_for("execution.configure_defaults")};
   }
 
-  /** @copydoc Host::scheduler_info */
-  Result<SchedulerInfoSnapshot> scheduler_info(
+  /** @copydoc Host::execution_info */
+  Result<ExecutionInfoSnapshot> execution_info(
       const GraphSessionId& session, ComputeIntent intent) const override {
     IpcHostInvocation invocation =
-        session_invocation("scheduler.info", session);
+        session_invocation("execution.info", session);
     invocation.intent = intent;
     record(std::move(invocation));
-    return configured_result("scheduler.info", scheduler_info_);
+    return configured_result("execution.info", execution_info_);
   }
 
-  /** @copydoc Host::replace_scheduler */
-  VoidResult replace_scheduler(const GraphSessionId& session,
+  /** @copydoc Host::replace_execution */
+  VoidResult replace_execution(const GraphSessionId& session,
                                ComputeIntent intent,
                                const std::string& type) override {
     IpcHostInvocation invocation =
-        text_invocation("scheduler.replace", session, type);
+        text_invocation("execution.replace", session, type);
     invocation.intent = intent;
     record(std::move(invocation));
-    return {status_for("scheduler.replace")};
+    return {status_for("execution.replace")};
   }
 
  private:
@@ -1192,20 +1271,29 @@ class IpcHostSpy final : public Host {
   /** @brief Configured combined operation source map. */
   std::map<std::string, std::string> ops_combined_sources_;
 
-  /** @brief Configured scheduler type discovery list. */
-  std::vector<std::string> scheduler_types_;
+  /** @brief Configured policy type discovery list. */
+  std::vector<std::string> policy_types_;
 
-  /** @brief Configured scheduler description text. */
-  std::string scheduler_description_;
+  /** @brief Configured policy description text. */
+  std::string policy_description_;
 
-  /** @brief Configured scheduler scan loaded-type count. */
-  std::size_t scheduler_scan_count_ = 0;
+  /** @brief Configured policy scan loaded-DSO count. */
+  std::size_t policy_scan_count_ = 0;
 
-  /** @brief Configured loaded scheduler-plugin labels. */
-  std::vector<std::string> scheduler_loaded_plugins_;
+  /** @brief Configured loaded policy-plugin labels. */
+  std::vector<std::string> policy_loaded_plugins_;
 
-  /** @brief Configured copied scheduler information value. */
-  SchedulerInfoSnapshot scheduler_info_;
+  /** @brief Configured copied policy information value. */
+  PolicyInfoSnapshot policy_info_;
+
+  /** @brief Configured execution route discovery list. */
+  std::vector<std::string> execution_types_;
+
+  /** @brief Configured execution route description text. */
+  std::string execution_description_;
+
+  /** @brief Configured copied execution information value. */
+  ExecutionInfoSnapshot execution_info_;
 
   /** @brief Configured bounded compute-event drain result. */
   ComputeEventBatch compute_event_batch_;
@@ -1216,8 +1304,8 @@ class IpcHostSpy final : public Host {
   /** @brief Index of the next configured destructive batch. */
   std::size_t next_compute_event_batch_ = 0;
 
-  /** @brief Configured bounded non-destructive scheduler-trace result. */
-  SchedulerTracePage scheduler_trace_page_;
+  /** @brief Configured bounded non-destructive execution-trace result. */
+  ExecutionTracePage execution_trace_page_;
 
   /** @brief Configured image-mode compute output. */
   ImageBuffer compute_image_;
