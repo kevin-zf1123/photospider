@@ -236,11 +236,17 @@ class ComputeRunControl {
   /**
    * @brief Attempts cancellation and performs plan/notification cleanup.
    * @param reason Stable reason proposed by a private source or deadline check.
+   * @param request_child_cancellation_won Optional request-level latch to
+   * publish when this cancellation wins the child terminal arbiter.
    * @return True only when cancellation claimed the open arbiter.
    * @throws Callback or synchronization exceptions after terminal publication.
-   * @note Terminal state is fixed before cleanup runs outside `mutex`.
+   * @note The optional latch is released while `mutex` is held, after the
+   * cancellation outcome is fixed and before Terminal becomes observable.
+   * Cleanup then runs outside `mutex`.
    */
-  bool request_cancellation(ComputeRunCancellationReason reason);
+  bool request_cancellation(
+      ComputeRunCancellationReason reason,
+      std::atomic<bool>* request_child_cancellation_won = nullptr);
 
   /**
    * @brief Observes the immutable deadline and current cancellation outcome.
@@ -384,7 +390,8 @@ bool ComputeRunControl::publish_terminal(ComputeRunTerminalOutcome outcome) {
 
 /** @copydoc ComputeRunControl::request_cancellation */
 bool ComputeRunControl::request_cancellation(
-    ComputeRunCancellationReason reason) {
+    ComputeRunCancellationReason reason,
+    std::atomic<bool>* request_child_cancellation_won) {
   TaskSubmissionPlan* plan = nullptr;
   {
     std::lock_guard<std::mutex> lock(mutex);
@@ -393,6 +400,9 @@ bool ComputeRunControl::request_cancellation(
     }
     terminal_outcome = ComputeRunTerminalOutcome{
         ComputeRunTerminalKind::Cancelled, nullptr, reason};
+    if (request_child_cancellation_won != nullptr) {
+      request_child_cancellation_won->store(true, std::memory_order_release);
+    }
     arbiter_state = ComputeRunArbiterState::Terminal;
     plan = submission_plan.get();
   }
@@ -535,7 +545,7 @@ bool ComputeRunControl::register_cancellation_slot(
 }
 
 /**
- * @brief Shared child-source list and stable request cancellation state.
+ * @brief Shared child-source list and distinct request/child-win state.
  * @throws std::bad_alloc when source storage grows.
  */
 class ComputeRequestCancellationControl final {
@@ -543,9 +553,16 @@ class ComputeRequestCancellationControl final {
   /** @brief Serializes attachment and first request acceptance. */
   mutable std::mutex mutex;
 
-  /** @brief Stable first request reason, absent before explicit cancellation.
+  /** @brief Stable first request reason, independent of child arbitration.
    */
   std::optional<ComputeRunCancellationReason> accepted_reason;
+
+  /**
+   * @brief True after the accepted request reason wins any child arbiter.
+   * @note The winning child publishes this latch with release ordering while
+   * holding its terminal mutex, before that Cancelled outcome is observable.
+   */
+  std::atomic<bool> child_cancellation_won{false};
 
   /** @brief Child Run ids already attached to this request. */
   std::vector<std::uint64_t> child_ids;
@@ -588,7 +605,12 @@ void ComputeRequestCancellationSource::attach(ComputeRun& run) {
     immediate_reason = control_->accepted_reason;
   }
   if (immediate_reason.has_value()) {
-    (void)child.request_cancellation(*immediate_reason);
+    const std::shared_ptr<ComputeRunControl> child_control =
+        child.control_.lock();
+    if (child_control != nullptr) {
+      (void)child_control->request_cancellation(
+          *immediate_reason, &control_->child_cancellation_won);
+    }
   }
 }
 
@@ -605,7 +627,12 @@ bool ComputeRequestCancellationSource::request_cancellation(
     control_->accepted_reason = reason;
   }
   for (const ComputeRunCancellationSource& child : children) {
-    (void)child.request_cancellation(reason);
+    const std::shared_ptr<ComputeRunControl> child_control =
+        child.control_.lock();
+    if (child_control != nullptr) {
+      (void)child_control->request_cancellation(
+          reason, &control_->child_cancellation_won);
+    }
   }
   return true;
 }
@@ -613,6 +640,17 @@ bool ComputeRequestCancellationSource::request_cancellation(
 /** @copydoc ComputeRequestCancellationSource::accepted_reason */
 std::optional<ComputeRunCancellationReason>
 ComputeRequestCancellationSource::accepted_reason() const {
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->accepted_reason;
+}
+
+/** @copydoc
+ * ComputeRequestCancellationSource::accepted_child_cancellation_reason */
+std::optional<ComputeRunCancellationReason>
+ComputeRequestCancellationSource::accepted_child_cancellation_reason() const {
+  if (!control_->child_cancellation_won.load(std::memory_order_acquire)) {
+    return std::nullopt;
+  }
   std::lock_guard<std::mutex> lock(control_->mutex);
   return control_->accepted_reason;
 }

@@ -411,6 +411,15 @@ class KernelGraphRevisionCommitPolicy final
           }
         })
         .get();
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+    const std::optional<compute::ComputeRunTerminalOutcome> terminal =
+        run_lease.terminal_outcome();
+    if (terminal.has_value() &&
+        terminal->kind == compute::ComputeRunTerminalKind::Succeeded) {
+      testing::notify_kernel_compute_commit_test_hook(
+          testing::KernelComputeCommitTestEvent::HighPrecisionCommitCompleted);
+    }
+#endif
   }
 
   /** @copydoc compute::ComputeCommitPolicy::commit_real_time */

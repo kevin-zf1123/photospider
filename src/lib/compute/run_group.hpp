@@ -167,7 +167,8 @@ class RunGroup final {
    * @throws Cancellation callback/synchronization failures after the group
    * reason becomes stable.
    * @note The pending sibling gate is denied before fan-out. An already
-   * committed RT gate remains committed and visible.
+   * committed RT gate remains committed and visible. Request-level acceptance
+   * does not imply cancellation won either child terminal arbiter.
    */
   bool request_cancellation(ComputeRunCancellationReason reason);
 
@@ -175,11 +176,12 @@ class RunGroup final {
    * @brief Selects one deterministic aggregate after both children settle.
    * @return Failure before cancellation before success; resource exhaustion
    * before other failure; RT before HP within a class; stable group-origin
-   * cancellation before a child-only reason.
+   * cancellation that won at least one child before a child-only reason.
    * @throws std::logic_error when either child is not terminal.
    * @throws std::system_error for child/source synchronization failure.
-   * @note The returned snapshot changes neither child terminal outcome nor an
-   * already committed RT proxy.
+   * @note A late group request after both children succeeded cannot replace
+   * aggregate success. The returned snapshot changes neither child terminal
+   * outcome nor an already committed RT proxy.
    */
   ComputeRunTerminalOutcome aggregate_terminal_outcome() const;
 

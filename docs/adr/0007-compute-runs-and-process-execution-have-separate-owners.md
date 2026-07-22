@@ -114,9 +114,12 @@ deterministic aggregate outcome after both child terminal outcomes are known:
    the RT failure breaks a tie within the selected failure class;
 3. when neither child failed, any child cancellation makes the group
    `Cancelled`; a group-origin lifecycle/explicit cancellation reason outranks a
-   child-only reason, the group's monotonic cancellation arbiter retains its
-   first accepted group-origin reason, and otherwise the RT reason outranks the
-   HP reason; and
+   child-only reason only when its fan-out actually claimed at least one open
+   child terminal arbiter. The group's monotonic request arbiter retains its
+   first accepted group-origin reason for traceability, but acceptance after
+   both children are terminal cannot replace their aggregate. Among
+   child-winning group requests the first accepted reason remains stable, and
+   otherwise the RT child reason outranks the HP child reason; and
 4. only two successful children make the group `Succeeded`, carrying the RT
    output.
 
@@ -592,7 +595,8 @@ As behavior lands, long-lived tests must cover:
 - monotonic phases and exact-once terminal races;
 - caller-observer destruction and lease-backed lifetime;
 - paired RT/HP aggregate outcome priority, asymmetric sibling propagation,
-  RT-first commit-gate races, and caller-future settlement;
+  RT-first commit-gate races, late group cancellation after two child
+  successes, and caller-future settlement;
 - ready-only submission and dispatcher-owned dependent release;
 - graph-close/admission and process-shutdown/admission linearization, including
   pending-candidate rollback and admitted-Run registry unregistration;

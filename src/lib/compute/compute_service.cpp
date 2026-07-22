@@ -638,8 +638,10 @@ NodeOutput& execute_realtime_child_run(
  * publication for every child that did not already settle.
  * @throws GraphError if normal return leaves either child unsettled.
  * @note The RunGroup preserves independent child terminal domains while
- * aggregating resource failure, other failure, stable request cancellation,
- * child-local cancellation, and success in deterministic order.
+ * aggregating resource failure, other failure, request cancellation that won
+ * at least one child arbiter, child-local cancellation, and success in
+ * deterministic order. Request acceptance after both child successes cannot
+ * replace aggregate success.
  */
 template <typename Execute>
 NodeOutput& execute_request_owned_realtime_runs(compute::RunGroup& run_group,
@@ -1061,7 +1063,7 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(
  * RealTimeUpdate creates one request-owned RunGroup with separate HP and RT
  * child Runs before preflight. Lifecycle leases are acquired before the
  * request cancellation source attaches, and aggregate cancellation/failure is
- * translated from stable Run-owned state.
+ * translated from stable Run-owned state plus a child-winning request reason.
  */
 NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
                                              GraphRuntime& runtime,

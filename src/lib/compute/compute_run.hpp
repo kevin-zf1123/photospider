@@ -620,9 +620,11 @@ class ComputeRunCancellationSource {
  * ComputeService attaches one HP Run for an ordinary request and distinct HP/RT
  * children for a realtime request. The coordinator remembers the first request
  * reason and immediately applies it to children attached after that request.
- * Child Runs keep independent ids, terminal arbiters, deadlines, staging, and
- * cleanup. This fan-out component aggregates no result; a realtime RunGroup
- * composes it with independent child ownership and terminal aggregation.
+ * It separately records whether that reason actually won at least one child
+ * terminal arbiter. Child Runs keep independent ids, terminal arbiters,
+ * deadlines, staging, and cleanup. This fan-out component aggregates no
+ * result; a realtime RunGroup composes it with independent child ownership and
+ * terminal aggregation.
  *
  * @throws std::bad_alloc when coordinator or child-source storage grows.
  * @throws std::system_error when coordinator or child Run locking fails.
@@ -670,8 +672,24 @@ class ComputeRequestCancellationSource final {
    * @brief Returns the stable accepted request reason when requested.
    * @return Stable first request reason, otherwise nullopt.
    * @throws std::system_error when coordinator locking fails.
+   * @note Presence records request-level acceptance only; use
+   * accepted_child_cancellation_reason() to determine whether fan-out won an
+   * attached child terminal arbiter.
    */
   std::optional<ComputeRunCancellationReason> accepted_reason() const;
+
+  /**
+   * @brief Returns the group reason only after it wins a child cancellation.
+   * @return Stable first request reason after it claims at least one attached
+   * child terminal arbiter, otherwise nullopt.
+   * @throws std::system_error when coordinator locking fails.
+   * @note An accepted request after every child has already succeeded or failed
+   * remains observable through accepted_reason() but is absent here. The child
+   * winner publishes before its Cancelled terminal outcome becomes observable,
+   * so RunGroup aggregation cannot miss a cancellation it already observed.
+   */
+  std::optional<ComputeRunCancellationReason>
+  accepted_child_cancellation_reason() const;
 
  private:
   /** @brief Shared coordinator state retained by request/test launch owners. */

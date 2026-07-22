@@ -503,17 +503,25 @@ equality, checked nonzero generation overflow, exact 64-total compute-lane
 admission, persistent ticket FIFO/wake behavior, concurrent same-key ticket
 adoption, cross-target/intent/Graph isolation, close retirement, deterministic
 18,000- and 36,000-publication storms, and `RunGroup` cancellation/aggregate
-rules. The stress cases assert one ticket, one logical active owner, at most one
-pending owner, exact displaced settlement, and only the final current generation
-remaining commit-eligible; they do not create a background runner or rely on
-timing sleeps.
+rules. The group cases distinguish a request-level accepted reason from a
+reason that actually wins an open child arbiter: late Superseded or
+ExplicitRequest after two child successes cannot replace aggregate success,
+while a winning cancellation retains the first reason below failure priority.
+CMake discovers all 15 cases through CTest with a 60-second per-case timeout.
+The stress cases assert one ticket, one logical active owner, at most one
+pending owner, exact displaced settlement, and only the final current
+generation remaining commit-eligible; they do not create a background runner
+or rely on timing sleeps.
 
 `test_kernel_contracts` owns the product boundary. It proves missing intent and
 explicit HP share one key, failed newest work does not resurrect an older
 prepared commit, already committed older output remains visible, and realtime
 supersession on both sides of RT publication denies the old HP sibling while
-preserving a valid old proxy. `test_compute_run` covers immutable supersession
-identity and child-local versus group-wide cancellation. Existing
+preserving a valid old proxy. A post-commit checkpoint additionally blocks the
+old realtime caller after both child successes and visible publication but
+before group aggregation; newer generation publication records Superseded
+without changing that old caller's success. `test_compute_run` covers immutable
+supersession identity and child-local versus group-wide cancellation. Existing
 `test_compute_service_split`, `test_host_adapter`, and
 `test_bad_alloc_boundaries` remain focused regression companions for service,
 Host lifecycle, and allocation-failure boundaries.
@@ -530,6 +538,8 @@ cmake --build build \
 ./build/tests/test_compute_service_split
 ./build/tests/test_host_adapter
 ./build/tests/test_bad_alloc_boundaries
+ctest --test-dir build --output-on-failure \
+  -R '^(SupersessionIdentity|GraphStateExecutorContinuation|ComputeRequestCoordinator|ComputeRequestCoordinatorStorm|RunGroup)\.'
 ```
 
 The installed Host, CLI, IPC version 1, operation plugin, and scheduler plugin

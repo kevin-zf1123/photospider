@@ -3500,6 +3500,135 @@ TEST(ComputeContracts,
 }
 
 /**
+ * @brief Proves late realtime supersession cannot replace aggregate success
+ * after both old child commits are terminal and visible.
+ * @return Nothing; GoogleTest assertions report terminal, coalescing, caller,
+ * or visible-proxy failures.
+ * @throws Setup, dirty execution, graph-state, or filesystem failures.
+ * @note The old HP callback blocks only after its visible publication and
+ * success terminal are complete and graph-state ownership is released. The RT
+ * sibling has already committed through the sibling gate. A newer generation
+ * can therefore publish and record Superseded before the old caller aggregates,
+ * without gaining authority to replace the two completed child successes.
+ */
+TEST(ComputeContracts,
+     RealtimeLateSupersessionAfterBothCommitsKeepsOldCallerSuccessful) {
+  register_contract_ops();
+  reset_blocking_contract_source();
+  const std::string graph_name = "contract_realtime_late_supersession";
+  const auto root =
+      clean_temp_path("photospider-contract-realtime-late-supersession-root");
+  const auto yaml_path =
+      temp_path("photospider-contract-realtime-late-supersession.yaml");
+  write_blocking_process_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  Kernel::ComputeRequest seed;
+  seed.name = graph_name;
+  seed.node_id = 2;
+  seed.cache.precision = "int8";
+  seed.cache.force_recache = true;
+  seed.cache.disable_disk_cache = true;
+  seed.cache.nosave = true;
+  ASSERT_TRUE(kernel.compute(seed));
+
+  CommitCheckpointGate gate(
+      testing::KernelComputeCommitTestEvent::HighPrecisionCommitCompleted);
+  ScopedKernelComputeCommitHook hook(gate);
+  const auto old_source =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  Kernel::ComputeRequest old_request = seed;
+  old_request.execution.parallel = true;
+  old_request.intent = ComputeIntent::RealTimeUpdate;
+  old_request.dirty_roi = PixelRect{0, 0, 8, 8};
+  old_request.cancellation_source = old_source;
+  auto old_future = kernel.compute_async(old_request);
+  ASSERT_TRUE(old_future.has_value());
+  ScopedCommitComputeFuture old_compute(gate, std::move(*old_future));
+  if (!gate.wait_until_entered(std::chrono::seconds(2))) {
+    ADD_FAILURE() << "old realtime completed-commit checkpoint was not reached";
+    return;
+  }
+
+  const NodeOutput old_visible_proxy =
+      testing::KernelTestAccess::runtime(kernel, graph_name)
+          .graph_state()
+          .submit([&kernel, &graph_name](GraphModel&) {
+            return testing::KernelTestAccess::runtime(kernel, graph_name)
+                .realtime_proxy_graph()
+                .require_output(2);
+          })
+          .get();
+  EXPECT_FLOAT_EQ(toCvMat(old_visible_proxy.image_buffer).at<float>(0, 0),
+                  5.0F);
+
+  Kernel::ComputeRequest latest_request = old_request;
+  latest_request.cancellation_source.reset();
+  auto latest_future = kernel.compute_async(latest_request);
+  if (!latest_future.has_value()) {
+    ADD_FAILURE() << "latest realtime replacement was not admitted";
+    return;
+  }
+  testing::KernelTestAccess::submit_graph_state(kernel, graph_name,
+                                                [](GraphModel&) {})
+      .get();
+  const auto blocked = testing::KernelTestAccess::runtime(kernel, graph_name)
+                           .compute_request_snapshot();
+  EXPECT_EQ(blocked.lineage_rows, 1U);
+  EXPECT_EQ(blocked.reserved_tickets, 1U);
+  EXPECT_EQ(blocked.active_candidates, 1U);
+  EXPECT_EQ(blocked.pending_candidates, 1U);
+  EXPECT_EQ(blocked.lane_admitted_units, 1U);
+  if (!old_source->accepted_reason().has_value()) {
+    ADD_FAILURE() << "newer publication did not record old supersession";
+  } else {
+    EXPECT_EQ(*old_source->accepted_reason(),
+              compute::ComputeRunCancellationReason::Superseded);
+  }
+  EXPECT_FALSE(old_source->accepted_child_cancellation_reason().has_value());
+  EXPECT_EQ(latest_future->wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+
+  Kernel::AsyncComputeResult old_outcome;
+  try {
+    old_outcome = old_compute.release_and_get(std::chrono::seconds(2));
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << error.what();
+  }
+  EXPECT_TRUE(old_outcome.ok);
+  EXPECT_FALSE(old_outcome.error.has_value());
+  ASSERT_EQ(latest_future->wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const Kernel::AsyncComputeResult latest_outcome = latest_future->get();
+  EXPECT_TRUE(latest_outcome.ok);
+  EXPECT_FALSE(latest_outcome.error.has_value());
+
+  testing::KernelTestAccess::runtime(kernel, graph_name)
+      .submit_compute_request([] {})
+      .get();
+  const NodeOutput final_proxy =
+      testing::KernelTestAccess::runtime(kernel, graph_name)
+          .graph_state()
+          .submit([&kernel, &graph_name](GraphModel&) {
+            return testing::KernelTestAccess::runtime(kernel, graph_name)
+                .realtime_proxy_graph()
+                .require_output(2);
+          })
+          .get();
+  EXPECT_FLOAT_EQ(toCvMat(final_proxy.image_buffer).at<float>(0, 0), 5.0F);
+  EXPECT_EQ(testing::KernelTestAccess::runtime(kernel, graph_name)
+                .compute_request_snapshot()
+                .lane_admitted_units,
+            0U);
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  reset_blocking_contract_source();
+  std::filesystem::remove_all(root);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
  * @brief Proves realtime publication-first supersession denies the old RT gate
  * and cancels both old child Runs while the latest RunGroup commits normally.
  * @return Nothing; GoogleTest assertions report gate, child cancellation,

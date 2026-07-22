@@ -818,6 +818,123 @@ TEST(ComputeRequestCoordinatorStorm,
 }
 
 /**
+ * @brief Checks that a request accepted after both children succeed cannot
+ * replace aggregate success.
+ * @param reason Late group-origin reason to record at request level.
+ * @param target_node_id Distinct test lineage target.
+ * @param generation Distinct test lineage generation.
+ * @return Nothing; GoogleTest assertions report terminal replacement.
+ * @throws Run construction and synchronization failures to GoogleTest.
+ * @note The request-level reason remains observable for coordinator
+ * traceability, while the child-winning reason must remain absent.
+ */
+void expect_late_group_cancellation_noop(ComputeRunCancellationReason reason,
+                                         int target_node_id,
+                                         std::uint64_t generation) {
+  const SupersessionIdentity identity{
+      SupersessionKey(target_node_id, ComputeIntent::RealTimeUpdate),
+      SupersessionGeneration(generation)};
+  auto source = std::make_shared<ComputeRequestCancellationSource>();
+  RunGroup group(
+      make_group_submission(ComputeIntent::GlobalHighPrecision,
+                            ComputeRunQuality::Full, identity),
+      make_group_submission(ComputeIntent::RealTimeUpdate,
+                            ComputeRunQuality::Interactive, identity),
+      source);
+  source->attach(group.hp_run());
+  source->attach(group.rt_run());
+
+  ASSERT_TRUE(group.hp_run().publish_succeeded());
+  ASSERT_TRUE(group.rt_run().publish_succeeded());
+  EXPECT_TRUE(group.request_cancellation(reason));
+  ASSERT_TRUE(source->accepted_reason().has_value());
+  EXPECT_EQ(*source->accepted_reason(), reason);
+  EXPECT_FALSE(source->accepted_child_cancellation_reason().has_value());
+
+  const ComputeRunTerminalOutcome aggregate =
+      group.aggregate_terminal_outcome();
+  EXPECT_EQ(aggregate.kind, ComputeRunTerminalKind::Succeeded);
+  EXPECT_FALSE(aggregate.failure);
+  EXPECT_FALSE(aggregate.cancellation_reason.has_value());
+}
+
+/**
+ * @brief Verifies late Superseded and ExplicitRequest group requests are
+ * aggregate no-ops after both child success publications.
+ * @return Nothing; GoogleTest assertions report reason or aggregate failures.
+ * @throws Run construction and synchronization failures to GoogleTest.
+ */
+TEST(RunGroup, LateCancellationAfterBothChildrenSucceedIsAggregateNoOp) {
+  expect_late_group_cancellation_noop(ComputeRunCancellationReason::Superseded,
+                                      41, 101);
+  expect_late_group_cancellation_noop(
+      ComputeRunCancellationReason::ExplicitRequest, 42, 102);
+}
+
+/**
+ * @brief Verifies a winning group cancellation latches the first reason while
+ * a pre-existing child failure retains aggregate priority.
+ * @return Nothing; GoogleTest assertions report arbitration or ordering
+ * failures.
+ * @throws Run construction and synchronization failures to GoogleTest.
+ */
+TEST(RunGroup, WinningCancellationLatchesFirstReasonBelowFailurePriority) {
+  const SupersessionIdentity cancellation_identity{
+      SupersessionKey(43, ComputeIntent::RealTimeUpdate),
+      SupersessionGeneration(103)};
+  auto cancellation_source =
+      std::make_shared<ComputeRequestCancellationSource>();
+  RunGroup cancelled_group(
+      make_group_submission(ComputeIntent::GlobalHighPrecision,
+                            ComputeRunQuality::Full, cancellation_identity),
+      make_group_submission(ComputeIntent::RealTimeUpdate,
+                            ComputeRunQuality::Interactive,
+                            cancellation_identity),
+      cancellation_source);
+  cancellation_source->attach(cancelled_group.hp_run());
+  cancellation_source->attach(cancelled_group.rt_run());
+  ASSERT_TRUE(cancelled_group.rt_run().publish_succeeded());
+  EXPECT_TRUE(cancelled_group.request_cancellation(
+      ComputeRunCancellationReason::Superseded));
+  EXPECT_FALSE(cancelled_group.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  ASSERT_TRUE(
+      cancellation_source->accepted_child_cancellation_reason().has_value());
+  EXPECT_EQ(*cancellation_source->accepted_child_cancellation_reason(),
+            ComputeRunCancellationReason::Superseded);
+  const ComputeRunTerminalOutcome cancelled_aggregate =
+      cancelled_group.aggregate_terminal_outcome();
+  EXPECT_EQ(cancelled_aggregate.kind, ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(cancelled_aggregate.cancellation_reason,
+            ComputeRunCancellationReason::Superseded);
+
+  const SupersessionIdentity failure_identity{
+      SupersessionKey(44, ComputeIntent::RealTimeUpdate),
+      SupersessionGeneration(104)};
+  auto failure_source = std::make_shared<ComputeRequestCancellationSource>();
+  RunGroup failed_group(
+      make_group_submission(ComputeIntent::GlobalHighPrecision,
+                            ComputeRunQuality::Full, failure_identity),
+      make_group_submission(ComputeIntent::RealTimeUpdate,
+                            ComputeRunQuality::Interactive, failure_identity),
+      failure_source);
+  failure_source->attach(failed_group.hp_run());
+  failure_source->attach(failed_group.rt_run());
+  ASSERT_TRUE(failed_group.rt_run().publish_failed(
+      std::make_exception_ptr(std::runtime_error("rt failure"))));
+  EXPECT_TRUE(failed_group.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  ASSERT_TRUE(failure_source->accepted_child_cancellation_reason().has_value());
+  EXPECT_EQ(*failure_source->accepted_child_cancellation_reason(),
+            ComputeRunCancellationReason::ExplicitRequest);
+  const ComputeRunTerminalOutcome failed_aggregate =
+      failed_group.aggregate_terminal_outcome();
+  EXPECT_EQ(failed_aggregate.kind, ComputeRunTerminalKind::Failed);
+  EXPECT_THROW(std::rethrow_exception(failed_aggregate.failure),
+               std::runtime_error);
+}
+
+/**
  * @brief Verifies stable group cancellation and child-local HP isolation.
  * @return Nothing; GoogleTest assertions report fan-out/aggregate failures.
  * @throws Run construction and synchronization failures to GoogleTest.

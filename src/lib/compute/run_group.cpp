@@ -137,7 +137,7 @@ ComputeRunTerminalOutcome RunGroup::aggregate_terminal_outcome() const {
   }
 
   const std::optional<ComputeRunCancellationReason> group_reason =
-      cancellation_->accepted_reason();
+      cancellation_->accepted_child_cancellation_reason();
   if (group_reason.has_value()) {
     return ComputeRunTerminalOutcome{ComputeRunTerminalKind::Cancelled, nullptr,
                                      group_reason};

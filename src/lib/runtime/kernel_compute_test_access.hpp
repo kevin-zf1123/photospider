@@ -13,6 +13,11 @@ enum class KernelComputeCommitTestEvent {
   HighPrecisionCommitPrepared,
   /** @brief HP live predicate passed before the no-throw visible swap. */
   HighPrecisionPredicateValidated,
+  /**
+   * @brief HP visible publication and Run success completed after graph-state
+   * ownership was released but before the service callback returned.
+   */
+  HighPrecisionCommitCompleted,
   /** @brief RT proxy publication copy is ready before graph-state submission.
    */
   RealTimeCommitPrepared,
