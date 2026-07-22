@@ -77,6 +77,9 @@ class DownsampleExecutor {
    * @throws GraphError or OpenCV exceptions if image conversion or resize
    * otherwise fails unexpectedly.
    * @note Empty request vectors are valid and leave graph state unchanged.
+   * Cancellation is observed before and after every request; one resize already
+   * entered is non-preemptible, but its staged result is checked before proxy
+   * publication and later requests are not entered.
    */
   void execute(const std::vector<Request>& requests);
 
@@ -90,7 +93,10 @@ class DownsampleExecutor {
    * @throws GraphError or OpenCV exceptions from other buffer conversion or
    * resize failures.
    * @note Missing nodes, missing HP outputs, and stale generations are skipped
-   * to preserve the previous dirty update behavior.
+   * to preserve the previous dirty update behavior. Passthrough and resized
+   * paths both observe cancellation after staging and immediately before
+   * `RealtimeProxyGraph` commit; cancellation observed there prevents that
+   * node's staged proxy commit.
    */
   void execute_one(const Request& request);
 

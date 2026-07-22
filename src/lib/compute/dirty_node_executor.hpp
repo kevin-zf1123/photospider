@@ -107,8 +107,13 @@ class HighPrecisionDirtyNodeExecutor {
    * @param entry HP dirty ROI, extent, and halo metadata for this node.
    * @return Nothing.
    * @throws GraphError when dependencies or operators are missing, or when the
-   * selected operation fails.
-   * @note Empty HP ROIs are valid no-op entries.
+   * selected operation fails, including accepted Run cancellation.
+   * @note Empty HP ROIs and stale dirty-source generations are valid no-op
+   * entries after the initial cancellation observation. Tiled providers
+   * observe before every tile; a monolithic provider already entered is
+   * non-preemptible. Cancellation observed after provider return suppresses
+   * ROI/version/event staging, leaving any partial write-buffer data
+   * request-local for outer failure cleanup.
    */
   void execute(Node& node, const HpPlanEntry& entry);
 
@@ -286,8 +291,13 @@ class RealTimeDirtyNodeExecutor {
    * @param entry RT dirty ROI, HP ROI, extent, and halo metadata.
    * @return Nothing.
    * @throws GraphError when dependencies or operators are missing, or when the
-   * selected operation fails.
-   * @note Empty RT ROIs are valid no-op entries.
+   * selected operation fails, including accepted Run cancellation.
+   * @note Empty RT ROIs and stale dirty-source generations are valid no-op
+   * entries after the initial cancellation observation. Tiled providers
+   * observe before every tile; a monolithic provider already entered is
+   * non-preemptible. Cancellation observed after provider return suppresses
+   * ROI/version/event staging, leaving any partial proxy write-buffer data
+   * request-local for outer failure cleanup.
    */
   void execute(Node& node, const RtPlanEntry& entry);
 

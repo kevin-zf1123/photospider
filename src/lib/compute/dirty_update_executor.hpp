@@ -269,13 +269,17 @@ class StabilizedDirtyParameters {
  * @return Immutable shared request snapshot. An empty producer set means no
  * connected-parameter preflight was needed, but generation identity remains.
  * @throws GraphError for missing targets, dependencies, operations, or empty
- * operation results.
+ * operation results, including accepted Run cancellation at a preflight
+ * boundary.
  * @throws std::bad_alloc unchanged from topology, operation, or output storage.
  * @note The caller must serialize graph topology/cache mutation for the call.
  * No GraphModel cache, RT proxy, timing, or event state is published. Operation
  * callbacks retain the existing non-rollbackable external side-effect
  * semantics, but each preflight closure node executes at most once and is not
- * repeated by HP phase two.
+ * repeated by HP phase two. Cancellation is observed around every preflight
+ * node and before each tiled provider chunk; a monolithic provider already
+ * entered is non-preemptible, and its result is discarded when cancellation is
+ * observed before staging.
  */
 std::shared_ptr<const StabilizedDirtyParameters>
 stabilize_connected_dirty_parameters(
@@ -422,7 +426,8 @@ class HighPrecisionDirtyExecutor {
    * planning, provider, tile, downsample, and commit boundaries.
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
-   * dispatch, scheduler submission, or target output validation fails.
+   * dispatch, scheduler submission, target output validation, or a cooperative
+   * cancellation boundary fails.
    * @throws std::bad_alloc unchanged when planning, task, cache, proxy, or
    * output storage exhausts memory.
    * @note The method is phase-split: planning/reset and final validation are
@@ -431,6 +436,10 @@ class HighPrecisionDirtyExecutor {
    * target HP extent because they recompute the full frame instead of
    * preserving pixels from the old HP cache. A supplied Run receives exactly
    * one staging buffer and the applicable queued/running/commit phases.
+   * Cancellation is observed around planning, providers/tiles, source-first
+   * phases, sibling gating, graph staging commit, and downsample work. Product
+   * callers use a request-owned Graph snapshot, so cancellation before the
+   * outer commit contender wins leaves any partial staged data invisible.
    */
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
                       GraphRuntime* runtime, const DirtyUpdateRequest& request,
@@ -511,12 +520,16 @@ class RealTimeDirtyExecutor {
    * planning, provider, tile, and proxy-commit boundaries.
    * @return Mutable real-time target output stored in the proxy graph.
    * @throws GraphError when planning, dependency resolution, operation
-   * dispatch, scheduler submission, or target output validation fails.
+   * dispatch, scheduler submission, target output validation, or a cooperative
+   * cancellation boundary fails.
    * @throws std::bad_alloc unchanged when planning, task, proxy, or output
    * storage exhausts memory.
    * @note The method is phase-split: planning/reset and final validation are
    * serialized with graph_mutex_, while dirty source-before-downstream task
-   * execution runs outside the outer graph lock.
+   * execution runs outside the outer graph lock. Cancellation is observed
+   * around planning, providers/tiles, source-first phases, and proxy staging
+   * commit. Product callers publish that staged proxy only through the later
+   * Run commit contender, so a cancellation winner remains invisible.
    */
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
                       GraphRuntime* runtime, const DirtyUpdateRequest& request,

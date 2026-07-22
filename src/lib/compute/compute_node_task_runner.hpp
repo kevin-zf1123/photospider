@@ -123,10 +123,14 @@ class NodeTaskRunner {
    * resolved_ops_.
    * @return Nothing.
    * @throws std::bad_alloc when node execution exhausts memory.
-   * @throws GraphError with compute-stage context for other OpenCV, standard,
-   * and unknown operation failures.
-   * @note This method is called from scheduler worker closures and therefore
-   * must leave exception transport to SchedulerTaskRuntime.
+   * @throws GraphError without node wrapping when cancellation is observed
+   * before node identity lookup, or with compute-stage node context for other
+   * OpenCV, standard, and unknown operation failures.
+   * @note Cancellation prevents provider entry at the initial boundary. A
+   * provider already executing remains non-preemptible except at tiled
+   * callbacks and is observed again by its enclosing task route. This method
+   * is called from scheduler worker closures and therefore leaves exception
+   * transport to SchedulerTaskRuntime.
    */
   void run_node(int node_idx);
 
@@ -136,10 +140,12 @@ class NodeTaskRunner {
    * @param task_id Dense id into task_graph.tasks.
    * @return Nothing.
    * @throws std::bad_alloc when task execution exhausts memory.
-   * @throws GraphError with compute-stage context for other operation
+   * @throws GraphError without task wrapping when cancellation is observed
+   * before task lookup, or with compute-stage node context for other operation
    * failures.
-   * @note Tile tasks execute only their PlannedTask::output_roi. Node and
-   * monolithic tasks delegate to run_node().
+   * @note Tile tasks execute only their PlannedTask::output_roi and observe
+   * cancellation before each provider tile. Node and monolithic tasks delegate
+   * to run_node(); a monolithic provider already entered is non-preemptible.
    */
   void run_task(int task_id);
 
@@ -232,7 +238,19 @@ class NodeTaskRunner {
   std::vector<const NodeOutput*> resolve_image_inputs(
       const Node& target_node) const;
 
-  /** @brief Builds tile execution configuration for tile-capable operations. */
+  /**
+   * @brief Builds tile execution configuration for tile-capable operations.
+   * @param target_node Node whose metadata and trace identity are captured.
+   * @param op Resolved operation used to decide whether tiling is active.
+   * @return Default configuration for monolithic operations, otherwise
+   * metadata-derived tile sizing plus a per-tile observation callback.
+   * @throws std::bad_alloc if copied callback or metadata storage allocates.
+   * @throws GraphError or scheduler trace exceptions when the installed
+   * callback later observes cancellation or logs tile execution.
+   * @note The callback observes cancellation before logging and before the
+   * provider enters each tile; it borrows this runner through synchronous
+   * dispatcher settlement.
+   */
   TiledExecutionConfig tiled_config_for(const Node& target_node,
                                         const OpRegistry::OpVariant& op) const;
 

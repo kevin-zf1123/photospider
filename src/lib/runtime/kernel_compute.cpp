@@ -158,6 +158,8 @@ class KernelGraphRevisionCommitPolicy final
    * @param staged_proxy Optional request-owned proxy used by dirty/RT work.
    * @param request Kernel request supplying label, cache precision, and nosave.
    * @throws std::bad_alloc when copied label or precision storage allocates.
+   * @note The policy stores only request-lifetime borrows; the Kernel
+   * compute-request lane outlives every commit callback.
    */
   KernelGraphRevisionCommitPolicy(GraphRuntime& runtime,
                                   GraphCacheService& cache,
@@ -303,6 +305,9 @@ class KernelGraphRevisionCommitPolicy final
    * @param proxy_required Whether a non-null exact proxy is mandatory.
    * @return Nothing after every predicate succeeds.
    * @throws GraphError on the first failed predicate.
+   * @note Commit phase and cancellation are deliberately not checked here.
+   * The serialized graph-state callback obtains the Run-owned contender before
+   * live validation, persistence, or visible publication.
    */
   void validate_staged_run(const compute::ComputeRunLease& run_lease,
                            ComputeIntent expected_intent,

@@ -21,6 +21,9 @@ namespace {
  * @param lease Retained lifecycle lease for the active dispatch.
  * @return Nothing while cancellation has not won.
  * @throws GraphError with ComputeError after explicit/deadline cancellation.
+ * @throws std::system_error when Run-state synchronization fails.
+ * @note The Run retains the stable cancellation reason for outer
+ * ComputeService translation; this helper only stops later local work.
  */
 void observe_dispatch_cancellation(const ComputeRunLease& lease) {
   if (lease.observe_cancellation().has_value()) {
@@ -132,7 +135,9 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * waits for owned callbacks and their dependent releases, then commits
  * Run-owned temp outputs under graph_mutex_. Every full-HP callback reaches the
  * runner through a composite identity and a matching lease; the scheduler
- * runtime remains borrowed through the current synchronous wait.
+ * runtime remains borrowed through the current synchronous wait. Cooperative
+ * observations bracket planning, dispatch, phase transitions, and result
+ * commit; cancellation that wins before commit leaves temp outputs unpublished.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
@@ -155,6 +160,10 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * @return Mutable committed target output.
  * @throws GraphError or standard exceptions from shared planning, service
  * execution, cache, telemetry, and commit.
+ * @note Accepted cancellation purges only this Run's queued service entries
+ * and waits executing callbacks to drain. Cancellation observed before the
+ * corresponding boundaries rejects dependent publication and suppresses final
+ * Graph cache commit.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, ExecutionService& execution_service,
@@ -179,7 +188,9 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * @throws GraphError or standard exceptions from the selected route and shared
  * semantic stages.
  * @note Only dispatch selection differs; plan, runner, temporary results, and
- * commit remain shared and Run/dispatcher-owned.
+ * commit remain shared and Run/dispatcher-owned. Cancellation observations
+ * surround every semantic stage; tiled providers observe per tile while a
+ * monolithic provider already entered remains non-preemptible.
  */
 NodeOutput& ComputeTaskDispatcher::execute_impl(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,

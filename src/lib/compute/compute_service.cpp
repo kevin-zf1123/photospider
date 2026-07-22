@@ -306,6 +306,8 @@ cancellation_source_for_request(const ComputeService::Request& request) {
  * @param reason Private accepted reason retained by a Run.
  * @return Static human-readable label.
  * @throws Nothing.
+ * @note Unknown enum storage is rendered defensively without changing Run
+ * terminal identity.
  */
 const char* cancellation_reason_label(
     compute::ComputeRunCancellationReason reason) noexcept {
@@ -414,6 +416,8 @@ void throw_if_run_cancelled(const compute::ComputeRunLease& lease) {
  * @param lease Retained read-only Run continuation.
  * @return Nothing while the Run remains open.
  * @throws Exact failure or translated cancellation after terminal observation.
+ * @note Observation may convert an expired immutable deadline into the Run's
+ * one stable cancellation outcome before terminal inspection.
  */
 void observe_open_run_or_throw(const compute::ComputeRunLease& lease) {
   (void)lease.observe_cancellation();
@@ -430,6 +434,8 @@ void observe_open_run_or_throw(const compute::ComputeRunLease& lease) {
  * @param output Staged-domain output selected before final publication.
  * @return The original output reference after Succeeded.
  * @throws Exact failure, translated cancellation, or missing-terminal error.
+ * @note This helper observes no new cancellation; the commit policy must have
+ * resolved the one-shot contender before calling it.
  */
 NodeOutput& require_run_success(const compute::ComputeRunLease& lease,
                                 NodeOutput& output) {
@@ -580,7 +586,9 @@ void commit_real_time_if_requested(const compute::ComputeRunLease& run_lease,
  * normal current-path return.
  * @note A normal return publishes success only after the callback has validated
  * committed or reusable target output. Failure publication retains the
- * original std::exception_ptr before rethrow.
+ * original std::exception_ptr before rethrow. Lifecycle lease acquisition
+ * precedes cancellation-source attachment; accepted cancellation skips later
+ * execution or commit and is translated from the Run-owned reason.
  */
 template <typename Execute, typename Commit>
 NodeOutput& execute_request_owned_hp_run(
@@ -622,6 +630,8 @@ NodeOutput& execute_request_owned_hp_run(
  * @throws GraphError if another terminal claimant wins before normal return.
  * @note This wrapper does not admit the Run because the paired request wrapper
  * admits both children before any shared preflight or sibling launch.
+ * Cancellation observed before commit suppresses the commit callback; failure
+ * publication cannot replace an already accepted cancellation outcome.
  */
 template <typename Execute, typename Commit>
 NodeOutput& execute_realtime_child_run(
@@ -725,12 +735,14 @@ NodeOutput& execute_request_owned_realtime_runs(
  * @throws std::bad_alloc unchanged when dependency, operation, cache,
  * telemetry, or result storage exhausts memory.
  * @throws GraphError when a cycle, missing dependency, missing operation, disk
- * cache failure, or compute failure occurs.
+ * cache failure, compute failure, or accepted cancellation occurs.
  * @note This method is used only by the sequential HP path and HP callbacks
  * that explicitly select sequential execution. Scheduler-backed dispatch does
  * not call this method as a compatibility fallback. The resolved input-size
  * hint retains its existing Graph state behavior, while runtime parameters and
- * other operation-facing state remain request-local.
+ * other operation-facing state remain request-local. Observations surround
+ * recursive dependency, disk-cache, provider/tile, cache-commit, and return
+ * boundaries; a monolithic provider already entered is non-preemptible.
  */
 NodeOutput& ComputeService::compute_internal(
     GraphModel& graph, int node_id, const RecursiveComputeContext& context) {
@@ -889,6 +901,8 @@ NodeOutput& ComputeService::compute_internal(
  * @note This method intentionally contains no node-level dirty execution logic;
  * ComputeService remains only the internal orchestration boundary; C++
  * `public:` access on its backend members does not make them product Host API.
+ * The delegated executor observes cancellation across planning/provider/commit
+ * boundaries and leaves partial request-owned staging unpublished when it wins.
  */
 NodeOutput& ComputeService::compute_high_precision_update(
     GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
@@ -945,7 +959,9 @@ NodeOutput& ComputeService::compute_high_precision_update(
  * before coordinator validation.
  * @note RT dirty output stays outside GraphModel and does not become reusable
  * HP cache authority. The synchronization owner is request-scoped and is not
- * stored in GraphModel, GraphRuntime, or process state.
+ * stored in GraphModel, GraphRuntime, or process state. Cancellation before
+ * the RT commit contender prevents visible proxy publication and denies the
+ * paired HP sibling gate.
  */
 NodeOutput& ComputeService::compute_real_time_update(
     GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
@@ -1025,11 +1041,14 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
  * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
  * cache, telemetry, Run storage, or result storage exhausts memory.
  * @throws GraphError from scheduler lookup, task dispatch, cache access, or
- * missing target output.
+ * missing target output, including accepted cancellation.
  * @note Built-in CPU planning routes ready submissions through the injected
  * ExecutionService; plugin, GPU, and serial planning retain the Graph-owned
  * scheduler path. Both routes synchronously settle while full-HP callbacks own
  * Run leases and composite identity without borrowed TaskExecutor pointers.
+ * Cancellation observed before the matching boundaries suppresses dependent
+ * release and final cache commit; built-in CPU also removes only the matching
+ * Run's queued entries after accepted cancellation.
  */
 NodeOutput& ComputeService::compute_parallel_hp_impl(
     GraphModel& graph, GraphRuntime& runtime, const Request& request,
@@ -1061,10 +1080,12 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(
  * @throws std::bad_alloc unchanged when Run construction, planning, task
  * dispatch, operation, cache, telemetry, or result storage exhausts memory.
  * @throws GraphError from scheduler lookup, planning, task dispatch, dirty
- * execution, cache access, or missing target output.
+ * execution, cache access, missing target output, or private cancellation.
  * @note Every non-realtime HP request creates exactly one Run before planning.
  * RealTimeUpdate creates separate HP and RT child Runs before preflight; no
- * mixed-domain Run or final RunGroup policy is introduced here.
+ * mixed-domain Run or final RunGroup policy is introduced here. Lifecycle
+ * leases are acquired before the request cancellation source attaches, and a
+ * cancellation winner is translated from the child Run's stable reason.
  */
 NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
                                              GraphRuntime& runtime,
@@ -1123,11 +1144,13 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
  * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
  * output storage exhausts memory.
  * @throws GraphError from intent validation, callback execution, scheduler
- * lookup, or missing target output.
+ * lookup, missing target output, or accepted child cancellation.
  * @note The coordinator owns HP/RT dual-path semantics; ComputeService only
  * supplies the concrete execution callbacks. Explicit GlobalHighPrecision
  * callbacks reuse hp_run and never recurse through a Run-creating public
- * entry. Realtime callbacks settle separate HP and RT children.
+ * entry. Realtime callbacks settle separate HP and RT children. RT
+ * cancellation before proxy commit denies HP publication through the sibling
+ * gate; already committed RT output is not rolled back by later HP failure.
  */
 NodeOutput& ComputeService::compute_intent_update_impl(
     GraphModel& graph, const ExecutionStrategy& strategy,
@@ -1356,6 +1379,8 @@ NodeOutput& ComputeService::compute_intent_update_impl(
  * @note Dirty HP and RT callbacks still use the dirty executors, but run node
  * work inline because no scheduler runtime is available. The realtime path
  * receives separate HP and RT child Runs without a mixed-domain owner.
+ * Cooperative observations still bracket inline providers and commit even
+ * though no scheduler queue exists.
  */
 NodeOutput& ComputeService::compute_with_intent_impl(
     GraphModel& graph, const Request& request, compute::ComputeRun* hp_run,
@@ -1375,10 +1400,12 @@ NodeOutput& ComputeService::compute_with_intent_impl(
  * @throws std::bad_alloc unchanged when any Host-reachable compute stage
  * exhausts memory.
  * @throws GraphError from validation, planning, recursive compute, or cache
- * operations.
+ * operations, including private cancellation translated to ComputeError.
  * @note Missing intent and explicit GlobalHighPrecision both create exactly one
  * request-owned Run before planning. RealTimeUpdate creates separate HP and RT
- * child Runs without a mixed-domain Run.
+ * child Runs without a mixed-domain Run. Leases are acquired before attaching
+ * the request cancellation source, and cancellation that wins commit
+ * arbitration leaves product staging unpublished.
  */
 NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
   const std::shared_ptr<compute::ComputeRequestCancellationSource>
@@ -1426,12 +1453,15 @@ NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
  * @throws std::bad_alloc unchanged when planning, recursion, cache, telemetry,
  * or result storage exhausts memory.
  * @throws GraphError when the target is missing, topology is invalid, planning
- * fails, recursive compute fails, or target output is unavailable.
+ * fails, recursive compute fails, target output is unavailable, or accepted
+ * cancellation is observed.
  * @note The method records the same node/cache-pruned plan shape used by the
  * parallel path before delegating to the recursive executor. The direct
  * recursive algorithm has no dispatcher-owned temporary output object; after
  * this method returns, the request wrapper advances the Run to CommitPending
- * before invoking the product commit policy.
+ * before invoking the product commit policy. Observations bracket planning,
+ * recursive/provider work, telemetry, and return; a monolithic provider
+ * already entered remains non-preemptible.
  */
 NodeOutput& ComputeService::compute_sequential_impl(
     GraphModel& graph, const Request& request, compute::ComputeRun& run,

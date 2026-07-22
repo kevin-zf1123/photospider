@@ -42,8 +42,10 @@ class ComputeCommitPolicy {
    * @throws GraphError or persistence exceptions when validation/publication
    * fails, after publishing the exact failure into the Run arbiter.
    * @note Implementations must claim commit inside their serialized visible
-   * transaction, resolve success/failure before it returns, and must not
-   * advance the authoritative GraphRevision.
+   * transaction before persistence or publication, resolve success/failure
+   * before it returns, and must not advance the authoritative GraphRevision.
+   * Failure to claim means cancellation/failure already owns the Run and no
+   * visible side effect may occur.
    */
   virtual void commit_high_precision(const ComputeRunLease& run_lease,
                                      GraphModel& staged_graph,
@@ -56,8 +58,11 @@ class ComputeCommitPolicy {
    * @param staged_graph Exact request-owned Graph snapshot used for planning.
    * @param staged_proxy Exact request-owned RT proxy snapshot to publish.
    * @return Nothing after proxy publication completes.
-   * @throws GraphError when the predicate or proxy publication fails.
-   * @note Successful RT publication resolves Run success before returning.
+   * @throws GraphError when the predicate or proxy publication fails, after
+   * publishing that exact failure into the Run arbiter.
+   * @note Implementations claim the contender in the serialized transaction
+   * before visible publication. Failure to claim performs no visible side
+   * effect. Successful RT publication resolves Run success before returning;
    * ComputeService opens the sibling gate only after observing that outcome.
    */
   virtual void commit_real_time(const ComputeRunLease& run_lease,

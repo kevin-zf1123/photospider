@@ -368,6 +368,9 @@ bool TaskSubmissionPlan::contains_task_identity(
  * @throws std::overflow_error when planned count exceeds scheduler integer
  * accounting.
  * @throws std::bad_alloc or scheduler exceptions from submission.
+ * @note Cancellation closes the publication gate and retires every completion
+ * unit not yet transferred to a materialized callback. The caller retains the
+ * separate bootstrap completion unit.
  */
 void TaskSubmissionPlan::submit_initial_ready_tasks(
     const ComputeRunLease& lease, SchedulerTaskRuntime& task_runtime) {
@@ -414,7 +417,11 @@ TaskSubmissionPlan::make_initial_ready_submissions(
  * @throws std::invalid_argument when identity mismatches.
  * @throws std::logic_error when a duplicate callback enters.
  * @throws GraphError, std::bad_alloc, or operation/runtime exceptions.
- * @note The exact original exception is rethrown after best-effort trace.
+ * @throws std::system_error when Run cancellation/outcome synchronization
+ * fails.
+ * @note Terminal state before entry skips provider work; terminal state after
+ * provider return suppresses dependent release. The exact original exception
+ * is rethrown after best-effort trace.
  */
 void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
                                       const ComputeRunLease& lease,
@@ -520,6 +527,8 @@ void TaskSubmissionPlan::resolve_operations() {
  * @return Nothing.
  * @throws std::bad_alloc unchanged.
  * @throws GraphError wrapping other dependency/submission failures.
+ * @note Cancellation is checked before dependency counters mutate, and the
+ * publication helpers recheck terminal closure before each ready submission.
  */
 void TaskSubmissionPlan::release_dependents(
     int current_task_id, int current_node_id, const ComputeRunLease& lease,

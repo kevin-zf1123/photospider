@@ -329,6 +329,10 @@ class DirtyReadyTaskContext final
    * @throws std::invalid_argument for mismatched or inactive identity.
    * @throws Exact task, dependency, submission, trace, or completion
    * exception.
+   * @note Cancellation before provider entry or immediately after provider
+   * return retires this callback's logical completion unit and returns without
+   * releasing dependents. Cancellation during dependent publication stops the
+   * remaining submissions before the same exact-once completion retirement.
    */
   void execute(ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
                SchedulerTaskRuntime& task_runtime);
@@ -663,8 +667,14 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
    *
    * @param task_id Dirty task id selected by scheduler.
    * @return Nothing.
-   * @throws Any exception propagated by the dirty node executor.
-   * @note Completion accounting mirrors TaskSubmissionPlan::run_task().
+   * @throws GraphError when cancellation is observed before or after the dirty
+   * provider, or when the provider reports a graph-domain failure.
+   * @throws Any other provider, trace, dependency, submission, or completion
+   * exception unchanged.
+   * @note Only the normal path retires the scheduler completion unit here;
+   * exception settlement remains owned by the legacy scheduler. Cancellation
+   * after provider return prevents dependency release, while a provider already
+   * entered is non-preemptible except at its own tile observations.
    */
   void run_task(int task_id) override {
     const auto& task = compute_plan_.task_graph.tasks.at(task_id);
@@ -769,7 +779,11 @@ auto make_dirty_context_and_release_outer_callable(
  * moved-from function one boundary. Submission construction, retained-demand
  * calculation, and admission therefore see only the context-owned target
  * without depending on the standard library's moved-from representation. The
- * dirty executor retains request-local inline fallback ordering.
+ * dirty executor retains request-local inline fallback ordering. Cancellation
+ * is observed at phase entry, around every source/downstream provider and
+ * boundary callback, and before dependency publication. It prevents later
+ * phase entry and final staged publication; a monolithic callback already
+ * entered remains non-preemptible until it returns.
  */
 template <typename RunTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,

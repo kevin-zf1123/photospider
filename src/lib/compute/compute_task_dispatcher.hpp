@@ -122,7 +122,12 @@ class ComputeTaskDispatcher {
    * telemetry, or result storage exhausts memory.
    * @note Worker tasks do not mutate GraphModel caches directly. They publish
    * temporary results, and execute() serializes final cache ownership after the
-   * scheduler drains. Full-HP callbacks own Run leases and carry
+   * scheduler drains. Cancellation is observed before planning, publication,
+   * phase changes, result commit, and return; cancellation observed before
+   * those boundaries suppresses dependent publication and final Graph cache
+   * commit. A monolithic provider already entered is non-preemptible, while
+   * tiled providers observe between tiles. Full-HP callbacks own Run leases and
+   * carry
    * `(ComputeRunId, ComputeRunLocalTaskId)` identity; they contain no borrowed
    * TaskExecutor pointer. The current graph/scheduler lifetime and visible
    * commit still require synchronous wait.
@@ -148,7 +153,10 @@ class ComputeTaskDispatcher {
    * @throws The exact first service worker exception after batch settlement.
    * @note Only ready submissions cross into execution_service. This overload
    * retains all planning, dependency, result, and commit authority in the
-   * dispatcher/Run boundary.
+   * dispatcher/Run boundary. Accepted cancellation retires this Run's queued
+   * service entries and drains callbacks already running; cancellation
+   * observed before publication suppresses dependent submission and final
+   * Graph cache commit.
    */
   NodeOutput& execute(GraphModel& graph, ExecutionService& execution_service,
                       SchedulerHostContext& host,
@@ -214,7 +222,10 @@ class ComputeTaskDispatcher {
    * @throws GraphError or standard exceptions from planning, execution,
    * service/scheduler settlement, cache, telemetry, or commit.
    * @note The optional route pointers select only physical dispatch; every
-   * semantic planning and visible commit stage is shared.
+   * semantic planning and visible commit stage is shared. Cooperative
+   * observations bracket planning, dispatch, phase transitions, and final
+   * result commit so cancellation that wins before commit leaves temporary
+   * outputs unpublished.
    */
   NodeOutput& execute_impl(GraphModel& graph,
                            SchedulerTaskRuntime& task_runtime,

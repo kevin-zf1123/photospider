@@ -151,10 +151,12 @@ struct ExecutionService::RunState final
 
   /**
    * @brief Tests whether the caller-side Run wait may finish.
-   * @return True after successful logical completion and callback drainage, or
-   * after failure and callback drainage.
+   * @return True after successful logical completion, first failure, or
+   * accepted cancellation, provided every in-flight callback has drained.
    * @throws Nothing.
-   * @note Caller holds `mutex`.
+   * @note Caller holds `mutex`. Failure and cancellation deliberately make the
+   * remaining logical completion count irrelevant, but neither may release
+   * the synchronous waiter while a callback is still executing.
    */
   bool settled() const noexcept {
     return in_flight == 0 &&

@@ -444,7 +444,13 @@ class ReadyTaskSubmission final {
    * @return Nothing.
    * @throws The exact executable exception after best-effort matching Run
    * failure publication.
-   * @note The submission and runtime must remain alive until this call returns.
+   * @throws Any Run cancellation-observation synchronization exception after
+   * the same best-effort failure publication.
+   * @note Cancellation observed before entry skips the executable entirely.
+   * Cancellation observed after a normal executable return is retained by the
+   * Run and completed by the outer service worker; neither observation is
+   * converted into a fabricated task exception. The submission and runtime
+   * must remain alive until this call returns.
    */
   void execute(SchedulerTaskRuntime& task_runtime);
 
@@ -705,11 +711,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::bad_alloc or std::system_error from pool/store setup.
    * @throws The exact first worker task exception after settlement.
    * @note Independent calls may overlap. Run-local state is removed only after
-   * queued work is retired and every in-flight callback has exited. Initial
-   * QueueEntry construction completes transactionally before the moved-from
-   * input vector is released, so neither that vector nor its backing spans the
-   * settlement wait. No Graph, plan, dependency, result, or commit object
-   * enters this method.
+   * queued work is retired and every in-flight callback has exited. Accepted
+   * cancellation purges only this exact Run's queued entries, rejects later
+   * dependent publication, and settles only after its running callbacks drain;
+   * cancellation already visible before service admission returns without
+   * publishing an active Run. Initial QueueEntry construction completes
+   * transactionally before the moved-from input vector is released, so neither
+   * that vector nor its backing spans the settlement wait. No Graph, plan,
+   * dependency, result, or commit object enters this method.
    */
   void execute_cpu_run(SchedulerHostContext& host,
                        std::vector<ReadyTaskSubmission> initial_submissions,

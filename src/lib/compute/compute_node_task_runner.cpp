@@ -215,10 +215,13 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
  * @param node_idx Dense index into the borrowed execution plan.
  * @return Nothing.
  * @throws std::bad_alloc when node execution exhausts memory.
- * @throws GraphError wrapping other standard and unknown failures, including
- * provider exceptions derived from std::exception.
+ * @throws GraphError directly when pre-entry cancellation is observed, or
+ * wrapping other standard and unknown failures, including provider exceptions
+ * derived from std::exception.
  * @note Resource exhaustion retains its type for scheduler/future transport;
- * all other failures retain the existing node-context diagnostic contract.
+ * cancellation occurs before node lookup and therefore intentionally has no
+ * node-context wrapper. All later recoverable failures retain the existing
+ * node-context diagnostic contract.
  */
 void NodeTaskRunner::run_node(int node_idx) {
   observe_runner_cancellation(run_lease_);
@@ -242,10 +245,13 @@ void NodeTaskRunner::run_node(int node_idx) {
  * @return Nothing.
  * @throws std::bad_alloc when task execution or dependency access exhausts
  * memory.
- * @throws GraphError wrapping other range, standard, and unknown failures,
- * including provider exceptions derived from std::exception.
- * @note Tile tasks execute directly; node and monolithic tasks delegate to
- * run_node(), while scheduler transport remains outside this runner.
+ * @throws GraphError directly when pre-entry cancellation is observed, or
+ * wrapping other range, standard, and unknown failures, including provider
+ * exceptions derived from std::exception.
+ * @note Cancellation occurs before task lookup and intentionally has no task
+ * context. Tile tasks execute directly and observe every provider tile; node
+ * and monolithic tasks delegate to run_node(), while scheduler transport
+ * remains outside this runner.
  */
 void NodeTaskRunner::run_task(int task_id) {
   observe_runner_cancellation(run_lease_);
@@ -512,6 +518,7 @@ std::vector<const NodeOutput*> NodeTaskRunner::resolve_image_inputs(
   return inputs_ready;
 }
 
+/** @copydoc NodeTaskRunner::tiled_config_for */
 TiledExecutionConfig NodeTaskRunner::tiled_config_for(
     const Node& target_node, const OpRegistry::OpVariant& op) const {
   TiledExecutionConfig tiled_config;

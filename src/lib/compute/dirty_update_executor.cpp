@@ -41,6 +41,9 @@ namespace {
  * @param run_lease Preferred retained lifecycle lease for product callers.
  * @return Nothing while no explicit/deadline cancellation has won.
  * @throws GraphError with ComputeError after cancellation.
+ * @throws std::system_error when Run-state synchronization fails.
+ * @note The Run retains the stable reason for outer ComputeService
+ * translation; this helper only terminates later dirty/preflight work.
  */
 void observe_dirty_run_or_throw(ComputeRun* run,
                                 const ComputeRunLease* run_lease) {
@@ -68,6 +71,8 @@ void observe_dirty_run_or_throw(ComputeRun* run,
  * @throws std::invalid_argument from invalid phase transitions.
  * @note Repeated calls while Running are idempotent so connected-parameter
  * preflight and the following dirty phase may share one domain Run.
+ * Cancellation is observed before transition and after every transition that
+ * could otherwise admit provider work.
  */
 void advance_dirty_run_for_execution(ComputeRun* run,
                                      const ComputeRunLease* run_lease,
@@ -943,7 +948,8 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * @throws std::bad_alloc unchanged when planning, task, cache, staging,
  * telemetry, or output storage exhausts memory.
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
- * target validation failures, including checked shared-resource estimation.
+ * target validation failures, including checked shared-resource estimation
+ * and accepted cancellation at a cooperative boundary.
  * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
  * outside that lock. Both standalone and realtime-child HP staging are
  * Run-owned. Per-node synchronization is request-local for standalone HP work
@@ -952,6 +958,10 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * synchronization owner. Concurrent HP/RT siblings therefore reserve the same
  * object conservatively in both Runs so either reservation can settle first
  * without leaving the surviving sibling's retained ownership unaccounted.
+ * Cancellation observations bracket planning, node/tile work, sibling gating,
+ * write-buffer commit, downsample, and return. A monolithic provider already
+ * entered remains non-preemptible, while product publication remains protected
+ * by the outer request-owned staging/commit contender.
  */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -1190,12 +1200,17 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  * @throws std::bad_alloc unchanged when planning, task, proxy, staging,
  * telemetry, or output storage exhausts memory.
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
- * target validation failures, including checked shared-resource estimation.
+ * target validation failures, including checked shared-resource estimation
+ * and accepted cancellation at a cooperative boundary.
  * @note Planning and commit hold graph_mutex_ while scheduler/service work runs
  * outside that lock. RT output never becomes formal reusable GraphModel cache.
  * Each process-service phase charges the complete per-node synchronization
  * owner; a shared HP/RT sibling object is therefore conservatively present in
- * both independent Run reservations.
+ * both independent Run reservations. Cancellation observations bracket
+ * planning, node/tile work, proxy write-buffer commit, and return. A
+ * monolithic provider already entered remains non-preemptible, while product
+ * publication remains protected by the outer request-owned staging/commit
+ * contender.
  */
 NodeOutput& RealTimeDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,

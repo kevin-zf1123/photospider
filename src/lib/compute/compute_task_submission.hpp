@@ -36,6 +36,9 @@ namespace ps::compute {
  * execution, and submission operations.
  * @note Scheduler callbacks never capture this object directly. They capture a
  * ComputeRunLease and reach the plan only through lease-validated identity.
+ * Cancellation or failure closes the publication gate, retires every
+ * unmaterialized legacy completion unit exactly once, and leaves already
+ * materialized units with their callback-owned retirement tokens.
  */
 class TaskSubmissionPlan {
  public:
@@ -179,7 +182,9 @@ class TaskSubmissionPlan {
    * @throws std::bad_alloc from ready identity or callback storage.
    * @throws Scheduler runtime exceptions from count, trace, or submission.
    * @note The caller owns one bootstrap completion unit. This method adds the
-   * planned task count but does not release the bootstrap unit.
+   * planned task count but does not release the bootstrap unit. Cancellation
+   * that closes publication before or during this operation prevents later
+   * callbacks and retires all still plan-owned completion units.
    */
   void submit_initial_ready_tasks(const ComputeRunLease& lease,
                                   SchedulerTaskRuntime& task_runtime);
@@ -214,9 +219,13 @@ class TaskSubmissionPlan {
    * @throws std::logic_error when the registered task already entered.
    * @throws GraphError or operation exceptions from NodeTaskRunner and
    * dependency release.
-   * @note Success releases dependents; the calling lease route or legacy
-   * exact-once token retires this callback's scheduler completion unit.
-   * Failure publication is owned by the calling lease route.
+   * @throws std::system_error when Run cancellation/outcome synchronization
+   * fails.
+   * @note Terminal state observed before exact-once entry skips the provider;
+   * cancellation observed after provider return suppresses dependent release.
+   * Otherwise success releases dependents. The calling lease route or legacy
+   * exact-once token retires this callback's scheduler completion unit, and
+   * failure publication remains owned by that calling route.
    */
   void execute_task(const ComputeRunTaskIdentity& identity,
                     const ComputeRunLease& lease,
@@ -383,7 +392,9 @@ class TaskSubmissionPlan {
    * @throws GraphError with scheduling-stage context for other dependency,
    * range, or scheduler submission failures.
    * @note Resource exhaustion keeps its exception identity; recoverable
-   * scheduling failures receive node context.
+   * scheduling failures receive node context. Cancellation is checked before
+   * dependency counters mutate, and every legacy/service publication rechecks
+   * the shared gate so no newly ready work enters after closure.
    */
   void release_dependents(int current_task_id, int current_node_id,
                           const ComputeRunLease& lease,
@@ -398,7 +409,9 @@ class TaskSubmissionPlan {
    * @throws std::logic_error for duplicate initialization.
    * @throws std::bad_alloc or scheduler completion-count exceptions.
    * @note Record allocation precedes the whole-plan increment; publication is
-   * enabled only after that increment succeeds.
+   * enabled only after that increment succeeds. Cancellation is observed
+   * before locking and rechecked under the publication gate; a terminal race
+   * after the increment retires all plan-owned units before returning false.
    */
   bool initialize_legacy_completion_ledger(const ComputeRunLease& lease,
                                            SchedulerTaskRuntime& task_runtime);
@@ -413,7 +426,9 @@ class TaskSubmissionPlan {
    * @throws std::bad_alloc or scheduler submission exceptions.
    * @note The recursive gate supports serial inline invocation before the void
    * submission call returns. Submission rollback or final callback destruction
-   * retires the transferred token exactly once.
+   * retires the transferred token exactly once. Cancellation is observed
+   * before locking and terminal state is rechecked while holding the gate, so
+   * a closed plan transfers no further completion ownership.
    */
   bool publish_legacy_callback(const ComputeRunLease& lease,
                                const ComputeRunTaskIdentity& identity,
@@ -426,6 +441,9 @@ class TaskSubmissionPlan {
    * @param ready_runtime Process service runtime accepting the owned value.
    * @return True when accepted, false after terminal closure.
    * @throws Submission construction or service admission exceptions.
+   * @note Cancellation is observed before locking and terminal state is
+   * rechecked under the recursive publication gate. The service never receives
+   * a dependent submission after that gate has closed.
    */
   bool publish_service_submission(const ComputeRunLease& lease,
                                   const ComputeRunTaskIdentity& identity,
