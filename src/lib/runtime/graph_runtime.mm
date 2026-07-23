@@ -7,8 +7,10 @@
 #include <exception>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -100,6 +102,24 @@ bool valid_execution_intent(ComputeIntent intent) noexcept {
          intent == ComputeIntent::RealTimeUpdate;
 }
 
+/**
+ * @brief Builds the complete initial execution-route binding map.
+ * @param info Borrowed construction values for the HP and RT route ids.
+ * @return Owned bindings for both supported compute intents at generation one.
+ * @throws std::bad_alloc If route-string copies or map nodes cannot allocate.
+ * @note Route vocabulary validation remains in `GraphRuntime` construction so
+ * the complete owner is staged before the runtime becomes observable.
+ */
+std::map<ComputeIntent, GraphRuntime::ExecutionRouteBinding>
+make_initial_execution_routes(const GraphRuntime::Info& info) {
+  return {
+      {ComputeIntent::GlobalHighPrecision,
+       GraphRuntime::ExecutionRouteBinding{info.hp_execution_type, 1U}},
+      {ComputeIntent::RealTimeUpdate,
+       GraphRuntime::ExecutionRouteBinding{info.rt_execution_type, 1U}},
+  };
+}
+
 }  // namespace
 
 /** @copydoc GraphRuntime::tls_worker_id_ */
@@ -136,12 +156,7 @@ GraphRuntime::GraphRuntime(const Info& info)
                      info.compute_event_initial_sequence,
                      info.compute_event_initial_dropped_count),
       realtime_proxy_graph_(std::make_unique<compute::RealtimeProxyGraph>()),
-      execution_routes_({
-          {ComputeIntent::GlobalHighPrecision,
-           ExecutionRouteBinding{info.hp_execution_type, 1U}},
-          {ComputeIntent::RealTimeUpdate,
-           ExecutionRouteBinding{info.rt_execution_type, 1U}},
-      }),
+      execution_routes_(make_initial_execution_routes(info)),
       execution_trace_slots_(info.execution_trace_capacity),
       execution_trace_next_sequence_(info.execution_trace_initial_sequence),
       execution_trace_unsequenced_drops_(
