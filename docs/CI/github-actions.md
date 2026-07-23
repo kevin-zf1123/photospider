@@ -3,7 +3,7 @@
 ## Workflows
 
 - `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests targeting `main` through `pull_request_target`, pushes to `main` and `CI/**`, and manual dispatch, followed by one stable `healthcheck` result gate.
-- `.github/workflows/ci-integration.yml`: documentation-only routing, a configuration-time inventory preflight, one reusable default build that publishes the post-build label-driven matrix, separately sharded full CTest and per-test build-smoke jobs, scripted `graph_cli`, scripted propagation, plugin loading, scheduler repeat checks, and one stable `integration` result gate.
+- `.github/workflows/ci-integration.yml`: documentation-only routing, a configuration-time inventory preflight, one reusable default build that publishes the post-build label-driven matrix, separately sharded full CTest and per-test build-smoke jobs, scripted `graph_cli`, scripted propagation, capability-selected plugin and execution-repeat checks, and one stable `integration` result gate.
 - `.github/workflows/ci-sanitizer.yml`: manual ASan or TSan focused checks.
 - `.github/workflows/build-ci-image.yml`: GHCR image publish for `ghcr.io/<owner>/<repo>/photospider-ci` on image-input pushes and manual dispatch.
 
@@ -104,7 +104,7 @@ but does not start a child configure, build, install, or compile target.
 `build-integrity-default` builds the complete default profile once and uploads
 `ci-build-default`. The regular test jobs reuse that artifact:
 
-- `full-ctest`, `scripted-cli`, `propagation-script`, `plugin-load`, and `scheduler-repeat` download only `ci-build-default`.
+- `full-ctest`, `scripted-cli`, `propagation-script`, `plugin-load`, and `execution-repeat` download only `ci-build-default`.
 - `full-ctest` excludes every exact `build-smoke` label with CTest's label
   filter. It has no name-based build-smoke exclusion list.
 - `build-smoke` consumes the build-integrity job's post-build JSON include
@@ -130,7 +130,7 @@ image and instead runs `local-image-integration` on one Docker-capable runner.
 After building `photospider-ci:local`, `integration_suite.sh` builds the default
 profile, reads the same post-build NUL-delimited exact-name inventory,
 excludes the label from full CTest, and runs every labelled smoke sequentially
-before the CLI, propagation, plugin, and scheduler shards. This fallback
+before the CLI, propagation, plugin, and execution-repeat shards. This fallback
 preserves the same discovery and selection contract while accepting that one
 local-image runner cannot fan out into matrix jobs.
 
@@ -141,6 +141,49 @@ supported CI toolchain. A targeted native old-version
 producer/install/consumer run is added only when a compatibility-sensitive
 change or release check needs it; the regular integration workflow does not
 lock Ubuntu or CMake to a dedicated minimum-version job.
+
+## Runtime Architecture Capability Transition
+
+Trusted CI supports exactly two complete runtime validation contracts while the
+policy/execution architecture moves through protected `CI/**` files. After
+configuration, each runtime-sensitive script captures
+`cmake --build <build-dir> --target help` and matches exact target names. The
+legacy scheduler contract requires all of `test_scheduler`,
+`test_scheduler_plugin_loader`, and `destroy_count_scheduler_plugin`, with no
+policy/execution markers. The new contract requires all of
+`test_policy_execution`, `test_policy_registry`, and `test_policy_plugin`, with
+no legacy markers. A partial, mixed, or marker-free inventory fails before a
+build or runtime command; branch names and commit identities never select the
+contract.
+
+`build-integrity-default` validates the architecture-neutral
+`photospider_kernel`, `graph_cli`, `test_propagation`, and operation-plugin
+lifecycle targets, then still builds the complete tree. Full CTest remains the
+ordinary-test authority and excludes only the exact `build-smoke` label. The
+label-driven build-smoke matrix, its independent jobs, static product consumer,
+and protected-path/image gates are unchanged.
+
+Runtime-sensitive shards select behavior without introducing product
+compatibility:
+
+- Scripted CLI configuration emits either the legacy `scheduler_*` keys or the
+  new `policy_*` and `execution_*` keys. It never mixes or translates them.
+- Plugin loading validates the operation surface plus either scheduler plugin
+  loading/listing or policy registry, policy/execution tests, policy plugin
+  loading/listing, and execution route listing.
+- `execution-repeat` runs deterministic scheduler repetitions for the legacy
+  contract and policy registry, policy/execution, compute-run routing, and
+  resource-admission repetitions for the new contract.
+- ASan and TSan retain the shared compute/propagation checks and select the
+  matching legacy scheduler or new policy/execution focused tests.
+
+This is a protected two-stage transition. The trusted `CI/**` change lands on
+`main` first and validates the legacy contract there. The architecture pull
+request then incorporates that trusted commit and removes its independent
+protected-path delta; its complete marker set selects the policy/execution
+contract. Once `main` and every maintained branch use only policy/execution, a
+later trusted CI cleanup should remove the legacy profile and capability
+switch.
 
 ## Scripted CLI Capability Transition
 
@@ -190,22 +233,23 @@ long-lived personal-overlay content. Explicitly documented general-purpose
 manual developer tools are separate; a clean primary checkout never imports
 personal development content.
 
-- `ci/scripts/healthcheck.sh`: builds a NUL-delimited changed-path artifact, runs `git diff --check`, the durable change-classification, build-smoke inventory, and CI-routing regressions, and `clang-format --dry-run --Werror` plus `cpplint` on every nondeleted changed C++ path; inventory failure terminates the script before a no-C++ summary.
+- `ci/scripts/healthcheck.sh`: builds a NUL-delimited changed-path artifact, runs `git diff --check`, the durable change-classification, build-smoke inventory, runtime-capability, and CI-routing regressions, and `clang-format --dry-run --Werror` plus `cpplint` on every nondeleted changed C++ path; inventory failure terminates the script before a no-C++ summary.
 - `ci/scripts/change_classification.sh`: classifies exact event revisions as documentation-only or full-integration, records all changed and non-documentation paths, and fails closed on Git uncertainty.
 - `ci/scripts/change_classification_test.sh`: exercises the long-lived routing contract across documentation, source, mixed, type-change, workflow, rename, deletion, repeated `CI/**` push, pull-request merge-base, missing branch or revision, zero/unavailable revision, manual, empty-diff, and shallow-clone cases.
-- `ci/scripts/ci_routing_test.sh`: whitespace-normalizes and exact-locks both production `protected-ci-paths.if` expressions, then extracts and executes the real stable-gate, pre-checkout fork-rejection, and protected-path shell blocks. It also locks the allow-empty configuration preflight, strict post-build job output, empty-output-safe `fromJSON` matrix, per-item artifact/name binding, full-CTest label exclusion, exact runner input, local fallback inventory, and aggregate build-smoke gate. Isolated Git fixtures prove that both production guards reject a newline-containing `ci/**` path, safely record it, and fail closed on producer or reader failure. A job/step-scoped production assertion extracts each exact published-image history-fetch step and requires its own top-level `shell: bash`, so metadata on another job or neighboring step cannot satisfy the contract. Another job/step-scoped assertion requires exactly one `Trust checked-out workspace` step with `shell: bash`; its only executable lines must enable strict mode, add the exact `$GITHUB_WORKSPACE` global `safe.directory`, and verify `HEAD^{commit}`. It rejects an entry in another job or adjacent step, any additional or wildcard `safe.directory`, and placement after either fetch or `healthcheck.sh`. The extracted production trust block runs with an isolated HOME and Git repository, where the resulting global configuration must contain exactly that repository path. Job-scoped assertions separately lock the published-image and local-image pull-request exact-base fetch, `CI/**` main fetch/verification, three-way `CI_BASE_REF` route, and execution order. The test executes both extracted production main-fetch blocks; an isolated history proves that cumulative `origin/main` scope retains an early unformatted C++ path while event-before scope contains only the later documentation path. Detector fixtures retain exact/cumulative bases, empty comparisons, newline paths, and changed-path failure propagation. These local source and shell checks deliberately do not claim to execute GitHub's expression evaluator, reproduce cross-UID dubious ownership, or emulate the hosted container runner.
+- `ci/scripts/ci_routing_test.sh`: whitespace-normalizes and exact-locks both production `protected-ci-paths.if` expressions, then extracts and executes the real stable-gate, pre-checkout fork-rejection, and protected-path shell blocks. It also locks the allow-empty configuration preflight, strict post-build job output, empty-output-safe `fromJSON` matrix, per-item artifact/name binding, full-CTest label exclusion, exact runner input, local fallback inventory, aggregate build-smoke gate, and the architecture-neutral `execution-repeat` job, environment, artifact, and final-gate routing. Isolated Git fixtures prove that both production guards reject a newline-containing `ci/**` path, safely record it, and fail closed on producer or reader failure. A job/step-scoped production assertion extracts each exact published-image history-fetch step and requires its own top-level `shell: bash`, so metadata on another job or neighboring step cannot satisfy the contract. Another job/step-scoped assertion requires exactly one `Trust checked-out workspace` step with `shell: bash`; its only executable lines must enable strict mode, add the exact `$GITHUB_WORKSPACE` global `safe.directory`, and verify `HEAD^{commit}`. It rejects an entry in another job or adjacent step, any additional or wildcard `safe.directory`, and placement after either fetch or `healthcheck.sh`. The extracted production trust block runs with an isolated HOME and Git repository, where the resulting global configuration must contain exactly that repository path. Job-scoped assertions separately lock the published-image and local-image pull-request exact-base fetch, `CI/**` main fetch/verification, three-way `CI_BASE_REF` route, and execution order. The test executes both extracted production main-fetch blocks; an isolated history proves that cumulative `origin/main` scope retains an early unformatted C++ path while event-before scope contains only the later documentation path. Detector fixtures retain exact/cumulative bases, empty comparisons, newline paths, and changed-path failure propagation. These local source and shell checks deliberately do not claim to execute GitHub's expression evaluator, reproduce cross-UID dubious ownership, or emulate the hosted container runner.
+- `ci/scripts/runtime_capability_test.sh`: exercises exact Make/Ninja target parsing, both complete contracts, partial/mixed/absent fail-closed behavior, required-target checks, and mutually exclusive CLI configuration output.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current NUL-delimited, unfiltered diff changes CI image inputs; workflows provide an exact fetched pull-request base SHA, and diff failure exits without a route output.
 - `ci/scripts/build_smoke_inventory.py`: strictly parses CTest JSON v1, emits a deterministic matrix and NUL-delimited exact names, and revalidates one matrix selection before index-based execution. Strict post-build mode rejects an empty selection; only explicit preflight mode permits it. Its focused regression covers malformed JSON/schema, duplicate names/properties/label values, invalid or missing labels, disabled/commandless entries, empty strict selection, deterministic ordering, JSON round trips, safe artifact keys, hostile test-name characters, absent/disabled/commandless runner selections that stop before execution, and real configuration-placeholder-to-post-build discovery.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled tree and validates an allow-empty, non-authoritative configuration-time inventory preview; it emits no workflow matrix output.
 - `ci/scripts/integration_suite.sh`: consumes the strict post-build exact names and runs the resulting integration shards sequentially for the local-image fallback path.
-- `ci/scripts/build_integrity.sh`: builds the default profile's required targets and complete tree, strictly validates the post-build labelled CTest inventory, exposes its matrix as the workflow job output, and stamps the reusable build.
+- `ci/scripts/build_integrity.sh`: detects one complete runtime contract, builds the default profile's architecture-neutral required targets and complete tree, strictly validates the post-build labelled CTest inventory, exposes its matrix as the workflow job output, and stamps the reusable build.
 - `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest with the exact `build-smoke` label excluded.
 - `ci/scripts/build_smoke_test.sh`: revalidates and runs the exact CTest name in `SMOKE_TEST_NAME` from a reusable default producer.
 - `ci/scripts/graph_cli_script_test.sh`: runs isolated positive, explicit-missing-source, and invalid-target REPL checks using the pre-execution Graph document capability marker described above.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
-- `ci/scripts/plugin_load_test.sh`: checks plugin artifacts, plugin manager tests, scheduler plugin loader tests, and CLI scheduler plugin listing.
-- `ci/scripts/scheduler_repeat_test.sh`: repeats key scheduler tests.
-- `ci/scripts/sanitizer_test.sh`: runs focused ASan or TSan tests from an isolated build directory.
+- `ci/scripts/plugin_load_test.sh`: checks operation plugins and selects either scheduler plugin loading/listing or policy plugin, registry, policy/execution, and CLI route checks.
+- `ci/scripts/execution_repeat_test.sh`: repeats the configured runtime contract's deterministic scheduler or policy/execution behavior tests.
+- `ci/scripts/sanitizer_test.sh`: runs shared and capability-selected focused ASan or TSan tests from an isolated build directory.
 
 ## Local Commands
 
@@ -219,6 +263,7 @@ CI_CHANGE_EVENT=push \
   bash ci/scripts/change_classification.sh
 bash ci/scripts/change_classification_test.sh
 python3 -B ci/scripts/build_smoke_inventory_test.py
+bash ci/scripts/runtime_capability_test.sh
 bash ci/scripts/ci_routing_test.sh
 CI_ARTIFACT_DIR=CI-results/integration-plan \
   bash ci/scripts/integration_plan.sh
@@ -242,8 +287,8 @@ BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
   CI_ARTIFACT_DIR=CI-results/plugin-load \
   bash ci/scripts/plugin_load_test.sh
 BUILD_DIR="$PWD/build/ci-default" CI_REUSE_BUILD=ON \
-  CI_ARTIFACT_DIR=CI-results/scheduler-repeat \
-  bash ci/scripts/scheduler_repeat_test.sh
+  CI_ARTIFACT_DIR=CI-results/execution-repeat \
+  bash ci/scripts/execution_repeat_test.sh
 SANITIZER=asan CI_ARTIFACT_DIR=CI-results/sanitizer-asan bash ci/scripts/sanitizer_test.sh
 ```
 
