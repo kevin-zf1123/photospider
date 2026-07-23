@@ -161,5 +161,9 @@ void load_or_create_config(const std::string& config_path, CliConfig& config);
  * One outer catch chain translates recoverable standard exceptions. The
  * process entry point alone owns resource-exhaustion exit policy, so this
  * reusable boundary preserves `std::bad_alloc` unchanged.
+ * @note `getopt_long` and its cursor/result globals are process-wide. Repeated
+ * serialized in-process calls are supported, but concurrent calls are not;
+ * embedders must serialize every complete `run_graph_cli` invocation, even
+ * when argument vectors and Host instances are distinct.
  */
 int run_graph_cli(int argc, char** argv, ps::Host& host);

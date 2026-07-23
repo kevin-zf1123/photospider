@@ -46,6 +46,10 @@ bool arguments_request_help(int argc, char** argv) noexcept {
  * Linux `getopt_long` uses `optind == 0` to clear hidden permutation state.
  * Calling this before both passes also isolates repeated in-process
  * `run_graph_cli` invocations with different option layouts.
+ * @note This helper mutates process-global `getopt` state (`optind` and, on
+ * Darwin, `optreset`) and performs no synchronization. It must not overlap any
+ * `getopt` or `getopt_long` scan; callers must serialize each complete
+ * `run_graph_cli` invocation.
  */
 void reset_cli_option_parser() noexcept {
 #if defined(__APPLE__)
@@ -95,6 +99,10 @@ void load_configured_policy_plugins(ps::Host& host, const CliConfig& config) {
  * configuration and every action. Resource exhaustion is rethrown unchanged;
  * `main` alone owns the process exit-code and allocation-independent
  * diagnostic policy.
+ * @note `getopt_long` and its cursor/result globals are process-wide. Repeated
+ * serialized in-process calls are supported, but concurrent calls are not;
+ * embedders must serialize every complete `run_graph_cli` invocation, even
+ * when argument vectors and Host instances are distinct.
  */
 int run_graph_cli(int argc, char** argv, ps::Host& svc) {
   try {
