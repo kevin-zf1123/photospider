@@ -110,8 +110,10 @@ Compute collaborator 位于 `src/lib/compute/`；ledger 与 Graph route binding 
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
-scratch demand 按最大 callback 并发数相乘，ready entry 与 byte 则按所有逻辑任务相乘，因此
-dependency release 已被预先覆盖。初始与 dependent entry 使用同一个 estimator 和 insertion
+scratch demand 按最大 callback 并发数相乘；该并发数是固定 worker 数、逻辑 task 数与 Run 可选
+正值 `maximum_parallelism` 三者的最小值。Ready entry 与 byte 仍按所有逻辑任务相乘，因此
+dependency release 已被预先覆盖。Reserved start 会针对 Run in-flight state 再次执行同一上限；
+该上限不会调整固定 pool 的大小。初始与 dependent entry 使用同一个 estimator 和 insertion
 boundary。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在所有
 initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
 active Run 和等待 settlement 之前销毁 caller-side submission vector 的 backing；此后只有暂存

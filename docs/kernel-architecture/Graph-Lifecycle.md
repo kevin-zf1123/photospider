@@ -119,13 +119,19 @@ retains the prior complete diagnostic together with the rest of runtime state.
 
 ## Execution Route Replacement
 
-Execution-route replacement is serialized with same-Graph compute and route
-inspection by the private per-Graph compute-request lane. Kernel first rejects
-anything outside the closed `cpu`, `serial_debug`, and `gpu_pipeline`
-vocabulary. Inside the lane, `GraphRuntime` copies the candidate id before
-locking route state, verifies the intent and checked generation, then publishes
-the copied id and next nonzero generation together. Same-name replacement also
-advances the generation.
+Execution-route inspection and replacement are serialized with same-Graph
+compute by the private per-Graph compute-request lane. Embedded Host inspection
+first preserves missing/closing-session classification as `NotFound`, then
+rejects an invalid `ComputeIntent` as `InvalidParameter` before the Kernel's
+optional route lookup. A valid intent whose copied route is absent remains
+`NotFound`; successful inspection returns only a copied route/statistics
+snapshot.
+
+For replacement, Kernel first rejects anything outside the closed `cpu`,
+`serial_debug`, and `gpu_pipeline` vocabulary. Inside the lane,
+`GraphRuntime` copies the candidate id before locking route state, verifies the
+intent and checked generation, then publishes the copied id and next nonzero
+generation together. Same-name replacement also advances the generation.
 
 No replacement constructs a worker, device owner, policy context, plugin, or
 resource reservation, so it needs no transient process headroom. Unknown
@@ -341,6 +347,8 @@ lease, socket, and shutdown rules are defined in
 | node replacement, existing target with malformed input, missing dependency, or cycle | `GraphErrc::InvalidYaml`; previous graph state remains visible |
 | forward/backward ROI projection, missing/closing session or missing endpoint | `GraphErrc::NotFound` |
 | forward/backward ROI projection, existing endpoints with no valid projection | `GraphErrc::InvalidParameter` |
+| execution inspection, missing/closing session or absent route | `GraphErrc::NotFound` |
+| execution inspection, existing session with invalid intent | `GraphErrc::InvalidParameter` |
 | execution replacement, unknown route, invalid intent, generation exhaustion, or handled lane failure | `GraphErrc::InvalidParameter`; old route binding remains published |
 | execution replacement, missing or closing session | `GraphErrc::NotFound` |
 | clear or close, missing session | `GraphErrc::NotFound` |

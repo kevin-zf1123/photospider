@@ -3764,6 +3764,59 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
   EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
 }
 
+/**
+ * @brief Verifies execution inspection preserves public error categories.
+ *
+ * @return Nothing.
+ * @throws Nothing when embedded Host setup and status translation honor the
+ * public contract; GoogleTest records unexpected failures.
+ * @note Missing sessions retain `NotFound`, including when the supplied enum
+ * is also invalid. An existing session with the same invalid enum must return
+ * `InvalidParameter` before Kernel optional lookup can erase the distinction.
+ */
+TEST(EmbeddedHostAdapter,
+     ExecutionInfoDistinguishesMissingSessionFromInvalidIntent) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_execution_info_error_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  constexpr ComputeIntent kInvalidIntent = static_cast<ComputeIntent>(99);
+  const GraphSessionId missing_session{"missing_execution_info_graph"};
+  const auto missing =
+      host->execution_info(missing_session, ComputeIntent::GlobalHighPrecision);
+  EXPECT_FALSE(missing.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
+
+  const auto missing_with_invalid_intent =
+      host->execution_info(missing_session, kInvalidIntent);
+  EXPECT_FALSE(missing_with_invalid_intent.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_with_invalid_intent.status),
+            GraphErrc::NotFound);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "execution_info_invalid_intent");
+  const auto invalid_intent = host->execution_info(session, kInvalidIntent);
+  EXPECT_FALSE(invalid_intent.status.ok);
+  EXPECT_EQ(checked_graph_error_code(invalid_intent.status),
+            GraphErrc::InvalidParameter);
+
+  const auto valid =
+      host->execution_info(session, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(valid.status.ok) << valid.status.message;
+  EXPECT_EQ(valid.value.intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_FALSE(valid.value.execution_type.empty());
+}
+
+/**
+ * @brief Verifies execution replacement preserves missing-session lookup.
+ *
+ * @return Nothing.
+ * @throws Nothing when embedded Host setup and status translation honor the
+ * public contract; GoogleTest records unexpected failures.
+ * @note Unknown routes on an existing session remain `InvalidParameter`, while
+ * missing and already closed sessions remain `NotFound`.
+ */
 TEST(EmbeddedHostAdapter, ReplaceExecutionReturnsNotFoundForMissingSession) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_execution_missing_test");

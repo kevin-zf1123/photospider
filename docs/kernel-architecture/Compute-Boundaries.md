@@ -130,9 +130,13 @@ area is the pure-C policy ABI declared by
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
 retained storage is charged once. Uniform per-task retained and scratch demand
-is multiplied by maximum callback concurrency, while ready entries and bytes
-are multiplied by every logical task so dependency release is already covered.
-Initial and dependent entries use the same estimator and insertion boundary.
+is multiplied by maximum callback concurrency: the minimum of the fixed worker
+count, logical task count, and the Run's optional positive
+`maximum_parallelism`. Ready entries and bytes are multiplied by every logical
+task so dependency release is already covered. The same cap is enforced again
+against Run in-flight state at reserved start; it does not resize the fixed
+pool. Initial and dependent entries use the same estimator and insertion
+boundary.
 Copied graph-identity metadata is charged by actual string capacity plus its
 terminator. After every initial value and ready grant has moved into a staged
 queue entry, `ExecutionService` destroys the caller-side submission-vector

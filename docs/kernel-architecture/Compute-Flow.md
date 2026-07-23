@@ -229,6 +229,9 @@ selected private route's logical completion count.
 
 Before a Run is published, the service atomically reserves its complete
 checked CPU, retained-memory, scratch, ready-entry, and ready-byte vector.
+CPU slots and uniform per-task retained/scratch envelopes use the minimum of
+fixed workers, logical tasks, and the Run's optional positive maximum
+parallelism; ready entries and bytes still cover every logical task.
 Initial and dependent entries hold child ready grants; reserved start exchanges
 that authority for CPU/memory/scratch before entering the submission's fixed
 CPU or Metal lane. The service rejects a device outside the configured

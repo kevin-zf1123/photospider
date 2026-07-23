@@ -113,11 +113,13 @@ lifecycle registry 或 public cancellation control。
 **`ComputeRunQos`**
 Run 捕获的私有不可变调度输入：显式 `Interactive` 或 `Throughput` service class、可选的单调时钟
 absolute deadline、正 weight 与可选的正 maximum-parallelism descriptor。当前 service 会将
-class、deadline 与 weight 用于 policy ordering 和 headroom admission。Maximum parallelism 会
-继续记录，但尚不是 execution cap。Deadline 会排列 interactive work；当现有 cooperative boundary
-观察到 injected monotonic clock 已达到或超过该值时，还会通过 Run terminal arbiter 提出
-`DeadlineExceeded`。这会在没有 timer thread 或 wall clock 的情况下协作式使 Run 过期。当前
-Kernel request 使用 throughput，且这些值都不会从 intent 或 output quality 推断。
+class、deadline 与 weight 用于 policy ordering 和 headroom admission。Maximum parallelism 会同时
+限制 Run root 对 CPU/retained/scratch 的 callback-concurrency 估算，以及该 Run 同时 in-flight 的
+callback 数量；它不会调整固定 worker pool 的大小。Ready-entry 与 ready-byte 准入仍覆盖每个逻辑
+task。Deadline 会排列 interactive work；当现有 cooperative boundary 观察到 injected monotonic
+clock 已达到或超过该值时，还会通过 Run terminal arbiter 提出 `DeadlineExceeded`。这会在没有
+timer thread 或 wall clock 的情况下协作式使 Run 过期。当前 Kernel request 使用 throughput，
+且这些值都不会从 intent 或 output quality 推断。
 
 **`FullTaskGraph`**
 一个 graph generation、compute intent 和 task-shape 配置下完整的 node/tile task 形态。

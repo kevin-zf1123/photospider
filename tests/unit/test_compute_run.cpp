@@ -3423,6 +3423,93 @@ TEST(ExecutionService, SeparatesSharedConcurrentAndLogicalTaskResources) {
 }
 
 /**
+ * @brief Proves Run maximum parallelism bounds exact root admission resources.
+ *
+ * @return Nothing.
+ * @throws Standard Run, service, submission, or worker exceptions unchanged;
+ * GoogleTest reports unexpected failures.
+ * @note The capped Run executes four logical tasks on a four-worker service
+ * whose retained/scratch limits admit only one callback envelope; CPU
+ * capacity remains at the service's required worker-pool floor. The otherwise
+ * identical uncapped Run is rejected before callback entry, proving both the
+ * diagnostic estimate and production admission use the Run QoS cap while
+ * ready grants still cover every logical task.
+ */
+TEST(ExecutionService, MaximumParallelismCapsRunAdmissionResources) {
+  constexpr unsigned int kWorkerCount = 4U;
+  constexpr int kLogicalTaskCount = 4;
+  constexpr ReadyTaskResourceDemand kTaskDemand{17U, 19U, 23U};
+  constexpr std::uint64_t kSharedBytes = 29U;
+  const CpuRunResourceDemand run_demand{kSharedBytes, kTaskDemand};
+
+  ComputeRunSubmission capped_submission =
+      make_test_submission("maximum-parallelism-admission", 1U, 1);
+  capped_submission.qos.maximum_parallelism = 1U;
+  ComputeRun capped_run(std::move(capped_submission));
+  std::atomic_int entered{0};
+  ReadyTaskSubmission capped_representative =
+      make_counted_ready_submission(capped_run.acquire_lease(), 0U, 1, entered,
+                                    ExecutionTaskPriority::Normal, kTaskDemand);
+
+  ComputeRunSubmission uncapped_submission =
+      make_test_submission("maximum-parallelism-admission", 2U, 1);
+  uncapped_submission.qos.maximum_parallelism.reset();
+  ComputeRun uncapped_run(std::move(uncapped_submission));
+  ReadyTaskSubmission uncapped_representative = make_counted_ready_submission(
+      uncapped_run.acquire_lease(), 0U, 1, entered,
+      ExecutionTaskPriority::Normal, kTaskDemand);
+
+  ExecutionService estimate_service(kWorkerCount);
+  const ResourceVector capped_resources =
+      estimate_service.estimate_cpu_run_resources(
+          capped_representative, kLogicalTaskCount, run_demand);
+  const ResourceVector uncapped_resources =
+      estimate_service.estimate_cpu_run_resources(
+          uncapped_representative, kLogicalTaskCount, run_demand);
+
+  EXPECT_EQ(capped_resources.cpu_slots, 1U);
+  EXPECT_EQ(uncapped_resources.cpu_slots, kWorkerCount);
+  EXPECT_EQ(capped_resources.scratch_bytes, kTaskDemand.scratch_bytes);
+  EXPECT_EQ(uncapped_resources.scratch_bytes,
+            kWorkerCount * kTaskDemand.scratch_bytes);
+  EXPECT_LT(capped_resources.retained_memory_bytes,
+            uncapped_resources.retained_memory_bytes);
+  EXPECT_EQ(capped_resources.ready_entries,
+            static_cast<std::uint64_t>(kLogicalTaskCount));
+  EXPECT_EQ(capped_resources.ready_entries, uncapped_resources.ready_entries);
+  EXPECT_EQ(capped_resources.ready_bytes, uncapped_resources.ready_bytes);
+
+  ExecutionResourceLimits capped_limits = execution_limits(capped_resources);
+  capped_limits.cpu_slots = kWorkerCount;
+  ExecutionService service(kWorkerCount, capped_limits);
+  ExecutionServiceHost host;
+  std::vector<ReadyTaskSubmission> capped_ready;
+  capped_ready.push_back(std::move(capped_representative));
+  for (int task_index = 1; task_index < kLogicalTaskCount; ++task_index) {
+    capped_ready.push_back(make_counted_ready_submission(
+        capped_run.acquire_lease(), static_cast<std::uint64_t>(task_index),
+        task_index + 1, entered, ExecutionTaskPriority::Normal, kTaskDemand));
+  }
+  EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(capped_ready),
+                                      kLogicalTaskCount, run_demand));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), kLogicalTaskCount);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  std::vector<ReadyTaskSubmission> uncapped_ready;
+  uncapped_ready.push_back(std::move(uncapped_representative));
+  for (int task_index = 1; task_index < kLogicalTaskCount; ++task_index) {
+    uncapped_ready.push_back(make_counted_ready_submission(
+        uncapped_run.acquire_lease(), static_cast<std::uint64_t>(task_index),
+        task_index + 1, entered, ExecutionTaskPriority::Normal, kTaskDemand));
+  }
+  EXPECT_THROW(service.execute_run(host, "cpu", std::move(uncapped_ready),
+                                   kLogicalTaskCount, run_demand),
+               GraphError);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), kLogicalTaskCount);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
  * @brief Verifies metadata string capacity uses both admission multipliers.
  *
  * @return Nothing.

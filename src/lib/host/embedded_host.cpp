@@ -3566,7 +3566,13 @@ class EmbeddedHost final : public Host {
         });
   }
 
-  /** @copydoc Host::execution_info */
+  /**
+   * @copydoc Host::execution_info
+   * @note Closing and missing-session classification precedes intent
+   * validation, matching `replace_execution()`. For an admitted existing
+   * session, invalid intent values are rejected before Kernel optional-result
+   * lookup can collapse them into `NotFound`.
+   */
   Result<ExecutionInfoSnapshot> execution_info(
       const GraphSessionId& session, ComputeIntent intent) const override {
     return guarded_result<ExecutionInfoSnapshot>(
@@ -3576,6 +3582,17 @@ class EmbeddedHost final : public Host {
             return failure_result<ExecutionInfoSnapshot>(
                 GraphErrc::NotFound,
                 "graph session is closing: " + session.value);
+          }
+          if (!session_exists(*state_, session)) {
+            return failure_result<ExecutionInfoSnapshot>(
+                GraphErrc::NotFound,
+                "graph session not found: " + session.value);
+          }
+          if (intent != ComputeIntent::GlobalHighPrecision &&
+              intent != ComputeIntent::RealTimeUpdate) {
+            return failure_result<ExecutionInfoSnapshot>(
+                GraphErrc::InvalidParameter,
+                "invalid execution intent for session: " + session.value);
           }
           const auto info =
               state_->interaction.cmd_execution_info(session.value, intent);

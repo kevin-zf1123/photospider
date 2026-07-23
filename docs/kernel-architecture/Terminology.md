@@ -140,13 +140,16 @@ The private immutable scheduling inputs captured by a Run: an explicit
 `Interactive` or `Throughput` service class, an optional absolute monotonic
 deadline, a positive weight, and an optional positive maximum-parallelism
 descriptor. The current service applies class, deadline, and weight to policy
-ordering and headroom admission. Maximum parallelism remains recorded but is
-not yet an execution cap. A deadline orders interactive work and, when an
-existing cooperative boundary observes the injected monotonic clock at or
-after that value, proposes `DeadlineExceeded` through the Run's terminal
-arbiter. This expires the Run cooperatively without a timer thread or wall
-clock. Current Kernel requests use throughput, and none of these values is
-inferred from intent or output quality.
+ordering and headroom admission. Maximum parallelism caps both the Run root's
+CPU/retained/scratch callback-concurrency estimate and the number of its
+simultaneously in-flight callbacks; it does not resize the fixed worker pool.
+Ready-entry and ready-byte admission still covers every logical task. A
+deadline orders interactive work and, when an existing cooperative boundary
+observes the injected monotonic clock at or after that value, proposes
+`DeadlineExceeded` through the Run's terminal arbiter. This expires the Run
+cooperatively without a timer thread or wall clock. Current Kernel requests
+use throughput, and none of these values is inferred from intent or output
+quality.
 
 **`FullTaskGraph`**
 The complete node/tile task shape for one graph generation, compute intent, and

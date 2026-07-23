@@ -263,14 +263,16 @@ enum class ComputeRunQosClass {
  * @brief Immutable-by-copy QoS inputs captured in a Run descriptor.
  *
  * The value does not own workers, reservations, ready entries, or policy
- * state. ExecutionService copies it into one admitted Run and consumes the
- * explicit class, deadline, and weight through its private policy strategies.
+ * state. ExecutionService copies it into one admitted Run, consumes the
+ * explicit class, deadline, and weight through its private policy strategies,
+ * and applies maximum_parallelism to both root admission and physical starts.
  *
  * @throws Nothing for default construction; copying an optional time point
  * does not allocate.
- * @note Weight and maximum_parallelism are validated by ComputeRun. Issue #71
- * applies weight but leaves maximum_parallelism as descriptor input; intent,
- * QoS, resource admission, and commit policy remain distinct concepts.
+ * @note Weight and maximum_parallelism are validated by ComputeRun. The
+ * positive optional maximum caps admitted callback concurrency without
+ * resizing the fixed service pool; intent, QoS, resource admission, and
+ * commit policy remain distinct concepts.
  */
 struct ComputeRunQos {
   /** @brief Requested scheduling service class. */

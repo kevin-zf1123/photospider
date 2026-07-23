@@ -464,19 +464,21 @@ std::uint64_t ExecutionService::calculate_policy_service_cost(
  * @param configured_workers Frozen service worker count.
  * @param graph_identity Copied metadata identity shared by logical tasks.
  * @param total_task_count Positive complete task count.
+ * @param maximum_parallelism Optional positive Run callback-concurrency cap.
  * @param demand Shared once-per-Run and uniform per-task declarations.
  * @return Complete root vector and reusable child-grant envelopes.
  * @throws std::invalid_argument for a nonpositive task count.
  * @throws GraphError when any addition or multiplication overflows.
  * @note Retained and scratch task bytes scale with maximum callback
- * concurrency, not batch size. Ready entries/bytes scale with every logical
- * task so dependency release cannot exceed the admitted reservation.
+ * concurrency: the minimum of fixed workers, logical tasks, and the optional
+ * Run cap. Ready entries/bytes scale with every logical task so dependency
+ * release cannot exceed the admitted reservation.
  */
 ExecutionService::CpuRunAdmissionEstimate
-ExecutionService::calculate_cpu_run_admission(unsigned int configured_workers,
-                                              const std::string& graph_identity,
-                                              int total_task_count,
-                                              CpuRunResourceDemand demand) {
+ExecutionService::calculate_cpu_run_admission(
+    unsigned int configured_workers, const std::string& graph_identity,
+    int total_task_count, std::optional<std::uint32_t> maximum_parallelism,
+    CpuRunResourceDemand demand) {
   if (total_task_count <= 0) {
     throw std::invalid_argument(
         "ExecutionService requires a positive total task count.");
@@ -507,8 +509,13 @@ ExecutionService::calculate_cpu_run_admission(unsigned int configured_workers,
 
   const std::uint64_t logical_task_count =
       static_cast<std::uint64_t>(total_task_count);
-  const std::uint64_t concurrent_task_count = std::min(
+  std::uint64_t concurrent_task_count = std::min(
       static_cast<std::uint64_t>(configured_workers), logical_task_count);
+  if (maximum_parallelism.has_value()) {
+    concurrent_task_count =
+        std::min(concurrent_task_count,
+                 static_cast<std::uint64_t>(*maximum_parallelism));
+  }
 
   const std::optional<ResourceVector> execution_resources =
       checked_multiply_resources(
@@ -2958,9 +2965,11 @@ ResourceVector ExecutionService::estimate_cpu_run_resources(
     }
     configured_workers = pool_->configured_workers;
   }
-  return calculate_cpu_run_admission(configured_workers,
-                                     representative.metadata().graph_identity(),
-                                     total_task_count, run_resource_demand)
+  return calculate_cpu_run_admission(
+             configured_workers, representative.metadata().graph_identity(),
+             total_task_count,
+             representative.metadata().qos().maximum_parallelism,
+             run_resource_demand)
       .resources;
 }
 
@@ -3020,6 +3029,7 @@ void ExecutionService::execute_run(
   CpuRunAdmissionEstimate admission = calculate_cpu_run_admission(
       configured_workers,
       initial_submissions.front().metadata().graph_identity(), total_task_count,
+      initial_submissions.front().metadata().qos().maximum_parallelism,
       run_resource_demand);
   std::optional<ResourceLedger::Reservation> reservation;
   {

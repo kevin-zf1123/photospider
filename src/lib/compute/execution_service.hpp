@@ -777,8 +777,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws GraphError when any structural aggregation overflows.
    * @note This diagnostic mints no authority. `execute_run()` uses the same
    * calculation before ledger admission, and initial/dependent queue entries
-   * use the same resulting per-task envelope. Ordering-only work units and
-   * interactive headroom do not change this diagnostic resource vector.
+   * use the same resulting per-task envelope. CPU, retained-memory, and
+   * scratch concurrency is capped by the representative Run's optional
+   * maximum parallelism; ordering-only work units and interactive headroom do
+   * not change this diagnostic resource vector.
    */
   ResourceVector estimate_cpu_run_resources(
       const ReadyTaskSubmission& representative, int total_task_count,
@@ -1018,14 +1020,19 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param configured_workers Frozen positive service worker count.
    * @param graph_identity Stable metadata copied by every logical task.
    * @param total_task_count Positive complete task count.
+   * @param maximum_parallelism Optional positive Run callback-concurrency cap.
    * @param demand Shared and uniform per-task adapter declaration.
    * @return Root vector and uniform ready/execution child envelopes.
    * @throws std::invalid_argument for a nonpositive task count.
    * @throws GraphError when any structural arithmetic overflows.
+   * @note CPU slots and per-task retained/scratch bytes scale by the minimum
+   * of fixed workers, logical tasks, and the optional Run cap. Ready entries
+   * and bytes still cover every logical task for dependent release.
    */
   static CpuRunAdmissionEstimate calculate_cpu_run_admission(
       unsigned int configured_workers, const std::string& graph_identity,
-      int total_task_count, CpuRunResourceDemand demand);
+      int total_task_count, std::optional<std::uint32_t> maximum_parallelism,
+      CpuRunResourceDemand demand);
 
   /** @brief Ready-byte conversion unit used by both built-in policies. */
   static constexpr std::uint64_t kPolicyReadyByteQuantum = 4096U;
