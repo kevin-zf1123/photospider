@@ -1973,11 +1973,11 @@ if(TARGET photospider_internal_test_product)
         endif()
     endforeach()
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
-        test_kernel_contracts
-        test_policy_execution)
+        test_kernel_contracts)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         list(APPEND PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
-            test_host_adapter)
+            test_host_adapter
+            test_policy_execution)
     endif()
     list(SORT PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS)
     list(SORT PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS)
