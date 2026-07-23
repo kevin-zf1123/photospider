@@ -7,9 +7,9 @@ import argparse
 import json
 import os
 import pathlib
-import shutil
-import stat
 import subprocess
+
+from cmake_build_smoke_support import remove_work_tree
 
 
 def run(command: list[str], cwd: pathlib.Path) -> None:
@@ -26,105 +26,6 @@ def run(command: list[str], cwd: pathlib.Path) -> None:
 
     print("+", " ".join(command), flush=True)
     subprocess.run(command, cwd=cwd, check=True)
-
-
-def resolve_work_directory(
-    work: pathlib.Path, repo: pathlib.Path
-) -> pathlib.Path:
-    """@brief Validate one destructive nested-build directory without
-    following its symlinks for deletion.
-
-    @param work Caller-selected directory whose prior tree may be removed.
-    @param repo Photospider repository root that must remain untouched.
-    @return Absolute work spelling after every destructive-path guard passes;
-      the returned path is never replaced with a symlink target.
-    @throws OSError If the current directory, either path, or an existing work
-      component cannot be inspected.
-    @throws RuntimeError If symlink resolution cannot complete.
-    @throws ValueError If work contains parent traversal, resolves to the
-      repository, any repository ancestor, or any filesystem root, or has a
-      symlink in any existing path component.
-    @note Canonical resolution is used only for protected-location comparison.
-      Root-to-leaf lstat inspection is the final validation step, so deletion
-      callers retain the original absolute spelling and never receive a
-      resolved symlink target. The path is suitable only for caller-owned
-      transient build content.
-    """
-
-    absolute_work = (
-        work if work.is_absolute() else pathlib.Path.cwd() / work
-    )
-    if os.pardir in absolute_work.parts:
-        raise ValueError(
-            "refusing parent traversal in destructive work path: "
-            f"{absolute_work}"
-        )
-
-    resolved_repo = repo.resolve()
-    comparison_work = absolute_work.resolve()
-    if comparison_work.parent == comparison_work:
-        raise ValueError(
-            f"refusing to remove filesystem root: {comparison_work}"
-        )
-    if (
-        comparison_work == resolved_repo
-        or comparison_work in resolved_repo.parents
-    ):
-        raise ValueError(
-            "refusing to remove repository or ancestor as work path: "
-            f"{comparison_work}"
-        )
-
-    components = (*reversed(absolute_work.parents), absolute_work)
-    for component in components:
-        try:
-            metadata = component.lstat()
-        except FileNotFoundError:
-            break
-        if stat.S_ISLNK(metadata.st_mode):
-            raise ValueError(
-                "refusing symlink component in destructive work path: "
-                f"{component}"
-            )
-    return absolute_work
-
-
-def remove_work_tree(work: pathlib.Path, repo: pathlib.Path) -> pathlib.Path:
-    """@brief Remove one validated nested-build tree without hiding failure.
-
-    @param work Caller-selected directory whose previous contents must vanish.
-    @param repo Photospider repository root protected from recursive removal.
-    @return Absolute, non-symlink-resolved work directory, absent when this
-      function returns.
-    @throws OSError If path inspection, resolution, or recursive removal fails.
-    @throws ValueError If work contains parent traversal, resolves to a
-      protected destructive path, or has any existing symlink component.
-    @throws RuntimeError If symlink resolution cannot complete or recursive
-      removal returns while the tree remains.
-    @note Validation is repeated in this destructive helper so callers cannot
-      accidentally separate safety checks from deletion. An existing tree is
-      revalidated immediately before recursive removal to narrow the
-      check/delete replacement window. Recursive removal always receives the
-      validated absolute spelling, never a resolved symlink target. The helper
-      never creates the returned directory.
-    """
-
-    validated_work = resolve_work_directory(work, repo)
-    try:
-        validated_work.lstat()
-    except FileNotFoundError:
-        return validated_work
-
-    validated_work = resolve_work_directory(validated_work, repo)
-    shutil.rmtree(validated_work)
-    try:
-        validated_work.lstat()
-    except FileNotFoundError:
-        return validated_work
-    else:
-        raise RuntimeError(
-            f"nested provider build directory still exists: {validated_work}"
-        )
 
 
 def cmake_cache_values(build: pathlib.Path) -> dict[str, str]:
@@ -411,14 +312,17 @@ def main() -> int:
     @throws OSError If path handling or command startup fails.
     @throws SystemExit If command-line parsing rejects the invocation.
     @throws UnicodeError If the nested CMake cache is not valid UTF-8 text.
-    @throws ValueError If the destructive work path resolves to a protected
-      repository or filesystem location.
+    @throws ValueError If the destructive work path is empty/relative,
+      traverses parents, names a protected repository/filesystem/temporary
+      root, or contains an untrusted symlink component.
     @throws RuntimeError If cleanup, cache metadata, configuration selection,
       or executable discovery violates the nested-build contract.
     @throws subprocess.CalledProcessError If configure, build, or test
       execution exits nonzero.
     @note The function removes only the validated caller-owned work tree before
-      configuration. It leaves the successful nested build available to CTest
+      configuration. Darwin's exact root-owned ``/tmp -> /private/tmp`` system
+      alias is normalized to its physical prefix; no other symlink is trusted.
+      The function leaves the successful nested build available to CTest
       cleanup and writes no separate report or provenance artifact.
     """
 

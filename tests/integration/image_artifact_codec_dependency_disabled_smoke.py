@@ -7,7 +7,7 @@ import argparse
 import pathlib
 import subprocess
 
-from optional_opencv_operation_provider_build_smoke import remove_work_tree
+from cmake_build_smoke_support import remove_work_tree
 
 
 def run(command: list[str], cwd: pathlib.Path) -> None:
@@ -27,20 +27,24 @@ def run(command: list[str], cwd: pathlib.Path) -> None:
 
 
 def main() -> int:
-    """@brief Build the fake-codec cache contract with the operation provider off.
+    """@brief Build the fake-codec cache contract with the provider off.
 
     @return Zero after configure, focused build, and fake-codec tests succeed.
     @throws OSError If path resolution or command startup fails.
     @throws SystemExit If argument parsing rejects the invocation.
-    @throws ValueError If the destructive work path is unsafe.
+    @throws ValueError If the destructive work path is empty/relative,
+      traverses parents, names a protected root, or contains an untrusted
+      symlink component.
     @throws RuntimeError If safe cleanup fails or the focused executable is
       missing after build.
-    @throws subprocess.CalledProcessError If configure, build, or test execution
-      exits nonzero.
-    @note This profile intentionally disables the repository OpenCV operation
-      provider while retaining the separately configured OpenCV artifact adapter.
-      `DependencyDisabledInstallSmoke` separately validates complete
-      OpenCV-free product composition.
+    @throws subprocess.CalledProcessError If configure, build, or test
+      execution exits nonzero.
+    @note Darwin's exact root-owned ``/tmp -> /private/tmp`` system alias is
+      normalized to its physical prefix before cleanup; no other symlink is
+      trusted. This profile intentionally disables the repository OpenCV
+      operation provider while retaining the separately configured OpenCV
+      artifact adapter. `DependencyDisabledInstallSmoke` separately validates
+      complete OpenCV-free product composition.
     """
 
     parser = argparse.ArgumentParser()

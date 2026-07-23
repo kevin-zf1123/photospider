@@ -6,11 +6,14 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import stat
 import tempfile
 import unittest
 from typing import Optional
 from unittest import mock
 
+import cmake_build_smoke_support as build_support
+import image_artifact_codec_dependency_disabled_smoke as image_consumer
 import optional_opencv_operation_provider_build_smoke as subject
 
 
@@ -142,7 +145,9 @@ class WorkDirectorySafetyTest(unittest.TestCase):
             for candidate in (synthetic_repo, synthetic_parent):
                 with self.subTest(candidate=candidate):
                     with self.assertRaises(ValueError):
-                        subject.remove_work_tree(candidate, synthetic_repo)
+                        build_support.remove_work_tree(
+                            candidate, synthetic_repo
+                        )
                     self.assertEqual(
                         marker.read_text(encoding="utf-8"), "synthetic"
                     )
@@ -178,9 +183,11 @@ class WorkDirectorySafetyTest(unittest.TestCase):
 
             self.assertTrue(traversal_work.is_absolute())
             self.assertIn(os.pardir, traversal_work.parts)
-            with mock.patch.object(subject.shutil, "rmtree") as remover:
+            with mock.patch.object(
+                build_support.shutil, "rmtree"
+            ) as remover:
                 with self.assertRaisesRegex(ValueError, "parent traversal"):
-                    subject.resolve_work_directory(
+                    build_support.resolve_work_directory(
                         traversal_work, synthetic_repo
                     )
                 remover.assert_not_called()
@@ -188,8 +195,201 @@ class WorkDirectorySafetyTest(unittest.TestCase):
                 marker.read_text(encoding="utf-8"), "synthetic"
             )
 
+    def test_rejects_empty_and_relative_work_spellings(self) -> None:
+        """@brief Reject work spellings whose ownership root is ambiguous.
+
+        @return None after empty and nonempty relative paths are rejected.
+        @throws AssertionError If either spelling is accepted or recursive
+          removal is reached.
+        @note The candidates are parsed only; the mocked remover guarantees
+          that this regression never performs recursive deletion.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-work-relative-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            synthetic_repo = sandbox / "checkout" / "photospider"
+            synthetic_repo.mkdir(parents=True)
+
+            for candidate in (pathlib.Path(), pathlib.Path("relative-work")):
+                with self.subTest(candidate=candidate):
+                    with mock.patch.object(
+                        build_support.shutil, "rmtree"
+                    ) as remover:
+                        with self.assertRaisesRegex(
+                            ValueError, "absolute"
+                        ):
+                            build_support.resolve_work_directory(
+                                candidate, synthetic_repo
+                            )
+                        remover.assert_not_called()
+
+    def test_accepts_only_injected_trusted_darwin_tmp_alias(self) -> None:
+        """@brief Accept only the exact trusted Darwin temporary-root alias.
+
+        The predicate is exercised with injected scalar filesystem facts, so
+        this regression runs on every host without creating or replacing
+        ``/tmp``. A synthetic trusted mapping then drives the real validation
+        and recursive-removal path.
+
+        @return None after the trusted child is removed through its physical
+          spelling and every near-miss predicate is rejected.
+        @throws OSError If the disposable synthetic tree cannot be created.
+        @throws AssertionError If trust is widened, normalization escapes the
+          physical subtree, or the logical root itself becomes removable.
+        @note Injection is limited to private test helpers. Production callers
+          always inspect the platform-owned ``/tmp`` and ``/private/tmp``.
+        """
+
+        physical_tmp = pathlib.Path("/private/tmp")
+        self.assertIsNone(
+            build_support._trusted_system_tmp_mapping(system_name="Linux")
+        )
+        self.assertTrue(
+            build_support._is_trusted_darwin_tmp_alias(
+                system_name="Darwin",
+                alias_mode=stat.S_IFLNK | 0o777,
+                alias_uid=0,
+                resolved_alias=physical_tmp,
+                physical_mode=stat.S_IFDIR | 0o1777,
+                physical_uid=0,
+            )
+        )
+        rejected_facts = (
+            {"system_name": "Linux"},
+            {"alias_mode": stat.S_IFDIR | 0o1777},
+            {"alias_uid": 501},
+            {"resolved_alias": pathlib.Path("/tmp-controlled")},
+            {"physical_mode": stat.S_IFLNK | 0o777},
+            {"physical_uid": 501},
+        )
+        trusted_facts = {
+            "system_name": "Darwin",
+            "alias_mode": stat.S_IFLNK | 0o777,
+            "alias_uid": 0,
+            "resolved_alias": physical_tmp,
+            "physical_mode": stat.S_IFDIR | 0o1777,
+            "physical_uid": 0,
+        }
+        for override in rejected_facts:
+            with self.subTest(override=override):
+                facts = dict(trusted_facts)
+                facts.update(override)
+                self.assertFalse(
+                    build_support._is_trusted_darwin_tmp_alias(**facts)
+                )
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-work-trusted-alias-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            synthetic_repo = sandbox / "checkout" / "photospider"
+            synthetic_repo.mkdir(parents=True)
+            logical_root = sandbox / "logical-tmp"
+            logical_root.mkdir()
+            physical_root = sandbox / "physical-tmp"
+            physical_work = physical_root / "nested" / "work"
+            physical_work.mkdir(parents=True)
+            (physical_work / "stale").write_text(
+                "stale", encoding="utf-8"
+            )
+
+            mapping = (logical_root, physical_root)
+            with mock.patch.object(
+                build_support,
+                "_trusted_system_tmp_mapping",
+                return_value=mapping,
+            ):
+                removed = build_support.remove_work_tree(
+                    logical_root / "nested" / "work", synthetic_repo
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "temporary root"
+                ):
+                    build_support.resolve_work_directory(
+                        logical_root, synthetic_repo
+                    )
+
+            self.assertEqual(removed, physical_work)
+            self.assertFalse(physical_work.exists())
+            self.assertTrue(logical_root.is_dir())
+            self.assertTrue(physical_root.is_dir())
+
+    def test_trusted_alias_still_rejects_remaining_symlink_component(
+        self,
+    ) -> None:
+        """@brief Recheck untrusted components after trusted-prefix rewriting.
+
+        @return None after a synthetic intermediate symlink and its unrelated
+          target remain untouched.
+        @throws OSError If the disposable tree cannot be created.
+        @throws AssertionError If prefix trust suppresses later ``lstat``
+          validation or mutates the unrelated target.
+        @note The test injects only the logical-to-physical root mapping; the
+          nested symlink is a real disposable filesystem object.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-work-alias-symlink-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            synthetic_repo = sandbox / "checkout" / "photospider"
+            synthetic_repo.mkdir(parents=True)
+            logical_root = sandbox / "logical-tmp"
+            logical_root.mkdir()
+            physical_root = sandbox / "physical-tmp"
+            physical_root.mkdir()
+            mapping = (logical_root, physical_root)
+            unrelated_target = sandbox / "unrelated-target"
+            unrelated_work = unrelated_target / "work"
+            unrelated_work.mkdir(parents=True)
+            marker = unrelated_work / "must-survive"
+            marker.write_text("unrelated", encoding="utf-8")
+            physical_link = physical_root / "nested-link"
+            try:
+                physical_link.symlink_to(
+                    unrelated_target, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            with mock.patch.object(
+                build_support,
+                "_trusted_system_tmp_mapping",
+                return_value=mapping,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "symlink component"
+                ):
+                    build_support.remove_work_tree(
+                        logical_root / "nested-link" / "work",
+                        synthetic_repo,
+                    )
+
+            self.assertTrue(physical_link.is_symlink())
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"), "unrelated"
+            )
+
+    def test_both_consumers_share_the_hardened_remover(self) -> None:
+        """@brief Lock both destructive build-smoke consumers to one helper.
+
+        @return None after both imported remover objects match the shared
+          support implementation.
+        @throws AssertionError If either consumer regains a divergent cleanup
+          path.
+        @note Import identity is the maintained seam: both real CTest drivers
+          call the same validated remover before nested configuration.
+        """
+
+        self.assertIs(
+            image_consumer.remove_work_tree, build_support.remove_work_tree
+        )
+        self.assertIs(subject.remove_work_tree, build_support.remove_work_tree)
+
     def test_rejects_current_filesystem_root_during_resolution(self) -> None:
-        """@brief Reject the current filesystem root through its dedicated guard.
+        """@brief Reject the current filesystem root through its guard.
 
         The test derives the active root from a disposable absolute path's
         anchor, then calls only `resolve_work_directory` with that root.
@@ -217,9 +417,11 @@ class WorkDirectorySafetyTest(unittest.TestCase):
             self.assertTrue(synthetic_absolute_path.is_absolute())
             self.assertTrue(filesystem_root.is_absolute())
             self.assertEqual(filesystem_root.parent, filesystem_root)
-            with mock.patch.object(subject.shutil, "rmtree") as remover:
+            with mock.patch.object(
+                build_support.shutil, "rmtree"
+            ) as remover:
                 with self.assertRaisesRegex(ValueError, "filesystem root"):
-                    subject.resolve_work_directory(
+                    build_support.resolve_work_directory(
                         filesystem_root, synthetic_repo
                     )
                 remover.assert_not_called()
@@ -263,7 +465,9 @@ class WorkDirectorySafetyTest(unittest.TestCase):
             for candidate in candidates:
                 with self.subTest(candidate=candidate):
                     with self.assertRaises(ValueError):
-                        subject.remove_work_tree(candidate, synthetic_repo)
+                        build_support.remove_work_tree(
+                            candidate, synthetic_repo
+                        )
                     self.assertEqual(
                         marker.read_text(encoding="utf-8"), "synthetic"
                     )
@@ -298,7 +502,7 @@ class WorkDirectorySafetyTest(unittest.TestCase):
                 self.skipTest(f"directory symlinks unavailable: {error}")
 
             with self.assertRaises(ValueError) as raised:
-                subject.remove_work_tree(work_link, synthetic_repo)
+                build_support.remove_work_tree(work_link, synthetic_repo)
 
             self.assertIn(str(work_link), str(raised.exception))
             self.assertTrue(work_link.is_symlink())
@@ -338,7 +542,7 @@ class WorkDirectorySafetyTest(unittest.TestCase):
                 self.skipTest(f"directory symlinks unavailable: {error}")
 
             with self.assertRaises(ValueError) as raised:
-                subject.remove_work_tree(
+                build_support.remove_work_tree(
                     parent_link / "work", synthetic_repo
                 )
 
@@ -368,21 +572,23 @@ class WorkDirectorySafetyTest(unittest.TestCase):
             work.mkdir()
 
             with mock.patch.object(
-                subject.shutil,
+                build_support.shutil,
                 "rmtree",
                 side_effect=OSError("injected recursive removal failure"),
             ):
                 with self.assertRaisesRegex(
                     OSError, "injected recursive removal failure"
                 ):
-                    subject.remove_work_tree(work, synthetic_repo)
+                    build_support.remove_work_tree(work, synthetic_repo)
             self.assertTrue(work.is_dir())
 
-            with mock.patch.object(subject.shutil, "rmtree", return_value=None):
+            with mock.patch.object(
+                build_support.shutil, "rmtree", return_value=None
+            ):
                 with self.assertRaisesRegex(
                     RuntimeError, "directory still exists"
                 ):
-                    subject.remove_work_tree(work, synthetic_repo)
+                    build_support.remove_work_tree(work, synthetic_repo)
             self.assertTrue(work.is_dir())
 
     def test_removes_only_valid_synthetic_work_tree(self) -> None:
@@ -407,7 +613,7 @@ class WorkDirectorySafetyTest(unittest.TestCase):
             work.mkdir()
             (work / "stale").write_text("stale", encoding="utf-8")
 
-            resolved = subject.remove_work_tree(work, synthetic_repo)
+            resolved = build_support.remove_work_tree(work, synthetic_repo)
 
             self.assertEqual(resolved, work.resolve())
             self.assertFalse(work.exists())
@@ -422,7 +628,7 @@ class ConfigurationLayoutTest(unittest.TestCase):
     """
 
     def test_resolves_single_and_multi_config_layouts_from_cache(self) -> None:
-        """@brief Require cache metadata, not platform, to choose subdirectories.
+        """@brief Require cache metadata to choose executable subdirectories.
 
         @return None after single- and multi-config paths match their caches.
         @throws AssertionError If either cached generator mode resolves
