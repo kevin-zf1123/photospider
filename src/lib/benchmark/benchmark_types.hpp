@@ -58,7 +58,11 @@ struct BenchmarkResult {
   std::string benchmark_name;  // 测试会话名称, e.g., "small_square_blur"
   std::string op_name;  // 核心测试的操作, e.g., "image_process:gaussian_blur"
   int width = 0, height = 0;
-  /** @brief Resolved process execution-worker count for this benchmark run. */
+  /**
+   * @brief Resolved Run maximum-parallelism cap for this benchmark.
+   * @note The fixed process worker ceiling may be lower; this field reports the
+   *       benchmark control applied to each Run, not a resized pool.
+   */
   int num_threads = 1;
 
   // --- 原始数据 ---
@@ -127,8 +131,8 @@ struct BenchmarkSessionConfig {
    * @brief Product execution and repetition controls for this session.
    * @throws Nothing for value construction; string-free fields do not
    *         allocate.
-   * @note Worker selection is applied to the process execution service before
-   * each benchmark run.
+   * @note Thread selection becomes Run QoS. Process execution infrastructure
+   *       remains Host-owned and fixed independently of individual sessions.
    */
   struct ExecutionConfig {
     /**
@@ -137,9 +141,10 @@ struct BenchmarkSessionConfig {
      */
     int runs = 10;
     /**
-     * @brief Process execution-worker request from zero through eight.
+     * @brief Run maximum-parallelism request from zero through eight.
      * @details Zero resolves to bounded hardware concurrency in `[1,8]`;
-     * positive values remain exact.
+     * positive values remain exact. The resolved value caps callbacks for this
+     * benchmark Run without resizing the process worker pool.
      * @default 0
      */
     int threads = 0;

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -499,6 +500,55 @@ void write_benchmark_probe_graph(const std::filesystem::path& path) {
 }
 
 /**
+ * @brief Writes mixed enabled, disabled, valid, invalid, and automatic
+ * sessions.
+ * @param path Benchmark configuration destination.
+ * @return Nothing.
+ * @throws std::runtime_error if the file cannot be written completely.
+ * @throws std::bad_alloc if path or stream storage exhausts memory.
+ * @note Every enabled valid session uses one repetition of the same custom
+ *       probe Graph. The disabled out-of-range numeric session proves its
+ *       thread range is outside RunAll preflight; the enabled invalid session
+ *       exercises skip diagnostics without blocking later valid sessions.
+ */
+void write_mixed_benchmark_config(const std::filesystem::path& path) {
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error("failed to open mixed benchmark config");
+  }
+  output << "sessions:\n"
+         << "  - name: one_thread\n"
+         << "    enabled: true\n"
+         << "    auto_generate: false\n"
+         << "    yaml_path: probe.yaml\n"
+         << "    execution: {runs: 1, threads: 1, parallel: true}\n"
+         << "  - name: disabled_invalid\n"
+         << "    enabled: false\n"
+         << "    auto_generate: false\n"
+         << "    yaml_path: probe.yaml\n"
+         << "    execution: {runs: 1, threads: 9, parallel: true}\n"
+         << "  - name: enabled_invalid\n"
+         << "    enabled: true\n"
+         << "    auto_generate: false\n"
+         << "    yaml_path: probe.yaml\n"
+         << "    execution: {runs: 1, threads: 9, parallel: true}\n"
+         << "  - name: two_threads\n"
+         << "    enabled: true\n"
+         << "    auto_generate: false\n"
+         << "    yaml_path: probe.yaml\n"
+         << "    execution: {runs: 1, threads: 2, parallel: true}\n"
+         << "  - name: automatic_threads\n"
+         << "    enabled: true\n"
+         << "    auto_generate: false\n"
+         << "    yaml_path: probe.yaml\n"
+         << "    execution: {runs: 1, parallel: true}\n";
+  output.close();
+  if (!output) {
+    throw std::runtime_error("failed to write mixed benchmark config");
+  }
+}
+
+/**
  * @brief Builds one custom benchmark config targeting the probe sink.
  * @param yaml_path Absolute source Graph path.
  * @param worker_count Exact benchmark execution-worker request.
@@ -595,33 +645,23 @@ void write_curve_output_graph(const std::filesystem::path& path) {
 }
 
 /**
- * @brief Computes one deterministic curve image with an exact worker count.
- * @param host Seeded public Host used for execution configuration and compute.
+ * @brief Computes one deterministic curve image with an exact Run cap.
+ * @param host Seeded public Host whose process execution pool is already fixed.
  * @param root Temporary root owning source, session, and cache paths.
  * @param yaml_path Deterministic Graph source path.
- * @param worker_count Exact process execution worker count.
+ * @param maximum_parallelism Exact positive Run callback cap.
  * @param session Unique graph session label.
  * @return Owned public image snapshot retained after graph close.
  * @throws std::bad_alloc if request, Host, or image storage exhausts memory.
- * @throws std::runtime_error if configuration, load, compute, or close fails.
+ * @throws std::runtime_error if load, compute, or close fails.
  * @note Compute uses the real public Host and tiled built-in callback path with
- *       cache reads, disk writes, and output saves disabled.
+ *       cache reads, disk writes, and output saves disabled. The cap changes
+ *       Run QoS without changing the process pool.
  */
 ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
                                 const std::filesystem::path& yaml_path,
-                                unsigned int worker_count,
+                                unsigned int maximum_parallelism,
                                 const std::string& session) {
-  HostExecutionConfig execution_config;
-  execution_config.hp_type = "cpu";
-  execution_config.rt_type = "cpu";
-  execution_config.worker_count = worker_count;
-  const VoidResult configured =
-      host.configure_execution_defaults(execution_config);
-  if (!configured.status.ok) {
-    throw std::runtime_error("failed to configure deterministic curve Graph: " +
-                             configured.status.message);
-  }
-
   GraphLoadRequest load;
   load.session = GraphSessionId{session};
   load.root_dir = (root / "sessions").string();
@@ -641,6 +681,7 @@ ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
   request.cache.disable_disk_cache = true;
   request.cache.nosave = true;
   request.execution.parallel = true;
+  request.execution.maximum_parallelism = maximum_parallelism;
   request.intent = ComputeIntent::GlobalHighPrecision;
   const Result<ImageBuffer> computed = host.compute_and_get_image(request);
   const VoidResult closed = host.close_graph(load.session);
@@ -656,16 +697,16 @@ ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
 }
 
 /**
- * @brief Proves automatic benchmark workers reach Host as one resolved grant.
+ * @brief Proves automatic benchmark threads become one Run cap.
  *
- * @throws Nothing when the benchmark publishes its resolved nonzero grant;
+ * @throws Nothing when the benchmark publishes its resolved nonzero cap;
  *         GoogleTest records mismatches and setup exceptions fail the test.
- * @note The Host boundary record and benchmark result must share the same
- *       value from one resolution. The verdict does not repeat hardware
- *       detection or depend on route construction resolving a zero.
+ * @note Process preparation uses the zero idempotent worker request, while the
+ *       compute request and benchmark result share one positive cap resolved
+ *       at the benchmark boundary.
  */
 TEST(OpenCvOperationConcurrency,
-     BenchmarkAutoThreadsPublishResolvedGrantToHost) {
+     BenchmarkAutoThreadsPublishRunCapAndPreserveFixedPool) {
   ScopedBenchmarkTempDir temp("photospider_benchmark_auto_worker_grant");
   const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
   write_benchmark_probe_graph(yaml_path);
@@ -685,9 +726,13 @@ TEST(OpenCvOperationConcurrency,
   const auto loaded = std::find_if(
       invocations.begin(), invocations.end(),
       [](const auto& call) { return call.method == "graph.load"; });
+  const auto computed = std::find_if(
+      invocations.begin(), invocations.end(),
+      [](const auto& call) { return call.method == "compute.submit"; });
 
   ASSERT_NE(configured, invocations.end());
   ASSERT_NE(loaded, invocations.end());
+  ASSERT_NE(computed, invocations.end());
   EXPECT_LT(configured, loaded);
   EXPECT_EQ(std::count_if(invocations.begin(), invocations.end(),
                           [](const auto& call) {
@@ -696,24 +741,126 @@ TEST(OpenCvOperationConcurrency,
                           }),
             1);
   EXPECT_EQ(configured->text, "cpu\ncpu");
-  EXPECT_GT(configured->worker_count, 0U);
-  EXPECT_LE(configured->worker_count, 8U);
-  EXPECT_EQ(configured->worker_count,
+  EXPECT_EQ(configured->worker_count, 0U);
+  ASSERT_TRUE(computed->compute_request.has_value());
+  ASSERT_TRUE(
+      computed->compute_request->execution.maximum_parallelism.has_value());
+  EXPECT_EQ(*computed->compute_request->execution.maximum_parallelism,
             static_cast<unsigned int>(result.num_threads));
+  EXPECT_GT(result.num_threads, 0);
+  EXPECT_LE(result.num_threads, 8);
 }
 
 /**
- * @brief Proves benchmark thread input controls real execution callbacks.
+ * @brief Proves mixed benchmark sessions share one process preparation.
+ *
+ * @throws Nothing when valid sessions publish their own caps, invalid enabled
+ *         input is diagnosed/skipped, and a disabled out-of-range numeric cap
+ *         is not preflighted.
+ * @note Configuration parsing still validates YAML structure and field types.
+ *       The Host spy makes process preparation count, per-Run QoS, result
+ *       order, and range-validation scope deterministic without backend
+ *       timing.
+ */
+TEST(OpenCvOperationConcurrency,
+     BenchmarkRunAllSharesPoolAndPreservesMixedSessionCaps) {
+  ScopedBenchmarkTempDir temp("photospider_benchmark_mixed_run_caps");
+  const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
+  write_benchmark_probe_graph(yaml_path);
+  write_mixed_benchmark_config(temp.root() / "benchmark_config.yaml");
+
+  testing::IpcHostSpy host;
+  BenchmarkService service(host);
+  ::testing::internal::CaptureStderr();
+  const std::vector<BenchmarkResult> results =
+      service.RunAll(temp.root().string());
+  const std::string diagnostics = ::testing::internal::GetCapturedStderr();
+  const std::vector<testing::IpcHostInvocation> invocations =
+      host.invocations();
+
+  ASSERT_EQ(results.size(), 3U);
+  EXPECT_EQ(results[0].benchmark_name, "one_thread");
+  EXPECT_EQ(results[0].num_threads, 1);
+  EXPECT_EQ(results[1].benchmark_name, "two_threads");
+  EXPECT_EQ(results[1].num_threads, 2);
+  EXPECT_EQ(results[2].benchmark_name, "automatic_threads");
+  EXPECT_EQ(results[2].num_threads,
+            static_cast<int>(expected_benchmark_workers(0)));
+  EXPECT_NE(diagnostics.find("Error running benchmark 'enabled_invalid': "
+                             "benchmark execution.threads must be between "
+                             "zero and eight"),
+            std::string::npos);
+  EXPECT_EQ(diagnostics.find("disabled_invalid"), std::string::npos);
+
+  EXPECT_EQ(host.call_count("execution.configure_defaults"), 1U);
+  std::vector<unsigned int> caps;
+  for (const auto& invocation : invocations) {
+    if (invocation.method != "compute.submit") {
+      continue;
+    }
+    ASSERT_TRUE(invocation.compute_request.has_value());
+    ASSERT_TRUE(
+        invocation.compute_request->execution.maximum_parallelism.has_value());
+    caps.push_back(*invocation.compute_request->execution.maximum_parallelism);
+  }
+  EXPECT_EQ(
+      caps,
+      (std::vector<unsigned int>{
+          1U, 2U, static_cast<unsigned int>(expected_benchmark_workers(0))}));
+}
+
+/**
+ * @brief Proves failed process preparation is global, retryable, and early.
+ *
+ * @throws Nothing when the exact Host diagnostic escapes before graph load
+ *         and a later call retries the once-only initialization successfully.
+ * @note `std::call_once` must not latch an exception as successful
+ *       preparation; the session QoS cap remains unchanged across the retry.
+ */
+TEST(OpenCvOperationConcurrency,
+     BenchmarkProcessPreparationFailureRetainsDiagnosticAndCanRetry) {
+  ScopedBenchmarkTempDir temp("photospider_benchmark_prepare_failure");
+  const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
+  write_benchmark_probe_graph(yaml_path);
+
+  testing::IpcHostSpy host;
+  OperationStatus rejected;
+  rejected.ok = false;
+  rejected.message = "benchmark process setup rejected";
+  host.set_status("execution.configure_defaults", rejected);
+  BenchmarkService service(host);
+  const BenchmarkSessionConfig config =
+      make_probe_benchmark_config(yaml_path, 2);
+
+  try {
+    (void)service.Run(temp.root().string(), config, 1);
+    FAIL() << "expected process execution preparation to fail";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "benchmark process setup rejected");
+  }
+  EXPECT_EQ(host.call_count("execution.configure_defaults"), 1U);
+  EXPECT_EQ(host.call_count("graph.load"), 0U);
+
+  host.set_status("execution.configure_defaults", OperationStatus{});
+  const BenchmarkResult result = service.Run(temp.root().string(), config, 1);
+  EXPECT_EQ(result.num_threads, 2);
+  EXPECT_EQ(host.call_count("execution.configure_defaults"), 2U);
+  EXPECT_EQ(host.call_count("graph.load"), 1U);
+}
+
+/**
+ * @brief Proves benchmark thread input caps real execution callbacks.
  *
  * @throws Nothing when product behavior satisfies the contract; GoogleTest
  *         records mismatches and C++ setup exceptions fail the test.
- * @note Each requested grant is reached exactly while the grant-plus-one
- *       observation remains bounded, so the verdict does not use workload
- *       timing or route display statistics. Every grant uses a fresh Host
- *       because one Host's issue #69 CPU pool freezes its resolved count.
+ * @note One Host pool is fixed at eight before the service starts. Sequential
+ *       benchmark Runs then vary only Run QoS; each cap is reached exactly
+ *       while cap-plus-one remains bounded, without elapsed-time assertions.
+ *       Callback identities may roam across up to eight fixed lanes over the
+ *       full Run because the cap limits simultaneous work, not lane selection.
  */
 TEST(OpenCvOperationConcurrency,
-     BenchmarkThreadsConfigureExactHostExecutionWorkers) {
+     BenchmarkThreadsCapCallbacksOnOneFixedExecutionPool) {
   ensure_benchmark_probe_registered();
   ScopedBenchmarkTempDir temp("photospider_benchmark_worker_control");
   const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
@@ -721,10 +868,15 @@ TEST(OpenCvOperationConcurrency,
 
   CallbackConcurrencyGate gate;
   ScopedCallbackGatePublication publication(gate);
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  HostExecutionConfig execution_config;
+  execution_config.worker_count = 8U;
+  const VoidResult configured =
+      host->configure_execution_defaults(execution_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+  BenchmarkService service(*host);
   for (const int configured_threads : {0, 1, 2, 4, 8}) {
-    std::unique_ptr<Host> host = create_embedded_host();
-    ASSERT_NE(host, nullptr);
-    BenchmarkService service(*host);
     const std::size_t expected_workers =
         expected_benchmark_workers(configured_threads);
     const BenchmarkSessionConfig config =
@@ -749,7 +901,8 @@ TEST(OpenCvOperationConcurrency,
     const BenchmarkResult result = run.get();
     EXPECT_EQ(result.num_threads, static_cast<int>(expected_workers));
     EXPECT_EQ(gate.max_active_callbacks(), expected_workers);
-    EXPECT_EQ(gate.unique_callback_threads(), expected_workers);
+    EXPECT_GE(gate.unique_callback_threads(), expected_workers);
+    EXPECT_LE(gate.unique_callback_threads(), 8U);
   }
 }
 
@@ -785,14 +938,70 @@ TEST(OpenCvOperationConcurrency,
 }
 
 /**
+ * @brief Proves zero is not a valid public Run maximum-parallelism value.
+ *
+ * @throws Nothing when the embedded Host rejects the request before callback
+ *         execution and leaves the loaded Graph closable.
+ * @note Absence, not zero, represents an uncapped Run. This keeps public Host
+ *       and IPC validation aligned with `ComputeRunQos`.
+ */
+TEST(OpenCvOperationConcurrency,
+     HostComputeSurfacesRejectZeroMaximumParallelismAsInvalidParameter) {
+  ensure_benchmark_probe_registered();
+  ScopedBenchmarkTempDir temp("photospider_zero_run_parallelism");
+  const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
+  write_benchmark_probe_graph(yaml_path);
+
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"zero_run_parallelism"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  const Result<GraphSessionId> loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest request;
+  request.session = load.session;
+  request.node = NodeId{kBenchmarkProbeSinkId};
+  request.execution.parallel = true;
+  request.execution.maximum_parallelism = 0U;
+  const VoidResult computed = host->compute(request);
+  EXPECT_FALSE(computed.status.ok);
+  EXPECT_EQ(computed.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(computed.status.code,
+            static_cast<std::int32_t>(GraphErrc::InvalidParameter));
+  EXPECT_EQ(computed.status.name, "invalid_parameter");
+
+  const Result<std::future<OperationStatus>> asynchronous =
+      host->compute_async(request);
+  EXPECT_FALSE(asynchronous.status.ok);
+  EXPECT_EQ(asynchronous.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(asynchronous.status.code,
+            static_cast<std::int32_t>(GraphErrc::InvalidParameter));
+  EXPECT_EQ(asynchronous.status.name, "invalid_parameter");
+
+  const Result<ImageBuffer> image = host->compute_and_get_image(request);
+  EXPECT_FALSE(image.status.ok);
+  EXPECT_EQ(image.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(image.status.code,
+            static_cast<std::int32_t>(GraphErrc::InvalidParameter));
+  EXPECT_EQ(image.status.name, "invalid_parameter");
+
+  const VoidResult closed = host->close_graph(load.session);
+  EXPECT_TRUE(closed.status.ok) << closed.status.message;
+}
+
+/**
  * @brief Proves tiled built-in callbacks reach the requested worker overlap.
  *
  * @throws Nothing when product behavior satisfies the reentrant provider
  *         contract; GoogleTest records any mismatch.
- * @note The observer blocks inside the built-in callback body so every grant
+ * @note The observer blocks inside the built-in callback body so every Run cap
  *       is reached exactly; elapsed operation performance is not part of the
- *       verdict. Each grant/repetition pair owns a fresh Host so the fixed
- *       process-service pool is never reconfigured.
+ *       verdict. One eight-worker pool remains fixed across every
+ *       cap/repetition pair, and sequential callbacks may use different lanes
+ *       while never exceeding the active cap.
  */
 TEST(OpenCvOperationConcurrency,
      BuiltinCurveCallbacksReachRequestedWorkerConcurrency) {
@@ -800,13 +1009,18 @@ TEST(OpenCvOperationConcurrency,
   CallbackConcurrencyGate gate;
   CurveOperationObserver observer(gate);
   ScopedOpenCvObserverPublication publication(observer);
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const VoidResult seeded = host->seed_builtin_ops();
+  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+  HostExecutionConfig execution_config;
+  execution_config.worker_count = 8U;
+  const VoidResult configured =
+      host->configure_execution_defaults(execution_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+  BenchmarkService service(*host);
   for (int repetition = 0; repetition < 3; ++repetition) {
     for (const int worker_count : {1, 2, 4, 8}) {
-      std::unique_ptr<Host> host = create_embedded_host();
-      ASSERT_NE(host, nullptr);
-      const VoidResult seeded = host->seed_builtin_ops();
-      ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
-      BenchmarkService service(*host);
       const BenchmarkSessionConfig config =
           make_curve_benchmark_config(worker_count);
       const std::size_t expected_workers =
@@ -832,45 +1046,41 @@ TEST(OpenCvOperationConcurrency,
       const BenchmarkResult result = run.get();
       EXPECT_EQ(result.num_threads, worker_count);
       EXPECT_EQ(gate.max_active_callbacks(), expected_workers);
-      EXPECT_EQ(gate.unique_callback_threads(), expected_workers);
+      EXPECT_GE(gate.unique_callback_threads(), expected_workers);
+      EXPECT_LE(gate.unique_callback_threads(), 8U);
     }
   }
 }
 
 /**
- * @brief Proves one- and eight-worker tiled curve execution is bitwise equal.
+ * @brief Proves one- and eight-cap tiled curve execution is bitwise equal.
  *
  * @throws Nothing when deterministic output is preserved; setup exceptions
  *         fail the test and GoogleTest records descriptor or pixel mismatches.
  * @note Comparison ignores aligned row padding and checks every packed pixel
- *       byte retained by the public Host image snapshots. The two grants use
- *       separate Host lifetimes because a Host's CPU pool is fixed once.
+ *       byte retained by the public Host image snapshots. Both Runs share one
+ *       fixed eight-lane pool and vary only public Run QoS.
  */
 TEST(OpenCvOperationConcurrency,
-     BuiltinCurveOutputMatchesBetweenOneAndEightWorkers) {
+     BuiltinCurveOutputMatchesBetweenOneAndEightRunCaps) {
   ScopedBenchmarkTempDir temp("photospider_opencv_curve_output");
   const std::filesystem::path yaml_path = temp.root() / "curve.yaml";
   write_curve_output_graph(yaml_path);
 
-  ImageBuffer serial;
-  {
-    std::unique_ptr<Host> host = create_embedded_host();
-    ASSERT_NE(host, nullptr);
-    const VoidResult seeded = host->seed_builtin_ops();
-    ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
-    serial = compute_curve_image(*host, temp.root(), yaml_path, 1U,
-                                 "curve_output_serial");
-  }
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const VoidResult seeded = host->seed_builtin_ops();
+  ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
+  HostExecutionConfig execution_config;
+  execution_config.worker_count = 8U;
+  const VoidResult configured =
+      host->configure_execution_defaults(execution_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
 
-  ImageBuffer parallel;
-  {
-    std::unique_ptr<Host> host = create_embedded_host();
-    ASSERT_NE(host, nullptr);
-    const VoidResult seeded = host->seed_builtin_ops();
-    ASSERT_TRUE(seeded.status.ok) << seeded.status.message;
-    parallel = compute_curve_image(*host, temp.root(), yaml_path, 8U,
-                                   "curve_output_parallel");
-  }
+  const ImageBuffer serial = compute_curve_image(*host, temp.root(), yaml_path,
+                                                 1U, "curve_output_serial");
+  const ImageBuffer parallel = compute_curve_image(
+      *host, temp.root(), yaml_path, 8U, "curve_output_parallel");
 
   ASSERT_EQ(serial.width, parallel.width);
   ASSERT_EQ(serial.height, parallel.height);

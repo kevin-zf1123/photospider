@@ -47,8 +47,10 @@ LastError mapping. It then translates the internal request to
 `ComputeService::Request`, which carries node target, cache, telemetry, intent,
 dirty ROI, session identity, and explicit Run QoS data. Parallel/runtime
 selection is carried separately as `ComputeService::ExecutionStrategy`. The
-added identity and QoS values remain private descriptor inputs and do not
-change the public Host request or plugin ABI.
+public `HostComputeExecutionOptions::maximum_parallelism` field carries one
+optional positive Run concurrency ceiling through the adapter to that QoS.
+The remaining identity and QoS values stay private descriptor inputs; the
+plugin ABI is unchanged.
 
 The dirty ROI remains a kernel-owned `PixelRect` while it is copied from
 `HostComputeRequest` through `Kernel::ComputeRequest`, graph propagation,
@@ -75,6 +77,16 @@ CPU, retained-memory, scratch, ready-entry, and ready-byte vector from the
 service-owned Host ledger. Graph load copies route ids and generations but
 owns no worker grant. This contract does not claim all threads used by compute,
 operations, or a private GPU backend.
+
+Benchmark configuration does not reconfigure that process pool. For each
+benchmark Run, `execution.threads` resolves to an optional positive
+`maximum_parallelism`: missing or `0` chooses a bounded automatic value in
+`[1,8]`, while `1..8` selects an exact Run ceiling. One `BenchmarkService`
+prepares execution at most once with automatic `worker_count=0`; this starts an
+unconfigured pool or preserves an already fixed pool. `RunAll` ignores
+disabled-session thread ranges after configuration parsing and does not execute
+those sessions, logs and skips enabled sessions whose thread value is invalid,
+and executes valid mixed caps against the same fixed pool.
 
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.
@@ -516,7 +528,8 @@ fixed-pool request, or unknown type maps to `InvalidParameter`; exhaustion of
 the Host ledger preserves `GraphErrc::ComputeError` through embedded Host and
 IPC status boundaries. Built-in CPU Run aggregation overflow or full-vector
 exhaustion likewise returns `ComputeError` before any initial ready entry is
-published.
+published. A present zero public `maximum_parallelism` is invalid and is
+rejected at Host or IPC decoding before graph execution.
 
 ## Boundaries and Rationale
 
@@ -565,6 +578,9 @@ making those later slices part of the current flow.
 ## Implementation and Validation Entry Points
 
 - `src/lib/runtime/kernel_compute.cpp`
+- `src/lib/host/embedded_host.cpp`
+- `src/lib/benchmark/benchmark_service.*`
+- `src/lib/ipc/request_router.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_supersession.*`
 - `src/lib/compute/compute_request_coordinator.*`
@@ -579,5 +595,7 @@ making those later slices part of the current flow.
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_opencv_operation_concurrency.cpp`
+- `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_event_stream_boundaries.cpp`

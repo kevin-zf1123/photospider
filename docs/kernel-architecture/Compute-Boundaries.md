@@ -14,8 +14,9 @@ transport, or process-wide operation plugin lifetime.
 The public caller reaches compute only through `ps::Host`. The embedded adapter
 translates public `HostComputeRequest` values into internal Kernel and
 `ComputeService` requests. No public API exposes a `ComputeService`, plan, task
-graph, or physical executor/policy pointer. Request, propagation, planning, and
-execution
+graph, or physical executor/policy pointer. A public compute request may carry
+an optional positive `maximum_parallelism` Run ceiling; it cannot resize or
+select the process executor. Request, propagation, planning, and execution
 geometry remains `PixelRect`/`PixelSize` through `NodeExecutor`; OpenCV geometry
 exists only inside a provider or algorithm implementation at the library call
 that consumes it.
@@ -292,6 +293,12 @@ Kernel and owns one direct fixed CPU worker pool, one private Metal worker lane,
 one host-authoritative ledger, and one bounded ready store. Configuration
 resolves and freezes `[1,8]` CPU infrastructure workers once; Graph load,
 replacement, Run execution, and dirty phases never resize either lane.
+Benchmark `execution.threads` is a per-Run ceiling rather than an execution
+configuration request. Missing or zero chooses a bounded automatic cap and
+`1..8` chooses an exact cap. `BenchmarkService` prepares the process service at
+most once with `worker_count=0`, then `RunAll` executes valid mixed caps on the
+same pool while omitting disabled-session thread-range validation and execution
+after configuration parsing and logging/skipping invalid enabled sessions.
 Every Run reserves its complete checked CPU/retained/scratch/ready vector
 before publication. Initial and dependency-released work both require matching
 ready-entry/byte grants and enter the same policy route. Queue removal
@@ -385,7 +392,8 @@ outside Host execution accounting.
 
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
 records this decision. Durable integration coverage proves exact callback
-overlap for `1/2/4/8` grants and bitwise-equal one-versus-eight-worker output;
+overlap for `1/2/4/8` Run caps on one fixed pool and bitwise-equal
+one-versus-eight-cap output;
 the manual native scaling evidence is documented in
 `../development/Testing-and-Validation.md`.
 [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
@@ -449,6 +457,9 @@ surfaces expose no cancellation entry; IPC jobs continue to report
   service count, an unknown private execution route, or an unavailable policy
   type fails without changing the current binding; ledger exhaustion while
   admitting a Run preserves `GraphErrc::ComputeError`.
+- A present zero public `maximum_parallelism` is rejected as
+  `GraphErrc::InvalidParameter` before graph execution. Absence means no
+  caller-supplied ceiling below the fixed service lanes.
 - Fixed service workers remain uncharged infrastructure until service
   destruction. Active Run reservations from both policy classes and all private
   routes share the ledger CPU dimension. A failed reserved-start transaction
@@ -536,6 +547,9 @@ future behavior.
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/runtime/kernel_compute.cpp`
+- `src/lib/host/embedded_host.cpp`
+- `src/lib/benchmark/benchmark_service.*`
+- `src/lib/ipc/request_router.cpp`
 - `src/lib/graph/graph_state_executor.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_resource_admission.cpp`
@@ -544,4 +558,6 @@ future behavior.
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_compute_supersession.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_opencv_operation_concurrency.cpp`
+- `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

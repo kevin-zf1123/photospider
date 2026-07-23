@@ -904,19 +904,21 @@ Json valid_host_routed_params(std::string_view method,
  */
 Json valid_compute_submit_params(const std::string& session_id,
                                  std::string result_mode = "status") {
-  return Json{{"session_id", session_id},
-              {"node_id", 37},
-              {"cache", Json{{"precision", "float16"},
-                             {"force_recache", true},
-                             {"disable_disk_cache", true},
-                             {"nosave", true},
-                             {"future_cache_field", "ignored"}}},
-              {"execution", Json{{"parallel", true}, {"quiet", true}}},
-              {"telemetry", Json{{"enable_timing", true}}},
-              {"intent", "real_time_update"},
-              {"dirty_roi", expected_rect(PixelRect{-4, 5, 6, 7})},
-              {"result_mode", std::move(result_mode)},
-              {"future_submit_field", true}};
+  return Json{
+      {"session_id", session_id},
+      {"node_id", 37},
+      {"cache", Json{{"precision", "float16"},
+                     {"force_recache", true},
+                     {"disable_disk_cache", true},
+                     {"nosave", true},
+                     {"future_cache_field", "ignored"}}},
+      {"execution",
+       Json{{"parallel", true}, {"quiet", true}, {"maximum_parallelism", 4}}},
+      {"telemetry", Json{{"enable_timing", true}}},
+      {"intent", "real_time_update"},
+      {"dirty_roi", expected_rect(PixelRect{-4, 5, 6, 7})},
+      {"result_mode", std::move(result_mode)},
+      {"future_submit_field", true}};
 }
 
 /**
@@ -1640,6 +1642,8 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_TRUE(request.cache.nosave);
   EXPECT_TRUE(request.execution.parallel);
   EXPECT_TRUE(request.execution.quiet);
+  ASSERT_TRUE(request.execution.maximum_parallelism.has_value());
+  EXPECT_EQ(*request.execution.maximum_parallelism, 4U);
   EXPECT_TRUE(request.telemetry.enable_timing);
   ASSERT_TRUE(request.intent.has_value());
   EXPECT_EQ(*request.intent, ComputeIntent::RealTimeUpdate);
@@ -1708,6 +1712,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
     EXPECT_FALSE(request.cache.nosave);
     EXPECT_FALSE(request.execution.parallel);
     EXPECT_FALSE(request.execution.quiet);
+    EXPECT_FALSE(request.execution.maximum_parallelism.has_value());
     EXPECT_FALSE(request.telemetry.enable_timing);
     EXPECT_FALSE(request.intent.has_value());
     EXPECT_FALSE(request.dirty_roi.has_value());
@@ -1756,6 +1761,19 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   Json execution_flag = valid;
   execution_flag["execution"]["parallel"] = "true";
   malformed.emplace_back("execution flag", std::move(execution_flag));
+  Json zero_parallelism = valid;
+  zero_parallelism["execution"]["maximum_parallelism"] = 0;
+  malformed.emplace_back("zero maximum parallelism",
+                         std::move(zero_parallelism));
+  Json wide_parallelism = valid;
+  wide_parallelism["execution"]["maximum_parallelism"] =
+      std::uint64_t{4294967296ULL};
+  malformed.emplace_back("wide maximum parallelism",
+                         std::move(wide_parallelism));
+  Json fractional_parallelism = valid;
+  fractional_parallelism["execution"]["maximum_parallelism"] = 1.5;
+  malformed.emplace_back("fractional maximum parallelism",
+                         std::move(fractional_parallelism));
   Json telemetry_flag = valid;
   telemetry_flag["telemetry"]["enable_timing"] = nullptr;
   malformed.emplace_back("telemetry flag", std::move(telemetry_flag));
@@ -1783,6 +1801,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(host_.call_count("compute.submit"), 0U);
 
   Json nullable = valid_compute_submit_params(unknown_session);
+  nullable["execution"]["maximum_parallelism"] = nullptr;
   nullable["intent"] = nullptr;
   nullable["dirty_roi"] = nullptr;
   const Json admitted = route("compute.submit", std::move(nullable));
@@ -7303,6 +7322,62 @@ TEST(ClientExecutionDefaults,
 }
 
 /**
+ * @brief Rejects a zero typed Run cap before wire I/O.
+ *
+ * A connected Client first receives a present zero maximum parallelism and
+ * then a valid positive value. The peer has a reply slot only for the valid
+ * submit, proving that local public-value validation sends no rejected frame
+ * and leaves the connection usable.
+ *
+ * @return Nothing; GoogleTest records status, request-count, or value errors.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         script, request, or peer-thread setup cannot complete.
+ * @note The accepted call receives a scripted daemon failure because this test
+ *       isolates request validation and encoding from result decoding.
+ */
+TEST(ClientComputeRequest,
+     RejectsZeroMaximumParallelismBeforeWireAndRetainsConnection) {
+  ScopedTempDirectory temp("ps-ipc-compute-run-cap");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const Json scripted_error{{"domain", "daemon"},
+                            {"code", kJobNotFoundCode},
+                            {"name", "job_not_found"},
+                            {"message", "scripted typed-call failure"}};
+  const std::vector<ScriptedClientReply> replies = {
+      {"compute.submit", scripted_error, true}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  ComputeSubmitRequest request;
+  request.session_id = IpcSessionId{std::string(32, 'a')};
+  request.node = NodeId{7};
+  request.execution.maximum_parallelism = 0U;
+  const IpcResult<ComputeJobSnapshot> rejected = client.submit_compute(request);
+
+  request.execution.maximum_parallelism = 2U;
+  const IpcResult<ComputeJobSnapshot> accepted = client.submit_compute(request);
+  client.disconnect();
+  peer.join();
+
+  EXPECT_FALSE(rejected.status.ok);
+  EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(rejected.status.code, kInvalidParamsCode);
+  EXPECT_EQ(rejected.status.name, "invalid_params");
+  EXPECT_FALSE(accepted.status.ok);
+  EXPECT_EQ(accepted.status.domain, OperationErrorDomain::Daemon);
+  EXPECT_TRUE(served);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests.front()["method"], "compute.submit");
+  EXPECT_EQ(requests.front()["params"]["execution"]["maximum_parallelism"], 2);
+}
+
+/**
  * @brief Dispatches the exact typed version 2 Client surface once per method.
  *
  * A scripted local peer expects all 60 normative methods in canonical order
@@ -7355,6 +7430,7 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionTwoMethodsOnce) {
   compute_request.session_id = session_id;
   compute_request.node = NodeId{7};
   compute_request.cache.precision = "float32";
+  compute_request.execution.maximum_parallelism = 3U;
   compute_request.intent = ComputeIntent::GlobalHighPrecision;
   compute_request.dirty_roi = roi;
   GraphLoadRequest graph_request;
@@ -7443,6 +7519,7 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionTwoMethodsOnce) {
   EXPECT_EQ(submit_params["result_mode"], "status");
   EXPECT_TRUE(submit_params["cache"].is_object());
   EXPECT_TRUE(submit_params["execution"].is_object());
+  EXPECT_EQ(submit_params["execution"]["maximum_parallelism"], 3);
   EXPECT_TRUE(submit_params["telemetry"].is_object());
   EXPECT_EQ(requests[30]["params"]["yaml_text"], "id: 7");
   EXPECT_TRUE(client.connected());

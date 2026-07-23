@@ -248,19 +248,28 @@ PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
  * @brief Builds the explicit default QoS consumed by built-in CPU Runs.
  *
  * @param use_parallel_executor Whether the request selects route-backed
- * execution.
- * @return Throughput QoS with no deadline, weight one, and a sequential
- * maximum-parallelism cap only for inline execution.
- * @throws Nothing.
- * @note ExecutionService routes apply this throughput class, weight, and absent
- * deadline. Inline work retains its existing execution behavior; intent and
- * quality never reclassify the value.
+ *        execution.
+ * @param requested_maximum_parallelism Optional positive caller cap for the
+ *        request's Run.
+ * @return Throughput QoS with no deadline, weight one, and either the caller
+ *         cap for route-backed execution or an effective cap of one for
+ *         inline execution.
+ * @throws std::invalid_argument if the optional caller cap is zero.
+ * @note ExecutionService routes apply the cap without resizing fixed lanes.
+ *       Inline work retains its existing single-callback behavior; intent and
+ *       quality never reclassify the value.
  */
 compute::ComputeRunQos make_default_compute_run_qos(
-    bool use_parallel_executor) {
+    bool use_parallel_executor,
+    std::optional<std::uint32_t> requested_maximum_parallelism) {
+  if (requested_maximum_parallelism && *requested_maximum_parallelism == 0U) {
+    throw std::invalid_argument(
+        "compute maximum_parallelism must be positive when present");
+  }
   return compute::ComputeRunQos{
       compute::ComputeRunQosClass::Throughput, std::nullopt, 1,
-      use_parallel_executor ? std::nullopt : std::optional<uint32_t>{1}};
+      use_parallel_executor ? requested_maximum_parallelism
+                            : std::optional<std::uint32_t>{1U}};
 }
 
 /**
@@ -292,7 +301,8 @@ ComputeService::Request make_service_compute_request(
       request.intent,
       request.dirty_roi,
       request.name,
-      make_default_compute_run_qos(request.execution.parallel),
+      make_default_compute_run_qos(request.execution.parallel,
+                                   request.execution.maximum_parallelism),
       std::move(commit_policy),
       staged_proxy,
       request.cancellation_source,

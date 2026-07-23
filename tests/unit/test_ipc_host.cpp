@@ -921,6 +921,8 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
   compute.session = session;
   compute.node = NodeId{7};
   compute.cache.precision = "fp32";
+  compute.execution.parallel = true;
+  compute.execution.maximum_parallelism = 3U;
   EXPECT_TRUE(host->compute(compute).status.ok);
   Result<std::future<OperationStatus>> async = host->compute_async(compute);
   ASSERT_TRUE(async.status.ok) << async.status.message;
@@ -1135,6 +1137,18 @@ TEST(IpcHostDispatch, MapsEveryCurrentHostVirtualWithoutFallback) {
   EXPECT_EQ(invocations.size(), 58U);
   EXPECT_EQ(actual_methods, expected_methods);
   EXPECT_EQ(actual_counts, expected_counts);
+  std::size_t compute_invocation_count = 0U;
+  for (const testing::IpcHostInvocation& invocation : invocations) {
+    if (invocation.method != "compute.submit") {
+      continue;
+    }
+    ++compute_invocation_count;
+    ASSERT_TRUE(invocation.compute_request.has_value());
+    ASSERT_TRUE(
+        invocation.compute_request->execution.maximum_parallelism.has_value());
+    EXPECT_EQ(*invocation.compute_request->execution.maximum_parallelism, 3U);
+  }
+  EXPECT_EQ(compute_invocation_count, 3U);
 
   host.reset();
   const OperationStatus stopped = server.stop();
@@ -1304,6 +1318,42 @@ TEST(IpcHostFactory, DefersConnectionAndReturnsExactTransportFailure) {
   EXPECT_EQ(result.status.domain, OperationErrorDomain::Transport);
   EXPECT_EQ(result.status.code, 1);
   EXPECT_EQ(result.status.name, "connect_failed");
+}
+
+/**
+ * @brief Rejects a zero public Run cap before IPC transport.
+ *
+ * @return Nothing; GoogleTest records Graph status and future mismatches.
+ * @throws std::bad_alloc if Host or diagnostic allocation fails.
+ * @note The deliberately absent socket proves sync, async, and image compute
+ *       all apply the public Host `InvalidParameter` contract before opening a
+ *       Client connection. Direct typed Client validation remains a protocol
+ *       boundary tested separately.
+ */
+TEST(IpcHostCompute, RejectsZeroMaximumParallelismBeforeTransport) {
+  std::unique_ptr<Host> host =
+      create_ipc_host("/path/that/does/not/exist.sock");
+  ASSERT_NE(host, nullptr);
+  HostComputeRequest request;
+  request.session = GraphSessionId{"opaque-session"};
+  request.node = NodeId{7};
+  request.execution.parallel = true;
+  request.execution.maximum_parallelism = 0U;
+
+  const VoidResult computed = host->compute(request);
+  const Result<std::future<OperationStatus>> asynchronous =
+      host->compute_async(request);
+  const Result<ImageBuffer> image = host->compute_and_get_image(request);
+
+  for (const OperationStatus* status :
+       {&computed.status, &asynchronous.status, &image.status}) {
+    EXPECT_FALSE(status->ok);
+    EXPECT_EQ(status->domain, OperationErrorDomain::Graph);
+    EXPECT_EQ(status->code,
+              static_cast<std::int32_t>(GraphErrc::InvalidParameter));
+    EXPECT_EQ(status->name, "invalid_parameter");
+  }
+  EXPECT_FALSE(asynchronous.value.valid());
 }
 
 /**

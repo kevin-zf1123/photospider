@@ -816,27 +816,45 @@ launches the child configure/build/CTest profile and carries `build-smoke`.
 ## OpenCV Operation Concurrency Validation
 
 `test_opencv_operation_concurrency` is a CTest-registered integration binary
-for the long-lived operation-provider and benchmark-worker contracts. It uses
+for the long-lived operation-provider and benchmark Run-concurrency contracts.
+It uses
 Host-boundary records and bounded callback gates rather than elapsed-time
 thresholds:
 
-- `BenchmarkAutoThreadsPublishResolvedGrantToHost` proves that automatic
-  selection is resolved once before Host configuration, publishes a nonzero
-  grant before Graph load, and reports that identical grant without repeating
-  hardware detection in the verdict.
-- `BenchmarkThreadsConfigureExactHostExecutionWorkers` runs the real
-  `BenchmarkService`, Host execution configuration, Graph load, and registered
-  callback path for automatic and explicit `1/2/4/8` requests. It requires the
-  exact resolved number of callbacks and rejects a grant-plus-one callback.
+- `BenchmarkAutoThreadsPublishRunCapAndPreserveFixedPool` proves that automatic
+  selection is resolved once, process execution is prepared with
+  `worker_count=0`, Graph load follows preparation, and the resolved nonzero
+  Run cap reaches the Host compute request and benchmark result.
+- `BenchmarkRunAllSharesPoolAndPreservesMixedSessionCaps` proves that enabled
+  `1`, `2`, and automatic sessions share one preparation and retain distinct
+  compute caps, while a disabled out-of-range numeric thread value is not
+  range-validated or executed and an invalid enabled session is diagnosed and
+  skipped.
+- `BenchmarkProcessPreparationFailureRetainsDiagnosticAndCanRetry` proves that
+  process preparation failure precedes Graph load, preserves the Host
+  diagnostic, and leaves once-only preparation retryable.
+- `BenchmarkThreadsCapCallbacksOnOneFixedExecutionPool` runs the real
+  `BenchmarkService`, one explicitly fixed eight-lane Host pool, Graph load,
+  and registered callback path for automatic and explicit `1/2/4/8` Run caps.
+  It requires exact cap-sized callback overlap and rejects a cap-plus-one
+  callback.
 - `BenchmarkThreadsRejectOutOfDomainValuesBeforeGraphLoad` requires signed
-  negative and above-eight worker requests to fail before publishing a Graph
+  negative and above-eight Run-cap requests to fail before publishing a Graph
   session.
+- `HostComputeSurfacesRejectZeroMaximumParallelismAsInvalidParameter` requires
+  a present zero public Run cap to fail with `GraphErrc::InvalidParameter`
+  across synchronous, asynchronous, and image compute.
+- `IpcHostDispatch.MapsEveryCurrentHostVirtualWithoutFallback` and
+  `IpcHostCompute.RejectsZeroMaximumParallelismBeforeTransport` prove that the
+  IPC Host preserves a positive Run cap through all three compute conveniences
+  and rejects zero in the public Graph error domain before transport.
 - `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` repeats the built-in
-  tiled `curve_transform` path three times at each `1/2/4/8` grant and requires
-  exact callback overlap through a test-only observer.
-- `BuiltinCurveOutputMatchesBetweenOneAndEightWorkers` compares packed pixel
-  rows from the public Host result and requires one-worker and eight-worker
-  output to be bitwise equal.
+  tiled `curve_transform` path three times at each `1/2/4/8` Run cap on one
+  fixed eight-lane pool and requires exact callback overlap through a test-only
+  observer.
+- `BuiltinCurveOutputMatchesBetweenOneAndEightRunCaps` compares packed pixel
+  rows from the public Host result and requires one-cap and eight-cap output on
+  one fixed pool to be bitwise equal.
 
 The observer exists only in `BUILD_TESTING` builds, is private to the source
 tree, and is never installed. These cases prove reachable concurrency and
@@ -859,9 +877,9 @@ The native snapshot captured on 2026-07-15 used macOS `arm64`, Clang 21.0.0
 (`clang-2100.1.1.101`), OpenCV 4.12.0, reported hardware concurrency 10, and
 reported `opencv_internal_threads=1`. The workload was a chain of four built-in
 `curve_transform` nodes over a 2048-by-2048 FP32 image, with two warmups and
-seven samples per grant:
+seven samples per Run cap:
 
-| Workers | Median wall (ms) | Throughput (Mpix/s) | Speedup | Max in flight |
+| Run cap | Median wall (ms) | Throughput (Mpix/s) | Speedup | Max in flight |
 | ---: | ---: | ---: | ---: | ---: |
 | 1 | 27.450 | 611.188 | 1.000 | 1 |
 | 2 | 19.567 | 857.433 | 1.403 | 2 |
@@ -870,12 +888,12 @@ seven samples per grant:
 
 The raw wall-time samples in milliseconds were:
 
-- 1 worker: `27.694|27.134|27.450|27.183|27.869|27.250|28.035`
-- 2 workers: `19.021|19.567|19.774|19.497|19.435|20.427|20.997`
-- 4 workers: `16.059|15.688|15.992|15.727|15.600|14.692|14.649`
-- 8 workers: `16.436|16.610|16.512|15.008|14.859|14.064|14.760`
+- cap 1: `27.694|27.134|27.450|27.183|27.869|27.250|28.035`
+- cap 2: `19.021|19.567|19.774|19.497|19.435|20.427|20.997`
+- cap 4: `16.059|15.688|15.992|15.727|15.600|14.692|14.649`
+- cap 8: `16.436|16.610|16.512|15.008|14.859|14.064|14.760`
 
-This snapshot establishes that the requested grants reached the real callback
+This snapshot establishes that the requested Run caps reached the real callback
 path and that the tested machine benefited from removing outer serialization.
 It is not a permanent performance baseline or pass/fail threshold. Rerun the
 exact command when evaluating another machine, compiler, OpenCV version, or

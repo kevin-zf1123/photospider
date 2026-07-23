@@ -3188,6 +3188,13 @@ IpcResult<ComputeJobSnapshot> Client::submit_compute(
   if (!impl_) {
     return failed_result<ComputeJobSnapshot>(not_connected_status());
   }
+  if (request.execution.maximum_parallelism &&
+      *request.execution.maximum_parallelism == 0U) {
+    return failed_result<ComputeJobSnapshot>(internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params",
+        "compute maximum_parallelism must be positive when present"));
+  }
   internal::Json params{
       {"session_id", request.session_id.value},
       {"node_id", request.node.value},
@@ -3202,6 +3209,10 @@ IpcResult<ComputeJobSnapshot> Client::submit_compute(
                                    {"quiet", request.execution.quiet}}},
       {"telemetry",
        internal::Json{{"enable_timing", request.telemetry.enable_timing}}}};
+  if (request.execution.maximum_parallelism) {
+    params["execution"]["maximum_parallelism"] =
+        *request.execution.maximum_parallelism;
+  }
   if (request.result_mode != ComputeResultMode::Status &&
       request.result_mode != ComputeResultMode::Image) {
     return failed_result<ComputeJobSnapshot>(internal::failure_status(

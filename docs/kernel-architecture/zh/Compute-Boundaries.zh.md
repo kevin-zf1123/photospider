@@ -11,7 +11,9 @@ transport 或进程级 operation plugin
 
 公共调用方只能通过 `ps::Host` 进入计算。Embedded adapter 把公共 `HostComputeRequest` 值
 转换为内部 Kernel 和 `ComputeService` 请求。公共 API 不暴露 `ComputeService`、plan、任务图，
-也不暴露物理 executor/policy pointer。Request、propagation、planning 与 execution geometry 直到
+也不暴露物理 executor/policy pointer。Public compute request 可以携带一个可选正值
+`maximum_parallelism` 作为 Run 上限；它不能调整进程 executor 的大小，也不能选择该 executor。
+Request、propagation、planning 与 execution geometry 直到
 `NodeExecutor` 都保持为 `PixelRect`/`PixelSize`；OpenCV geometry 只存在于 provider 或
 算法实现内部，并且位于真正消费它的 library call 处。
 
@@ -235,7 +237,11 @@ start，并把 callback 所有权转移到复制的 Graph route binding。
 Issue #70 与 #71 的 CPU service 在 Kernel 之前显式组合，并直接拥有一个固定 CPU worker pool、
 一个私有 Metal worker lane、一个 Host 权威 ledger 和一个有界 ready store。配置只会解析并
 冻结一次 `[1,8]` 个 CPU 基础设施 worker；Graph load、replacement、Run execution 与 dirty
-阶段都不会调整任一 lane 的大小。每个 Run 在发布前原子预留
+阶段都不会调整任一 lane 的大小。Benchmark `execution.threads` 是单次 Run 上限，不是
+execution configuration request。缺失或零会选择一个有界自动 cap，`1..8` 会选择精确 cap。
+`BenchmarkService` 最多以 `worker_count=0` 准备进程 service 一次；随后 `RunAll` 会在同一个
+pool 上运行采用混合 cap 的有效 session；配置文件解析完成后，它不会校验 disabled session 的
+thread 范围，也不会运行这些 session；它还会记录和跳过无效 enabled session。每个 Run 在发布前原子预留
 完整且经过检查的 CPU/retained/scratch/ready vector。Initial 与 dependency-released work 都
 必须持有匹配的 ready-entry/byte grant，并进入同一个 policy route；从队列移除时会把该 grant
 交换为 CPU/memory/scratch 执行权。Completion、failure 与所有异常路径都恰好释放一次精确 vector。
@@ -304,8 +310,8 @@ operation lock，也不是 scheduler exclusivity contract。仓库自有 provide
 第三方内部 thread 与 platform runtime worker 仍不计入 Host execution accounting。
 
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录本项决策。
-长期 integration coverage 会证明 `1/2/4/8` grant 对应精确 callback overlap，以及单 worker 与
-八 worker 输出按位相同；手工原生扩展性证据记录在
+长期 integration coverage 会证明同一个固定 pool 上 `1/2/4/8` Run cap 对应精确 callback
+overlap，以及单 cap 与八 cap 输出按位相同；手工原生扩展性证据记录在
 `../../development/zh/Testing-and-Validation.zh.md`。
 [ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)与精确的
 [依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)会把 OpenCV algorithm、
@@ -353,6 +359,9 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 - 超过八的 worker 请求、与固定 service 数量冲突的正数请求、未知私有 execution route 或不可用
   policy type 都会在不改变当前 binding 的情况下失败；准入 Run 时的 ledger 耗尽会保留
   `GraphErrc::ComputeError`。
+- Public `maximum_parallelism` 显式为零会在图执行前以
+  `GraphErrc::InvalidParameter` 被拒绝。该字段缺失表示调用方没有在固定 service lane
+  以下再提供上限。
 - 固定 service worker 作为不计费的基础设施一直存活到 service 析构。两个 policy class 与所有
   私有 route 的 active Run reservation 共用 ledger CPU 维度。失败的 reserved-start transaction
   会恰好一次归还 staged capacity，且不改变 ready/fairness state。
@@ -423,6 +432,9 @@ Run-owned commit arbitration 保持不变。带 graph-close/process-shutdown can
 - `src/lib/runtime/resource_ledger.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/runtime/kernel_compute.cpp`
+- `src/lib/host/embedded_host.cpp`
+- `src/lib/benchmark/benchmark_service.*`
+- `src/lib/ipc/request_router.cpp`
 - `src/lib/graph/graph_state_executor.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_resource_admission.cpp`
@@ -431,4 +443,6 @@ Run-owned commit arbitration 保持不变。带 graph-close/process-shutdown can
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_compute_supersession.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_opencv_operation_concurrency.cpp`
+- `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

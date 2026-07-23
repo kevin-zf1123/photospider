@@ -492,6 +492,8 @@ class PHOTOSPIDER_API Host {
    * @param request Host compute request.
    * @return Success, NotFound when the graph session is missing or closed, or
    *         a compute failure status for existing sessions.
+   *         `GraphErrc::InvalidParameter` is returned before session access
+   *         when a present `maximum_parallelism` is zero.
    * @throws std::bad_alloc if request processing, compute execution, backend-
    *         to-status translation, or copied result construction exhausts
    *         memory.
@@ -508,7 +510,9 @@ class PHOTOSPIDER_API Host {
    *
    * @param request Host compute request captured by value.
    * @return Future resolving to the final operation status, or a failure status
-   *         when scheduling cannot start.
+   *         when scheduling cannot start. A present zero
+   *         `maximum_parallelism` returns `GraphErrc::InvalidParameter` before
+   *         async admission.
    * @throws std::bad_alloc if request processing, async submission, backend-
    *         to-status translation, or copied result construction exhausts
    *         memory.
@@ -536,7 +540,8 @@ class PHOTOSPIDER_API Host {
    * @return ImageBuffer descriptor on success, an ok empty descriptor when the
    *         compute succeeds without image output, `GraphErrc::NotFound` when
    *         the graph session is missing or closed, or a compute failure status
-   *         for existing sessions.
+   *         for existing sessions. A present zero `maximum_parallelism`
+   *         returns `GraphErrc::InvalidParameter` before session access.
    * @throws std::bad_alloc if request processing, compute/image execution,
    *         backend-to-status translation, or copied result construction
    *         exhausts memory.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -44,11 +45,22 @@ struct HostComputeCacheOptions {
  *
  * @throws Nothing.
  * @note `parallel` selects the private execution path where supported, while
- *       `quiet` suppresses graph output for this request only.
+ *       `maximum_parallelism` optionally caps this request's Run callbacks
+ *       without resizing the process worker pool. `quiet` suppresses graph
+ *       output for this request only.
  */
 struct HostComputeExecutionOptions {
   /** @brief Whether parallel private execution should be requested. */
   bool parallel = false;
+
+  /**
+   * @brief Optional positive maximum number of callbacks in flight for one
+   *        Run.
+   * @note Absence leaves the Run uncapped below the fixed process lanes. Zero
+   *       is invalid; the value controls Run QoS only and never reconfigures
+   *       process workers.
+   */
+  std::optional<std::uint32_t> maximum_parallelism;
 
   /** @brief Whether graph output should be quiet during this request. */
   bool quiet = false;

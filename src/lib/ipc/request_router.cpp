@@ -402,9 +402,9 @@ bool read_compute_boolean_object(
  * @return True only after every known submit member validates completely.
  * @throws std::bad_alloc if owned request strings or diagnostics allocate.
  * @note Optional cache/execution/telemetry objects preserve public defaults;
- *       optional intent/dirty ROI accept absence or JSON null. Unknown fields
- *       at every object level are forward-compatible. No registry or Host
- *       access occurs in this helper.
+ *       optional maximum parallelism, intent, and dirty ROI accept absence or
+ *       JSON null. Unknown fields at every object level are
+ *       forward-compatible. No registry or Host access occurs in this helper.
  */
 bool decode_compute_submit(const Json& params, IpcSessionId* session_id,
                            HostComputeRequest* request, ComputeResultMode* mode,
@@ -457,6 +457,22 @@ bool decode_compute_submit(const Json& params, IpcSessionId* session_id,
                                     {"quiet", &request->execution.quiet}})) {
     *message = "compute.submit execution controls must be boolean";
     return false;
+  }
+  if (params.contains("execution")) {
+    const Json& execution = params["execution"];
+    if (execution.contains("maximum_parallelism") &&
+        !execution["maximum_parallelism"].is_null()) {
+      std::uint32_t maximum_parallelism = 0U;
+      if (!decode_integer(execution["maximum_parallelism"],
+                          &maximum_parallelism) ||
+          maximum_parallelism == 0U) {
+        *message =
+            "compute.submit maximum_parallelism must be null or a positive "
+            "uint32";
+        return false;
+      }
+      request->execution.maximum_parallelism = maximum_parallelism;
+    }
   }
   if (!read_compute_boolean_object(
           params, "telemetry",

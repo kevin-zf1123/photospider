@@ -27,9 +27,12 @@ registration thread cannot define scheduler-worker behavior. By contrast,
 `cv::setNumThreads` controls process-wide OpenCV CPU parallelism and must not be
 reconfigured while OpenCV work is active.
 
-The CLI benchmark service had a separate evidence defect: it reported
-`execution.threads` without applying the request to the Host scheduler that
-executed the benchmark Graph.
+The CLI benchmark service had a separate evidence defect: it first reported
+`execution.threads` without applying it to execution, then an interim migration
+applied each session value by reconfiguring Host execution defaults. That
+second form was incompatible with the fixed process worker pool: a `RunAll`
+sweep such as one thread followed by two threads rejected and skipped the
+later session.
 
 ## Decision
 
@@ -64,21 +67,28 @@ No scheduler `exclusive` metadata and no public operation/plugin ABI are added.
 Third-party providers remain responsible for their own reentrancy and backend
 state.
 
-`BenchmarkService::Run` validates the public zero-through-eight worker request
-and resolves it exactly once. Before Graph load, it passes that same nonzero
-grant unchanged to both future HP and RT Host defaults and reports the
-identical value; the zero automatic-selection sentinel does not cross the Host
-boundary for later scheduler resolution. A CTest-registered Host-boundary
-regression verifies this identity, and callback regressions prove exact overlap
-for `1/2/4/8` grants without elapsed-time assertions. A separate manual
-benchmark exercises the same Host, scheduler, Graph, and operation path and
+`BenchmarkService` validates each enabled zero-through-eight
+`execution.threads` value and resolves zero exactly once to bounded hardware
+concurrency. The resolved positive value is the benchmark Run's
+`maximum_parallelism`, not a process worker request. One service lifetime
+prepares future HP/RT CPU routes at most once with `worker_count=0`; this starts
+an unfixed pool automatically or preserves an already fixed pool. Every
+repetition carries and reports the same Run cap. `RunAll` preflights enabled
+sessions, does not thread-range validate or execute disabled sessions after
+configuration parsing, diagnoses/skips an invalid enabled session, and
+executes mixed valid caps without resizing the pool. A CTest-registered
+Host-boundary regression verifies the one preparation and per-Run values, and
+callback regressions prove exact overlap for `1/2/4/8` caps on one fixed
+eight-worker pool without elapsed-time assertions. A separate manual benchmark
+exercises the same Host, execution service, Graph, and operation path and
 reports raw timing samples; its performance ratios are observations, not
 correctness gates.
 
 ## Consequences
 
 - Independent repository-owned CPU operation callbacks can overlap up to the
-  scheduler's admitted worker grant across tiles, Graphs, and intent routes.
+  minimum of the fixed process lanes and each Run's admitted parallelism cap
+  across tiles, Graphs, and intent routes.
 - The process no longer pays a hidden global serialization penalty for the 13
   formerly locked entry points.
 - Nested CPU work remains bounded because OpenCV internal threading is fixed at
@@ -94,7 +104,7 @@ correctness gates.
   decision.
 - Provider-local locks may still reduce concurrency where real shared backend
   state requires them; those locks must be documented by the provider.
-- Scheduler worker accounting does not include third-party internal threads,
+- Host execution accounting does not include third-party internal threads,
   hostile DSOs, OpenCV use outside repository-owned providers, or platform
   runtime workers.
 - Deterministic concurrency and output-equality regressions are durable product
@@ -122,6 +132,14 @@ outside scheduler admission.
 
 ### Let OpenCV choose its own internal thread count
 
-Rejected for the current product because scheduler workers would then create
+Rejected for the current product because execution workers would then create
 unaccounted nested CPU parallelism. Any future policy change requires an
 explicit process-level ownership design.
+
+### Reconfigure process workers for each benchmark session
+
+Rejected because the process pool is a fixed composition resource, while
+benchmark thread sweeps are per-Run workload controls. Reconfiguration would
+either skip mixed sessions after the first pool freeze or recreate a
+per-session worker owner. Run `maximum_parallelism` preserves the sweep without
+either ownership error.

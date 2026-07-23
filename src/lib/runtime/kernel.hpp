@@ -12,6 +12,7 @@
  * depending on Kernel, GraphRuntime, or compute-service ownership.
  */
 
+#include <cstdint>
 #include <future>
 #include <map>
 #include <memory>
@@ -178,12 +179,22 @@ class Kernel {
    * embedded adapter and backend callers should treat it as immutable once the
    * request is submitted.
    *
-   * @note parallel selects execution-bound compute where supported. quiet is
-   * applied to the graph model around the compute call.
+   * @note parallel selects execution-bound compute where supported.
+   * maximum_parallelism is optional positive per-Run QoS and never resizes the
+   * fixed service. quiet is applied to the graph model around the compute
+   * call.
    */
   struct ComputeExecutionOptions {
     /** @brief Whether the request should use queued execution-service work. */
     bool parallel = false;
+
+    /**
+     * @brief Optional positive Run callback-concurrency cap.
+     * @note The value is copied from the Host request and never resizes the
+     *       fixed execution-service lanes. Inline execution uses an effective
+     *       cap of one.
+     */
+    std::optional<std::uint32_t> maximum_parallelism;
 
     /** @brief Whether graph output should be quiet during this request. */
     bool quiet = false;

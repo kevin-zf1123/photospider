@@ -640,20 +640,32 @@ configure/build/CTest profile 并携带 `build-smoke` 标签。
 ## OpenCV Operation 并发验证
 
 `test_opencv_operation_concurrency` 是注册到 CTest 的 integration binary，用于验证长期
-operation-provider 与 benchmark-worker contract。它使用 Host-boundary record 与有界 callback
-gate，而不是 elapsed-time threshold：
+operation-provider 与 benchmark Run-concurrency contract。它使用 Host-boundary record 与
+有界 callback gate，而不是 elapsed-time threshold：
 
-- `BenchmarkAutoThreadsPublishResolvedGrantToHost` 证明自动选择会在 Host 配置前只解析一次，
-  在 Graph load 前发布非零 grant，并报告完全相同的 grant；判定过程不会重复硬件探测。
-- `BenchmarkThreadsConfigureExactHostExecutionWorkers` 会对自动 request 与显式 `1/2/4/8`
-  request 运行真实 `BenchmarkService`、Host execution 配置、Graph load 与已注册 callback 路径。
-  它要求达到精确的解析后 callback 数量，并拒绝出现 grant-plus-one callback。
-- `BenchmarkThreadsRejectOutOfDomainValuesBeforeGraphLoad` 要求负数与大于八的 worker request
+- `BenchmarkAutoThreadsPublishRunCapAndPreserveFixedPool` 证明自动选择只解析一次，进程
+  execution 以 `worker_count=0` 准备，Graph load 发生在准备之后，并且解析后的非零 Run cap
+  同时到达 Host compute request 与 benchmark result。
+- `BenchmarkRunAllSharesPoolAndPreservesMixedSessionCaps` 证明 enabled 的 `1`、`2` 与自动
+  session 共用一次准备，并保留不同 compute cap；disabled session 的越界数值 thread 值不会
+  接受范围校验或执行，enabled 的无效 session 会被诊断并跳过。
+- `BenchmarkProcessPreparationFailureRetainsDiagnosticAndCanRetry` 证明进程准备失败发生在
+  Graph load 前、保留 Host diagnostic，并让 once-only preparation 可重试。
+- `BenchmarkThreadsCapCallbacksOnOneFixedExecutionPool` 会在一个显式固定的八 lane Host pool
+  上，对自动和显式 `1/2/4/8` Run cap 运行真实 `BenchmarkService`、Graph load 与已注册
+  callback 路径。它要求达到 cap 大小的精确 callback overlap，并拒绝 cap-plus-one callback。
+- `BenchmarkThreadsRejectOutOfDomainValuesBeforeGraphLoad` 要求负数与大于八的 Run-cap request
   在发布 Graph session 前失败。
-- `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` 会在每个 `1/2/4/8` grant 下重复三次
-  builtin tiled `curve_transform` 路径，并通过仅供测试的 observer 要求精确 callback overlap。
-- `BuiltinCurveOutputMatchesBetweenOneAndEightWorkers` 会比较 public Host result 中打包后的
-  pixel row，并要求单 worker 与八 worker 输出按位相同。
+- `HostComputeSurfacesRejectZeroMaximumParallelismAsInvalidParameter` 要求显式为零的 public
+  Run cap 在同步、异步与 image compute 上都以 `GraphErrc::InvalidParameter` 失败。
+- `IpcHostDispatch.MapsEveryCurrentHostVirtualWithoutFallback` 与
+  `IpcHostCompute.RejectsZeroMaximumParallelismBeforeTransport` 证明 IPC Host 会通过三种
+  compute convenience 保留正 Run cap，并在 transport 前以 public Graph error domain 拒绝零。
+- `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` 会在同一个固定八 lane pool 上、每个
+  `1/2/4/8` Run cap 下重复三次 builtin tiled `curve_transform` 路径，并通过仅供测试的
+  observer 要求精确 callback overlap。
+- `BuiltinCurveOutputMatchesBetweenOneAndEightRunCaps` 会比较 public Host result 中打包后的
+  pixel row，并要求同一个固定 pool 上单 cap 与八 cap 输出按位相同。
 
 Observer 只存在于 `BUILD_TESTING` build，是 source tree 私有接口，绝不会安装。这些 case 证明
 并发路径可达且输出确定，不承诺与机器无关的 speedup。
@@ -672,9 +684,9 @@ cmake --build build --target opencv_operation_concurrency_benchmark -j
 2026-07-15 采集的原生快照使用 macOS `arm64`、Clang 21.0.0
 （`clang-2100.1.1.101`）、OpenCV 4.12.0；报告 hardware concurrency 为 10，且
 `opencv_internal_threads=1`。Workload 是在 2048×2048 FP32 image 上串联四个 builtin
-`curve_transform` node，每个 grant 先执行两次 warmup，再采集七个 sample：
+`curve_transform` node，每个 Run cap 先执行两次 warmup，再采集七个 sample：
 
-| Worker | Median wall（ms） | Throughput（Mpix/s） | Speedup | 最大 in flight |
+| Run cap | Median wall（ms） | Throughput（Mpix/s） | Speedup | 最大 in flight |
 | ---: | ---: | ---: | ---: | ---: |
 | 1 | 27.450 | 611.188 | 1.000 | 1 |
 | 2 | 19.567 | 857.433 | 1.403 | 2 |
@@ -683,12 +695,12 @@ cmake --build build --target opencv_operation_concurrency_benchmark -j
 
 原始 wall-time sample（单位：毫秒）为：
 
-- 1 worker：`27.694|27.134|27.450|27.183|27.869|27.250|28.035`
-- 2 worker：`19.021|19.567|19.774|19.497|19.435|20.427|20.997`
-- 4 worker：`16.059|15.688|15.992|15.727|15.600|14.692|14.649`
-- 8 worker：`16.436|16.610|16.512|15.008|14.859|14.064|14.760`
+- cap 1：`27.694|27.134|27.450|27.183|27.869|27.250|28.035`
+- cap 2：`19.021|19.567|19.774|19.497|19.435|20.427|20.997`
+- cap 4：`16.059|15.688|15.992|15.727|15.600|14.692|14.649`
+- cap 8：`16.436|16.610|16.512|15.008|14.859|14.064|14.760`
 
-该快照证明所请求 grant 到达真实 callback 路径，并且测试机器能从移除外层串行化中获益。它不是
+该快照证明所请求 Run cap 到达真实 callback 路径，并且测试机器能从移除外层串行化中获益。它不是
 永久性能 baseline 或 pass/fail threshold。在评估另一台机器、compiler、OpenCV version 或
 operation-concurrency 变更时，应重新运行准确命令，并解释新输出的原始 sample。
 

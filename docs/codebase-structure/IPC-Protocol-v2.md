@@ -775,7 +775,11 @@ as nested values:
     "disable_disk_cache": true,
     "nosave": true
   },
-  "execution": {"parallel": true, "quiet": true},
+  "execution": {
+    "parallel": true,
+    "maximum_parallelism": 4,
+    "quiet": true
+  },
   "telemetry": {"enable_timing": true},
   "intent": "real_time_update",
   "dirty_roi": {"x": -4, "y": 5, "width": 6, "height": 7},
@@ -784,10 +788,14 @@ as nested values:
 ```
 
 The three nested option objects and their known members are optional and retain
-the public `HostComputeRequest` defaults when absent. `intent` and `dirty_roi`
-may be absent or JSON null. Every present known value is type-, range-, UTF-8-,
-and byte-bound-checked before session lookup or registry admission; unknown
-members are ignored for forward compatibility.
+the public `HostComputeRequest` defaults when absent. `maximum_parallelism`,
+`intent`, and `dirty_roi` may be absent or JSON null. A non-null
+`maximum_parallelism` must be a positive `uint32`; it caps callback concurrency
+for this compute Run and never resizes the fixed process worker pool. Every
+present known value is type-, range-, UTF-8-, and byte-bound-checked before
+session lookup or registry admission; unknown members are ignored for forward
+compatibility. The typed Client rejects a present zero before wire I/O, and the
+router applies the same validation before Host access.
 
 Before a queue commit, submission admits the active session, enforces a global
 maximum of 64 queued/running records, validates and collision-checks a

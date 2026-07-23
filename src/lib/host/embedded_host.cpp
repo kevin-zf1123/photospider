@@ -2006,6 +2006,8 @@ DirtyRegionInspectionSnapshot to_public_dirty_snapshot(
  * @param request Public Host compute request.
  * @return Kernel request with kernel-native dirty ROI.
  * @throws std::bad_alloc if copying strings allocates and fails.
+ * @note The optional positive Run cap is copied verbatim after public Host
+ *       validation and does not configure process execution.
  */
 Kernel::ComputeRequest to_kernel_compute_request(
     const HostComputeRequest& request) {
@@ -2017,6 +2019,8 @@ Kernel::ComputeRequest to_kernel_compute_request(
   kernel_request.cache.disable_disk_cache = request.cache.disable_disk_cache;
   kernel_request.cache.nosave = request.cache.nosave;
   kernel_request.execution.parallel = request.execution.parallel;
+  kernel_request.execution.maximum_parallelism =
+      request.execution.maximum_parallelism;
   kernel_request.execution.quiet = request.execution.quiet;
   kernel_request.telemetry.enable_timing = request.telemetry.enable_timing;
   kernel_request.intent = request.intent;
@@ -2024,6 +2028,22 @@ Kernel::ComputeRequest to_kernel_compute_request(
     kernel_request.dirty_roi = *request.dirty_roi;
   }
   return kernel_request;
+}
+
+/**
+ * @brief Validates public Run-level execution controls before Kernel access.
+ *
+ * @param execution Public request execution options.
+ * @return True when the optional maximum parallelism is absent or positive.
+ * @throws Nothing.
+ * @note This check classifies caller input consistently as
+ *       `GraphErrc::InvalidParameter` for sync, async, and image compute. The
+ *       value is a Run QoS cap and is not compared with or applied to the
+ *       process worker count here.
+ */
+bool valid_compute_execution_options(
+    const HostComputeExecutionOptions& execution) noexcept {
+  return !execution.maximum_parallelism || *execution.maximum_parallelism != 0U;
 }
 
 /**
@@ -2311,7 +2331,8 @@ class EmbeddedHost final : public Host {
    *
    * @param request Public compute request.
    * @return Success, NotFound for a missing or closed session, or compute
-   *         failure status.
+   *         failure status. A present zero Run cap returns InvalidParameter
+   *         before session access.
    * @throws std::bad_alloc on allocation failure.
    * @note A lifecycle admission protects session lookup, Kernel execution, and
    *       status mapping against close. Backend LastError is used only when the
@@ -2319,6 +2340,11 @@ class EmbeddedHost final : public Host {
    */
   VoidResult compute(const HostComputeRequest& request) override {
     return guarded_void("compute", GraphErrc::ComputeError, [&] {
+      if (!valid_compute_execution_options(request.execution)) {
+        return failure_void(
+            GraphErrc::InvalidParameter,
+            "compute maximum_parallelism must be positive when present");
+      }
       auto admission = state_->try_admit_session_operation(request.session);
       if (!admission) {
         return failure_void(GraphErrc::NotFound, "graph session is closing: " +
@@ -2342,7 +2368,8 @@ class EmbeddedHost final : public Host {
    * @brief Schedules async compute and tracks runtime and diagnostic lifetime.
    *
    * @param request Public compute request captured by value.
-   * @return Future resolving to OperationStatus, or scheduling failure.
+   * @return Future resolving to OperationStatus, scheduling failure, or
+   *         InvalidParameter for a present zero Run cap before admission.
    * @throws std::bad_alloc on allocation failure.
    * @note Host tracking is pre-registered under the lifecycle lock, which is
    *       released before potentially blocking backend lane submission. A
@@ -2354,6 +2381,11 @@ class EmbeddedHost final : public Host {
       HostComputeRequest request) override {
     return guarded_result<std::future<OperationStatus>>(
         "compute_async", GraphErrc::ComputeError, [&] {
+          if (!valid_compute_execution_options(request.execution)) {
+            return failure_result<std::future<OperationStatus>>(
+                GraphErrc::InvalidParameter,
+                "compute maximum_parallelism must be positive when present");
+          }
           auto kernel_request = to_kernel_compute_request(request);
           GraphSessionId session = request.session;
           auto state = state_;
@@ -2423,7 +2455,8 @@ class EmbeddedHost final : public Host {
    * @param request Public compute request.
    * @return ImageBuffer value, a successful empty ImageBuffer when compute
    *         completes without image output, NotFound for a missing or closed
-   *         session, or a compute failure status for existing sessions.
+   *         session, InvalidParameter for a present zero Run cap, or a compute
+   *         failure status for existing sessions.
    * @throws std::bad_alloc on allocation failure.
    * @note One lifecycle admission protects session lookup, compute, empty/error
    *       classification, and public image construction against close. Backend
@@ -2434,6 +2467,11 @@ class EmbeddedHost final : public Host {
       const HostComputeRequest& request) override {
     return guarded_result<ImageBuffer>(
         "compute_and_get_image", GraphErrc::ComputeError, [&] {
+          if (!valid_compute_execution_options(request.execution)) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::InvalidParameter,
+                "compute maximum_parallelism must be positive when present");
+          }
           auto admission = state_->try_admit_session_operation(request.session);
           if (!admission) {
             return failure_result<ImageBuffer>(

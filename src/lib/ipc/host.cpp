@@ -496,6 +496,29 @@ ComputeSubmitRequest compute_submission(const HostComputeRequest& request,
 }
 
 /**
+ * @brief Validates public Run execution controls before IPC transport.
+ *
+ * @param execution Public Host execution options.
+ * @return Success when the optional Run cap is absent or positive; otherwise
+ *         Graph `InvalidParameter`.
+ * @throws std::bad_alloc if the invalid-value diagnostic cannot be allocated.
+ * @note IPC Host applies the public Host error domain before opening a Client
+ *       connection. The typed Client independently rejects zero as protocol
+ *       `invalid_params` for direct Client callers.
+ */
+OperationStatus validate_host_compute_execution(
+    const HostComputeExecutionOptions& execution) {
+  if (!execution.maximum_parallelism || *execution.maximum_parallelism != 0U) {
+    return {};
+  }
+  return internal::failure_status(
+      OperationErrorDomain::Graph,
+      static_cast<std::int32_t>(GraphErrc::InvalidParameter),
+      graph_error_stable_name(GraphErrc::InvalidParameter),
+      "compute maximum_parallelism must be positive when present");
+}
+
+/**
  * @brief Reports whether one compute job state is terminal.
  * @param state Typed job lifecycle state.
  * @return True for Succeeded or Failed.
@@ -1592,6 +1615,11 @@ class IpcHost final : public Host {
 
 /** @copydoc IpcHost::compute */
 VoidResult IpcHost::compute(const HostComputeRequest& request) {
+  OperationStatus validation =
+      validate_host_compute_execution(request.execution);
+  if (!validation.ok) {
+    return {std::move(validation)};
+  }
   const ComputeSubmitRequest submit_request =
       compute_submission(request, ComputeResultMode::Status);
   IpcResult<ComputeJobSnapshot> submitted = call_value<ComputeJobSnapshot>(
@@ -1626,6 +1654,11 @@ VoidResult IpcHost::compute(const HostComputeRequest& request) {
 /** @copydoc IpcHost::compute_async */
 Result<std::future<OperationStatus>> IpcHost::compute_async(
     HostComputeRequest request) {
+  OperationStatus validation =
+      validate_host_compute_execution(request.execution);
+  if (!validation.ok) {
+    return {std::move(validation), {}};
+  }
   reap_finished_workers();
   auto completion = std::make_shared<AsyncCompletion>();
   std::future<OperationStatus> future = completion->take_future();
@@ -1672,6 +1705,11 @@ Result<std::future<OperationStatus>> IpcHost::compute_async(
 /** @copydoc IpcHost::compute_and_get_image */
 Result<ImageBuffer> IpcHost::compute_and_get_image(
     const HostComputeRequest& request) {
+  OperationStatus validation =
+      validate_host_compute_execution(request.execution);
+  if (!validation.ok) {
+    return {std::move(validation), {}};
+  }
   const ComputeSubmitRequest submit_request =
       compute_submission(request, ComputeResultMode::Image);
   IpcResult<ComputeJobSnapshot> submitted = call_value<ComputeJobSnapshot>(

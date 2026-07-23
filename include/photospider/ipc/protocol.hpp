@@ -220,7 +220,11 @@ struct ComputeSubmitRequest {
   /** @brief Cache precision and persistence controls. */
   HostComputeCacheOptions cache;
 
-  /** @brief Private execution and quiet-mode controls. */
+  /**
+   * @brief Parallel-route, optional positive Run-cap, and quiet-mode controls.
+   * @note The direct Client omits an absent `maximum_parallelism`, preserves a
+   *       positive value exactly, and rejects zero before wire I/O.
+   */
   HostComputeExecutionOptions execution;
 
   /** @brief Timing and telemetry controls. */

@@ -672,7 +672,11 @@ waiter、shutdown 活动 worker descriptor、以 local Transport code 5 `client_
     "disable_disk_cache": true,
     "nosave": true
   },
-  "execution": {"parallel": true, "quiet": true},
+  "execution": {
+    "parallel": true,
+    "maximum_parallelism": 4,
+    "quiet": true
+  },
   "telemetry": {"enable_timing": true},
   "intent": "real_time_update",
   "dirty_roi": {"x": -4, "y": 5, "width": 6, "height": 7},
@@ -681,9 +685,12 @@ waiter、shutdown 活动 worker descriptor、以 local Transport code 5 `client_
 ```
 
 三个 nested option object 及其 known member 都是 optional；缺失时保留 public
-`HostComputeRequest` default。`intent` 与 `dirty_roi` 可以缺失，也可以是 JSON null。每个存在的
-known value 都会在 session lookup 或 registry admission 前完成 type、range、UTF-8 与 byte-bound
-验证；unknown member 会为了 forward compatibility 被忽略。
+`HostComputeRequest` default。`maximum_parallelism`、`intent` 与 `dirty_roi` 可以缺失，也可以
+是 JSON null。非 null 的 `maximum_parallelism` 必须是正 `uint32`；它只限制本次 compute Run
+的 callback 并发数，绝不调整固定 process worker pool 的大小。每个存在的 known value 都会在
+session lookup 或 registry admission 前完成 type、range、UTF-8 与 byte-bound 验证；unknown
+member 会为了 forward compatibility 被忽略。Typed Client 会在 wire I/O 前拒绝显式为零的值，
+router 也会在 Host access 前执行相同校验。
 
 Queue commit 之前，submission 会 admit active session，执行全局最多 64 个 queued/running record
 的限制，验证并 collision-check 一个 daemon-generated 32-lowercase-hex compute id，并预留全部
