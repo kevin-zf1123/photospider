@@ -210,12 +210,14 @@ class RequestRouter {
    * @brief Drains compute/snapshots/output, then closes every Host session.
    *
    * @return Nothing.
-   * @throws Nothing; job cleanup, Host failures, and Host exceptions are
-   *         contained so socket lifecycle cleanup can continue.
+   * @throws Nothing; pre-invocation allocation/lock failures are contained.
+   *         A Host exception or nonterminal status after invocation is the
+   *         documented fail-stop ambiguity boundary.
    * @note Call after accepted client workers have stopped. Compute shutdown
    *       releases job ownership first; snapshot records/reservations are then
-   *       cleared, and OutputStore waits active leases before Host sessions and
-   *       registry rows are cleared.
+   *       cleared, and OutputStore waits active leases before every remaining
+   *       session selects or joins its preallocated close generation. Registry
+   *       rows are cleared only after these generation claims retire.
    */
   void finish_shutdown() noexcept;
 
@@ -1016,6 +1018,17 @@ class RequestRouter {
   std::optional<std::string> route_observation_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
+
+  /**
+   * @brief Selects or joins one daemon close generation during shutdown.
+   * @param session_id Opaque session copied after accepted-job drain.
+   * @return Nothing after the generation resolves or a pre-invocation failure
+   * is contained.
+   * @throws Nothing; post-invocation ambiguity terminates the process.
+   * @note Exactly the Owner enters `Host::close_graph`; a live request Owner is
+   * joined, and an already removed row is a harmless late NotFound.
+   */
+  void close_shutdown_session(const IpcSessionId& session_id) noexcept;
 
   /** @brief Sole daemon Host borrowed from `photospiderd`. */
   Host& host_;

@@ -418,16 +418,6 @@ void ComputeRequestCoordinator::stop_admission() {
   reservation_changed_.notify_all();
 }
 
-/** @copydoc ComputeRequestCoordinator::restart_after_close_failure */
-void ComputeRequestCoordinator::restart_after_close_failure() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!rows_.empty() || active_key_.has_value()) {
-    throw std::logic_error(
-        "Supersession coordinator can restart only after complete drain.");
-  }
-  accepting_ = true;
-}
-
 /** @copydoc ComputeRequestCoordinator::snapshot */
 ComputeRequestCoordinator::Snapshot ComputeRequestCoordinator::snapshot()
     const {

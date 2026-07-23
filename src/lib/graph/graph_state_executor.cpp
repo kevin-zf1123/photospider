@@ -160,38 +160,7 @@ void GraphStateExecutor::close_and_drain() {
         admitted_unit_count_);
 #endif
   }
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
-  testing::notify_graph_state_executor_close_publish_test_hook();
-#endif
   state_changed_.notify_all();
-}
-
-/** @copydoc GraphStateExecutor::restart_after_close_failure */
-void GraphStateExecutor::restart_after_close_failure() {
-  reject_worker_reentry("restart_after_close_failure");
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (state_ == State::Accepting) {
-    return;
-  }
-  if (state_ != State::Closed || join_in_progress_ || worker_.joinable()) {
-    throw std::logic_error(
-        "GraphStateExecutor can restart only after its worker is joined");
-  }
-
-  state_ = State::Accepting;
-  try {
-    worker_ = std::thread(&GraphStateExecutor::worker_loop, this);
-  } catch (...) {
-    state_ = State::Closed;
-    throw;
-  }
-  worker_thread_count_ = 1;
-#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
-  publish_graph_state_executor_test_snapshot(
-      testing::GraphStateExecutorTestEvent::Reopened, queue_capacity_,
-      queued_task_count_, active_task_count_, worker_thread_count_,
-      admitted_unit_count_);
-#endif
 }
 
 /** @copydoc GraphStateExecutor::enqueue */
@@ -619,21 +588,6 @@ using GraphStateExecutorTestHookPtr = const GraphStateExecutorTestHook*;
 std::atomic<GraphStateExecutorTestHookPtr> g_graph_state_executor_test_hook{
     nullptr};  // NOLINT(whitespace/indent_namespace)
 
-/**
- * @brief Borrowed unlocked close-publication hook pointer.
- * @throws Nothing for alias use.
- */
-using ClosePublishTestHookPtr = const GraphStateExecutorClosePublishTestHook*;
-
-/**
- * @brief Process-local hook for deterministic Closed/restart overlap tests.
- * @throws Nothing for atomic initialization and pointer publication.
- * @note Tests serialize installation and clear the borrowed hook after every
- *       affected close has completed.
- */
-std::atomic<ClosePublishTestHookPtr> g_close_publish_test_hook{
-    nullptr};  // NOLINT(whitespace/indent_namespace)
-
 }  // namespace
 
 /** @copydoc ps::testing::set_graph_state_executor_test_hook */
@@ -649,21 +603,6 @@ void notify_graph_state_executor_test_hook(
       g_graph_state_executor_test_hook.load(std::memory_order_acquire);
   if (hook != nullptr && hook->notify != nullptr) {
     hook->notify(hook->context, snapshot);
-  }
-}
-
-/** @copydoc ps::testing::set_graph_state_executor_close_publish_test_hook */
-void set_graph_state_executor_close_publish_test_hook(
-    const GraphStateExecutorClosePublishTestHook* hook) noexcept {
-  g_close_publish_test_hook.store(hook, std::memory_order_release);
-}
-
-/** @copydoc ps::testing::notify_graph_state_executor_close_publish_test_hook */
-void notify_graph_state_executor_close_publish_test_hook() noexcept {
-  const GraphStateExecutorClosePublishTestHook* hook =
-      g_close_publish_test_hook.load(std::memory_order_acquire);
-  if (hook != nullptr && hook->before_waiter_notification != nullptr) {
-    hook->before_waiter_notification(hook->context);
   }
 }
 

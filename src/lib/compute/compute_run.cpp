@@ -6,6 +6,7 @@
 #include "compute/compute_run.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <limits>
@@ -17,6 +18,7 @@
 
 #include "compute/compute_task_submission.hpp"
 #include "compute/dirty_write_buffers.hpp"
+#include "compute/execution_lifecycle_telemetry.hpp"
 #include "compute/resource_demand_estimator.hpp"
 
 namespace ps::compute {
@@ -281,6 +283,53 @@ class ComputeRunControl {
   bool register_cancellation_slot(
       const std::shared_ptr<ComputeRunCancellationSlot>& slot);
 
+  /**
+   * @brief Registers one physical root reservation before ledger admission.
+   * @param telemetry Stable service telemetry owner outliving this control.
+   * @return Non-owning exact-settlement callback bound to this control.
+   * @throws std::overflow_error when the pending count is exhausted.
+   * @throws std::system_error when Run synchronization fails.
+   */
+  ResourceLedger::ReservationSettlementObserver
+  begin_resource_settlement_observation(ExecutionLifecycleTelemetry& telemetry);
+
+  /**
+   * @brief Moves one staged observation into committed root ownership.
+   * @return Nothing.
+   * @throws Nothing; counter underflow or synchronization failure terminates.
+   */
+  void commit_resource_settlement_observation() noexcept;
+
+  /**
+   * @brief Rolls back one physical root observation before ledger commit.
+   * @return Nothing.
+   * @throws Nothing; underflow or synchronization failure terminates.
+   */
+  void cancel_resource_settlement_observation() noexcept;
+
+  /**
+   * @brief Completes one committed root after exact physical settlement.
+   * @return Nothing.
+   * @throws Nothing; underflow or synchronization failure terminates.
+   */
+  void complete_resource_settlement_observation() noexcept;
+
+  /**
+   * @brief Advances the global child-grant physical ownership counter.
+   * @return Nothing.
+   * @throws Nothing; missing telemetry or counter exhaustion terminates.
+   * @note Called under the reservation mutex and therefore takes no Run lock.
+   */
+  void observe_child_granted() noexcept;
+
+  /**
+   * @brief Retires one global child-grant physical ownership counter.
+   * @return Nothing.
+   * @throws Nothing; missing telemetry or counter underflow terminates.
+   * @note Called under the reservation mutex and therefore takes no Run lock.
+   */
+  void observe_child_released() noexcept;
+
   /** @brief Immutable identity and request inputs captured before planning. */
   const ComputeRunDescriptor descriptor;
 
@@ -316,6 +365,40 @@ class ComputeRunControl {
 
   /** @brief Number of live non-forgeable leases retaining this control. */
   std::atomic<std::size_t> active_leases{0};
+
+  /**
+   * @brief Serializes lease-count mutation with finalization waiting.
+   * @note This mutex is independent from Run state/resource synchronization;
+   * no path holds it while acquiring `mutex`.
+   */
+  std::mutex lease_count_mutex;
+
+  /**
+   * @brief Wakes registry finalization after any active lease release.
+   * @note Predicate mutation and waiting share `lease_count_mutex`, preventing
+   * a release notification from being lost before the waiter blocks.
+   */
+  std::condition_variable lease_release_cv;
+
+  /** @brief Root observations staged before authoritative ledger commit. */
+  std::uint64_t pending_root_reservations = 0U;
+
+  /**
+   * @brief Committed physical roots not yet exactly returned by the ledger.
+   * @note The value advances only after successful ledger admission and
+   * returns to zero after physical/quota settlement.
+   */
+  std::uint64_t live_root_reservations = 0U;
+
+  /**
+   * @brief Stable non-owning service telemetry used by ledger callbacks.
+   * @note The pointer is installed before root publication and the registry
+   * lease guarantees that the owning ExecutionService outlives every callback.
+   */
+  std::atomic<ExecutionLifecycleTelemetry*> lifecycle_telemetry{nullptr};
+
+  /** @brief Wakes lifecycle finalization after exact root settlement. */
+  std::condition_variable resource_settlement_cv;
 };
 
 /**
@@ -542,6 +625,116 @@ bool ComputeRunControl::register_cancellation_slot(
     slot->invoke(*immediate_reason);
   }
   return false;
+}
+
+/** @copydoc ComputeRunControl::begin_resource_settlement_observation */
+ResourceLedger::ReservationSettlementObserver
+ComputeRunControl::begin_resource_settlement_observation(
+    ExecutionLifecycleTelemetry& telemetry) {
+  std::lock_guard<std::mutex> lock(mutex);
+  ExecutionLifecycleTelemetry* current =
+      lifecycle_telemetry.load(std::memory_order_acquire);
+  if (current != &telemetry) {
+    if (pending_root_reservations != 0U || live_root_reservations != 0U) {
+      throw std::logic_error(
+          "ComputeRun cannot span active execution lifecycle owners.");
+    }
+    lifecycle_telemetry.store(&telemetry, std::memory_order_release);
+  }
+  if (pending_root_reservations == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error(
+        "ComputeRun root reservation observation count exhausted.");
+  }
+  ++pending_root_reservations;
+  return ResourceLedger::ReservationSettlementObserver{
+      this, &ComputeRunLease::complete_resource_settlement_observation,
+      &ComputeRunLease::observe_child_granted,
+      &ComputeRunLease::observe_child_released};
+}
+
+/** @copydoc ComputeRunControl::commit_resource_settlement_observation */
+void ComputeRunControl::commit_resource_settlement_observation() noexcept {
+  try {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (pending_root_reservations == 0U ||
+          live_root_reservations == std::numeric_limits<std::uint64_t>::max()) {
+        std::terminate();
+      }
+      --pending_root_reservations;
+      ++live_root_reservations;
+    }
+    ExecutionLifecycleTelemetry* telemetry =
+        lifecycle_telemetry.load(std::memory_order_acquire);
+    if (telemetry == nullptr) {
+      std::terminate();
+    }
+    telemetry->increment_physical_counter(
+        ExecutionLifecyclePhysicalCounter::LiveRootReservation);
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/** @copydoc ComputeRunControl::cancel_resource_settlement_observation */
+void ComputeRunControl::cancel_resource_settlement_observation() noexcept {
+  try {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (pending_root_reservations == 0U) {
+        std::terminate();
+      }
+      --pending_root_reservations;
+    }
+    resource_settlement_cv.notify_all();
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/** @copydoc ComputeRunControl::complete_resource_settlement_observation */
+void ComputeRunControl::complete_resource_settlement_observation() noexcept {
+  try {
+    ExecutionLifecycleTelemetry* telemetry = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (live_root_reservations == 0U) {
+        std::terminate();
+      }
+      telemetry = lifecycle_telemetry.load(std::memory_order_acquire);
+      --live_root_reservations;
+    }
+    if (telemetry == nullptr) {
+      std::terminate();
+    }
+    telemetry->decrement_physical_counter(
+        ExecutionLifecyclePhysicalCounter::LiveRootReservation);
+    resource_settlement_cv.notify_all();
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/** @copydoc ComputeRunControl::observe_child_granted */
+void ComputeRunControl::observe_child_granted() noexcept {
+  ExecutionLifecycleTelemetry* telemetry =
+      lifecycle_telemetry.load(std::memory_order_acquire);
+  if (telemetry == nullptr) {
+    std::terminate();
+  }
+  telemetry->increment_physical_counter(
+      ExecutionLifecyclePhysicalCounter::LiveChildGrant);
+}
+
+/** @copydoc ComputeRunControl::observe_child_released */
+void ComputeRunControl::observe_child_released() noexcept {
+  ExecutionLifecycleTelemetry* telemetry =
+      lifecycle_telemetry.load(std::memory_order_acquire);
+  if (telemetry == nullptr) {
+    std::terminate();
+  }
+  telemetry->decrement_physical_counter(
+      ExecutionLifecyclePhysicalCounter::LiveChildGrant);
 }
 
 /**
@@ -1094,7 +1287,16 @@ ComputeRunLease::~ComputeRunLease() noexcept {
  */
 void ComputeRunLease::retain() noexcept {
   if (control_) {
-    control_->active_leases.fetch_add(1U, std::memory_order_acq_rel);
+    try {
+      std::lock_guard<std::mutex> lock(control_->lease_count_mutex);
+      const std::size_t previous =
+          control_->active_leases.fetch_add(1U, std::memory_order_acq_rel);
+      if (previous == std::numeric_limits<std::size_t>::max()) {
+        std::terminate();
+      }
+    } catch (...) {
+      std::terminate();
+    }
   }
 }
 
@@ -1110,12 +1312,20 @@ void ComputeRunLease::release() noexcept {
   if (!control_) {
     return;
   }
-  const std::size_t previous =
-      control_->active_leases.fetch_sub(1U, std::memory_order_acq_rel);
-  if (previous == 0U) {
+  try {
+    {
+      std::lock_guard<std::mutex> lock(control_->lease_count_mutex);
+      const std::size_t previous =
+          control_->active_leases.fetch_sub(1U, std::memory_order_acq_rel);
+      if (previous == 0U) {
+        std::terminate();
+      }
+    }
+    control_->lease_release_cv.notify_all();
+    control_.reset();
+  } catch (...) {
     std::terminate();
   }
-  control_.reset();
 }
 
 /**
@@ -1231,6 +1441,77 @@ std::optional<ComputeRunTerminalOutcome> ComputeRunLease::terminal_outcome()
     const {
   std::lock_guard<std::mutex> lock(control_->mutex);
   return control_->terminal_outcome;
+}
+
+/** @copydoc ComputeRunLease::wait_until_only_lease */
+void ComputeRunLease::wait_until_only_lease() const {
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (!control_->terminal_outcome.has_value()) {
+      throw std::logic_error(
+          "ComputeRun registry lease wait requires terminal outcome.");
+    }
+  }
+  std::unique_lock<std::mutex> lock(control_->lease_count_mutex);
+  control_->lease_release_cv.wait(lock, [this]() {
+    return control_->active_leases.load(std::memory_order_acquire) == 1U;
+  });
+}
+
+/** @copydoc ComputeRunLease::wait_for_resource_settlement */
+void ComputeRunLease::wait_for_resource_settlement() const {
+  std::unique_lock<std::mutex> lock(control_->mutex);
+  if (!control_->terminal_outcome.has_value()) {
+    throw std::logic_error(
+        "ComputeRun resource settlement requires terminal outcome.");
+  }
+  control_->resource_settlement_cv.wait(lock, [this]() {
+    return control_->pending_root_reservations == 0U &&
+           control_->live_root_reservations == 0U;
+  });
+}
+
+/** @copydoc ComputeRunLease::begin_resource_settlement_observation */
+ResourceLedger::ReservationSettlementObserver
+ComputeRunLease::begin_resource_settlement_observation(
+    ExecutionLifecycleTelemetry& telemetry) const {
+  return control_->begin_resource_settlement_observation(telemetry);
+}
+
+/** @copydoc ComputeRunLease::commit_resource_settlement_observation */
+void ComputeRunLease::commit_resource_settlement_observation() const noexcept {
+  control_->commit_resource_settlement_observation();
+}
+
+/** @copydoc ComputeRunLease::cancel_resource_settlement_observation */
+void ComputeRunLease::cancel_resource_settlement_observation() const noexcept {
+  control_->cancel_resource_settlement_observation();
+}
+
+/** @copydoc ComputeRunLease::complete_resource_settlement_observation */
+void ComputeRunLease::complete_resource_settlement_observation(
+    void* context) noexcept {
+  if (context == nullptr) {
+    std::terminate();
+  }
+  static_cast<ComputeRunControl*>(context)
+      ->complete_resource_settlement_observation();
+}
+
+/** @copydoc ComputeRunLease::observe_child_granted */
+void ComputeRunLease::observe_child_granted(void* context) noexcept {
+  if (context == nullptr) {
+    std::terminate();
+  }
+  static_cast<ComputeRunControl*>(context)->observe_child_granted();
+}
+
+/** @copydoc ComputeRunLease::observe_child_released */
+void ComputeRunLease::observe_child_released(void* context) noexcept {
+  if (context == nullptr) {
+    std::terminate();
+  }
+  static_cast<ComputeRunControl*>(context)->observe_child_released();
 }
 
 /** @copydoc ComputeRunLease::observe_cancellation */

@@ -3818,19 +3818,32 @@ std::optional<std::string> RequestRouter::route_graph_lifecycle_method(
   if (!claim.status.ok) {
     return bounded_error(id, claim.status);
   }
-  VoidResult closed;
-  {
-    std::lock_guard<std::mutex> host_lock(host_mutex_);
-    closed = host_.close_graph(claim.value.host_session());
-    if (closed.status.ok ||
-        checked_graph_error_code(closed.status) == GraphErrc::NotFound) {
-      claim.value.erase();
-    } else {
-      claim.value.reopen();
+  OperationStatus close_status;
+  if (claim.value.role() == SessionRegistry::CloseClaim::Role::Joiner) {
+    close_status = claim.value.wait_result();
+  } else {
+    VoidResult closed;
+    bool host_close_started = false;
+    try {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      claim.value.mark_host_close_started();
+      host_close_started = true;
+      closed = host_.close_graph(claim.value.host_session());
+    } catch (...) {
+      if (host_close_started) {
+        std::terminate();
+      }
+      throw;
     }
+    if (!closed.status.ok &&
+        checked_graph_error_code(closed.status) != GraphErrc::NotFound) {
+      std::terminate();
+    }
+    claim.value.complete_host_close(std::move(closed.status));
+    close_status = claim.value.wait_result();
   }
-  if (!closed.status.ok) {
-    return bounded_error(id, graph_status(closed.status));
+  if (!close_status.ok) {
+    return bounded_error(id, graph_status(close_status));
   }
   return encode_success_response(id, Json{{"closed", true}});
 }
@@ -3948,6 +3961,44 @@ void RequestRouter::begin_shutdown() noexcept {
   output_store_.stop_leases();
 }
 
+/** @copydoc RequestRouter::close_shutdown_session */
+void RequestRouter::close_shutdown_session(
+    const IpcSessionId& session_id) noexcept {
+  try {
+    IpcResult<SessionRegistry::CloseClaim> claim =
+        registry_.begin_shutdown_close(session_id);
+    if (!claim.status.ok) {
+      return;
+    }
+    if (claim.value.role() == SessionRegistry::CloseClaim::Role::Joiner) {
+      (void)claim.value.wait_result();
+      return;
+    }
+
+    VoidResult closed;
+    bool host_close_started = false;
+    try {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      claim.value.mark_host_close_started();
+      host_close_started = true;
+      closed = host_.close_graph(claim.value.host_session());
+    } catch (...) {
+      if (host_close_started) {
+        std::terminate();
+      }
+      return;
+    }
+    if (!closed.status.ok &&
+        checked_graph_error_code(closed.status) != GraphErrc::NotFound) {
+      std::terminate();
+    }
+    claim.value.complete_host_close(std::move(closed.status));
+    (void)claim.value.wait_result();
+  } catch (...) {
+    return;
+  }
+}
+
 /** @copydoc RequestRouter::finish_shutdown */
 void RequestRouter::finish_shutdown() noexcept {
   compute_registry_.shutdown();
@@ -3956,11 +4007,7 @@ void RequestRouter::finish_shutdown() noexcept {
   try {
     const auto sessions = registry_.active_sessions();
     for (const auto& session : sessions) {
-      try {
-        std::lock_guard<std::mutex> host_lock(host_mutex_);
-        (void)host_.close_graph(session.second);
-      } catch (...) {
-      }
+      close_shutdown_session(session.first);
     }
   } catch (...) {
   }

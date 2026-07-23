@@ -50,6 +50,7 @@
 #include "support/graph_model_test_access.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
+#include "support/scoped_execution_graph_lifecycle.hpp"
 
 namespace ps {
 namespace {
@@ -1776,6 +1777,8 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   graph.add_node(make_contract_node());
   graph.add_node(make_contract_process_node());
   graph.validate_topology();
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   // HP compute populates cached_output_high_precision only
   ComputeService::Request hp_request;
@@ -1848,6 +1851,8 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreNodesWithoutHpState) {
   graph.add_node(rt_only_node);
 
   graph.validate_topology();
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   // HP compute for node 2 — also computes node 1 as dependency
   ComputeService::Request hp_request;
@@ -2482,6 +2487,8 @@ TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
 
   GraphModel graph(temp_path("photospider-contract-rt-error"));
   graph.add_node(make_contract_node());
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request request;
   request.node_id = 1;
@@ -4443,10 +4450,11 @@ TEST(ComputeContracts, ExecutionObservationAndReplacementWaitForCompute) {
 }
 
 /**
- * @brief Verifies graph close waits behind accepted asynchronous compute.
+ * @brief Verifies Graph close cancels and drains accepted asynchronous work.
  *
- * @throws Nothing when close remains pending until the compute-request work
- * item completes, then removes the runtime without invalidating its outcome.
+ * @throws Nothing when close remains pending until the entered callback
+ * returns, the request reports GraphClose cancellation, and runtime removal
+ * completes only after exact Run settlement.
  * @note The blocking operation creates a deterministic close/compute race and
  * avoids relying on a fixed operation sleep duration.
  */
@@ -4497,8 +4505,12 @@ TEST(ComputeContracts, CloseWaitsForAcceptedAsyncComputeRequest) {
 
   release_compute.set_value();
   const Kernel::AsyncComputeResult outcome = compute_future->get();
-  EXPECT_TRUE(outcome.ok);
-  EXPECT_FALSE(outcome.error.has_value());
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  EXPECT_NE(outcome.error->message.find("ComputeRun cancelled: graph close."),
+            std::string::npos)
+      << outcome.error->message;
   EXPECT_TRUE(close_future.get());
   EXPECT_FALSE(kernel.last_error(graph_name).has_value());
 

@@ -218,33 +218,16 @@ class GraphStateExecutor {
    * @brief Stops admission, drains admitted FIFO work, and joins the worker.
    * @return Nothing.
    * @throws std::logic_error if called from this lane's own worker.
-   * @throws std::overflow_error if starting a new close generation would wrap.
+   * @throws std::overflow_error if starting the close generation would wrap.
    * @throws std::system_error if lifecycle synchronization or worker join
    * fails.
    * @note Concurrent calls capture the same close generation and each returns
    *       only after that generation's worker join is durably recorded.
-   *       Failed-close restart may reopen a later generation before every
-   *       waiter resumes; the completed-generation record still releases those
-   *       original waiters. Repeated calls on a closed generation are
-   *       idempotent. Producers blocked on a full queue are awakened and
-   *       rejected.
+   *       The lane remains permanently closed after the join; repeated calls
+   *       observe the same completed generation and are idempotent. Producers
+   *       blocked on a full queue are awakened and rejected.
    */
   void close_and_drain();
-
-  /**
-   * @brief Recreates the sole worker after runtime shutdown aborts close.
-   * @return Nothing.
-   * @throws std::logic_error if called from this lane worker or before the
-   *         prior worker has reached the fully joined `Closed` state.
-   * @throws std::system_error if replacement worker creation fails.
-   * @note Calling this while already accepting is idempotent. The method is a
-   *       narrow Kernel close-rollback operation, not a general public restart
-   *       facility; it never restores discarded tasks because close drained all
-   *       prior admissions before runtime shutdown began. Completion of the
-   *       joined generation remains recorded so its delayed close waiters do
-   *       not wait on this replacement worker.
-   */
-  void restart_after_close_failure();
 
   /**
    * @brief Disables copying because mutex ownership cannot be duplicated.
@@ -422,10 +405,9 @@ class GraphStateExecutor {
    * @throws std::logic_error if called from this lane's own worker.
    * @throws std::overflow_error if a new generation cannot be represented.
    * @throws std::system_error if lifecycle synchronization fails.
-   * @note The returned token remains a completed-history identity after a
-   *       failed-close restart opens a later accepting generation. This lets
-   *       every close waiter finish its original cycle even when restart wins
-   *       the lifecycle mutex before that waiter wakes.
+   * @note The returned token remains the permanent completed-close identity,
+   *       allowing every concurrent waiter to recognize the same joined
+   *       worker without reopening admission.
    */
   CloseGeneration stop_admission_for_close(const char* operation);
 

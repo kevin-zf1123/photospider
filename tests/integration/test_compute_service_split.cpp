@@ -49,6 +49,7 @@
 #include "runtime/interaction.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
+#include "support/scoped_execution_graph_lifecycle.hpp"
 
 namespace ps {
 namespace {
@@ -1856,6 +1857,8 @@ TEST(TaskGraphPlanningSplit,
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request execution_request;
   execution_request.node_id = 2;
   execution_request.intent = ComputeIntent::GlobalHighPrecision;
@@ -1984,6 +1987,8 @@ TEST(ComputeRunProductPath, HpAndRealtimeChildrenValidateBeforePlanning) {
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request hp_request;
   hp_request.node_id = 404;
@@ -2011,6 +2016,8 @@ TEST(ComputeServiceSplit,
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request full;
   full.node_id = 2;
@@ -2061,6 +2068,8 @@ TEST(ComputeServiceSplit,
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2123,6 +2132,8 @@ TEST(ComputeServiceSplit,
     GraphEventService events;
     compute::ExecutionService execution_service;
     ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                           graph);
     ComputeService::Request request;
     request.node_id = 2;
     request.cache.precision = "float32";
@@ -2176,6 +2187,8 @@ TEST(ComputeServiceSplit,
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2205,6 +2218,8 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2258,6 +2273,8 @@ TEST(ComputeServiceSplit,
     GraphEventService events;
     compute::ExecutionService execution_service(1U);
     ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                           graph);
     ComputeService::Request request;
     request.node_id = 2;
     request.cache.precision = "float32";
@@ -2459,6 +2476,8 @@ TEST(ComputeServiceCancellation,
     GraphEventService events;
     compute::ExecutionService execution_service(1U);
     ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                           graph);
     ComputeService::Request request;
     request.node_id = 2;
     request.cache.precision = "float32";
@@ -2580,6 +2599,8 @@ TEST(ComputeServiceSplit,
   GraphEventService events;
   compute::ExecutionService execution_service(1U);
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2628,6 +2649,8 @@ TEST(ComputeServiceSplit,
   GraphEventService events;
   compute::ExecutionService execution_service(1U);
   ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2793,6 +2816,8 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   GraphEventService events;
   compute::ExecutionService execution_service(1U);
   ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request request;
   request.node_id = 1;
@@ -2932,6 +2957,8 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
 
   compute::ExecutionService execution_service(1U);
   ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 1;
   request.cache.precision = "int8";
@@ -3432,6 +3459,8 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request request;
   request.node_id = 2;
@@ -3496,6 +3525,8 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request full_request;
   full_request.node_id = 2;
@@ -3557,6 +3588,8 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   GraphEventService events;
   compute::ExecutionService execution_service;
   ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request full_request;
   full_request.node_id = 2;

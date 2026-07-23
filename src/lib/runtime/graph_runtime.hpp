@@ -37,6 +37,7 @@ namespace ps {
 class GraphRuntime;
 namespace compute {
 class RealtimeProxyGraph;
+class GraphLifetimeAnchor;
 }  // namespace compute
 
 /**
@@ -299,6 +300,18 @@ class GraphRuntime : public ExecutionHostContext {
   const Info& info() const noexcept { return info_; }
 
   /**
+   * @brief Returns the complete preallocated Graph lifetime anchor.
+   * @return Shared exact-identity anchor retained through close completion.
+   * @throws Nothing.
+   * @note The anchor contains no GraphModel or lane pointer. Kernel registers
+   * it only after runtime construction and both lanes are complete.
+   */
+  std::shared_ptr<compute::GraphLifetimeAnchor> lifetime_anchor()
+      const noexcept {
+    return lifetime_anchor_;
+  }
+
+  /**
    * @brief Returns the runtime-owned mutable graph model.
    * @return Borrowed graph model reference.
    * @throws Nothing.
@@ -430,19 +443,6 @@ class GraphRuntime : public ExecutionHostContext {
   void close_compute_requests() {
     compute_request_coordinator_.stop_admission();
     compute_requests_.close_and_drain();
-  }
-
-  /**
-   * @brief Restarts request admission after execution shutdown aborts close.
-   * @return Nothing.
-   * @throws The lifecycle errors documented by
-   *         GraphStateExecutor::restart_after_close_failure.
-   * @note Kernel restarts graph-state first, then this lane, so newly admitted
-   *       compute can always capture visible state.
-   */
-  void restart_compute_requests_after_close_failure() {
-    compute_requests_.restart_after_close_failure();
-    compute_request_coordinator_.restart_after_close_failure();
   }
 
   /**
@@ -642,6 +642,11 @@ class GraphRuntime : public ExecutionHostContext {
   Info info_;
   /** @brief Runtime-owned graph model and cache-facing state. */
   GraphModel model_;
+  /**
+   * @brief Exact-identity lifetime root declared before lanes so reverse
+   * destruction retires it after both lane owners.
+   */
+  std::shared_ptr<compute::GraphLifetimeAnchor> lifetime_anchor_;
   /** @brief Serial executor governing mutable graph model access. */
   GraphStateExecutor graph_state_;
   /**

@@ -21,6 +21,7 @@
 #include <string>
 #include <utility>
 
+#include "compute/execution_service.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "runtime/kernel.hpp"
@@ -331,6 +332,8 @@ class KernelGraphRevisionCommitPolicy final
    * @brief Captures exact staged owners and persistence policy.
    * @param runtime Runtime whose visible graph/proxy and lane are
    * authoritative.
+   * @param execution_service Process lifecycle registry owner used only for
+   * the brief graph-state/lifecycle commit predicate.
    * @param cache Cache service used only after the live predicate succeeds.
    * @param staged_graph Request-owned Graph used by every compute callback.
    * @param staged_proxy Optional request-owned proxy used by dirty/RT work.
@@ -340,11 +343,13 @@ class KernelGraphRevisionCommitPolicy final
    * compute-request lane outlives every commit callback.
    */
   KernelGraphRevisionCommitPolicy(GraphRuntime& runtime,
+                                  compute::ExecutionService& execution_service,
                                   GraphCacheService& cache,
                                   GraphModel& staged_graph,
                                   compute::RealtimeProxyGraph* staged_proxy,
                                   const Kernel::ComputeRequest& request)
       : runtime_(runtime),
+        execution_service_(execution_service),
         cache_(cache),
         staged_graph_(&staged_graph),
         staged_proxy_(staged_proxy),
@@ -392,6 +397,7 @@ class KernelGraphRevisionCommitPolicy final
             return;
           }
           try {
+            validate_lifecycle_commit(commit_lease);
             validate_current_supersession(commit_lease);
             validate_live_graph(live_graph, instance_id, revision);
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
@@ -460,6 +466,7 @@ class KernelGraphRevisionCommitPolicy final
             return;
           }
           try {
+            validate_lifecycle_commit(commit_lease);
             validate_current_supersession(commit_lease);
             validate_live_graph(live_graph, instance_id, revision);
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
@@ -489,6 +496,27 @@ class KernelGraphRevisionCommitPolicy final
   }
 
  private:
+  /**
+   * @brief Validates exact Open-row and registered-Run commit permission.
+   * @param run_lease Commit contender executing on the graph-state lane.
+   * @return Nothing while lifecycle publication remains permitted.
+   * @throws GraphError when Graph close or unregister won first.
+   * @throws std::system_error when the lifecycle fence cannot be locked.
+   * @note This is the sole graph-state/lifecycle lock nesting. The registry
+   * check waits for nothing and releases its fence before persistence or
+   * visible publication.
+   */
+  void validate_lifecycle_commit(
+      const compute::ComputeRunLease& run_lease) const {
+    const compute::ComputeRunDescriptor& descriptor = run_lease.descriptor();
+    if (!execution_service_.permits_visible_commit(
+            descriptor.graph_instance_id(), descriptor.id())) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "ComputeRun lifecycle close won; staged output discarded.");
+    }
+  }
+
   /**
    * @brief Validates Run domain, label, and exact staged provenance.
    * @param run_lease Commit-pending domain Run lease.
@@ -588,6 +616,9 @@ class KernelGraphRevisionCommitPolicy final
 
   /** @brief Borrowed runtime valid through the request-lane callback. */
   GraphRuntime& runtime_;
+
+  /** @brief Borrowed process lifecycle registry facade. */
+  compute::ExecutionService& execution_service_;
 
   /** @brief Borrowed Kernel-owned cache service used for deferred writes. */
   GraphCacheService& cache_;
@@ -914,6 +945,9 @@ Kernel::compute_async_request(ComputeRequest request) {
 void Kernel::execute_staged_compute_request(GraphRuntime& runtime,
                                             const ComputeRequest& request,
                                             NodeOutput* committed_output) {
+  compute::RunLifecycleAdmissionCandidate lifecycle_candidate =
+      execution_service_->begin_graph_admission(runtime.model().instance_id());
+
   /**
    * @brief Owns the exact Graph and optional proxy snapshots for one request.
    * @throws Nothing for destruction; members release staged payload ownership.
@@ -948,17 +982,20 @@ void Kernel::execute_staged_compute_request(GraphRuntime& runtime,
   staged.graph->set_quiet(request.execution.quiet);
   staged.graph->set_skip_save_cache(true);
   auto commit_policy = std::make_shared<KernelGraphRevisionCommitPolicy>(
-      runtime, cache_service_, *staged.graph, staged.proxy.get(), request);
+      runtime, *execution_service_, cache_service_, *staged.graph,
+      staged.proxy.get(), request);
   const ComputeService::Request service_request = make_service_compute_request(
       request, std::move(commit_policy), staged.proxy.get());
   ComputeService compute_service(traversal_service_, cache_service_,
                                  runtime.event_service(), *execution_service_);
   NodeOutput* staged_output = nullptr;
   if (request.execution.parallel) {
-    staged_output = &compute_service.compute_parallel(*staged.graph, runtime,
-                                                      service_request);
+    staged_output = &compute_service.compute_parallel(
+        *staged.graph, runtime, service_request,
+        std::move(lifecycle_candidate));
   } else {
-    staged_output = &compute_service.compute(*staged.graph, service_request);
+    staged_output = &compute_service.compute(*staged.graph, service_request,
+                                             std::move(lifecycle_candidate));
   }
 
   if (committed_output != nullptr) {

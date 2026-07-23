@@ -104,6 +104,22 @@ RunGroup::RunGroup(
 /** @copydoc RunGroup::~RunGroup */
 RunGroup::~RunGroup() noexcept = default;
 
+/** @copydoc RunGroup::hp_lease */
+const ComputeRunLease& RunGroup::hp_lease() const {
+  if (!hp_lease_.has_value()) {
+    throw std::logic_error("RunGroup HP lifecycle lease was released.");
+  }
+  return *hp_lease_;
+}
+
+/** @copydoc RunGroup::rt_lease */
+const ComputeRunLease& RunGroup::rt_lease() const {
+  if (!rt_lease_.has_value()) {
+    throw std::logic_error("RunGroup RT lifecycle lease was released.");
+  }
+  return *rt_lease_;
+}
+
 /** @copydoc RunGroup::request_cancellation */
 bool RunGroup::request_cancellation(ComputeRunCancellationReason reason) {
   sibling_commit_gate_->abort_hp_commit();
@@ -150,6 +166,12 @@ ComputeRunTerminalOutcome RunGroup::aggregate_terminal_outcome() const {
   }
   return ComputeRunTerminalOutcome{ComputeRunTerminalKind::Succeeded, nullptr,
                                    std::nullopt};
+}
+
+/** @copydoc RunGroup::release_lifecycle_leases */
+void RunGroup::release_lifecycle_leases() noexcept {
+  hp_lease_.reset();
+  rt_lease_.reset();
 }
 
 }  // namespace ps::compute

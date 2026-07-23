@@ -17,7 +17,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -873,11 +872,14 @@ class ExecutionService::BoundedReadyStore final {
    * @brief Fixes aggregate ready-store limits for the service lifetime.
    * @param entry_limit Maximum stored entries across both service classes.
    * @param byte_limit Maximum accounted bytes across both service classes.
+   * @param telemetry Stable physical-counter owner outliving this store.
    * @throws Nothing.
    */
-  BoundedReadyStore(std::uint64_t entry_limit,
-                    std::uint64_t byte_limit) noexcept
-      : entry_limit_(entry_limit), byte_limit_(byte_limit) {}
+  BoundedReadyStore(std::uint64_t entry_limit, std::uint64_t byte_limit,
+                    ExecutionLifecycleTelemetry& telemetry) noexcept
+      : entry_limit_(entry_limit),
+        byte_limit_(byte_limit),
+        telemetry_(telemetry) {}
 
   /**
    * @brief Returns conservative per-Run policy-map structural ownership.
@@ -1008,6 +1010,8 @@ class ExecutionService::BoundedReadyStore final {
     link_entry(run_state, *entry);
     entry_count_ = next->ready_entries;
     byte_count_ = next->ready_bytes;
+    telemetry_.increment_physical_counter(
+        ExecutionLifecyclePhysicalCounter::ReadyEntry);
     return true;
   }
 
@@ -1320,11 +1324,50 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
+   * @brief Tests exact physical policy-state ownership for one Run.
+   * @param run Matching retained RunState.
+   * @return True only when the policy row retains the same raw state.
+   * @throws Nothing.
+   * @note This is a physical ready-store predicate, not lifecycle admission or
+   * close authority.
+   */
+  bool owns_run(const std::shared_ptr<RunState>& run) const noexcept {
+    const auto found = run_states_.find(run->id.value());
+    return found != run_states_.end() && found->second.run == run.get();
+  }
+
+  /**
+   * @brief Reports whether any physical policy row uses one Run identity.
+   * @param run_id Exact nonzero Run identity.
+   * @return True while initial/dependent publication or settlement retains the
+   * policy row.
+   * @throws Nothing.
+   * @note Used only to reject duplicate physical execution of one globally
+   * unique Run; it does not replace RunLifecycleRegistry.
+   */
+  bool contains_run_id(ComputeRunId run_id) const noexcept {
+    return run_states_.find(run_id.value()) != run_states_.end();
+  }
+
+  /**
+   * @brief Returns current physical policy Run rows.
+   * @return Exact row count.
+   * @throws Nothing.
+   */
+  std::uint64_t run_count() const noexcept {
+    return static_cast<std::uint64_t>(run_states_.size());
+  }
+
+  /**
    * @brief Drops all entries and policy rows during final service teardown.
    * @return Nothing.
    * @throws Nothing; owner destruction is noexcept.
    */
   void clear() noexcept {
+    for (std::uint64_t count = 0U; count < entry_count_; ++count) {
+      telemetry_.decrement_physical_counter(
+          ExecutionLifecyclePhysicalCounter::ReadyEntry);
+    }
     entries_.clear();
     run_states_.clear();
     graph_states_.clear();
@@ -2206,6 +2249,8 @@ class ExecutionService::BoundedReadyStore final {
     entry.run_previous = nullptr;
     entry.run_next = nullptr;
     entries_.erase(entry.store_position);
+    telemetry_.decrement_physical_counter(
+        ExecutionLifecyclePhysicalCounter::ReadyEntry);
   }
 
   /** @brief Immutable maximum entries across all classes and lanes. */
@@ -2213,6 +2258,9 @@ class ExecutionService::BoundedReadyStore final {
 
   /** @brief Immutable maximum accounted bytes across all classes and lanes. */
   const std::uint64_t byte_limit_;
+
+  /** @brief Stable non-owning physical lifecycle counter owner. */
+  ExecutionLifecycleTelemetry& telemetry_;
 
   /** @brief Store-owned list node for every currently ready value. */
   std::list<std::shared_ptr<QueueEntry>> entries_;
@@ -2269,9 +2317,6 @@ std::uint64_t ExecutionService::service_run_envelope_bytes(
   RetainedMemoryEstimator estimate("ExecutionService Run envelope");
   estimate.add_objects<RunState>();
   estimate.add_shared_control_block();
-  estimate
-      .add_objects<std::pair<const std::uint64_t, std::weak_ptr<RunState>>>();
-  estimate.add_objects<void*>(3U);
   estimate.add_bytes(BoundedReadyStore::run_policy_envelope_bytes());
   estimate.add_bytes(static_cast<std::uint64_t>(graph_identity.capacity()));
   estimate.add_bytes(1U);
@@ -2446,26 +2491,34 @@ class ExecutionService::PoolState final {
   /**
    * @brief Creates one unconfigured execution domain with immutable limits.
    * @param resource_limits Complete ledger and ready-store limits.
+   * @param telemetry Stable physical counter owner.
+   * @param policy_observer Stable non-owning service callback/binding observer.
    * @throws std::invalid_argument when interactive headroom exceeds a limit.
    * @throws std::bad_alloc when ledger state cannot allocate.
    */
-  explicit PoolState(ExecutionResourceLimits resource_limits)
+  PoolState(ExecutionResourceLimits resource_limits,
+            ExecutionLifecycleTelemetry& telemetry,
+            policy::PolicyLifecycleObserver policy_observer)
       : registry(policy::PolicyRegistry::process_instance()),
         interactive_binding(registry.create_binding(
-            "interactive", PolicyClass::Interactive, 1U)),
-        throughput_binding(
-            registry.create_binding("throughput", PolicyClass::Throughput, 1U)),
+            "interactive", PolicyClass::Interactive, 1U, policy_observer)),
+        throughput_binding(registry.create_binding(
+            "throughput", PolicyClass::Throughput, 1U, policy_observer)),
         throughput_reservations(std::make_shared<ThroughputReservationAccount>(
             calculate_general_capacity(resource_limits.resource_vector(),
                                        resource_limits.interactive_headroom))),
         ledger(resource_limits.resource_vector()),
-        ready_store(resource_limits.ready_entries,
-                    resource_limits.ready_bytes) {}
+        ready_store(resource_limits.ready_entries, resource_limits.ready_bytes,
+                    telemetry) {
+    interactive_binding->mark_service_published();
+    throughput_binding->mark_service_published();
+  }
 
   /**
    * @brief Applies one built-in policy ceiling before ordinary ledger commit.
    * @param resources Complete checked root vector requested by one Run/owner.
    * @param service_class Explicit policy class; no intent inference occurs.
+   * @param settlement_observer Non-owning exact Run settlement callback.
    * @return Ledger-minted reservation, or null without mutation when either
    * policy ceiling or authoritative capacity is unavailable.
    * @throws std::bad_alloc or std::system_error from ledger admission.
@@ -2475,9 +2528,10 @@ class ExecutionService::PoolState final {
    * policy mints no token; `ledger` remains the sole physical authority.
    */
   std::optional<ResourceLedger::Reservation> try_reserve_for_policy(
-      const ResourceVector& resources, ComputeRunQosClass service_class) {
+      const ResourceVector& resources, ComputeRunQosClass service_class,
+      ResourceLedger::ReservationSettlementObserver settlement_observer) {
     if (service_class == ComputeRunQosClass::Interactive) {
-      return ledger.try_reserve(resources);
+      return ledger.try_reserve(resources, nullptr, settlement_observer);
     }
 
     std::lock_guard<std::mutex> transaction_lock(
@@ -2487,8 +2541,8 @@ class ExecutionService::PoolState final {
     if (!after.has_value()) {
       return std::nullopt;
     }
-    std::optional<ResourceLedger::Reservation> reservation =
-        ledger.try_reserve(resources, throughput_reservations);
+    std::optional<ResourceLedger::Reservation> reservation = ledger.try_reserve(
+        resources, throughput_reservations, settlement_observer);
     if (!reservation.has_value()) {
       return std::nullopt;
     }
@@ -2560,22 +2614,31 @@ class ExecutionService::PoolState final {
   /** @brief Private route discovery plus allocation-free start/finish state. */
   execution::PhysicalExecutionRoutes physical_routes;
 
-  /** @brief Active Run states keyed by non-reused numeric Run id. */
-  std::unordered_map<uint64_t, std::weak_ptr<RunState>> active_runs;
-
   /** @brief Fixed CPU workers followed by one GPU-pipeline worker. */
   std::vector<std::thread> workers;
 
   /** @brief Frozen worker count, or zero before complete configuration. */
   unsigned int configured_workers = 0U;
 
-  /** @brief True after destructor requests worker-loop exit. */
+  /** @brief True after explicit shutdown requests worker-loop exit. */
   bool stopping = false;
+
+  /** @brief True while one control thread owns physical shutdown progress. */
+  bool shutdown_in_progress = false;
+
+  /** @brief True after routes, workers, bindings, and telemetry stop. */
+  bool shutdown_complete = false;
+
+  /** @brief Wakes repeated shutdown callers after the owner completes. */
+  std::condition_variable shutdown_cv;
 };
 
 /** @brief Current service-worker Run context, null outside callbacks. */
 thread_local ExecutionService::RunState* ExecutionService::tls_run_state_ =
     nullptr;
+
+/** @brief Exact service owning the entered callback, or null outside one. */
+thread_local ExecutionService* ExecutionService::tls_service_ = nullptr;
 
 /** @brief Current service worker id, or -1 outside callbacks. */
 thread_local int ExecutionService::tls_worker_id_ = -1;
@@ -2656,7 +2719,16 @@ ExecutionService::ExecutionService()
 
 /** @copydoc ExecutionService::ExecutionService */
 ExecutionService::ExecutionService(ExecutionResourceLimits resource_limits)
-    : pool_(std::make_unique<PoolState>(resource_limits)) {}
+    : lifecycle_telemetry_(std::make_unique<ExecutionLifecycleTelemetry>()),
+      lifecycle_registry_(
+          std::make_unique<RunLifecycleRegistry>(*lifecycle_telemetry_)),
+      pool_(std::make_unique<PoolState>(resource_limits, *lifecycle_telemetry_,
+                                        policy_lifecycle_observer())) {
+  const ExecutionLifecycleCounters counters = lifecycle_registry_->counters();
+  lifecycle_telemetry_->publish(ExecutionLifecycleEventKind::ServiceStarted,
+                                ExecutionLifecycleCategory::None, 0U, 0U, 0U,
+                                0U, counters);
+}
 
 /** @copydoc ExecutionService::ExecutionService */
 ExecutionService::ExecutionService(unsigned int worker_count)
@@ -2674,31 +2746,71 @@ ExecutionService::~ExecutionService() noexcept {
   if (!pool_) {
     return;
   }
-
-  std::vector<std::thread> workers;
   try {
-    {
-      std::lock_guard<std::mutex> lock(pool_->mutex);
-      pool_->stopping = true;
-      pool_->physical_routes.begin_shutdown();
-      pool_->ready_store.clear();
-      pool_->advance_worker_notification_epoch();
-      workers.swap(pool_->workers);
-    }
-    pool_->ready_cv.notify_all();
-    for (std::thread& worker : workers) {
-      if (worker.joinable()) {
-        worker.join();
-      }
-    }
-    {
-      std::lock_guard<std::mutex> lock(pool_->mutex);
-      if (!pool_->physical_routes.drained()) {
-        std::terminate();
-      }
-      pool_->active_runs.clear();
-      pool_->configured_workers = 0U;
-    }
+    shutdown();
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/** @copydoc ExecutionService::policy_lifecycle_observer */
+policy::PolicyLifecycleObserver
+ExecutionService::policy_lifecycle_observer() noexcept {
+  return policy::PolicyLifecycleObserver{
+      this, &ExecutionService::observe_policy_invocation_entered,
+      &ExecutionService::observe_policy_invocation_returned,
+      &ExecutionService::observe_policy_binding_published,
+      &ExecutionService::observe_policy_binding_retired};
+}
+
+/** @copydoc ExecutionService::observe_policy_invocation_entered */
+void ExecutionService::observe_policy_invocation_entered(
+    void* context) noexcept {
+  if (context == nullptr) {
+    std::terminate();
+  }
+  auto* service = static_cast<ExecutionService*>(context);
+  service->lifecycle_telemetry_->increment_physical_counter(
+      ExecutionLifecyclePhysicalCounter::LivePolicyInvocation);
+}
+
+/** @copydoc ExecutionService::observe_policy_invocation_returned */
+void ExecutionService::observe_policy_invocation_returned(
+    void* context) noexcept {
+  if (context == nullptr) {
+    std::terminate();
+  }
+  auto* service = static_cast<ExecutionService*>(context);
+  service->lifecycle_telemetry_->decrement_physical_counter(
+      ExecutionLifecyclePhysicalCounter::LivePolicyInvocation);
+}
+
+/** @copydoc ExecutionService::observe_policy_binding_published */
+void ExecutionService::observe_policy_binding_published(
+    void* context) noexcept {
+  if (context == nullptr) {
+    std::terminate();
+  }
+  auto* service = static_cast<ExecutionService*>(context);
+  service->lifecycle_telemetry_->increment_physical_counter(
+      ExecutionLifecyclePhysicalCounter::LivePolicyBinding);
+}
+
+/** @copydoc ExecutionService::observe_policy_binding_retired */
+void ExecutionService::observe_policy_binding_retired(
+    void* context, std::uint64_t generation, bool destroy_failed) noexcept {
+  if (context == nullptr) {
+    std::terminate();
+  }
+  auto* service = static_cast<ExecutionService*>(context);
+  service->lifecycle_telemetry_->decrement_physical_counter(
+      ExecutionLifecyclePhysicalCounter::LivePolicyBinding);
+  try {
+    service->lifecycle_telemetry_->publish(
+        ExecutionLifecycleEventKind::BindingRetired,
+        destroy_failed ? ExecutionLifecycleCategory::FailureOther
+                       : ExecutionLifecycleCategory::None,
+        0U, 0U, 0U, generation, service->lifecycle_registry_->counters());
   } catch (...) {
     std::terminate();
   }
@@ -2785,7 +2897,7 @@ std::string ExecutionService::get_stats() const {
   const ResourceLedger::Snapshot resources = pool_->ledger.snapshot();
   std::ostringstream stream;
   stream << "Workers: " << pool_->configured_workers << ", GPU lanes: 1"
-         << ", Active runs: " << pool_->active_runs.size()
+         << ", Active runs: " << pool_->ready_store.run_count()
          << ", Ready tasks: " << pool_->ready_store.entry_count()
          << ", Ready bytes: " << pool_->ready_store.byte_count()
          << ", Reserved CPU: " << resources.reserved.cpu_slots;
@@ -2838,13 +2950,13 @@ void ExecutionService::configure_policy_defaults(
   }
 
   std::shared_ptr<policy::PolicyBinding> interactive =
-      pool_->registry.create_binding(config.interactive_type,
-                                     PolicyClass::Interactive,
-                                     interactive_generation + 1U);
+      pool_->registry.create_binding(
+          config.interactive_type, PolicyClass::Interactive,
+          interactive_generation + 1U, policy_lifecycle_observer());
   std::shared_ptr<policy::PolicyBinding> throughput =
-      pool_->registry.create_binding(config.throughput_type,
-                                     PolicyClass::Throughput,
-                                     throughput_generation + 1U);
+      pool_->registry.create_binding(
+          config.throughput_type, PolicyClass::Throughput,
+          throughput_generation + 1U, policy_lifecycle_observer());
   {
     std::lock_guard<std::mutex> pool_lock(pool_->mutex);
     if (pool_->interactive_binding->generation() != interactive_generation ||
@@ -2854,6 +2966,8 @@ void ExecutionService::configure_policy_defaults(
     }
     pool_->interactive_binding.swap(interactive);
     pool_->throughput_binding.swap(throughput);
+    pool_->interactive_binding->mark_service_published();
+    pool_->throughput_binding->mark_service_published();
     pool_->advance_worker_notification_epoch();
   }
   pool_->ready_cv.notify_all();
@@ -2905,7 +3019,8 @@ void ExecutionService::replace_policy(PolicyClass policy_class,
   }
   std::shared_ptr<policy::PolicyBinding> candidate =
       pool_->registry.create_binding(type, policy_class,
-                                     current->generation() + 1U);
+                                     current->generation() + 1U,
+                                     policy_lifecycle_observer());
   {
     std::lock_guard<std::mutex> pool_lock(pool_->mutex);
     std::shared_ptr<policy::PolicyBinding>& published =
@@ -2916,6 +3031,7 @@ void ExecutionService::replace_policy(PolicyClass policy_class,
                        "ExecutionService policy replacement raced state.");
     }
     published.swap(candidate);
+    published->mark_service_published();
     pool_->advance_worker_notification_epoch();
   }
   pool_->ready_cv.notify_all();
@@ -2941,6 +3057,192 @@ bool ExecutionService::is_execution_type(
 /** @copydoc ExecutionService::resource_snapshot */
 ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
   return pool_->ledger.snapshot();
+}
+
+/** @copydoc ExecutionService::register_graph_lifecycle */
+void ExecutionService::register_graph_lifecycle(
+    std::shared_ptr<GraphLifetimeAnchor> anchor) {
+  lifecycle_registry_->register_graph(std::move(anchor));
+}
+
+/** @copydoc ExecutionService::rollback_graph_lifecycle_registration */
+void ExecutionService::rollback_graph_lifecycle_registration(
+    GraphInstanceId graph_instance_id) {
+  lifecycle_registry_->rollback_graph_registration(graph_instance_id);
+}
+
+/** @copydoc ExecutionService::begin_graph_admission */
+RunLifecycleAdmissionCandidate ExecutionService::begin_graph_admission(
+    GraphInstanceId graph_instance_id) {
+  return lifecycle_registry_->begin_graph_admission(graph_instance_id);
+}
+
+/** @copydoc ExecutionService::commit_graph_admission */
+RunLifecycleAdmissionHandle ExecutionService::commit_graph_admission(
+    RunLifecycleAdmissionCandidate candidate, ComputeRunLease run_lease,
+    std::shared_ptr<ComputeRequestCancellationSource> cancellation) {
+  return lifecycle_registry_->commit_standalone(
+      std::move(candidate), std::move(run_lease), std::move(cancellation));
+}
+
+/** @copydoc ExecutionService::commit_graph_admission_group */
+RunLifecycleAdmissionHandle ExecutionService::commit_graph_admission_group(
+    RunLifecycleAdmissionCandidate candidate, RunGroupId run_group_id,
+    ComputeRunLease hp_lease, ComputeRunLease rt_lease,
+    std::shared_ptr<ComputeRequestCancellationSource> cancellation,
+    std::shared_ptr<DirtySiblingCommitGate> sibling_commit_gate) {
+  return lifecycle_registry_->commit_realtime_group(
+      std::move(candidate), run_group_id, std::move(hp_lease),
+      std::move(rt_lease), std::move(cancellation),
+      std::move(sibling_commit_gate));
+}
+
+/** @copydoc ExecutionService::finalize_graph_admission */
+void ExecutionService::finalize_graph_admission(
+    RunLifecycleAdmissionHandle handle) {
+  lifecycle_registry_->finalize_admission(std::move(handle));
+}
+
+/** @copydoc ExecutionService::permits_visible_commit */
+bool ExecutionService::permits_visible_commit(GraphInstanceId graph_instance_id,
+                                              ComputeRunId run_id) const {
+  return lifecycle_registry_->permits_visible_commit(graph_instance_id, run_id);
+}
+
+/** @copydoc ExecutionService::begin_graph_close_lifecycle */
+std::uint64_t ExecutionService::begin_graph_close_lifecycle(
+    GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason) {
+  return lifecycle_registry_->begin_graph_close(graph_instance_id, reason);
+}
+
+/** @copydoc ExecutionService::finish_graph_close_lifecycle */
+void ExecutionService::finish_graph_close_lifecycle(
+    GraphInstanceId graph_instance_id) {
+  lifecycle_registry_->finish_graph_close(graph_instance_id);
+}
+
+/** @copydoc ExecutionService::close_graph_lifecycle */
+void ExecutionService::close_graph_lifecycle(
+    GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason) {
+  lifecycle_registry_->close_graph(graph_instance_id, reason);
+}
+
+/** @copydoc ExecutionService::begin_shutdown */
+std::uint64_t ExecutionService::begin_shutdown() {
+  if (tls_service_ == this ||
+      policy::PolicyRegistry::callback_active_on_current_thread(this)) {
+    throw std::logic_error(
+        "ExecutionService shutdown cannot run from its worker or policy "
+        "callback.");
+  }
+  return lifecycle_registry_->begin_service_shutdown();
+}
+
+/** @copydoc ExecutionService::shutdown */
+void ExecutionService::shutdown() {
+  if (tls_service_ == this ||
+      policy::PolicyRegistry::callback_active_on_current_thread(this)) {
+    throw std::logic_error(
+        "ExecutionService shutdown cannot run from its worker or policy "
+        "callback.");
+  }
+  (void)begin_shutdown();
+
+  {
+    std::unique_lock<std::mutex> lock(pool_->mutex);
+    if (pool_->shutdown_complete) {
+      return;
+    }
+    if (pool_->shutdown_in_progress) {
+      pool_->shutdown_cv.wait(
+          lock, [this]() { return !pool_->shutdown_in_progress; });
+      if (pool_->shutdown_complete) {
+        return;
+      }
+    }
+    pool_->shutdown_in_progress = true;
+  }
+
+  try {
+    lifecycle_registry_->wait_until_empty();
+    const ResourceLedger::Snapshot before_stop = pool_->ledger.snapshot();
+    if (before_stop.reserved != ResourceVector{}) {
+      throw std::logic_error(
+          "ExecutionService registry settled before resource ledger zero.");
+    }
+
+    std::vector<std::thread> workers;
+    std::shared_ptr<policy::PolicyBinding> interactive_binding;
+    std::shared_ptr<policy::PolicyBinding> throughput_binding;
+    {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      pool_->stopping = true;
+      pool_->physical_routes.begin_shutdown();
+      if (!pool_->ready_store.empty()) {
+        throw std::logic_error(
+            "ExecutionService registry settled with ready entries.");
+      }
+      pool_->ready_store.clear();
+      pool_->advance_worker_notification_epoch();
+      workers.swap(pool_->workers);
+      interactive_binding = std::move(pool_->interactive_binding);
+      throughput_binding = std::move(pool_->throughput_binding);
+    }
+    pool_->ready_cv.notify_all();
+
+    for (std::thread& worker : workers) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+      lifecycle_telemetry_->publish(ExecutionLifecycleEventKind::WorkerJoined,
+                                    ExecutionLifecycleCategory::None, 0U, 0U,
+                                    0U,
+                                    lifecycle_registry_->shutdown_generation(),
+                                    lifecycle_registry_->counters());
+    }
+
+    interactive_binding.reset();
+    throughput_binding.reset();
+
+    {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      if (!pool_->physical_routes.drained()) {
+        throw std::logic_error(
+            "ExecutionService routes did not drain before worker join.");
+      }
+      pool_->configured_workers = 0U;
+    }
+    if (pool_->ledger.snapshot().reserved != ResourceVector{}) {
+      throw std::logic_error(
+          "ExecutionService resource ledger changed after worker join.");
+    }
+    if (!lifecycle_telemetry_->physical_counters_zero()) {
+      throw std::logic_error(
+          "ExecutionService physical lifecycle counters did not retire.");
+    }
+
+    ExecutionLifecycleCounters final_counters;
+    (void)lifecycle_registry_->mark_service_stopped(final_counters);
+    {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      pool_->shutdown_complete = true;
+      pool_->shutdown_in_progress = false;
+    }
+    pool_->shutdown_cv.notify_all();
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      pool_->shutdown_in_progress = false;
+    }
+    pool_->shutdown_cv.notify_all();
+    throw;
+  }
+}
+
+/** @copydoc ExecutionService::lifecycle_snapshot */
+ExecutionLifecyclePage ExecutionService::lifecycle_snapshot(
+    std::uint64_t after_cursor, std::uint32_t limit) const {
+  return lifecycle_telemetry_->snapshot(after_cursor, limit);
 }
 
 /** @copydoc ExecutionService::throughput_reservation_snapshot_for_testing */
@@ -3032,20 +3334,31 @@ void ExecutionService::execute_run(
       initial_submissions.front().metadata().qos().maximum_parallelism,
       run_resource_demand);
   std::optional<ResourceLedger::Reservation> reservation;
+  const ResourceLedger::ReservationSettlementObserver settlement_observer =
+      service_lease.begin_resource_settlement_observation(
+          *lifecycle_telemetry_);
   {
-    std::lock_guard<std::mutex> lock(pool_->mutex);
-    if (pool_->stopping) {
-      throw std::logic_error("ExecutionService is stopping.");
+    try {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      if (pool_->stopping) {
+        throw std::logic_error("ExecutionService is stopping.");
+      }
+      reservation = pool_->try_reserve_for_policy(
+          admission.resources,
+          initial_submissions.front().metadata().qos().service_class,
+          settlement_observer);
+    } catch (...) {
+      service_lease.cancel_resource_settlement_observation();
+      throw;
     }
-    reservation = pool_->try_reserve_for_policy(
-        admission.resources,
-        initial_submissions.front().metadata().qos().service_class);
   }
   if (!reservation.has_value()) {
+    service_lease.cancel_resource_settlement_observation();
     throw GraphError(
         GraphErrc::ComputeError,
         "ExecutionService policy/ledger cannot admit the complete Run.");
   }
+  service_lease.commit_resource_settlement_observation();
 
   auto run = std::make_shared<RunState>(
       run_id, std::move(admission.policy_graph_identity),
@@ -3093,13 +3406,10 @@ void ExecutionService::execute_run(
       if (run->cancelled) {
         return;
       }
-      const uint64_t key = run_id.value();
-      const auto existing = pool_->active_runs.find(key);
-      if (existing != pool_->active_runs.end() && !existing->second.expired()) {
+      if (pool_->ready_store.contains_run_id(run_id)) {
         throw std::logic_error("ExecutionService Run id is already active.");
       }
 
-      pool_->active_runs.insert_or_assign(key, run);
       try {
         for (const std::shared_ptr<QueueEntry>& entry : staged_entries) {
           if (!pool_->ready_store.try_push(entry)) {
@@ -3112,7 +3422,6 @@ void ExecutionService::execute_run(
         pool_->advance_worker_notification_epoch();
       } catch (...) {
         (void)pool_->ready_store.erase_run(run);
-        pool_->active_runs.erase(key);
         pool_->ready_store.retire_run(run);
         throw;
       }
@@ -3133,13 +3442,6 @@ void ExecutionService::execute_run(
 
   {
     std::lock_guard<std::mutex> lock(pool_->mutex);
-    const auto current = pool_->active_runs.find(run_id.value());
-    if (current != pool_->active_runs.end()) {
-      const std::shared_ptr<RunState> published = current->second.lock();
-      if (!published || published.get() == run.get()) {
-        pool_->active_runs.erase(current);
-      }
-    }
     pool_->ready_store.retire_run(run);
     run->reservation.reset();
   }
@@ -3222,9 +3524,7 @@ void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
     if (pool_->stopping) {
       throw std::logic_error("ExecutionService is stopping.");
     }
-    const auto active = pool_->active_runs.find(run->id.value());
-    if (active == pool_->active_runs.end() ||
-        active->second.lock().get() != run.get()) {
+    if (!pool_->ready_store.owns_run(run)) {
       throw std::logic_error(
           "ExecutionService Run no longer accepts ready work.");
     }
@@ -3247,30 +3547,14 @@ void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
   pool_->ready_cv.notify_all();
 }
 
-/** @copydoc ExecutionService::find_active_run */
-std::shared_ptr<ExecutionService::RunState> ExecutionService::find_active_run(
-    ComputeRunId run_id) {
-  std::lock_guard<std::mutex> lock(pool_->mutex);
-  const auto active = pool_->active_runs.find(run_id.value());
-  if (active == pool_->active_runs.end()) {
-    throw std::invalid_argument("ReadyTaskSubmission names no active Run.");
-  }
-  std::shared_ptr<RunState> run = active->second.lock();
-  if (!run || run->id != run_id) {
-    throw std::invalid_argument("ReadyTaskSubmission names no active Run.");
-  }
-  return run;
-}
-
 /** @copydoc ExecutionService::submit_ready_submission */
 void ExecutionService::submit_ready_submission(ReadyTaskSubmission submission) {
   const ComputeRunId run_id = submission.metadata().run_id();
-  std::shared_ptr<RunState> run;
-  if (tls_run_state_ != nullptr && tls_run_state_->id == run_id) {
-    run = tls_run_state_->shared_from_this();
-  } else {
-    run = find_active_run(run_id);
+  if (tls_run_state_ == nullptr || tls_run_state_->id != run_id) {
+    throw std::invalid_argument(
+        "Dependent ready publication requires the matching worker Run.");
   }
+  std::shared_ptr<RunState> run = tls_run_state_->shared_from_this();
   enqueue_submission(run, std::move(submission));
 }
 
@@ -3721,9 +4005,12 @@ void ExecutionService::worker_loop(
       continue;
     }
 
+    tls_service_ = this;
     tls_run_state_ = run.get();
     tls_worker_id_ = worker_id;
     run->host->set_task_context(worker_id, run->id.value());
+    lifecycle_telemetry_->increment_physical_counter(
+        ExecutionLifecyclePhysicalCounter::EnteredCallback);
     try {
       if (entry->submission.metadata().is_initial_ready()) {
         log_event(ExecutionTraceAction::AssignInitial,
@@ -3738,9 +4025,12 @@ void ExecutionService::worker_loop(
     } catch (...) {
       fail_run(run, std::current_exception());
     }
+    lifecycle_telemetry_->decrement_physical_counter(
+        ExecutionLifecyclePhysicalCounter::EnteredCallback);
     run->host->clear_task_context();
     tls_worker_id_ = -1;
     tls_run_state_ = nullptr;
+    tls_service_ = nullptr;
     {
       std::lock_guard<std::mutex> pool_lock(pool_->mutex);
       std::lock_guard<std::mutex> run_lock(run->mutex);

@@ -571,8 +571,8 @@ NodeOutput& execute_request_owned_hp_run(
     compute::ComputeRequestCancellationSource& request_cancellation,
     Execute&& execute, Commit&& commit) {
   compute::ComputeRunLease lifecycle_lease = run.acquire_lease();
-  request_cancellation.attach(run);
   try {
+    request_cancellation.attach(run);
     observe_open_run_or_throw(lifecycle_lease);
     if (!run.advance_to(compute::ComputeRunPhase::Admitted)) {
       observe_open_run_or_throw(lifecycle_lease);
@@ -652,9 +652,9 @@ NodeOutput& execute_request_owned_realtime_runs(compute::RunGroup& run_group,
       run_group.cancellation_source();
   const compute::ComputeRunLease& hp_lifecycle_lease = run_group.hp_lease();
   const compute::ComputeRunLease& rt_lifecycle_lease = run_group.rt_lease();
-  request_cancellation.attach(rt_run);
-  request_cancellation.attach(hp_run);
   try {
+    request_cancellation.attach(rt_run);
+    request_cancellation.attach(hp_run);
     observe_open_run_or_throw(hp_lifecycle_lease);
     observe_open_run_or_throw(rt_lifecycle_lease);
     if (!hp_run.advance_to(compute::ComputeRunPhase::Admitted)) {
@@ -1042,6 +1042,17 @@ NodeOutput& ComputeService::compute_parallel_hp_impl(
 NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
                                              GraphRuntime& runtime,
                                              const Request& request) {
+  return compute_parallel(
+      graph, runtime, request,
+      execution_service_.begin_graph_admission(graph.instance_id()));
+}
+
+/** @copydoc ComputeService::compute_parallel(
+ * GraphModel&, GraphRuntime&, const Request&,
+ * compute::RunLifecycleAdmissionCandidate) */
+NodeOutput& ComputeService::compute_parallel(
+    GraphModel& graph, GraphRuntime& runtime, const Request& request,
+    compute::RunLifecycleAdmissionCandidate admission_candidate) {
   const std::shared_ptr<compute::ComputeRequestCancellationSource>
       request_cancellation = cancellation_source_for_request(request);
   if (is_realtime_request(request)) {
@@ -1049,35 +1060,64 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
         make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision),
         make_run_submission(graph, request, ComputeIntent::RealTimeUpdate),
         request_cancellation);
+    compute::RunLifecycleAdmissionHandle admission =
+        execution_service_.commit_graph_admission_group(
+            std::move(admission_candidate), run_group.id(),
+            compute::ComputeRunLease(run_group.hp_lease()),
+            compute::ComputeRunLease(run_group.rt_lease()),
+            run_group.cancellation_source_owner(),
+            run_group.sibling_commit_gate());
     compute::ComputeRun& hp_run = run_group.hp_run();
     compute::ComputeRun& rt_run = run_group.rt_run();
-    return execute_request_owned_realtime_runs(
-        run_group,
-        [&](const compute::ComputeRunLease& hp_lease,
-            const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
-          return compute_intent_update_impl(
-              graph, ExecutionStrategy{&runtime, true}, request, &hp_run,
-              &rt_run, &hp_lease, &rt_lease, run_group.sibling_commit_gate());
-        });
+    try {
+      NodeOutput& output = execute_request_owned_realtime_runs(
+          run_group,
+          [&](const compute::ComputeRunLease& hp_lease,
+              const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
+            return compute_intent_update_impl(
+                graph, ExecutionStrategy{&runtime, true}, request, &hp_run,
+                &rt_run, &hp_lease, &rt_lease, run_group.sibling_commit_gate());
+          });
+      run_group.release_lifecycle_leases();
+      execution_service_.finalize_graph_admission(std::move(admission));
+      return output;
+    } catch (...) {
+      const std::exception_ptr failure = std::current_exception();
+      run_group.release_lifecycle_leases();
+      execution_service_.finalize_graph_admission(std::move(admission));
+      std::rethrow_exception(failure);
+    }
   }
 
   compute::ComputeRun run(
       make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision));
-  return execute_request_owned_hp_run(
-      run, *request_cancellation,
-      [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
-        if (request.intent) {
-          return compute_intent_update_impl(
-              graph, ExecutionStrategy{&runtime, true}, request, &run, nullptr,
-              &run_lease, nullptr, nullptr);
-        }
-        return compute_parallel_hp_impl(graph, runtime, request, run,
-                                        run_lease);
-      },
-      [&](const compute::ComputeRunLease& run_lease) {
-        commit_high_precision_if_requested(
-            run_lease, graph, request.staged_realtime_proxy, request);
-      });
+  compute::RunLifecycleAdmissionHandle admission =
+      execution_service_.commit_graph_admission(std::move(admission_candidate),
+                                                run.acquire_lease(),
+                                                request_cancellation);
+  try {
+    NodeOutput& output = execute_request_owned_hp_run(
+        run, *request_cancellation,
+        [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
+          if (request.intent) {
+            return compute_intent_update_impl(
+                graph, ExecutionStrategy{&runtime, true}, request, &run,
+                nullptr, &run_lease, nullptr, nullptr);
+          }
+          return compute_parallel_hp_impl(graph, runtime, request, run,
+                                          run_lease);
+        },
+        [&](const compute::ComputeRunLease& run_lease) {
+          commit_high_precision_if_requested(
+              run_lease, graph, request.staged_realtime_proxy, request);
+        });
+    execution_service_.finalize_graph_admission(std::move(admission));
+    return output;
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    execution_service_.finalize_graph_admission(std::move(admission));
+    std::rethrow_exception(failure);
+  }
 }
 
 /**
@@ -1333,6 +1373,15 @@ NodeOutput& ComputeService::compute_with_intent_impl(
  * leaves product staging unpublished.
  */
 NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
+  return compute(graph, request,
+                 execution_service_.begin_graph_admission(graph.instance_id()));
+}
+
+/** @copydoc ComputeService::compute(
+ * GraphModel&, const Request&, compute::RunLifecycleAdmissionCandidate) */
+NodeOutput& ComputeService::compute(
+    GraphModel& graph, const Request& request,
+    compute::RunLifecycleAdmissionCandidate admission_candidate) {
   const std::shared_ptr<compute::ComputeRequestCancellationSource>
       request_cancellation = cancellation_source_for_request(request);
   if (is_realtime_request(request)) {
@@ -1340,33 +1389,62 @@ NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
         make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision),
         make_run_submission(graph, request, ComputeIntent::RealTimeUpdate),
         request_cancellation);
+    compute::RunLifecycleAdmissionHandle admission =
+        execution_service_.commit_graph_admission_group(
+            std::move(admission_candidate), run_group.id(),
+            compute::ComputeRunLease(run_group.hp_lease()),
+            compute::ComputeRunLease(run_group.rt_lease()),
+            run_group.cancellation_source_owner(),
+            run_group.sibling_commit_gate());
     compute::ComputeRun& hp_run = run_group.hp_run();
     compute::ComputeRun& rt_run = run_group.rt_run();
-    return execute_request_owned_realtime_runs(
-        run_group,
-        [&](const compute::ComputeRunLease& hp_lease,
-            const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
-          return compute_with_intent_impl(graph, request, &hp_run, &rt_run,
-                                          &hp_lease, &rt_lease,
-                                          run_group.sibling_commit_gate());
-        });
+    try {
+      NodeOutput& output = execute_request_owned_realtime_runs(
+          run_group,
+          [&](const compute::ComputeRunLease& hp_lease,
+              const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
+            return compute_with_intent_impl(graph, request, &hp_run, &rt_run,
+                                            &hp_lease, &rt_lease,
+                                            run_group.sibling_commit_gate());
+          });
+      run_group.release_lifecycle_leases();
+      execution_service_.finalize_graph_admission(std::move(admission));
+      return output;
+    } catch (...) {
+      const std::exception_ptr failure = std::current_exception();
+      run_group.release_lifecycle_leases();
+      execution_service_.finalize_graph_admission(std::move(admission));
+      std::rethrow_exception(failure);
+    }
   }
 
   compute::ComputeRun run(
       make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision));
-  return execute_request_owned_hp_run(
-      run, *request_cancellation,
-      [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
-        if (request.intent) {
-          return compute_with_intent_impl(graph, request, &run, nullptr,
-                                          &run_lease, nullptr, nullptr);
-        }
-        return compute_sequential_impl(graph, request, run, run_lease);
-      },
-      [&](const compute::ComputeRunLease& run_lease) {
-        commit_high_precision_if_requested(
-            run_lease, graph, request.staged_realtime_proxy, request);
-      });
+  compute::RunLifecycleAdmissionHandle admission =
+      execution_service_.commit_graph_admission(std::move(admission_candidate),
+                                                run.acquire_lease(),
+                                                request_cancellation);
+  try {
+    NodeOutput& output = execute_request_owned_hp_run(
+        run, *request_cancellation,
+        [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
+          if (request.intent) {
+            return compute_with_intent_impl(graph, request, &run, nullptr,
+                                            &run_lease, nullptr, nullptr);
+          }
+          return compute_sequential_impl(graph, request, run, run_lease);
+        },
+        [&](const compute::ComputeRunLease& run_lease) {
+          commit_high_precision_if_requested(
+              run_lease, graph, request.staged_realtime_proxy, request);
+        });
+    execution_service_.finalize_graph_admission(std::move(admission));
+    return output;
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    execution_service_.finalize_graph_admission(std::move(admission));
+    std::rethrow_exception(failure);
+  }
 }
 
 /**

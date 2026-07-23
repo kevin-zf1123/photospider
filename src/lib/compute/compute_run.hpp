@@ -15,6 +15,7 @@
 #include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/device.hpp"
+#include "runtime/resource_ledger.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 class GraphModel;
@@ -29,6 +30,8 @@ class ComputeRequestCancellationControl;
 class HighPrecisionDirtyWriteBuffer;
 class TaskSubmissionPlan;
 class ComputeRun;
+class ExecutionService;
+class ExecutionLifecycleTelemetry;
 
 /**
  * @brief Opaque stable identity for one request-owned compute Run.
@@ -1024,6 +1027,33 @@ class ComputeRunLease {
   std::optional<ComputeRunTerminalOutcome> terminal_outcome() const;
 
   /**
+   * @brief Waits until this value is the only remaining active Run lease.
+   *
+   * @return Nothing after all callback, queue, continuation, and caller-owned
+   * lease copies have released.
+   * @throws std::logic_error unless a terminal outcome is already published.
+   * @throws std::system_error when Run synchronization or waiting fails.
+   * @note Only `RunLifecycleRegistry` invokes this on its final retained lease.
+   * The wait has no finite bound when an entered callback never returns and
+   * never holds the lifecycle registry fence.
+   */
+  void wait_until_only_lease() const;
+
+  /**
+   * @brief Waits for every attached physical root reservation to settle.
+   *
+   * @return Nothing after root owners closed, all child grants released, exact
+   * ledger capacity returned, and companion quota observers completed.
+   * @throws std::logic_error unless a terminal outcome is already published.
+   * @throws std::system_error when Run synchronization or waiting fails.
+   * @note RunLifecycleRegistry invokes this only after
+   * wait_until_only_lease(), which closes future physical observation
+   * registration. The ResourceLedger callback is non-owning and allocation-free
+   * and never runs under the lifecycle registry fence.
+   */
+  void wait_for_resource_settlement() const;
+
+  /**
    * @brief Observes explicit cancellation and the immutable Run deadline.
    * @return Stable cancellation reason when cancellation owns the terminal
    * outcome, otherwise nullopt for an open, failed, or succeeded Run.
@@ -1106,6 +1136,8 @@ class ComputeRunLease {
 
  private:
   friend class ComputeRun;
+  friend class ComputeRunControl;
+  friend class ExecutionService;
 
   /**
    * @brief Mints the first active lease for one Run control block.
@@ -1131,6 +1163,59 @@ class ComputeRunLease {
    * @throws Nothing.
    */
   void release() noexcept;
+
+  /**
+   * @brief Registers one pending physical root before ledger admission.
+   * @param telemetry Stable service telemetry owner outliving this Run.
+   * @return Non-owning callback for the matching ResourceLedger reservation.
+   * @throws std::overflow_error when the per-Run pending count is exhausted.
+   * @throws std::system_error when Run synchronization fails.
+   * @note ExecutionService must call cancel_resource_settlement_observation()
+   * when reservation admission does not commit.
+   */
+  ResourceLedger::ReservationSettlementObserver
+  begin_resource_settlement_observation(
+      ExecutionLifecycleTelemetry& telemetry) const;
+
+  /**
+   * @brief Commits one pending observation after ledger root admission.
+   * @return Nothing.
+   * @throws Nothing; pending underflow or telemetry failure terminates.
+   * @note The matching root cannot settle before this call because its
+   * Reservation owner is still retained by the admission caller.
+   */
+  void commit_resource_settlement_observation() const noexcept;
+
+  /**
+   * @brief Rolls back one pending observation when ledger admission fails.
+   * @return Nothing.
+   * @throws Nothing; underflow or synchronization failure terminates.
+   */
+  void cancel_resource_settlement_observation() const noexcept;
+
+  /**
+   * @brief Completes one pending observation after exact ledger root release.
+   * @param context Borrowed stable ComputeRunControl address.
+   * @return Nothing.
+   * @throws Nothing; underflow or synchronization failure terminates.
+   */
+  static void complete_resource_settlement_observation(void* context) noexcept;
+
+  /**
+   * @brief Observes one successfully minted ready or execution child grant.
+   * @param context Borrowed stable ComputeRunControl address.
+   * @return Nothing.
+   * @throws Nothing; missing telemetry or counter failure terminates.
+   */
+  static void observe_child_granted(void* context) noexcept;
+
+  /**
+   * @brief Observes exact release of one ready or execution child grant.
+   * @param context Borrowed stable ComputeRunControl address.
+   * @return Nothing.
+   * @throws Nothing; missing telemetry or counter underflow terminates.
+   */
+  static void observe_child_released(void* context) noexcept;
 
   /** @brief Shared Run control retained independently from observers. */
   std::shared_ptr<ComputeRunControl> control_;

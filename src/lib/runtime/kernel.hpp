@@ -311,46 +311,37 @@ class Kernel {
                                         const std::string& cache_root_dir = "");
 
   /**
-   * @brief Stops one loaded graph's compute-request admission before Host
-   * drain.
-   *
-   * @param name Graph session name whose request lane rejects new submissions.
-   * @return true when a runtime exists and its request lane is draining/closed;
-   *         false when the session name is unknown.
-   * @throws std::logic_error if invoked from the target lane worker.
-   * @throws std::overflow_error if the close-generation counter is exhausted.
-   * @throws std::system_error if executor lifecycle synchronization fails.
-   * @note This is the non-destructive first phase of embedded Host close. It
-   *       preserves the graph map entry, route bindings, model, accepted
-   *       request-lane work, graph-state admission, and LastError state while
-   *       waking producers blocked by the full request FIFO. Graph-state stays
-   *       open so accepted compute can commit. `close_graph()` performs the
-   *       later request-drain and graph-state drain phase
-   * after Host-level admitted callers and async publication have settled.
-   */
-  bool stop_graph_admission(const std::string& name);
-
-  /**
-   * @brief Stops and removes a loaded graph runtime.
+   * @brief Monotonically closes and removes one loaded graph runtime.
    *
    * @param name Graph session name to close.
    * @return true when a runtime existed and was removed; false when the session
    *         name is unknown.
-   * @throws Any exception propagated while stopping the runtime; no exception
-   *         is thrown when the graph name is unknown.
-   * @note Close first drains and joins the compute-request lane while
-   *       graph-state remains available for accepted commits. It then stops,
-   *       drains, and joins graph-state before runtime destruction. Embedded
-   *       Host first rejects new calls and drains pre-marker synchronous
-   *       admissions, calls `stop_graph_admission()`, then waits for async
-   *       scheduling/status publication before invoking this method. The
-   *       graph map entry and its mutex-protected LastError snapshot are erased
-   *       only after stop succeeds. If stop throws, graph-state and
-   *       compute-request workers are recreated in that order before rethrow so
-   *       the retained session can be inspected, computed, or closed again;
-   *       replacement-worker failure is surfaced.
+   * @throws Run lifecycle or lane synchronization errors before authoritative
+   *         close linearization; no exception is thrown when the graph name is
+   *         unknown.
+   * @note The first caller owns the preallocated close generation; concurrent
+   *       callers join its success. Close changes the exact registry row to
+   *       Closing and requests GraphClose, stops external compute-request
+   *       admission, settles and unregisters every indexed Run/candidate,
+   *       removes the empty row, drains and joins compute-request while
+   *       graph-state remains available for commit denial/discard, then drains
+   *       graph-state and removes runtime/routes. After lifecycle linearization
+   *       the Graph is never reopened.
    */
   bool close_graph(const std::string& name);
+
+  /**
+   * @brief Closes every Graph with ProcessShutdown and stops execution.
+   * @return Nothing after all registry rows, lanes, resources, routes, workers,
+   * and policy bindings retire.
+   * @throws std::logic_error when invoked from a same-service worker/policy
+   * callback before mutation.
+   * @throws std::system_error from lifecycle/lane synchronization.
+   * @note Repeated control-thread calls are harmless. This is the composition
+   * root path; no Host or IPC process-shutdown method is exposed.
+   */
+  void shutdown();
+
   std::vector<std::string> list_graphs() const;
 
   /**
@@ -1404,6 +1395,19 @@ class Kernel {
    */
   std::optional<ImageBuffer> compute_and_get_image_request(
       const ComputeRequest& request);
+
+  /**
+   * @brief Executes the monotonic close sequence with one exact reason.
+   * @param name Graph session label used only for map lookup.
+   * @param reason GraphClose for direct close or ProcessShutdown for root stop.
+   * @return True when a runtime existed and completed close; false if absent.
+   * @throws std::logic_error or std::system_error before authoritative close
+   * linearization; an invariant failure afterward terminates.
+   * @note Registry row removal precedes compute-request lane drain, then
+   * graph-state drain, route/model destruction, and public completion.
+   */
+  bool close_graph_with_reason(const std::string& name,
+                               compute::ComputeRunCancellationReason reason);
 
   /**
    * @brief Captures, executes, and revision-commits one Kernel compute request.

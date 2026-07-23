@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <limits>
@@ -154,6 +155,57 @@ class RecordingReservationReleaseObserver final
   /** @brief Complete vector from the most recent callback. */
   ResourceVector released_resources_;
 };
+
+/**
+ * @brief Records non-owning root-settlement and child-grant observations.
+ *
+ * @throws Nothing for construction or atomic observation.
+ * @note The state owns no ledger authority and must outlive the observed root
+ * reservation plus every child grant.
+ */
+struct SettlementObservationState final {
+  /** @brief Number of successfully minted child grants. */
+  std::atomic_uint64_t child_granted_count{0U};
+
+  /** @brief Number of child grants returned exactly once. */
+  std::atomic_uint64_t child_released_count{0U};
+
+  /** @brief Number of roots physically returned after all child releases. */
+  std::atomic_uint64_t settled_count{0U};
+};
+
+/**
+ * @brief Records one exact root-settlement callback.
+ * @param context Nonnull `SettlementObservationState` borrowed by the ledger.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void record_root_settled(void* context) noexcept {
+  static_cast<SettlementObservationState*>(context)->settled_count.fetch_add(
+      1U, std::memory_order_relaxed);
+}
+
+/**
+ * @brief Records one successfully minted child grant.
+ * @param context Nonnull `SettlementObservationState` borrowed by the ledger.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void record_child_granted(void* context) noexcept {
+  static_cast<SettlementObservationState*>(context)
+      ->child_granted_count.fetch_add(1U, std::memory_order_relaxed);
+}
+
+/**
+ * @brief Records one exact child-grant release.
+ * @param context Nonnull `SettlementObservationState` borrowed by the ledger.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void record_child_released(void* context) noexcept {
+  static_cast<SettlementObservationState*>(context)
+      ->child_released_count.fetch_add(1U, std::memory_order_relaxed);
+}
 
 /**
  * @brief Returns a vector with one selected dimension set.
@@ -343,6 +395,60 @@ TEST(ResourceLedgerGrant, ReleaseObserverWaitsForOutstandingChild) {
   EXPECT_EQ(ledger.snapshot().reserved, ResourceVector{});
   EXPECT_EQ(observer->release_count(), 1U);
   EXPECT_EQ(observer->released_resources(), committed);
+}
+
+/**
+ * @brief Proves physical ownership callbacks match root and child lifetimes.
+ *
+ * @throws Nothing when atomic observations and ledger snapshots remain exact.
+ * @note Closing the parent cannot publish root settlement while either child
+ * grant remains. Capacity becomes reusable only after the final child release.
+ */
+TEST(ResourceLedgerGrant,
+     SettlementObserverTracksChildrenAndFinalCapacityReturnExactly) {
+  const ResourceVector committed{2U, 4U, 6U, 8U, 10U};
+  ResourceLedger ledger(committed);
+  SettlementObservationState observation;
+  const ResourceLedger::ReservationSettlementObserver observer{
+      &observation, &record_root_settled, &record_child_granted,
+      &record_child_released};
+
+  auto reservation = ledger.try_reserve(committed, nullptr, observer);
+  ASSERT_TRUE(reservation.has_value());
+  auto first_child = reservation->try_grant(ResourceVector{1U, 1U, 2U, 3U, 4U});
+  auto second_child =
+      reservation->try_grant(ResourceVector{1U, 3U, 4U, 5U, 6U});
+  ASSERT_TRUE(first_child.has_value());
+  ASSERT_TRUE(second_child.has_value());
+  EXPECT_EQ(observation.child_granted_count.load(std::memory_order_relaxed),
+            2U);
+  EXPECT_EQ(observation.child_released_count.load(std::memory_order_relaxed),
+            0U);
+  EXPECT_EQ(observation.settled_count.load(std::memory_order_relaxed), 0U);
+
+  reservation.reset();
+  EXPECT_EQ(ledger.snapshot().reserved, committed);
+  EXPECT_FALSE(ledger.try_reserve(ResourceVector{1U}).has_value());
+  EXPECT_EQ(observation.settled_count.load(std::memory_order_relaxed), 0U);
+
+  first_child.reset();
+  EXPECT_EQ(ledger.snapshot().reserved, committed);
+  EXPECT_EQ(observation.child_released_count.load(std::memory_order_relaxed),
+            1U);
+  EXPECT_EQ(observation.settled_count.load(std::memory_order_relaxed), 0U);
+
+  second_child.reset();
+  EXPECT_EQ(ledger.snapshot().reserved, ResourceVector{});
+  EXPECT_EQ(observation.child_released_count.load(std::memory_order_relaxed),
+            2U);
+  EXPECT_EQ(observation.settled_count.load(std::memory_order_relaxed), 1U);
+
+  auto reused = ledger.try_reserve(committed);
+  ASSERT_TRUE(reused.has_value());
+  EXPECT_EQ(ledger.snapshot().reserved, committed);
+  reused.reset();
+  EXPECT_EQ(ledger.snapshot().reserved, ResourceVector{});
+  EXPECT_EQ(observation.settled_count.load(std::memory_order_relaxed), 1U);
 }
 
 /**

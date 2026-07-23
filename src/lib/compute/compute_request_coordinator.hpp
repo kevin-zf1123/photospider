@@ -204,15 +204,6 @@ class ComputeRequestCoordinator final {
   void stop_admission();
 
   /**
-   * @brief Reopens preparation after a fully drained close rollback.
-   * @return Nothing.
-   * @throws std::logic_error when retained rows prove drainage incomplete.
-   * @throws std::system_error if coordinator synchronization fails.
-   * @note The graph-wide generation allocator is preserved and never rewound.
-   */
-  void restart_after_close_failure();
-
-  /**
    * @brief Copies the current bounded ownership counts for tests.
    * @return Scalar snapshot captured under coordinator and lane locks.
    * @throws std::system_error if either synchronization primitive fails.

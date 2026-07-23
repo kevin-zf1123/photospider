@@ -25,6 +25,7 @@ class DirtyNodeSynchronization;
 class DirtySiblingCommitGate;
 class ExecutionService;
 class RealtimeProxyGraph;
+class RunLifecycleAdmissionCandidate;
 class StabilizedDirtyParameters;
 }  // namespace compute
 
@@ -255,6 +256,21 @@ class ComputeService {
   NodeOutput& compute(GraphModel& graph, const Request& request);
 
   /**
+   * @brief Executes inline work through an already indexed Graph candidate.
+   * @param graph Exact staged or direct Graph.
+   * @param request Complete service request.
+   * @param admission_candidate Candidate begun before revision capture.
+   * @return Mutable selected-domain output.
+   * @throws The ordinary compute and lifecycle installation errors unchanged.
+   * @note Kernel uses this overload so snapshot/revision capture, planning,
+   * reservation, Run construction, and staging all occur after the first
+   * lifecycle check. The candidate is consumed or rolled back exactly once.
+   */
+  NodeOutput& compute(
+      GraphModel& graph, const Request& request,
+      compute::RunLifecycleAdmissionCandidate admission_candidate);
+
+  /**
    * @brief Executes an execution-bound compute request against one graph.
    *
    * @param graph Graph whose node caches, timing, and inspection state are
@@ -282,6 +298,20 @@ class ComputeService {
    */
   NodeOutput& compute_parallel(GraphModel& graph, GraphRuntime& runtime,
                                const Request& request);
+
+  /**
+   * @brief Executes route-backed work through an already indexed candidate.
+   * @param graph Exact staged Graph.
+   * @param runtime Runtime retaining routes, lanes, and lifetime anchor.
+   * @param request Complete service request.
+   * @param admission_candidate Candidate begun before revision capture.
+   * @return Mutable selected-domain output.
+   * @throws The ordinary parallel and lifecycle errors unchanged.
+   * @note Bundle installation remains all-or-nothing after off-fence staging.
+   */
+  NodeOutput& compute_parallel(
+      GraphModel& graph, GraphRuntime& runtime, const Request& request,
+      compute::RunLifecycleAdmissionCandidate admission_candidate);
 
  private:
   /**

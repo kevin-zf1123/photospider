@@ -49,8 +49,23 @@ struct PolicyTypeRecord final {
 
 namespace {
 
-/** @brief Number of policy callbacks entered on the calling thread. */
-thread_local unsigned int g_policy_callback_depth = 0U;
+/**
+ * @brief Allocation-free service identity frame for one entered callback.
+ *
+ * @throws Nothing for stack construction.
+ * @note Frames live inside `CallbackGuard` stack storage. A null
+ * `service_context` represents a registry callback without a service observer.
+ */
+struct PolicyCallbackFrame final {
+  /** @brief Borrowed service identity, or null for an unobserved callback. */
+  const void* service_context = nullptr;
+
+  /** @brief Prior nested frame on this same physical thread. */
+  const PolicyCallbackFrame* previous = nullptr;
+};
+
+/** @brief Innermost entered policy callback on the calling thread. */
+thread_local const PolicyCallbackFrame* g_policy_callback_frame = nullptr;
 
 /**
  * @brief Marks one honest in-process policy callback interval.
@@ -60,24 +75,45 @@ thread_local unsigned int g_policy_callback_depth = 0U;
  */
 class CallbackGuard final {
  public:
-  /** @brief Enters one nested callback interval. */
-  CallbackGuard() noexcept {
-    if (g_policy_callback_depth == std::numeric_limits<unsigned int>::max()) {
-      std::terminate();
+  /**
+   * @brief Enters one nested callback interval and optional service counter.
+   * @param lifecycle_observer Optional non-owning service observation.
+   * @throws Nothing.
+   */
+  explicit CallbackGuard(
+      const PolicyLifecycleObserver* lifecycle_observer = nullptr) noexcept
+      : lifecycle_observer_(lifecycle_observer),
+        frame_{lifecycle_observer != nullptr ? lifecycle_observer->context
+                                             : nullptr,
+               g_policy_callback_frame} {
+    g_policy_callback_frame = &frame_;
+    if (lifecycle_observer_ != nullptr &&
+        lifecycle_observer_->observes_invocations()) {
+      lifecycle_observer_->on_invocation_entered(lifecycle_observer_->context);
     }
-    ++g_policy_callback_depth;
   }
 
   /** @brief Leaves the exact entered callback interval. */
   ~CallbackGuard() noexcept {
-    if (g_policy_callback_depth == 0U) {
+    if (g_policy_callback_frame != &frame_) {
       std::terminate();
     }
-    --g_policy_callback_depth;
+    if (lifecycle_observer_ != nullptr &&
+        lifecycle_observer_->observes_invocations()) {
+      lifecycle_observer_->on_invocation_returned(lifecycle_observer_->context);
+    }
+    g_policy_callback_frame = frame_.previous;
   }
 
   CallbackGuard(const CallbackGuard&) = delete;
   CallbackGuard& operator=(const CallbackGuard&) = delete;
+
+ private:
+  /** @brief Optional stable service observation for this callback interval. */
+  const PolicyLifecycleObserver* lifecycle_observer_;
+
+  /** @brief Stack-owned exact callback/service nesting frame. */
+  const PolicyCallbackFrame frame_;
 };
 
 /**
@@ -87,7 +123,7 @@ class CallbackGuard final {
  * @throws GraphError with `InvalidParameter` during callback reentry.
  */
 void reject_reentrant_mutation(const char* operation) {
-  if (g_policy_callback_depth != 0U) {
+  if (g_policy_callback_frame != nullptr) {
     throw GraphError(GraphErrc::InvalidParameter,
                      std::string("Policy callback cannot reenter mutation '") +
                          operation + "'.");
@@ -554,30 +590,53 @@ void PolicyRegistry::assert_mutation_allowed(const char* operation) {
   reject_reentrant_mutation(operation);
 }
 
+/** @copydoc PolicyRegistry::callback_active_on_current_thread */
+bool PolicyRegistry::callback_active_on_current_thread(
+    const void* service_context) noexcept {
+  if (service_context == nullptr) {
+    return false;
+  }
+  for (const PolicyCallbackFrame* frame = g_policy_callback_frame;
+       frame != nullptr; frame = frame->previous) {
+    if (frame->service_context == service_context) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** @copydoc PolicyBinding::PolicyBinding */
-PolicyBinding::PolicyBinding(std::shared_ptr<const PolicyTypeRecord> type,
-                             PolicyClass policy_class, std::uint64_t generation,
-                             void* context, bool destroy_required) noexcept
+PolicyBinding::PolicyBinding(
+    std::shared_ptr<const PolicyTypeRecord> type, PolicyClass policy_class,
+    std::uint64_t generation, void* context, bool destroy_required,
+    PolicyLifecycleObserver lifecycle_observer) noexcept
     : type_(std::move(type)),
       policy_class_(policy_class),
       generation_(generation),
       context_(context),
-      destroy_required_(destroy_required) {
+      destroy_required_(destroy_required),
+      lifecycle_observer_(lifecycle_observer) {
   // Ownership state is fully established by the initializer list.
 }
 
 /** @copydoc PolicyBinding::~PolicyBinding */
 PolicyBinding::~PolicyBinding() noexcept {
-  if (!destroy_required_ || !type_ || type_->builtin ||
-      type_->api.destroy == nullptr) {
-    return;
+  bool destroy_failed = false;
+  if (destroy_required_ && type_ && !type_->builtin &&
+      type_->api.destroy != nullptr) {
+    destroy_required_ = false;
+    try {
+      CallbackGuard guard(&lifecycle_observer_);
+      const auto destroy =
+          reinterpret_cast<DestroyFunction>(type_->api.destroy);
+      destroy_failed = destroy(context_) != PS_POLICY_STATUS_OK;
+    } catch (...) {
+      destroy_failed = true;
+    }
   }
-  destroy_required_ = false;
-  try {
-    CallbackGuard guard;
-    const auto destroy = reinterpret_cast<DestroyFunction>(type_->api.destroy);
-    (void)destroy(context_);
-  } catch (...) {
+  if (service_published_ && lifecycle_observer_.observes_bindings()) {
+    lifecycle_observer_.on_binding_retired(lifecycle_observer_.context,
+                                           generation_, destroy_failed);
   }
 }
 
@@ -657,7 +716,7 @@ PolicyInvocationResult PolicyBinding::select(
     decision.candidate_id = selected.candidate_id;
   } else {
     try {
-      CallbackGuard guard;
+      CallbackGuard guard(&lifecycle_observer_);
       const auto select = reinterpret_cast<SelectFunction>(type_->api.select);
       status = select(context_, &snapshot, &decision);
     } catch (...) {
@@ -666,6 +725,17 @@ PolicyInvocationResult PolicyBinding::select(
   }
   return validate_decision(*type_, decision, status, callback_threw,
                            generation_, snapshot_generation, candidates);
+}
+
+/** @copydoc PolicyBinding::mark_service_published */
+void PolicyBinding::mark_service_published() noexcept {
+  if (service_published_) {
+    std::terminate();
+  }
+  service_published_ = true;
+  if (lifecycle_observer_.observes_bindings()) {
+    lifecycle_observer_.on_binding_published(lifecycle_observer_.context);
+  }
 }
 
 /** @copydoc PolicyRegistry::process_instance */
@@ -893,7 +963,8 @@ std::size_t PolicyRegistry::scan(const std::vector<std::string>& directories) {
 /** @copydoc PolicyRegistry::create_binding */
 std::shared_ptr<PolicyBinding> PolicyRegistry::create_binding(
     const std::string& type_name, PolicyClass policy_class,
-    std::uint64_t generation) const {
+    std::uint64_t generation,
+    PolicyLifecycleObserver lifecycle_observer) const {
   reject_reentrant_mutation("create_binding");
   if (generation == 0U || !is_canonical_policy_type(type_name)) {
     throw GraphError(GraphErrc::InvalidParameter,
@@ -912,8 +983,8 @@ std::shared_ptr<PolicyBinding> PolicyRegistry::create_binding(
     type = found->second;
   }
 
-  std::shared_ptr<PolicyBinding> binding(
-      new PolicyBinding(type, policy_class, generation, nullptr, false));
+  std::shared_ptr<PolicyBinding> binding(new PolicyBinding(
+      type, policy_class, generation, nullptr, false, lifecycle_observer));
   if (type->builtin) {
     return binding;
   }
@@ -926,7 +997,7 @@ std::shared_ptr<PolicyBinding> PolicyRegistry::create_binding(
   void* context = nullptr;
   ps_policy_status_v1 status = PS_POLICY_STATUS_INTERNAL_ERROR;
   try {
-    CallbackGuard guard;
+    CallbackGuard guard(&lifecycle_observer);
     const auto create = reinterpret_cast<CreateFunction>(type->api.create);
     status = create(type->type_index, &args, &context);
   } catch (...) {

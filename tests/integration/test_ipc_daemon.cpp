@@ -1772,6 +1772,53 @@ bool ping_before_deadline(const std::string& socket_path,
 }
 
 /**
+ * @brief Sends one complete typed-envelope request and returns before reading.
+ *
+ * @param socket_path Running daemon Unix socket.
+ * @param method Exact version 1 method.
+ * @param params Complete typed params object.
+ * @param id Correlated request identity.
+ * @param deadline Hard deadline shared across connect and frame send.
+ * @param message Receives transport or framing diagnostics.
+ * @return Connected descriptor after the complete request frame is sent, or
+ *         empty when setup or transmission fails.
+ * @throws std::bad_alloc if request or diagnostic storage cannot allocate.
+ * @note The caller decides whether to read the response or abandon the
+ *       connection. The helper performs no retry, so closing the returned
+ *       descriptor models an ambiguous/lost response without replaying the
+ *       mutating request.
+ */
+internal::UniqueFd send_raw_daemon_request(
+    const std::string& socket_path, const std::string& method,
+    internal::Json params, std::string id,
+    std::chrono::steady_clock::time_point deadline, std::string* message) {
+  internal::UniqueFd connection =
+      connect_before_deadline(socket_path, deadline, message);
+  if (!connection) {
+    return {};
+  }
+  const std::string request = internal::Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", std::move(id)},
+      {"method", method},
+      {"params",
+       std::move(params)}}.dump();
+  if (request.empty() || request.size() > kMaximumFramePayloadBytes) {
+    *message = "real daemon RPC request exceeds frame bounds";
+    return {};
+  }
+  const std::uint32_t network_size =
+      htonl(static_cast<std::uint32_t>(request.size()));
+  if (!send_before_deadline(connection.get(), &network_size,
+                            sizeof(network_size), deadline, message) ||
+      !send_before_deadline(connection.get(), request.data(), request.size(),
+                            deadline, message)) {
+    return {};
+  }
+  return connection;
+}
+
+/**
  * @brief Performs one short-lived typed-envelope call without public Client
  *        compute helpers.
  *
@@ -1797,31 +1844,9 @@ internal::Json raw_daemon_call(
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   std::string message;
   internal::UniqueFd connection =
-      connect_before_deadline(socket_path, deadline, &message);
+      send_raw_daemon_request(socket_path, method, std::move(params),
+                              std::move(id), deadline, &message);
   if (!connection) {
-    if (report_failure) {
-      ADD_FAILURE() << message;
-    }
-    return internal::Json::object();
-  }
-  const std::string request = internal::Json{
-      {"protocol_version", kProtocolVersion},
-      {"id", std::move(id)},
-      {"method", method},
-      {"params",
-       std::move(params)}}.dump();
-  if (request.empty() || request.size() > 16U * 1024U * 1024U) {
-    if (report_failure) {
-      ADD_FAILURE() << "real daemon RPC request exceeds frame bounds";
-    }
-    return internal::Json::object();
-  }
-  const std::uint32_t network_size =
-      htonl(static_cast<std::uint32_t>(request.size()));
-  if (!send_before_deadline(connection.get(), &network_size,
-                            sizeof(network_size), deadline, &message) ||
-      !send_before_deadline(connection.get(), request.data(), request.size(),
-                            deadline, &message)) {
     if (report_failure) {
       ADD_FAILURE() << message;
     }
@@ -5317,10 +5342,20 @@ TEST(IpcDaemonComputeLifecycle,
     return;
   }
 
-  RawDaemonCallTask closing(
+  std::string abandoned_close_message;
+  internal::UniqueFd abandoned_close = send_raw_daemon_request(
       socket_path, "graph.close",
       internal::Json{{"session_id", loaded.value.session_id.value}},
-      "active-close", std::chrono::seconds(12));
+      "active-close-lost-response",
+      std::chrono::steady_clock::now() + std::chrono::seconds(3),
+      &abandoned_close_message);
+  if (!abandoned_close) {
+    (void)reload_fifo.release();
+    daemon.stop();
+    (void)reloading.join();
+    FAIL() << abandoned_close_message;
+    return;
+  }
   bool closing_observed = false;
   const auto closing_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -5341,15 +5376,19 @@ TEST(IpcDaemonComputeLifecycle,
     }
     std::this_thread::yield();
   }
-  if (!closing_observed || closing.complete()) {
+  if (!closing_observed) {
     (void)reload_fifo.release();
     daemon.stop();
-    (void)closing.join();
     (void)reloading.join();
     FAIL() << "graph close did not enter its blocked closing state";
     return;
   }
 
+  RawDaemonCallTask closing(
+      socket_path, "graph.close",
+      internal::Json{{"session_id", loaded.value.session_id.value}},
+      "active-close-joined", std::chrono::seconds(12));
+  abandoned_close.reset();
   if (!reload_fifo.release()) {
     daemon.stop();
     (void)closing.join();
@@ -5370,6 +5409,13 @@ TEST(IpcDaemonComputeLifecycle,
   ASSERT_TRUE(reloaded.contains("result")) << reloaded.dump();
   ASSERT_TRUE(closed.contains("result")) << closed.dump();
   EXPECT_TRUE(closed["result"]["closed"].get<bool>());
+  const internal::Json late_close = raw_daemon_call(
+      socket_path, "graph.close",
+      internal::Json{{"session_id", loaded.value.session_id.value}},
+      "active-close-late");
+  ASSERT_TRUE(late_close.contains("error")) << late_close.dump();
+  EXPECT_EQ(late_close["error"]["domain"], "graph");
+  EXPECT_EQ(late_close["error"]["name"], "not_found");
 
   for (const std::string& compute_id : compute_ids) {
     const internal::Json terminal = wait_for_real_compute_terminal(

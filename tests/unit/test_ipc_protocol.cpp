@@ -5072,6 +5072,70 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 /**
+ * @brief Proves concurrent clients and shutdown join one daemon close result.
+ *
+ * @throws Nothing when controlled Host entry and router shutdown settle before
+ * the test deadline.
+ * @note The first routed caller crosses the Host boundary. Signal-style
+ * shutdown stops ordinary admission, joins that exact generation, and neither
+ * a discarded response nor a late close can replay `Host::close_graph`.
+ */
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ConcurrentCloseAndShutdownIssueOneHostCallWithoutReplay) {
+  std::mutex gate_mutex;
+  std::condition_variable gate_changed;
+  bool close_entered = false;
+  bool release_close = false;
+  host_.set_call_hook([&](std::string_view method) {
+    if (method != "graph.close") {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    close_entered = true;
+    gate_changed.notify_all();
+    gate_changed.wait(lock, [&] { return release_close; });
+  });
+
+  auto close_future = std::async(std::launch::async, [&] {
+    return route("graph.close", Json{{"session_id", session_id_}},
+                 "discarded-close-response");
+  });
+  ScopedProtocolGateRelease release_guard(gate_mutex, gate_changed,
+                                          release_close);
+  {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    ASSERT_TRUE(gate_changed.wait_for(lock, std::chrono::seconds(2),
+                                      [&] { return close_entered; }));
+  }
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+
+  router_.begin_shutdown();
+  auto shutdown_future =
+      std::async(std::launch::async, [&] { router_.finish_shutdown(); });
+  EXPECT_EQ(shutdown_future.wait_for(std::chrono::milliseconds(25)),
+            std::future_status::timeout);
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+
+  release_guard.release();
+  const Json discarded_response = close_future.get();
+  ASSERT_TRUE(discarded_response.contains("result"))
+      << discarded_response.dump();
+  EXPECT_TRUE(discarded_response["result"]["closed"].get<bool>());
+  ASSERT_EQ(shutdown_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  shutdown_future.get();
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+
+  const Json late =
+      route("graph.close", Json{{"session_id", session_id_}}, "late-close");
+  ASSERT_TRUE(late.contains("error")) << late.dump();
+  EXPECT_EQ(late["error"]["domain"], "graph");
+  EXPECT_EQ(late["error"]["name"], "not_found");
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+  host_.set_call_hook({});
+}
+
+/**
  * @brief Verifies one complete internal enum label table transactionally.
  *
  * @tparam Enum Public enum type handled by the overloaded codec.

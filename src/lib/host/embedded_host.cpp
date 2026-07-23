@@ -263,6 +263,87 @@ struct EmbeddedHostState {
   };
 
   /**
+   * @brief Preallocated edge-admission and close-result state for one session.
+   *
+   * @throws Nothing after the owning shared state and session label have been
+   * allocated before backend publication.
+   * @note This record is only the embedded Host edge gate. Kernel and
+   * RunLifecycleRegistry remain authoritative for Graph and Run close.
+   */
+  struct SessionCloseRecord final {
+    /**
+     * @brief Monotonic adapter-local session lifecycle.
+     * @throws Nothing for value construction and comparison.
+     */
+    enum class State {
+      /** @brief Backend load has not yet published the Graph. */
+      Loading,
+      /** @brief Public session-scoped operations may enter. */
+      Open,
+      /** @brief One close generation rejects later public operations. */
+      Closing,
+      /** @brief The selected close generation has one immutable result. */
+      Completed,
+    };
+
+    /**
+     * @brief Immutable result shared by every caller joining one generation.
+     * @throws Nothing for value construction and comparison.
+     */
+    enum class Outcome {
+      /** @brief Backend progression has not published a result. */
+      Pending,
+      /** @brief The exact live Graph closed successfully. */
+      Success,
+      /** @brief The preallocated Host record proved stale at Kernel entry. */
+      NotFound,
+    };
+
+    /**
+     * @brief Creates a pre-publication record for one requested session label.
+     * @param session_id Stable public session label copied before backend load.
+     * @throws std::bad_alloc when copying the session label exhausts memory.
+     */
+    explicit SessionCloseRecord(GraphSessionId session_id)
+        : session(std::move(session_id)) {}
+
+    /** @brief Stable public session label owned by this record. */
+    GraphSessionId session;
+    /** @brief Loading/Open/Closing/Completed monotonic state. */
+    State state = State::Loading;
+    /** @brief Pending or terminal result for the selected close generation. */
+    Outcome outcome = Outcome::Pending;
+  };
+
+  /**
+   * @brief Result of selecting or joining one Host close generation.
+   *
+   * @throws Nothing for aggregate construction and destruction.
+   * @note Missing carries no record. Owner and Joiner retain the exact
+   * preallocated record even after successful completion removes its public
+   * session mapping.
+   */
+  struct SessionCloseClaim final {
+    /**
+     * @brief Caller responsibility selected under lifecycle_mutex_.
+     * @throws Nothing for value construction and comparison.
+     */
+    enum class Role {
+      /** @brief No open or joinable session record exists. */
+      Missing,
+      /** @brief Caller performs the only Kernel close progression. */
+      Owner,
+      /** @brief Caller waits for the already selected result. */
+      Joiner,
+    };
+
+    /** @brief Selected caller role. */
+    Role role = Role::Missing;
+    /** @brief Exact retained record for Owner or Joiner. */
+    std::shared_ptr<SessionCloseRecord> record;
+  };
+
+  /**
    * @brief RAII token for one synchronous session admission.
    *
    * @throws Nothing for destruction.
@@ -412,6 +493,78 @@ struct EmbeddedHostState {
    *       callers still hold adapter-created futures.
    */
   ~EmbeddedHostState() { wait_for_all_async_compute(); }
+
+  /**
+   * @brief Preallocates one session close record before backend Graph load.
+   *
+   * @param session Requested public session label.
+   * @return New Loading record, or null when the label already has a Loading,
+   * Open, or Closing record.
+   * @throws std::bad_alloc when record, label, or table growth allocation
+   * fails.
+   * @throws std::system_error when lifecycle synchronization fails.
+   * @note All close-generation storage is established before Kernel can publish
+   * the Graph. The lifecycle mutex is never retained across backend loading.
+   */
+  std::shared_ptr<SessionCloseRecord> reserve_session_close_record(
+      const GraphSessionId& session) {
+    auto staged =
+        std::make_shared<SessionCloseRecord>(GraphSessionId{session.value});
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (find_session_close_record_locked(session) !=
+        session_close_records_.end()) {
+      return nullptr;
+    }
+    session_close_records_.push_back(staged);
+    return staged;
+  }
+
+  /**
+   * @brief Publishes a successfully loaded session as Open.
+   *
+   * @param record Exact Loading record reserved before backend load.
+   * @return Nothing.
+   * @throws std::logic_error for a foreign or non-Loading record.
+   * @throws std::system_error when lifecycle synchronization fails.
+   * @note The transition allocates nothing and occurs only after Kernel Graph
+   * registration/publication and public success-result staging both succeed.
+   */
+  void publish_session_close_record(
+      const std::shared_ptr<SessionCloseRecord>& record) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    const auto found = find_session_close_record_locked(record);
+    if (found == session_close_records_.end() ||
+        (*found)->state != SessionCloseRecord::State::Loading) {
+      throw std::logic_error(
+          "Embedded Host cannot publish an unknown session close record.");
+    }
+    (*found)->state = SessionCloseRecord::State::Open;
+  }
+
+  /**
+   * @brief Removes an unpublished session close record after load failure.
+   *
+   * @param record Exact Loading record to remove.
+   * @return Nothing.
+   * @throws Nothing; an invariant or synchronization failure terminates.
+   * @note This rollback is legal only before Kernel load success. It never
+   * reopens a selected close generation.
+   */
+  void rollback_session_close_record(
+      const std::shared_ptr<SessionCloseRecord>& record) noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      const auto found = find_session_close_record_locked(record);
+      if (found == session_close_records_.end() ||
+          (*found)->state != SessionCloseRecord::State::Loading) {
+        std::terminate();
+      }
+      session_close_records_.erase(found);
+    } catch (...) {
+      std::terminate();
+    }
+    lifecycle_cv_.notify_all();
+  }
 
   /**
    * @brief Joins and removes completed asynchronous status workers.
@@ -681,34 +834,38 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Claims the exclusive Host close marker for one session.
+   * @brief Selects the one Host close owner or joins its live generation.
    *
-   * @param session Session about to be closed.
-   * @return Nothing after this caller exclusively owns the close marker.
-   * @throws std::bad_alloc if recording the closing marker allocates.
+   * @param session Session requested by the public close caller.
+   * @return Missing, Owner, or Joiner with the exact preallocated record.
    * @throws std::system_error if lifecycle synchronization fails.
-   * @note A caller arriving during another close waits until that attempt
-   *       clears its marker, then claims a fresh marker and performs its own
-   *       backend existence/close attempt. This phase deliberately does not
-   *       wait for admitted users. The caller next drains pre-marker
-   *       synchronous admissions, then stops Kernel lane admission so a
-   *       full-queue async producer can leave its placeholder.
+   * @note Selection is allocation-free and does not wait for admitted users.
+   * The Owner next drains pre-marker synchronous admissions before invoking
+   * Kernel exactly once. A Joiner waits for the same immutable result and
+   * never performs a second backend existence/close attempt.
    */
-  void begin_session_close(const GraphSessionId& session) {
-    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-    while (session_close_in_progress_locked(session)) {
+  SessionCloseClaim begin_session_close(const GraphSessionId& session) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    const auto found = find_session_close_record_locked(session);
+    if (found == session_close_records_.end() ||
+        (*found)->state == SessionCloseRecord::State::Loading ||
+        (*found)->state == SessionCloseRecord::State::Completed) {
+      return SessionCloseClaim{};
+    }
+    const std::shared_ptr<SessionCloseRecord> record = *found;
+    if (record->state == SessionCloseRecord::State::Closing) {
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
       notify_embedded_lifecycle_test_hook(
           EmbeddedLifecycleTestEvent::DuplicateAboutToWait);
 #endif
-      lifecycle_cv_.wait(
-          lock, [&] { return !session_close_in_progress_locked(session); });
+      return SessionCloseClaim{SessionCloseClaim::Role::Joiner, record};
     }
-    mark_session_closing_locked(session);
+    record->state = SessionCloseRecord::State::Closing;
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     notify_embedded_lifecycle_test_hook(
         EmbeddedLifecycleTestEvent::MarkerClaimed);
 #endif
+    return SessionCloseClaim{SessionCloseClaim::Role::Owner, record};
   }
 
   /**
@@ -770,22 +927,65 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Ends a Host close lifecycle for one session.
+   * @brief Waits for the immutable result of one selected close generation.
    *
-   * @param session Session whose backend close attempt has returned.
-   * @return Nothing.
-   * @throws Nothing.
-   * @note This method must be called after `begin_session_close()` even when a
-   *       later admission-stop or backend close reports NotFound, so load
-   *       attempts using the same label are not rejected as still closing.
+   * @param record Exact Closing record retained by a Joiner.
+   * @return Success or NotFound after Owner publication.
+   * @throws std::logic_error for a foreign/unselected record.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note Waiting has no finite timeout. A nonreturning accepted callback keeps
+   * every joiner honestly blocked on the same generation.
    */
-  void finish_session_close(const GraphSessionId& session) {
+  SessionCloseRecord::Outcome wait_for_session_close(
+      const std::shared_ptr<SessionCloseRecord>& record) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    if (record == nullptr ||
+        record->state == SessionCloseRecord::State::Loading ||
+        record->state == SessionCloseRecord::State::Open) {
+      throw std::logic_error(
+          "Embedded Host close join requires a selected generation.");
+    }
+    lifecycle_cv_.wait(lock, [&record] {
+      return record->state == SessionCloseRecord::State::Completed;
+    });
+    if (record->outcome == SessionCloseRecord::Outcome::Pending) {
+      throw std::logic_error(
+          "Embedded Host close completed without an immutable result.");
+    }
+    return record->outcome;
+  }
+
+  /**
+   * @brief Publishes one terminal close result and removes the public mapping.
+   *
+   * @param record Exact Closing record owned by the progressing caller.
+   * @param outcome Success or NotFound returned by the sole Kernel call.
+   * @return Nothing.
+   * @throws std::invalid_argument for Pending outcome.
+   * @throws std::logic_error for a foreign or non-Closing record.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note Removal makes callers entering after completion observe NotFound,
+   * while existing joiners retain this record and receive the same outcome.
+   * The generation is never reopened or retried.
+   */
+  void complete_session_close(const std::shared_ptr<SessionCloseRecord>& record,
+                              SessionCloseRecord::Outcome outcome) {
+    if (outcome == SessionCloseRecord::Outcome::Pending) {
+      throw std::invalid_argument(
+          "Embedded Host close requires a terminal result.");
+    }
     {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      closing_sessions_.erase(
-          std::remove(closing_sessions_.begin(), closing_sessions_.end(),
-                      session.value),
-          closing_sessions_.end());
+      const auto found = find_session_close_record_locked(record);
+      if (found == session_close_records_.end() ||
+          (*found)->state != SessionCloseRecord::State::Closing ||
+          (*found)->outcome != SessionCloseRecord::Outcome::Pending) {
+        throw std::logic_error(
+            "Embedded Host close completion has no live owner record.");
+      }
+      record->outcome = outcome;
+      record->state = SessionCloseRecord::State::Completed;
+      session_close_records_.erase(found);
     }
     lifecycle_cv_.notify_all();
   }
@@ -888,6 +1088,40 @@ struct EmbeddedHostState {
   }
 
   /**
+   * @brief Finds one session close record by public label.
+   *
+   * @param session Exact public session label.
+   * @return Mutable iterator or session_close_records_.end().
+   * @throws Nothing.
+   * @note Caller must hold lifecycle_mutex_.
+   */
+  std::vector<std::shared_ptr<SessionCloseRecord>>::iterator
+  find_session_close_record_locked(const GraphSessionId& session) noexcept {
+    return std::find_if(
+        session_close_records_.begin(), session_close_records_.end(),
+        [&session](const std::shared_ptr<SessionCloseRecord>& record) {
+          return record->session.value == session.value;
+        });
+  }
+
+  /**
+   * @brief Finds one exact retained close record by shared ownership identity.
+   *
+   * @param record Record returned by reserve_session_close_record() or
+   * begin_session_close().
+   * @return Mutable iterator or session_close_records_.end().
+   * @throws Nothing.
+   * @note Caller must hold lifecycle_mutex_. Pointer identity prevents a stale
+   * record from mutating a future same-label Graph generation.
+   */
+  std::vector<std::shared_ptr<SessionCloseRecord>>::iterator
+  find_session_close_record_locked(
+      const std::shared_ptr<SessionCloseRecord>& record) noexcept {
+    return std::find(session_close_records_.begin(),
+                     session_close_records_.end(), record);
+  }
+
+  /**
    * @brief Returns whether one session is already in close lifecycle.
    *
    * @param session Session label to search.
@@ -896,24 +1130,12 @@ struct EmbeddedHostState {
    * @note Caller must hold lifecycle_mutex_.
    */
   bool session_close_in_progress_locked(const GraphSessionId& session) const {
-    return std::find(closing_sessions_.begin(), closing_sessions_.end(),
-                     session.value) != closing_sessions_.end();
-  }
-
-  /**
-   * @brief Records that close_graph has started for one session.
-   *
-   * @param session Session label being closed.
-   * @return Nothing.
-   * @throws std::bad_alloc if inserting the label allocates.
-   * @note Caller must hold lifecycle_mutex_ and must already have rejected a
-   *       duplicate marker. The separate wait path prevents two callers from
-   *       entering Kernel::close_graph() concurrently for one session.
-   */
-  void mark_session_closing_locked(const GraphSessionId& session) {
-    if (!session_close_in_progress_locked(session)) {
-      closing_sessions_.push_back(session.value);
-    }
+    return std::any_of(
+        session_close_records_.cbegin(), session_close_records_.cend(),
+        [&session](const std::shared_ptr<SessionCloseRecord>& record) {
+          return record->session.value == session.value &&
+                 record->state == SessionCloseRecord::State::Closing;
+        });
   }
 
   /**
@@ -932,8 +1154,13 @@ struct EmbeddedHostState {
   /** @brief Synchronous session operations admitted before close began. */
   std::vector<ActiveSessionAdmission> active_admissions_;
 
-  /** @brief Sessions currently being closed by the Host adapter. */
-  std::vector<std::string> closing_sessions_;
+  /**
+   * @brief Preallocated Loading/Open/Closing session edge records.
+   *
+   * @note Entries allocate before backend Graph publication, remain stable
+   * through close, and are removed only after an immutable terminal result.
+   */
+  std::vector<std::shared_ptr<SessionCloseRecord>> session_close_records_;
 
   /** @brief Monotonic id source for async tracking entries. */
   std::atomic<uint64_t> next_async_id_{1};
@@ -2122,57 +2349,85 @@ class EmbeddedHost final : public Host {
   Result<GraphSessionId> load_graph(const GraphLoadRequest& request) override {
     return guarded_result<GraphSessionId>(
         "load_graph", GraphErrc::Unknown, [&] {
-          auto loaded = state_->interaction.cmd_load_graph(
-              request.session.value, request.root_dir, request.yaml_path,
-              request.config_path, request.cache_root_dir);
-          if (!loaded) {
+          const std::shared_ptr<EmbeddedHostState::SessionCloseRecord> record =
+              state_->reserve_session_close_record(request.session);
+          if (record == nullptr) {
             return failure_result<GraphSessionId>(
                 GraphErrc::InvalidParameter,
-                "failed to load graph session '" + request.session.value + "'");
+                "graph session is already loaded or loading: " +
+                    request.session.value);
           }
-          return success_result(GraphSessionId{std::move(*loaded)});
+          try {
+            auto loaded = state_->interaction.cmd_load_graph(
+                request.session.value, request.root_dir, request.yaml_path,
+                request.config_path, request.cache_root_dir);
+            if (!loaded) {
+              Result<GraphSessionId> result = failure_result<GraphSessionId>(
+                  GraphErrc::InvalidParameter,
+                  "failed to load graph session '" + request.session.value +
+                      "'");
+              state_->rollback_session_close_record(record);
+              return result;
+            }
+            Result<GraphSessionId> result =
+                success_result(GraphSessionId{std::move(*loaded)});
+            state_->publish_session_close_record(record);
+            return result;
+          } catch (...) {
+            state_->rollback_session_close_record(record);
+            throw;
+          }
         });
   }
 
   /**
-   * @brief Closes a graph after adapter-submitted async status mapping
-   * completes.
+   * @brief Selects or joins one monotonic close generation for a graph.
    *
    * @param session Session to close.
-   * @return Success, NotFound only when the graph session does not exist, or a
-   *         non-NotFound failure when runtime shutdown fails before removal.
+   * @return The generation's shared success, or NotFound for an absent, stale,
+   * or post-completion session.
    * @throws std::bad_alloc on diagnostic allocation failure.
-   * @note The adapter first marks the session closing and waits only the
-   *       synchronous operations admitted before that marker, leaving both
-   *       lanes open for those accepted calls. It then asks Kernel to stop
-   *       compute-request admission before waiting for pre-registered async
-   *       placeholders. This ordering wakes a producer blocked by the full
-   *       request FIFO and prevents
-   *       close-marker starvation without rejecting accepted synchronous work.
-   *       Every backend-accepted async promise is made caller-visible and its
-   *       status worker is joined before backend close drains the request lane,
-   *       closes graph-state, and destroys the runtime. A shutdown failure
-   * recreates both workers before the adapter clears the marker, so the session
-   * may be retried.
+   * @note All close state was allocated before Graph publication. The Owner
+   * publishes the edge marker, drains pre-marker synchronous Host calls, and
+   * invokes Kernel exactly once. Kernel linearizes the registry row before
+   * stopping the request lane, settles Runs, removes the row, then drains the
+   * request and graph-state lanes. Adapter-tracked async statuses are published
+   * and joined before the close result is released. Joiners receive the exact
+   * same immutable result; the generation is never reopened.
    */
   VoidResult close_graph(const GraphSessionId& session) override {
     return guarded_graph_close([&] {
-      state_->begin_session_close(session);
-      bool closed = false;
+      const EmbeddedHostState::SessionCloseClaim claim =
+          state_->begin_session_close(session);
+      if (claim.role == EmbeddedHostState::SessionCloseClaim::Role::Missing) {
+        return failure_void(GraphErrc::NotFound,
+                            "graph session not found: " + session.value);
+      }
+      if (claim.role == EmbeddedHostState::SessionCloseClaim::Role::Joiner) {
+        const EmbeddedHostState::SessionCloseRecord::Outcome outcome =
+            state_->wait_for_session_close(claim.record);
+        if (outcome ==
+            EmbeddedHostState::SessionCloseRecord::Outcome::Success) {
+          return success_void();
+        }
+        return failure_void(GraphErrc::NotFound,
+                            "graph session not found: " + session.value);
+      }
+
+      EmbeddedHostState::SessionCloseRecord::Outcome outcome =
+          EmbeddedHostState::SessionCloseRecord::Outcome::Pending;
       try {
         state_->wait_for_session_admissions(session);
-        const bool runtime_exists =
-            state_->interaction.cmd_stop_graph_admission(session.value);
+        const bool closed = state_->interaction.cmd_close_graph(session.value);
         state_->wait_for_session_async_compute(session);
-        if (runtime_exists) {
-          closed = state_->interaction.cmd_close_graph(session.value);
-        }
+        outcome =
+            closed ? EmbeddedHostState::SessionCloseRecord::Outcome::Success
+                   : EmbeddedHostState::SessionCloseRecord::Outcome::NotFound;
+        state_->complete_session_close(claim.record, outcome);
       } catch (...) {
-        state_->finish_session_close(session);
-        throw;
+        std::terminate();
       }
-      state_->finish_session_close(session);
-      if (!closed) {
+      if (outcome == EmbeddedHostState::SessionCloseRecord::Outcome::NotFound) {
         return failure_void(GraphErrc::NotFound,
                             "graph session not found: " + session.value);
       }

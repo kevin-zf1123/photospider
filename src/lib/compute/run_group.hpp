@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "compute/compute_run.hpp"
 #include "compute/dirty_sibling_commit_gate.hpp"
@@ -130,17 +131,17 @@ class RunGroup final {
 
   /**
    * @brief Returns the group-owned HP child observation lease.
-   * @return Borrowed lease retained through group destruction.
-   * @throws Nothing.
+   * @return Borrowed lease retained until explicit lifecycle release.
+   * @throws std::logic_error after release_lifecycle_leases().
    */
-  const ComputeRunLease& hp_lease() const noexcept { return hp_lease_; }
+  const ComputeRunLease& hp_lease() const;
 
   /**
    * @brief Returns the group-owned RT child observation lease.
-   * @return Borrowed lease retained through group destruction.
-   * @throws Nothing.
+   * @return Borrowed lease retained until explicit lifecycle release.
+   * @throws std::logic_error after release_lifecycle_leases().
    */
-  const ComputeRunLease& rt_lease() const noexcept { return rt_lease_; }
+  const ComputeRunLease& rt_lease() const;
 
   /**
    * @brief Returns the request-wide child cancellation coordinator.
@@ -149,6 +150,18 @@ class RunGroup final {
    */
   ComputeRequestCancellationSource& cancellation_source() noexcept {
     return *cancellation_;
+  }
+
+  /**
+   * @brief Returns shared request cancellation ownership for registry fan-out.
+   * @return Strong coordinator owner retained by the group and registry.
+   * @throws Nothing.
+   * @note The coordinator carries cancellation only; it retains child Runs
+   * weakly and owns no Graph, resource, worker, or terminal result.
+   */
+  std::shared_ptr<ComputeRequestCancellationSource> cancellation_source_owner()
+      const noexcept {
+    return cancellation_;
   }
 
   /**
@@ -185,6 +198,16 @@ class RunGroup final {
    */
   ComputeRunTerminalOutcome aggregate_terminal_outcome() const;
 
+  /**
+   * @brief Releases both group-owned observation leases before unregister.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Both children must already be terminal and no later group method may
+   * request either lease. Registry-owned minimum leases remain alive until
+   * complete bundle finalization.
+   */
+  void release_lifecycle_leases() noexcept;
+
  private:
   /** @brief Fresh request-group identity. */
   RunGroupId id_;
@@ -195,9 +218,9 @@ class RunGroup final {
   /** @brief Independent RT Interactive child Run. */
   ComputeRun rt_run_;
   /** @brief Baseline HP observation retained until group destruction. */
-  ComputeRunLease hp_lease_;
+  std::optional<ComputeRunLease> hp_lease_;
   /** @brief Baseline RT observation retained until group destruction. */
-  ComputeRunLease rt_lease_;
+  std::optional<ComputeRunLease> rt_lease_;
   /** @brief Group-wide cancellation source attached to both children. */
   std::shared_ptr<ComputeRequestCancellationSource> cancellation_;
   /** @brief Pending/RT-committed/denied asymmetric sibling gate. */

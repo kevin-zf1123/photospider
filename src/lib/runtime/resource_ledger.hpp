@@ -110,6 +110,93 @@ struct ResourceReservationState;
 class ResourceLedger final {
  public:
   /**
+   * @brief Non-owning exact root-settlement notification.
+   *
+   * @throws Nothing for value construction, copying, and invocation.
+   * @note The callback carries no capacity authority and allocates nothing. Its
+   * context must outlive the root reservation, including every deferred child
+   * grant. The ledger invokes it exactly once after physical capacity and any
+   * companion quota accounting have both been returned.
+   */
+  struct ReservationSettlementObserver final {
+    /**
+     * @brief Non-throwing root- or child-settlement lifecycle callback.
+     *
+     * @param context Borrowed observer context supplied with this value.
+     * @return Nothing.
+     * @throws Nothing.
+     */
+    using Callback = void (*)(void* context) noexcept;
+
+    /**
+     * @brief Creates an empty or complete non-owning callback value.
+     * @param observer_context Borrowed stable context, or null.
+     * @param settled_callback Exact-once root-settlement callback, or null.
+     * @param child_granted_callback Callback after one child grant is minted,
+     * or null.
+     * @param child_released_callback Callback after one child grant is
+     * returned, or null.
+     * @throws Nothing.
+     */
+    constexpr ReservationSettlementObserver(
+        void* observer_context = nullptr, Callback settled_callback = nullptr,
+        Callback child_granted_callback = nullptr,
+        Callback child_released_callback = nullptr) noexcept
+        : context(observer_context),
+          on_settled(settled_callback),
+          on_child_granted(child_granted_callback),
+          on_child_released(child_released_callback) {}
+
+    /** @brief Borrowed stable context retained only as an opaque address. */
+    void* context;
+
+    /**
+     * @brief Exact-once post-release callback, or null for no observation.
+     * @param context Borrowed stable context supplied above.
+     * @return Nothing.
+     * @throws Nothing; throwing across this callback terminates.
+     */
+    Callback on_settled;
+
+    /**
+     * @brief Post-mint child-grant observation, or null when unobserved.
+     * @param context Borrowed stable context supplied above.
+     * @return Nothing.
+     * @throws Nothing; throwing across this callback terminates.
+     * @note The callback observes ownership only and cannot modify the grant.
+     */
+    Callback on_child_granted;
+
+    /**
+     * @brief Post-release child-grant observation, or null when unobserved.
+     * @param context Borrowed stable context supplied above.
+     * @return Nothing.
+     * @throws Nothing; throwing across this callback terminates.
+     * @note The callback runs exactly once for each successfully minted child.
+     */
+    Callback on_child_released;
+
+    /**
+     * @brief Reports whether this value names a complete callback.
+     * @return True only when context and function are both non-null.
+     * @throws Nothing.
+     */
+    bool valid() const noexcept {
+      return context != nullptr && on_settled != nullptr;
+    }
+
+    /**
+     * @brief Reports whether both exact child-lifetime callbacks are complete.
+     * @return True only when context and both child callbacks are non-null.
+     * @throws Nothing.
+     */
+    bool observes_children() const noexcept {
+      return context != nullptr && on_child_granted != nullptr &&
+             on_child_released != nullptr;
+    }
+  };
+
+  /**
    * @brief Observes exact root release under one caller-owned transaction lock.
    *
    * @throws Nothing from destruction or either callback.
@@ -417,17 +504,20 @@ class ResourceLedger final {
    * @param requested Checked resource demand.
    * @param release_observer Optional non-authoritative owner retained only for
    * a successful reservation and notified after its exact physical release.
+   * @param settlement_observer Optional non-owning exact-settlement callback.
    * @return Move-only reservation, or `std::nullopt` without state change when
    * any dimension lacks capacity.
    * @throws std::bad_alloc when reservation state allocation fails.
    * @throws std::system_error when internal mutex locking fails.
    * @note A caller coupling admission to companion accounting must hold the
    * observer's transaction mutex across this call and its own successful
-   * charge. The ledger remains the sole capacity authority.
+   * charge. The settlement observer context must remain alive until callback.
+   * The ledger remains the sole capacity authority.
    */
   std::optional<Reservation> try_reserve(
       const ResourceVector& requested,
-      std::shared_ptr<ReservationReleaseObserver> release_observer = nullptr);
+      std::shared_ptr<ReservationReleaseObserver> release_observer = nullptr,
+      ReservationSettlementObserver settlement_observer = {});
 
   /**
    * @brief Atomically commits two independently owned root vectors.

@@ -29,6 +29,7 @@
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/execution_service.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#include "compute/run_group.hpp"
 #include "core/image_buffer_processing.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "graph/graph_cache_service.hpp"
@@ -2879,6 +2880,69 @@ TEST(ComputeRunLifecycle, ConcurrentTerminalContendersSelectExactlyOne) {
   EXPECT_EQ(accepted.load(std::memory_order_relaxed), 1);
   EXPECT_TRUE(run.is_terminal());
   EXPECT_TRUE(run.terminal_outcome().has_value());
+}
+
+/**
+ * @brief Verifies registry finalization waits for every peer lease release.
+ *
+ * @return Nothing; GoogleTest assertions report premature or stalled
+ * finalization.
+ * @throws Allocation or synchronization exceptions from fixture setup.
+ * @note The finalizer retains exactly one lease and must not return while a
+ * caller/callback peer still owns another lease.
+ */
+TEST(ComputeRunLifecycle, FinalizerWaitsForEveryPeerLeaseRelease) {
+  ComputeRun run(make_test_submission("finalizer-wait", 61, 71));
+  std::optional<ComputeRunLease> finalizer(run.acquire_lease());
+  std::optional<ComputeRunLease> peer(run.acquire_lease());
+  ASSERT_TRUE(run.publish_succeeded());
+
+  std::future<void> completion = std::async(std::launch::async, [&finalizer]() {
+    finalizer->wait_until_only_lease();
+  });
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+
+  peer.reset();
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_FALSE(run.is_quiescent());
+
+  finalizer.reset();
+  EXPECT_TRUE(run.is_quiescent());
+}
+
+/**
+ * @brief Verifies a realtime group releases both baseline child leases.
+ *
+ * @return Nothing; GoogleTest assertions report asymmetric child retirement.
+ * @throws Run construction or synchronization exceptions unchanged.
+ * @note Both child outcomes are terminal before lifecycle release; afterward
+ * neither discarded group observer may be requested again.
+ */
+TEST(RunGroupLifecycle, ReleasesBothTerminalChildLeasesTogether) {
+  ComputeRunSubmission hp = make_test_submission("run-group-lifecycle", 62, 72);
+  hp.supersession =
+      SupersessionIdentity{SupersessionKey(72, ComputeIntent::RealTimeUpdate),
+                           SupersessionGeneration(2)};
+  ComputeRunSubmission rt = hp;
+  rt.intent = ComputeIntent::RealTimeUpdate;
+  rt.quality = ComputeRunQuality::Interactive;
+  RunGroup group(std::move(hp), std::move(rt));
+
+  EXPECT_FALSE(group.hp_run().is_quiescent());
+  EXPECT_FALSE(group.rt_run().is_quiescent());
+  ASSERT_TRUE(group.hp_run().publish_succeeded());
+  ASSERT_TRUE(group.rt_run().publish_succeeded());
+  group.release_lifecycle_leases();
+
+  EXPECT_TRUE(group.hp_run().is_quiescent());
+  EXPECT_TRUE(group.rt_run().is_quiescent());
+  EXPECT_THROW((void)group.hp_lease(), std::logic_error);
+  EXPECT_THROW((void)group.rt_lease(), std::logic_error);
+  EXPECT_EQ(group.aggregate_terminal_outcome().kind,
+            ComputeRunTerminalKind::Succeeded);
 }
 
 /**

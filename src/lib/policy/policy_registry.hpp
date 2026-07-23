@@ -90,6 +90,103 @@ class PolicyRegistry;
 struct PolicyTypeRecord;
 
 /**
+ * @brief Non-owning service lifecycle observation for policy
+ * callbacks/bindings.
+ *
+ * @throws Nothing for value construction and copying.
+ * @note The callbacks carry no registry, binding, context, DSO, scheduling, or
+ * shutdown authority. The context must outlive every binding created with this
+ * value, including displaced bindings retained by entered callbacks.
+ */
+struct PolicyLifecycleObserver final {
+  /**
+   * @brief Non-throwing callback for one policy invocation or binding event.
+   *
+   * @param context Borrowed observer context supplied with this value.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  using EventCallback = void (*)(void* context) noexcept;
+
+  /**
+   * @brief Non-throwing callback for exact binding retirement.
+   *
+   * @param context Borrowed observer context supplied with this value.
+   * @param generation Exact retired binding generation.
+   * @param destroy_failed Whether plugin destroy returned failure or threw.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  using BindingRetiredCallback = void (*)(void* context,
+                                          std::uint64_t generation,
+                                          bool destroy_failed) noexcept;
+
+  /**
+   * @brief Creates an empty or complete policy lifecycle observer.
+   * @param observer_context Borrowed stable service context, or null.
+   * @param invocation_entered Callback immediately before plugin entry.
+   * @param invocation_returned Callback immediately after plugin return.
+   * @param binding_published Callback after service publication.
+   * @param binding_retired Callback after final destroy attempt and retirement.
+   * @throws Nothing.
+   */
+  constexpr PolicyLifecycleObserver(
+      void* observer_context = nullptr,
+      EventCallback invocation_entered = nullptr,
+      EventCallback invocation_returned = nullptr,
+      EventCallback binding_published = nullptr,
+      BindingRetiredCallback binding_retired = nullptr) noexcept
+      : context(observer_context),
+        on_invocation_entered(invocation_entered),
+        on_invocation_returned(invocation_returned),
+        on_binding_published(binding_published),
+        on_binding_retired(binding_retired) {}
+
+  /** @brief Borrowed stable service context. */
+  void* context;
+
+  /** @brief Pre-entry plugin callback observation, or null. */
+  EventCallback on_invocation_entered;
+
+  /** @brief Post-return plugin callback observation, or null. */
+  EventCallback on_invocation_returned;
+
+  /** @brief Post-publication binding observation, or null. */
+  EventCallback on_binding_published;
+
+  /**
+   * @brief Post-destroy binding retirement observation, or null.
+   * @param context Borrowed service context.
+   * @param generation Exact retired binding generation.
+   * @param destroy_failed Whether plugin destroy returned failure or threw.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  BindingRetiredCallback on_binding_retired;
+
+  /**
+   * @brief Reports whether both invocation callbacks are complete.
+   * @return True only with non-null context and entry/return callbacks.
+   * @throws Nothing.
+   */
+  bool observes_invocations() const noexcept {
+    return context != nullptr && on_invocation_entered != nullptr &&
+           on_invocation_returned != nullptr;
+  }
+
+  /**
+   * @brief Reports whether both binding callbacks are complete.
+   * @return True only with non-null context and publication/retirement
+   * callbacks.
+   * @throws Nothing.
+   */
+  bool observes_bindings() const noexcept {
+    return context != nullptr && on_binding_published != nullptr &&
+           on_binding_retired != nullptr;
+  }
+};
+
+/**
  * @brief One immutable class-specific context, generation, and DSO lease.
  *
  * The binding owns exactly one successful logical create result. Concurrent
@@ -184,6 +281,15 @@ class PolicyBinding final {
       std::uint64_t snapshot_generation,
       std::uint64_t selection_sequence) const;
 
+  /**
+   * @brief Marks one fully published service binding exactly once.
+   * @return Nothing.
+   * @throws Nothing; duplicate publication terminates as an ownership breach.
+   * @note The service invokes this while publishing its current-binding slot.
+   * Final destruction reports retirement only after this transition.
+   */
+  void mark_service_published() noexcept;
+
  private:
   friend class PolicyRegistry;
 
@@ -194,11 +300,13 @@ class PolicyBinding final {
    * @param generation Nonzero service-owned generation.
    * @param context Plugin-owned opaque context, possibly null on success.
    * @param destroy_required Whether final retirement must call ABI destroy.
+   * @param lifecycle_observer Non-owning callback/binding observation.
    * @throws Nothing.
    */
   PolicyBinding(std::shared_ptr<const PolicyTypeRecord> type,
                 PolicyClass policy_class, std::uint64_t generation,
-                void* context, bool destroy_required) noexcept;
+                void* context, bool destroy_required,
+                PolicyLifecycleObserver lifecycle_observer) noexcept;
 
   /** @brief Immutable type/callback/DSO lease owner. */
   std::shared_ptr<const PolicyTypeRecord> type_;
@@ -214,6 +322,12 @@ class PolicyBinding final {
 
   /** @brief Whether final retirement owes one ABI destroy call. */
   bool destroy_required_ = false;
+
+  /** @brief Non-owning service callback and binding lifecycle observation. */
+  const PolicyLifecycleObserver lifecycle_observer_;
+
+  /** @brief Whether this binding entered one service current/displaced set. */
+  bool service_published_ = false;
 
   /** @brief Serializes only copied first-fault observation state. */
   mutable std::mutex fault_mutex_;
@@ -247,6 +361,20 @@ class PolicyRegistry final {
    * @note Call this before waiting for any service-level mutation lock.
    */
   static void assert_mutation_allowed(const char* operation);
+
+  /**
+   * @brief Reports whether this service owns an entered policy callback here.
+   * @param service_context Nonnull service identity carried by its lifecycle
+   * observer.
+   * @return True while any nested callback frame belongs to that exact service.
+   * @throws Nothing.
+   * @note Frames with another service or no service observer do not match.
+   * ExecutionService uses this source-private observation to reject only
+   * same-service shutdown before mutation/wait. It grants no callback or
+   * shutdown authority.
+   */
+  static bool callback_active_on_current_thread(
+      const void* service_context) noexcept;
 
   /**
    * @brief Returns the process policy registry.
@@ -317,15 +445,17 @@ class PolicyRegistry final {
    * @param type_name Canonical registered type.
    * @param policy_class Requested class supported by the type metadata.
    * @param generation Nonzero candidate generation chosen by the service.
+   * @param lifecycle_observer Optional non-owning service observation hooks.
    * @return Shared context/record/lease owner ready for no-throw publication.
    * @throws GraphError using the frozen invalid/unsupported/internal mapping.
    * @throws std::bad_alloc for Host or synchronous plugin OOM.
    * @note Registry lookup is copied first; plugin create runs without the
    * registry mutex or any service/Graph/Run/resource lock.
    */
-  std::shared_ptr<PolicyBinding> create_binding(const std::string& type_name,
-                                                PolicyClass policy_class,
-                                                std::uint64_t generation) const;
+  std::shared_ptr<PolicyBinding> create_binding(
+      const std::string& type_name, PolicyClass policy_class,
+      std::uint64_t generation,
+      PolicyLifecycleObserver lifecycle_observer = {}) const;
 
   /**
    * @brief Removes every DSO type from registry visibility for tests/shutdown.

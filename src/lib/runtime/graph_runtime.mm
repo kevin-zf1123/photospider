@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "compute/realtime_proxy_graph.hpp"
+#include "compute/run_lifecycle_registry.hpp"
 #include "photospider/core/graph_error.hpp"
 
 #ifdef __APPLE__
@@ -147,6 +148,8 @@ struct GraphRuntime::GpuContext {
 GraphRuntime::GraphRuntime(const Info& info)
     : info_(info),
       model_(info.cache_root.empty() ? info.root / "cache" : info.cache_root),
+      lifetime_anchor_(
+          std::make_shared<compute::GraphLifetimeAnchor>(model_.instance_id())),
       graph_state_(model_),
       compute_requests_(model_, GraphStateExecutor::kDefaultQueueCapacity,
                         GraphStateExecutor::CapacityMode::TotalAdmission),
@@ -204,6 +207,7 @@ GraphRuntime::~GraphRuntime() noexcept {
     std::terminate();
   }
   running_.store(false, std::memory_order_release);
+  lifetime_anchor_->mark_retired();
 }
 
 /** @copydoc GraphRuntime::this_worker_id */

@@ -17,6 +17,7 @@
 #include <atomic>
 #include <exception>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -109,7 +110,11 @@ Kernel::Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
 
 /** @copydoc Kernel::~Kernel */
 Kernel::~Kernel() noexcept {
-  graphs_.clear();
+  try {
+    shutdown();
+  } catch (...) {
+    std::terminate();
+  }
 }
 
 /**
@@ -275,44 +280,76 @@ std::optional<std::string> Kernel::load_graph(
   }
 
   std::optional<std::string> loaded_name(std::in_place, name);
-  const auto inserted = graphs_.emplace(name, std::move(runtime));
-  if (!inserted.second) {
+  std::map<std::string, std::unique_ptr<GraphRuntime>> staged_graph;
+  staged_graph.emplace(name, std::move(runtime));
+  auto staged_node = staged_graph.extract(staged_graph.begin());
+  const GraphInstanceId graph_instance_id =
+      staged_node.mapped()->model().instance_id();
+  execution_service_->register_graph_lifecycle(
+      staged_node.mapped()->lifetime_anchor());
+  const auto inserted = graphs_.insert(std::move(staged_node));
+  if (!inserted.inserted) {
+    execution_service_->rollback_graph_lifecycle_registration(
+        graph_instance_id);
     return std::nullopt;
   }
   return loaded_name;
 }
 
-/** @copydoc Kernel::stop_graph_admission */
-bool Kernel::stop_graph_admission(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return false;
-  }
-  it->second->stop_compute_request_admission();
-  return true;
-}
-
 /** @copydoc Kernel::close_graph */
 bool Kernel::close_graph(const std::string& name) {
+  return close_graph_with_reason(
+      name, compute::ComputeRunCancellationReason::GraphClose);
+}
+
+/** @copydoc Kernel::close_graph_with_reason */
+bool Kernel::close_graph_with_reason(
+    const std::string& name, compute::ComputeRunCancellationReason reason) {
   auto it = graphs_.find(name);
   if (it == graphs_.end()) {
     return false;
   }
 
   GraphRuntime& runtime = *it->second;
-  runtime.close_compute_requests();
-  runtime.graph_state().close_and_drain();
-  try {
-    runtime.stop();
-  } catch (...) {
-    const std::exception_ptr stop_failure = std::current_exception();
-    runtime.graph_state().restart_after_close_failure();
-    runtime.restart_compute_requests_after_close_failure();
-    std::rethrow_exception(stop_failure);
+  const std::shared_ptr<compute::GraphCloseCoordinator> close =
+      runtime.lifetime_anchor()->close_coordinator();
+  if (close->begin() == compute::GraphCloseCoordinator::Role::Joiner) {
+    close->wait_for_success();
+    return true;
   }
-  graphs_.erase(it);
-  clear_last_error(name);
-  return true;
+
+  bool lifecycle_linearized = false;
+  try {
+    const GraphInstanceId graph_instance_id = runtime.model().instance_id();
+    (void)execution_service_->begin_graph_close_lifecycle(graph_instance_id,
+                                                          reason);
+    lifecycle_linearized = true;
+    runtime.stop_compute_request_admission();
+    execution_service_->finish_graph_close_lifecycle(graph_instance_id);
+    runtime.close_compute_requests();
+    runtime.graph_state().close_and_drain();
+    runtime.stop();
+    graphs_.erase(it);
+    clear_last_error(name);
+    close->complete_success();
+    return true;
+  } catch (...) {
+    if (lifecycle_linearized) {
+      std::terminate();
+    }
+    throw;
+  }
+}
+
+/** @copydoc Kernel::shutdown */
+void Kernel::shutdown() {
+  (void)execution_service_->begin_shutdown();
+  while (!graphs_.empty()) {
+    const std::string name = graphs_.begin()->first;
+    (void)close_graph_with_reason(
+        name, compute::ComputeRunCancellationReason::ProcessShutdown);
+  }
+  execution_service_->shutdown();
 }
 
 std::vector<std::string> Kernel::list_graphs() const {

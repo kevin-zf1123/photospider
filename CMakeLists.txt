@@ -575,7 +575,9 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_supersession.cpp
     src/lib/compute/compute_task_dependency_state.cpp
     src/lib/compute/compute_task_submission.cpp
+    src/lib/compute/execution_lifecycle_telemetry.cpp
     src/lib/compute/execution_service.cpp
+    src/lib/compute/run_lifecycle_registry.cpp
     src/lib/compute/task_graph_planning.cpp
     src/lib/compute/task_population_strategy.cpp
     src/lib/compute/tiled_input_normalizer.cpp
@@ -1629,6 +1631,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_link_libraries(test_policy_execution PRIVATE ${CMAKE_DL_LIBS})
     add_dependencies(test_policy_execution test_policy_plugin)
     add_ps_test(test_compute_run tests/unit/test_compute_run.cpp)
+    add_ps_test(test_run_lifecycle_registry
+        tests/unit/test_run_lifecycle_registry.cpp)
+    add_ps_test(test_execution_lifecycle_telemetry
+        tests/unit/test_execution_lifecycle_telemetry.cpp)
     add_ps_test(test_compute_supersession
         tests/unit/test_compute_supersession.cpp)
     add_ps_test(test_bad_alloc_boundaries
@@ -1938,6 +1944,12 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_compute_run
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_run_lifecycle_registry
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_execution_lifecycle_telemetry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_compute_supersession

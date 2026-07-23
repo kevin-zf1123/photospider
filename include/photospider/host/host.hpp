@@ -387,21 +387,21 @@ class PHOTOSPIDER_API Host {
    * @brief Closes a loaded graph session.
    *
    * @param session Session to close.
-   * @return Success, `GraphErrc::NotFound` only when the session is absent, or
-   *         another failure code when shutdown fails while the session remains
-   *         loaded.
+   * @return Success shared by every caller joining the live close generation,
+   *         or `GraphErrc::NotFound` when the session is absent, stale, or
+   *         already removed.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The embedded implementation first publishes its closing marker and
-   *       drains synchronous calls admitted before that marker. It then stops
-   *       compute-request admission so full-FIFO producers are awakened and
-   *       rejected before close waits pre-registered async requests and every
-   *       backend-accepted caller-visible status future. It then drains that
-   *       lane while graph-state remains available for accepted commits, closes
-   *       graph-state, stops the Graph runtime, and releases its route ids. A
-   *       failed close restores both serial lanes and reopens retained session
-   *       admission so callers may retry it; process execution workers remain
-   *       owned by the Host-lifetime service.
+   * @note The embedded implementation preallocates one close record before
+   *       Graph publication. The first caller publishes its edge marker and
+   *       drains synchronous calls admitted before that marker; concurrent
+   *       callers join the same immutable result. Kernel then linearizes the
+   *       exact lifecycle row to Closing, cancels Graph-indexed work, stops
+   *       compute-request admission, settles and unregisters Runs, removes the
+   *       row, drains compute-request then graph-state, stops the runtime, and
+   *       releases route ids. At most one Kernel close call progresses, and the
+   *       generation is never reopened; process execution workers remain owned
+   *       by the Host-lifetime service.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 

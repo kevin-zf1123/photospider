@@ -382,6 +382,76 @@ std::uint32_t PS_POLICY_CALL cycling_select_hook(
 }
 
 /**
+ * @brief Records one shutdown attempt made from a fixture policy callback.
+ *
+ * @throws Nothing for construction and atomic observations.
+ * @note `target` is borrowed and must outlive the installed fixture hook.
+ */
+struct PolicyShutdownHookState final {
+  /** @brief Service selected as the callback's shutdown target. */
+  ExecutionService* target = nullptr;
+
+  /** @brief True when shutdown returned normally. */
+  std::atomic_bool returned{false};
+
+  /** @brief True when same-service shutdown was rejected as required. */
+  std::atomic_bool logic_error{false};
+
+  /** @brief True when any unexpected exception crossed the attempted call. */
+  std::atomic_bool unexpected_error{false};
+};
+
+/**
+ * @brief Attempts service shutdown from one entered fixture selection callback.
+ * @param context Nonnull `PolicyShutdownHookState` retained by the test.
+ * @param event Fixture callback phase; only selection attempts shutdown.
+ * @return Zero so the fixture preserves its configured selection result.
+ * @throws Nothing; every shutdown outcome is captured into atomic flags.
+ */
+std::uint32_t PS_POLICY_CALL policy_shutdown_hook(
+    void* context, ps_policy_fixture_hook_event event) noexcept {
+  auto* state = static_cast<PolicyShutdownHookState*>(context);
+  if (state == nullptr || state->target == nullptr ||
+      event != PS_POLICY_FIXTURE_HOOK_SELECT) {
+    return 0U;
+  }
+  try {
+    state->target->shutdown();
+    state->returned.store(true, std::memory_order_relaxed);
+  } catch (const std::logic_error&) {
+    state->logic_error.store(true, std::memory_order_relaxed);
+  } catch (...) {
+    state->unexpected_error.store(true, std::memory_order_relaxed);
+  }
+  return 0U;
+}
+
+/**
+ * @brief Tests whether all fifteen lifecycle counters are exactly zero.
+ * @param counters Complete source-private counter snapshot.
+ * @return True only when every registry and physical owner count is zero.
+ * @throws Nothing.
+ */
+bool all_lifecycle_counters_zero(
+    const ExecutionLifecycleCounters& counters) noexcept {
+  return counters.registered_graph_count == 0U &&
+         counters.open_graph_count == 0U &&
+         counters.closing_graph_count == 0U &&
+         counters.pending_candidate_count == 0U &&
+         counters.admitted_standalone_run_count == 0U &&
+         counters.admitted_run_group_count == 0U &&
+         counters.admitted_child_run_count == 0U &&
+         counters.terminal_not_quiescent_run_count == 0U &&
+         counters.finalizing_run_count == 0U &&
+         counters.ready_entry_count == 0U &&
+         counters.entered_callback_count == 0U &&
+         counters.live_root_reservation_count == 0U &&
+         counters.live_child_grant_count == 0U &&
+         counters.live_policy_invocation_count == 0U &&
+         counters.live_policy_binding_count == 0U;
+}
+
+/**
  * @brief Guarantees a controlled selection hook cannot strand a test future.
  */
 class ScopedHookRelease final {
@@ -466,6 +536,156 @@ class PolicyExecutionFixture : public ::testing::Test {
   /** @brief Native control handle kept through every fixture callback. */
   PolicyFixtureController control_{PS_TEST_POLICY_PLUGIN_PATH};
 };
+
+/**
+ * @brief Verifies worker self-shutdown rejects before mutation and finalizes.
+ *
+ * @throws ExecutionService or telemetry failures unchanged outside the worker
+ * callback; the callback records unexpected outcomes without throwing.
+ * @note One configured CPU worker plus the dedicated Metal worker must join
+ * before both built-in bindings retire and the sole ServiceStopped event
+ * freezes all fifteen counters at zero.
+ */
+TEST(ExecutionServiceShutdown,
+     WorkerSelfShutdownRejectsAndRepeatedControlShutdownIsExact) {
+  ExecutionService service(1U);
+  TestHostContext host;
+  ComputeRun run(make_submission("worker-self-shutdown", 80U, 1));
+  std::atomic_bool rejected{false};
+  std::atomic_bool unexpected{false};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(make_ready(
+      run.acquire_lease(), 0U, 1,
+      [&service, &rejected, &unexpected](ComputeRunLease&,
+                                         const ComputeRunTaskIdentity&,
+                                         ExecutionTaskRuntime& runtime) {
+        try {
+          service.shutdown();
+          unexpected.store(true, std::memory_order_relaxed);
+        } catch (const std::logic_error&) {
+          rejected.store(true, std::memory_order_relaxed);
+        } catch (...) {
+          unexpected.store(true, std::memory_order_relaxed);
+        }
+        runtime.dec_tasks_to_complete();
+      }));
+
+  service.execute_run(host, "cpu", std::move(ready), 1);
+  EXPECT_TRUE(rejected.load(std::memory_order_relaxed));
+  EXPECT_FALSE(unexpected.load(std::memory_order_relaxed));
+  EXPECT_EQ(service.lifecycle_snapshot(0U, 64U).service_state,
+            ExecutionLifecycleServiceState::Accepting);
+
+  const std::uint64_t shutdown_generation = service.begin_shutdown();
+  ASSERT_NE(shutdown_generation, 0U);
+  service.shutdown();
+  service.shutdown();
+  EXPECT_EQ(service.begin_shutdown(), shutdown_generation);
+
+  const ExecutionLifecyclePage page = service.lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(page.service_state, ExecutionLifecycleServiceState::Stopped);
+  EXPECT_EQ(page.shutdown_generation, shutdown_generation);
+  EXPECT_TRUE(all_lifecycle_counters_zero(page.counters));
+
+  std::size_t worker_joined_count = 0U;
+  std::size_t binding_retired_count = 0U;
+  std::size_t service_stopped_count = 0U;
+  std::uint64_t last_worker_sequence = 0U;
+  std::uint64_t first_binding_sequence =
+      std::numeric_limits<std::uint64_t>::max();
+  std::uint64_t last_binding_sequence = 0U;
+  std::uint64_t service_stopped_sequence = 0U;
+  for (const ExecutionLifecycleEvent& event : page.records) {
+    switch (event.kind) {
+      case ExecutionLifecycleEventKind::WorkerJoined:
+        ++worker_joined_count;
+        last_worker_sequence = event.sequence;
+        break;
+      case ExecutionLifecycleEventKind::BindingRetired:
+        ++binding_retired_count;
+        first_binding_sequence =
+            std::min(first_binding_sequence, event.sequence);
+        last_binding_sequence = event.sequence;
+        break;
+      case ExecutionLifecycleEventKind::ServiceStopped:
+        ++service_stopped_count;
+        service_stopped_sequence = event.sequence;
+        EXPECT_TRUE(all_lifecycle_counters_zero(event.counters));
+        break;
+      default:
+        break;
+    }
+  }
+  EXPECT_EQ(worker_joined_count, 2U);
+  EXPECT_EQ(binding_retired_count, 2U);
+  EXPECT_EQ(service_stopped_count, 1U);
+  EXPECT_LT(last_worker_sequence, first_binding_sequence);
+  EXPECT_LT(last_binding_sequence, service_stopped_sequence);
+}
+
+/**
+ * @brief Verifies a policy callback cannot shut down its owning service.
+ *
+ * @throws Fixture loading or execution failures unchanged.
+ * @note The same-service identity check occurs before admission changes, so
+ * the Run completes and telemetry remains Accepting until control-thread
+ * shutdown.
+ */
+TEST_F(PolicyExecutionFixture,
+       SameServicePolicyCallbackRejectsShutdownBeforeMutation) {
+  ExecutionService service(1U);
+  service.replace_policy(PolicyClass::Throughput, "fixture_policy");
+  PolicyShutdownHookState hook{&service};
+  control_.set_hook(&policy_shutdown_hook, &hook);
+  control_.set_select_mode(PS_POLICY_FIXTURE_SELECT_HOOK_LAST);
+
+  std::atomic_int entered{0};
+  TestHostContext host;
+  execute_successful_run(service, "cpu", "policy-self-shutdown", 81U, entered,
+                         host);
+  EXPECT_TRUE(hook.logic_error.load(std::memory_order_relaxed));
+  EXPECT_FALSE(hook.returned.load(std::memory_order_relaxed));
+  EXPECT_FALSE(hook.unexpected_error.load(std::memory_order_relaxed));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(service.lifecycle_snapshot(0U, 64U).service_state,
+            ExecutionLifecycleServiceState::Accepting);
+
+  control_.set_hook(nullptr, nullptr);
+  service.shutdown();
+}
+
+/**
+ * @brief Verifies service identity does not over-reject cross-service control.
+ *
+ * @throws Fixture loading or execution failures unchanged.
+ * @note A policy callback entered by one service may synchronously shut down a
+ * distinct idle service; only the callback-owning service remains protected.
+ */
+TEST_F(PolicyExecutionFixture,
+       PolicyCallbackMayShutdownADifferentExecutionService) {
+  ExecutionService callback_owner(1U);
+  ExecutionService shutdown_target(1U);
+  callback_owner.replace_policy(PolicyClass::Throughput, "fixture_policy");
+  PolicyShutdownHookState hook{&shutdown_target};
+  control_.set_hook(&policy_shutdown_hook, &hook);
+  control_.set_select_mode(PS_POLICY_FIXTURE_SELECT_HOOK_LAST);
+
+  std::atomic_int entered{0};
+  TestHostContext host;
+  execute_successful_run(callback_owner, "cpu", "cross-service-shutdown", 82U,
+                         entered, host);
+  EXPECT_TRUE(hook.returned.load(std::memory_order_relaxed));
+  EXPECT_FALSE(hook.logic_error.load(std::memory_order_relaxed));
+  EXPECT_FALSE(hook.unexpected_error.load(std::memory_order_relaxed));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(shutdown_target.lifecycle_snapshot(0U, 64U).service_state,
+            ExecutionLifecycleServiceState::Stopped);
+  EXPECT_EQ(callback_owner.lifecycle_snapshot(0U, 64U).service_state,
+            ExecutionLifecycleServiceState::Accepting);
+
+  control_.set_hook(nullptr, nullptr);
+  callback_owner.shutdown();
+}
 
 /**
  * @brief Verifies route-aware device discovery has deterministic fallback.
@@ -996,6 +1216,36 @@ TEST_F(PolicyExecutionFixture,
   EXPECT_EQ(host.exits(), 1);
   EXPECT_FALSE(host.observation_failed());
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies displaced plugin destroy failure is recorded after one try.
+ *
+ * @return Nothing; GoogleTest assertions report duplicate destruction,
+ * missing retirement telemetry, or a leaked binding counter.
+ * @throws Policy replacement, snapshot, or synchronization failures unchanged.
+ * @note Returned destroy failure cannot roll back the already published
+ * replacement and is represented by one FailureOther BindingRetired record.
+ */
+TEST_F(PolicyExecutionFixture,
+       DestroyFailureRetiresDisplacedBindingOnceAndRecordsTelemetry) {
+  ExecutionService service(1U);
+  service.replace_policy(PolicyClass::Throughput, "fixture_policy");
+  control_.set_destroy_mode(PS_POLICY_FIXTURE_DESTROY_STATUS_INTERNAL);
+
+  service.replace_policy(PolicyClass::Throughput, "throughput");
+  EXPECT_EQ(control_.destroy_count(), 1U);
+
+  const ExecutionLifecyclePage page = service.lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(page.counters.live_policy_binding_count, 2U);
+  const auto failure = std::find_if(
+      page.records.begin(), page.records.end(),
+      [](const ExecutionLifecycleEvent& event) {
+        return event.kind == ExecutionLifecycleEventKind::BindingRetired &&
+               event.generation == 2U &&
+               event.category == ExecutionLifecycleCategory::FailureOther;
+      });
+  EXPECT_NE(failure, page.records.end());
 }
 
 /**

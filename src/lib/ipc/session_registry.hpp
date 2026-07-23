@@ -2,8 +2,10 @@
 
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -30,6 +32,9 @@ namespace ps::ipc::internal {
  *       a short registry critical section.
  */
 class SessionRegistry {
+ private:
+  struct CloseGeneration;
+
  public:
   /**
    * @brief Function that returns one opaque token candidate.
@@ -230,14 +235,28 @@ class SessionRegistry {
   };
 
   /**
-   * @brief Exclusive move-only claim for one graph-close lifecycle.
+   * @brief Move-only owner/joiner claim for one daemon close generation.
    *
-   * @throws std::bad_alloc when moved string ownership cannot be represented.
-   * @note `begin_close()` marks the row Closing and waits admitted work before
-   *       publishing this claim. Destruction without `erase()` reopens the row.
+   * @throws std::bad_alloc when moved status/string ownership cannot be
+   * represented.
+   * @note `begin_close()` marks the row Closing once. The Owner waits admitted
+   * work and invokes Host exactly once; Joiners wait for the same preallocated
+   * generation result. Destruction may reopen only while the Owner can prove
+   * Host invocation never began.
    */
   class CloseClaim {
    public:
+    /**
+     * @brief Distinguishes the single Host caller from result joiners.
+     * @throws Nothing for value construction and comparison.
+     */
+    enum class Role {
+      /** @brief Caller must invoke Host exactly once and publish its result. */
+      Owner,
+      /** @brief Caller waits for the already selected generation result. */
+      Joiner,
+    };
+
     /**
      * @brief Creates an inactive claim used by failed result values.
      * @throws Nothing.
@@ -245,8 +264,8 @@ class SessionRegistry {
     CloseClaim() = default;
 
     /**
-     * @brief Reopens an unresolved close claim best-effort.
-     * @throws Nothing.
+     * @brief Releases this participant or performs proven pre-invocation abort.
+     * @throws Nothing; an unresolved post-invocation Owner terminates.
      */
     ~CloseClaim() noexcept;
 
@@ -271,10 +290,11 @@ class SessionRegistry {
     CloseClaim(CloseClaim&& other) noexcept;
 
     /**
-     * @brief Reopens any current claim and transfers another claim.
+     * @brief Resolves any current claim and transfers another claim.
      * @param other Claim that becomes inactive.
      * @return This claim after transfer.
-     * @throws Nothing.
+     * @throws Nothing; assigning over an unresolved post-invocation Owner
+     * terminates.
      */
     CloseClaim& operator=(CloseClaim&& other) noexcept;
 
@@ -286,23 +306,51 @@ class SessionRegistry {
     const GraphSessionId& host_session() const noexcept;
 
     /**
-     * @brief Removes the closed or Host-missing session mapping.
-     * @return Nothing.
-     * @throws Nothing.
-     * @note Call only after Host close success or Graph NotFound.
+     * @brief Returns whether this caller owns Host backend progression.
+     * @return Owner or Joiner for an active claim.
+     * @throws std::logic_error for an inactive moved-from claim.
      */
-    void erase() noexcept;
+    Role role() const;
 
     /**
-     * @brief Reopens session admission after a retryable Host close failure.
-     * @return Nothing.
-     * @throws Nothing.
+     * @brief Returns the selected nonzero close-generation identity.
+     * @return Row-local generation shared by the Owner and every Joiner.
+     * @throws std::logic_error for an inactive moved-from claim.
+     * @note The value never changes while any claim from this generation is
+     * active and grants no Host invocation ownership.
      */
-    void reopen() noexcept;
+    std::uint64_t generation() const;
 
     /**
-     * @brief Reports whether this object owns an unresolved close claim.
-     * @return True only before erase, reopen, or move.
+     * @brief Marks the exact point immediately before the Owner invokes Host.
+     * @return Nothing.
+     * @throws Nothing.
+     * @note Valid only for Owner. Any later unresolved exception is fail-stop
+     * and cannot reopen daemon admission.
+     */
+    void mark_host_close_started() noexcept;
+
+    /**
+     * @brief Publishes the sole Host success or Graph NotFound result.
+     * @param status Exact structured Host status moved into the generation.
+     * @return Nothing.
+     * @throws Nothing; invalid role/state/status terminates.
+     * @note Completion removes the opaque mapping before any response encoding.
+     */
+    void complete_host_close(OperationStatus status) noexcept;
+
+    /**
+     * @brief Waits for and copies the immutable generation result.
+     * @return Exact Host success/NotFound or daemon HostCloseNotStarted
+     * failure.
+     * @throws std::bad_alloc if copying result diagnostics exhausts memory.
+     * @throws std::system_error when generation waiting fails.
+     */
+    OperationStatus wait_result() const;
+
+    /**
+     * @brief Reports whether this object retains one close-generation claim.
+     * @return True only before destruction or movement.
      * @throws Nothing.
      */
     bool active() const noexcept;
@@ -311,16 +359,26 @@ class SessionRegistry {
     friend class SessionRegistry;
 
     /**
-     * @brief Creates one exclusive claim after admitted work reaches zero.
+     * @brief Creates one owner/joiner claim for a selected generation.
      * @param owner Registry that owns the Closing row.
      * @param token Opaque row key.
      * @param host_session Private Host session safe for the caller to close.
+     * @param generation Preallocated close-generation record.
+     * @param role Owner or Joiner responsibility.
      * @throws std::bad_alloc if owned strings cannot be moved or copied.
      */
     CloseClaim(SessionRegistry* owner, std::string token,
-               GraphSessionId host_session);
+               GraphSessionId host_session,
+               std::shared_ptr<CloseGeneration> generation, Role role);
 
-    /** @brief Registry whose row is Closing, or null when resolved. */
+    /**
+     * @brief Releases participation or aborts before Host invocation.
+     * @return Nothing.
+     * @throws Nothing; unsafe post-invocation abandonment terminates.
+     */
+    void reset() noexcept;
+
+    /** @brief Registry coordinating the generation, or null when inactive. */
     SessionRegistry* owner_ = nullptr;
 
     /** @brief Opaque row key retained independently of map node addresses. */
@@ -328,6 +386,18 @@ class SessionRegistry {
 
     /** @brief Private Host session captured before the wait completed. */
     GraphSessionId host_session_;
+
+    /** @brief Preallocated generation retained after mapping removal. */
+    std::shared_ptr<CloseGeneration> generation_;
+
+    /** @brief Owner or Joiner responsibility for this participant. */
+    Role role_ = Role::Joiner;
+
+    /** @brief True only after Owner crossed the Host invocation boundary. */
+    bool host_close_started_ = false;
+
+    /** @brief True after Owner published Host success/NotFound. */
+    bool host_close_completed_ = false;
   };
 
   /**
@@ -422,16 +492,31 @@ class SessionRegistry {
   IpcResult<JobAdmission> admit_job(const IpcSessionId& session_id);
 
   /**
-   * @brief Claims one session close and waits all admitted work to finish.
+   * @brief Selects or joins one session close generation.
    *
    * @param session_id Opaque active session identifier.
-   * @return Exclusive close claim, or Graph NotFound when absent, already
-   *         Closing, or global admission is stopped.
+   * @return Owner after admitted work drains, Joiner for an already live
+   *         generation, or Graph NotFound when absent/global admission stopped.
    * @throws std::bad_alloc if claim ownership cannot be allocated.
-   * @note The row becomes Closing before waiting. The condition-variable wait
-   *       releases the registry mutex, and the caller receives no held lock.
+   * @note The first caller changes the row to Closing before waiting.
+   * Concurrent callers retain the same preallocated record and never invoke
+   * Host. A pre-invocation wait failure publishes internal HostCloseNotStarted
+   * and reopens the mapping; after Host invocation no path can reopen.
    */
   IpcResult<CloseClaim> begin_close(const IpcSessionId& session_id);
+
+  /**
+   * @brief Selects or joins a close while global daemon admission is stopped.
+   *
+   * @param session_id Opaque committed session copied for shutdown.
+   * @return Owner/Joiner for a still-present row, or Graph NotFound when a
+   * concurrent close already removed it.
+   * @throws std::bad_alloc if claim ownership cannot be allocated.
+   * @note This is a shutdown-only internal admission bypass. It preserves the
+   * same preallocated generation, admitted-work drain, one Host owner, and
+   * pre-invocation-only reopen semantics as `begin_close()`.
+   */
+  IpcResult<CloseClaim> begin_shutdown_close(const IpcSessionId& session_id);
 
   /**
    * @brief Enables new load, Host-call, job, and close admission.
@@ -505,6 +590,48 @@ class SessionRegistry {
   };
 
   /**
+   * @brief Preallocated monotonic close-generation state for one active row.
+   *
+   * @throws std::bad_alloc only during construction before active publication.
+   * @note All fields are protected by SessionRegistry::mutex_. Claims retain
+   * this record after active-index removal so result joiners remain safe.
+   */
+  struct CloseGeneration final {
+    /**
+     * @brief Internal generation phase.
+     * @throws Nothing for value construction and comparison.
+     */
+    enum class State {
+      /** @brief No close generation is currently selected. */
+      Idle,
+      /** @brief Owner selected; admitted work is draining or Host is pending.
+       */
+      Preparing,
+      /** @brief Owner crossed the Host invocation boundary. */
+      HostInvoked,
+      /** @brief Host success or NotFound was published and mapping removed. */
+      Completed,
+      /** @brief Host invocation provably never began and mapping reopened. */
+      HostCloseNotStarted,
+    };
+
+    /**
+     * @brief Preconstructs the only reopenable daemon/internal status.
+     * @throws std::bad_alloc when diagnostic storage exhausts memory.
+     */
+    CloseGeneration();
+
+    /** @brief Nonzero monotonically increasing row-local generation. */
+    std::uint64_t generation = 0U;
+    /** @brief Idle/preparing/invoked/completed/pre-invocation-abort phase. */
+    State state = State::Idle;
+    /** @brief Number of live Owner/Joiner claims retaining this result. */
+    std::size_t participants = 0U;
+    /** @brief Exact Host terminal status or preconstructed internal failure. */
+    OperationStatus terminal_status;
+  };
+
+  /**
    * @brief Committed registry row containing private and display identities.
    *
    * @throws std::bad_alloc when copied strings cannot be allocated.
@@ -524,6 +651,9 @@ class SessionRegistry {
 
     /** @brief Compute jobs queued/running before terminal publication. */
     std::size_t admitted_jobs = 0;
+
+    /** @brief Close record allocated before this row becomes active. */
+    std::shared_ptr<CloseGeneration> close_generation;
   };
 
   /**
@@ -536,13 +666,64 @@ class SessionRegistry {
   void release_admission(const std::string& token, AdmissionKind kind) noexcept;
 
   /**
-   * @brief Resolves one close claim by erasing or reopening its row.
-   * @param token Opaque Closing-row key.
-   * @param erase_mapping True to remove all indexes; false to reopen.
-   * @return Nothing.
-   * @throws Nothing.
+   * @brief Implements ordinary and shutdown-only close selection.
+   * @param session_id Exact opaque committed session.
+   * @param allow_stopped_admission Whether daemon shutdown may bypass the
+   * global admission marker.
+   * @return Owner, Joiner, or one exact structured failure.
+   * @throws std::bad_alloc if claim ownership cannot be allocated.
+   * @note The registry fence is never retained across Host invocation.
    */
-  void complete_close(const std::string& token, bool erase_mapping) noexcept;
+  IpcResult<CloseClaim> begin_close_impl(const IpcSessionId& session_id,
+                                         bool allow_stopped_admission);
+
+  /**
+   * @brief Marks one Owner immediately before Host invocation.
+   * @param token Exact opaque Closing row.
+   * @param generation Selected preallocated generation.
+   * @return Nothing.
+   * @throws Nothing; role/state/invariant failure terminates.
+   */
+  void mark_host_close_started(
+      const std::string& token,
+      const std::shared_ptr<CloseGeneration>& generation) noexcept;
+
+  /**
+   * @brief Removes one mapping and publishes exact Host terminal status.
+   * @param token Exact opaque Closing row.
+   * @param generation Selected preallocated generation.
+   * @param status Exact Host success or Graph NotFound.
+   * @return Nothing.
+   * @throws Nothing; invalid state/status terminates.
+   */
+  void complete_host_close(const std::string& token,
+                           const std::shared_ptr<CloseGeneration>& generation,
+                           OperationStatus status) noexcept;
+
+  /**
+   * @brief Waits for and copies one generation terminal result.
+   * @param generation Exact retained record.
+   * @return Host success/NotFound or HostCloseNotStarted internal failure.
+   * @throws std::bad_alloc when status copying exhausts memory.
+   * @throws std::system_error when waiting fails.
+   */
+  OperationStatus wait_close_result(
+      const std::shared_ptr<CloseGeneration>& generation);
+
+  /**
+   * @brief Releases one claim and optionally aborts before Host invocation.
+   * @param token Exact row key retained by the claim.
+   * @param generation Exact selected generation.
+   * @param owner Whether the released participant owned backend progression.
+   * @param host_close_started Whether Owner crossed the invocation boundary.
+   * @param host_close_completed Whether Owner published the terminal result.
+   * @return Nothing.
+   * @throws Nothing; unresolved post-invocation Owner terminates.
+   */
+  void release_close_claim(const std::string& token,
+                           const std::shared_ptr<CloseGeneration>& generation,
+                           bool owner, bool host_close_started,
+                           bool host_close_completed) noexcept;
 
   /** @brief Serializes all registry indexes and reservations. */
   mutable std::mutex mutex_;

@@ -110,16 +110,20 @@ struct ResourceReservationState final {
    * @param root_state Matching ledger root.
    * @param committed_resources Exact root reservation vector.
    * @param observer Optional non-authoritative exact-release observer.
+   * @param settlement_observer Optional non-owning post-release callback.
    * @throws Nothing after shared owner construction.
    */
   ResourceReservationState(
       std::shared_ptr<ResourceLedgerRootState> root_state,
       ResourceVector committed_resources,
       std::shared_ptr<ResourceLedger::ReservationReleaseObserver> observer =
-          nullptr) noexcept
+          nullptr,
+      ResourceLedger::ReservationSettlementObserver settlement_observer =
+          {}) noexcept
       : root(std::move(root_state)),
         committed(committed_resources),
-        release_observer(std::move(observer)) {}
+        release_observer(std::move(observer)),
+        settlement_observer(settlement_observer) {}
 
   /** @brief Serializes parent closure and child accounting. */
   mutable std::mutex mutex;
@@ -138,6 +142,11 @@ struct ResourceReservationState final {
    */
   std::shared_ptr<ResourceLedger::ReservationReleaseObserver> release_observer;
 
+  /**
+   * @brief Non-owning callback published after exact root/quota settlement.
+   */
+  const ResourceLedger::ReservationSettlementObserver settlement_observer;
+
   /** @brief Number of live child owner values. */
   std::uint64_t child_count = 0U;
 
@@ -155,6 +164,7 @@ namespace {
  * @param root Matching shared root state.
  * @param resources Previously committed vector.
  * @param observer Optional companion-accounting observer.
+ * @param settlement_observer Optional non-owning final settlement callback.
  * @return Nothing.
  * @throws Nothing; invariant or synchronization failure terminates.
  * @note With an observer, its transaction mutex spans root release and the
@@ -164,8 +174,9 @@ namespace {
 void release_root_resources(
     const std::shared_ptr<ResourceLedgerRootState>& root,
     const ResourceVector& resources,
-    const std::shared_ptr<ResourceLedger::ReservationReleaseObserver>&
-        observer) noexcept {
+    const std::shared_ptr<ResourceLedger::ReservationReleaseObserver>& observer,
+    ResourceLedger::ReservationSettlementObserver
+        settlement_observer) noexcept {
   try {
     std::unique_lock<std::mutex> transaction_lock;
     if (observer) {
@@ -181,6 +192,9 @@ void release_root_resources(
     }
     if (observer) {
       observer->on_reservation_released(resources);
+    }
+    if (settlement_observer.valid()) {
+      settlement_observer.on_settled(settlement_observer.context);
     }
   } catch (...) {
     std::terminate();
@@ -339,6 +353,10 @@ std::optional<ResourceLedger::Grant> ResourceLedger::Reservation::try_grant(
   Grant grant(staged_state, requested);
   staged_state->granted = *next_granted;
   ++staged_state->child_count;
+  if (staged_state->settlement_observer.observes_children()) {
+    staged_state->settlement_observer.on_child_granted(
+        staged_state->settlement_observer.context);
+  }
   return grant;
 }
 
@@ -370,7 +388,7 @@ void ResourceLedger::Reservation::reset() noexcept {
   }
   if (release_root) {
     release_root_resources(state->root, state->committed,
-                           state->release_observer);
+                           state->release_observer, state->settlement_observer);
   }
 }
 
@@ -433,6 +451,10 @@ void ResourceLedger::Grant::reset() noexcept {
       }
       state->granted = subtract_resources(state->granted, resources);
       --state->child_count;
+      if (state->settlement_observer.observes_children()) {
+        state->settlement_observer.on_child_released(
+            state->settlement_observer.context);
+      }
       if (!state->parent_active && state->child_count == 0U) {
         if (state->root_released || state->granted != ResourceVector{}) {
           std::terminate();
@@ -446,7 +468,7 @@ void ResourceLedger::Grant::reset() noexcept {
   }
   if (release_root) {
     release_root_resources(state->root, state->committed,
-                           state->release_observer);
+                           state->release_observer, state->settlement_observer);
   }
 }
 
@@ -460,9 +482,10 @@ ResourceLedger::~ResourceLedger() noexcept = default;
 /** @copydoc ResourceLedger::try_reserve */
 std::optional<ResourceLedger::Reservation> ResourceLedger::try_reserve(
     const ResourceVector& requested,
-    std::shared_ptr<ReservationReleaseObserver> release_observer) {
+    std::shared_ptr<ReservationReleaseObserver> release_observer,
+    ReservationSettlementObserver settlement_observer) {
   auto reservation_state = std::make_shared<ResourceReservationState>(
-      state_, requested, std::move(release_observer));
+      state_, requested, std::move(release_observer), settlement_observer);
   std::lock_guard<std::mutex> lock(state_->mutex);
   const std::optional<ResourceVector> next_reserved =
       checked_add_resources(state_->reserved, requested);

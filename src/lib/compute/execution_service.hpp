@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "compute/compute_run.hpp"
+#include "compute/execution_lifecycle_telemetry.hpp"
+#include "compute/run_lifecycle_registry.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "runtime/resource_ledger.hpp"
 
@@ -21,6 +23,7 @@ struct PolicyInfoSnapshot;
 namespace policy {
 class PolicyBinding;
 class PolicyRegistry;
+struct PolicyLifecycleObserver;
 }  // namespace policy
 
 namespace execution {
@@ -766,6 +769,144 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   ResourceLedger::Snapshot resource_snapshot() const;
 
   /**
+   * @brief Registers one fully initialized GraphRuntime lifecycle anchor.
+   * @param anchor Exact runtime identity/lifetime/close record.
+   * @return Nothing after GraphRegistered publication.
+   * @throws RunLifecycleRegistry registration errors unchanged.
+   * @note Kernel invokes this only after both Graph-owned lanes and runtime
+   * identity are complete and before public Graph publication.
+   */
+  void register_graph_lifecycle(std::shared_ptr<GraphLifetimeAnchor> anchor);
+
+  /**
+   * @brief Rolls back an unpublished empty Graph lifecycle row.
+   * @param graph_instance_id Exact failed-load identity.
+   * @return Nothing after row removal.
+   * @throws RunLifecycleRegistry rollback errors unchanged.
+   * @note This is not Graph close recovery and is invalid after publication.
+   */
+  void rollback_graph_lifecycle_registration(GraphInstanceId graph_instance_id);
+
+  /**
+   * @brief Begins one pre-publication admission candidate transaction.
+   * @param graph_instance_id Exact Graph identity captured at edge entry.
+   * @return Candidate retaining a Graph lifetime lease.
+   * @throws RunLifecycleRegistry admission errors unchanged.
+   */
+  RunLifecycleAdmissionCandidate begin_graph_admission(
+      GraphInstanceId graph_instance_id);
+
+  /**
+   * @brief Atomically installs one standalone child Run.
+   * @param candidate Matching unresolved Graph candidate.
+   * @param run_lease Minimum registry lease.
+   * @param cancellation Request cancellation owner.
+   * @return Installed handle consumed by finalize_graph_admission().
+   * @throws RunLifecycleRegistry commit errors unchanged.
+   */
+  RunLifecycleAdmissionHandle commit_graph_admission(
+      RunLifecycleAdmissionCandidate candidate, ComputeRunLease run_lease,
+      std::shared_ptr<ComputeRequestCancellationSource> cancellation);
+
+  /**
+   * @brief Atomically installs one realtime group and both children.
+   * @param candidate Matching unresolved Graph candidate.
+   * @param run_group_id Exact group identity.
+   * @param hp_lease HP child registry lease.
+   * @param rt_lease RT child registry lease.
+   * @param cancellation Shared request fan-out owner.
+   * @param sibling_commit_gate Shared RT-first gate.
+   * @return One complete installed bundle handle.
+   * @throws RunLifecycleRegistry commit errors unchanged.
+   */
+  RunLifecycleAdmissionHandle commit_graph_admission_group(
+      RunLifecycleAdmissionCandidate candidate, RunGroupId run_group_id,
+      ComputeRunLease hp_lease, ComputeRunLease rt_lease,
+      std::shared_ptr<ComputeRequestCancellationSource> cancellation,
+      std::shared_ptr<DirtySiblingCommitGate> sibling_commit_gate);
+
+  /**
+   * @brief Waits for full Run ownership settlement and unregisters a bundle.
+   * @param handle Exact installed standalone/group handle.
+   * @return Nothing after every child record leaves the registry.
+   * @throws RunLifecycleRegistry finalization errors unchanged.
+   */
+  void finalize_graph_admission(RunLifecycleAdmissionHandle handle);
+
+  /**
+   * @brief Tests exact Graph/Open and registered-Run commit permission.
+   * @param graph_instance_id Exact staged/live Graph identity.
+   * @param run_id Exact child Run identity.
+   * @return True only while visible publication remains permitted.
+   * @throws RunLifecycleRegistry synchronization errors unchanged.
+   */
+  bool permits_visible_commit(GraphInstanceId graph_instance_id,
+                              ComputeRunId run_id) const;
+
+  /**
+   * @brief Linearizes one exact Graph row to Closing and fans cancellation.
+   * @param graph_instance_id Exact runtime identity.
+   * @param reason GraphClose or ProcessShutdown.
+   * @return Stable nonzero close generation.
+   * @throws RunLifecycleRegistry close-start errors unchanged.
+   * @note Kernel stops compute-request admission after this returns and before
+   * waiting for registry settlement.
+   */
+  std::uint64_t begin_graph_close_lifecycle(
+      GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason);
+
+  /**
+   * @brief Waits for one Closing Graph row to empty and removes it.
+   * @param graph_instance_id Exact runtime identity.
+   * @return Nothing after GraphRowRemoved publication.
+   * @throws RunLifecycleRegistry settlement errors unchanged.
+   */
+  void finish_graph_close_lifecycle(GraphInstanceId graph_instance_id);
+
+  /**
+   * @brief Settles and removes one Graph lifecycle row before lane teardown.
+   * @param graph_instance_id Exact runtime identity.
+   * @param reason GraphClose or ProcessShutdown.
+   * @return Nothing after row removal.
+   * @throws RunLifecycleRegistry close errors unchanged.
+   */
+  void close_graph_lifecycle(GraphInstanceId graph_instance_id,
+                             ComputeRunCancellationReason reason);
+
+  /**
+   * @brief Starts the monotonic process shutdown admission transition.
+   * @return Stable nonzero shutdown generation.
+   * @throws std::logic_error from a same-service worker/policy callback before
+   * any mutation.
+   * @throws RunLifecycleRegistry transition errors unchanged.
+   * @note Kernel retains Graph lanes and finishes Graph close after this call.
+   */
+  std::uint64_t begin_shutdown();
+
+  /**
+   * @brief Completes idempotent process execution-domain shutdown.
+   * @return Nothing after registry/resource/route/worker/binding retirement
+   * and final ServiceStopped publication.
+   * @throws std::logic_error from a same-service worker/policy callback before
+   * mutation or when authoritative resource state is unexpectedly nonzero.
+   * @throws std::system_error from control-thread synchronization.
+   * @note Concurrent/repeated non-worker callers join or observe the same
+   * generation. This operation never reopens admission.
+   */
+  void shutdown();
+
+  /**
+   * @brief Copies trusted source-private lifecycle telemetry.
+   * @param after_cursor Last observed epoch-local sequence.
+   * @param limit Exact page size in [1,4096].
+   * @return Atomic-cut non-destructive page.
+   * @throws ExecutionLifecycleTelemetry snapshot errors unchanged.
+   * @note This adds no Host, IPC, CLI, operation, or Policy ABI surface.
+   */
+  ExecutionLifecyclePage lifecycle_snapshot(std::uint64_t after_cursor,
+                                            std::uint32_t limit) const;
+
+  /**
    * @brief Calculates the exact structural vector used for CPU Run admission.
    * @param representative Any submission from the Run, used for immutable
    * graph-identity metadata capacity.
@@ -1145,13 +1286,49 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
                   ComputeRunCancellationReason reason) noexcept;
 
   /**
-   * @brief Resolves a registered Run from one submission identity.
-   * @param run_id Run namespace carried by an owned submission.
-   * @return Strong active Run state.
-   * @throws std::invalid_argument when no matching active Run exists.
-   * @throws std::system_error if private state locking fails.
+   * @brief Builds the non-owning policy lifecycle observer for this service.
+   * @return Callback table retaining only this stable ExecutionService address.
+   * @throws Nothing.
+   * @note Every observed binding is retired before service destruction.
    */
-  std::shared_ptr<RunState> find_active_run(ComputeRunId run_id);
+  policy::PolicyLifecycleObserver policy_lifecycle_observer() noexcept;
+
+  /**
+   * @brief Advances the entered policy-callback counter.
+   * @param context Borrowed stable ExecutionService address.
+   * @return Nothing.
+   * @throws Nothing; invalid context or counter exhaustion terminates.
+   */
+  static void observe_policy_invocation_entered(void* context) noexcept;
+
+  /**
+   * @brief Retires the entered policy-callback counter.
+   * @param context Borrowed stable ExecutionService address.
+   * @return Nothing.
+   * @throws Nothing; invalid context or counter underflow terminates.
+   */
+  static void observe_policy_invocation_returned(void* context) noexcept;
+
+  /**
+   * @brief Advances the current/displaced policy-binding counter.
+   * @param context Borrowed stable ExecutionService address.
+   * @return Nothing.
+   * @throws Nothing; invalid context or counter exhaustion terminates.
+   */
+  static void observe_policy_binding_published(void* context) noexcept;
+
+  /**
+   * @brief Retires one binding and publishes its exact lifecycle event.
+   * @param context Borrowed stable ExecutionService address.
+   * @param generation Exact retired binding generation.
+   * @param destroy_failed Whether its plugin destroy returned failure or threw.
+   * @return Nothing.
+   * @throws Nothing; invalid context or telemetry failure terminates.
+   * @note Publication occurs only after an entered destroy callback returns.
+   */
+  static void observe_policy_binding_retired(void* context,
+                                             std::uint64_t generation,
+                                             bool destroy_failed) noexcept;
 
   /**
    * @brief Copies the built-in Throughput admission charge for repository
@@ -1171,7 +1348,18 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   static RunState& current_worker_run();
 
-  /** @brief Private fixed-pool, ready-store, registry, and ledger owner. */
+  /**
+   * @brief Fixed-capacity diagnostics constructed first and destroyed last.
+   */
+  std::unique_ptr<ExecutionLifecycleTelemetry> lifecycle_telemetry_;
+
+  /**
+   * @brief Sole Graph/Run lifecycle authority destroyed after physical state.
+   */
+  std::unique_ptr<RunLifecycleRegistry> lifecycle_registry_;
+
+  /** @brief Private fixed-pool, ready-store, routes, policy, and ledger owner.
+   */
   std::unique_ptr<PoolState> pool_;
 
   /**
@@ -1193,6 +1381,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /** @brief Current service-worker Run context, null outside callbacks. */
   static thread_local RunState* tls_run_state_;
+
+  /** @brief Exact service whose worker callback entered this thread. */
+  static thread_local ExecutionService* tls_service_;
 
   /** @brief Current fixed worker id, or -1 outside service callbacks. */
   static thread_local int tls_worker_id_;

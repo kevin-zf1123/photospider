@@ -98,29 +98,13 @@ class InteractionService {
     }
   }
   /**
-   * @brief Stops compute-request admission for the first phase of Host close.
-   * @param name Graph session whose request lane rejects new submissions.
-   * @return True when the graph exists; false when no runtime is loaded.
-   * @throws std::logic_error if invoked from the target lane worker.
-   * @throws std::overflow_error if the close-generation counter is exhausted.
-   * @throws std::system_error if executor lifecycle synchronization fails.
-   * @note The runtime remains owned by Kernel. Embedded Host calls
-   *       this after publishing its close marker and draining pre-marker
-   *       synchronous admissions, but before waiting on pre-registered async
-   *       placeholders.
-   */
-  bool cmd_stop_graph_admission(const std::string& name) {
-    return kernel_.stop_graph_admission(name);
-  }
-
-  /**
-   * @brief Completes graph close after Host admission drainage.
+   * @brief Performs one complete monotonic Kernel Graph close.
    * @param name Graph session whose lanes and state must be torn down.
    * @return True when the runtime existed and was removed; false when absent.
-   * @throws Any executor or runtime lifecycle failure propagated by Kernel.
-   * @note Kernel drains the already-stopped compute-request lane, then closes
-   *       graph-state before runtime removal. A stop failure reopens
-   * graph-state and compute-request workers before rethrow.
+   * @throws Any lifecycle/executor failure propagated by Kernel.
+   * @note Kernel linearizes registry Closing, settles indexed Runs, removes the
+   * row, drains compute-request before graph-state, and never reopens the
+   * Graph.
    */
   bool cmd_close_graph(const std::string& name) {
     return kernel_.close_graph(name);
