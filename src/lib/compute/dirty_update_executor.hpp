@@ -23,8 +23,20 @@ namespace ps::compute {
 class ComputeRun;
 class DirtySiblingCommitGate;
 class RealtimeProxyGraph;
+class PreparedConnectedDirtyParameters;
+class StabilizedDirtyParameters;
+struct PreparedConnectedDirtyParametersState;
 struct PreparedHighPrecisionDirtyRunState;
 struct PreparedRealTimeDirtyRunState;
+
+PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
+    GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
+    ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
+    ComputeRun*, const ComputeRunLease*, const std::string&,
+    const std::vector<Device>*);
+std::shared_ptr<const StabilizedDirtyParameters>
+execute_prepared_connected_dirty_parameters(
+    PreparedConnectedDirtyParameters prepared);
 
 /**
  * @brief Move-only fully staged HP dirty candidate.
@@ -288,14 +300,14 @@ class StabilizedDirtyParameters {
       const std::vector<int>& anticipated_node_ids) const;
 
  private:
+  friend PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
+      GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
+      ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
+      ComputeRun*, const ComputeRunLease*, const std::string&,
+      const std::vector<Device>*);
   friend std::shared_ptr<const StabilizedDirtyParameters>
-  stabilize_connected_dirty_parameters(GraphModel&, GraphTraversalService&, int,
-                                       uint64_t, uint64_t,
-                                       ExecutionTaskRuntime*, ExecutionService*,
-                                       ExecutionHostContext*, ComputeRun*,
-                                       const ComputeRunLease*,
-                                       const std::string&,
-                                       const std::vector<Device>*);
+  execute_prepared_connected_dirty_parameters(
+      PreparedConnectedDirtyParameters prepared);
 
   /** @brief Generation shared by every domain of one dirty request. */
   uint64_t request_generation_ = 0;
@@ -324,6 +336,125 @@ class StabilizedDirtyParameters {
   /** @brief Consumers/descendants whose output extent may have changed. */
   std::unordered_set<int> geometry_affected_node_ids_;
 };
+
+/**
+ * @brief Move-only connected-parameter candidate prepared before installation.
+ *
+ * Operation variants, devices, provider callables, complete service
+ * reservations, ready grants, queue entries, and route ownership are frozen
+ * during preparation. No provider/plugin/user callback is entered until
+ * execute_prepared_connected_dirty_parameters() consumes this value after
+ * lifecycle installation.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note Destruction before execution releases every prepared service root,
+ * callback, DSO lease, and Run lease without provider entry.
+ */
+class PreparedConnectedDirtyParameters final {
+ public:
+  /** @brief Creates an inactive moved-from preparation. */
+  PreparedConnectedDirtyParameters() noexcept;
+  /**
+   * @brief Transfers complete unpublished preflight ownership.
+   * @param other Preparation made inactive.
+   * @throws Nothing.
+   */
+  PreparedConnectedDirtyParameters(
+      PreparedConnectedDirtyParameters&& other) noexcept;
+  /**
+   * @brief Replaces only inactive ownership by transfer.
+   * @param other Preparation made inactive.
+   * @return Reference to this value.
+   * @throws Nothing; overwriting active ownership terminates.
+   */
+  PreparedConnectedDirtyParameters& operator=(
+      PreparedConnectedDirtyParameters&& other) noexcept;
+  /** @brief Releases all unpublished preflight ownership. */
+  ~PreparedConnectedDirtyParameters() noexcept;
+
+  /** @brief Prevents duplicate provider/publication ownership. */
+  PreparedConnectedDirtyParameters(const PreparedConnectedDirtyParameters&) =
+      delete;
+  /** @brief Prevents duplicate provider/publication assignment. */
+  PreparedConnectedDirtyParameters& operator=(
+      const PreparedConnectedDirtyParameters&) = delete;
+
+  /**
+   * @brief Reports whether this value owns one unpublished preflight.
+   * @return True before movement or execution.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
+      GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
+      ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
+      ComputeRun*, const ComputeRunLease*, const std::string&,
+      const std::vector<Device>*);
+  friend std::shared_ptr<const StabilizedDirtyParameters>
+  execute_prepared_connected_dirty_parameters(
+      PreparedConnectedDirtyParameters prepared);
+
+  /**
+   * @brief Adopts one complete unpublished connected preflight.
+   * @param state Heap-stable staged state.
+   * @throws Nothing.
+   */
+  explicit PreparedConnectedDirtyParameters(
+      std::unique_ptr<PreparedConnectedDirtyParametersState> state) noexcept;
+
+  /** @brief Complete unpublished provider and physical-root ownership. */
+  std::unique_ptr<PreparedConnectedDirtyParametersState> state_;
+};
+
+/**
+ * @brief Prepares connected parameter work without entering provider code.
+ *
+ * @param graph Live graph whose stable topology and committed inputs are read.
+ * @param traversal Traversal service used to derive target postorder.
+ * @param target_node_id Dirty request target.
+ * @param request_generation Non-zero identity reserved for the whole request.
+ * @param topology_generation Topology identity captured with the generation.
+ * @param task_runtime Optional task runtime used after installation.
+ * @param execution_service Optional process service used instead of runtime.
+ * @param host Service trace target required with execution_service.
+ * @param run Optional HP child Run naming provider work.
+ * @param run_lease Optional retained HP lifecycle lease.
+ * @param execution_type Frozen private service route.
+ * @param available_devices_override Optional frozen route inventory.
+ * @return Move-only prepared preflight, including an empty-producer snapshot.
+ * @throws GraphError or standard exceptions from topology, operation
+ * selection, retained-memory estimation, reservation, and queue staging.
+ * @note Candidate preparation invokes no operation provider. With the process
+ * service, every callback can start only from its pre-reserved prepared batch
+ * after the caller installs the matching lifecycle bundle.
+ */
+PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
+    GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
+    uint64_t request_generation, uint64_t topology_generation,
+    ExecutionTaskRuntime* task_runtime = nullptr,
+    ExecutionService* execution_service = nullptr,
+    ExecutionHostContext* host = nullptr, ComputeRun* run = nullptr,
+    const ComputeRunLease* run_lease = nullptr,
+    const std::string& execution_type = "cpu",
+    const std::vector<Device>* available_devices_override = nullptr);
+
+/**
+ * @brief Executes one installed connected preflight in frozen topology order.
+ *
+ * @param prepared Complete candidate from prepare_connected_dirty_parameters().
+ * @return Immutable request-local provider snapshot.
+ * @throws GraphError or standard exceptions from cancellation, provider
+ * execution, service settlement, output validation, or classification.
+ * @note The caller must install the matching Run bundle first. Each process
+ * service provider enters only after its exact prepared root performs reserved
+ * start. Output-dependent dirty planning intentionally follows this call
+ * inside the installed Run transaction.
+ */
+std::shared_ptr<const StabilizedDirtyParameters>
+execute_prepared_connected_dirty_parameters(
+    PreparedConnectedDirtyParameters prepared);
 
 /**
  * @brief Stabilizes connected parameter values before dirty intent dispatch.
@@ -360,7 +491,9 @@ class StabilizedDirtyParameters {
  * @note The caller must serialize graph topology/cache mutation for the call.
  * No GraphModel cache, RT proxy, timing, or event state is published. Operation
  * callbacks retain the existing non-rollbackable external side-effect
- * semantics, but each preflight closure node executes at most once and is not
+ * semantics. This compatibility helper composes prepare and execute
+ * immediately; product ComputeService uses the two calls separately around
+ * lifecycle installation. Each closure node executes at most once and is not
  * repeated by HP phase two. Cancellation is observed around every preflight
  * node and before each tiled provider chunk; a monolithic provider already
  * entered is non-preemptible, and its result is discarded when cancellation is

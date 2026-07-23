@@ -763,9 +763,103 @@ StabilizedDirtyParameters::missing_staged_output_entry_retained_memory_bytes(
   return estimate.bytes();
 }
 
-/** @copydoc stabilize_connected_dirty_parameters */
-std::shared_ptr<const StabilizedDirtyParameters>
-stabilize_connected_dirty_parameters(
+/**
+ * @brief One frozen connected-preflight node and optional service root.
+ *
+ * @throws Nothing from movement after preparation allocations complete.
+ * @note Exactly one of inline_task and service_prepared is active.
+ */
+struct PreparedConnectedDirtyNode final {
+  /** @brief Exact topological node identity. */
+  int node_id = -1;
+  /** @brief Frozen inline/task-runtime provider callback. */
+  std::function<void()> inline_task;
+  /** @brief Complete process-service root reserved before installation. */
+  std::optional<PreparedExecutionRun> service_prepared;
+};
+
+/**
+ * @brief Complete unpublished connected-parameter preflight state.
+ *
+ * @throws std::bad_alloc when copied route, lease, result, or step ownership
+ * grows.
+ * @note The heap address remains stable while callbacks borrow its Run lease.
+ * Prepared service roots are declared in the step vector and therefore retire
+ * before the shared result and borrowed Graph/Run pointers.
+ */
+struct PreparedConnectedDirtyParametersState final {
+  /**
+   * @brief Captures stable execution owners for candidate preparation.
+   * @param active_graph Graph read later by installed provider callbacks.
+   * @param active_task_runtime Optional task-runtime route.
+   * @param active_execution_service Optional process execution service.
+   * @param active_run Optional HP Run.
+   * @param lifecycle_lease Optional strong HP lifecycle lease.
+   * @throws Nothing except ComputeRunLease copy construction.
+   */
+  PreparedConnectedDirtyParametersState(
+      GraphModel& active_graph, ExecutionTaskRuntime* active_task_runtime,
+      ExecutionService* active_execution_service, ComputeRun* active_run,
+      const ComputeRunLease* lifecycle_lease)
+      : graph(&active_graph),
+        task_runtime(active_task_runtime),
+        execution_service(active_execution_service),
+        run(active_run),
+        run_lease(lifecycle_lease != nullptr
+                      ? std::optional<ComputeRunLease>(*lifecycle_lease)
+                      : std::nullopt) {}
+
+  /** @brief Borrowed request Graph stable through installed execution. */
+  GraphModel* graph = nullptr;
+  /** @brief Optional task runtime used only after installation. */
+  ExecutionTaskRuntime* task_runtime = nullptr;
+  /** @brief Optional process service owning pre-reserved roots. */
+  ExecutionService* execution_service = nullptr;
+  /** @brief Optional request HP Run. */
+  ComputeRun* run = nullptr;
+  /** @brief Stable lease observed by every provider boundary. */
+  std::optional<ComputeRunLease> run_lease;
+  /** @brief Mutable result built only by topologically serialized callbacks. */
+  std::shared_ptr<StabilizedDirtyParameters> result;
+  /** @brief Frozen topological callbacks and service roots. */
+  std::vector<PreparedConnectedDirtyNode> steps;
+};
+
+/** @copydoc PreparedConnectedDirtyParameters::PreparedConnectedDirtyParameters
+ */
+PreparedConnectedDirtyParameters::PreparedConnectedDirtyParameters() noexcept =
+    default;  // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc PreparedConnectedDirtyParameters::PreparedConnectedDirtyParameters
+ */
+PreparedConnectedDirtyParameters::PreparedConnectedDirtyParameters(
+    std::unique_ptr<PreparedConnectedDirtyParametersState> state) noexcept
+    : state_(std::move(state)) {}
+
+/** @copydoc PreparedConnectedDirtyParameters::PreparedConnectedDirtyParameters
+ */
+PreparedConnectedDirtyParameters::PreparedConnectedDirtyParameters(
+    PreparedConnectedDirtyParameters&& other) noexcept = default;  // NOLINT
+
+/** @copydoc PreparedConnectedDirtyParameters::operator= */
+PreparedConnectedDirtyParameters& PreparedConnectedDirtyParameters::operator=(
+    PreparedConnectedDirtyParameters&& other) noexcept {
+  if (this != &other) {
+    if (state_) {
+      std::terminate();
+    }
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+/** @copydoc PreparedConnectedDirtyParameters::~PreparedConnectedDirtyParameters
+ */
+PreparedConnectedDirtyParameters::~PreparedConnectedDirtyParameters() noexcept =
+    default;
+
+/** @copydoc prepare_connected_dirty_parameters */
+PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
     uint64_t request_generation, uint64_t topology_generation,
     ExecutionTaskRuntime* task_runtime, ExecutionService* execution_service,
@@ -788,7 +882,10 @@ stabilize_connected_dirty_parameters(
   observe_dirty_run_or_throw(run, run_lease);
   std::unordered_set<int> target_cone(execution_order.begin(),
                                       execution_order.end());
+  auto state = std::make_unique<PreparedConnectedDirtyParametersState>(
+      graph, task_runtime, execution_service, run, run_lease);
   auto result = std::make_shared<StabilizedDirtyParameters>();
+  state->result = result;
   result->request_generation_ = request_generation;
   result->topology_generation_ = topology_generation;
   std::unordered_set<int> parameter_consumers;
@@ -810,7 +907,7 @@ stabilize_connected_dirty_parameters(
   }
   if (result->parameter_producer_node_ids_.empty()) {
     observe_dirty_run_or_throw(run, run_lease);
-    return result;
+    return PreparedConnectedDirtyParameters(std::move(state));
   }
 
   const std::vector<Device> available_devices =
@@ -868,6 +965,15 @@ stabilize_connected_dirty_parameters(
     }
   }
 
+  std::vector<int> anticipated_node_ids;
+  anticipated_node_ids.reserve(result->staged_node_ids_.size());
+  for (int node_id : execution_order) {
+    if (result->staged_node_ids_.count(node_id)) {
+      anticipated_node_ids.push_back(node_id);
+    }
+  }
+  state->steps.reserve(anticipated_node_ids.size());
+  PreparedConnectedDirtyParametersState* state_ptr = state.get();
   uint64_t preflight_task_id = 0U;
   for (int node_id : execution_order) {
     if (!result->staged_node_ids_.count(node_id)) {
@@ -884,12 +990,13 @@ stabilize_connected_dirty_parameters(
     }
     const Device selected_device = selected_operation->device;
     OpRegistry::OpVariant operation = std::move(selected_operation->operation);
-    auto execute_preflight_node = [&graph, result, node_id, run, run_lease,
-                                   operation]() {
-      observe_dirty_run_or_throw(run, run_lease);
-      Node node_for_exec = graph.node(node_id);
+    auto execute_preflight_node = [state_ptr, result, node_id, operation]() {
+      const ComputeRunLease* active_lease =
+          state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
+      observe_dirty_run_or_throw(state_ptr->run, active_lease);
+      Node node_for_exec = state_ptr->graph->node(node_id);
       const NodeInputResolver::OutputLookup lookup =
-          [&](int upstream_id) -> const NodeOutput* {
+          [state_ptr, &result](int upstream_id) -> const NodeOutput* {
         if (const NodeOutput* staged =
                 result->find_staged_output(upstream_id)) {
           return staged;
@@ -897,19 +1004,22 @@ stabilize_connected_dirty_parameters(
         if (result->staged_node_ids_.count(upstream_id)) {
           return nullptr;
         }
-        const Node* upstream = graph.find_node(upstream_id);
+        const Node* upstream = state_ptr->graph->find_node(upstream_id);
         return upstream ? ComputeCachePolicy::reusable_output(*upstream)
                         : nullptr;
       };
       const ResolvedNodeInputs resolved = NodeInputResolver::resolve(
           node_for_exec, lookup, "Connected-parameter stabilization");
       TiledExecutionConfig tiled_config;
-      tiled_config.on_tile = [run, run_lease](const PixelRect&) {
-        observe_dirty_run_or_throw(run, run_lease);
+      tiled_config.on_tile = [state_ptr](const PixelRect&) {
+        const ComputeRunLease* lease =
+            state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
+        observe_dirty_run_or_throw(state_ptr->run, lease);
       };
-      NodeOutput output = NodeExecutor::execute(
-          graph, node_for_exec, operation, resolved.image_inputs, tiled_config);
-      observe_dirty_run_or_throw(run, run_lease);
+      NodeOutput output =
+          NodeExecutor::execute(*state_ptr->graph, node_for_exec, operation,
+                                resolved.image_inputs, tiled_config);
+      observe_dirty_run_or_throw(state_ptr->run, active_lease);
       if (!has_image_payload(output) && output.data.empty()) {
         throw GraphError(
             GraphErrc::ComputeError,
@@ -922,15 +1032,18 @@ stabilize_connected_dirty_parameters(
                            output.image_buffer.height};
       }
       result->staged_outputs_.emplace(
-          node_id,
-          StabilizedDirtyNodeOutput{
-              std::move(output), graph.node(node_id).hp_version + 1, hp_roi});
+          node_id, StabilizedDirtyNodeOutput{
+                       std::move(output),
+                       state_ptr->graph->node(node_id).hp_version + 1, hp_roi});
     };
+    PreparedConnectedDirtyNode step;
+    step.node_id = node_id;
     if (execution_service) {
-      auto owned_preflight =
-          std::make_shared<std::function<void()>>(execute_preflight_node);
-      ComputeRunLease lease =
-          run_lease != nullptr ? *run_lease : run->acquire_lease();
+      auto owned_preflight = std::make_shared<std::function<void()>>(
+          std::move(execute_preflight_node));
+      ComputeRunLease lease = state->run_lease.has_value()
+                                  ? *state->run_lease
+                                  : run->acquire_lease();
       const ComputeRunTaskIdentity identity = lease.task_identity(
           std::numeric_limits<uint64_t>::max() - preflight_task_id);
       auto service_callback = [owned_preflight, node_id](
@@ -965,7 +1078,8 @@ stabilize_connected_dirty_parameters(
       shared_demand.add_bytes(lease.retained_memory_bytes());
       shared_demand.add_bytes(result->retained_memory_bytes());
       shared_demand.add_bytes(
-          result->missing_staged_output_entry_retained_memory_bytes({node_id}));
+          result->missing_staged_output_entry_retained_memory_bytes(
+              anticipated_node_ids));
       shared_demand.add_objects<std::function<void()>>();
       shared_demand.add_shared_control_block();
       shared_demand.add_bytes(owned_callable_retained_memory_bytes(
@@ -975,28 +1089,67 @@ stabilize_connected_dirty_parameters(
                                std::move(service_callback),
                                ExecutionTaskPriority::High, task_demand,
                                selected_device);
-      execution_service->execute_run(
+      step.service_prepared.emplace(execution_service->prepare_run(
           *host, execution_type, std::move(submissions), 1,
-          CpuRunResourceDemand{shared_demand.bytes(), task_demand});
-      observe_dirty_run_or_throw(run, run_lease);
-    } else if (task_runtime) {
-      PreflightExecutionTaskExecutor<decltype(execute_preflight_node)> executor(
-          execute_preflight_node, *task_runtime, node_id);
-      std::vector<ExecutionTaskHandle> handles{
-          ExecutionTaskHandle{&executor, 0, node_id}};
-      task_runtime->submit_initial_task_handles(std::move(handles), 1,
-                                                ExecutionTaskPriority::High);
-      task_runtime->wait_for_completion();
-      observe_dirty_run_or_throw(run, run_lease);
+          CpuRunResourceDemand{shared_demand.bytes(), task_demand}));
     } else {
-      execute_preflight_node();
-      observe_dirty_run_or_throw(run, run_lease);
+      step.inline_task = std::move(execute_preflight_node);
     }
+    state->steps.push_back(std::move(step));
     ++preflight_task_id;
   }
 
   observe_dirty_run_or_throw(run, run_lease);
+  return PreparedConnectedDirtyParameters(std::move(state));
+}
 
+/** @copydoc execute_prepared_connected_dirty_parameters */
+std::shared_ptr<const StabilizedDirtyParameters>
+execute_prepared_connected_dirty_parameters(
+    PreparedConnectedDirtyParameters prepared) {
+  if (!prepared.state_ || !prepared.state_->graph || !prepared.state_->result) {
+    throw std::invalid_argument(
+        "Connected-parameter execution requires active prepared state.");
+  }
+  std::unique_ptr<PreparedConnectedDirtyParametersState> state =
+      std::move(prepared.state_);
+  const ComputeRunLease* run_lease =
+      state->run_lease.has_value() ? &*state->run_lease : nullptr;
+  observe_dirty_run_or_throw(state->run, run_lease);
+
+  for (PreparedConnectedDirtyNode& step : state->steps) {
+    if (state->execution_service != nullptr) {
+      if (!step.service_prepared.has_value() ||
+          !step.service_prepared->active()) {
+        throw std::logic_error(
+            "Connected-parameter service step is not prepared.");
+      }
+      state->execution_service->execute_prepared_run(
+          std::move(*step.service_prepared));
+      step.service_prepared.reset();
+    } else if (state->task_runtime != nullptr) {
+      if (!step.inline_task) {
+        throw std::logic_error(
+            "Connected-parameter task-runtime step has no callback.");
+      }
+      PreflightExecutionTaskExecutor<std::function<void()>> executor(
+          step.inline_task, *state->task_runtime, step.node_id);
+      std::vector<ExecutionTaskHandle> handles{
+          ExecutionTaskHandle{&executor, 0, step.node_id}};
+      state->task_runtime->submit_initial_task_handles(
+          std::move(handles), 1, ExecutionTaskPriority::High);
+      state->task_runtime->wait_for_completion();
+    } else {
+      if (!step.inline_task) {
+        throw std::logic_error(
+            "Connected-parameter inline step has no callback.");
+      }
+      step.inline_task();
+    }
+    observe_dirty_run_or_throw(state->run, run_lease);
+  }
+
+  const std::shared_ptr<StabilizedDirtyParameters> result = state->result;
   for (int producer_id : result->parameter_producer_node_ids_) {
     const NodeOutput* output = result->find_staged_output(producer_id);
     if (!output) {
@@ -1012,6 +1165,22 @@ stabilize_connected_dirty_parameters(
     }
   }
   return result;
+}
+
+/** @copydoc stabilize_connected_dirty_parameters */
+std::shared_ptr<const StabilizedDirtyParameters>
+stabilize_connected_dirty_parameters(
+    GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
+    uint64_t request_generation, uint64_t topology_generation,
+    ExecutionTaskRuntime* task_runtime, ExecutionService* execution_service,
+    ExecutionHostContext* host, ComputeRun* run,
+    const ComputeRunLease* run_lease, const std::string& execution_type,
+    const std::vector<Device>* available_devices_override) {
+  return execute_prepared_connected_dirty_parameters(
+      prepare_connected_dirty_parameters(
+          graph, traversal, target_node_id, request_generation,
+          topology_generation, task_runtime, execution_service, host, run,
+          run_lease, execution_type, available_devices_override));
 }
 
 /**

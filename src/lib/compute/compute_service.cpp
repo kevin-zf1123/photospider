@@ -750,10 +750,10 @@ NodeOutput& execute_request_owned_realtime_runs(compute::RunGroup& run_group,
 /**
  * @brief Complete unpublished dirty intent orchestration state.
  *
- * @throws std::bad_alloc from copied request, lease, gate, parameter snapshot,
- * synchronization, or prepared dirty-domain ownership.
- * @note HP/RT physical roots and ready/index nodes are owned by the two
- * prepared domain values. The state publishes no lifecycle or caller-visible
+ * @throws std::bad_alloc from copied request, lease, gate, connected-preflight
+ * staging, synchronization, or later dirty-domain ownership.
+ * @note Connected providers and the output-dependent HP/RT dirty planning run
+ * only after lifecycle installation. The state publishes no caller-visible
  * result and remains heap-stable across concurrent sibling callbacks.
  */
 struct PreparedIntentUpdateState final {
@@ -810,7 +810,10 @@ struct PreparedIntentUpdateState final {
   std::string rt_execution_type = "cpu";
   /** @brief Whether sibling callbacks may run concurrently. */
   bool can_submit_concurrently = false;
-  /** @brief Immutable connected-parameter preflight result. */
+  /** @brief Complete provider-free connected preflight candidate. */
+  compute::PreparedConnectedDirtyParameters connected_preflight;
+  /** @brief Immutable connected-parameter result produced after installation.
+   */
   std::shared_ptr<const compute::StabilizedDirtyParameters>
       stabilized_parameters;
   /** @brief Shared HP/RT node synchronization for concurrent siblings. */
@@ -1264,17 +1267,15 @@ ComputeService::prepare_intent_update(
           *strategy.runtime, state->hp_execution_type);
       preflight_devices_override = &preflight_devices;
     }
-    state->stabilized_parameters =
-        compute::stabilize_connected_dirty_parameters(
-            graph, traversal_, request.node_id, request_generation,
-            topology_generation, nullptr, nullptr, nullptr, hp_run,
-            &state->hp_lease, state->hp_execution_type,
-            preflight_devices_override);
+    state->connected_preflight = compute::prepare_connected_dirty_parameters(
+        graph, traversal_, request.node_id, request_generation,
+        topology_generation, nullptr,
+        uses_process_service ? &execution_service_ : nullptr,
+        uses_process_service ? strategy.runtime : nullptr, hp_run,
+        &state->hp_lease, state->hp_execution_type, preflight_devices_override);
   }
 
   state->proxy_graph = &realtime_proxy_graph_for(graph, strategy, request);
-  compute::ExecutionService* physical_service =
-      uses_process_service ? &execution_service_ : nullptr;
   if (intent == ComputeIntent::RealTimeUpdate) {
     const compute::ComputeRunCancellationSource hp_cancellation =
         hp_run->cancellation_source();
@@ -1286,29 +1287,6 @@ ComputeService::prepare_intent_update(
               (void)hp_cancellation.request_cancellation(reason);
             });
     (void)state->rt_lease->observe_cancellation();
-
-    const Request silent_request = make_silent_dirty_request(request);
-    compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
-    state->hp_prepared = hp_executor.prepare(
-        graph, *state->proxy_graph, strategy.runtime,
-        make_dirty_update_request(
-            silent_request, true, state->sibling_commit_gate,
-            state->stabilized_parameters, state->node_synchronization),
-        hp_run, physical_service, &state->hp_lease);
-    compute::RealTimeDirtyExecutor rt_executor(traversal_, events_);
-    state->rt_prepared = rt_executor.prepare(
-        graph, *state->proxy_graph, strategy.runtime,
-        make_dirty_update_request(request, false, nullptr,
-                                  state->stabilized_parameters,
-                                  state->node_synchronization),
-        rt_run, physical_service, &*state->rt_lease);
-  } else {
-    compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
-    state->hp_prepared = hp_executor.prepare(
-        graph, *state->proxy_graph, strategy.runtime,
-        make_dirty_update_request(request, false, nullptr,
-                                  state->stabilized_parameters),
-        hp_run, physical_service, &state->hp_lease);
   }
 
   PreparedIntentUpdateState* state_ptr = state.get();
@@ -1363,16 +1341,58 @@ ComputeService::prepare_intent_update(
 NodeOutput& ComputeService::execute_prepared_intent_update(
     std::unique_ptr<PreparedIntentUpdateState> prepared) {
   if (!prepared || prepared->graph == nullptr ||
-      !prepared->request.intent.has_value() ||
-      !prepared->hp_prepared.active() ||
-      (*prepared->request.intent == ComputeIntent::RealTimeUpdate &&
-       !prepared->rt_prepared.active())) {
+      !prepared->request.intent.has_value()) {
     throw std::invalid_argument(
         "Prepared intent execution requires complete active state.");
   }
+  const ComputeIntent intent = *prepared->request.intent;
+  const bool has_dirty_area = prepared->request.dirty_roi->width > 0 &&
+                              prepared->request.dirty_roi->height > 0;
+  if (has_dirty_area) {
+    if (!prepared->connected_preflight.active()) {
+      throw std::invalid_argument(
+          "Prepared dirty intent requires active connected preflight.");
+    }
+    prepared->stabilized_parameters =
+        compute::execute_prepared_connected_dirty_parameters(
+            std::move(prepared->connected_preflight));
+  }
+
+  compute::ExecutionService* physical_service =
+      prepared->strategy.use_parallel_executor ? &execution_service_ : nullptr;
+  if (intent == ComputeIntent::RealTimeUpdate) {
+    const Request silent_request = make_silent_dirty_request(prepared->request);
+    compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
+    prepared->hp_prepared = hp_executor.prepare(
+        *prepared->graph, *prepared->proxy_graph, prepared->strategy.runtime,
+        make_dirty_update_request(
+            silent_request, true, prepared->sibling_commit_gate,
+            prepared->stabilized_parameters, prepared->node_synchronization),
+        prepared->hp_run, physical_service, &prepared->hp_lease);
+    compute::RealTimeDirtyExecutor rt_executor(traversal_, events_);
+    prepared->rt_prepared = rt_executor.prepare(
+        *prepared->graph, *prepared->proxy_graph, prepared->strategy.runtime,
+        make_dirty_update_request(prepared->request, false, nullptr,
+                                  prepared->stabilized_parameters,
+                                  prepared->node_synchronization),
+        prepared->rt_run, physical_service, &*prepared->rt_lease);
+  } else {
+    compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
+    prepared->hp_prepared = hp_executor.prepare(
+        *prepared->graph, *prepared->proxy_graph, prepared->strategy.runtime,
+        make_dirty_update_request(prepared->request, false, nullptr,
+                                  prepared->stabilized_parameters),
+        prepared->hp_run, physical_service, &prepared->hp_lease);
+  }
+  if (!prepared->hp_prepared.active() ||
+      (intent == ComputeIntent::RealTimeUpdate &&
+       !prepared->rt_prepared.active())) {
+    throw std::logic_error(
+        "Installed dirty intent failed to stage its physical domains.");
+  }
   return compute::IntentUpdateCoordinator::coordinate_intent_update(
-      *prepared->request.intent, prepared->can_submit_concurrently,
-      prepared->request.dirty_roi, prepared->callbacks);
+      intent, prepared->can_submit_concurrently, prepared->request.dirty_roi,
+      prepared->callbacks);
 }
 
 /**

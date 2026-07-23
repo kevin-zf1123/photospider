@@ -382,11 +382,19 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
   匹配的 `ComputeRunLease`；failure publication 必须匹配 `(RunId, RunLocalTaskId)`。
   Dirty/preflight work 使用 heap-owned phase context 与 child Run lease，并经过相同的 policy、
   reserved-start 与 completion 边界。
+- connected-preflight candidate preparation 会在不进入 provider 的情况下冻结
+  operation/device/callable、DSO lease 与每个完整 service root。provider 只在完整 lifecycle
+  bundle 安装且 reserved start commit 后进入；其 output 随后在已安装 Run 内驱动 dirty planning。
+- worker 会在 `in_flight` 仍阻止 settlement 时，于 lock 外销毁本地
+  queue/submission/callable/lease owner，然后递减 `in_flight` 并通知 quiescence。bundle
+  finalization 会保留一个 synchronized、可 retry、幂等的 authority，直至 unregistration。
 - Graph close 会先把精确的 lifecycle-registry row 标记为 `Closing`，拒绝并 settle pending
   candidate，再对该 row 中每个已安装 Run 请求 `GraphClose` cancellation。Finalization 会等待
   terminal outcome、physical quiescence、graph commit/discard、root/child grant 精确释放与
   registry unregistration。只有移除空 row 后，Kernel 才依次停止 compute-request lane、停止
-  graph-state lane并销毁 Graph state；无关 Graph 与 process-owned route 会继续运行。
+  graph-state lane 并销毁 Graph state。Closing linearize 后会收纳 cleanup callback failure；
+  如果 synchronization/structural failure 可能丢失 cancellation authority，则采取 fail-stop。
+  无关 Graph 与 process-owned route 会继续运行。
 - Process execution shutdown 使用同一个 registry fence 停止全局 admission 并关闭每个 Graph
   row，请求 `ProcessShutdown` cancellation，排空全部 admitted Run，然后 retire ready work、
   route、policy invocation/binding 与物理 worker。同一 service 的 worker 或 policy callback

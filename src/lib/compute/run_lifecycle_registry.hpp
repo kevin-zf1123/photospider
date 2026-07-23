@@ -17,11 +17,16 @@
 #include "compute/run_group.hpp"
 #include "graph/graph_revision.hpp"
 
+namespace ps::testing {
+class RunLifecycleRegistryTestAccess;
+}  // namespace ps::testing
+
 namespace ps::compute {
 
 class DirtySiblingCommitGate;
 class RunLifecycleRegistry;
 struct RunLifecycleAdmissionCandidateControl;
+struct RunLifecycleAdmissionHandleControl;
 
 /**
  * @brief Preallocated one-generation Graph close completion coordinator.
@@ -334,7 +339,8 @@ class RunLifecycleAdmissionCandidate final {
 /**
  * @brief Move-only installed standalone or realtime admission identity.
  *
- * @throws Nothing for movement and destruction.
+ * @throws Nothing for movement and destruction; destroying an unresolved
+ * finalization obligation terminates the process.
  * @note The value owns no Run lease itself. The registry record owns the
  * minimum leases until finalize_admission() retires every non-registry lease
  * and removes the complete bundle.
@@ -357,8 +363,12 @@ class RunLifecycleAdmissionHandle final {
    */
   RunLifecycleAdmissionHandle& operator=(
       RunLifecycleAdmissionHandle&& other) noexcept = delete;
-  /** @brief Releases an inactive or already-finalized scalar value. */
-  ~RunLifecycleAdmissionHandle() noexcept = default;
+  /**
+   * @brief Releases an inactive or already-finalized authority.
+   * @throws Nothing; an unresolved installed bundle terminates the process.
+   * @note Silent loss of the sole finalization obligation is forbidden.
+   */
+  ~RunLifecycleAdmissionHandle() noexcept;
 
   /** @brief Prevents duplicating one bundle finalization obligation. */
   RunLifecycleAdmissionHandle(const RunLifecycleAdmissionHandle&) = delete;
@@ -375,30 +385,27 @@ class RunLifecycleAdmissionHandle final {
 
   /**
    * @brief Reports whether the handle still names an installed bundle.
-   * @return True before finalize_admission() consumes it.
+   * @return True while the persistent authority remains unresolved.
    * @throws Nothing.
+   * @note A successful finalization leaves the shared control present but
+   * marks it Finalized so concurrent/repeated observers are idempotent.
    */
-  bool active() const noexcept {
-    return registry_ != nullptr && bundle_id_ != 0U;
-  }
+  bool active() const noexcept;
 
  private:
   friend class RunLifecycleRegistry;
 
   /**
    * @brief Binds one installed bundle to its process registry.
-   * @param registry Stable owner that outlives every handle.
-   * @param bundle_id Fresh nonzero installed identity.
+   * @param control Preallocated persistent installed-bundle authority.
    * @throws Nothing.
    */
-  RunLifecycleAdmissionHandle(RunLifecycleRegistry* registry,
-                              std::uint64_t bundle_id) noexcept
-      : registry_(registry), bundle_id_(bundle_id) {}
+  explicit RunLifecycleAdmissionHandle(
+      std::shared_ptr<RunLifecycleAdmissionHandleControl> control) noexcept
+      : control_(std::move(control)) {}
 
-  /** @brief Registry owner that must consume this handle. */
-  RunLifecycleRegistry* registry_ = nullptr;
-  /** @brief Nonzero installed bundle identity. */
-  std::uint64_t bundle_id_ = 0U;
+  /** @brief Persistent synchronized finalization obligation. */
+  std::shared_ptr<RunLifecycleAdmissionHandleControl> control_;
 };
 
 /**
@@ -508,16 +515,19 @@ class RunLifecycleRegistry final {
 
   /**
    * @brief Completes terminal/quiescent settlement and unregisters one bundle.
-   * @param handle Exact installed bundle; cleared only on success.
+   * @param handle Exact persistent bundle authority, finalized on success.
    * @return Nothing only after every registry Run lease is the sole lease and
    * every child record has left the registry.
-   * @throws std::invalid_argument for an inactive/foreign handle.
+   * @throws std::invalid_argument for an inactive/foreign handle; a previously
+   * finalized handle is an idempotent no-op.
    * @throws std::logic_error before every child is terminal.
    * @throws std::system_error when registry or Run waiting fails.
    * @note This method never waits while holding the lifecycle fence. A
-   * terminal-not-ready or synchronization failure leaves the same handle active
-   * for retry; no by-value duplicate authority is created. Callers must
-   * complete commit/discard and root resource release first.
+   * terminal-not-ready or synchronization failure restores the shared
+   * authority to Active for retry. Concurrent callers serialize through
+   * Active/Finalizing/Finalized state and observe one successful finalization;
+   * no by-value duplicate authority is created. Callers must complete
+   * commit/discard and root resource release first.
    */
   void finalize_admission(RunLifecycleAdmissionHandle& handle);
 
@@ -539,11 +549,13 @@ class RunLifecycleRegistry final {
    * @param graph_instance_id Exact row identity.
    * @param reason GraphClose or ProcessShutdown.
    * @return Stable nonzero close generation.
-   * @throws The validation/lookup/synchronization errors documented by
-   * close_graph().
+   * @throws Validation, lookup, or lifecycle-fence synchronization errors only
+   * before `Open -> Closing` linearizes.
    * @note The method returns after cancellation fan-out but before waiting for
    * candidate/bundle settlement, allowing Kernel to stop request admission in
-   * the exact row-before-lane order.
+   * the exact row-before-lane order. After linearization, cleanup callback
+   * failures are contained and cancellation synchronization/invariant failures
+   * fail stop rather than unwind an irreversible transition.
    */
   std::uint64_t begin_graph_close(GraphInstanceId graph_instance_id,
                                   ComputeRunCancellationReason reason);
@@ -567,9 +579,11 @@ class RunLifecycleRegistry final {
    * GraphRowRemoved was published.
    * @throws GraphError with NotFound for an absent row.
    * @throws std::invalid_argument for any other reason.
-   * @throws std::system_error from registry waits/cancellation observation.
+   * @throws std::system_error from registry lookup or settlement waits.
    * @note Cancellation fan-out and settlement waits occur outside the fence.
-   * Row removal precedes compute-request and graph-state lane drain.
+   * Row removal precedes compute-request and graph-state lane drain. Once
+   * Closing linearizes, cancellation synchronization/invariant failures fail
+   * stop rather than escape as a recoverable close error.
    */
   void close_graph(GraphInstanceId graph_instance_id,
                    ComputeRunCancellationReason reason);
@@ -578,8 +592,11 @@ class RunLifecycleRegistry final {
    * @brief Starts the one process shutdown generation and cancels every row.
    * @return Stable nonzero generation; repeated calls return the same value.
    * @throws std::overflow_error when shutdown generation is exhausted.
-   * @throws std::system_error from registry/cancellation synchronization.
+   * @throws std::system_error from lifecycle-fence synchronization before the
+   * Stopping transition.
    * @note This method does not stop workers/routes or wait for Graph lanes.
+   * After Stopping linearizes, cancellation synchronization/invariant failures
+   * fail stop and cleanup callback failures are contained.
    */
   std::uint64_t begin_service_shutdown();
 
@@ -625,7 +642,24 @@ class RunLifecycleRegistry final {
   std::uint64_t shutdown_generation() const;
 
  private:
+  friend class ::ps::testing::RunLifecycleRegistryTestAccess;
   friend class RunLifecycleAdmissionCandidate;
+
+  /**
+   * @brief Repository-test observer for one finalization wait boundary.
+   *
+   * @param context Opaque test context.
+   * @param bundle_id Exact installed bundle.
+   * @param resource_phase False before lease quiescence, true before root
+   * resource settlement.
+   * @return Nothing.
+   * @throws Test-injected synchronization exception unchanged.
+   * @note Production leaves this pointer null. The private support bridge uses
+   * it to prove failed-owner retry without changing installed APIs.
+   */
+  using FinalizationWaitObserver = void (*)(void* context,
+                                            std::uint64_t bundle_id,
+                                            bool resource_phase);
 
   class Impl;
 
@@ -638,6 +672,11 @@ class RunLifecycleRegistry final {
   void rollback_candidate(
       const std::shared_ptr<RunLifecycleAdmissionCandidateControl>&
           control) noexcept;
+
+  /** @brief Optional repository-test finalization wait observer. */
+  FinalizationWaitObserver finalization_wait_observer_ = nullptr;
+  /** @brief Opaque context paired with finalization_wait_observer_. */
+  void* finalization_wait_observer_context_ = nullptr;
 
   /** @brief Heap-owned stable implementation and lifecycle fence. */
   std::unique_ptr<Impl> impl_;

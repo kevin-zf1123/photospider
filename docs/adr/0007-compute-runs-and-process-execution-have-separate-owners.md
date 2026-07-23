@@ -343,6 +343,14 @@ Run admission and graph close use the following two-stage protocol:
    and graph lease exactly once; the non-admitted Run publishes the exact
    failure/cancellation to its caller but never appears in an admitted index.
 
+Connected-parameter preflight divides its work across that point. Before
+installation it freezes the topology closure, operation/device/callable, DSO
+lease, and complete service roots without entering provider code. After
+installation, each prepared phase performs reserved start before provider
+entry, and provider output drives the output-dependent dirty plans inside the
+installed Run. These later failures therefore use terminal finalization rather
+than candidate rollback.
+
 Graph close changes the graph row from `Open` to `Closing` under the same fence.
 If registration linearizes first, close finds the Run in its graph index. If
 close linearizes first, `commit_admission` rejects the candidate and close waits
@@ -369,6 +377,15 @@ reservation/grant and the Run-owned graph-lifetime lease have released exactly
 once. Unregistration releases only the registry's `RunLease`; only then may
 graph close observe its index and candidate count empty or a caller future
 publish settled completion.
+
+The worker retires execution-grant/route accounting and then destroys its
+worker-local queue entry, submission, callable, DSO lease, and Run lease
+outside locks while `in_flight` still prevents settlement. It decrements
+`in_flight` and notifies quiescence only afterward. Finalization itself retains
+one persistent synchronized `Active -> Finalizing -> Finalized` authority:
+pre-removal failure restores `Active` for trusted retry, concurrent success is
+idempotent, and production failure or destruction of an active obligation is
+fail-stop.
 
 ### Host-authoritative resource accounting
 
@@ -535,6 +552,12 @@ Current Graph close (#76):
    stops and drains the graph-state lane and destroys graph state without
    stopping any process-owned execution route; and
 7. leaves `ExecutionService` and unrelated Graph Runs running.
+
+After `Open -> Closing` linearizes, cancellation cannot escape as a recoverable
+error: cleanup callback failures are contained after complete fan-out, while a
+synchronization/structural failure that could lose the preallocated
+cancellation record or settlement obligation fails stop. The same rule applies
+after process `Accepting -> Stopping`.
 
 The implementation composes the registry fence with the local two-lane order
 without restoring the old single-lane model. Graph close unregisters every Run,

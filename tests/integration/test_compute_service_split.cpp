@@ -136,6 +136,26 @@ std::atomic_int g_host_preparation_hp_target_calls{0};
 std::atomic_int g_host_preparation_rt_target_calls{0};
 
 /**
+ * @brief Optional service observed from inside a connected provider callback.
+ * @note The scoped owning test installs the pointer only around one synchronous
+ * request, so the service outlives every acquire-load.
+ */
+std::atomic<compute::ExecutionService*> g_preflight_lifecycle_service{nullptr};
+
+/** @brief Snapshot sequence preceding the observed dirty request. */
+std::atomic<std::uint64_t> g_preflight_lifecycle_min_sequence{0U};
+
+/** @brief Number of provider-side lifecycle observations. */
+std::atomic_int g_preflight_lifecycle_observations{0};
+
+/** @brief Whether exact current-request installation preceded provider entry.
+ */
+std::atomic_bool g_preflight_observed_installed_bundle{false};
+
+/** @brief Whether reserved-start physical authority preceded provider entry. */
+std::atomic_bool g_preflight_observed_reserved_start{false};
+
+/**
  * @brief Optional request source cancelled by the host-preparation provider.
  * @note Atomic shared ownership lets the execution callback safely retain the
  * source while its synchronous owning test clears the process-global hook.
@@ -244,6 +264,47 @@ class ScopedHostPreparationCancellationSource final {
       const ScopedHostPreparationCancellationSource&) = delete;
 };
 
+/**
+ * @brief Installs provider-side lifecycle observation for one request.
+ *
+ * @throws std::bad_alloc or synchronization exceptions from the baseline
+ * lifecycle snapshot.
+ * @note Construction captures the prior sequence before publishing the service
+ * pointer. Destruction clears the pointer after synchronous settlement.
+ */
+class ScopedPreflightLifecycleObservation final {
+ public:
+  /**
+   * @brief Arms one exact service for provider-side observation.
+   * @param service Service owning the request lifecycle and physical root.
+   * @throws std::bad_alloc or synchronization exceptions from snapshot copy.
+   */
+  explicit ScopedPreflightLifecycleObservation(
+      compute::ExecutionService& service) {
+    const compute::ExecutionLifecyclePage before =
+        service.lifecycle_snapshot(0U, 1U);
+    g_preflight_lifecycle_min_sequence.store(before.snapshot_cut,
+                                             std::memory_order_release);
+    g_preflight_lifecycle_observations.store(0, std::memory_order_relaxed);
+    g_preflight_observed_installed_bundle.store(false,
+                                                std::memory_order_relaxed);
+    g_preflight_observed_reserved_start.store(false, std::memory_order_relaxed);
+    g_preflight_lifecycle_service.store(&service, std::memory_order_release);
+  }
+
+  /** @brief Clears provider-visible service ownership. */
+  ~ScopedPreflightLifecycleObservation() noexcept {
+    g_preflight_lifecycle_service.store(nullptr, std::memory_order_release);
+  }
+
+  /** @brief Prevents overlapping observer installations. */
+  ScopedPreflightLifecycleObservation(
+      const ScopedPreflightLifecycleObservation&) = delete;
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedPreflightLifecycleObservation& operator=(
+      const ScopedPreflightLifecycleObservation&) = delete;
+};
+
 Node make_node(int id, std::string type, std::string subtype) {
   Node node;
   node.id = id;
@@ -287,6 +348,34 @@ NodeOutput execute_host_preparation_source(
         "host-preparation source received an image input: " + node.name);
   }
   g_host_preparation_source_calls.fetch_add(1, std::memory_order_relaxed);
+  if (compute::ExecutionService* observed_service =
+          g_preflight_lifecycle_service.load(std::memory_order_acquire)) {
+    const compute::ExecutionLifecyclePage lifecycle =
+        observed_service->lifecycle_snapshot(0U, 4096U);
+    const std::uint64_t minimum_sequence =
+        g_preflight_lifecycle_min_sequence.load(std::memory_order_acquire);
+    const bool current_bundle_admitted = std::any_of(
+        lifecycle.records.begin(), lifecycle.records.end(),
+        [minimum_sequence](const compute::ExecutionLifecycleEvent& event) {
+          return event.sequence > minimum_sequence &&
+                 event.kind ==
+                     compute::ExecutionLifecycleEventKind::BundleAdmitted;
+        });
+    const bool installed =
+        current_bundle_admitted &&
+        lifecycle.counters.pending_candidate_count == 0U &&
+        (lifecycle.counters.admitted_standalone_run_count != 0U ||
+         lifecycle.counters.admitted_run_group_count != 0U);
+    const bool reserved_start =
+        lifecycle.counters.entered_callback_count != 0U &&
+        lifecycle.counters.live_root_reservation_count != 0U &&
+        observed_service->resource_snapshot().reserved != ResourceVector{};
+    g_preflight_observed_installed_bundle.store(installed,
+                                                std::memory_order_release);
+    g_preflight_observed_reserved_start.store(reserved_start,
+                                              std::memory_order_release);
+    g_preflight_lifecycle_observations.fetch_add(1, std::memory_order_release);
+  }
   NodeOutput output = make_image_output(
       as_int_flexible(node.parameters, "width", 64),
       as_int_flexible(node.parameters, "height", 16), 1, 4.0f);
@@ -2549,6 +2638,76 @@ TEST(ComputeServiceSplit,
     }
     runtime.stop();
   }
+}
+
+/**
+ * @brief Proves connected provider entry follows install and reserved start.
+ *
+ * @return Nothing; GoogleTest reports lifecycle, ledger, or provider-order
+ * failures.
+ * @throws Setup, graph, service, allocation, or callback exceptions unchanged.
+ * @note The provider copies the real lifecycle/ledger snapshots from inside
+ * its callback. The observed BundleAdmitted sequence must be newer than the
+ * baseline request, the candidate must already be consumed, and both entered
+ * callback plus live root counters must be nonzero.
+ */
+TEST(ComputeServiceLifecycle,
+     ConnectedPreflightProviderEntersAfterInstallAndReservedStart) {
+  register_split_ops();
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-connected-preflight-installed-start");
+  GraphRuntime::Info info;
+  info.name = "connected-preflight-installed-start";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  populate_host_preparation_failure_graph(graph);
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  (void)service.compute_parallel(graph, runtime, request);
+
+  g_host_preparation_emit_malformed_value.store(false,
+                                                std::memory_order_release);
+  g_host_preparation_source_calls.store(0, std::memory_order_relaxed);
+  g_host_preparation_plugin_calls.store(0, std::memory_order_relaxed);
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.dirty_roi = PixelRect{8, 0, 4, 4};
+  {
+    ScopedPreflightLifecycleObservation observation(execution_service);
+    EXPECT_NO_THROW((void)service.compute_parallel(graph, runtime, request));
+  }
+
+  EXPECT_EQ(g_host_preparation_source_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_host_preparation_plugin_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_preflight_lifecycle_observations.load(std::memory_order_acquire),
+            1);
+  EXPECT_TRUE(
+      g_preflight_observed_installed_bundle.load(std::memory_order_acquire));
+  EXPECT_TRUE(
+      g_preflight_observed_reserved_start.load(std::memory_order_acquire));
+  const compute::ExecutionLifecyclePage settled =
+      execution_service.lifecycle_snapshot(0U, 4096U);
+  EXPECT_EQ(settled.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(settled.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(settled.counters.live_root_reservation_count, 0U);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
+  runtime.stop();
 }
 
 /**

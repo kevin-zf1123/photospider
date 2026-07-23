@@ -275,6 +275,12 @@ Run admission 与 Graph close 使用以下两阶段协议：
    一次回滚 reservation、pending candidate 与 graph lease；未 admission 的 Run 会向 caller 发布
    精确 failure/cancellation，但不会出现在 admitted index 中。
 
+connected-parameter preflight 会跨越该点拆分工作。安装前，它会在不进入 provider code 的情况下
+冻结 topology closure、operation/device/callable、DSO lease 与完整 service root。安装后，每个
+prepared phase 会在进入 provider 前执行 reserved start，provider output 则在已安装 Run 内驱动
+依赖 output 的 dirty plan。因此这些后续 failure 使用 terminal finalization，而不是 candidate
+rollback。
+
 Graph close 会在同一个 fence 下把 graph row 从 `Open` 改为 `Closing`。如果 registration 先
 线性化，close 会在 graph index 中找到该 Run；如果 close 先线性化，`commit_admission` 会拒绝
 candidate，close 则等待其回滚。因此不会迟到 admission，也不会漏掉已 admission Run 或 in-flight
@@ -295,6 +301,13 @@ finalization 已完成，并且所有 reservation/grant 与 Run-owned graph-life
 一次后，可信 finalization path 才能注销 entry。Unregistration 只释放 registry 的
 `RunLease`；只有此后 Graph close 才能观察到 index 与 candidate count 均为空，caller future
 也才能发布已 settle completion。
+
+worker 会先 retire execution-grant/route accounting，然后在 `in_flight` 仍阻止 settlement 时，
+于 lock 外销毁 worker-local queue entry、submission、callable、DSO lease 与 Run lease；只有之后
+才递减 `in_flight` 并通知 quiescence。finalization 本身保留一个持久同步的
+`Active -> Finalizing -> Finalized` authority：removal 前 failure 会恢复 `Active` 供 trusted
+retry，并发 success 是幂等的，而 production failure 或 active obligation destruction 会
+fail-stop。
 
 ### Host 权威的资源核算
 
@@ -430,6 +443,11 @@ process-shutdown denial source 现在会 fan-out 到两个 child。
    compute-request lane，再停止并排空 graph-state lane、销毁 Graph state，但不停止任何
    process-owned execution route；
 7. 让 `ExecutionService` 和无关 Graph Run 继续运行。
+
+`Open -> Closing` linearize 后，cancellation 不能作为 recoverable error 逃逸：完整 fan-out 后
+收纳 cleanup callback failure；如果 synchronization/structural failure 可能丢失预分配
+cancellation record 或 settlement obligation，则采取 fail-stop。process
+`Accepting -> Stopping` 后遵循相同规则。
 
 实现会把 registry fence 与本地双 lane 顺序组合起来，而不会恢复旧的 single-lane 模型。Graph
 close 会注销每个 Run、移除空 row、停止/排空 compute-request lane，再停止/排空 graph-state lane

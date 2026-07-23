@@ -287,11 +287,15 @@ realtime request 的两个 child Run；immutable deadline 会在有界 observati
 active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。这是
 process-owned `RunLifecycleRegistry` 现在会在 capture 或 planning 前开始 candidate、保留 Graph
 lifetime lease，并原子安装一个 standalone Run 或包含两个 realtime child 的完整 bundle。
-Empty/no-op 与 connected-preflight 路径使用相同的 admission/finalization 边界。Graph close 与
-process shutdown 会通过该 registry 发起 cancellation，并在 unregistration 前等待精确
-physical/resource settlement。这仍是 cooperative 而非 preemptive execution；不声称支持
-provider preemption 或 public Host/CLI/IPC cancellation。Commit policy 在概念上仍与
-`ComputeIntent` 分离，因为 HP/RT intent 语义既不定义可见性，也不定义 cancellation authority。
+Empty/no-op 与 connected-preflight 路径使用相同的 admission/finalization 边界。connected
+preflight 会在不进入 provider 的情况下冻结 provider/device/callable 与完整 service root；
+provider 只在 bundle installation 与 reserved start 后进入，其 output 会在已安装 Run 内驱动
+dirty planning。Graph close 与 process shutdown 会通过该 registry 发起 cancellation，并在
+unregistration 前等待精确 physical/resource settlement。worker-local queue/callable/lease owner
+会在 settlement notification 前 retire，持久 finalization authority 不能被静默丢弃。这仍是
+cooperative 而非 preemptive execution；不声称支持 provider preemption 或 public Host/CLI/IPC
+cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent 语义既不定义
+可见性，也不定义 cancellation authority。
 
 ## GlobalHighPrecision
 

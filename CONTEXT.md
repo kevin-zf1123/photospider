@@ -52,11 +52,19 @@ to HP, every candidate receives a graph-wide checked generation, same-key
 pending work coalesces behind one reserved ticket, and exact generation joins
 instance/revision validation before visible commit. RT publishes before opening
 its `RunGroup` sibling gate, and later stale HP or failed newer work cannot roll
-back an already valid RT proxy. Do not describe the remaining accepted targets
-as current: issue #75 policy-only scheduler ABI generation and issue #76 final
+back an already valid RT proxy. Issue #75 makes the policy-only scheduler ABI,
+closed private execution routes, route-aware device freezing, and reserved
+start current. Issue #76 makes the process-owned
 `ExecutionService::RunLifecycleRegistry`, graph-close/process-shutdown fence,
-and lifecycle/telemetry invariants remain future. The general `Value` model,
-heterogeneous executors, server control plane, and isolated plugin workers also
+exact lifecycle/resource settlement, and bounded lifecycle telemetry current.
+Connected-parameter preflight now freezes provider/device/callable and complete
+service reservations before admission, enters providers only after atomic
+bundle installation and reserved start, and performs output-dependent dirty
+planning inside the installed Run. Worker settlement retires its local queue,
+callable, lease, and grant owners before publishing quiescence; persistent
+finalization authority and irreversible close/shutdown cancellation fail stop
+rather than silently lose cleanup obligations. The general `Value` model,
+heterogeneous executors, server control plane, and isolated plugin workers
 remain later target work.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;

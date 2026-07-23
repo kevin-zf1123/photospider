@@ -41,11 +41,14 @@ void observe_dispatch_cancellation(const ComputeRunLease& lease) {
  * @param plan Complete Run-owned submission plan being prepared.
  * @return Nothing when every aligned operation slot is populated.
  * @throws std::logic_error when plan vectors violate their alignment invariant.
- * @throws GraphError with NoOperation for the first missing implementation.
+ * @throws GraphError with ComputeError for the first missing implementation.
  * @throws std::bad_alloc if construction of failure context cannot allocate.
  * @note This validation belongs to admission-aware production preparation.
  * Generic TaskSubmissionPlan construction preserves its historical ability to
  * represent an unresolved operation for storage and worker-failure tests.
+ * Production parallel compute historically reports a missing prepared
+ * operation through its ComputeError boundary after dispatch; eager validation
+ * preserves that public category while moving failure before installation.
  */
 void validate_prepared_operations(const GraphModel& graph,
                                   const TaskSubmissionPlan& plan) {
@@ -60,7 +63,7 @@ void validate_prepared_operations(const GraphModel& graph,
       continue;
     }
     const Node& node = graph.node(execution_order[i]);
-    throw GraphError(GraphErrc::NoOperation,
+    throw GraphError(GraphErrc::ComputeError,
                      "No op for " + node.type + ":" + node.subtype);
   }
 }

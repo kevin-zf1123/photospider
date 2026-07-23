@@ -187,6 +187,21 @@ enum class ComputeRunArbiterState : std::uint8_t {
   Terminal,
 };
 
+/**
+ * @brief Separates cancellation acceptance from cleanup callback failure.
+ *
+ * @throws Nothing for value movement.
+ * @note Synchronization and plan-publication failures are not stored here;
+ * they still escape the internal dispatch boundary.
+ */
+struct ComputeRunCancellationDispatchResult {
+  /** @brief True only when cancellation won the child terminal arbiter. */
+  bool accepted = false;
+  /** @brief First cleanup callback failure after all callbacks were attempted.
+   */
+  std::exception_ptr callback_failure;
+};
+
 }  // namespace
 
 /**
@@ -247,6 +262,21 @@ class ComputeRunControl {
    * Cleanup then runs outside `mutex`.
    */
   bool request_cancellation(
+      ComputeRunCancellationReason reason,
+      std::atomic<bool>* request_child_cancellation_won = nullptr);
+
+  /**
+   * @brief Performs cancellation while returning callback failure separately.
+   * @param reason Stable reason proposed by a trusted private source.
+   * @param request_child_cancellation_won Optional request-level winner latch.
+   * @return Acceptance plus the first cleanup callback failure.
+   * @throws Synchronization or plan-publication exceptions.
+   * @note Every selected cleanup callback is attempted. This seam lets the
+   * post-lifecycle-linearization caller contain callback code without
+   * misclassifying a synchronization failure as recoverable.
+   */
+  ComputeRunCancellationDispatchResult
+  request_cancellation_containing_callbacks(
       ComputeRunCancellationReason reason,
       std::atomic<bool>* request_child_cancellation_won = nullptr);
 
@@ -475,11 +505,25 @@ bool ComputeRunControl::publish_terminal(ComputeRunTerminalOutcome outcome) {
 bool ComputeRunControl::request_cancellation(
     ComputeRunCancellationReason reason,
     std::atomic<bool>* request_child_cancellation_won) {
+  ComputeRunCancellationDispatchResult result =
+      request_cancellation_containing_callbacks(reason,
+                                                request_child_cancellation_won);
+  if (result.callback_failure) {
+    std::rethrow_exception(result.callback_failure);
+  }
+  return result.accepted;
+}
+
+/** @copydoc ComputeRunControl::request_cancellation_containing_callbacks */
+ComputeRunCancellationDispatchResult
+ComputeRunControl::request_cancellation_containing_callbacks(
+    ComputeRunCancellationReason reason,
+    std::atomic<bool>* request_child_cancellation_won) {
   TaskSubmissionPlan* plan = nullptr;
   {
     std::lock_guard<std::mutex> lock(mutex);
     if (arbiter_state != ComputeRunArbiterState::Open) {
-      return false;
+      return {};
     }
     terminal_outcome = ComputeRunTerminalOutcome{
         ComputeRunTerminalKind::Cancelled, nullptr, reason};
@@ -514,10 +558,7 @@ bool ComputeRunControl::request_cancellation(
       }
     }
   }
-  if (first_callback_failure) {
-    std::rethrow_exception(first_callback_failure);
-  }
-  return true;
+  return ComputeRunCancellationDispatchResult{true, first_callback_failure};
 }
 
 /** @copydoc ComputeRunControl::observe_cancellation */
@@ -831,16 +872,14 @@ bool ComputeRequestCancellationSource::request_cancellation(
   }
   std::exception_ptr first_child_failure;
   for (const ComputeRunCancellationSource& child : children) {
-    try {
-      const std::shared_ptr<ComputeRunControl> child_control =
-          child.control_.lock();
-      if (child_control != nullptr) {
-        (void)child_control->request_cancellation(
-            reason, &control_->child_cancellation_won);
-      }
-    } catch (...) {
-      if (!first_child_failure) {
-        first_child_failure = std::current_exception();
+    const std::shared_ptr<ComputeRunControl> child_control =
+        child.control_.lock();
+    if (child_control != nullptr) {
+      ComputeRunCancellationDispatchResult result =
+          child_control->request_cancellation_containing_callbacks(
+              reason, &control_->child_cancellation_won);
+      if (!first_child_failure && result.callback_failure) {
+        first_child_failure = result.callback_failure;
       }
     }
   }
@@ -848,6 +887,39 @@ bool ComputeRequestCancellationSource::request_cancellation(
     std::rethrow_exception(first_child_failure);
   }
   return true;
+}
+
+/**
+ * @copydoc
+ * ComputeRequestCancellationSource::request_cancellation_after_linearization
+ */
+bool ComputeRequestCancellationSource::request_cancellation_after_linearization(
+    ComputeRunCancellationReason reason) noexcept {
+  try {
+    std::vector<ComputeRunCancellationSource> children;
+    {
+      std::lock_guard<std::mutex> lock(control_->mutex);
+      if (control_->accepted_reason.has_value()) {
+        return false;
+      }
+      control_->accepted_reason = reason;
+      children.swap(control_->child_sources);
+    }
+    if (after_linearization_observer_ != nullptr) {
+      after_linearization_observer_(after_linearization_observer_context_);
+    }
+    for (const ComputeRunCancellationSource& child : children) {
+      const std::shared_ptr<ComputeRunControl> child_control =
+          child.control_.lock();
+      if (child_control != nullptr) {
+        (void)child_control->request_cancellation_containing_callbacks(
+            reason, &control_->child_cancellation_won);
+      }
+    }
+    return true;
+  } catch (...) {
+    std::terminate();
+  }
 }
 
 /** @copydoc ComputeRunSettlementObserver::terminal_outcome */

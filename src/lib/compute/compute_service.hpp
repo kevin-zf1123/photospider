@@ -479,13 +479,14 @@ class ComputeService {
    * @param hp_run_lease Candidate HP lease.
    * @param rt_run_lease Candidate RT lease for realtime, otherwise null.
    * @param sibling_commit_gate Realtime RT-first gate, otherwise null.
-   * @return Complete unpublished intent state owning all required dirty phase
-   * reservations and ready/index staging.
-   * @throws GraphError or standard exceptions from validation, preflight,
-   * planning, operation lookup, reservation, and staging.
-   * @note Connected-parameter provider results remain request-local during
-   * candidate preparation. No physical ready entry, Run phase, lifecycle
-   * record, Graph output, or proxy output is published.
+   * @return Complete unpublished intent state owning provider-free connected
+   * preflight staging; output-dependent dirty domains are prepared later.
+   * @throws GraphError or standard exceptions from validation, topology,
+   * operation lookup, resource reservation, and preflight staging.
+   * @note Candidate preparation freezes connected-preflight providers,
+   * devices, callables, and service reservations without entering provider
+   * code. No physical callback, Run phase, lifecycle record, Graph output, or
+   * proxy output is published.
    */
   std::unique_ptr<PreparedIntentUpdateState> prepare_intent_update(
       GraphModel& graph, const ExecutionStrategy& strategy,
@@ -498,10 +499,14 @@ class ComputeService {
    * @brief Executes one installed prepared dirty intent request.
    * @param prepared Complete unpublished state from prepare_intent_update().
    * @return Mutable selected-domain output.
-   * @throws GraphError or standard exceptions from coordination, execution,
-   * commit policy, telemetry, or validation.
+   * @throws GraphError or standard exceptions from installed preflight,
+   * output-dependent dirty planning/staging, coordination, execution, commit
+   * policy, telemetry, or validation.
    * @note The caller must atomically install the matching standalone/group
-   * bundle before entry. The preparation is consumed exactly once.
+   * bundle before entry. Connected providers enter only from a pre-reserved
+   * start after that installation; their immutable outputs then drive HP/RT
+   * dirty-domain preparation inside the installed Run. The preparation is
+   * consumed exactly once.
    */
   NodeOutput& execute_prepared_intent_update(
       std::unique_ptr<PreparedIntentUpdateState> prepared);

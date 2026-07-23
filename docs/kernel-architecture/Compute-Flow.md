@@ -365,11 +365,16 @@ pending owner, and still denies stale commit if cancellation arrives late.
 The process-owned `RunLifecycleRegistry` now begins a candidate before capture
 or planning, retains a Graph lifetime lease, and atomically installs either one
 standalone Run or both realtime children as a complete bundle. Empty/no-op and
-connected-preflight paths use the same admission/finalization boundary. Graph
-close and process shutdown cancel through that registry and wait for exact
-physical/resource settlement before unregistration. This remains cooperative
-rather than preemptive execution; provider preemption and public Host/CLI/IPC
-cancellation are not claimed.
+connected-preflight paths use the same admission/finalization boundary.
+Connected preflight freezes provider/device/callable and complete service roots
+without provider entry; providers enter only after bundle installation and
+reserved start, and their output drives dirty planning inside the installed
+Run. Graph close and process shutdown cancel through that registry and wait for
+exact physical/resource settlement before unregistration. Worker-local
+queue/callable/lease owners retire before settlement notification, and the
+persistent finalization authority cannot be silently discarded. This remains
+cooperative rather than preemptive execution; provider preemption and public
+Host/CLI/IPC cancellation are not claimed.
 Commit policy remains conceptually separate from `ComputeIntent`, because
 HP/RT intent semantics define neither visibility nor cancellation authority.
 

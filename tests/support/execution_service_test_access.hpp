@@ -37,6 +37,17 @@ class ExecutionServiceTestAccess final {
       std::size_t released_size, std::size_t released_capacity) noexcept;
 
   /**
+   * @brief Repository-test callback after one worker QueueEntry is destroyed.
+   * @param context Opaque fixture state.
+   * @param run_id Exact observed Run identity.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The Run remains non-settleable through `in_flight` during callback.
+   */
+  using WorkerEntryRetirementObserver =
+      void (*)(void* context, compute::ComputeRunId run_id) noexcept;
+
+  /**
    * @brief Releases one initial-submission vector through the production seam.
    * @param submissions Initial values whose storage should be retired.
    * @return Nothing.
@@ -75,6 +86,33 @@ class ExecutionServiceTestAccess final {
       compute::ExecutionService& service) noexcept {
     service.initial_submission_storage_observer_ = nullptr;
     service.initial_submission_storage_observer_context_ = nullptr;
+  }
+
+  /**
+   * @brief Installs the deterministic worker-entry retirement observer.
+   * @param service Isolated service whose worker is observed.
+   * @param observer Allocation-free callback, or null to disable.
+   * @param context Opaque context, or null when disabling.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void set_worker_entry_retirement_observer(
+      compute::ExecutionService& service,
+      WorkerEntryRetirementObserver observer, void* context) noexcept {
+    service.worker_entry_retirement_observer_context_ = context;
+    service.worker_entry_retirement_observer_ = observer;
+  }
+
+  /**
+   * @brief Clears the worker-entry observer after the Run settles.
+   * @param service Isolated service whose observer is removed.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void clear_worker_entry_retirement_observer(
+      compute::ExecutionService& service) noexcept {
+    service.worker_entry_retirement_observer_ = nullptr;
+    service.worker_entry_retirement_observer_context_ = nullptr;
   }
 
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)

@@ -23,6 +23,10 @@ class GraphTraversalService;
 class ExecutionTaskRuntime;
 }  // namespace ps
 
+namespace ps::testing {
+class ComputeRequestCancellationSourceTestAccess;
+}  // namespace ps::testing
+
 namespace ps::compute {
 class ComputeRunControl;
 class ComputeRunCancellationSlot;
@@ -680,6 +684,19 @@ class ComputeRequestCancellationSource final {
                                 ComputeRunCancellationReason::ExplicitRequest);
 
   /**
+   * @brief Fans out an already-committed lifecycle cancellation without unwind.
+   * @param reason GraphClose or ProcessShutdown selected by the registry.
+   * @return True only for the first request-level acceptance.
+   * @throws Nothing; synchronization/structural failure terminates, while
+   * cleanup callback failures are contained after every child is attempted.
+   * @note Call only after a lifecycle Closing/Stopping transition has
+   * linearized. At that point rollback is impossible and losing the
+   * preallocated dispatch record would violate settlement progress.
+   */
+  bool request_cancellation_after_linearization(
+      ComputeRunCancellationReason reason) noexcept;
+
+  /**
    * @brief Returns the stable accepted request reason when requested.
    * @return Stable first request reason, otherwise nullopt.
    * @throws std::system_error when coordinator locking fails.
@@ -703,6 +720,23 @@ class ComputeRequestCancellationSource final {
   accepted_child_cancellation_reason() const;
 
  private:
+  friend class ::ps::testing::ComputeRequestCancellationSourceTestAccess;
+
+  /**
+   * @brief Repository-test observer after request-reason linearization.
+   * @param context Opaque test context.
+   * @return Nothing.
+   * @throws Test-injected synchronization exception.
+   * @note Production leaves this pointer null. The post-lifecycle method
+   * catches any escape and terminates before a dispatch record can be lost.
+   */
+  using AfterLinearizationObserver = void (*)(void* context);
+
+  /** @brief Optional repository-test post-linearization observer. */
+  AfterLinearizationObserver after_linearization_observer_ = nullptr;
+  /** @brief Opaque context paired with after_linearization_observer_. */
+  void* after_linearization_observer_context_ = nullptr;
+
   /** @brief Shared coordinator state retained by request/test launch owners. */
   std::shared_ptr<ComputeRequestCancellationControl> control_;
 };

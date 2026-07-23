@@ -323,6 +323,15 @@ struct ExecutionService::RunState final
 
   /** @brief Whether dependency release may publish additional ready work. */
   bool accepting = true;
+
+  /**
+   * @brief Whether this physical phase owns the active ready-store Run row.
+   *
+   * @note Multiple provider-free phases may be prepared for one ComputeRun id.
+   * Cancellation marks every phase, but only the currently published phase may
+   * erase that id from the ready store.
+   */
+  bool published = false;
 };
 
 /**
@@ -3327,8 +3336,12 @@ RunLifecycleAdmissionHandle ExecutionService::commit_graph_admission_group(
 
 /** @copydoc ExecutionService::finalize_graph_admission */
 void ExecutionService::finalize_graph_admission(
-    RunLifecycleAdmissionHandle& handle) {
-  lifecycle_registry_->finalize_admission(handle);
+    RunLifecycleAdmissionHandle& handle) noexcept {
+  try {
+    lifecycle_registry_->finalize_admission(handle);
+  } catch (...) {
+    std::terminate();
+  }
 }
 
 /** @copydoc ExecutionService::permits_visible_commit */
@@ -3669,6 +3682,7 @@ void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {
           GraphErrc::ComputeError,
           "ExecutionService bounded ready store rejected initial work.");
     }
+    run->published = true;
     pool_->advance_worker_notification_epoch();
   }
   pool_->ready_cv.notify_all();
@@ -3682,8 +3696,10 @@ void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {
   }
 
   {
-    std::lock_guard<std::mutex> lock(pool_->mutex);
+    std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+    std::lock_guard<std::mutex> run_lock(run->mutex);
     pool_->ready_store.retire_run(run);
+    run->published = false;
     run->reservation.reset();
   }
 
@@ -3945,7 +3961,9 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
       if (!run->cancelled) {
         run->accepting = false;
       }
-      (void)pool_->ready_store.erase_run(run);
+      if (run->published) {
+        (void)pool_->ready_store.erase_run(run);
+      }
       pool_->advance_worker_notification_epoch();
     }
     pool_->ready_cv.notify_all();
@@ -3968,12 +3986,55 @@ void ExecutionService::cancel_run(
       }
       run->first_exception = nullptr;
       run->accepting = false;
-      (void)pool_->ready_store.erase_run(run);
+      if (run->published) {
+        (void)pool_->ready_store.erase_run(run);
+      }
       pool_->advance_worker_notification_epoch();
     }
     pool_->ready_cv.notify_all();
     run->settled_cv.notify_all();
   } catch (...) {
+  }
+}
+
+/** @copydoc ExecutionService::retire_worker_entry */
+void ExecutionService::retire_worker_entry(
+    std::shared_ptr<QueueEntry>& entry,
+    const std::shared_ptr<RunState>& run) noexcept {
+  try {
+    const Device device = entry->submission.metadata().device();
+    {
+      std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+      std::lock_guard<std::mutex> run_lock(run->mutex);
+      if (run->in_flight <= 0) {
+        std::terminate();
+      }
+      entry->execution_grant.reset();
+      if (!pool_->physical_routes.finish(run->route, device)) {
+        std::terminate();
+      }
+      pool_->advance_worker_notification_epoch();
+    }
+
+    entry.reset();
+    if (worker_entry_retirement_observer_ != nullptr) {
+      worker_entry_retirement_observer_(
+          worker_entry_retirement_observer_context_, run->id);
+    }
+
+    bool settled = false;
+    {
+      std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+      std::lock_guard<std::mutex> run_lock(run->mutex);
+      --run->in_flight;
+      settled = run->settled();
+    }
+    if (settled) {
+      run->settled_cv.notify_all();
+    }
+    pool_->ready_cv.notify_all();
+  } catch (...) {
+    std::terminate();
   }
 }
 
@@ -4239,24 +4300,7 @@ void ExecutionService::worker_loop(
       }
     }
     if (skip_callback) {
-      {
-        std::lock_guard<std::mutex> pool_lock(pool_->mutex);
-        std::lock_guard<std::mutex> run_lock(run->mutex);
-        if (run->in_flight <= 0) {
-          std::terminate();
-        }
-        entry->execution_grant.reset();
-        --run->in_flight;
-        if (!pool_->physical_routes.finish(
-                run->route, entry->submission.metadata().device())) {
-          std::terminate();
-        }
-        pool_->advance_worker_notification_epoch();
-        if (run->settled()) {
-          run->settled_cv.notify_all();
-        }
-      }
-      pool_->ready_cv.notify_all();
+      retire_worker_entry(entry, run);
       continue;
     }
 
@@ -4286,24 +4330,7 @@ void ExecutionService::worker_loop(
     tls_worker_id_ = -1;
     tls_run_state_ = nullptr;
     tls_service_ = nullptr;
-    {
-      std::lock_guard<std::mutex> pool_lock(pool_->mutex);
-      std::lock_guard<std::mutex> run_lock(run->mutex);
-      if (run->in_flight <= 0) {
-        std::terminate();
-      }
-      entry->execution_grant.reset();
-      --run->in_flight;
-      if (!pool_->physical_routes.finish(
-              run->route, entry->submission.metadata().device())) {
-        std::terminate();
-      }
-      pool_->advance_worker_notification_epoch();
-      if (run->settled()) {
-        run->settled_cv.notify_all();
-      }
-    }
-    pool_->ready_cv.notify_all();
+    retire_worker_entry(entry, run);
   }
 }
 

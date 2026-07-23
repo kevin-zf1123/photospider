@@ -45,6 +45,50 @@ struct RunLifecycleAdmissionCandidateControl final {
   std::atomic<bool> resolved{false};
 };
 
+/**
+ * @brief Persistent synchronized authority for one installed bundle.
+ *
+ * @throws std::system_error when finalization serialization fails.
+ * @note The control is allocated before admission linearization. Active,
+ * Finalizing, and Finalized form a retryable state machine shared by every
+ * concurrent call on the same move-only handle.
+ */
+struct RunLifecycleAdmissionHandleControl final {
+  /**
+   * @brief Monotonic state except a failed owner returns Finalizing to Active.
+   * @throws Nothing for value operations.
+   */
+  enum class State : std::uint8_t {
+    /** @brief Installed bundle still requires a finalization owner. */
+    Active,
+    /** @brief Exactly one caller currently performs registry settlement. */
+    Finalizing,
+    /** @brief Registry retirement completed and repeat calls are no-ops. */
+    Finalized,
+  };
+
+  /**
+   * @brief Binds one preallocated authority to its registry and bundle.
+   * @param registry_in Stable registry that outlives installed handles.
+   * @param bundle_id_in Fresh nonzero installed bundle identity.
+   * @throws Nothing.
+   */
+  RunLifecycleAdmissionHandleControl(RunLifecycleRegistry* registry_in,
+                                     std::uint64_t bundle_id_in) noexcept
+      : registry(registry_in), bundle_id(bundle_id_in) {}
+
+  /** @brief Stable registry that must perform settlement. */
+  RunLifecycleRegistry* const registry;
+  /** @brief Stable nonzero installed bundle identity. */
+  const std::uint64_t bundle_id;
+  /** @brief Lock-free destructor-visible obligation state. */
+  std::atomic<State> state{State::Active};
+  /** @brief Serializes owner selection and failed-owner retry. */
+  std::mutex mutex;
+  /** @brief Wakes concurrent callers after owner success or failure. */
+  std::condition_variable changed;
+};
+
 namespace {
 
 /**
@@ -594,15 +638,30 @@ void RunLifecycleAdmissionCandidate::reset() noexcept {
 /** @copydoc RunLifecycleAdmissionHandle::RunLifecycleAdmissionHandle */
 RunLifecycleAdmissionHandle::RunLifecycleAdmissionHandle(
     RunLifecycleAdmissionHandle&& other) noexcept
-    : registry_(std::exchange(other.registry_, nullptr)),
-      bundle_id_(std::exchange(other.bundle_id_, 0U)) {}  // NOLINT
+    : control_(std::move(other.control_)) {}  // NOLINT
+
+/** @copydoc RunLifecycleAdmissionHandle::~RunLifecycleAdmissionHandle */
+RunLifecycleAdmissionHandle::~RunLifecycleAdmissionHandle() noexcept {
+  if (control_ != nullptr &&
+      control_->state.load(std::memory_order_acquire) !=
+          RunLifecycleAdmissionHandleControl::State::Finalized) {
+    std::terminate();
+  }
+}
+
+/** @copydoc RunLifecycleAdmissionHandle::active */
+bool RunLifecycleAdmissionHandle::active() const noexcept {
+  return control_ != nullptr &&
+         control_->state.load(std::memory_order_acquire) !=
+             RunLifecycleAdmissionHandleControl::State::Finalized;
+}
 
 /** @copydoc RunLifecycleAdmissionHandle::bundle_id */
 std::uint64_t RunLifecycleAdmissionHandle::bundle_id() const {
   if (!active()) {
     throw std::logic_error("Run lifecycle admission handle is inactive.");
   }
-  return bundle_id_;
+  return control_->bundle_id;
 }
 
 /** @copydoc RunLifecycleRegistry::RunLifecycleRegistry */
@@ -744,6 +803,8 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_standalone(
   const std::uint64_t bundle_id = mint_registry_identity(
       bundle_identity_counter(),
       "Run lifecycle bundle identity space is exhausted.");
+  auto handle_control =
+      std::make_shared<RunLifecycleAdmissionHandleControl>(this, bundle_id);
   std::list<Impl::AdmissionRecord> staged;
   Impl::AdmissionRecord record;
   record.bundle_id = bundle_id;
@@ -794,7 +855,7 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_standalone(
   }
   candidate.control_.reset();
   impl_->changed.notify_all();
-  return RunLifecycleAdmissionHandle(this, bundle_id);
+  return RunLifecycleAdmissionHandle(std::move(handle_control));
 }
 
 /** @copydoc RunLifecycleRegistry::commit_realtime_group */
@@ -820,6 +881,8 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_realtime_group(
   const std::uint64_t bundle_id = mint_registry_identity(
       bundle_identity_counter(),
       "Run lifecycle bundle identity space is exhausted.");
+  auto handle_control =
+      std::make_shared<RunLifecycleAdmissionHandleControl>(this, bundle_id);
   std::list<Impl::AdmissionRecord> staged;
   Impl::AdmissionRecord record;
   record.bundle_id = bundle_id;
@@ -880,159 +943,206 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_realtime_group(
   }
   candidate.control_.reset();
   impl_->changed.notify_all();
-  return RunLifecycleAdmissionHandle(this, bundle_id);
+  return RunLifecycleAdmissionHandle(std::move(handle_control));
 }
 
 /** @copydoc RunLifecycleRegistry::finalize_admission */
 void RunLifecycleRegistry::finalize_admission(
     RunLifecycleAdmissionHandle& handle) {
-  if (!handle.active() || handle.registry_ != this) {
+  const std::shared_ptr<RunLifecycleAdmissionHandleControl> control =
+      handle.control_;
+  if (control == nullptr || control->registry != this) {
     throw std::invalid_argument(
         "Run lifecycle finalization requires a live local handle.");
   }
-  const std::uint64_t bundle_id = handle.bundle_id_;
-  std::array<ComputeRunSettlementObserver, 2U> settlement_observers;
-  std::array<ComputeRunTerminalOutcome, 2U> outcomes;
-  std::size_t run_count = 0U;
-  GraphInstanceId graph_instance_id{1U};
-  std::uint64_t run_group_id = 0U;
   {
-    std::lock_guard<std::mutex> lock(impl_->fence);
-    const auto admission = impl_->find_admission(bundle_id);
-    if (admission == impl_->admissions.end()) {
-      throw std::invalid_argument(
-          "Run lifecycle finalization names no installed bundle.");
+    std::unique_lock<std::mutex> lock(control->mutex);
+    for (;;) {
+      const RunLifecycleAdmissionHandleControl::State state =
+          control->state.load(std::memory_order_acquire);
+      if (state == RunLifecycleAdmissionHandleControl::State::Finalized) {
+        return;
+      }
+      if (state == RunLifecycleAdmissionHandleControl::State::Active) {
+        control->state.store(
+            RunLifecycleAdmissionHandleControl::State::Finalizing,
+            std::memory_order_release);
+        break;
+      }
+      control->changed.wait(lock);
     }
-    if (admission->runs.empty() ||
-        admission->runs.size() > settlement_observers.size()) {
-      throw std::logic_error(
-          "Run lifecycle bundle has an invalid child count.");
-    }
-    graph_instance_id = admission->graph_instance_id;
-    run_group_id = admission->run_group_id;
-    for (Impl::RunRecord& run : admission->runs) {
-      if (!run.lease.has_value()) {
+  }
+
+  const std::uint64_t bundle_id = control->bundle_id;
+  try {
+    std::array<ComputeRunSettlementObserver, 2U> settlement_observers;
+    std::array<ComputeRunTerminalOutcome, 2U> outcomes;
+    std::size_t run_count = 0U;
+    GraphInstanceId graph_instance_id{1U};
+    std::uint64_t run_group_id = 0U;
+    {
+      std::lock_guard<std::mutex> lock(impl_->fence);
+      const auto admission = impl_->find_admission(bundle_id);
+      if (admission == impl_->admissions.end()) {
+        throw std::invalid_argument(
+            "Run lifecycle finalization names no installed bundle.");
+      }
+      if (admission->runs.empty() ||
+          admission->runs.size() > settlement_observers.size()) {
         throw std::logic_error(
-            "Run lifecycle installed record has no registry lease.");
+            "Run lifecycle bundle has an invalid child count.");
       }
-      settlement_observers[run_count++] = run.lease->settlement_observer();
-    }
-  }
-
-  for (std::size_t index = 0U; index < run_count; ++index) {
-    const std::optional<ComputeRunTerminalOutcome> outcome =
-        settlement_observers[index].terminal_outcome();
-    if (!outcome.has_value()) {
-      throw std::logic_error(
-          "Run lifecycle finalization requires terminal child Runs.");
-    }
-    outcomes[index] = *outcome;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(impl_->fence);
-    const auto admission = impl_->find_admission(bundle_id);
-    if (admission == impl_->admissions.end() ||
-        admission->graph_instance_id != graph_instance_id ||
-        admission->run_group_id != run_group_id ||
-        admission->runs.size() != run_count) {
-      throw std::logic_error(
-          "Run lifecycle bundle changed during terminal observation.");
-    }
-    std::size_t index = 0U;
-    for (Impl::RunRecord& run : admission->runs) {
-      if (!run.finalizing) {
-        run.finalizing = true;
-        publish_committed_transition([&]() {
-          impl_->telemetry.publish(ExecutionLifecycleEventKind::RunTerminal,
-                                   terminal_category(outcomes[index]),
-                                   admission->graph_instance_id.value(),
-                                   run.run_id.value(), admission->run_group_id,
-                                   bundle_id, impl_->counters_locked());
-        });
-      }
-      ++index;
-    }
-  }
-
-  for (std::size_t index = 0U; index < run_count; ++index) {
-    settlement_observers[index].wait_until_registry_lease();
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(impl_->fence);
-    const auto admission = impl_->find_admission(bundle_id);
-    if (admission == impl_->admissions.end()) {
-      throw std::logic_error(
-          "Run lifecycle bundle disappeared during finalization.");
-    }
-    for (Impl::RunRecord& run : admission->runs) {
-      if (!run.quiescent) {
-        run.quiescent = true;
-        publish_committed_transition([&]() {
-          impl_->telemetry.publish(ExecutionLifecycleEventKind::RunQuiescent,
-                                   ExecutionLifecycleCategory::None,
-                                   admission->graph_instance_id.value(),
-                                   run.run_id.value(), admission->run_group_id,
-                                   bundle_id, impl_->counters_locked());
-        });
+      graph_instance_id = admission->graph_instance_id;
+      run_group_id = admission->run_group_id;
+      for (Impl::RunRecord& run : admission->runs) {
+        if (!run.lease.has_value()) {
+          throw std::logic_error(
+              "Run lifecycle installed record has no registry lease.");
+        }
+        settlement_observers[run_count++] = run.lease->settlement_observer();
       }
     }
-  }
 
-  for (std::size_t index = 0U; index < run_count; ++index) {
-    settlement_observers[index].wait_for_resource_settlement();
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(impl_->fence);
-    const auto admission = impl_->find_admission(bundle_id);
-    if (admission == impl_->admissions.end()) {
-      throw std::logic_error(
-          "Run lifecycle bundle disappeared during resource settlement.");
-    }
-    for (Impl::RunRecord& run : admission->runs) {
-      if (!run.quiescent) {
+    for (std::size_t index = 0U; index < run_count; ++index) {
+      const std::optional<ComputeRunTerminalOutcome> outcome =
+          settlement_observers[index].terminal_outcome();
+      if (!outcome.has_value()) {
         throw std::logic_error(
-            "Run lifecycle resource settlement preceded quiescence.");
+            "Run lifecycle finalization requires terminal child Runs.");
       }
-      if (!run.resource_settled) {
-        run.resource_settled = true;
+      outcomes[index] = *outcome;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(impl_->fence);
+      const auto admission = impl_->find_admission(bundle_id);
+      if (admission == impl_->admissions.end() ||
+          admission->graph_instance_id != graph_instance_id ||
+          admission->run_group_id != run_group_id ||
+          admission->runs.size() != run_count) {
+        throw std::logic_error(
+            "Run lifecycle bundle changed during terminal observation.");
+      }
+      std::size_t index = 0U;
+      for (Impl::RunRecord& run : admission->runs) {
+        if (!run.finalizing) {
+          run.finalizing = true;
+          publish_committed_transition([&]() {
+            impl_->telemetry.publish(
+                ExecutionLifecycleEventKind::RunTerminal,
+                terminal_category(outcomes[index]),
+                admission->graph_instance_id.value(), run.run_id.value(),
+                admission->run_group_id, bundle_id, impl_->counters_locked());
+          });
+        }
+        ++index;
+      }
+    }
+
+    if (finalization_wait_observer_ != nullptr) {
+      finalization_wait_observer_(finalization_wait_observer_context_,
+                                  bundle_id, false);
+    }
+    for (std::size_t index = 0U; index < run_count; ++index) {
+      settlement_observers[index].wait_until_registry_lease();
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(impl_->fence);
+      const auto admission = impl_->find_admission(bundle_id);
+      if (admission == impl_->admissions.end()) {
+        throw std::logic_error(
+            "Run lifecycle bundle disappeared during finalization.");
+      }
+      for (Impl::RunRecord& run : admission->runs) {
+        if (!run.quiescent) {
+          run.quiescent = true;
+          publish_committed_transition([&]() {
+            impl_->telemetry.publish(
+                ExecutionLifecycleEventKind::RunQuiescent,
+                ExecutionLifecycleCategory::None,
+                admission->graph_instance_id.value(), run.run_id.value(),
+                admission->run_group_id, bundle_id, impl_->counters_locked());
+          });
+        }
+      }
+    }
+
+    if (finalization_wait_observer_ != nullptr) {
+      finalization_wait_observer_(finalization_wait_observer_context_,
+                                  bundle_id, true);
+    }
+    for (std::size_t index = 0U; index < run_count; ++index) {
+      settlement_observers[index].wait_for_resource_settlement();
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(impl_->fence);
+      const auto admission = impl_->find_admission(bundle_id);
+      if (admission == impl_->admissions.end()) {
+        throw std::logic_error(
+            "Run lifecycle bundle disappeared during resource settlement.");
+      }
+      for (Impl::RunRecord& run : admission->runs) {
+        if (!run.quiescent) {
+          throw std::logic_error(
+              "Run lifecycle resource settlement preceded quiescence.");
+        }
+        if (!run.resource_settled) {
+          run.resource_settled = true;
+          publish_committed_transition([&]() {
+            impl_->telemetry.publish(
+                ExecutionLifecycleEventKind::ResourceSettled,
+                ExecutionLifecycleCategory::None,
+                admission->graph_instance_id.value(), run.run_id.value(),
+                admission->run_group_id, bundle_id, impl_->counters_locked());
+          });
+        }
+      }
+      std::array<std::uint64_t, 2U> run_ids{0U, 0U};
+      std::size_t run_id_count = 0U;
+      for (const Impl::RunRecord& run : admission->runs) {
+        run_ids[run_id_count++] = run.run_id.value();
+      }
+      const auto row = impl_->find_graph(graph_instance_id);
+      if (row == impl_->rows.end()) {
+        throw std::logic_error(
+            "Run lifecycle Graph row disappeared before finalization.");
+      }
+      row->cancellation_records.remove_if(
+          [bundle_id](const Impl::CancellationDispatchRecord& record) {
+            return record.bundle_id == bundle_id;
+          });
+      impl_->admissions.erase(admission);
+      for (std::size_t index = 0U; index < run_id_count; ++index) {
         publish_committed_transition([&]() {
-          impl_->telemetry.publish(ExecutionLifecycleEventKind::ResourceSettled,
+          impl_->telemetry.publish(ExecutionLifecycleEventKind::RunUnregistered,
                                    ExecutionLifecycleCategory::None,
-                                   admission->graph_instance_id.value(),
-                                   run.run_id.value(), admission->run_group_id,
-                                   bundle_id, impl_->counters_locked());
+                                   graph_instance_id.value(), run_ids[index],
+                                   run_group_id, bundle_id,
+                                   impl_->counters_locked());
         });
       }
     }
-    std::array<std::uint64_t, 2U> run_ids{0U, 0U};
-    std::size_t run_id_count = 0U;
-    for (const Impl::RunRecord& run : admission->runs) {
-      run_ids[run_id_count++] = run.run_id.value();
+  } catch (...) {
+    try {
+      std::lock_guard<std::mutex> lock(control->mutex);
+      control->state.store(RunLifecycleAdmissionHandleControl::State::Active,
+                           std::memory_order_release);
+    } catch (...) {
+      std::terminate();
     }
-    const auto row = impl_->find_graph(graph_instance_id);
-    if (row == impl_->rows.end()) {
-      throw std::logic_error(
-          "Run lifecycle Graph row disappeared before finalization.");
-    }
-    row->cancellation_records.remove_if(
-        [bundle_id](const Impl::CancellationDispatchRecord& record) {
-          return record.bundle_id == bundle_id;
-        });
-    impl_->admissions.erase(admission);
-    for (std::size_t index = 0U; index < run_id_count; ++index) {
-      publish_committed_transition([&]() {
-        impl_->telemetry.publish(
-            ExecutionLifecycleEventKind::RunUnregistered,
-            ExecutionLifecycleCategory::None, graph_instance_id.value(),
-            run_ids[index], run_group_id, bundle_id, impl_->counters_locked());
-      });
-    }
+    control->changed.notify_all();
+    throw;
   }
-  handle.registry_ = nullptr;
-  handle.bundle_id_ = 0U;
+  try {
+    std::lock_guard<std::mutex> lock(control->mutex);
+    control->state.store(RunLifecycleAdmissionHandleControl::State::Finalized,
+                         std::memory_order_release);
+  } catch (...) {
+    std::terminate();
+  }
+  control->changed.notify_all();
   impl_->changed.notify_all();
 }
 
@@ -1093,12 +1203,7 @@ std::uint64_t RunLifecycleRegistry::begin_graph_close(
     if (record.sibling_commit_gate) {
       record.sibling_commit_gate->abort_hp_commit();
     }
-    try {
-      (void)record.cancellation->request_cancellation(reason);
-    } catch (...) {
-      // Terminal cancellation is published before callback failure; close is
-      // monotonic and must continue settlement.
-    }
+    (void)record.cancellation->request_cancellation_after_linearization(reason);
     std::lock_guard<std::mutex> lock(impl_->fence);
     publish_committed_transition([&]() {
       impl_->telemetry.publish(
@@ -1197,13 +1302,8 @@ std::uint64_t RunLifecycleRegistry::begin_service_shutdown() {
     if (record.sibling_commit_gate) {
       record.sibling_commit_gate->abort_hp_commit();
     }
-    try {
-      (void)record.cancellation->request_cancellation(
-          ComputeRunCancellationReason::ProcessShutdown);
-    } catch (...) {
-      // The accepted terminal reason is stable before any cleanup callback
-      // exception. Process shutdown remains monotonic.
-    }
+    (void)record.cancellation->request_cancellation_after_linearization(
+        ComputeRunCancellationReason::ProcessShutdown);
     std::lock_guard<std::mutex> lock(impl_->fence);
     publish_committed_transition([&]() {
       impl_->telemetry.publish(

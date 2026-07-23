@@ -188,10 +188,12 @@ child-grant release，随后清除 cycle mark，并重验 current Host state。
 失败时保留旧路由。
 
 操作选择会在 Run 准入前同时冻结实现 callback 及其 `Device`。完整 HP、dirty HP/RT
-和连接参数预检都使用同一份 route-aware inventory。每个 ready submission 都携带冻结
-的 device；如果 device 不在已配置 route/Host inventory 中，`ExecutionService` 会在
-发布 Run 前拒绝它。CPU submission 进入固定 CPU 池，Metal submission 进入单一 GPU
-lane。两个 lane 共用 ready store、policy decision、reserved-start transaction、Host
+和连接参数预检都使用同一份 route-aware inventory。connected-preflight preparation 还会在
+不进入 provider code 的情况下冻结每个 callable/DSO lease 与完整 service root；只有已安装 Run
+才能执行 reserved start 并调用 provider，之后依赖 output 的 dirty planning 仍由 Run 拥有。
+每个 ready submission 都携带冻结的 device；如果 device 不在已配置 route/Host inventory 中，
+`ExecutionService` 会在发布 Run 前拒绝它。CPU submission 进入固定 CPU 池，Metal submission
+进入单一 GPU lane。两个 lane 共用 ready store、policy decision、reserved-start transaction、Host
 ledger、Run maximum-parallelism grant、cancellation、completion、exception、reuse、
 shutdown 与 drainage 规则；不会创建第二套 device-capacity authority 或 per-Graph
 executor。

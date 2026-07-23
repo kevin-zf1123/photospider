@@ -488,13 +488,23 @@ surfaces expose no cancellation entry; IPC jobs continue to report
   `(RunId, RunLocalTaskId)`. Dirty/preflight work uses heap-owned phase contexts
   and child Run leases through the same policy, reserved-start, and completion
   boundary.
+- Connected-preflight candidate preparation freezes operation/device/callable,
+  DSO lease, and every complete service root without provider entry. Providers
+  enter only after the complete lifecycle bundle installs and reserved start
+  commits; their output then drives dirty planning inside the installed Run.
+- A worker destroys its local queue/submission/callable/lease owners outside
+  locks while `in_flight` still blocks settlement, then decrements
+  `in_flight` and notifies quiescence. Bundle finalization retains one
+  synchronized retryable/idempotent authority until unregistration.
 - Graph close first marks the exact lifecycle-registry row `Closing`, rejects
   and settles pending candidates, and requests `GraphClose` cancellation for
   every installed Run in that row. Finalization waits for terminal outcome,
   physical quiescence, graph commit/discard, exact root/child grant release,
   and registry unregistration. Only after the empty row is removed does Kernel
   stop the compute-request lane, stop the graph-state lane, and destroy Graph
-  state. Unrelated Graphs and process-owned routes continue running.
+  state. After Closing linearizes, cleanup callback failures are contained and
+  synchronization/structural failure that could lose cancellation authority
+  fails stop. Unrelated Graphs and process-owned routes continue running.
 - Process execution shutdown uses the same registry fence to stop global
   admission and close every Graph row, requests `ProcessShutdown`
   cancellation, drains every admitted Run, then retires ready work, routes,

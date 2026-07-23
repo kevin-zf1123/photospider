@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -1900,6 +1901,140 @@ class ScopedInitialSubmissionStorageObserver final {
    */
   ScopedInitialSubmissionStorageObserver& operator=(
       const ScopedInitialSubmissionStorageObserver& other) = delete;
+
+ private:
+  /** @brief Borrowed isolated service whose observer is cleared. */
+  ExecutionService* service_ = nullptr;
+};
+
+/**
+ * @brief Blocks the exact post-QueueEntry/pre-settlement worker boundary.
+ *
+ * @throws Nothing from construction; callback synchronization failure
+ * terminates because the production observer contract is noexcept.
+ * @note The probe retains only a weak callable token. Expiry at observation
+ * proves every worker-local submission/callable copy has retired.
+ */
+struct WorkerEntryRetirementProbe final {
+  /** @brief Serializes one observation/release handshake. */
+  std::mutex mutex;
+  /** @brief Wakes the test and the blocked service worker. */
+  std::condition_variable changed;
+  /** @brief Weak identity owned only by callback copies. */
+  std::weak_ptr<void> callable_owner;
+  /** @brief True after production invokes the retirement seam. */
+  bool observed = false;
+  /** @brief True when callable_owner was expired at the seam. */
+  bool callable_retired = false;
+  /** @brief True after the test permits settlement to continue. */
+  bool released = false;
+  /** @brief True if the test failed to release the worker within its bound. */
+  bool release_timed_out = false;
+  /** @brief Exact Run observed at the seam. */
+  std::uint64_t run_id = 0U;
+
+  /**
+   * @brief Arms this probe for one fresh synchronous service Run.
+   * @param owner Weak token retained only by the submitted callable.
+   * @return Nothing.
+   * @throws std::system_error when test synchronization fails.
+   */
+  void arm(std::weak_ptr<void> owner) {
+    std::lock_guard<std::mutex> lock(mutex);
+    callable_owner = std::move(owner);
+    observed = false;
+    callable_retired = false;
+    released = false;
+    release_timed_out = false;
+    run_id = 0U;
+  }
+
+  /**
+   * @brief Waits for production to retire one worker entry.
+   * @return True when observed within two seconds.
+   * @throws std::system_error when test synchronization fails.
+   */
+  bool wait_until_observed() {
+    std::unique_lock<std::mutex> lock(mutex);
+    return changed.wait_for(lock, std::chrono::seconds(2),
+                            [this]() { return observed; });
+  }
+
+  /**
+   * @brief Releases the worker to decrement in-flight and notify settlement.
+   * @return Nothing.
+   * @throws std::system_error when test synchronization fails.
+   */
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      released = true;
+    }
+    changed.notify_all();
+  }
+
+  /**
+   * @brief Observes entry retirement and blocks before settlement publication.
+   * @param context Opaque pointer to this probe.
+   * @param observed_run Exact retired entry's Run identity.
+   * @return Nothing.
+   * @throws Nothing; synchronization failure terminates.
+   */
+  static void observe(void* context, ComputeRunId observed_run) noexcept {
+    auto* probe = static_cast<WorkerEntryRetirementProbe*>(context);
+    if (probe == nullptr) {
+      std::terminate();
+    }
+    try {
+      std::unique_lock<std::mutex> lock(probe->mutex);
+      probe->callable_retired = probe->callable_owner.expired();
+      probe->run_id = observed_run.value();
+      probe->observed = true;
+      probe->changed.notify_all();
+      if (!probe->changed.wait_for(lock, std::chrono::seconds(2),
+                                   [probe]() { return probe->released; })) {
+        probe->release_timed_out = true;
+      }
+    } catch (...) {
+      std::terminate();
+    }
+  }
+};
+
+/**
+ * @brief Installs one deterministic worker-entry observer on a test service.
+ *
+ * @throws Nothing from construction and destruction.
+ * @note The owning test clears the seam only after every asynchronous Run has
+ * completed, so the borrowed probe always outlives callback entry.
+ */
+class ScopedWorkerEntryRetirementObserver final {
+ public:
+  /**
+   * @brief Installs one isolated service/probe pair.
+   * @param service Service whose workers are observed.
+   * @param probe Probe that outlives this guard.
+   * @throws Nothing.
+   */
+  ScopedWorkerEntryRetirementObserver(
+      ExecutionService& service, WorkerEntryRetirementProbe& probe) noexcept
+      : service_(&service) {
+    testing::ExecutionServiceTestAccess::set_worker_entry_retirement_observer(
+        service, &WorkerEntryRetirementProbe::observe, &probe);
+  }
+
+  /** @brief Clears the observer after all observed Runs settle. */
+  ~ScopedWorkerEntryRetirementObserver() noexcept {
+    testing::ExecutionServiceTestAccess::clear_worker_entry_retirement_observer(
+        *service_);
+  }
+
+  /** @brief Prevents duplicating observer-clearing ownership. */
+  ScopedWorkerEntryRetirementObserver(
+      const ScopedWorkerEntryRetirementObserver&) = delete;
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedWorkerEntryRetirementObserver& operator=(
+      const ScopedWorkerEntryRetirementObserver&) = delete;
 
  private:
   /** @brief Borrowed isolated service whose observer is cleared. */
@@ -6698,6 +6833,77 @@ TEST(ExecutionService, RejectsMixedRunInitialBatchBeforeExecution) {
 }
 
 /**
+ * @brief Proves worker-local callable/lease ownership retires before settle.
+ *
+ * @return Nothing; GoogleTest reports ordering, timeout, or ledger failures.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and execution.
+ * @note Sixteen real Runs block at the production post-entry-destruction
+ * seam. While blocked, the callable token must already be expired and the
+ * synchronous caller must remain unfinished because `in_flight` still guards
+ * settlement. Release then yields immediate zero-root accounting without
+ * polling.
+ */
+TEST(ExecutionService,
+     WorkerEntryRetiresCallableBeforeSettlementAcrossRepeatedRuns) {
+  ExecutionService service(1);
+  ExecutionServiceHost host;
+  WorkerEntryRetirementProbe probe;
+  ScopedWorkerEntryRetirementObserver observer(service, probe);
+
+  for (std::uint64_t iteration = 0U; iteration < 16U; ++iteration) {
+    SCOPED_TRACE(iteration);
+    ComputeRun run(make_test_submission(
+        "worker-entry-retirement-" + std::to_string(iteration),
+        1000U + iteration, 72));
+    ComputeRunLease lease = run.acquire_lease();
+    const ComputeRunTaskIdentity identity = lease.task_identity(0U);
+    std::shared_ptr<void> callable_token =
+        std::make_shared<std::uint64_t>(iteration);
+    const std::weak_ptr<void> weak_callable = callable_token;
+    std::vector<ReadyTaskSubmission> ready;
+    ready.emplace_back(std::move(lease), identity, 72, true,
+                       [owner = std::move(callable_token)](
+                           ComputeRunLease&, const ComputeRunTaskIdentity&,
+                           ExecutionTaskRuntime& runtime) {
+                         (void)owner;
+                         runtime.dec_tasks_to_complete();
+                       });
+    probe.arm(weak_callable);
+
+    auto completion = std::async(
+        std::launch::async,
+        [&service, &host, submissions = std::move(ready)]() mutable {
+          service.execute_run(host, "cpu", std::move(submissions), 1);
+        });
+    const bool observed = probe.wait_until_observed();
+    if (!observed) {
+      probe.release();
+    }
+    ASSERT_TRUE(observed);
+    {
+      std::lock_guard<std::mutex> lock(probe.mutex);
+      EXPECT_TRUE(probe.callable_retired);
+      EXPECT_EQ(probe.run_id, run.descriptor().id().value());
+    }
+    EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(5)),
+              std::future_status::timeout);
+    EXPECT_NE(service.resource_snapshot().reserved, ResourceVector{});
+
+    probe.release();
+    ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_NO_THROW(completion.get());
+    {
+      std::lock_guard<std::mutex> lock(probe.mutex);
+      EXPECT_FALSE(probe.release_timed_out);
+    }
+    EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+    EXPECT_TRUE(run.publish_succeeded());
+  }
+}
+
+/**
  * @brief Verifies cancellation before service publication admits no callback.
  *
  * @return Nothing; GoogleTest assertions report premature admission or leaked
@@ -6733,9 +6939,9 @@ TEST(ExecutionServiceCancellation,
  * drainage failures.
  * @throws Allocation, service, or synchronization exceptions from setup.
  * @note The Host hook runs after the worker counts the task in flight. The
- * submission executable must remain unentered. Caller settlement may precede
- * destruction of the worker's final local Run owner, so the ledger is polled
- * until that owner releases the root reservation.
+ * submission executable must remain unentered. Production now destroys the
+ * worker's QueueEntry/callable/lease before decrementing `in_flight`, so
+ * synchronous return itself proves exact root settlement without polling.
  */
 TEST(ExecutionServiceCancellation,
      CancellationAfterDequeueSuppressesExecutableAndDrainsExactly) {
@@ -6756,7 +6962,7 @@ TEST(ExecutionServiceCancellation,
   EXPECT_FALSE(host.trace_recording_failed());
   ASSERT_TRUE(run.terminal_outcome().has_value());
   EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
-  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**

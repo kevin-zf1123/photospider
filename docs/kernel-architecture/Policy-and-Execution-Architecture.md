@@ -221,9 +221,13 @@ generation. Failure preserves the old route.
 
 Operation selection freezes both the implementation callable and its `Device`
 before Run admission. Full HP, dirty HP/RT, and connected-parameter preflight
-all consume the same route-aware inventory. Every ready submission carries the
-frozen device, and `ExecutionService` rejects a device outside the configured
-route/Host inventory before publishing the Run. CPU submissions enter the
+all consume the same route-aware inventory. Connected-preflight preparation
+also freezes each callable/DSO lease and complete service root without entering
+provider code; only an installed Run may perform reserved start and invoke the
+provider, after which output-dependent dirty planning remains Run-owned. Every
+ready submission carries the frozen device, and `ExecutionService` rejects a
+device outside the configured route/Host inventory before publishing the Run.
+CPU submissions enter the
 fixed CPU pool; Metal submissions enter the single GPU lane. Both lanes share
 the common ready store, policy decision, reserved-start transaction, Host
 ledger, Run maximum-parallelism grant, cancellation, completion, exception,

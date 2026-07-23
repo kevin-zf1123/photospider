@@ -900,12 +900,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Waits for full Run ownership settlement and unregisters a bundle.
-   * @param handle Exact installed standalone/group handle, cleared on success.
+   * @param handle Exact installed standalone/group handle finalized on success.
    * @return Nothing after every child record leaves the registry.
-   * @throws RunLifecycleRegistry finalization errors unchanged; the same handle
-   * remains active for retry.
+   * @throws Nothing; an unexpected registry/synchronization failure terminates
+   * because production must never unwind an active finalization authority.
+   * @note Registry-level tests exercise retryable failures directly. This
+   * production boundary is the fail-stop owner of the persistent obligation.
    */
-  void finalize_graph_admission(RunLifecycleAdmissionHandle& handle);
+  void finalize_graph_admission(RunLifecycleAdmissionHandle& handle) noexcept;
 
   /**
    * @brief Tests exact Graph/Open and registered-Run commit permission.
@@ -1237,6 +1239,19 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       std::size_t released_size, std::size_t released_capacity) noexcept;
 
   /**
+   * @brief Test-only observer after worker QueueEntry ownership is retired.
+   *
+   * @param context Opaque repository-test context.
+   * @param run_id Exact Run whose callback/lease owner was destroyed.
+   * @return Nothing.
+   * @throws Nothing; observers must be allocation-free and noexcept.
+   * @note Invocation occurs while `in_flight` still prevents settlement and
+   * outside the pool/Run mutexes. Production leaves this pointer null.
+   */
+  using WorkerEntryRetirementObserver = void (*)(void* context,
+                                                 ComputeRunId run_id) noexcept;
+
+  /**
    * @brief Calculates mandatory bytes for one service-owned submission.
    * @param graph_identity Stable copied metadata string.
    * @return Queue, shared-control, store-handle, and string envelope bytes.
@@ -1311,6 +1326,20 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   void worker_loop(int worker_id,
                    execution::PhysicalExecutionLane lane) noexcept;
+
+  /**
+   * @brief Retires one started QueueEntry before making its Run settleable.
+   * @param entry Worker-local owner reset by this method.
+   * @param run Matching Run retained only for accounting and notification.
+   * @return Nothing.
+   * @throws Nothing; synchronization or accounting invariant failure
+   * terminates.
+   * @note Execution grant/route ownership retires first, then QueueEntry,
+   * submission, callable target, and Run lease are destroyed outside locks.
+   * Only afterward is `in_flight` decremented and settlement notified.
+   */
+  void retire_worker_entry(std::shared_ptr<QueueEntry>& entry,
+                           const std::shared_ptr<RunState>& run) noexcept;
 
   /**
    * @brief Enqueues one owned ready submission for a registered Run.
@@ -1492,6 +1521,20 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * that can invoke the observer.
    */
   void* initial_submission_storage_observer_context_ = nullptr;
+
+  /**
+   * @brief Optional repository-test callback for worker-entry retirement.
+   *
+   * @note Installed and cleared only around an isolated test service.
+   */
+  WorkerEntryRetirementObserver worker_entry_retirement_observer_ = nullptr;
+
+  /**
+   * @brief Opaque context paired with worker_entry_retirement_observer_.
+   *
+   * @note The test bridge keeps this value alive through observed settlement.
+   */
+  void* worker_entry_retirement_observer_context_ = nullptr;
 
   /** @brief Current service-worker Run context, null outside callbacks. */
   static thread_local RunState* tls_run_state_;

@@ -1,5 +1,7 @@
 #include "compute/dirty_sibling_commit_gate.hpp"
 
+#include <exception>
+
 namespace ps::compute {
 
 /** @copydoc DirtySiblingCommitGate::wait_for_rt_commit_or_throw */
@@ -24,14 +26,18 @@ void DirtySiblingCommitGate::mark_rt_committed() {
 }
 
 /** @copydoc DirtySiblingCommitGate::abort_hp_commit */
-void DirtySiblingCommitGate::abort_hp_commit() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (state_ == State::Pending) {
-      state_ = State::Denied;
+void DirtySiblingCommitGate::abort_hp_commit() noexcept {
+  try {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (state_ == State::Pending) {
+        state_ = State::Denied;
+      }
     }
+    condition_.notify_all();
+  } catch (...) {
+    std::terminate();
   }
-  condition_.notify_all();
 }
 
 }  // namespace ps::compute

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -12,12 +13,15 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 
 #include "compute/dirty_sibling_commit_gate.hpp"
 #include "compute/run_lifecycle_registry.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "support/compute_request_cancellation_source_test_access.hpp"
+#include "support/run_lifecycle_registry_test_access.hpp"
 
 namespace allocation_probe {
 
@@ -227,6 +231,52 @@ void close_graph(RunLifecycleRegistry& registry,
   anchor->mark_retired();
 }
 
+/**
+ * @brief Injects one synchronization-shaped resource-settlement failure.
+ *
+ * @throws std::system_error exactly once at the resource wait boundary.
+ * @note Atomic state makes accidental duplicate observation visible without
+ * requiring callback-side allocation or locking.
+ */
+struct FinalizationWaitFault final {
+  /** @brief Whether the one resource-phase failure already fired. */
+  std::atomic_bool fired{false};
+  /** @brief Exact bundle observed by the injected boundary. */
+  std::atomic<std::uint64_t> bundle_id{0U};
+
+  /**
+   * @brief Throws once before root-resource settlement.
+   * @param context Opaque pointer to this probe.
+   * @param observed_bundle_id Exact installed bundle.
+   * @param resource_phase Whether the resource wait is about to start.
+   * @return Nothing on non-resource or repeated observation.
+   * @throws std::system_error on the first resource-phase observation.
+   */
+  static void observe(void* context, std::uint64_t observed_bundle_id,
+                      bool resource_phase) {
+    auto* fault = static_cast<FinalizationWaitFault*>(context);
+    if (fault == nullptr || !resource_phase ||
+        fault->fired.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    fault->bundle_id.store(observed_bundle_id, std::memory_order_release);
+    throw std::system_error(std::make_error_code(std::errc::io_error),
+                            "injected settlement wait failure");
+  }
+};
+
+/**
+ * @brief Injects a synchronization failure after cancellation linearization.
+ * @param context Unused test context.
+ * @return Never returns.
+ * @throws std::system_error on every invocation.
+ */
+[[noreturn]] void throw_after_cancellation_linearization(void* context) {
+  (void)context;
+  throw std::system_error(std::make_error_code(std::errc::io_error),
+                          "injected cancellation synchronization failure");
+}
+
 TEST(GraphCloseCoordinator, SelectsOneOwnerAndJoinsOneGeneration) {
   GraphCloseCoordinator coordinator;
   EXPECT_EQ(coordinator.begin(), GraphCloseCoordinator::Role::Owner);
@@ -313,6 +363,106 @@ TEST(RunLifecycleRegistry, InstallsAndFinalizesStandaloneBeforeRowRemoval) {
                                    ExecutionLifecycleEventKind::GraphRowRemoved;
                           }));
 }
+
+TEST(RunLifecycleRegistry,
+     TerminalNotReadyFailureRetainsAuthorityAndRetryIsIdempotent) {
+  ExecutionLifecycleTelemetry telemetry;
+  RunLifecycleRegistry registry(telemetry);
+  auto anchor = register_graph(registry, GraphInstanceId{211U});
+  ComputeRun run(make_standalone_submission(anchor->graph_instance_id(), 8));
+  auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+  cancellation->attach(run);
+  RunLifecycleAdmissionHandle handle = registry.commit_standalone(
+      registry.begin_graph_admission(anchor->graph_instance_id()),
+      run.acquire_lease(), cancellation);
+
+  EXPECT_THROW(registry.finalize_admission(handle), std::logic_error);
+  EXPECT_TRUE(handle.active());
+  const std::uint64_t bundle_id = handle.bundle_id();
+
+  ASSERT_TRUE(run.publish_succeeded());
+  EXPECT_NO_THROW(registry.finalize_admission(handle));
+  EXPECT_FALSE(handle.active());
+  EXPECT_NO_THROW(registry.finalize_admission(handle));
+  EXPECT_THROW((void)handle.bundle_id(), std::logic_error);
+  EXPECT_NE(bundle_id, 0U);
+  close_graph(registry, anchor);
+}
+
+TEST(RunLifecycleRegistry,
+     SettlementSynchronizationFailureRetainsAuthorityForRetry) {
+  ExecutionLifecycleTelemetry telemetry;
+  RunLifecycleRegistry registry(telemetry);
+  auto anchor = register_graph(registry, GraphInstanceId{212U});
+  ComputeRun run(make_standalone_submission(anchor->graph_instance_id(), 9));
+  auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+  cancellation->attach(run);
+  RunLifecycleAdmissionHandle handle = registry.commit_standalone(
+      registry.begin_graph_admission(anchor->graph_instance_id()),
+      run.acquire_lease(), cancellation);
+  const std::uint64_t bundle_id = handle.bundle_id();
+  ASSERT_TRUE(run.publish_succeeded());
+
+  FinalizationWaitFault fault;
+  testing::RunLifecycleRegistryTestAccess::set_finalization_wait_observer(
+      registry, &FinalizationWaitFault::observe, &fault);
+  EXPECT_THROW(registry.finalize_admission(handle), std::system_error);
+  EXPECT_TRUE(fault.fired.load(std::memory_order_acquire));
+  EXPECT_EQ(fault.bundle_id.load(std::memory_order_acquire), bundle_id);
+  EXPECT_TRUE(handle.active());
+  testing::RunLifecycleRegistryTestAccess::clear_finalization_wait_observer(
+      registry);
+
+  EXPECT_NO_THROW(registry.finalize_admission(handle));
+  EXPECT_FALSE(handle.active());
+  close_graph(registry, anchor);
+}
+
+TEST(RunLifecycleRegistry, ConcurrentFinalizersShareOnePersistentAuthority) {
+  ExecutionLifecycleTelemetry telemetry;
+  RunLifecycleRegistry registry(telemetry);
+  auto anchor = register_graph(registry, GraphInstanceId{213U});
+  ComputeRun run(make_standalone_submission(anchor->graph_instance_id(), 10));
+  auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+  cancellation->attach(run);
+  RunLifecycleAdmissionHandle handle = registry.commit_standalone(
+      registry.begin_graph_admission(anchor->graph_instance_id()),
+      run.acquire_lease(), cancellation);
+  ASSERT_TRUE(run.publish_succeeded());
+
+  auto first = std::async(std::launch::async, [&registry, &handle]() {
+    registry.finalize_admission(handle);
+  });
+  auto second = std::async(std::launch::async, [&registry, &handle]() {
+    registry.finalize_admission(handle);
+  });
+  EXPECT_NO_THROW(first.get());
+  EXPECT_NO_THROW(second.get());
+  EXPECT_FALSE(handle.active());
+  EXPECT_EQ(registry.counters().admitted_standalone_run_count, 0U);
+  close_graph(registry, anchor);
+}
+
+#if GTEST_HAS_DEATH_TEST
+TEST(RunLifecycleRegistry, DestroyingActiveFinalizationAuthorityTerminates) {
+  EXPECT_DEATH(
+      {
+        ExecutionLifecycleTelemetry telemetry;
+        RunLifecycleRegistry registry(telemetry);
+        auto anchor = register_graph(registry, GraphInstanceId{214U});
+        ComputeRun run(
+            make_standalone_submission(anchor->graph_instance_id(), 11));
+        auto cancellation =
+            std::make_shared<ComputeRequestCancellationSource>();
+        cancellation->attach(run);
+        RunLifecycleAdmissionHandle handle = registry.commit_standalone(
+            registry.begin_graph_admission(anchor->graph_instance_id()),
+            run.acquire_lease(), cancellation);
+        (void)handle;
+      },
+      ".*");
+}
+#endif
 
 TEST(RunLifecycleRegistry, RealtimeBundleAppearsAndRetiresAtomically) {
   ExecutionLifecycleTelemetry telemetry;
@@ -467,6 +617,36 @@ TEST(RunLifecycleRegistry,
                     }),
       2);
 }
+
+#if GTEST_HAS_DEATH_TEST
+TEST(RunLifecycleRegistry,
+     PostCloseLinearizationSynchronizationFailureTerminates) {
+  EXPECT_DEATH(
+      {
+        ExecutionLifecycleTelemetry telemetry;
+        RunLifecycleRegistry registry(telemetry);
+        auto anchor = register_graph(registry, GraphInstanceId{453U});
+        ComputeRun run(
+            make_standalone_submission(anchor->graph_instance_id(), 24));
+        auto cancellation =
+            std::make_shared<ComputeRequestCancellationSource>();
+        cancellation->attach(run);
+        testing::ComputeRequestCancellationSourceTestAccess::
+            set_after_linearization_observer(
+                *cancellation, &throw_after_cancellation_linearization,
+                nullptr);
+        RunLifecycleAdmissionHandle handle = registry.commit_standalone(
+            registry.begin_graph_admission(anchor->graph_instance_id()),
+            run.acquire_lease(), cancellation);
+        (void)handle;
+        (void)registry.begin_graph_close(
+            anchor->graph_instance_id(),
+            ComputeRunCancellationReason::GraphClose);
+        std::_Exit(0);
+      },
+      ".*");
+}
+#endif
 
 TEST(RunLifecycleRegistry,
      ProcessShutdownUsesPreallocatedFanoutAfterStoppingTransition) {
