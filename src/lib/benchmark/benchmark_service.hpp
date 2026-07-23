@@ -20,6 +20,8 @@ namespace ps {
  *
  * @throws std::bad_alloc from non-destructor methods when configuration,
  * telemetry, result, or Host-side compute storage exhausts memory.
+ * @throws std::system_error from Run or RunAll when one-time execution
+ * preparation synchronization cannot execute as specified.
  */
 class BenchmarkService {
  public:
@@ -45,6 +47,8 @@ class BenchmarkService {
    *         or greater than eight.
    * @throws std::runtime_error when YAML loading, graph loading, or compute
    *         fails.
+   * @throws std::system_error when one-time execution preparation
+   *         synchronization cannot execute as specified.
    * @throws YAML::Exception when generated or user-provided graph YAML is
    *         malformed.
    * @note Before graph load, `execution.threads` is resolved once to a
@@ -64,6 +68,8 @@ class BenchmarkService {
    * @throws std::bad_alloc if configuration, Host execution, or result storage
    *         exhausts memory.
    * @throws std::runtime_error when configuration loading fails.
+   * @throws std::system_error when one-time execution preparation
+   *         synchronization cannot execute as specified.
    * @throws YAML::Exception when benchmark configuration values are malformed.
    * @throws std::filesystem::filesystem_error when pre-run artifact directory
    *         inspection fails.
@@ -115,6 +121,8 @@ class BenchmarkService {
    * @throws std::bad_alloc if Host request or diagnostic storage allocation
    *         fails.
    * @throws std::runtime_error if Host rejects CPU route preparation.
+   * @throws std::system_error if `std::call_once` cannot execute the one-time
+   *         synchronization as specified.
    * @note The Host receives `worker_count=0`, which initializes an unfixed
    *       pool automatically or preserves an already fixed pool. No benchmark
    *       session worker cap is forwarded through this process setting.

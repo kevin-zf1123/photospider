@@ -170,7 +170,18 @@ static void configure_benchmark_execution(Host& host) {
  */
 BenchmarkService::BenchmarkService(ps::Host& svc) : svc_(svc) {}
 
-/** @copydoc BenchmarkService::prepare_execution */
+/**
+ * @brief Prepares CPU execution defaults once for this service lifetime.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc if Host request or diagnostic storage allocation
+ * fails.
+ * @throws std::runtime_error if Host rejects CPU route preparation.
+ * @throws std::system_error if `std::call_once` cannot execute the one-time
+ * synchronization as specified.
+ * @note The Host receives `worker_count=0`, and an exception leaves the once
+ * flag eligible for a later retry.
+ */
 void BenchmarkService::prepare_execution() {
   std::call_once(execution_preparation_once_,
                  [this] { configure_benchmark_execution(svc_); });
@@ -193,6 +204,8 @@ void BenchmarkService::prepare_execution() {
  * @throws std::invalid_argument when `execution.threads` is outside zero
  * through eight.
  * @throws std::runtime_error when graph input, loading, or compute fails.
+ * @throws std::system_error when one-time execution preparation
+ * synchronization cannot execute as specified.
  * @throws YAML::Exception when generated or user-provided YAML is malformed.
  * @note The thread request resolves once to a Run maximum-parallelism cap.
  * Process CPU routes are prepared at most once with an automatic/idempotent
@@ -416,6 +429,8 @@ void BenchmarkService::analyze_results(
  * exhausts memory.
  * @throws std::runtime_error or YAML::Exception when configuration loading
  * fails before per-session execution begins.
+ * @throws std::system_error when one-time execution preparation
+ * synchronization cannot execute as specified.
  * @throws std::filesystem::filesystem_error when pre-run artifact directory
  * inspection fails.
  * @note Disabled sessions are not thread-range preflighted or executed;

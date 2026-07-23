@@ -1530,6 +1530,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_graph_document_adapter.cpp)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
+    add_ps_test(test_host_compute_request_contracts
+        tests/unit/test_host_compute_request_contracts.cpp)
     add_executable(test_stdlib_image_buffer_processing
         tests/unit/test_stdlib_image_buffer_processing.cpp
         src/lib/core/image_buffer_processing.cpp)
@@ -1898,6 +1900,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_host_compute_request_contracts
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_stdlib_image_buffer_processing
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_event_stream_boundaries
