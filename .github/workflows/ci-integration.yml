@@ -352,8 +352,8 @@ jobs:
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             -e CI_ARTIFACT_ROOT=/workspace/CI-results \
-            -e SCHEDULER_REPEAT=5 \
-            -e GPU_PIPELINE_REPEAT=3 \
+            -e EXECUTION_REPEAT=5 \
+            -e LEGACY_GPU_REPEAT=3 \
             photospider-ci:local \
             bash ci/scripts/integration_suite.sh
 
@@ -565,7 +565,7 @@ jobs:
           path: CI-results/plugin-load
           if-no-files-found: warn
 
-  scheduler-repeat:
+  execution-repeat:
     needs: [integration-plan, build-integrity-default]
     runs-on: ubuntu-latest
     container:
@@ -590,19 +590,19 @@ jobs:
           rm -rf build/ci
           mkdir -p build
           tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
-      - name: Run scheduler repeat test
+      - name: Run execution repeat test
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/scheduler-repeat
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/execution-repeat
           CI_REUSE_BUILD: ON
-          SCHEDULER_REPEAT: 5
-          GPU_PIPELINE_REPEAT: 3
-        run: bash ci/scripts/scheduler_repeat_test.sh
-      - name: Upload scheduler repeat logs
+          EXECUTION_REPEAT: 5
+          LEGACY_GPU_REPEAT: 3
+        run: bash ci/scripts/execution_repeat_test.sh
+      - name: Upload execution repeat logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scheduler-repeat-results
-          path: CI-results/scheduler-repeat
+          name: execution-repeat-results
+          path: CI-results/execution-repeat
           if-no-files-found: warn
 
   integration:
@@ -618,7 +618,7 @@ jobs:
       - scripted-cli
       - propagation-script
       - plugin-load
-      - scheduler-repeat
+      - execution-repeat
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -644,7 +644,7 @@ jobs:
           SCRIPTED_CLI_RESULT: ${{ needs.scripted-cli.result }}
           PROPAGATION_RESULT: ${{ needs.propagation-script.result }}
           PLUGIN_LOAD_RESULT: ${{ needs.plugin-load.result }}
-          SCHEDULER_REPEAT_RESULT: ${{ needs.scheduler-repeat.result }}
+          EXECUTION_REPEAT_RESULT: ${{ needs.execution-repeat.result }}
         run: |
           set -Eeuo pipefail
 
@@ -677,7 +677,7 @@ jobs:
             require_value scripted-cli "$SCRIPTED_CLI_RESULT" skipped
             require_value propagation-script "$PROPAGATION_RESULT" skipped
             require_value plugin-load "$PLUGIN_LOAD_RESULT" skipped
-            require_value scheduler-repeat "$SCHEDULER_REPEAT_RESULT" skipped
+            require_value execution-repeat "$EXECUTION_REPEAT_RESULT" skipped
           }
 
           if [[ "$CI_EVENT_NAME" == pull_request_target &&
@@ -724,7 +724,7 @@ jobs:
               require_value scripted-cli "$SCRIPTED_CLI_RESULT" success
               require_value propagation-script "$PROPAGATION_RESULT" success
               require_value plugin-load "$PLUGIN_LOAD_RESULT" success
-              require_value scheduler-repeat "$SCHEDULER_REPEAT_RESULT" success
+              require_value execution-repeat "$EXECUTION_REPEAT_RESULT" success
 
               echo "Full published-image integration matrix passed." |
                 tee -a "$GITHUB_STEP_SUMMARY"

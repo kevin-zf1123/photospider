@@ -94,9 +94,9 @@ run_integration_check env \
   bash "$SCRIPT_DIR/plugin_load_test.sh"
 run_integration_check env \
   CI_BUILD_PROFILE=default BUILD_DIR="$DEFAULT_BUILD_DIR" CI_REUSE_BUILD=ON \
-  CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/scheduler-repeat" \
-  SCHEDULER_REPEAT="${SCHEDULER_REPEAT:-5}" \
-  GPU_PIPELINE_REPEAT="${GPU_PIPELINE_REPEAT:-3}" \
-  bash "$SCRIPT_DIR/scheduler_repeat_test.sh"
+  CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/execution-repeat" \
+  EXECUTION_REPEAT="${EXECUTION_REPEAT:-5}" \
+  LEGACY_GPU_REPEAT="${LEGACY_GPU_REPEAT:-3}" \
+  bash "$SCRIPT_DIR/execution_repeat_test.sh"
 
 exit "$suite_status"
