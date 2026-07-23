@@ -445,8 +445,15 @@ single-flight、serial worker-zero single-flight、shutdown rejection 与 commit
 `test_policy_execution` 使用 deterministic fake-Metal Host，证明规范的逐 route device inventory、
 Run 发布前拒绝、彼此独立的固定 CPU/GPU worker、Metal exception publication/recovery、route
 reuse、cancellation，以及不会产生 candidate/version ABA 或 grant leak 的 reserved-start rollback。
-Rollback probe 是只编译进不安装 test product 的固定大小 atomic state；production 不含 observer
-typedef、object field、class-layout change、worker hot-path callback/runtime branch 或 symbol。
+它还证明：grant-blocked high-priority Run A 不能饿死较低优先级的独立 Run B；A 的 ready entry
+随后恰好执行一次；仅一个 candidate 被阻塞时 policy-selection retry 有界，且 cancellation 会
+唤醒 worker。
+
+reserved-start rollback probe 是只编译进不安装 test product 的固定大小 atomic state。Issue #75
+probe macro 不改变 production class definition 或 layout，production object 不包含 reserved-start-
+probe observer typedef、object field、callback、worker hot-path runtime branch、helper global 或
+symbol。该声明只限定于这项 probe；既有 initial-submission storage observer 属于 baseline behavior，
+本阶段既不移除它，也不承诺迁移它。
 `test_compute_run` 中的
 `Issue75DeviceRouting.*` 证明 full HP、dirty HP/RT 与 connected preflight 会冻结选中的 Metal
 implementation/device，并在 Metal 不存在时使用 CPU fallback。

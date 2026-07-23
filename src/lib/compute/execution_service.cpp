@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -354,6 +355,15 @@ struct ExecutionService::QueueEntry final {
 
   /** @brief Nonreused private version protecting remove/reinsert ABA. */
   std::uint64_t entry_version = 0U;
+
+  /**
+   * @brief Workers that transiently observed execution-grant exhaustion.
+   *
+   * @note The service mutex protects this cycle-local mask. A set bit changes
+   * only candidate visibility for that worker; it never removes ready
+   * ownership or advances policy/fairness accounting.
+   */
+  std::uint16_t grant_blocked_worker_mask = 0U;
 
   /** @brief Stable successful-dispatch count observed at publication. */
   std::uint64_t enqueued_class_dispatch_count = 0U;
@@ -903,6 +913,8 @@ class ExecutionService::BoundedReadyStore final {
    * @throws std::invalid_argument when identity, class, cost, or grant shape is
    * structurally invalid.
    * @throws std::bad_alloc when entry or policy-row ownership cannot allocate.
+   * @note Successful publication assigns fresh nonreused identities and clears
+   * every prior transient worker-cycle grant-block mark before visibility.
    */
   bool try_push(const std::shared_ptr<QueueEntry>& entry) {
     if (!entry) {
@@ -982,6 +994,7 @@ class ExecutionService::BoundedReadyStore final {
     entry->high_lane = entry->priority == ExecutionTaskPriority::High;
     entry->candidate_id = ++next_candidate_id_;
     entry->entry_version = ++next_entry_version_;
+    entry->grant_blocked_worker_mask = 0U;
     entry->enqueued_class_dispatch_count =
         class_dispatch_count(entry->run->policy_qos.service_class);
     entry->enqueue_sequence = ++next_enqueue_sequence_;
@@ -1205,6 +1218,44 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
+   * @brief Hides one exact grant-exhausted pin from one worker selection cycle.
+   * @param pin Candidate/version/enqueue identity returned by current
+   * selection.
+   * @param worker_id CPU or GPU worker whose next selection must skip the pin.
+   * @return True only when the identical store-owned entry was marked.
+   * @throws Nothing.
+   * @note Caller holds the service/store mutex. The mark is allocation-free,
+   * preserves ready ownership and fairness state, and cannot transfer to a
+   * replacement entry because all nonreused identities are revalidated.
+   */
+  bool mark_grant_blocked(const SelectionPin& pin, int worker_id) noexcept {
+    if (!pin.entry || !pin.entry->store_owned ||
+        pin.entry->candidate_id != pin.candidate_id ||
+        pin.entry->entry_version != pin.entry_version ||
+        pin.entry->enqueue_sequence != pin.enqueue_sequence ||
+        *pin.entry->store_position != pin.entry) {
+      return false;
+    }
+    pin.entry->grant_blocked_worker_mask |= worker_mask(worker_id);
+    return true;
+  }
+
+  /**
+   * @brief Restores every transiently blocked candidate for one worker.
+   * @param worker_id CPU or GPU worker starting a fresh selection cycle.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Caller holds the service/store mutex. Other workers' independent
+   * block marks remain unchanged.
+   */
+  void clear_grant_blocked(int worker_id) noexcept {
+    const std::uint16_t mask = worker_mask(worker_id);
+    for (const std::shared_ptr<QueueEntry>& entry : entries_) {
+      entry->grant_blocked_worker_mask &= static_cast<std::uint16_t>(~mask);
+    }
+  }
+
+  /**
    * @brief Purges every queued entry belonging to one Run.
    * @param run Matching retained Run state.
    * @return Number of removed entries; the empty policy row remains active.
@@ -1297,6 +1348,32 @@ class ExecutionService::BoundedReadyStore final {
   std::uint64_t byte_count() const noexcept { return byte_count_; }
 
  private:
+  /**
+   * @brief Returns the fixed bit assigned to one configured physical worker.
+   * @param worker_id CPU id in `[0,7]` or the GPU id in `[1,8]`.
+   * @return Nonzero bit in the 16-bit per-entry transient mask.
+   * @throws Nothing; an out-of-domain trusted id terminates.
+   */
+  static std::uint16_t worker_mask(int worker_id) noexcept {
+    if (worker_id < 0 ||
+        worker_id > static_cast<int>(kExecutionWorkerRequestMax)) {
+      std::terminate();
+    }
+    return static_cast<std::uint16_t>(1U << worker_id);
+  }
+
+  /**
+   * @brief Tests whether one entry is hidden in the current worker cycle.
+   * @param entry Current store-owned ready entry.
+   * @param worker_id Worker attempting route selection.
+   * @return True only after that worker observed grant exhaustion for `entry`.
+   * @throws Nothing; invalid internal worker ids terminate.
+   */
+  static bool is_grant_blocked(const QueueEntry& entry,
+                               int worker_id) noexcept {
+    return (entry.grant_blocked_worker_mask & worker_mask(worker_id)) != 0U;
+  }
+
   /**
    * @brief Intrusive same-Run FIFO endpoints for one priority hint.
    * @throws Nothing for value construction.
@@ -1907,7 +1984,8 @@ class ExecutionService::BoundedReadyStore final {
       execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) const noexcept {
     for (QueueEntry* entry = head; entry != nullptr; entry = entry->run_next) {
-      if (route_startable(*state.run, *entry, worker_id, lane, routes)) {
+      if (!is_grant_blocked(*entry, worker_id) &&
+          route_startable(*state.run, *entry, worker_id, lane, routes)) {
         return entry;
       }
     }
@@ -2203,6 +2281,16 @@ std::uint64_t ExecutionService::service_run_envelope_bytes(
 namespace {
 
 /**
+ * @brief Low-frequency fallback for grant releases outside service callbacks.
+ *
+ * @note Ordinary enqueue, completion, cancellation, policy replacement, and
+ * shutdown transitions wake workers through a notification epoch. This bound
+ * prevents an unobservable external child-grant release from stranding work
+ * while keeping an exhausted candidate out of a busy retry loop.
+ */
+constexpr std::chrono::milliseconds kGrantRetryBackoff{50};
+
+/**
  * @brief Resolves the bounded process execution-worker request once.
  * @param requested Zero for automatic resolution or an exact value in `[1,8]`.
  * @param detected Platform hardware concurrency, possibly zero.
@@ -2402,6 +2490,18 @@ class ExecutionService::PoolState final {
   }
 
   /**
+   * @brief Publishes one worker-relevant state transition under `mutex`.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Every caller holds `mutex` and subsequently notifies `ready_cv`.
+   * Unsigned wrap remains safe because grant-blocked waits also use a bounded
+   * fallback; observing exactly one full 64-bit lap cannot strand a worker.
+   */
+  void advance_worker_notification_epoch() noexcept {
+    ++worker_notification_epoch;
+  }
+
+  /**
    * @brief Copies the current immutable binding for one explicit class.
    * @param service_class Run QoS class already chosen by Host arbitration.
    * @return Shared invocation/context/DSO lease.
@@ -2440,6 +2540,9 @@ class ExecutionService::PoolState final {
 
   /** @brief Wakes fixed workers when ready work or shutdown is published. */
   std::condition_variable ready_cv;
+
+  /** @brief Monotonic worker-relevant publication/completion generation. */
+  std::uint64_t worker_notification_epoch = 0U;
 
   /** @brief Sole host-authoritative resource mint for this service. */
   ResourceLedger ledger;
@@ -2572,6 +2675,7 @@ ExecutionService::~ExecutionService() noexcept {
       pool_->stopping = true;
       pool_->physical_routes.begin_shutdown();
       pool_->ready_store.clear();
+      pool_->advance_worker_notification_epoch();
       workers.swap(pool_->workers);
     }
     pool_->ready_cv.notify_all();
@@ -2636,6 +2740,7 @@ void ExecutionService::configure_worker_count(unsigned int worker_count) {
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
     pool_->stopping = true;
+    pool_->advance_worker_notification_epoch();
     lock.unlock();
     pool_->ready_cv.notify_all();
     for (std::thread& worker : staged_workers) {
@@ -2742,6 +2847,7 @@ void ExecutionService::configure_policy_defaults(
     }
     pool_->interactive_binding.swap(interactive);
     pool_->throughput_binding.swap(throughput);
+    pool_->advance_worker_notification_epoch();
   }
   pool_->ready_cv.notify_all();
 }
@@ -2803,6 +2909,7 @@ void ExecutionService::replace_policy(PolicyClass policy_class,
                        "ExecutionService policy replacement raced state.");
     }
     published.swap(candidate);
+    pool_->advance_worker_notification_epoch();
   }
   pool_->ready_cv.notify_all();
 }
@@ -2992,6 +3099,7 @@ void ExecutionService::execute_run(
           }
         }
         published = true;
+        pool_->advance_worker_notification_epoch();
       } catch (...) {
         (void)pool_->ready_store.erase_run(run);
         pool_->active_runs.erase(key);
@@ -3124,8 +3232,9 @@ void ExecutionService::enqueue_submission(const std::shared_ptr<RunState>& run,
           GraphErrc::ComputeError,
           "ExecutionService bounded ready store rejected dependent work.");
     }
+    pool_->advance_worker_notification_epoch();
   }
-  pool_->ready_cv.notify_one();
+  pool_->ready_cv.notify_all();
 }
 
 /** @copydoc ExecutionService::find_active_run */
@@ -3288,7 +3397,9 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
         run->accepting = false;
       }
       (void)pool_->ready_store.erase_run(run);
+      pool_->advance_worker_notification_epoch();
     }
+    pool_->ready_cv.notify_all();
     run->settled_cv.notify_all();
   } catch (...) {
   }
@@ -3309,7 +3420,9 @@ void ExecutionService::cancel_run(
       run->first_exception = nullptr;
       run->accepting = false;
       (void)pool_->ready_store.erase_run(run);
+      pool_->advance_worker_notification_epoch();
     }
+    pool_->ready_cv.notify_all();
     run->settled_cv.notify_all();
   } catch (...) {
   }
@@ -3324,12 +3437,35 @@ void ExecutionService::worker_loop(
     std::shared_ptr<RunState> failed_run;
     unsigned int obsolete_retries = 0U;
     bool force_builtin = false;
+    bool grant_blocked = false;
+    std::uint64_t grant_blocked_epoch = 0U;
 
     while (!entry && !selection_failure) {
       BoundedReadyStore::PolicySnapshot snapshot;
       std::shared_ptr<policy::PolicyBinding> binding;
       {
         std::unique_lock<std::mutex> lock(pool_->mutex);
+        if (grant_blocked && !pool_->ready_store.has_startable_work(
+                                 worker_id, lane, pool_->physical_routes)) {
+          const std::uint64_t observed_epoch = grant_blocked_epoch;
+          if (!pool_->stopping &&
+              pool_->worker_notification_epoch == observed_epoch) {
+            (void)pool_->ready_cv.wait_for(
+                lock, kGrantRetryBackoff, [this, observed_epoch]() {
+                  return pool_->stopping ||
+                         pool_->worker_notification_epoch != observed_epoch;
+                });
+          }
+          if (pool_->stopping) {
+            return;
+          }
+          pool_->ready_store.clear_grant_blocked(worker_id);
+          grant_blocked = false;
+          obsolete_retries = 0U;
+          force_builtin = false;
+          failed_run.reset();
+          continue;
+        }
         pool_->ready_cv.wait(lock, [this, worker_id, lane]() {
           return pool_->stopping ||
                  pool_->ready_store.has_startable_work(worker_id, lane,
@@ -3371,6 +3507,16 @@ void ExecutionService::worker_loop(
                                                 pool_->physical_routes);
             if (result == BoundedReadyStore::StartResult::Started) {
               entry = std::move(pin.entry);
+            } else if (result ==
+                       BoundedReadyStore::StartResult::GrantUnavailable) {
+              if (pool_->ready_store.mark_grant_blocked(pin, worker_id)) {
+                if (!grant_blocked) {
+                  grant_blocked_epoch = pool_->worker_notification_epoch;
+                }
+                grant_blocked = true;
+                obsolete_retries = 0U;
+                failed_run.reset();
+              }
             } else if (result ==
                        BoundedReadyStore::StartResult::IdentityExhausted) {
               selection_failure = std::make_exception_ptr(
@@ -3478,6 +3624,18 @@ void ExecutionService::worker_loop(
             if (result == BoundedReadyStore::StartResult::Started) {
               entry = std::move(pin.entry);
             } else if (result ==
+                       BoundedReadyStore::StartResult::GrantUnavailable) {
+              if (pool_->ready_store.mark_grant_blocked(pin, worker_id)) {
+                if (!grant_blocked) {
+                  grant_blocked_epoch = pool_->worker_notification_epoch;
+                }
+                grant_blocked = true;
+                obsolete_retries = 0U;
+                failed_run.reset();
+              } else {
+                obsolete = true;
+              }
+            } else if (result ==
                        BoundedReadyStore::StartResult::IdentityExhausted) {
               selection_failure = std::make_exception_ptr(
                   GraphError(GraphErrc::ComputeError,
@@ -3497,6 +3655,11 @@ void ExecutionService::worker_loop(
           force_builtin = true;
         }
       }
+    }
+
+    if (grant_blocked) {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      pool_->ready_store.clear_grant_blocked(worker_id);
     }
 
     if (selection_failure) {
@@ -3539,6 +3702,7 @@ void ExecutionService::worker_loop(
                 run->route, entry->submission.metadata().device())) {
           std::terminate();
         }
+        pool_->advance_worker_notification_epoch();
         if (run->settled()) {
           run->settled_cv.notify_all();
         }
@@ -3579,6 +3743,7 @@ void ExecutionService::worker_loop(
               run->route, entry->submission.metadata().device())) {
         std::terminate();
       }
+      pool_->advance_worker_notification_epoch();
       if (run->settled()) {
         run->settled_cv.notify_all();
       }

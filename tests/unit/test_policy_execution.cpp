@@ -177,19 +177,96 @@ class TestHostContext final : public ExecutionHostContext {
  * @param trace_node_id Diagnostic trace node.
  * @param executable Test callback entered by a physical route.
  * @param device Private lane selected for the callback.
+ * @param priority Ready-order hint carried by the submission.
+ * @param is_initial_ready Whether publication belongs to the initial batch.
  * @return Move-owned ready submission.
  * @throws Standard callback, metadata, or function ownership exceptions.
  */
-ReadyTaskSubmission make_ready(ComputeRunLease lease,
-                               std::uint64_t local_task_id, int trace_node_id,
-                               ReadyTaskSubmission::Executable executable,
-                               Device device = Device::CPU) {
+ReadyTaskSubmission make_ready(
+    ComputeRunLease lease, std::uint64_t local_task_id, int trace_node_id,
+    ReadyTaskSubmission::Executable executable, Device device = Device::CPU,
+    ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
+    bool is_initial_ready = true) {
   const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
-  return ReadyTaskSubmission(
-      std::move(lease), identity, trace_node_id, true, std::move(executable),
-      ExecutionTaskPriority::Normal,
-      ReadyTaskSubmission::default_resource_demand(), device);
+  return ReadyTaskSubmission(std::move(lease), identity, trace_node_id,
+                             is_initial_ready, std::move(executable), priority,
+                             ReadyTaskSubmission::default_resource_demand(),
+                             device);
 }
+
+/**
+ * @brief Waits until the policy fixture observed a minimum selection count.
+ * @param control Thread-safe fixture counter source.
+ * @param minimum_count Inclusive target count.
+ * @return True when the target was reached before `kTestTimeout`.
+ * @throws Nothing.
+ * @note Polling observes only test instrumentation; production worker waits
+ * remain driven by condition-variable notifications and bounded backoff.
+ */
+bool wait_for_select_count(const PolicyFixtureController& control,
+                           std::uint64_t minimum_count) noexcept {
+  const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (control.select_count() >= minimum_count) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return control.select_count() >= minimum_count;
+}
+
+/**
+ * @brief Guarantees one callback gate opens before asynchronous cleanup.
+ *
+ * @throws Nothing for construction and destruction; explicit release may
+ * propagate `std::future_error` from a violated test invariant.
+ * @note The guard is intentionally declared after the owning async future so
+ * reverse destruction opens the gate before that future waits for completion.
+ */
+class ScopedPromiseRelease final {
+ public:
+  /**
+   * @brief Borrows one promise owned by the enclosing test.
+   * @param promise Single-use callback release promise.
+   * @throws Nothing.
+   */
+  explicit ScopedPromiseRelease(std::promise<void>& promise) noexcept
+      : promise_(&promise) {}
+
+  /** @brief Opens an unreleased gate while suppressing cleanup failures. */
+  ~ScopedPromiseRelease() noexcept {
+    try {
+      release();
+    } catch (...) {
+    }
+  }
+
+  /** @brief Prevents duplicate promise ownership. */
+  ScopedPromiseRelease(const ScopedPromiseRelease&) = delete;
+
+  /** @brief Prevents assigning duplicate promise ownership. */
+  ScopedPromiseRelease& operator=(const ScopedPromiseRelease&) = delete;
+
+  /**
+   * @brief Opens the callback gate exactly once.
+   * @return Nothing.
+   * @throws std::future_error when the borrowed promise state is invalid.
+   */
+  void release() {
+    if (released_) {
+      return;
+    }
+    promise_->set_value();
+    released_ = true;
+  }
+
+ private:
+  /** @brief Borrowed single-use promise. */
+  std::promise<void>* promise_;
+
+  /** @brief Whether this guard already published the release. */
+  bool released_ = false;
+};
 
 /**
  * @brief Executes one successful single-task Run on an exact route.
@@ -732,6 +809,192 @@ TEST_F(PolicyExecutionFixture,
                          recovery_host);
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(control_.select_count(), 2U);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies a grant-blocked high-priority Run cannot starve another Run.
+ *
+ * Run A holds its only execution child grant in a CPU callback and publishes a
+ * high-priority Metal dependent. The GPU worker must retain that exact ready
+ * entry without charging dispatch, then select lower-priority independent Run
+ * B. Releasing A must subsequently execute its retained dependent exactly once.
+ */
+TEST_F(PolicyExecutionFixture,
+       GrantBlockedGpuCandidateDoesNotStarveIndependentRun) {
+  ExecutionService service(1U);
+  control_.set_select_mode(PS_POLICY_FIXTURE_SELECT_FIRST);
+  service.replace_policy(PolicyClass::Throughput, "fixture_policy");
+
+  TestHostContext host_a(true);
+  ComputeRun run_a(make_submission("grant-blocked-a", 61U, 1));
+  std::atomic_int cpu_a_entries{0};
+  std::atomic_int gpu_a_entries{0};
+  std::promise<void> cpu_a_entered_promise;
+  std::future<void> cpu_a_entered = cpu_a_entered_promise.get_future();
+  std::promise<void> gpu_a_entered_promise;
+  std::future<void> gpu_a_entered = gpu_a_entered_promise.get_future();
+  std::promise<void> release_cpu_a_promise;
+  const std::shared_future<void> release_cpu_a =
+      release_cpu_a_promise.get_future().share();
+  std::vector<ReadyTaskSubmission> ready_a;
+  ready_a.push_back(make_ready(
+      run_a.acquire_lease(), 0U, 1,
+      [&cpu_a_entries, &gpu_a_entries, &cpu_a_entered_promise,
+       &gpu_a_entered_promise,
+       release_cpu_a](ComputeRunLease& lease, const ComputeRunTaskIdentity&,
+                      ExecutionTaskRuntime& runtime) {
+        auto* ready_runtime =
+            dynamic_cast<ReadyTaskSubmissionRuntime*>(&runtime);
+        if (ready_runtime == nullptr) {
+          throw std::logic_error(
+              "Grant-block regression requires ready-submission runtime.");
+        }
+        ready_runtime->submit_ready_submission(make_ready(
+            lease, 1U, 2,
+            [&gpu_a_entries, &gpu_a_entered_promise](
+                ComputeRunLease&, const ComputeRunTaskIdentity&,
+                ExecutionTaskRuntime& gpu_runtime) {
+              gpu_a_entries.fetch_add(1, std::memory_order_relaxed);
+              gpu_a_entered_promise.set_value();
+              gpu_runtime.dec_tasks_to_complete();
+            },
+            Device::GPU_METAL, ExecutionTaskPriority::High, false));
+        cpu_a_entries.fetch_add(1, std::memory_order_relaxed);
+        cpu_a_entered_promise.set_value();
+        release_cpu_a.wait();
+        runtime.dec_tasks_to_complete();
+      }));
+
+  TestHostContext host_b(true);
+  ComputeRun run_b(make_submission("grant-blocked-b", 62U, 1));
+  std::atomic_int gpu_b_entries{0};
+  std::promise<void> gpu_b_entered_promise;
+  std::future<void> gpu_b_entered = gpu_b_entered_promise.get_future();
+  std::future<void> completion_a = std::async(
+      std::launch::async,
+      [&service, &host_a, ready = std::move(ready_a)]() mutable {
+        service.execute_run(host_a, "gpu_pipeline", std::move(ready), 2);
+      });
+  std::future<void> completion_b;
+  ScopedPromiseRelease release_guard(release_cpu_a_promise);
+
+  ASSERT_EQ(cpu_a_entered.wait_for(kTestTimeout), std::future_status::ready);
+  ASSERT_TRUE(wait_for_select_count(control_, 2U));
+  EXPECT_EQ(gpu_a_entered.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+
+  std::vector<ReadyTaskSubmission> ready_b;
+  ready_b.push_back(make_ready(
+      run_b.acquire_lease(), 0U, 1,
+      [&gpu_b_entries, &gpu_b_entered_promise](ComputeRunLease&,
+                                               const ComputeRunTaskIdentity&,
+                                               ExecutionTaskRuntime& runtime) {
+        gpu_b_entries.fetch_add(1, std::memory_order_relaxed);
+        gpu_b_entered_promise.set_value();
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+  completion_b = std::async(
+      std::launch::async,
+      [&service, &host_b, ready = std::move(ready_b)]() mutable {
+        service.execute_run(host_b, "gpu_pipeline", std::move(ready), 1);
+      });
+
+  ASSERT_EQ(gpu_b_entered.wait_for(kTestTimeout), std::future_status::ready);
+  ASSERT_EQ(completion_b.wait_for(kTestTimeout), std::future_status::ready);
+  EXPECT_NO_THROW(completion_b.get());
+  EXPECT_EQ(gpu_b_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(gpu_a_entries.load(std::memory_order_relaxed), 0);
+  EXPECT_NE(service.get_stats().find("Ready tasks: 1"), std::string::npos);
+
+  release_guard.release();
+  ASSERT_EQ(gpu_a_entered.wait_for(kTestTimeout), std::future_status::ready);
+  ASSERT_EQ(completion_a.wait_for(kTestTimeout), std::future_status::ready);
+  EXPECT_NO_THROW(completion_a.get());
+  EXPECT_EQ(cpu_a_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(gpu_a_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(host_a.exits(), 2);
+  EXPECT_EQ(host_b.exits(), 1);
+  EXPECT_FALSE(host_a.observation_failed());
+  EXPECT_FALSE(host_b.observation_failed());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies a sole grant-blocked candidate waits without retry spinning.
+ *
+ * The fixture selection counter bounds retries while Run A's CPU callback owns
+ * its only execution grant. Accepted cancellation must purge the retained GPU
+ * ready entry, wake the blocked worker, and leave no callback or resource leak;
+ * service destruction then wakes both idle physical workers.
+ */
+TEST_F(PolicyExecutionFixture,
+       SoleGrantBlockedCandidateWaitsAndCancellationWakesWorker) {
+  ExecutionService service(1U);
+  control_.set_select_mode(PS_POLICY_FIXTURE_SELECT_FIRST);
+  service.replace_policy(PolicyClass::Throughput, "fixture_policy");
+
+  TestHostContext host(true);
+  ComputeRun run(make_submission("grant-blocked-cancel", 63U, 1));
+  const ComputeRunCancellationSource cancellation = run.cancellation_source();
+  std::atomic_int cpu_entries{0};
+  std::atomic_int gpu_entries{0};
+  std::promise<void> cpu_entered_promise;
+  std::future<void> cpu_entered = cpu_entered_promise.get_future();
+  std::promise<void> release_cpu_promise;
+  const std::shared_future<void> release_cpu =
+      release_cpu_promise.get_future().share();
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(make_ready(
+      run.acquire_lease(), 0U, 1,
+      [&cpu_entries, &gpu_entries, &cpu_entered_promise, release_cpu](
+          ComputeRunLease& lease, const ComputeRunTaskIdentity&,
+          ExecutionTaskRuntime& runtime) {
+        auto* ready_runtime =
+            dynamic_cast<ReadyTaskSubmissionRuntime*>(&runtime);
+        if (ready_runtime == nullptr) {
+          throw std::logic_error(
+              "Grant-block regression requires ready-submission runtime.");
+        }
+        ready_runtime->submit_ready_submission(make_ready(
+            lease, 1U, 2,
+            [&gpu_entries](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                           ExecutionTaskRuntime& gpu_runtime) {
+              gpu_entries.fetch_add(1, std::memory_order_relaxed);
+              gpu_runtime.dec_tasks_to_complete();
+            },
+            Device::GPU_METAL, ExecutionTaskPriority::High, false));
+        cpu_entries.fetch_add(1, std::memory_order_relaxed);
+        cpu_entered_promise.set_value();
+        release_cpu.wait();
+        runtime.dec_tasks_to_complete();
+      }));
+  std::future<void> completion = std::async(
+      std::launch::async,
+      [&service, &host, ready = std::move(ready)]() mutable {
+        service.execute_run(host, "gpu_pipeline", std::move(ready), 2);
+      });
+  ScopedPromiseRelease release_guard(release_cpu_promise);
+
+  ASSERT_EQ(cpu_entered.wait_for(kTestTimeout), std::future_status::ready);
+  ASSERT_TRUE(wait_for_select_count(control_, 2U));
+  const std::uint32_t before_wait = control_.select_count();
+  std::this_thread::sleep_for(std::chrono::milliseconds(180));
+  const std::uint32_t after_wait = control_.select_count();
+  EXPECT_LE(after_wait - before_wait, 6U);
+  EXPECT_NE(service.get_stats().find("Ready tasks: 1"), std::string::npos);
+
+  EXPECT_TRUE(cancellation.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  EXPECT_NE(service.get_stats().find("Ready tasks: 0"), std::string::npos);
+  release_guard.release();
+  ASSERT_EQ(completion.wait_for(kTestTimeout), std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(cpu_entries.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(gpu_entries.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(host.exits(), 1);
+  EXPECT_FALSE(host.observation_failed());
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 

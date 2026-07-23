@@ -128,7 +128,7 @@ Host 首先根据原始调用校验回调完成状态和每一个决策字节：
 
 结果明确分为两类：
 
-- **因 Host 状态而过时**：决策生成时有效，但就绪、取消、取代、路由、授权、
+- **因 Host 状态而过时**：决策生成时有效，但就绪、取消、取代、路由、
   公平性或代次状态已经变化。Host 最多再取得两个新的插件快照，之后使用当前
   同类别的内建选择。这不会记录策略故障。
 - **无效插件决策**：回调失败、抛出可捕获的外部异常、弃权、返回格式错误的
@@ -157,6 +157,15 @@ Host 首先根据原始调用校验回调完成状态和每一个决策字节：
 提交之前不会开始任何执行器回调。提交前的每一次拒绝或异常都会保持就绪/公平性/
 突发/飞行中状态不变，并且只释放一次暂存授权。完成、取消、取代、依赖释放和
 Run 结算同样只释放一次各自授权。
+
+重验后 execution grant 暂时耗尽不属于 plugin fault 或 obsolete-decision retry。ready
+store 只在该 worker 的当前 cycle 中标记精确 candidate/version，并在不移除 entry、不释放
+ready grant、也不 charge fairness 的情况下重算 class/frontier selection。这样，独立的较低
+优先级 Run 可以从剩余 current candidate 中 start。如果每个 lane-compatible candidate 都被
+标记，worker 会等待 predicate-protected notification epoch；enqueue、dependency release、
+completion/grant release、cancellation/failure purge、policy replacement 与 shutdown 都会推进
+该 epoch。spurious wake 不触发 retry；50 ms low-frequency fallback 覆盖其他不可观测的外部
+child-grant release，随后清除 cycle mark，并重验 current Host state。
 
 ## 私有执行路由
 

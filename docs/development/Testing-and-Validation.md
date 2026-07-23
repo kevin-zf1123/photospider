@@ -575,10 +575,18 @@ shutdown rejection, and committed-work drainage. `test_policy_execution`
 uses a deterministic fake-Metal Host to prove the canonical per-route device
 inventory, rejection before Run publication, distinct fixed CPU/GPU workers,
 Metal exception publication/recovery, route reuse, cancellation, and reserved-
-start rollback without candidate/version ABA or leaked grants. The rollback
-probe is fixed-size atomic state compiled only into the non-installed test
-product; production has no observer typedef, object field, class-layout change,
-worker hot-path callback/runtime branch, or symbol. `Issue75DeviceRouting.*` in
+start rollback without candidate/version ABA or leaked grants. It also proves
+that a grant-blocked high-priority Run A cannot starve lower-priority independent
+Run B, that A's ready entry later executes exactly once, and that a sole blocked
+candidate has bounded policy-selection retries and wakes on cancellation.
+
+The reserved-start rollback probe is fixed-size atomic state compiled only into
+the non-installed test product. The Issue #75 probe macro changes no production
+class definition or layout, and the production object has no reserved-start-
+probe observer typedef, object field, callback, worker hot-path runtime branch,
+helper global, or symbol. This statement is limited to that probe; the
+pre-existing initial-submission storage observer is baseline behavior and is
+not removed or committed for migration in this phase. `Issue75DeviceRouting.*` in
 `test_compute_run`
 proves that full HP, dirty HP/RT, and connected preflight freeze the chosen
 Metal implementation/device and use CPU fallback when Metal is absent.

@@ -544,7 +544,11 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
  * policy strategies
  * rank explicit interactive/throughput QoS with checked work/byte service,
  * Graph/Run fairness, dispatch aging, admission headroom, and bounded batch
- * progress. Policies own no physical or resource authority. The service owns
+ * progress. A worker that cannot mint one candidate's execution grant hides
+ * only that exact candidate/version for its current selection cycle, evaluates
+ * independent work, and uses notification-driven bounded waiting when every
+ * compatible candidate is blocked. Policies own no physical or resource
+ * authority. The service owns
  * no planning, dependency, Graph/cache, dirty propagation, visible commit, or
  * final lifecycle-registry authority.
  *
@@ -1038,6 +1042,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param lane Fixed physical lane owned by this worker.
    * @return Nothing.
    * @throws Nothing; task exceptions are routed into matching Run state.
+   * @note Grant exhaustion preserves the ready entry and fairness state, marks
+   * its exact candidate/version only for this worker cycle, and recomputes all
+   * selection inputs. An all-blocked lane waits on the worker-notification
+   * epoch with a bounded low-frequency fallback; spurious wakes do not retry.
    */
   void worker_loop(int worker_id,
                    execution::PhysicalExecutionLane lane) noexcept;
@@ -1109,6 +1117,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param failure Exact non-null worker exception.
    * @return Nothing.
    * @throws Nothing; worker failure transport cannot be replaced by cleanup.
+   * @note Purge advances the worker-notification epoch and wakes workers whose
+   * current lane candidates were transiently grant-blocked.
    */
   void fail_run(const std::shared_ptr<RunState>& run,
                 std::exception_ptr failure) noexcept;
@@ -1121,7 +1131,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws Nothing; cancellation cleanup cannot replace terminal ownership.
    * @note Acquires the pool mutex before the Run mutex, matching publication,
    * failure cleanup, and worker dequeue. In-flight callbacks remain counted
-   * until their actual exit and are never synchronously interrupted.
+   * until their actual exit and are never synchronously interrupted. Purge
+   * advances the worker-notification epoch before waking blocked workers.
    */
   void cancel_run(const std::shared_ptr<RunState>& run,
                   ComputeRunCancellationReason reason) noexcept;

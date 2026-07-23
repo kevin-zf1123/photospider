@@ -149,7 +149,7 @@ selection is then compared with current Host state.
 There are two distinct outcomes:
 
 - **obsolete by Host state**: the decision was valid when made, but readiness,
-  cancellation, supersession, route, grant, fairness, or generation state
+  cancellation, supersession, route, fairness, or generation state
   changed. The Host may take at most two fresh plugin snapshots, then uses the
   current same-class built-in choice. This records no policy fault.
 - **invalid plugin decision**: the callback failed, threw a catchable foreign
@@ -183,6 +183,18 @@ No executor callback begins before that commit. Every rejection or exception
 before commit preserves ready/fairness/burst/in-flight state and releases staged
 grants exactly once. Completion, cancellation, supersession, dependency release,
 and Run settlement also release their grants exactly once.
+
+Temporary execution-grant exhaustion after revalidation is not a plugin fault
+or obsolete-decision retry. The ready store marks the exact candidate/version
+only for that worker's current cycle and recomputes class/frontier selection
+without removing the entry, releasing its ready grant, or charging fairness.
+This lets an independent lower-priority Run start from the remaining current
+candidates. If every lane-compatible candidate is marked, the worker waits on
+a predicate-protected notification epoch advanced by enqueue, dependency
+release, completion/grant release, cancellation/failure purge, policy
+replacement, and shutdown. Spurious wakes do not retry; a 50 ms low-frequency
+fallback covers an otherwise unobservable external child-grant release, after
+which cycle marks are cleared and current Host state is revalidated.
 
 ## Private Execution Routes
 
