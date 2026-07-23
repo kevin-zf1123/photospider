@@ -39,6 +39,24 @@ bool arguments_request_help(int argc, char** argv) noexcept {
 }
 
 /**
+ * @brief Reinitializes platform option-parser state for one argument scan.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Darwin exposes `optreset` with the POSIX `optind == 1` restart, while
+ * Linux `getopt_long` uses `optind == 0` to clear hidden permutation state.
+ * Calling this before both passes also isolates repeated in-process
+ * `run_graph_cli` invocations with different option layouts.
+ */
+void reset_cli_option_parser() noexcept {
+#if defined(__APPLE__)
+  optreset = 1;
+  optind = 1;
+#else
+  optind = 0;
+#endif
+}
+
+/**
  * @brief Scans configured directories for policy plugins before graph load.
  * @param host Borrowed Host that owns loaded policy plugin handles.
  * @param config CLI value snapshot containing directories to scan.
@@ -85,7 +103,7 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
       return 0;
     }
 
-    optind = 1;
+    reset_cli_option_parser();
     (void)svc.seed_builtin_ops();
 
     CliConfig config;
@@ -109,7 +127,7 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
         custom_config_path = optarg;
       }
     }
-    optind = 1;
+    reset_cli_option_parser();
 
     std::string config_to_load =
         custom_config_path.empty() ? "config.yaml" : custom_config_path;

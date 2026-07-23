@@ -254,7 +254,9 @@ load/output 与短 traversal case 会保留 Host 返回的 session target，
 并固定 `-t` 无参数 grammar。失败 case 要求 load、output、dependency-tree print、
 traversal-order 与全缓存清理失败返回可恢复 exit code 2，且不得打印成功 footer 或进入 REPL。
 Load case 还会捕获 REPL banner，证明唯一 action 失败时，失败结果优先于正常的 no-action
-fallback。
+fallback。每次进程内调用都会在 configuration scan 与有序 action replay 前完整重新初始化平台
+`getopt_long` 状态。全缓存清理 case 会先完成一次 option shape 不同的 traversal 调用，因此其
+第二次调用能够证明：隐藏 parser 状态不能让后续 action 被重排或跳过。
 
 Option replay 仍保持有序；另一个可恢复 action 失败前后已经成功的 action 可能产生可见效果，
 该边界不提供多 action rollback transaction。尽管如此，只要任一 action 或 loaded-graph

@@ -344,6 +344,11 @@ require load, output, dependency-tree print, traversal-order, and all-cache
 clear failures to return recoverable exit code 2 without printing the success
 footer or entering the REPL. The load case also captures the REPL banner,
 proving that a failed only action wins over the normal no-action fallback.
+Each in-process invocation fully reinitializes platform `getopt_long` state
+before both the configuration scan and ordered action replay. The cache-clear
+case first completes a traversal invocation with a different option shape, so
+its second invocation proves that hidden parser state cannot reorder or skip a
+later action.
 
 Option replay remains ordered and may expose effects from successful actions
 before or after another recoverable action failure; it does not provide a

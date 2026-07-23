@@ -611,13 +611,35 @@ TEST(CliOptionActions, FailedTraversalAfterSuccessfulReadReturnsTwo) {
  * @return Nothing; GoogleTest assertions report action-result violations.
  * @throws std::filesystem::filesystem_error, std::runtime_error, or
  * std::bad_alloc if fixture or captured-output storage cannot be prepared.
- * @note Status-only Host actions participate in the same invocation-wide
- * failure contract as value-returning and document actions.
+ * @note A successful traversal invocation first leaves platform option-parser
+ * state in a different terminal shape. The cache invocation must fully reset
+ * that state before both parser passes; its status-only Host action then
+ * participates in the same invocation-wide failure contract as value-returning
+ * and document actions.
  */
 TEST(CliOptionActions, FailedCacheClearAfterSuccessfulReadReturnsTwo) {
   ScopedCliConfigTempDir directory("photospider_cli_failed_cache_clear");
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "failed-cache-clear-root");
+
+  ps::testing::IpcHostSpy traversal_host(
+      ps::GraphSessionId{"parser-reset-traversal"});
+  std::array<std::string, 6> traversal_arguments = {
+      "graph_cli", "--config", config_path.string(), "-r", "input.yaml", "-t"};
+  std::vector<char*> traversal_argv;
+  traversal_argv.reserve(traversal_arguments.size());
+  for (std::string& argument : traversal_arguments) {
+    traversal_argv.push_back(argument.data());
+  }
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  const int traversal_exit_code =
+      run_graph_cli(static_cast<int>(traversal_argv.size()),
+                    traversal_argv.data(), traversal_host);
+  (void)testing::internal::GetCapturedStderr();
+  (void)testing::internal::GetCapturedStdout();
+  ASSERT_EQ(traversal_exit_code, 0);
+  ASSERT_EQ(traversal_host.call_count("inspect.traversal_orders"), 1U);
 
   ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-cache-clear"});
   host.set_status(
