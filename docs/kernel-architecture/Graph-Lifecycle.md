@@ -276,45 +276,59 @@ optional/path/string access.
 
 ## Close and Lifetime
 
-Embedded Host close first marks the session closing. New compute, execution,
-reload, required save, node-YAML replacement, ROI projection, timing
-inspection, and all-cache clearing admissions fail. The Host waits through
-caller-visible result/status translation for synchronous calls admitted before
-that marker while both runtime lanes remain open. Kernel first stops coordinator
-admission and then the private compute-request lane's admission. Producers
-blocked on its exact 64-total-unit capacity are awakened and rejected without
-requiring queue space. Parked ticket owners receive a close-owned turn so
-accepted pending/active state retires exactly once. Only after that stop does
-the Host wait for async submission placeholders and caller-visible status
-publication.
+One completely constructed `GraphRuntime` owns a stable
+`GraphLifetimeAnchor` and a preallocated monotonic close coordinator. Kernel
+registers the non-reused `GraphInstanceId` and anchor only after load is ready
+to publish. A lifecycle candidate retains an anchor lease from its first
+admission check through atomic standalone/realtime-bundle installation or
+rollback, so close cannot miss planning that began before its marker.
 
-Kernel next drains accepted request callbacks in FIFO order and joins the sole
-request worker while graph-state remains available for their capture and final
-commit transactions. It then stops, drains, and joins the graph-state lane.
-After both joined boundaries, `GraphRuntime::stop()` marks the owner inactive
-and Kernel removes the map entry. No Graph-local physical route, policy context,
-worker, plugin, or ledger reservation requires teardown.
+Embedded Host close first selects or joins that one close generation and marks
+the public session closing. New compute, execution, reload, required save,
+node-YAML replacement, ROI projection, timing inspection, and all-cache
+clearing admissions fail. Under the `RunLifecycleRegistry` fence, the owner
+changes the exact Graph row `Open -> Closing`, rejects pending candidates,
+denies visible commit, and requests `GraphClose` cancellation for every
+installed Run. It releases the fence before waiting; a candidate either
+installed before the marker or rolls back, and no late Run can enter the row.
+Every live concurrent close caller joins the same successful generation.
 
-Concurrent close callers serialize through the Host lifecycle gate. Each
-executor records the close generation a closer joined and durably publishes
-that generation as joined. A restart seam remains available only for an
-exception from the post-drain runtime-stop boundary: graph-state is recreated
-first and the compute-request lane second before the failure is rethrown. The
-current ownerless `GraphRuntime::stop()` only clears running state and does not
-throw. A restart may win before delayed waiters for the prior generation wake,
-but those waiters still return and no duplicate worker is created.
+Accepted synchronous calls finish result/status translation, accepted daemon
+jobs keep status/result/release ownership, and already admitted Runs retain
+only the ready, execution, completion, and graph-finalization paths needed to
+settle. Finalization waits for terminal publication, physical callback
+quiescence, commit/discard completion, exact root reservation and child-grant
+release, Graph lifetime lease release, and registry unregistration. A
+non-preemptible provider that never returns can therefore keep close blocked;
+the implementation does not fabricate recovery.
 
-Destroying an embedded Host without explicit close follows the same synchronous
-ownership chain. The adapter first waits its joined async
-status workers and stops external admission; `Kernel::~Kernel()` then clears
-the runtime map while Kernel services remain alive. Every `GraphRuntime` drains
-and joins its compute-request lane, then graph-state, before releasing
-Graph-local state. Direct internal Kernel owners have the same duty to stop
-concurrent callers before destruction. Those joined boundaries are also the
-lifetime fence for the diagnostic store owned directly by each live or staged
-`GraphModel`: execution callbacks and both runtime lanes must stop accessing it before model member
-teardown, and the store itself owns no thread or detached lifetime. `NotFound`
-is reserved for a session that is actually absent.
+After the Graph index and candidate count are empty, close performs the exact
+irreversible tail:
+
+1. remove the empty lifecycle-registry row;
+2. stop coordinator and compute-request admission, wake capacity-blocked
+   producers, retire parked tickets, drain accepted callbacks, and join the
+   request worker while graph-state finalization remains available;
+3. stop, drain, and join the graph-state lane;
+4. mark the runtime retired, remove route ids/map ownership, and destroy Graph
+   state.
+
+There is no post-marker reopen or worker reconstruction. A valid direct Host
+close succeeds; an absent Graph with no joinable generation returns
+`NotFound`. Graph close never stops process-owned workers, routes, policy
+bindings, or unrelated Graph Runs.
+
+Destroying an embedded Host without explicit close first stops external Host
+admission and invokes the same Graph close path for each live session. After
+all Graphs settle, the composition root invokes idempotent process execution
+shutdown exactly once. That shutdown changes the service to `Stopping` and all
+remaining rows to `Closing`, drains every installed Run, then stops ready and
+route admission, joins physical executors, retires policy invocations and
+current/displaced bindings, and publishes `ServiceStopped` only with all
+lifecycle/resource counters zero. Direct internal Kernel owners have the same
+duty to stop concurrent callers before destruction. The joined boundaries are
+also the lifetime fence for each live or staged `GraphModel` diagnostic store;
+the store owns no thread or detached lifetime.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
@@ -398,15 +412,13 @@ The accepted
 now governs the implemented strong Graph identity/revision, staged compute,
 exact revision/generation commit predicate, cooperative Run cancellation,
 latest-wins supersession, request-owned realtime `RunGroup`, and separate
-compute-request/graph-state lanes. Current graph close still drains accepted
-work, including physically active cancelled Runs, and is not a cancellation
-requester. The complete target still requires the future
-`ExecutionService`-owned admitted-Run registry, atomic
-Run-admission/Graph-close fence, lifecycle-driven close/shutdown cancellation,
-and telemetry from issue #76. Issue #75's pure-C policy ABI, Host-authored
-frontier, reserved-start admission, and private execution-route replacement are
-current behavior. This document does not claim the later issue #76
-capabilities.
+compute-request/graph-state lanes. The `ExecutionService`-owned
+`RunLifecycleRegistry`, atomic Run-admission/Graph-close fence,
+lifecycle-driven close/shutdown cancellation, exact settlement, and
+source-private telemetry from issue #76 are current behavior. Issue #75's
+pure-C policy ABI, Host-authored frontier, reserved-start admission, and
+private execution-route replacement remain current. Public cancellation and
+lifecycle telemetry are intentionally not exposed through Host, CLI, or IPC.
 
 ## Implementation and Validation Entry Points
 
@@ -435,6 +447,8 @@ capabilities.
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/run_lifecycle_registry.*`
+- `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/host/embedded_host.cpp`

@@ -83,15 +83,15 @@ per-generation thread is created.
 `close_and_drain()` is concurrent-call and repeat-call idempotent. It stops
 admission, wakes full-queue producers with `std::runtime_error`, drains prior
 work FIFO, and joins the worker before returning. Each caller waits for the
-durable close generation that it joined; a failed-stop restart may reopen a
-later accepting generation before a delayed caller wakes without trapping that
-caller or creating a second worker. `GraphRuntime` stops and drains compute
-requests first while graph-state remains available for accepted commits, then
-drains graph-state before releasing Graph-local state. Different graphs have
-independent workers and queues. The Host-composition resource ledger does not
-charge these lane workers or fixed service threads; they remain infrastructure.
-Its CPU dimension instead admits per-Run execution rights committed by the
-Host-owned reserved-start transaction.
+durable close generation that it joined. A joined lane never reopens admission
+or creates a replacement worker; delayed callers observe the same completed
+generation. `GraphRuntime` stops and drains compute requests first while
+graph-state remains available for accepted commits, then drains graph-state
+before releasing Graph-local state. Different graphs have independent workers
+and queues. The Host-composition resource ledger does not charge these lane
+workers or fixed service threads; they remain infrastructure. Its CPU dimension
+instead admits per-Run execution rights committed by the Host-owned
+reserved-start transaction.
 
 ## Current Collaborators
 
@@ -488,11 +488,19 @@ surfaces expose no cancellation entry; IPC jobs continue to report
   `(RunId, RunLocalTaskId)`. Dirty/preflight work uses heap-owned phase contexts
   and child Run leases through the same policy, reserved-start, and completion
   boundary.
-- Graph close stops coordinator admission before draining the compute lane,
-  lets accepted ticket owners retire their pending/active state exactly once,
-  and keeps graph-state available for their final settlement. Issue #76 still
-  owns the broader graph-close/process-shutdown cancellation and lifecycle
-  lease model.
+- Graph close first marks the exact lifecycle-registry row `Closing`, rejects
+  and settles pending candidates, and requests `GraphClose` cancellation for
+  every installed Run in that row. Finalization waits for terminal outcome,
+  physical quiescence, graph commit/discard, exact root/child grant release,
+  and registry unregistration. Only after the empty row is removed does Kernel
+  stop the compute-request lane, stop the graph-state lane, and destroy Graph
+  state. Unrelated Graphs and process-owned routes continue running.
+- Process execution shutdown uses the same registry fence to stop global
+  admission and close every Graph row, requests `ProcessShutdown`
+  cancellation, drains every admitted Run, then retires ready work, routes,
+  policy invocations/bindings, and physical workers. Same-service worker or
+  policy-callback shutdown is rejected; repeated external shutdown joins the
+  one monotonic generation.
 
 ## Boundary Rationale
 
@@ -510,7 +518,7 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #75: all HP/RT ready work enters one Host-owned
+is authoritative through issue #76: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources before a closed private route starts execution. Graphs retain
@@ -519,9 +527,12 @@ plugin, per-Graph physical owner, or compatibility adapter remains. Separate
 realtime child Runs, request-owned staging, strong identity/revision checks,
 latest-wins supersession, cancellation observation, exact-Run queued purge,
 dependent suppression, and Run-owned commit arbitration remain unchanged.
-Final lifecycle admission/leases with graph-close/process-shutdown cancellation
-and telemetry (#76), and public Host/CLI/IPC cancellation entry points remain
-future behavior.
+`RunLifecycleRegistry` now supplies the atomic candidate/close/shutdown fence,
+Graph lifetime leases, standalone and realtime-bundle installation, exact
+finalization/unregistration, and monotonic close generations.
+`ExecutionLifecycleTelemetry` supplies source-private bounded lifecycle proof;
+it is not a public Host/CLI/IPC control surface. Public cancellation entry
+points remain future behavior.
 
 ## Implementation and Validation Entry Points
 
@@ -532,6 +543,8 @@ future behavior.
 - `src/lib/compute/compute_run.*`
 - `src/lib/compute/run_group.*`
 - `src/lib/compute/execution_service.*`
+- `src/lib/compute/run_lifecycle_registry.*`
+- `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/task_graph_planning.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_submission.*`

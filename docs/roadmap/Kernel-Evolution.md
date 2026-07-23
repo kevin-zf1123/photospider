@@ -103,11 +103,11 @@ ticket-backed coalescing, and current-generation commit authority. Issue #75
 removes the scheduler SDK and adds pure-C policy ABI v1, atomic policy binding
 replacement, Host-authored frontier and fallback, sticky generation-local
 faults, reserved start, and private execution routes. Registry-owned
-close/shutdown cancellation remains issue #76.
+close/shutdown cancellation, exact settlement, and lifecycle telemetry are
+current Issue #76 behavior.
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
-is authoritative for the detailed target Run lifetime, owner boundaries,
-resource mint, close/shutdown scope, and delivery dependencies; it does not make
-those objects current behavior.
+is authoritative for the detailed current Run lifetime, owner boundaries,
+resource mint, close/shutdown scope, and delivery dependencies.
 
 ## Architectural Principles
 
@@ -176,8 +176,9 @@ the frontend from producing a newer revision. Issue #72 makes that minimum
 identity/revision staging behavior current, Issue #73 makes private Run
 cancellation and commit arbitration current, and Issue #74 makes request-level
 grouping plus supersession generation current. Issue #75 makes policy
-generation, reserved start, and private execution routes current. The diagram
-still includes later registry, device, I/O, and isolated-plugin target slices.
+generation, reserved start, and private execution routes current. Issue #76
+makes lifecycle registry, close/shutdown, and telemetry current. The diagram
+still includes later device, I/O, and isolated-plugin target slices.
 
 ## Run and Process Execution Domain Contract
 
@@ -214,10 +215,12 @@ immutable supersession key/generation, request-wide realtime cancellation and
 aggregate settlement, one pending mailbox and persistent ticket per exact key,
 and current-generation commit validation. Issue #75 adds Host-authored policy
 frontiers, generation-scoped policy binding and fault state, reserved-start
-admission, and private execution routes. Public cancellation control and
-lifecycle registry wiring remain subsequent slices.
+admission, and private execution routes. Issue #76 adds current lifecycle
+registry wiring, Graph close, process shutdown, and telemetry. Public
+cancellation control remains a subsequent slice.
 
-The remainder of this section describes the complete accepted target.
+The remainder of this section describes the implemented ownership contract and
+its remaining target extensions.
 
 `ComputeRun` is the unit of compute identity and lifetime. It is distinct from
 `GraphRuntime`, a policy selection snapshot, and `ComputeIntent`.
@@ -360,10 +363,11 @@ commit. Per-Graph supersession now coalesces one pending owner per exact key and
 requires the current checked generation at commit. Host-authored policy
 frontiers, pure-C plugin selection, generation-local sticky fallback,
 allocation-free start commit, and ready-to-execution grant exchange are also
-current, while public cancellation control and the lifecycle registry remain
-future work.
+current. Issue #76 adds the current lifecycle registry, Graph lifetime leases,
+monotonic Graph close, explicit process shutdown, and source-private telemetry;
+public cancellation control remains future work.
 
-The final service owns physical CPU workers and later resource executors,
+The service owns physical CPU workers and later resource executors,
 bounded ready storage, Run/resource admission, policy-result validation,
 execution exception fences, and completion routing. It does not own planning,
 dependency semantics, Graph/document persistence, cache authority, dirty
@@ -404,8 +408,8 @@ queues/memory/in-flight work, compute-I/O operations/bytes, and
 plugin-process/invocation/IPC remain future dimensions and are not represented
 by fake zero-valued authority. Current success, failure, rejection, rollback,
 replacement, and worker-exception paths release every reservation and grant
-exactly once. Current cancellation and later close/shutdown slices must
-preserve that contract. Capacity exhaustion and checked overflow fail without
+exactly once. Current cancellation and close/shutdown finalization preserve
+that contract. Capacity exhaustion and checked overflow fail without
 partial reservation, overcommit, or silent clamping.
 
 Each policy binding is a comparison seam, not a physical executor or resource
@@ -476,8 +480,8 @@ cancellation of older matching Runs without reusing their identity or mutating
 their plans. Non-preemptible work and external side effects may finish, but
 stale, cancelled, failed, or overdue output cannot commit.
 
-The remaining complete target further adds an `Open` registry graph row plus a
-registered Run and valid graph-lifetime lease from issue #76.
+Issue #76 further adds the current `Open` registry Graph row, registered Run,
+and valid Graph lifetime lease checks.
 
 Any future compatible-revision optimization requires another explicit decision;
 compatibility is not inferred from equal topology.
@@ -487,8 +491,8 @@ gate. Issue #72 currently opens it only after valid RT proxy publication and
 then applies an independent HP revision predicate; a later stale HP result does
 not roll back RT. Issue #73 makes RT cancellation while `Pending` deny the gate
 and request HP cancellation; HP cancellation after `RtCommitted` cannot roll
-back RT. Graph-close and process-shutdown denial reasons remain later slices of
-the complete gate contract.
+back RT. Graph-close and process-shutdown denial reasons now fan through both
+child Runs.
 
 ### Close and shutdown scopes
 
@@ -498,8 +502,10 @@ enumerates the complete graph Run index. It denies visible commit, cancels or
 drains those Runs, and preserves their finalization paths. Only after terminal
 publication, physical quiescence, commit/discard finalization, exact graph/
 resource release, and admitted-Run unregistration does it remove the empty row,
-stop the graph-state lane, and destroy graph state. Unrelated Graph Runs and the
-shared service continue.
+stop/drain the compute-request lane while graph-state finalization remains
+available, stop/drain the graph-state lane, and destroy Graph state. Unrelated
+Graph Runs and the shared service continue; marker completion never reopens
+either lane.
 
 Process execution-domain shutdown marks the service stopping and all graph rows
 closing under the same fence, resolves pending candidates, and enumerates the
@@ -507,7 +513,9 @@ complete process Run index. Bounded ready submission, execution, completion
 routing, and graph-state finalization remain available only for already-admitted
 Runs chosen to cancel or drain. After every Run settles, releases graph/resource
 leases exactly once, and unregisters, shutdown stops remaining work admission,
-joins all physical executors, and destroys the service.
+joins all physical executors, retires policy bindings, publishes
+`ServiceStopped` with all 15 lifecycle/resource counters zero, and destroys the
+service.
 Worker/operation exceptions are fenced and routed through the matching Run
 lease; late completion performs cleanup only.
 

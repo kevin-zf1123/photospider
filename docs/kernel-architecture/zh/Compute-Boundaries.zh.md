@@ -71,12 +71,12 @@ reserved-ticket turn 最多 materialize 一个 generation，并运行既有 Kern
 
 `close_and_drain()` 对并发调用与重复调用都保持幂等。它会停止 admission，让被满队列阻塞的
 producer 以 `std::runtime_error` 被唤醒，按 FIFO 排空已有 work，并在返回前 join worker。每个
-caller 都等待自己加入的持久 close generation；失败 stop 后的 restart 可以在延迟 caller 被唤醒前
-重新开放后续 accepting generation，但不会困住该 caller，也不会创建第二个 worker。
-`GraphRuntime` 会先停止并排空 compute request，同时保持 graph-state 可供已接受 request commit；
-随后排空 graph-state，再释放 Graph-local state。不同 graph 具有独立的 worker 和队列。
-Host composition 的 resource ledger 不对这些 lane worker 或固定 service thread 计费；它们保持为
-基础设施。其 CPU 维度改为准入由 Host-owned reserved-start transaction 提交的每个 Run 执行权。
+caller 都等待自己加入的持久 close generation。已 join 的 lane 永远不会重新开放 admission 或创建
+replacement worker；延迟 caller 会观察同一个已完成 generation。`GraphRuntime` 会先停止并排空
+compute request，同时保持 graph-state 可供已接受 request commit；随后排空 graph-state，再释放
+Graph-local state。不同 graph 具有独立的 worker 和队列。Host composition 的 resource ledger
+不对这些 lane worker 或固定 service thread 计费；它们保持为基础设施。其 CPU 维度改为准入由
+Host-owned reserved-start transaction 提交的每个 Run 执行权。
 
 ## 当前协作者
 
@@ -382,9 +382,15 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
   匹配的 `ComputeRunLease`；failure publication 必须匹配 `(RunId, RunLocalTaskId)`。
   Dirty/preflight work 使用 heap-owned phase context 与 child Run lease，并经过相同的 policy、
   reserved-start 与 completion 边界。
-- Graph close 会先停止 coordinator admission，再排空 compute lane；已接受的 ticket owner 可以恰好
-  一次 retire 其 pending/active state，同时 graph-state 保持可用以完成最终 settlement。更广泛的
-  graph-close/process-shutdown cancellation 与 lifecycle lease 模型仍由 Issue #76 负责。
+- Graph close 会先把精确的 lifecycle-registry row 标记为 `Closing`，拒绝并 settle pending
+  candidate，再对该 row 中每个已安装 Run 请求 `GraphClose` cancellation。Finalization 会等待
+  terminal outcome、physical quiescence、graph commit/discard、root/child grant 精确释放与
+  registry unregistration。只有移除空 row 后，Kernel 才依次停止 compute-request lane、停止
+  graph-state lane并销毁 Graph state；无关 Graph 与 process-owned route 会继续运行。
+- Process execution shutdown 使用同一个 registry fence 停止全局 admission 并关闭每个 Graph
+  row，请求 `ProcessShutdown` cancellation，排空全部 admitted Run，然后 retire ready work、
+  route、policy invocation/binding 与物理 worker。同一 service 的 worker 或 policy callback
+  发起 shutdown 会被拒绝；外部重复 shutdown 会加入同一个单调 generation。
 
 ## 边界原理
 
@@ -398,15 +404,17 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #75 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #76 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源。Graph 只保留复制的 route
 id/generation；不再存在拥有 worker 的 scheduler SDK、scheduler plugin、per-Graph 物理 owner 或
 compatibility adapter。独立 realtime child Run、request-owned staging、强 identity/revision check、
 latest-wins supersession、cancellation observation、精确 Run queued purge、dependent suppression 与
-Run-owned commit arbitration 保持不变。带 graph-close/process-shutdown cancellation 与 telemetry
-的最终 lifecycle admission/lease（#76），以及 public Host/CLI/IPC cancellation entry point 仍是
-未来行为。
+Run-owned commit arbitration 保持不变。`RunLifecycleRegistry` 现在提供原子
+candidate/close/shutdown fence、Graph lifetime lease、standalone 与 realtime bundle 安装、精确
+finalization/unregistration 及单调 close generation。`ExecutionLifecycleTelemetry` 提供
+source-private 有界 lifecycle proof；它不是 public Host/CLI/IPC control surface。Public
+cancellation entry point 仍是未来行为。
 
 ## 实现与验证入口
 
@@ -417,6 +425,8 @@ Run-owned commit arbitration 保持不变。带 graph-close/process-shutdown can
 - `src/lib/compute/compute_run.*`
 - `src/lib/compute/run_group.*`
 - `src/lib/compute/execution_service.*`
+- `src/lib/compute/run_lifecycle_registry.*`
+- `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/task_graph_planning.*`
 - `src/lib/compute/compute_dispatch_plan_builder.*`
 - `src/lib/compute/compute_task_submission.*`

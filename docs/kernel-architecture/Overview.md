@@ -260,13 +260,15 @@ defined in `../codebase-structure/IPC-Protocol-v2.md`.
 | `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 60-method version 2 inventory; it validates correlated result shapes and exposes no raw JSON call. |
 | `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
 | daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
-| `GraphRuntime` | Per-graph resource container with model, graph-state lane, exact-64-total compute-request lane, one latest-wins coordinator, fixed-capacity execution trace ring, copied HP/RT route bindings, and platform context. |
+| `GraphRuntime` | Per-graph resource container with model, graph-state lane, exact-64-total compute-request lane, one latest-wins coordinator, fixed-capacity execution trace ring, copied HP/RT route bindings, Graph lifetime anchor, and platform context. |
 | `GraphModel` | Graph state holder with a non-reused strong instance identity, checked authoritative revision, private node/topology storage, cache root, timing data, quiet/skip-save flags, and complete compute snapshot/publication primitives. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
 | `ComputeRequestCoordinator` | Per-live-Graph latest-wins owner for checked generations, exact-key pending coalescing, one persistent ticket per admitted key, active cancellation notification, and exact pending settlement on the existing compute-lane worker. |
 | `RunGroup` | Realtime request owner for distinct HP Full and RT Interactive child Runs, their observation leases, shared cancellation source, RT-first gate, and deterministic aggregate outcome. |
-| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision and supersession identity, monotonic phase, one terminal arbiter, stable cooperative-cancellation reason, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service. Public cancellation control and the final lifecycle registry remain future. |
+| `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision and supersession identity, monotonic phase, one terminal arbiter, stable cooperative-cancellation reason, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service and its lifecycle registry. Public cancellation control remains future. |
+| `RunLifecycleRegistry` | Process-owned atomic fence for Graph registration, candidate admission, standalone/realtime-bundle installation, Graph close, process shutdown, exact Run finalization, and empty-row removal. |
+| `ExecutionLifecycleTelemetry` | Source-private fixed-capacity lifecycle event/counter store used to prove close and shutdown settlement; it exposes copied diagnostics without ownership or a public Host/IPC method. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -608,8 +610,9 @@ Important current behavior:
   `RunGroup`, checked latest-wins generations, bounded ticket-backed coalescing,
   and current-generation commit predicate are current. Issue #75's pure-C
   policy ABI, Host-authored frontier, reserved start, private execution routes,
-  and protocol-v2 control surface are current. Issue #76's lifecycle
-  registry/close/shutdown fence and public cancellation control remain future.
+  and protocol-v2 control surface are current. Issue #76's lifecycle registry,
+  Graph close/process shutdown fence, exact settlement, and source-private
+  telemetry are current. Public cancellation control remains future.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

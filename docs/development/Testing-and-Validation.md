@@ -709,6 +709,64 @@ maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
 
+## Graph Close and Process Shutdown Validation
+
+Issue #76 keeps lifecycle correctness in maintained behavior tests rather than
+migration scans. `test_run_lifecycle_registry` owns Graph registration,
+candidate rollback/install races, atomic standalone/realtime-bundle admission,
+Graph-close isolation, process shutdown, and exact final unregistration.
+`test_execution_lifecycle_telemetry` owns schema-v1 fixed records, the
+65,536-entry ring, 1..4,096 page bounds, atomic cuts, cursor gap/drop/saturation
+semantics, all 15 counters, all six physical counter selectors, and the final
+`ServiceStopped` zero-counter event.
+
+The existing product-boundary targets carry integration ownership:
+
+- `test_compute_run`, `test_compute_service_split`, and
+  `test_kernel_contracts` cover full, dirty, preflight, no-op, realtime child,
+  admission-race, visible-commit, exact finalization, and unrelated-Graph
+  behavior.
+- `test_resource_ledger` and `test_policy_execution` cover exact root/child
+  release, ready/callback/policy/binding counters, route drainage, same-service
+  worker/policy-callback shutdown rejection, cross-service shutdown, repeated
+  shutdown, and final counter/event order.
+- `test_host_adapter` covers coalesced direct Host close, post-marker
+  `NotFound`, close isolation, lane retirement order, and one composition-root
+  shutdown.
+- `test_compute_request_registry`, `test_ipc_protocol`, `test_ipc_host`, and
+  `test_ipc_daemon` cover preallocated daemon close generations,
+  pre-invocation-only `HostCloseNotStarted`, exactly one Host call, lost
+  response without replay/reopen, late `NotFound`, Client/IPC Host local-only
+  destruction, accepted-job drainage, signal shutdown, and Host lifetime.
+
+Run the focused lifecycle boundary with:
+
+```bash
+cmake --build build --target test_run_lifecycle_registry \
+  test_execution_lifecycle_telemetry test_compute_run \
+  test_compute_service_split test_kernel_contracts test_resource_ledger \
+  test_policy_execution test_host_adapter test_compute_request_registry \
+  test_ipc_protocol test_ipc_host test_ipc_daemon -j
+./build/tests/test_run_lifecycle_registry
+./build/tests/test_execution_lifecycle_telemetry
+./build/tests/test_compute_run
+./build/tests/test_compute_service_split
+./build/tests/test_kernel_contracts
+./build/tests/test_resource_ledger
+./build/tests/test_policy_execution
+./build/tests/test_host_adapter
+./build/tests/test_compute_request_registry
+./build/tests/test_ipc_protocol
+./build/tests/test_ipc_host
+./build/tests/test_ipc_daemon
+```
+
+The final delivery pass uses one clean native configure, one full build, one
+ordinary CTest/JUnit run excluding the exact `build-smoke` label, then strictly
+discovers and independently runs every post-build build-smoke entry. It does
+not register lifecycle provenance, stale-term searches, or source-quality
+audits as product tests.
+
 ## Injected Image Artifact Codec Validation
 
 `test_kernel_contracts` owns the long-lived fake-codec cache boundary. Its
@@ -790,21 +848,44 @@ it emits commands/results to CTest and retains no per-run report. This stage
 disables the operation provider, not the separate OpenCV codec, normalization,
 adapter, or embedded-product dependencies.
 
-Before removing its transient tree, the nested-build driver derives an
-absolute work spelling without resolving it for deletion. It rejects parent
-traversal, the repository, every repository ancestor, filesystem roots, and
-every symlink in the final work path or an existing parent component. Canonical
-resolution is used only for protected-location comparison; the same checks are
-repeated immediately before recursive removal, which always receives the
-validated absolute spelling rather than a symlink target. Recursive-removal
-failures propagate, and an lstat-style postcondition verifies that no directory
-or dangling link remains.
+The OpenCV-provider and injected-codec nested-build drivers import the same
+destructive work-tree helper from `cmake_build_smoke_support.py`. Before
+removing a transient tree, that helper requires a nonempty absolute work
+spelling and rejects parent traversal, the repository, every repository
+ancestor, filesystem roots, and every untrusted symlink in the final work path
+or an existing parent component. On Darwin it recognizes exactly one
+platform-owned alias: `lstat("/tmp")` must report a root-owned symlink, strict
+canonical resolution must equal `/private/tmp`, and `lstat("/private/tmp")`
+must report a root-owned directory. Only then is a leading `/tmp` component
+rewritten to physical `/private/tmp`; the temporary root itself is still
+protected, and every later component is still inspected with `lstat`.
+Linux's ordinary `/tmp` keeps the ordinary path, while a non-Darwin, non-root,
+wrong-target, user-controlled, intermediate, or leaf symlink receives no
+special trust.
+
+This normalization is required at the driver boundary because CMake on macOS
+may serialize a physically selected `/private/tmp/...` binary directory as
+`/tmp/...` in `${CMAKE_BINARY_DIR}` and the generated CTest command. The raw
+CTest registration therefore remains executable without rewriting the
+registration or weakening arbitrary-symlink rejection. Canonical resolution
+is otherwise used only for protected-location comparison. The complete checks
+are repeated immediately before recursive removal, which receives the physical
+trusted-alias spelling or the original non-symlink spelling. Recursive-removal
+failures propagate, and an `lstat`-style postcondition verifies that no
+directory or dangling link remains. The check/delete sequence is not an atomic
+cross-platform filesystem transaction, so these drivers accept only
+caller-owned transient subtrees whose components are not concurrently replaced.
+
 `OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
 failure propagation, and postcondition only against a synthetic repository,
 ancestors, and unrelated symlink targets under a disposable temporary root.
-Its final-symlink and symlinked-parent cases require each unrelated target and
-marker to survive; the test never passes the real checkout or its parents to
-the remover. The driver also reads the nested
+It injects scalar Darwin ownership/type/target facts and a synthetic
+logical-to-physical mapping, so every platform covers the trusted-alias
+positive case without creating or replacing `/tmp`. It also locks both real
+consumer modules to the common remover. Its final-symlink, symlinked-parent,
+and post-normalization symlink cases require each unrelated target and marker
+to survive; the test never passes the real checkout or its parents to the
+remover. The driver also reads the nested
 `CMakeCache.txt`: a nonempty `CMAKE_CONFIGURATION_TYPES` selects
 `tests/<config>/`, while a single-config cache must contain the exact requested
 `CMAKE_BUILD_TYPE`. Missing or contradictory cache state fails explicitly, and

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted as the target architecture. Issues #70 through #75 are current software
+Accepted and implemented through Issue #76. Issues #70 through #76 are current software
 behavior for the CPU execution/resource, policy, and private-route slice: the
 embedded composition root injects one fixed `ExecutionService`; built-in CPU
 HP, RT, connected-parameter preflight, and dirty source/downstream work crosses
@@ -38,8 +38,9 @@ background runner or per-generation thread is added. Issue #75 removes the
 worker-owning scheduler SDK/ABI and adds pure-C policy ABI v1, atomic
 generation-scoped binding replacement, Host-authored frontier and fallback,
 sticky generation-local faults, reserved start, and closed private execution
-routes. `RunLifecycleRegistry` and final close/shutdown/telemetry (#76) remain
-target behavior.
+routes. Issue #76 adds the process-owned `RunLifecycleRegistry`, Graph lifetime
+anchors/leases, monotonic Graph close, explicit process execution shutdown,
+exact lifecycle/resource settlement, and source-private bounded telemetry.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -174,8 +175,7 @@ None is inferred from another.
 
 ### Monotonic state and one terminal outcome
 
-The phase progression, current for private Runs through Issue #75 and retained
-by the complete target, is:
+The phase progression, current for private Runs through Issue #76, is:
 
 ```text
 Created -> Admitted -> Queued -> Running -> CommitPending -> Terminal
@@ -191,8 +191,8 @@ Exactly one terminal outcome is published:
 - `Failed`, carrying the exact host-owned failure or exception category,
   including admission failure; or
 - `Cancelled`, carrying a stable reason. Current private sources cover an
-  explicit request, an expired monotonic deadline, and issue #74 supersession;
-  graph-close and process-shutdown source wiring remains assigned to #76.
+  explicit request, an expired monotonic deadline, issue #74 supersession, and
+  issue #76 Graph-close/process-shutdown lifecycle cancellation.
 
 Operation completion alone is not success. The dispatcher must finish
 dependency aggregation and the graph-state commit transaction must validate the
@@ -285,7 +285,7 @@ changing dependency state. Newly ready dependent work re-enters process
 admission, the bounded ready store, and global policy; a permanent worker-local
 path may not bypass fairness, cancellation, or Run isolation.
 
-### Target ownership boundaries
+### Current ownership boundaries
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
@@ -303,9 +303,9 @@ The product composition root now constructs and injects the current fixed-lane
 isolated domains. Composition-root execution configuration resolves and freezes
 its worker count; policy plugins cannot request, grant, or resize that pool.
 Graph load, route replacement, Run submission, and dirty phases never resize
-the pool. The current active-Run map isolates execution settlement, but is not
-the target graph-indexed
-`RunLifecycleRegistry` or an admission/shutdown fence.
+the pool. The graph-indexed `RunLifecycleRegistry` is now the sole admitted-Run
+index and admission/close/shutdown fence; the former physical-execution-only
+weak active-Run map has been removed.
 
 The root constructs the service before injected Kernels/Hosts and keeps it
 alive until they have stopped Run admission and drained their Runs. Planning,
@@ -408,9 +408,8 @@ A Run reservation cannot release while child grants remain live.
 Checked overflow or capacity exhaustion never overcommits, partially reserves,
 or silently clamps. Synchronous documented allocation exhaustion remains
 `std::bad_alloc`; asynchronous failure is captured by the exact Run failure
-channel and cannot commit partial output. Issue #73 cancellation preserves the
-same invariant; the later #76 lifecycle-registry slice must continue to preserve
-it.
+channel and cannot commit partial output. Issue #73 cancellation and Issue #76
+lifecycle finalization preserve the same invariant.
 
 The former worker-only counter is completely removed rather than wrapped,
 renamed, aliased, or retained as a second authority. Execution worker-count
@@ -490,10 +489,10 @@ persistence failure resolves it as the exact Run failure. A later cancellation
 is a no-op. Failed validation discards staged output and cannot mutate visible
 Graph/proxy state or write deferred cache artifacts.
 
-Issue #74 extends that current predicate with exact supersession key/generation
-equality against the live Graph coordinator. The remaining complete target adds
-an `Open` registry graph row plus a registered Run and valid graph-lifetime
-lease from #76.
+Issue #74 extends that predicate with exact supersession key/generation equality
+against the live Graph coordinator. Issue #76 adds the current final checks:
+the registry Graph row is `Open`, the Run is registered, and its Graph lifetime
+lease remains valid.
 
 Revision compatibility is never inferred from equal topology or similar
 output. Any future compatible-revision optimization requires a new explicit
@@ -511,12 +510,12 @@ cancellation, or supersession before publication transitions `Pending ->
 Denied`; cancellation also requests HP cancellation. `Denied` never reopens
 even if late RT work completes. The HP child applies independent revision,
 generation, cancellation, terminal, and staged-output predicates, so a later
-stale or cancelled HP result does not roll back RT. Issue #76 adds
-graph-closing and process-shutdown denial sources.
+stale or cancelled HP result does not roll back RT. Graph-close and
+process-shutdown denial sources now fan through both children.
 
 ### Close and shutdown scopes
 
-Target Graph close (#76):
+Current Graph close (#76):
 
 1. under the lifecycle-registry fence changes the graph row to `Closing`, stops
    new/pending Run admission and ordinary external graph-state admission for
@@ -537,16 +536,13 @@ Target Graph close (#76):
    stopping any process-owned execution route; and
 7. leaves `ExecutionService` and unrelated Graph Runs running.
 
-Issue #75's current pre-registry close already preserves that local two-lane
-ordering: request admission stops first, accepted request work drains while
-graph-state remains open, and graph-state drains second. Graph destruction does
-not stop the process-owned routes. Issue #76 must compose its registry fence
-with this ordering or explicitly supersede it; the target steps above do not
-restore the old single-lane close model. Issue #73 preserves drainage of an
-already-cancelled private Run through quiescence and exact release, but does not
-make Graph close a cancellation requester.
+The implementation composes the registry fence with the local two-lane order
+without restoring the old single-lane model. Graph close unregisters every Run,
+removes the empty row, stops/drains the compute-request lane, then stops/drains
+the graph-state lane and destroys Graph state. Graph destruction does not stop
+process-owned routes, and there is no post-marker reopen.
 
-Target process execution-domain shutdown (#76):
+Current process execution-domain shutdown (#76):
 
 1. under the same registry fence changes the service to `Stopping`, changes
    every graph row to `Closing`, and stops global admission of new Runs and
@@ -570,8 +566,8 @@ publication or graph close performs cleanup only.
 
 ## Delivery Boundaries
 
-This decision fixes the dependency contract. Issues #66 through #75 are now
-implemented as current slices; #76 retains this target order. The
+This decision fixes the dependency contract. Issues #66 through #76 are now
+implemented as current slices; #76 completes this order. The
 non-goal column records the historical boundary when each slice was delivered;
 it does not describe current repository state:
 
@@ -698,10 +694,12 @@ static composition object.
   issue #74's latest-wins generations, bounded ticket-backed coalescing,
   current-generation commit predicate and realtime `RunGroup`, and issue #75's
   pure-C policy ABI, Host-authored frontier/fallback, reserved start, and
-  private execution routes, remains
+  private execution routes, and issue #76's lifecycle registry, exact Graph
+  close/process shutdown, and source-private telemetry, remains
   authoritative in
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md),
   [Compute Flow](../kernel-architecture/Compute-Flow.md), and
   [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md);
-  #76 final lifecycle/telemetry becomes current only after implementation and
-  durable verification.
+  Issue #76 lifecycle/telemetry is current implementation behavior; independent
+  delivery review and remote integration remain release gates rather than
+  runtime ownership semantics.

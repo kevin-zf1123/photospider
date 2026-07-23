@@ -260,24 +260,38 @@ old method names are rejected before Host access. The exact schemas and bounds
 are maintained in
 [`IPC-Protocol-v2.md`](../codebase-structure/IPC-Protocol-v2.md).
 
-## Observability and Deferred Lifecycle Work
+## Observability and Lifecycle Proof
 
 Execution trace pages contain copied sequence, epoch, node, worker, action, and
 timestamp values. Pages are non-destructive, bounded to 4,096 entries, and
 preserve drop/exhaustion semantics. Trace data carries no queue or callback
 capability.
 
-Issue #75 does not add a public cancellation command or make policy callbacks
-recoverable when they never return. Final `RunLifecycleRegistry`, Graph-close
-and process-shutdown cancellation, and lifecycle telemetry belong to Issue #76.
-General-data heterogeneous execution belongs to Issue #77; process-isolated
-plugin supervision belongs to Issue #91.
+`ExecutionService` also owns source-private
+`ExecutionLifecycleTelemetry`: a schema-versioned fixed ring of 65,536 records
+with non-destructive 1..4,096-record snapshot pages, atomic cuts, explicit
+cursor gaps, and saturating cumulative drop accounting. Its 15 post-transition
+counters combine registry state with exact ready entry, entered operation
+callback, live root reservation, live child grant, policy invocation, and
+current/displaced policy-binding ownership. Records contain copied scalar
+identities only and expose no label, path, pointer, callback, lease, or mutable
+handle. This store is not added to Host, CLI, or protocol v2.
+
+`RunLifecycleRegistry` now drives Graph-close and process-shutdown
+cancellation. Shutdown keeps already admitted ready/execution/completion paths
+alive until every Run settles, then joins physical workers and retires policy
+bindings before publishing `ServiceStopped` with all 15 counters zero. A
+nonreturning callback can therefore keep shutdown honestly blocked; it is not
+made recoverable. General-data heterogeneous execution belongs to Issue #77;
+process-isolated plugin supervision belongs to Issue #91.
 
 ## Implementation and Validation Entry Points
 
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/policy/policy_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_service.hpp` and `.cpp`
+- `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
+- `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/runtime/graph_runtime.hpp` and `.mm`
 - `src/lib/runtime/kernel_execution_facade.cpp`

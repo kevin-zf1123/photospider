@@ -504,14 +504,24 @@ mappings. A disagreement is a daemon invariant error and leaks no untracked
 Host name. Returned rows are sorted by `session_name`, then `session_id`.
 
 `graph.close` resolves only the opaque id through the session lifecycle gate.
-It first marks the mapping closing, rejects every new session-scoped Host or
-compute admission with Graph `not_found`, and waits for already-admitted Host
-calls plus queued/running jobs without holding the Host mutex. It then acquires
-the Host mutex and calls `Host::close_graph`. Successful Host close removes all
-three active indexes. Host `NotFound` also removes the stale mapping while
-preserving the failure response; any other Host failure atomically reopens the
-mapping. Closing rows are omitted from `graph.list` results while remaining
-part of Host/registry invariant reconciliation. Disconnecting a client does
+Each active row preallocates one monotonic close-generation record. The first
+caller marks the mapping closing and owns backend progression; every valid
+caller arriving before completion joins that generation. Post-marker
+session-scoped Host/compute admission returns Graph `not_found`, while accepted
+Host calls and queued/running jobs drain without holding the Host mutex.
+Exactly one owner then acquires that mutex and calls `Host::close_graph`.
+
+Host success removes all active indexes and publishes the same success to
+every joiner. Host `NotFound` removes a stale mapping while preserving that
+exact failure. The only reopenable outcome is internal, non-wire
+`HostCloseNotStarted`, selected while the daemon can prove the Host invocation
+never began; it preserves the mapping and advances to a fresh generation.
+Once Host invocation begins, the mapping never reopens: an internal
+post-linearization exception/invariant failure is fail-stop, while response
+allocation/encoding or transport loss affects delivery only. A late explicit
+close returns Graph `not_found`, and Client/IPC Host performs no automatic
+replay or idempotency-key retry. Closing rows are omitted from `graph.list`
+while still participating in invariant reconciliation. Client disconnect does
 not close sessions.
 
 ## Host-Routed Graph State and Diagnostics
@@ -1468,9 +1478,13 @@ down tracked client descriptors to wake reads and joins all connection workers.
 It then drains every accepted compute job, joins the sole compute worker,
 releases terminal job ownership, clears retained collection snapshots, waits
 active delivery leases through explicit release or TTL, and closes the
-OutputStore before Host sessions and session mappings. Finally it releases the
-lifecycle lock and destroys Host state. The persistent lock file intentionally
-remains.
+OutputStore before Host sessions and session mappings. Session cleanup selects
+or joins the same preallocated close generation as live `graph.close`;
+exactly one owner enters Host and post-invocation state never reopens. Server
+destruction then releases the lifecycle lock while the borrowed embedded Host
+is still alive. The Host composition root subsequently invokes idempotent
+process execution shutdown exactly once and only then destroys Host state.
+The persistent lock file intentionally remains.
 
 Before installing SIGINT/SIGTERM handlers, `photospiderd` creates a nonblocking
 close-on-exec self-pipe. The handler only preserves `errno`, writes one byte,

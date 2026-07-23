@@ -455,10 +455,11 @@ constructs the
 process execution owner before Kernel, and Kernel injects it into request-local
 `ComputeService` instances without a static singleton. Issue #75's process
 policy bindings, pure-C ABI, Host-authored frontier, reserved-start admission,
-and closed private execution routes are current. Only the final lifecycle
-fence/shutdown/telemetry work (#76) remains target layout.
+and closed private execution routes are current. Issue #76's lifecycle
+fence, monotonic Graph close, explicit shutdown, exact settlement, and
+source-private telemetry are current too.
 
-In that target:
+In the current layout:
 
 - `GraphRuntime` remains graph-scoped and owns Graph state, the graph-state lane,
   latest-wins coordinator, bounded compute-request lane, revision/generation
@@ -468,9 +469,9 @@ In that target:
   separate HP `Full`/RT `Interactive` child Runs of realtime calls, including
   descriptor/phase/terminal and cancellation state, the Run-owned one-shot
   commit contender, and corresponding full-plan/temporary or standalone dirty
-  staging storage; all full HP work retains non-forgeable
-  read-only leases and composite task identity, while final lifecycle
-  registration remains a later target;
+  staging storage; all full HP work retains non-forgeable read-only leases,
+  composite task identity, Graph lifetime leases, and final lifecycle
+  registration;
 - current request-owned `RunGroup` coordination keeps HP and RT as independent Runs,
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
@@ -491,6 +492,9 @@ In that target:
   graph-close/process-shutdown fence, pending-candidate tracking,
   graph-indexed registry-held `RunLease` entries, and process enumeration without
   owning Run plans, dispatchers, terminal state, Graph state, or resource tokens;
+- its source-private `ExecutionLifecycleTelemetry` preallocates a fixed 65,536
+  record ring, copies atomic-cut cursor pages and 15 post-transition counters,
+  and grants no public or runtime authority;
 - the internal host-authoritative `ResourceLedger` is the only reservation and
   grant mint; and
 - the current process policy registry owns built-in and pure-C DSO types. One
@@ -727,8 +731,8 @@ worker-owning SDK, adds process policy bindings plus a pure-C policy ABI,
 reduces candidates through a Host-authored frontier, commits starts through a
 resource-safe transaction, and routes all work through closed private
 execution ids. Graph load/replacement now copies route values only. Issue #76
-still closes lifecycle registry, graph-close/process-shutdown, and telemetry
-invariants. The authoritative acyclic
+completes the lifecycle registry, graph-close/process-shutdown, exact
+settlement, and telemetry invariants. The authoritative acyclic
 dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 

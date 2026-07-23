@@ -386,10 +386,11 @@ ticket-backed coalescing 与 current-generation commit predicate 也已成为当
 `EmbeddedHostState` 会在 Kernel 前构造 process execution owner，Kernel 再把它注入
 request-local `ComputeService`，不使用 static singleton。Request-level `RunGroup` 与 latest-wins
 supersession 已是当前布局；Issue #75 的 process policy binding、纯 C ABI、Host-authored frontier、
-reserved-start admission 与封闭私有 execution route 都已成为当前行为。只有最终
-lifecycle fence/shutdown/telemetry（#76）仍是目标布局。
+reserved-start admission 与封闭私有 execution route 都已成为当前行为。Issue #76 的 lifecycle
+fence、单调 Graph close、显式 shutdown、精确 settlement 与 source-private telemetry 也已是当前
+行为。
 
-在该目标中：
+在当前布局中：
 
 - `GraphRuntime` 仍以 graph 为作用域，拥有 Graph state、graph-state lane、latest-wins coordinator、
   有界 compute-request lane、revision/generation capture 与 commit validation、稳定 graph-instance
@@ -397,8 +398,8 @@ lifecycle fence/shutdown/telemetry（#76）仍是目标布局。
 - 当前 `ComputeRun` 的共享 control 拥有非 realtime HP Run，以及 realtime call 中彼此分离的
   HP `Full`/RT `Interactive` 子 Run，包括 descriptor/phase/terminal 与 cancellation state、
   Run-owned one-shot commit contender，以及对应的 full-plan/temporary storage 或 standalone
-  dirty staging storage；所有 full HP work 都会保留不可伪造的 read-only lease 与复合
-  task identity，最终 lifecycle registration 仍是后续目标；
+  dirty staging storage；所有 full HP work 都会保留不可伪造的 read-only lease、复合 task
+  identity、Graph lifetime lease 与最终 lifecycle registration；
 - 当前 request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - 当前 `ExecutionService` 拥有一个固定 CPU worker pool、私有 `serial_debug`/`gpu_pipeline` 行为、
@@ -415,6 +416,8 @@ lifecycle fence/shutdown/telemetry（#76）仍是目标布局。
   fence、pending-candidate tracking、按 Graph 建索引且由 registry 持有的 `RunLease` entry 与
   process enumeration，同时不拥有 Run plan、dispatcher、terminal state、Graph state 或 resource
   token；
+- 其 source-private `ExecutionLifecycleTelemetry` 会预分配固定 65,536 条 record 的 ring，复制
+  atomic-cut cursor page 与 15 个 post-transition counter，且不授予 public 或 runtime authority；
 - 内部 Host 权威 `ResourceLedger` 是唯一的 reservation 与 grant mint；以及
 - 当前 process policy registry 拥有 built-in 与纯 C DSO type。每个 `PolicyClass` 的一个 binding
   拥有 context、非零 generation、immutable first fault 与 DSO lease。Host state 选择 service class
@@ -613,8 +616,8 @@ exact-revision staging、cooperative cancellation、latest-wins supersession 与
 ownership。Issue #75 现在已成为当前行为：删除所有 per-Graph scheduler owner 与拥有 worker 的 SDK，
 增加 process policy binding 与纯 C policy ABI，通过 Host-authored frontier 收窄 candidate，以
 resource-safe transaction 提交 start，并让所有 work 进入封闭的私有 execution id。Graph load/
-replacement 现在只复制 route value。Issue #76 仍需收束 lifecycle registry、graph-close/
-process-shutdown 与 telemetry 不变量。权威的无环
+replacement 现在只复制 route value。Issue #76 已收束 lifecycle registry、graph-close/
+process-shutdown、精确 settlement 与 telemetry 不变量。权威的无环
 依赖表位于
 [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md#交付依赖契约)。
 

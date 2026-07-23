@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted as a target architecture. Issues #70 through #75 implement the current
+Accepted. Issues #70 through #76 implement the current
 execution/resource, policy, and private-route slice: each embedded
 composition root explicitly creates and injects one fixed `ExecutionService`;
 built-in CPU HP and RT work, including connected-parameter preflight and dirty
@@ -24,10 +24,11 @@ bounded ticket-backed coalescing on the existing compute-lane worker, and
 current-generation commit authority. Issue #75 removes the worker-owning
 scheduler SDK/ABI and adds pure-C policy ABI v1, atomic binding replacement,
 generation-local sticky faults, reserved start, and closed private execution
-routes, including one fixed CPU pool and one private Metal lane. The final
-lifecycle registry/graph-close/process-shutdown/telemetry
-contract (#76) and public Host/CLI/IPC cancellation controls remain future
-behavior. ADR 0007 supersedes this ADR only as the detailed
+routes, including one fixed CPU pool and one private Metal lane. Issue #76
+implements the lifecycle registry, monotonic Graph close, explicit process
+execution shutdown, exact settlement, and source-private telemetry. Public
+Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes
+this ADR only as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
 and its historical context remain in force.
 
@@ -61,8 +62,8 @@ slice. Current software now implements Issue #73 cooperative cancellation as
 Run-owned terminal correctness: the service observes and purges/drains only the
 matching Run, while the graph-state transaction arbitrates cancellation against
 commit. Latest-wins supersession and request-level realtime grouping are now
-current Issue #74 behavior; final lifecycle-driven graph-close/process-shutdown
-cancellation remains Issue #76 work. Issue #75 separates policy comparison
+current Issue #74 behavior; lifecycle-driven Graph-close/process-shutdown
+cancellation is current Issue #76 behavior. Issue #75 separates policy comparison
 from execution ownership: the Host builds the frontier and validates decisions,
 while a pure-C callback can only choose one immutable candidate or abstain.
 
@@ -127,7 +128,7 @@ No compatibility adapter or forwarding layer remains.
 
 ## Relationship to Current Documentation
 
-ADR 0001 remains fully in force. Issues #69 through #75 supersede the per-Graph
+ADR 0001 remains fully in force. Issues #69 through #76 supersede the per-Graph
 physical ownership and worker-owning scheduler model described by historical
 versions of `docs/kernel-architecture/Policy-and-Execution-Architecture.md`:
 HP, RT, preflight, and dirty ready work all pass through the injected fixed

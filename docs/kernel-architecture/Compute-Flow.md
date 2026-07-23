@@ -355,16 +355,21 @@ supersession key/generation, performs eligible deferred HP cache persistence,
 and swaps complete visible state in the same graph-state work item. It publishes
 Run success only after that transaction succeeds.
 
-This is the current baseline through issue #75. A private request source can
+This is the current baseline through issue #76. A private request source can
 cooperatively cancel one HP Run or both current realtime child Runs; immutable
 deadlines propose `DeadlineExceeded` at bounded observation points, and the
 Run-owned terminal arbiter orders cancellation, failure, and visible commit.
 Per-Graph latest-wins publication makes the newest generation authoritative for
 that exact key, requests cancellation of an older active owner, coalesces one
 pending owner, and still denies stale commit if cancellation arrives late.
-This is cooperative rather than preemptive execution. It does not claim the
-final `RunLifecycleRegistry`, a graph-lifetime lease,
-provider preemption, or public Host/CLI/IPC cancellation.
+The process-owned `RunLifecycleRegistry` now begins a candidate before capture
+or planning, retains a Graph lifetime lease, and atomically installs either one
+standalone Run or both realtime children as a complete bundle. Empty/no-op and
+connected-preflight paths use the same admission/finalization boundary. Graph
+close and process shutdown cancel through that registry and wait for exact
+physical/resource settlement before unregistration. This remains cooperative
+rather than preemptive execution; provider preemption and public Host/CLI/IPC
+cancellation are not claimed.
 Commit policy remains conceptually separate from `ComputeIntent`, because
 HP/RT intent semantics define neither visibility nor cancellation authority.
 
@@ -558,8 +563,9 @@ rejected at Host or IPC decoding before graph execution.
   dependency, phase, and commit boundaries observe private Run cancellation;
   entered non-preemptible providers may finish, but their staged output cannot
   commit. The current supersession generation is an independent commit
-  predicate, so late cancellation cannot resurrect stale output. Public
-  cancellation control and lifecycle cancellation remain future contracts.
+  predicate, so late cancellation cannot resurrect stale output. Graph-close
+  and process-shutdown lifecycle cancellation are current private contracts;
+  public cancellation control remains future.
 
 These separations keep planning, physical dispatch, and visible commit
 independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
@@ -569,11 +575,10 @@ defines the current fixed multi-Graph HP/RT service, independent child Runs,
 built-in policy ordering, lease/completion isolation, authoritative
 revision/generation-safe staging, RT-first independent commit gate,
 cooperative Run cancellation, deterministic `RunGroup` settlement, and
-latest-wins supersession, plus the later admitted-Run registry and broader
-lifecycle ownership, while the
+latest-wins supersession, admitted-Run registry, Graph lifetime leases, and
+close/shutdown lifecycle ownership. The
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
-describes the remaining lifecycle boundary without
-making those later slices part of the current flow.
+retains the durable ownership direction without changing these current facts.
 
 ## Implementation and Validation Entry Points
 
@@ -582,6 +587,8 @@ making those later slices part of the current flow.
 - `src/lib/benchmark/benchmark_service.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/run_lifecycle_registry.*`
+- `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/compute_supersession.*`
 - `src/lib/compute/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`

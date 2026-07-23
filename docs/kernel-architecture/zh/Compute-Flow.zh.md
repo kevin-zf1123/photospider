@@ -280,15 +280,18 @@ revision 与 current supersession key/generation，执行符合条件的延迟 H
 同一 graph-state work item 中交换完整可见状态。
 只有该 transaction 成功后才会发布 Run success。
 
-这是截至 issue #75 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
+这是截至 issue #76 的当前基线。私有 request source 可以 cooperative cancel 一个 HP Run，或当前
 realtime request 的两个 child Run；immutable deadline 会在有界 observation point 提议
 `DeadlineExceeded`，Run-owned terminal arbiter 则会排列 cancellation、failure 与 visible commit。
 每个 Graph 的 latest-wins publication 会让精确 key 的最新 generation 成为权威、请求取消旧的
 active owner、合并一个 pending owner，并在 cancellation 迟到时仍拒绝 stale commit。这是
-cooperative 而不是 preemptive execution；它不声称实现最终 `RunLifecycleRegistry`、
-graph-lifetime lease、provider preemption 或 public Host/CLI/IPC
-cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent 语义既不定义
-可见性，也不定义 cancellation authority。
+process-owned `RunLifecycleRegistry` 现在会在 capture 或 planning 前开始 candidate、保留 Graph
+lifetime lease，并原子安装一个 standalone Run 或包含两个 realtime child 的完整 bundle。
+Empty/no-op 与 connected-preflight 路径使用相同的 admission/finalization 边界。Graph close 与
+process shutdown 会通过该 registry 发起 cancellation，并在 unregistration 前等待精确
+physical/resource settlement。这仍是 cooperative 而非 preemptive execution；不声称支持
+provider preemption 或 public Host/CLI/IPC cancellation。Commit policy 在概念上仍与
+`ComputeIntent` 分离，因为 HP/RT intent 语义既不定义可见性，也不定义 cancellation authority。
 
 ## GlobalHighPrecision
 
@@ -442,8 +445,8 @@ IPC decoding 拒绝。
   触发 expiry。内建 ready publication、queue/dequeue、operation、dependency、phase 与 commit
   边界都会观察私有 Run cancellation；已经进入的 non-preemptible provider 可以完成，但其 staged
   output 不能 commit。Current supersession generation 是独立 commit predicate，因此迟到的
-  cancellation 无法恢复 stale output。Public cancellation control 与 lifecycle cancellation 仍是
-  后续契约。
+  cancellation 无法恢复 stale output。Graph-close 与 process-shutdown lifecycle cancellation
+  已是当前私有契约；public cancellation control 仍是未来行为。
 
 这些拆分使 planning、physical dispatch 与 visible commit 可以独立测试。
 [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)约束当前
@@ -451,9 +454,10 @@ graph-state/dispatch 区分。已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
 同时定义当前固定的多 Graph HP/RT service、独立 child Run、内建 policy ordering、
 lease/completion isolation、权威 revision/generation-safe staging、RT-first 独立 commit gate、
-cooperative Run cancellation、确定性 `RunGroup` settlement 与 latest-wins supersession，以及后续
-admitted-Run registry 与更广泛的 lifecycle 所有权，而
-[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)描述剩余 lifecycle 边界，但不会让这些后续切片成为当前流程的一部分。
+cooperative Run cancellation、确定性 `RunGroup` settlement、latest-wins supersession、
+admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有权。
+[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)保留长期所有权方向，但不改变
+这些当前事实。
 
 ## 实现与验证入口
 
@@ -462,6 +466,8 @@ admitted-Run registry 与更广泛的 lifecycle 所有权，而
 - `src/lib/benchmark/benchmark_service.*`
 - `src/lib/ipc/request_router.cpp`
 - `src/lib/compute/compute_service.*`
+- `src/lib/compute/run_lifecycle_registry.*`
+- `src/lib/compute/execution_lifecycle_telemetry.*`
 - `src/lib/compute/compute_supersession.*`
 - `src/lib/compute/compute_request_coordinator.*`
 - `src/lib/compute/compute_run.*`

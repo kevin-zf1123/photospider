@@ -1,10 +1,11 @@
 # Kernel Terminology
 
 This glossary defines the language used by the current kernel implementation.
-Terms that exist only in an accepted target decision, including
-[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
-or the [kernel evolution target](../roadmap/Kernel-Evolution.md) must not be
-described as current runtime objects.
+Terms that remain only in an accepted target decision or the
+[kernel evolution target](../roadmap/Kernel-Evolution.md) must not be described
+as current runtime objects. The Issue #76 ownership defined by
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+is current where this glossary says so.
 
 ## Product and Runtime Ownership
 
@@ -30,8 +31,9 @@ cache, traversal, inspection, and persistence services.
 The per-graph resource container. It owns one `GraphModel`, one bounded
 graph-state lane, one bounded private compute-request lane, one private
 supersession coordinator, copied HP/RT execution-route bindings, events,
-execution traces, and platform runtime resources. It is not the owner of
-compute dependency planning, policy contexts, or physical route workers.
+execution traces, one stable Graph lifetime anchor, and platform runtime
+resources. It is not the owner of compute dependency planning, policy
+contexts, or physical route workers.
 
 **`GraphModel`**
 The in-memory graph state: nodes, topology adjacency, parameters, outputs,
@@ -55,9 +57,10 @@ node from reservation through retirement, and wake/worker-tail handoff never
 self-submits or waits for capacity. Full-capacity admission blocks; close stops
 external admission/wake, drains prior one-shot and reserved-ticket work, and
 joins the worker. Concurrent closers wait for the durable completion generation
-they joined, even if failure recovery reopens the lane before they wake. The
-executor remains separate from ready dispatch; its worker is uncharged
-infrastructure, not a Run execution grant.
+they joined. The executor's generic failure recovery is not a Graph-close
+reopen path: lifecycle close is monotonic and never reconstructs either lane
+after its marker. The executor remains separate from ready dispatch; its
+worker is uncharged infrastructure, not a Run execution grant.
 
 **Graph document**
 The persisted representation used to create or update graph state. YAML is the
@@ -93,6 +96,15 @@ wraps or reuses a value. Allocation is preparatory; graph-state publication is
 the current-generation linearization point. Each admitted key owns at most one
 reserved compute-lane ticket, one active/draining candidate, and one latest
 pending mailbox value.
+
+**`GraphLifetimeAnchor` / graph lifetime lease**
+The stable per-Graph lifetime root registered only after a complete
+`GraphRuntime` can publish. A candidate retains a lease from its first
+lifecycle check through bundle installation or rollback; an installed Run
+retains its lease until commit/discard, resource settlement, and registry
+unregistration. The anchor also retains the preallocated monotonic close
+coordinator through lane and runtime retirement. It owns no `GraphModel`,
+worker, route, policy, or resource authority.
 
 ## Compute Planning and Execution
 
@@ -134,6 +146,17 @@ or failure before proxy commit denies HP; child-only HP cancellation does not
 cancel RT; an already committed RT proxy is not rolled back by later HP or
 generation failure. It owns no child plan/dispatcher, worker, Graph state,
 resource mint, lifecycle registry, or public cancellation control.
+
+**`RunLifecycleRegistry`**
+The process-owned admission and settlement authority inside one
+`ExecutionService`. Its single lifecycle fence indexes `Open`/`Closing` Graph
+rows, pending candidates, standalone Runs, realtime bundles, finalization, and
+one service `Accepting`/`Stopping` generation. It atomically installs a
+standalone Run or both realtime children, drives Graph-close/process-shutdown
+cancellation, removes a Run only after exact quiescence/resource settlement,
+and removes an empty Graph row before lane destruction. It owns no plan,
+dispatcher, staged output, graph state, worker, policy decision, or resource
+mint.
 
 **`ComputeRunQos`**
 The private immutable scheduling inputs captured by a Run: an explicit
@@ -252,6 +275,18 @@ capacity. Default limits belong to the Host composition, not a static process
 singleton. The ledger owns no worker, ready ordering, dependency, lifecycle
 registry, device/I/O/plugin estimate, or fairness authority.
 
+**`ExecutionLifecycleTelemetry`**
+The source-private schema-v1 process lifecycle proof store owned by one
+`ExecutionService`. It preallocates 65,536 fixed records, publishes 15 event
+kinds and a complete 15-counter post-transition view, and provides
+non-destructive atomic-cut pages of 1..4,096 records with explicit cursor gaps
+and saturating drop totals. Six trusted physical counter selectors cover ready
+entries, entered operation callbacks, live root reservations, live child
+grants, policy invocations, and current/displaced bindings; registry-derived
+counters come only from `RunLifecycleRegistry`. Records contain copied scalar
+identities and grant no lifecycle, queue, callback, plugin, Graph, or Run
+authority. No Host, CLI, or IPC method exposes this store.
+
 **Bounded ready store**
 The `ExecutionService`-owned policy-aware store whose aggregate entry and
 accounted-byte counts cannot exceed immutable ledger limits. It bills one
@@ -359,6 +394,8 @@ planning, cache, policy, or physical-execution semantics.
   license to guess undeclared device/I/O/plugin dimensions.
 - A root reservation is not an executing callback; a child grant is not
   transferable outside its ledger-created ownership path.
+- Lifecycle telemetry is observation, not admission, cancellation, resource,
+  policy, or close authority.
 - A policy owns ordering only; a private execution route owns physical entry
   only; a Run owns request correctness and settlement; the Host owns validation
   and resource authority.
@@ -375,6 +412,8 @@ planning, cache, policy, or physical-execution semantics.
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution_service.hpp`
+- `src/lib/compute/run_lifecycle_registry.hpp`
+- `src/lib/compute/execution_lifecycle_telemetry.hpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/policy/policy_registry.hpp`
 - `src/lib/compute/compute_request_coordinator.hpp`
