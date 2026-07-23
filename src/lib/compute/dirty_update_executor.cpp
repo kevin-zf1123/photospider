@@ -770,7 +770,8 @@ stabilize_connected_dirty_parameters(
     uint64_t request_generation, uint64_t topology_generation,
     ExecutionTaskRuntime* task_runtime, ExecutionService* execution_service,
     ExecutionHostContext* host, ComputeRun* run,
-    const ComputeRunLease* run_lease, const std::string& execution_type) {
+    const ComputeRunLease* run_lease, const std::string& execution_type,
+    const std::vector<Device>* available_devices_override) {
   observe_dirty_run_or_throw(run, run_lease);
   if (execution_service != nullptr &&
       (task_runtime != nullptr || host == nullptr || run == nullptr)) {
@@ -812,13 +813,13 @@ stabilize_connected_dirty_parameters(
     return result;
   }
 
-  advance_dirty_run_for_execution(
-      run, run_lease, execution_service != nullptr || task_runtime != nullptr);
   const std::vector<Device> available_devices =
-      execution_service
-          ? execution_service->available_devices(*host, execution_type)
-          : (task_runtime ? task_runtime->available_devices()
-                          : std::vector<Device>{Device::CPU});
+      available_devices_override != nullptr
+          ? *available_devices_override
+          : (execution_service
+                 ? execution_service->available_devices(*host, execution_type)
+                 : (task_runtime ? task_runtime->available_devices()
+                                 : std::vector<Device>{Device::CPU}));
 
   std::vector<int> closure_stack(result->parameter_producer_node_ids_.begin(),
                                  result->parameter_producer_node_ids_.end());
@@ -1014,6 +1015,243 @@ stabilize_connected_dirty_parameters(
 }
 
 /**
+ * @brief Complete unpublished HP dirty domain state.
+ *
+ * @throws std::bad_alloc from copied request, plan, operation, staging, or
+ * synchronization ownership.
+ * @note The state has a stable heap address before node callbacks are built.
+ * Physical phases are declared last and therefore roll back first.
+ */
+struct PreparedHighPrecisionDirtyRunState final {
+  /**
+   * @brief Captures all planned HP state and creates the write buffer.
+   * @param active_graph Request-local Graph snapshot.
+   * @param active_proxy Staged proxy graph.
+   * @param active_runtime Optional route/trace owner.
+   * @param dirty_request Copied request options and shared owners.
+   * @param active_run Optional candidate Run.
+   * @param lifecycle_lease Optional candidate lease.
+   * @param event_service Borrowed event service.
+   * @param prepared_plan Complete dirty/compute plan.
+   * @param operations Pre-resolved operation map.
+   * @param devices Task-aligned physical devices.
+   * @param synchronization Complete per-node synchronization owner.
+   * @param route_type Copied private execution route.
+   * @throws std::bad_alloc or GraphError from request/staging construction.
+   */
+  PreparedHighPrecisionDirtyRunState(
+      GraphModel& active_graph, RealtimeProxyGraph& active_proxy,
+      GraphRuntime* active_runtime, const DirtyUpdateRequest& dirty_request,
+      ComputeRun* active_run, const ComputeRunLease* lifecycle_lease,
+      GraphEventService& event_service,
+      PreparedDirtyPlan<HighPrecisionDirtyPlan> prepared_plan,
+      DirtyResolvedOperationMap operations, std::vector<Device> devices,
+      std::shared_ptr<DirtyNodeSynchronization> synchronization,
+      std::string route_type)
+      : graph(&active_graph),
+        proxy_graph(&active_proxy),
+        runtime(active_runtime),
+        request(dirty_request),
+        run(active_run),
+        run_lease(lifecycle_lease != nullptr
+                      ? std::optional<ComputeRunLease>(*lifecycle_lease)
+                      : (active_run != nullptr
+                             ? std::optional<ComputeRunLease>(
+                                   active_run->acquire_lease())
+                             : std::nullopt)),
+        events(&event_service),
+        prepared(std::move(prepared_plan)),
+        resolved_operations(std::move(operations)),
+        task_devices(std::move(devices)),
+        node_synchronization(std::move(synchronization)),
+        execution_type(std::move(route_type)) {
+    if (run != nullptr) {
+      hp_write_buffer =
+          &run->emplace_dirty_hp_write_buffer(!request.force_recache);
+    } else {
+      local_hp_write_buffer = std::make_unique<HighPrecisionDirtyWriteBuffer>(
+          !request.force_recache);
+      hp_write_buffer = local_hp_write_buffer.get();
+    }
+  }
+
+  /** @brief Request-local Graph snapshot. */
+  GraphModel* graph = nullptr;
+  /** @brief Staged RT proxy used for optional downsample. */
+  RealtimeProxyGraph* proxy_graph = nullptr;
+  /** @brief Optional route and trace owner. */
+  GraphRuntime* runtime = nullptr;
+  /** @brief Complete copied dirty request. */
+  DirtyUpdateRequest request;
+  /** @brief Optional candidate Run owning shared staging. */
+  ComputeRun* run = nullptr;
+  /** @brief Stable strong lease address used by callbacks. */
+  std::optional<ComputeRunLease> run_lease;
+  /** @brief Borrowed event sink. */
+  GraphEventService* events = nullptr;
+  /** @brief Complete HP dirty and compute plans. */
+  PreparedDirtyPlan<HighPrecisionDirtyPlan> prepared;
+  /** @brief Pre-resolved operation variants. */
+  DirtyResolvedOperationMap resolved_operations;
+  /** @brief Per-task immutable device choices. */
+  std::vector<Device> task_devices;
+  /** @brief Complete request-local node synchronization. */
+  std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
+  /** @brief Copied private route id. */
+  std::string execution_type;
+  /** @brief Local write buffer when no Run owns one. */
+  std::unique_ptr<HighPrecisionDirtyWriteBuffer> local_hp_write_buffer;
+  /** @brief Exact active write buffer, Run-owned or local. */
+  HighPrecisionDirtyWriteBuffer* hp_write_buffer = nullptr;
+  /** @brief Node executor borrowing only stable state fields above. */
+  std::unique_ptr<HighPrecisionDirtyNodeExecutor> node_executor;
+  /** @brief Both unpublished physical dirty phases. */
+  PreparedDirtySourceFirstRun physical_phases;
+};
+
+/**
+ * @brief Complete unpublished RT dirty domain state.
+ *
+ * @throws std::bad_alloc from copied request, plan, operation, proxy staging,
+ * or synchronization ownership.
+ * @note The state has a stable heap address before node callbacks are built.
+ * Physical phases are destroyed first on rollback.
+ */
+struct PreparedRealTimeDirtyRunState final {
+  /**
+   * @brief Captures all planned RT state and creates the proxy write buffer.
+   * @param active_graph Request-local Graph snapshot.
+   * @param active_proxy Staged proxy graph.
+   * @param active_runtime Optional route/trace owner.
+   * @param dirty_request Copied request options and shared owners.
+   * @param active_run Optional candidate Run.
+   * @param lifecycle_lease Optional candidate lease.
+   * @param event_service Borrowed event service.
+   * @param prepared_plan Complete dirty/compute plan.
+   * @param operations Pre-resolved operation map.
+   * @param devices Task-aligned physical devices.
+   * @param synchronization Complete per-node synchronization owner.
+   * @param route_type Copied private execution route.
+   * @throws std::bad_alloc or GraphError from request/staging construction.
+   */
+  PreparedRealTimeDirtyRunState(
+      GraphModel& active_graph, RealtimeProxyGraph& active_proxy,
+      GraphRuntime* active_runtime, const DirtyUpdateRequest& dirty_request,
+      ComputeRun* active_run, const ComputeRunLease* lifecycle_lease,
+      GraphEventService& event_service,
+      PreparedDirtyPlan<RealTimeDirtyPlan> prepared_plan,
+      DirtyResolvedOperationMap operations, std::vector<Device> devices,
+      std::shared_ptr<DirtyNodeSynchronization> synchronization,
+      std::string route_type)
+      : graph(&active_graph),
+        proxy_graph(&active_proxy),
+        runtime(active_runtime),
+        request(dirty_request),
+        run(active_run),
+        run_lease(lifecycle_lease != nullptr
+                      ? std::optional<ComputeRunLease>(*lifecycle_lease)
+                      : (active_run != nullptr
+                             ? std::optional<ComputeRunLease>(
+                                   active_run->acquire_lease())
+                             : std::nullopt)),
+        events(&event_service),
+        prepared(std::move(prepared_plan)),
+        resolved_operations(std::move(operations)),
+        task_devices(std::move(devices)),
+        node_synchronization(std::move(synchronization)),
+        execution_type(std::move(route_type)),
+        rt_write_buffer(std::make_unique<RealtimeProxyWriteBuffer>(
+            active_proxy, !dirty_request.force_recache)) {}
+
+  /** @brief Request-local Graph snapshot. */
+  GraphModel* graph = nullptr;
+  /** @brief Staged proxy graph and eventual commit owner. */
+  RealtimeProxyGraph* proxy_graph = nullptr;
+  /** @brief Optional route and trace owner. */
+  GraphRuntime* runtime = nullptr;
+  /** @brief Complete copied dirty request. */
+  DirtyUpdateRequest request;
+  /** @brief Optional candidate Run. */
+  ComputeRun* run = nullptr;
+  /** @brief Stable strong lease address used by callbacks. */
+  std::optional<ComputeRunLease> run_lease;
+  /** @brief Borrowed event sink. */
+  GraphEventService* events = nullptr;
+  /** @brief Complete RT dirty and compute plans. */
+  PreparedDirtyPlan<RealTimeDirtyPlan> prepared;
+  /** @brief Pre-resolved operation variants. */
+  DirtyResolvedOperationMap resolved_operations;
+  /** @brief Per-task immutable device choices. */
+  std::vector<Device> task_devices;
+  /** @brief Complete request-local node synchronization. */
+  std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
+  /** @brief Copied private route id. */
+  std::string execution_type;
+  /** @brief Complete request-local proxy staging buffer. */
+  std::unique_ptr<RealtimeProxyWriteBuffer> rt_write_buffer;
+  /** @brief Node executor borrowing only stable state fields above. */
+  std::unique_ptr<RealTimeDirtyNodeExecutor> node_executor;
+  /** @brief Both unpublished physical dirty phases. */
+  PreparedDirtySourceFirstRun physical_phases;
+};
+
+/** @copydoc PreparedHighPrecisionDirtyRun::PreparedHighPrecisionDirtyRun */
+PreparedHighPrecisionDirtyRun::PreparedHighPrecisionDirtyRun() noexcept =
+    default;  // NOLINT
+
+/** @copydoc PreparedHighPrecisionDirtyRun::PreparedHighPrecisionDirtyRun */
+PreparedHighPrecisionDirtyRun::PreparedHighPrecisionDirtyRun(
+    std::unique_ptr<PreparedHighPrecisionDirtyRunState> state) noexcept
+    : state_(std::move(state)) {}
+
+/** @copydoc PreparedHighPrecisionDirtyRun::PreparedHighPrecisionDirtyRun */
+PreparedHighPrecisionDirtyRun::PreparedHighPrecisionDirtyRun(
+    PreparedHighPrecisionDirtyRun&& other) noexcept = default;  // NOLINT
+
+/** @copydoc PreparedHighPrecisionDirtyRun::operator= */
+PreparedHighPrecisionDirtyRun& PreparedHighPrecisionDirtyRun::operator=(
+    PreparedHighPrecisionDirtyRun&& other) noexcept {
+  if (this != &other) {
+    if (state_) {
+      std::terminate();
+    }
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+/** @copydoc PreparedHighPrecisionDirtyRun::~PreparedHighPrecisionDirtyRun */
+PreparedHighPrecisionDirtyRun::~PreparedHighPrecisionDirtyRun() noexcept =
+    default;  // NOLINT
+
+/** @copydoc PreparedRealTimeDirtyRun::PreparedRealTimeDirtyRun */
+PreparedRealTimeDirtyRun::PreparedRealTimeDirtyRun() noexcept = default;
+
+/** @copydoc PreparedRealTimeDirtyRun::PreparedRealTimeDirtyRun */
+PreparedRealTimeDirtyRun::PreparedRealTimeDirtyRun(
+    std::unique_ptr<PreparedRealTimeDirtyRunState> state) noexcept
+    : state_(std::move(state)) {}
+
+/** @copydoc PreparedRealTimeDirtyRun::PreparedRealTimeDirtyRun */
+PreparedRealTimeDirtyRun::PreparedRealTimeDirtyRun(
+    PreparedRealTimeDirtyRun&& other) noexcept = default;  // NOLINT
+
+/** @copydoc PreparedRealTimeDirtyRun::operator= */
+PreparedRealTimeDirtyRun& PreparedRealTimeDirtyRun::operator=(
+    PreparedRealTimeDirtyRun&& other) noexcept {
+  if (this != &other) {
+    if (state_) {
+      std::terminate();
+    }
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+/** @copydoc PreparedRealTimeDirtyRun::~PreparedRealTimeDirtyRun */
+PreparedRealTimeDirtyRun::~PreparedRealTimeDirtyRun() noexcept = default;
+
+/**
  * @brief Constructs the HP dirty executor from borrowed support services.
  *
  * @param traversal Traversal service used by dirty planning.
@@ -1102,6 +1340,15 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request, ComputeRun* run,
     ExecutionService* execution_service, const ComputeRunLease* run_lease) {
+  return execute_prepared(prepare(graph, proxy_graph, runtime, request, run,
+                                  execution_service, run_lease));
+}
+
+/** @copydoc HighPrecisionDirtyExecutor::prepare */
+PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
+    GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
+    const DirtyUpdateRequest& request, ComputeRun* run,
+    ExecutionService* execution_service, const ComputeRunLease* run_lease) {
   observe_dirty_run_or_throw(run, run_lease);
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
@@ -1147,8 +1394,7 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
       *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::GlobalHighPrecision, request.node_id, false,
                      planning_roi},
-      planning_graph != &graph ? &graph : nullptr, externally_satisfied_nodes);
-  HighPrecisionDirtyPlan& prepared_dirty_plan = prepared.dirty_plan;
+      externally_satisfied_nodes);
   observe_dirty_run_or_throw(run, run_lease);
   planning_graph_owner.reset();
   graph_lock.unlock();
@@ -1173,17 +1419,18 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
                                ComputeIntent::GlobalHighPrecision);
   std::vector<Device> task_devices =
       dirty_task_devices(prepared.compute_plan, resolved_operations);
-
-  std::optional<HighPrecisionDirtyWriteBuffer> local_hp_write_buffer;
-  HighPrecisionDirtyWriteBuffer* hp_write_buffer_ptr = nullptr;
-  if (run) {
-    hp_write_buffer_ptr =
-        &run->emplace_dirty_hp_write_buffer(!request.force_recache);
-  } else {
-    hp_write_buffer_ptr =
-        &local_hp_write_buffer.emplace(!request.force_recache);
+  std::shared_ptr<DirtyNodeSynchronization> node_synchronization =
+      request.node_synchronization;
+  if (!node_synchronization) {
+    node_synchronization =
+        make_dirty_node_synchronization(prepared.compute_plan);
   }
-  HighPrecisionDirtyWriteBuffer& hp_write_buffer = *hp_write_buffer_ptr;
+  auto state = std::make_unique<PreparedHighPrecisionDirtyRunState>(
+      graph, proxy_graph, runtime, request, run, run_lease, events_,
+      std::move(prepared), std::move(resolved_operations),
+      std::move(task_devices), std::move(node_synchronization), execution_type);
+  HighPrecisionDirtyPlan& prepared_dirty_plan = state->prepared.dirty_plan;
+  HighPrecisionDirtyWriteBuffer& hp_write_buffer = *state->hp_write_buffer;
   if (request.stabilized_parameters) {
     for (const auto& [node_id, staged] :
          request.stabilized_parameters->staged_outputs()) {
@@ -1195,63 +1442,68 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
               : std::nullopt);
     }
   }
-  std::shared_ptr<DirtyNodeSynchronization> node_synchronization =
-      request.node_synchronization;
-  if (!node_synchronization) {
-    node_synchronization =
-        make_dirty_node_synchronization(prepared.compute_plan);
-  }
   DirtyNodeExecutionContext node_context{
       graph,
       runtime,
       events_,
       prepared_dirty_plan.snapshot,
-      resolved_operations,
+      state->resolved_operations,
       prepared_dirty_plan.snapshot.graph_generation,
-      *node_synchronization,
+      *state->node_synchronization,
       request.stabilized_parameters.get(),
-      run_lease};
-  HighPrecisionDirtyNodeExecutor node_executor(node_context, hp_write_buffer);
+      state->run_lease.has_value() ? &*state->run_lease : nullptr};
+  state->node_executor = std::make_unique<HighPrecisionDirtyNodeExecutor>(
+      node_context, hp_write_buffer);
 
-  auto run_hp_task = [&](int task_id) {
-    observe_dirty_run_or_throw(run, run_lease);
+  PreparedHighPrecisionDirtyRunState* state_ptr = state.get();
+  auto run_hp_task = [state_ptr](int task_id) {
+    const ComputeRunLease* active_lease =
+        state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
+    observe_dirty_run_or_throw(state_ptr->run, active_lease);
     run_planned_dirty_task(
-        runtime, prepared_dirty_plan.entries, prepared.compute_plan, task_id,
-        [&](int node_id, HpPlanEntry& entry, const PlannedTask& task) {
-          Node& node = graph.mutable_node(node_id);
+        state_ptr->runtime, state_ptr->prepared.dirty_plan.entries,
+        state_ptr->prepared.compute_plan, task_id,
+        [state_ptr, active_lease](int node_id, HpPlanEntry& entry,
+                                  const PlannedTask& task) {
+          Node& node = state_ptr->graph->mutable_node(node_id);
           HpPlanEntry task_entry = entry_for_task(entry, task);
-          observe_dirty_run_or_throw(run, run_lease);
-          node_executor.execute(node, task_entry);
-          observe_dirty_run_or_throw(run, run_lease);
+          observe_dirty_run_or_throw(state_ptr->run, active_lease);
+          state_ptr->node_executor->execute(node, task_entry);
+          observe_dirty_run_or_throw(state_ptr->run, active_lease);
         });
-    observe_dirty_run_or_throw(run, run_lease);
+    observe_dirty_run_or_throw(state_ptr->run, active_lease);
   };
-  auto validate_hp_source_boundaries = [&]() {
-    observe_dirty_run_or_throw(run, run_lease);
-    std::lock_guard<std::mutex> lock(graph.graph_mutex_);
-    validate_hp_source_boundaries_ready(graph, prepared_dirty_plan.snapshot,
-                                        hp_write_buffer);
+  auto validate_hp_source_boundaries = [state_ptr]() {
+    const ComputeRunLease* active_lease =
+        state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
+    observe_dirty_run_or_throw(state_ptr->run, active_lease);
+    std::lock_guard<std::mutex> lock(state_ptr->graph->graph_mutex_);
+    validate_hp_source_boundaries_ready(*state_ptr->graph,
+                                        state_ptr->prepared.dirty_plan.snapshot,
+                                        *state_ptr->hp_write_buffer);
   };
 
-  advance_dirty_run_for_execution(run, run_lease, runtime != nullptr);
   DirtySourceFirstRunRequest source_first_request;
   source_first_request.runtime = runtime;
   source_first_request.intent = ComputeIntent::GlobalHighPrecision;
   source_first_request.execution_service = execution_service;
-  source_first_request.execution_type = execution_type;
+  source_first_request.execution_type = state->execution_type;
   source_first_request.host = runtime;
   source_first_request.run = run;
-  source_first_request.run_lease = run_lease;
-  source_first_request.compute_plan = &prepared.compute_plan;
-  source_first_request.selection = &prepared.selection;
-  source_first_request.task_devices = &task_devices;
+  source_first_request.run_lease =
+      state->run_lease.has_value() ? &*state->run_lease : nullptr;
+  source_first_request.compute_plan = &state->prepared.compute_plan;
+  source_first_request.selection = &state->prepared.selection;
+  source_first_request.task_devices = &state->task_devices;
   RetainedMemoryEstimator hp_shared_demand("HP dirty request");
-  hp_shared_demand.add_bytes(prepared_dirty_retained_memory_bytes(prepared));
-  hp_shared_demand.add_bytes(node_synchronization->retained_memory_bytes());
   hp_shared_demand.add_bytes(
-      dirty_operation_retained_memory_bytes(resolved_operations));
+      prepared_dirty_retained_memory_bytes(state->prepared));
+  hp_shared_demand.add_bytes(
+      state->node_synchronization->retained_memory_bytes());
+  hp_shared_demand.add_bytes(
+      dirty_operation_retained_memory_bytes(state->resolved_operations));
   hp_shared_demand.add_objects<Device>(
-      static_cast<std::uint64_t>(task_devices.capacity()));
+      static_cast<std::uint64_t>(state->task_devices.capacity()));
   if (request.stabilized_parameters) {
     hp_shared_demand.add_bytes(
         request.stabilized_parameters->retained_memory_bytes());
@@ -1259,43 +1511,72 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   source_first_request.additional_shared_retained_memory_bytes =
       hp_shared_demand.bytes();
   source_first_request.phase_shared_retained_memory_bytes =
-      [&graph, &hp_write_buffer, &compute_plan = prepared.compute_plan](
-          const std::vector<int>& task_ids) {
-        return hp_write_buffer.missing_entry_retained_memory_bytes(
-            graph, planned_nodes_for_task_ids(compute_plan, task_ids));
+      [state_ptr](const std::vector<int>& task_ids) {
+        return state_ptr->hp_write_buffer->missing_entry_retained_memory_bytes(
+            *state_ptr->graph, planned_nodes_for_task_ids(
+                                   state_ptr->prepared.compute_plan, task_ids));
       };
-  source_first_request.source_task_ids = &prepared.source_task_ids;
-  source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
+  source_first_request.source_task_ids = &state->prepared.source_task_ids;
+  source_first_request.downstream_task_ids =
+      &state->prepared.downstream_task_ids;
   source_first_request.dirty_generation =
       prepared_dirty_plan.snapshot.graph_generation;
   source_first_request.before_downstream = validate_hp_source_boundaries;
-  run_dirty_source_first(source_first_request, run_hp_task);
-  observe_dirty_run_or_throw(run, run_lease);
-  if (request.sibling_commit_gate) {
-    request.sibling_commit_gate->wait_for_rt_commit_or_throw();
+  state->physical_phases = prepare_dirty_source_first(
+      source_first_request, std::function<void(int)>(run_hp_task),
+      static_cast<std::uint64_t>(sizeof(run_hp_task)));
+  observe_dirty_run_or_throw(
+      run, state->run_lease.has_value() ? &*state->run_lease : nullptr);
+  return PreparedHighPrecisionDirtyRun(std::move(state));
+}
+
+/** @copydoc HighPrecisionDirtyExecutor::execute_prepared */
+NodeOutput& HighPrecisionDirtyExecutor::execute_prepared(
+    PreparedHighPrecisionDirtyRun prepared) {
+  if (!prepared.state_) {
+    throw std::invalid_argument(
+        "HP dirty execution requires active preparation.");
   }
-  observe_dirty_run_or_throw(run, run_lease);
-  if (run) {
-    if (!run->advance_to(ComputeRunPhase::CommitPending)) {
-      observe_dirty_run_or_throw(run, run_lease);
+  std::unique_ptr<PreparedHighPrecisionDirtyRunState> state =
+      std::move(prepared.state_);
+  const ComputeRunLease* run_lease =
+      state->run_lease.has_value() ? &*state->run_lease : nullptr;
+  observe_dirty_run_or_throw(state->run, run_lease);
+  advance_dirty_run_for_execution(state->run, run_lease,
+                                  state->runtime != nullptr);
+  {
+    std::lock_guard<std::mutex> graph_lock(state->graph->graph_mutex_);
+    observe_dirty_run_or_throw(state->run, run_lease);
+    publish_prepared_dirty_inspection(*state->graph, state->prepared);
+  }
+  state->physical_phases.execute();
+  observe_dirty_run_or_throw(state->run, run_lease);
+  if (state->request.sibling_commit_gate) {
+    state->request.sibling_commit_gate->wait_for_rt_commit_or_throw();
+  }
+  observe_dirty_run_or_throw(state->run, run_lease);
+  if (state->run != nullptr) {
+    if (!state->run->advance_to(ComputeRunPhase::CommitPending)) {
+      observe_dirty_run_or_throw(state->run, run_lease);
     }
   }
-  graph_lock.lock();
-  observe_dirty_run_or_throw(run, run_lease);
-  if (request.stabilized_parameters &&
-      request.stabilized_parameters->topology_generation() !=
-          graph.topology_generation()) {
+  std::unique_lock<std::mutex> graph_lock(state->graph->graph_mutex_);
+  observe_dirty_run_or_throw(state->run, run_lease);
+  if (state->request.stabilized_parameters &&
+      state->request.stabilized_parameters->topology_generation() !=
+          state->graph->topology_generation()) {
     throw GraphError(GraphErrc::ComputeError,
                      "Graph topology changed during HP dirty execution.");
   }
-  hp_write_buffer.commit_to_graph(graph);
-  observe_dirty_run_or_throw(run, run_lease);
-  if (!request.suppress_graph_downsample) {
-    DownsampleExecutor(graph, proxy_graph, runtime, events_, run_lease)
-        .execute(hp_write_buffer.downsample_requests());
-    observe_dirty_run_or_throw(run, run_lease);
+  state->hp_write_buffer->commit_to_graph(*state->graph);
+  observe_dirty_run_or_throw(state->run, run_lease);
+  if (!state->request.suppress_graph_downsample) {
+    DownsampleExecutor(*state->graph, *state->proxy_graph, state->runtime,
+                       *state->events, run_lease)
+        .execute(state->hp_write_buffer->downsample_requests());
+    observe_dirty_run_or_throw(state->run, run_lease);
   }
-  return require_target_output(graph, request.node_id);
+  return require_target_output(*state->graph, state->request.node_id);
 }
 
 /**
@@ -1377,6 +1658,15 @@ NodeOutput& RealTimeDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request, ComputeRun* run,
     ExecutionService* execution_service, const ComputeRunLease* run_lease) {
+  return execute_prepared(prepare(graph, proxy_graph, runtime, request, run,
+                                  execution_service, run_lease));
+}
+
+/** @copydoc RealTimeDirtyExecutor::prepare */
+PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
+    GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
+    const DirtyUpdateRequest& request, ComputeRun* run,
+    ExecutionService* execution_service, const ComputeRunLease* run_lease) {
   observe_dirty_run_or_throw(run, run_lease);
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
@@ -1424,13 +1714,9 @@ NodeOutput& RealTimeDirtyExecutor::execute(
       *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::RealTimeUpdate, request.node_id, false,
                      request.dirty_roi},
-      planning_graph != &graph ? &graph : nullptr, externally_satisfied_nodes);
-  RealTimeDirtyPlan& prepared_dirty_plan = prepared.dirty_plan;
+      externally_satisfied_nodes);
   observe_dirty_run_or_throw(run, run_lease);
   planning_graph_owner.reset();
-  if (request.force_recache) {
-    reset_plan_cache(proxy_graph, prepared_dirty_plan);
-  }
   graph_lock.unlock();
 
   observe_dirty_run_or_throw(run, run_lease);
@@ -1453,65 +1739,78 @@ NodeOutput& RealTimeDirtyExecutor::execute(
                                ComputeIntent::RealTimeUpdate);
   std::vector<Device> task_devices =
       dirty_task_devices(prepared.compute_plan, resolved_operations);
-
-  RealtimeProxyWriteBuffer rt_write_buffer(proxy_graph, !request.force_recache);
   std::shared_ptr<DirtyNodeSynchronization> node_synchronization =
       request.node_synchronization;
   if (!node_synchronization) {
     node_synchronization =
         make_dirty_node_synchronization(prepared.compute_plan);
   }
+  auto state = std::make_unique<PreparedRealTimeDirtyRunState>(
+      graph, proxy_graph, runtime, request, run, run_lease, events_,
+      std::move(prepared), std::move(resolved_operations),
+      std::move(task_devices), std::move(node_synchronization), execution_type);
+  RealTimeDirtyPlan& prepared_dirty_plan = state->prepared.dirty_plan;
   DirtyNodeExecutionContext node_context{
       graph,
       runtime,
       events_,
       prepared_dirty_plan.snapshot,
-      resolved_operations,
+      state->resolved_operations,
       prepared_dirty_plan.snapshot.graph_generation,
-      *node_synchronization,
+      *state->node_synchronization,
       request.stabilized_parameters.get(),
-      run_lease};
-  RealTimeDirtyNodeExecutor node_executor(node_context, proxy_graph,
-                                          rt_write_buffer);
-  auto run_rt_task = [&](int task_id) {
-    observe_dirty_run_or_throw(run, run_lease);
+      state->run_lease.has_value() ? &*state->run_lease : nullptr};
+  state->node_executor = std::make_unique<RealTimeDirtyNodeExecutor>(
+      node_context, proxy_graph, *state->rt_write_buffer);
+  PreparedRealTimeDirtyRunState* state_ptr = state.get();
+  auto run_rt_task = [state_ptr](int task_id) {
+    const ComputeRunLease* active_lease =
+        state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
+    observe_dirty_run_or_throw(state_ptr->run, active_lease);
     run_planned_dirty_task(
-        runtime, prepared_dirty_plan.entries, prepared.compute_plan, task_id,
-        [&](int node_id, RtPlanEntry& entry, const PlannedTask& task) {
-          Node& node = graph.mutable_node(node_id);
+        state_ptr->runtime, state_ptr->prepared.dirty_plan.entries,
+        state_ptr->prepared.compute_plan, task_id,
+        [state_ptr, active_lease](int node_id, RtPlanEntry& entry,
+                                  const PlannedTask& task) {
+          Node& node = state_ptr->graph->mutable_node(node_id);
           RtPlanEntry task_entry = entry_for_task(entry, task);
-          observe_dirty_run_or_throw(run, run_lease);
-          node_executor.execute(node, task_entry);
-          observe_dirty_run_or_throw(run, run_lease);
+          observe_dirty_run_or_throw(state_ptr->run, active_lease);
+          state_ptr->node_executor->execute(node, task_entry);
+          observe_dirty_run_or_throw(state_ptr->run, active_lease);
         });
-    observe_dirty_run_or_throw(run, run_lease);
+    observe_dirty_run_or_throw(state_ptr->run, active_lease);
   };
-  auto validate_rt_source_boundaries = [&]() {
-    observe_dirty_run_or_throw(run, run_lease);
-    std::lock_guard<std::mutex> lock(graph.graph_mutex_);
+  auto validate_rt_source_boundaries = [state_ptr]() {
+    const ComputeRunLease* active_lease =
+        state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
+    observe_dirty_run_or_throw(state_ptr->run, active_lease);
+    std::lock_guard<std::mutex> lock(state_ptr->graph->graph_mutex_);
     validate_rt_source_boundaries_ready(
-        graph, proxy_graph, prepared_dirty_plan.snapshot, rt_write_buffer);
+        *state_ptr->graph, *state_ptr->proxy_graph,
+        state_ptr->prepared.dirty_plan.snapshot, *state_ptr->rt_write_buffer);
   };
 
-  advance_dirty_run_for_execution(run, run_lease, runtime != nullptr);
   DirtySourceFirstRunRequest source_first_request;
   source_first_request.runtime = runtime;
   source_first_request.intent = ComputeIntent::RealTimeUpdate;
   source_first_request.execution_service = execution_service;
-  source_first_request.execution_type = execution_type;
+  source_first_request.execution_type = state->execution_type;
   source_first_request.host = runtime;
   source_first_request.run = run;
-  source_first_request.run_lease = run_lease;
-  source_first_request.compute_plan = &prepared.compute_plan;
-  source_first_request.selection = &prepared.selection;
-  source_first_request.task_devices = &task_devices;
+  source_first_request.run_lease =
+      state->run_lease.has_value() ? &*state->run_lease : nullptr;
+  source_first_request.compute_plan = &state->prepared.compute_plan;
+  source_first_request.selection = &state->prepared.selection;
+  source_first_request.task_devices = &state->task_devices;
   RetainedMemoryEstimator rt_shared_demand("RT dirty request");
-  rt_shared_demand.add_bytes(prepared_dirty_retained_memory_bytes(prepared));
-  rt_shared_demand.add_bytes(node_synchronization->retained_memory_bytes());
   rt_shared_demand.add_bytes(
-      dirty_operation_retained_memory_bytes(resolved_operations));
+      prepared_dirty_retained_memory_bytes(state->prepared));
+  rt_shared_demand.add_bytes(
+      state->node_synchronization->retained_memory_bytes());
+  rt_shared_demand.add_bytes(
+      dirty_operation_retained_memory_bytes(state->resolved_operations));
   rt_shared_demand.add_objects<Device>(
-      static_cast<std::uint64_t>(task_devices.capacity()));
+      static_cast<std::uint64_t>(state->task_devices.capacity()));
   if (request.stabilized_parameters) {
     rt_shared_demand.add_bytes(
         request.stabilized_parameters->retained_memory_bytes());
@@ -1519,40 +1818,73 @@ NodeOutput& RealTimeDirtyExecutor::execute(
   source_first_request.additional_shared_retained_memory_bytes =
       rt_shared_demand.bytes();
   source_first_request.phase_shared_retained_memory_bytes =
-      [&rt_write_buffer, &compute_plan = prepared.compute_plan](
-          const std::vector<int>& task_ids) {
+      [state_ptr](const std::vector<int>& task_ids) {
         RetainedMemoryEstimator estimate("RT dirty staging phase");
-        estimate.add_bytes(rt_write_buffer.retained_memory_bytes());
-        estimate.add_bytes(rt_write_buffer.missing_entry_retained_memory_bytes(
-            planned_nodes_for_task_ids(compute_plan, task_ids)));
+        estimate.add_bytes(state_ptr->rt_write_buffer->retained_memory_bytes());
+        estimate.add_bytes(
+            state_ptr->rt_write_buffer->missing_entry_retained_memory_bytes(
+                planned_nodes_for_task_ids(state_ptr->prepared.compute_plan,
+                                           task_ids)));
         return estimate.bytes();
       };
-  source_first_request.source_task_ids = &prepared.source_task_ids;
-  source_first_request.downstream_task_ids = &prepared.downstream_task_ids;
+  source_first_request.source_task_ids = &state->prepared.source_task_ids;
+  source_first_request.downstream_task_ids =
+      &state->prepared.downstream_task_ids;
   source_first_request.dirty_generation =
       prepared_dirty_plan.snapshot.graph_generation;
   source_first_request.before_downstream = validate_rt_source_boundaries;
-  run_dirty_source_first(source_first_request, run_rt_task);
-  observe_dirty_run_or_throw(run, run_lease);
-  graph_lock.lock();
-  observe_dirty_run_or_throw(run, run_lease);
-  if (request.stabilized_parameters &&
-      request.stabilized_parameters->topology_generation() !=
-          graph.topology_generation()) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Graph topology changed during RT dirty execution.");
+  state->physical_phases = prepare_dirty_source_first(
+      source_first_request, std::function<void(int)>(run_rt_task),
+      static_cast<std::uint64_t>(sizeof(run_rt_task)));
+  observe_dirty_run_or_throw(
+      run, state->run_lease.has_value() ? &*state->run_lease : nullptr);
+  return PreparedRealTimeDirtyRun(std::move(state));
+}
+
+/** @copydoc RealTimeDirtyExecutor::execute_prepared */
+NodeOutput& RealTimeDirtyExecutor::execute_prepared(
+    PreparedRealTimeDirtyRun prepared) {
+  if (!prepared.state_) {
+    throw std::invalid_argument(
+        "RT dirty execution requires active preparation.");
   }
-  graph_lock.unlock();
-  observe_dirty_run_or_throw(run, run_lease);
-  if (run) {
-    if (!run->advance_to(ComputeRunPhase::CommitPending)) {
-      observe_dirty_run_or_throw(run, run_lease);
+  std::unique_ptr<PreparedRealTimeDirtyRunState> state =
+      std::move(prepared.state_);
+  const ComputeRunLease* run_lease =
+      state->run_lease.has_value() ? &*state->run_lease : nullptr;
+  observe_dirty_run_or_throw(state->run, run_lease);
+  if (state->request.force_recache) {
+    reset_plan_cache(*state->proxy_graph, state->prepared.dirty_plan);
+  }
+  advance_dirty_run_for_execution(state->run, run_lease,
+                                  state->runtime != nullptr);
+  {
+    std::lock_guard<std::mutex> graph_lock(state->graph->graph_mutex_);
+    observe_dirty_run_or_throw(state->run, run_lease);
+    publish_prepared_dirty_inspection(*state->graph, state->prepared);
+  }
+  state->physical_phases.execute();
+  observe_dirty_run_or_throw(state->run, run_lease);
+  {
+    std::lock_guard<std::mutex> graph_lock(state->graph->graph_mutex_);
+    observe_dirty_run_or_throw(state->run, run_lease);
+    if (state->request.stabilized_parameters &&
+        state->request.stabilized_parameters->topology_generation() !=
+            state->graph->topology_generation()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Graph topology changed during RT dirty execution.");
     }
   }
-  observe_dirty_run_or_throw(run, run_lease);
-  rt_write_buffer.commit_to_proxy_graph();
-  observe_dirty_run_or_throw(run, run_lease);
-  return require_target_output(proxy_graph, request.node_id);
+  observe_dirty_run_or_throw(state->run, run_lease);
+  if (state->run != nullptr) {
+    if (!state->run->advance_to(ComputeRunPhase::CommitPending)) {
+      observe_dirty_run_or_throw(state->run, run_lease);
+    }
+  }
+  observe_dirty_run_or_throw(state->run, run_lease);
+  state->rt_write_buffer->commit_to_proxy_graph();
+  observe_dirty_run_or_throw(state->run, run_lease);
+  return require_target_output(*state->proxy_graph, state->request.node_id);
 }
 
 }  // namespace ps::compute

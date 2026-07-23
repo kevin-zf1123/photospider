@@ -226,6 +226,25 @@ bool all_counters_zero(const ExecutionLifecycleCounters& counters) noexcept {
          counters.live_policy_binding_count == 0U;
 }
 
+/**
+ * @brief Completes trusted telemetry after an irreversible state transition.
+ * @tparam Publish Allocation-free telemetry operation.
+ * @param publish Callable that records the already committed transition.
+ * @return Nothing.
+ * @throws Nothing; telemetry synchronization failure terminates because the
+ * transition cannot be rolled back or safely reported as recoverable.
+ * @note Callers may hold the lifecycle fence. The callable must not wait or
+ * enter plugin, policy, route, ledger, or Run code.
+ */
+template <typename Publish>
+void publish_committed_transition(Publish&& publish) noexcept {
+  try {
+    std::forward<Publish>(publish)();
+  } catch (...) {
+    std::terminate();
+  }
+}
+
 }  // namespace
 
 /** @copydoc GraphCloseCoordinator::begin */
@@ -357,9 +376,24 @@ class RunLifecycleRegistry::Impl final {
     std::uint64_t run_group_id = 0U;
     /** @brief One standalone child or exact HP/RT pair. */
     std::vector<RunRecord> runs;
-    /** @brief Request-level cancellation fan-out invoked outside the fence. */
+  };
+
+  /**
+   * @brief Preallocated cancellation fan-out node for one installed bundle.
+   *
+   * @throws Nothing after off-fence list-node and shared-owner staging.
+   * @note Graph close or process shutdown splices these nodes out under the
+   * lifecycle fence, then invokes their owners without the fence. Finalization
+   * erases an undispatched node by bundle identity.
+   */
+  struct CancellationDispatchRecord final {
+    /** @brief Matching installed bundle identity. */
+    std::uint64_t bundle_id = 0U;
+    /** @brief Exact Graph correlation used by close telemetry. */
+    GraphInstanceId graph_instance_id{1U};
+    /** @brief Request-level cancellation fan-out owner. */
     std::shared_ptr<ComputeRequestCancellationSource> cancellation;
-    /** @brief Realtime pending gate denied before close fan-out. */
+    /** @brief Optional realtime gate denied before fan-out. */
     std::shared_ptr<DirtySiblingCommitGate> sibling_commit_gate;
   };
 
@@ -376,12 +410,11 @@ class RunLifecycleRegistry::Impl final {
     GraphState state = GraphState::Open;
     /** @brief One nonzero Graph close generation after Closing. */
     std::uint64_t close_generation = 0U;
-    /** @brief True after one owner captured and invoked cancellation sources.
-     */
-    bool cancellation_dispatched = false;
     /** @brief Indexed unresolved candidate controls. */
     std::list<std::shared_ptr<RunLifecycleAdmissionCandidateControl>>
         candidates;
+    /** @brief Installed-bundle cancellation nodes not yet captured by close. */
+    std::list<CancellationDispatchRecord> cancellation_records;
   };
 
   /**
@@ -558,6 +591,12 @@ void RunLifecycleAdmissionCandidate::reset() noexcept {
   control->registry->rollback_candidate(control);
 }
 
+/** @copydoc RunLifecycleAdmissionHandle::RunLifecycleAdmissionHandle */
+RunLifecycleAdmissionHandle::RunLifecycleAdmissionHandle(
+    RunLifecycleAdmissionHandle&& other) noexcept
+    : registry_(std::exchange(other.registry_, nullptr)),
+      bundle_id_(std::exchange(other.bundle_id_, 0U)) {}  // NOLINT
+
 /** @copydoc RunLifecycleAdmissionHandle::bundle_id */
 std::uint64_t RunLifecycleAdmissionHandle::bundle_id() const {
   if (!active()) {
@@ -603,7 +642,7 @@ void RunLifecycleRegistry::register_graph(
                                   std::move(anchor),
                                   Impl::GraphState::Open,
                                   0U,
-                                  false,
+                                  {},
                                   {}});
   const GraphInstanceId graph_instance_id = staged.front().graph_instance_id;
   std::lock_guard<std::mutex> lock(impl_->fence);
@@ -711,8 +750,11 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_standalone(
   record.graph_instance_id = candidate.control_->graph_instance_id;
   record.runs.reserve(1U);
   record.runs.emplace_back(run_lease.descriptor().id(), std::move(run_lease));
-  record.cancellation = std::move(cancellation);
   staged.push_back(std::move(record));
+  std::list<Impl::CancellationDispatchRecord> staged_cancellation;
+  staged_cancellation.push_back(Impl::CancellationDispatchRecord{
+      bundle_id, candidate.control_->graph_instance_id, std::move(cancellation),
+      nullptr});
 
   std::shared_ptr<RunLifecycleAdmissionCandidateControl> control =
       candidate.control_;
@@ -741,10 +783,14 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_standalone(
     control->resolved.store(true, std::memory_order_release);
     control->graph_lease = GraphLifetimeLease();
     impl_->admissions.splice(impl_->admissions.end(), staged);
-    impl_->telemetry.publish(ExecutionLifecycleEventKind::BundleAdmitted,
-                             ExecutionLifecycleCategory::None,
-                             control->graph_instance_id.value(), run_id.value(),
-                             0U, bundle_id, impl_->counters_locked());
+    row->cancellation_records.splice(row->cancellation_records.end(),
+                                     staged_cancellation);
+    publish_committed_transition([&]() {
+      impl_->telemetry.publish(
+          ExecutionLifecycleEventKind::BundleAdmitted,
+          ExecutionLifecycleCategory::None, control->graph_instance_id.value(),
+          run_id.value(), 0U, bundle_id, impl_->counters_locked());
+    });
   }
   candidate.control_.reset();
   impl_->changed.notify_all();
@@ -782,9 +828,11 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_realtime_group(
   record.runs.reserve(2U);
   record.runs.emplace_back(hp_lease.descriptor().id(), std::move(hp_lease));
   record.runs.emplace_back(rt_lease.descriptor().id(), std::move(rt_lease));
-  record.cancellation = std::move(cancellation);
-  record.sibling_commit_gate = std::move(sibling_commit_gate);
   staged.push_back(std::move(record));
+  std::list<Impl::CancellationDispatchRecord> staged_cancellation;
+  staged_cancellation.push_back(Impl::CancellationDispatchRecord{
+      bundle_id, candidate.control_->graph_instance_id, std::move(cancellation),
+      std::move(sibling_commit_gate)});
 
   std::shared_ptr<RunLifecycleAdmissionCandidateControl> control =
       candidate.control_;
@@ -820,11 +868,15 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_realtime_group(
     control->graph_lease = GraphLifetimeLease();
     const ComputeRunId first_run = staged.front().runs.front().run_id;
     impl_->admissions.splice(impl_->admissions.end(), staged);
-    impl_->telemetry.publish(ExecutionLifecycleEventKind::BundleAdmitted,
-                             ExecutionLifecycleCategory::None,
-                             control->graph_instance_id.value(),
-                             first_run.value(), run_group_id.value(), bundle_id,
-                             impl_->counters_locked());
+    row->cancellation_records.splice(row->cancellation_records.end(),
+                                     staged_cancellation);
+    publish_committed_transition([&]() {
+      impl_->telemetry.publish(ExecutionLifecycleEventKind::BundleAdmitted,
+                               ExecutionLifecycleCategory::None,
+                               control->graph_instance_id.value(),
+                               first_run.value(), run_group_id.value(),
+                               bundle_id, impl_->counters_locked());
+    });
   }
   candidate.control_.reset();
   impl_->changed.notify_all();
@@ -833,13 +885,13 @@ RunLifecycleAdmissionHandle RunLifecycleRegistry::commit_realtime_group(
 
 /** @copydoc RunLifecycleRegistry::finalize_admission */
 void RunLifecycleRegistry::finalize_admission(
-    RunLifecycleAdmissionHandle handle) {
+    RunLifecycleAdmissionHandle& handle) {
   if (!handle.active() || handle.registry_ != this) {
     throw std::invalid_argument(
         "Run lifecycle finalization requires a live local handle.");
   }
   const std::uint64_t bundle_id = handle.bundle_id_;
-  std::array<ComputeRunLease*, 2U> registry_leases{nullptr, nullptr};
+  std::array<ComputeRunSettlementObserver, 2U> settlement_observers;
   std::array<ComputeRunTerminalOutcome, 2U> outcomes;
   std::size_t run_count = 0U;
   GraphInstanceId graph_instance_id{1U};
@@ -852,7 +904,7 @@ void RunLifecycleRegistry::finalize_admission(
           "Run lifecycle finalization names no installed bundle.");
     }
     if (admission->runs.empty() ||
-        admission->runs.size() > registry_leases.size()) {
+        admission->runs.size() > settlement_observers.size()) {
       throw std::logic_error(
           "Run lifecycle bundle has an invalid child count.");
     }
@@ -863,13 +915,13 @@ void RunLifecycleRegistry::finalize_admission(
         throw std::logic_error(
             "Run lifecycle installed record has no registry lease.");
       }
-      registry_leases[run_count++] = &*run.lease;
+      settlement_observers[run_count++] = run.lease->settlement_observer();
     }
   }
 
   for (std::size_t index = 0U; index < run_count; ++index) {
     const std::optional<ComputeRunTerminalOutcome> outcome =
-        registry_leases[index]->terminal_outcome();
+        settlement_observers[index].terminal_outcome();
     if (!outcome.has_value()) {
       throw std::logic_error(
           "Run lifecycle finalization requires terminal child Runs.");
@@ -889,18 +941,22 @@ void RunLifecycleRegistry::finalize_admission(
     }
     std::size_t index = 0U;
     for (Impl::RunRecord& run : admission->runs) {
-      run.finalizing = true;
-      impl_->telemetry.publish(ExecutionLifecycleEventKind::RunTerminal,
-                               terminal_category(outcomes[index]),
-                               admission->graph_instance_id.value(),
-                               run.run_id.value(), admission->run_group_id,
-                               bundle_id, impl_->counters_locked());
+      if (!run.finalizing) {
+        run.finalizing = true;
+        publish_committed_transition([&]() {
+          impl_->telemetry.publish(ExecutionLifecycleEventKind::RunTerminal,
+                                   terminal_category(outcomes[index]),
+                                   admission->graph_instance_id.value(),
+                                   run.run_id.value(), admission->run_group_id,
+                                   bundle_id, impl_->counters_locked());
+        });
+      }
       ++index;
     }
   }
 
   for (std::size_t index = 0U; index < run_count; ++index) {
-    registry_leases[index]->wait_until_only_lease();
+    settlement_observers[index].wait_until_registry_lease();
   }
 
   {
@@ -911,17 +967,21 @@ void RunLifecycleRegistry::finalize_admission(
           "Run lifecycle bundle disappeared during finalization.");
     }
     for (Impl::RunRecord& run : admission->runs) {
-      run.quiescent = true;
-      impl_->telemetry.publish(ExecutionLifecycleEventKind::RunQuiescent,
-                               ExecutionLifecycleCategory::None,
-                               admission->graph_instance_id.value(),
-                               run.run_id.value(), admission->run_group_id,
-                               bundle_id, impl_->counters_locked());
+      if (!run.quiescent) {
+        run.quiescent = true;
+        publish_committed_transition([&]() {
+          impl_->telemetry.publish(ExecutionLifecycleEventKind::RunQuiescent,
+                                   ExecutionLifecycleCategory::None,
+                                   admission->graph_instance_id.value(),
+                                   run.run_id.value(), admission->run_group_id,
+                                   bundle_id, impl_->counters_locked());
+        });
+      }
     }
   }
 
   for (std::size_t index = 0U; index < run_count; ++index) {
-    registry_leases[index]->wait_for_resource_settlement();
+    settlement_observers[index].wait_for_resource_settlement();
   }
 
   {
@@ -936,24 +996,39 @@ void RunLifecycleRegistry::finalize_admission(
         throw std::logic_error(
             "Run lifecycle resource settlement preceded quiescence.");
       }
-      run.resource_settled = true;
-      impl_->telemetry.publish(ExecutionLifecycleEventKind::ResourceSettled,
-                               ExecutionLifecycleCategory::None,
-                               admission->graph_instance_id.value(),
-                               run.run_id.value(), admission->run_group_id,
-                               bundle_id, impl_->counters_locked());
+      if (!run.resource_settled) {
+        run.resource_settled = true;
+        publish_committed_transition([&]() {
+          impl_->telemetry.publish(ExecutionLifecycleEventKind::ResourceSettled,
+                                   ExecutionLifecycleCategory::None,
+                                   admission->graph_instance_id.value(),
+                                   run.run_id.value(), admission->run_group_id,
+                                   bundle_id, impl_->counters_locked());
+        });
+      }
     }
     std::array<std::uint64_t, 2U> run_ids{0U, 0U};
     std::size_t run_id_count = 0U;
     for (const Impl::RunRecord& run : admission->runs) {
       run_ids[run_id_count++] = run.run_id.value();
     }
+    const auto row = impl_->find_graph(graph_instance_id);
+    if (row == impl_->rows.end()) {
+      throw std::logic_error(
+          "Run lifecycle Graph row disappeared before finalization.");
+    }
+    row->cancellation_records.remove_if(
+        [bundle_id](const Impl::CancellationDispatchRecord& record) {
+          return record.bundle_id == bundle_id;
+        });
     impl_->admissions.erase(admission);
     for (std::size_t index = 0U; index < run_id_count; ++index) {
-      impl_->telemetry.publish(
-          ExecutionLifecycleEventKind::RunUnregistered,
-          ExecutionLifecycleCategory::None, graph_instance_id.value(),
-          run_ids[index], run_group_id, bundle_id, impl_->counters_locked());
+      publish_committed_transition([&]() {
+        impl_->telemetry.publish(
+            ExecutionLifecycleEventKind::RunUnregistered,
+            ExecutionLifecycleCategory::None, graph_instance_id.value(),
+            run_ids[index], run_group_id, bundle_id, impl_->counters_locked());
+      });
     }
   }
   handle.registry_ = nullptr;
@@ -986,9 +1061,8 @@ bool RunLifecycleRegistry::permits_visible_commit(
 std::uint64_t RunLifecycleRegistry::begin_graph_close(
     GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason) {
   const std::uint16_t encoded_reason = encode_candidate_cancellation(reason);
-  std::size_t source_count = 0U;
+  std::list<Impl::CancellationDispatchRecord> cancellation_records;
   std::uint64_t close_generation = 0U;
-  bool dispatch_cancellation = false;
   {
     std::lock_guard<std::mutex> lock(impl_->fence);
     const auto row = impl_->find_graph(graph_instance_id);
@@ -1003,54 +1077,35 @@ std::uint64_t RunLifecycleRegistry::begin_graph_close(
         candidate->cancellation.store(encoded_reason,
                                       std::memory_order_release);
       }
-      impl_->telemetry.publish(ExecutionLifecycleEventKind::GraphClosing,
-                               cancellation_category(reason),
-                               graph_instance_id.value(), 0U, 0U,
-                               row->close_generation, impl_->counters_locked());
+      publish_committed_transition([&]() {
+        impl_->telemetry.publish(
+            ExecutionLifecycleEventKind::GraphClosing,
+            cancellation_category(reason), graph_instance_id.value(), 0U, 0U,
+            row->close_generation, impl_->counters_locked());
+      });
     }
     close_generation = row->close_generation;
-    if (!row->cancellation_dispatched) {
-      row->cancellation_dispatched = true;
-      dispatch_cancellation = true;
-      source_count = static_cast<std::size_t>(std::count_if(
-          impl_->admissions.cbegin(), impl_->admissions.cend(),
-          [graph_instance_id](const Impl::AdmissionRecord& admission) {
-            return admission.graph_instance_id == graph_instance_id;
-          }));
-    }
+    cancellation_records.splice(cancellation_records.end(),
+                                row->cancellation_records);
   }
 
-  if (!dispatch_cancellation) {
-    return close_generation;
-  }
-  std::vector<std::shared_ptr<ComputeRequestCancellationSource>> sources;
-  std::vector<std::shared_ptr<DirtySiblingCommitGate>> gates;
-  sources.reserve(source_count);
-  gates.reserve(source_count);
-  {
-    std::lock_guard<std::mutex> lock(impl_->fence);
-    for (const Impl::AdmissionRecord& admission : impl_->admissions) {
-      if (admission.graph_instance_id == graph_instance_id) {
-        sources.push_back(admission.cancellation);
-        gates.push_back(admission.sibling_commit_gate);
-      }
-    }
-  }
-  for (std::size_t index = 0U; index < sources.size(); ++index) {
-    if (gates[index]) {
-      gates[index]->abort_hp_commit();
+  for (const Impl::CancellationDispatchRecord& record : cancellation_records) {
+    if (record.sibling_commit_gate) {
+      record.sibling_commit_gate->abort_hp_commit();
     }
     try {
-      (void)sources[index]->request_cancellation(reason);
+      (void)record.cancellation->request_cancellation(reason);
     } catch (...) {
       // Terminal cancellation is published before callback failure; close is
       // monotonic and must continue settlement.
     }
     std::lock_guard<std::mutex> lock(impl_->fence);
-    impl_->telemetry.publish(ExecutionLifecycleEventKind::CancellationRequested,
-                             cancellation_category(reason),
-                             graph_instance_id.value(), 0U, 0U,
-                             close_generation, impl_->counters_locked());
+    publish_committed_transition([&]() {
+      impl_->telemetry.publish(
+          ExecutionLifecycleEventKind::CancellationRequested,
+          cancellation_category(reason), graph_instance_id.value(), 0U, 0U,
+          close_generation, impl_->counters_locked());
+    });
   }
 
   return close_generation;
@@ -1096,7 +1151,7 @@ void RunLifecycleRegistry::close_graph(GraphInstanceId graph_instance_id,
 
 /** @copydoc RunLifecycleRegistry::begin_service_shutdown */
 std::uint64_t RunLifecycleRegistry::begin_service_shutdown() {
-  std::size_t source_count = 0U;
+  std::list<Impl::CancellationDispatchRecord> cancellation_records;
   std::uint64_t generation = 0U;
   {
     std::lock_guard<std::mutex> lock(impl_->fence);
@@ -1118,47 +1173,45 @@ std::uint64_t RunLifecycleRegistry::begin_service_shutdown() {
         row.state = Impl::GraphState::Closing;
         row.close_generation = 1U;
       }
-      row.cancellation_dispatched = true;
       for (const auto& candidate : row.candidates) {
         candidate->cancellation.store(encoded, std::memory_order_release);
       }
+      cancellation_records.splice(cancellation_records.end(),
+                                  row.cancellation_records);
     }
-    source_count = impl_->admissions.size();
-    impl_->telemetry.mark_stopping(generation, impl_->counters_locked());
+    publish_committed_transition([&]() {
+      impl_->telemetry.mark_stopping(generation, impl_->counters_locked());
+    });
     for (const Impl::GraphRow& row : impl_->rows) {
-      impl_->telemetry.publish(ExecutionLifecycleEventKind::GraphClosing,
-                               ExecutionLifecycleCategory::ProcessShutdown,
-                               row.graph_instance_id.value(), 0U, 0U,
-                               row.close_generation, impl_->counters_locked());
+      publish_committed_transition([&]() {
+        impl_->telemetry.publish(ExecutionLifecycleEventKind::GraphClosing,
+                                 ExecutionLifecycleCategory::ProcessShutdown,
+                                 row.graph_instance_id.value(), 0U, 0U,
+                                 row.close_generation,
+                                 impl_->counters_locked());
+      });
     }
   }
 
-  std::vector<std::shared_ptr<ComputeRequestCancellationSource>> sources;
-  std::vector<std::shared_ptr<DirtySiblingCommitGate>> gates;
-  sources.reserve(source_count);
-  gates.reserve(source_count);
-  {
-    std::lock_guard<std::mutex> lock(impl_->fence);
-    for (const Impl::AdmissionRecord& admission : impl_->admissions) {
-      sources.push_back(admission.cancellation);
-      gates.push_back(admission.sibling_commit_gate);
-    }
-  }
-  for (std::size_t index = 0U; index < sources.size(); ++index) {
-    if (gates[index]) {
-      gates[index]->abort_hp_commit();
+  for (const Impl::CancellationDispatchRecord& record : cancellation_records) {
+    if (record.sibling_commit_gate) {
+      record.sibling_commit_gate->abort_hp_commit();
     }
     try {
-      (void)sources[index]->request_cancellation(
+      (void)record.cancellation->request_cancellation(
           ComputeRunCancellationReason::ProcessShutdown);
     } catch (...) {
       // The accepted terminal reason is stable before any cleanup callback
       // exception. Process shutdown remains monotonic.
     }
     std::lock_guard<std::mutex> lock(impl_->fence);
-    impl_->telemetry.publish(ExecutionLifecycleEventKind::CancellationRequested,
-                             ExecutionLifecycleCategory::ProcessShutdown, 0U,
-                             0U, 0U, generation, impl_->counters_locked());
+    publish_committed_transition([&]() {
+      impl_->telemetry.publish(
+          ExecutionLifecycleEventKind::CancellationRequested,
+          ExecutionLifecycleCategory::ProcessShutdown,
+          record.graph_instance_id.value(), 0U, 0U, generation,
+          impl_->counters_locked());
+    });
   }
   return generation;
 }

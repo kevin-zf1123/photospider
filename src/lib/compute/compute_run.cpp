@@ -493,6 +493,7 @@ bool ComputeRunControl::request_cancellation(
     plan->close_publication();
   }
 
+  std::exception_ptr first_callback_failure;
   std::size_t slot_index = 0U;
   for (;;) {
     std::shared_ptr<ComputeRunCancellationSlot> slot;
@@ -504,8 +505,17 @@ bool ComputeRunControl::request_cancellation(
       slot = cancellation_slots[slot_index++].lock();
     }
     if (slot != nullptr) {
-      slot->invoke(reason);
+      try {
+        slot->invoke(reason);
+      } catch (...) {
+        if (!first_callback_failure) {
+          first_callback_failure = std::current_exception();
+        }
+      }
     }
+  }
+  if (first_callback_failure) {
+    std::rethrow_exception(first_callback_failure);
   }
   return true;
 }
@@ -816,18 +826,72 @@ bool ComputeRequestCancellationSource::request_cancellation(
     if (control_->accepted_reason.has_value()) {
       return false;
     }
-    children = control_->child_sources;
     control_->accepted_reason = reason;
+    children.swap(control_->child_sources);
   }
+  std::exception_ptr first_child_failure;
   for (const ComputeRunCancellationSource& child : children) {
-    const std::shared_ptr<ComputeRunControl> child_control =
-        child.control_.lock();
-    if (child_control != nullptr) {
-      (void)child_control->request_cancellation(
-          reason, &control_->child_cancellation_won);
+    try {
+      const std::shared_ptr<ComputeRunControl> child_control =
+          child.control_.lock();
+      if (child_control != nullptr) {
+        (void)child_control->request_cancellation(
+            reason, &control_->child_cancellation_won);
+      }
+    } catch (...) {
+      if (!first_child_failure) {
+        first_child_failure = std::current_exception();
+      }
     }
   }
+  if (first_child_failure) {
+    std::rethrow_exception(first_child_failure);
+  }
   return true;
+}
+
+/** @copydoc ComputeRunSettlementObserver::terminal_outcome */
+std::optional<ComputeRunTerminalOutcome>
+ComputeRunSettlementObserver::terminal_outcome() const {
+  if (!control_) {
+    throw std::logic_error("ComputeRun settlement observer is inactive.");
+  }
+  std::lock_guard<std::mutex> lock(control_->mutex);
+  return control_->terminal_outcome;
+}
+
+/** @copydoc ComputeRunSettlementObserver::wait_until_registry_lease */
+void ComputeRunSettlementObserver::wait_until_registry_lease() const {
+  if (!control_) {
+    throw std::logic_error("ComputeRun settlement observer is inactive.");
+  }
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (!control_->terminal_outcome.has_value()) {
+      throw std::logic_error(
+          "ComputeRun registry observer wait requires terminal outcome.");
+    }
+  }
+  std::unique_lock<std::mutex> lock(control_->lease_count_mutex);
+  control_->lease_release_cv.wait(lock, [this]() {
+    return control_->active_leases.load(std::memory_order_acquire) == 1U;
+  });
+}
+
+/** @copydoc ComputeRunSettlementObserver::wait_for_resource_settlement */
+void ComputeRunSettlementObserver::wait_for_resource_settlement() const {
+  if (!control_) {
+    throw std::logic_error("ComputeRun settlement observer is inactive.");
+  }
+  std::unique_lock<std::mutex> lock(control_->mutex);
+  if (!control_->terminal_outcome.has_value()) {
+    throw std::logic_error(
+        "ComputeRun resource settlement requires terminal outcome.");
+  }
+  control_->resource_settlement_cv.wait(lock, [this]() {
+    return control_->pending_root_reservations == 0U &&
+           control_->live_root_reservations == 0U;
+  });
 }
 
 /** @copydoc ComputeRequestCancellationSource::accepted_reason */
@@ -1126,6 +1190,8 @@ bool ComputeRun::is_terminal() const {
  * @param node_id Requested target node.
  * @param available_devices Active-route devices transferred into plan
  * ownership.
+ * @param publish_plan_inspection Whether construction immediately updates graph
+ * diagnostics.
  * @return Mutable Run-owned submission plan.
  * @throws std::logic_error for duplicate storage or terminal Run.
  * @throws GraphError or standard exceptions from TaskSubmissionPlan.
@@ -1133,7 +1199,7 @@ bool ComputeRun::is_terminal() const {
  */
 TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
     GraphModel& graph, GraphTraversalService& traversal, int node_id,
-    std::vector<Device> available_devices) {
+    std::vector<Device> available_devices, bool publish_plan_inspection) {
   std::lock_guard<std::mutex> lock(control_->mutex);
   if (control_->arbiter_state != ComputeRunArbiterState::Open) {
     throw std::logic_error(
@@ -1144,7 +1210,7 @@ TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
   }
   control_->submission_plan = std::make_unique<TaskSubmissionPlan>(
       control_->descriptor.id(), graph, traversal, node_id,
-      std::move(available_devices));
+      std::move(available_devices), publish_plan_inspection);
   return *control_->submission_plan;
 }
 

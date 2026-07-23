@@ -121,6 +121,24 @@ void ReadyTaskSubmission::execute(ExecutionTaskRuntime& task_runtime) {
 namespace {
 
 /**
+ * @brief Completes one irreversible shutdown action without recoverable unwind.
+ * @tparam Action Join or trusted telemetry operation.
+ * @param action Callable completing the already committed shutdown transition.
+ * @return Nothing.
+ * @throws Nothing; failure terminates because unwinding could destroy still
+ * joinable workers or report a recoverable state after admission closed.
+ * @note Callers hold no pool, Run, policy, route, or lifecycle lock.
+ */
+template <typename Action>
+void complete_shutdown_action_or_terminate(Action&& action) noexcept {
+  try {
+    std::forward<Action>(action)();
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/**
  * @brief Tests a frozen private-route inventory for one selected device.
  * @param execution_type Exact private route id.
  * @param metal_available Metal capability captured before Run publication.
@@ -797,6 +815,10 @@ bool record_reserved_start_attempt_for_testing(
  * dependency, resource-token, worker, completion, or lifecycle authority.
  */
 class ExecutionService::BoundedReadyStore final {
+ private:
+  struct PolicyGraphState;
+  struct PolicyRunState;
+
  public:
   /**
    * @brief Immutable ABI snapshot prepared while the ready store is locked.
@@ -1513,6 +1535,166 @@ class ExecutionService::BoundedReadyStore final {
     LaneEndpoints normal;
   };
 
+ public:
+  /**
+   * @brief Complete detached initial-publication storage for one Run.
+   *
+   * @throws Nothing from movement/destruction after staging allocations finish.
+   * @note Map/list nodes, ready grants, queue entries, and nonreused identities
+   * are all owned here before lifecycle installation. No node is visible in the
+   * live store until try_publish_prepared_batch().
+   */
+  struct PreparedBatch final {
+    /** @brief Matching Run retained independently from staged entries. */
+    std::shared_ptr<RunState> run;
+    /** @brief Detached queue-list nodes in initial publication order. */
+    std::list<std::shared_ptr<QueueEntry>> entries;
+    /** @brief Detached candidate Graph policy row. */
+    std::map<std::string, PolicyGraphState> graph_states;
+    /** @brief Detached exact Run policy row. */
+    std::map<std::uint64_t, PolicyRunState> run_states;
+    /** @brief Aggregate ready-entry/byte charge for the initial set. */
+    ResourceVector ready_charge;
+  };
+
+  /**
+   * @brief Allocates every store node for one unpublished initial batch.
+   * @param run Matching prepared Run state.
+   * @param entries Fully granted queue entries.
+   * @return Detached batch with reserved nonreused publication identities.
+   * @throws std::invalid_argument for empty/mismatched entries.
+   * @throws std::overflow_error when store identities are exhausted.
+   * @throws GraphError when aggregate ready charge overflows.
+   * @throws std::bad_alloc when detached map/list nodes cannot allocate.
+   * @note Caller holds the pool mutex. Identity gaps after staging failure are
+   * intentional and preserve non-reuse without publishing any store state.
+   */
+  PreparedBatch prepare_initial_batch(
+      const std::shared_ptr<RunState>& run,
+      const std::vector<std::shared_ptr<QueueEntry>>& entries) {
+    if (!run || entries.empty()) {
+      throw std::invalid_argument(
+          "ExecutionService prepared batch requires Run and entries.");
+    }
+    const std::uint64_t count = static_cast<std::uint64_t>(entries.size());
+    if (count >
+            std::numeric_limits<std::uint64_t>::max() - next_candidate_id_ ||
+        count >
+            std::numeric_limits<std::uint64_t>::max() - next_entry_version_ ||
+        count > std::numeric_limits<std::uint64_t>::max() -
+                    next_enqueue_sequence_ ||
+        next_graph_id_ == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error(
+          "ExecutionService ready publication identity space is exhausted.");
+    }
+
+    PreparedBatch batch;
+    batch.run = run;
+    batch.graph_states.try_emplace(std::move(run->available_graph_key),
+                                   ++next_graph_id_);
+    PolicyGraphState* staged_graph = &batch.graph_states.begin()->second;
+    batch.run_states.try_emplace(run->id.value(), run.get(), staged_graph);
+    for (const std::shared_ptr<QueueEntry>& entry : entries) {
+      if (!entry || entry->run.get() != run.get()) {
+        throw std::invalid_argument(
+            "ExecutionService prepared batch mixes Run ownership.");
+      }
+      validate_entry(*entry);
+      const std::optional<ResourceVector> next_charge = checked_add_resources(
+          batch.ready_charge, entry->ready_grant->resources());
+      if (!next_charge.has_value()) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "ExecutionService prepared ready charge exceeds representation.");
+      }
+      batch.ready_charge = *next_charge;
+      entry->candidate_id = ++next_candidate_id_;
+      entry->entry_version = ++next_entry_version_;
+      entry->enqueue_sequence = ++next_enqueue_sequence_;
+      batch.entries.push_back(entry);
+    }
+    return batch;
+  }
+
+  /**
+   * @brief Atomically links one detached initial batch into the live store.
+   * @param batch Active detached batch from prepare_initial_batch().
+   * @return True after publication, false when current bounded capacity rejects
+   * the complete batch without mutation.
+   * @throws std::invalid_argument for inactive/foreign/duplicate Run state.
+   * @throws std::system_error only if standard container internals violate
+   * their allocator/comparator contract.
+   * @note Caller holds the pool and matching Run mutexes. All allocating nodes
+   * already exist. Graph-row insertion rollback preserves an empty live store
+   * if the Run node cannot link.
+   */
+  bool try_publish_prepared_batch(PreparedBatch& batch) {
+    if (!batch.run || batch.entries.empty() ||
+        batch.graph_states.size() != 1U || batch.run_states.size() != 1U ||
+        batch.run_states.begin()->first != batch.run->id.value()) {
+      throw std::invalid_argument(
+          "ExecutionService prepared batch is inactive or malformed.");
+    }
+    if (contains_run_id(batch.run->id)) {
+      throw std::invalid_argument(
+          "ExecutionService prepared Run id is already active.");
+    }
+    const std::optional<ResourceVector> next = checked_add_resources(
+        ResourceVector{0U, 0U, 0U, entry_count_, byte_count_},
+        batch.ready_charge);
+    if (!next.has_value() || next->ready_entries > entry_limit_ ||
+        next->ready_bytes > byte_limit_) {
+      return false;
+    }
+
+    bool graph_inserted = false;
+    auto graph_it = graph_states_.find(batch.run->graph);
+    if (graph_it == graph_states_.end()) {
+      graph_states_.merge(batch.graph_states);
+      graph_it = graph_states_.find(batch.run->graph);
+      if (graph_it == graph_states_.end()) {
+        std::terminate();
+      }
+      graph_inserted = true;
+    }
+
+    batch.run_states.begin()->second.graph = &graph_it->second;
+    try {
+      run_states_.merge(batch.run_states);
+    } catch (...) {
+      if (graph_inserted) {
+        auto graph_node = graph_states_.extract(graph_it);
+        batch.graph_states.insert(std::move(graph_node));
+      }
+      throw;
+    }
+    const auto run_it = run_states_.find(batch.run->id.value());
+    if (run_it == run_states_.end() || !batch.run_states.empty()) {
+      std::terminate();
+    }
+    ++graph_it->second.active_runs;
+
+    const auto first = batch.entries.begin();
+    entries_.splice(entries_.end(), batch.entries);
+    for (auto entry_it = first; entry_it != entries_.end(); ++entry_it) {
+      QueueEntry& entry = **entry_it;
+      entry.store_position = entry_it;
+      entry.store_owned = true;
+      entry.high_lane = entry.priority == ExecutionTaskPriority::High;
+      entry.grant_blocked_worker_mask = 0U;
+      entry.enqueued_class_dispatch_count =
+          class_dispatch_count(entry.run->policy_qos.service_class);
+      link_entry(run_it->second, entry);
+      telemetry_.increment_physical_counter(
+          ExecutionLifecyclePhysicalCounter::ReadyEntry);
+    }
+    entry_count_ = next->ready_entries;
+    byte_count_ = next->ready_bytes;
+    batch.run.reset();
+    return true;
+  }
+
+ private:
   /**
    * @brief Complete mutable selection retained only during one pop call.
    * @throws Nothing for value construction.
@@ -2311,6 +2493,52 @@ class ExecutionService::BoundedReadyStore final {
   std::uint64_t consecutive_interactive_ = 0U;
 };
 
+/**
+ * @brief Complete unpublished physical batch behind PreparedExecutionRun.
+ *
+ * @throws Nothing from destruction after successful construction.
+ * @note Field order makes cancellation registration retire before detached
+ * entries, then RunState/reservation. The owning service outlives every
+ * admission candidate and prepared batch.
+ */
+struct PreparedExecutionRunState final {
+  /** @brief Exact service that created and may publish this state. */
+  ExecutionService* owner = nullptr;
+  /** @brief Matching physical Run and root reservation owner. */
+  std::shared_ptr<ExecutionService::RunState> run;
+  /** @brief Fully detached ready-store map/list publication nodes. */
+  ExecutionService::BoundedReadyStore::PreparedBatch batch;
+  /** @brief Cancellation cleanup active through publication and settlement. */
+  ComputeRunCancellationRegistration cancellation_registration;
+};
+
+/** @copydoc PreparedExecutionRun::PreparedExecutionRun */
+PreparedExecutionRun::PreparedExecutionRun() noexcept = default;
+
+/** @copydoc PreparedExecutionRun::PreparedExecutionRun */
+PreparedExecutionRun::PreparedExecutionRun(
+    std::unique_ptr<PreparedExecutionRunState> state) noexcept
+    : state_(std::move(state)) {}
+
+/** @copydoc PreparedExecutionRun::PreparedExecutionRun */
+PreparedExecutionRun::PreparedExecutionRun(
+    PreparedExecutionRun&& other) noexcept = default;  // NOLINT
+
+/** @copydoc PreparedExecutionRun::operator= */
+PreparedExecutionRun& PreparedExecutionRun::operator=(
+    PreparedExecutionRun&& other) noexcept {
+  if (this != &other) {
+    if (state_) {
+      std::terminate();
+    }
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+/** @copydoc PreparedExecutionRun::~PreparedExecutionRun */
+PreparedExecutionRun::~PreparedExecutionRun() noexcept = default;
+
 /** @copydoc ExecutionService::service_run_envelope_bytes */
 std::uint64_t ExecutionService::service_run_envelope_bytes(
     const std::string& graph_identity, const std::string& graph_key) {
@@ -3099,8 +3327,8 @@ RunLifecycleAdmissionHandle ExecutionService::commit_graph_admission_group(
 
 /** @copydoc ExecutionService::finalize_graph_admission */
 void ExecutionService::finalize_graph_admission(
-    RunLifecycleAdmissionHandle handle) {
-  lifecycle_registry_->finalize_admission(std::move(handle));
+    RunLifecycleAdmissionHandle& handle) {
+  lifecycle_registry_->finalize_admission(handle);
 }
 
 /** @copydoc ExecutionService::permits_visible_commit */
@@ -3192,13 +3420,15 @@ void ExecutionService::shutdown() {
 
     for (std::thread& worker : workers) {
       if (worker.joinable()) {
-        worker.join();
+        complete_shutdown_action_or_terminate([&worker]() { worker.join(); });
       }
-      lifecycle_telemetry_->publish(ExecutionLifecycleEventKind::WorkerJoined,
-                                    ExecutionLifecycleCategory::None, 0U, 0U,
-                                    0U,
-                                    lifecycle_registry_->shutdown_generation(),
-                                    lifecycle_registry_->counters());
+      complete_shutdown_action_or_terminate([this]() {
+        lifecycle_telemetry_->publish(
+            ExecutionLifecycleEventKind::WorkerJoined,
+            ExecutionLifecycleCategory::None, 0U, 0U, 0U,
+            lifecycle_registry_->shutdown_generation(),
+            lifecycle_registry_->counters());
+      });
     }
 
     interactive_binding.reset();
@@ -3275,8 +3505,8 @@ ResourceVector ExecutionService::estimate_cpu_run_resources(
       .resources;
 }
 
-/** @copydoc ExecutionService::execute_run */
-void ExecutionService::execute_run(
+/** @copydoc ExecutionService::prepare_run */
+PreparedExecutionRun ExecutionService::prepare_run(
     ExecutionHostContext& host, const std::string& execution_type,
     std::vector<ReadyTaskSubmission> initial_submissions, int total_task_count,
     CpuRunResourceDemand run_resource_demand) {
@@ -3296,9 +3526,6 @@ void ExecutionService::execute_run(
       route_exposes_device(host, execution_type, Device::GPU_METAL);
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
   ComputeRunLease service_lease = initial_submissions.front().lease_;
-  if (service_lease.observe_cancellation().has_value()) {
-    return;
-  }
   for (const ReadyTaskSubmission& submission : initial_submissions) {
     if (submission.metadata().run_id() != run_id) {
       throw std::invalid_argument(
@@ -3378,57 +3605,71 @@ void ExecutionService::execute_run(
             }
           });
 
-  bool published = false;
-  {
-    std::vector<std::shared_ptr<QueueEntry>> staged_entries;
-    staged_entries.reserve(initial_submissions.size());
-    for (ReadyTaskSubmission& submission : initial_submissions) {
-      staged_entries.push_back(make_queue_entry(run, std::move(submission)));
-    }
-    const std::size_t staged_submission_size = initial_submissions.size();
-    const std::size_t staged_submission_capacity =
-        initial_submissions.capacity();
-    release_initial_submission_storage(initial_submissions);
-    observe_initial_submission_storage(
-        admission.resources, staged_submission_size, staged_submission_capacity,
-        initial_submissions);
-
-    {
-      std::lock_guard<std::mutex> pool_lock(pool_->mutex);
-      if (pool_->configured_workers == 0U || pool_->workers.empty()) {
-        throw std::logic_error(
-            "ExecutionService worker count is not configured.");
-      }
-      if (pool_->stopping) {
-        throw std::logic_error("ExecutionService is stopping.");
-      }
-      std::lock_guard<std::mutex> run_lock(run->mutex);
-      if (run->cancelled) {
-        return;
-      }
-      if (pool_->ready_store.contains_run_id(run_id)) {
-        throw std::logic_error("ExecutionService Run id is already active.");
-      }
-
-      try {
-        for (const std::shared_ptr<QueueEntry>& entry : staged_entries) {
-          if (!pool_->ready_store.try_push(entry)) {
-            throw GraphError(
-                GraphErrc::ComputeError,
-                "ExecutionService bounded ready store rejected initial work.");
-          }
-        }
-        published = true;
-        pool_->advance_worker_notification_epoch();
-      } catch (...) {
-        (void)pool_->ready_store.erase_run(run);
-        pool_->ready_store.retire_run(run);
-        throw;
-      }
-    }
+  std::vector<std::shared_ptr<QueueEntry>> staged_entries;
+  staged_entries.reserve(initial_submissions.size());
+  for (ReadyTaskSubmission& submission : initial_submissions) {
+    staged_entries.push_back(make_queue_entry(run, std::move(submission)));
   }
-  if (!published) {
-    return;
+  const std::size_t staged_submission_size = initial_submissions.size();
+  const std::size_t staged_submission_capacity = initial_submissions.capacity();
+  release_initial_submission_storage(initial_submissions);
+  observe_initial_submission_storage(
+      admission.resources, staged_submission_size, staged_submission_capacity,
+      initial_submissions);
+
+  BoundedReadyStore::PreparedBatch batch;
+  {
+    std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+    if (pool_->configured_workers == 0U || pool_->workers.empty()) {
+      throw std::logic_error(
+          "ExecutionService worker count is not configured.");
+    }
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+    if (pool_->ready_store.contains_run_id(run_id)) {
+      throw std::logic_error("ExecutionService Run id is already active.");
+    }
+    batch = pool_->ready_store.prepare_initial_batch(run, staged_entries);
+  }
+
+  auto state = std::make_unique<PreparedExecutionRunState>();
+  state->owner = this;
+  state->run = std::move(run);
+  state->batch = std::move(batch);
+  state->cancellation_registration = std::move(cancellation_registration);
+  return PreparedExecutionRun(std::move(state));
+}
+
+/** @copydoc ExecutionService::execute_prepared_run */
+void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {
+  if (!prepared.state_ || prepared.state_->owner != this) {
+    throw std::invalid_argument(
+        "ExecutionService requires one active local prepared Run.");
+  }
+  std::unique_ptr<PreparedExecutionRunState> state = std::move(prepared.state_);
+  const std::shared_ptr<RunState> run = state->run;
+
+  {
+    std::lock_guard<std::mutex> pool_lock(pool_->mutex);
+    if (pool_->configured_workers == 0U || pool_->workers.empty()) {
+      throw std::logic_error(
+          "ExecutionService worker count is not configured.");
+    }
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+    std::lock_guard<std::mutex> run_lock(run->mutex);
+    if (run->cancelled) {
+      run->reservation.reset();
+      return;
+    }
+    if (!pool_->ready_store.try_publish_prepared_batch(state->batch)) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "ExecutionService bounded ready store rejected initial work.");
+    }
+    pool_->advance_worker_notification_epoch();
   }
   pool_->ready_cv.notify_all();
 
@@ -3449,6 +3690,20 @@ void ExecutionService::execute_run(
   if (failure) {
     std::rethrow_exception(failure);
   }
+}
+
+/** @copydoc ExecutionService::execute_run */
+void ExecutionService::execute_run(
+    ExecutionHostContext& host, const std::string& execution_type,
+    std::vector<ReadyTaskSubmission> initial_submissions, int total_task_count,
+    CpuRunResourceDemand run_resource_demand) {
+  if (!initial_submissions.empty() &&
+      initial_submissions.front().lease_.observe_cancellation().has_value()) {
+    return;
+  }
+  execute_prepared_run(prepare_run(host, execution_type,
+                                   std::move(initial_submissions),
+                                   total_task_count, run_resource_demand));
 }
 
 /** @copydoc ExecutionService::release_initial_submission_storage */

@@ -343,11 +343,20 @@ class RunLifecycleAdmissionHandle final {
  public:
   /** @brief Creates an inactive handle for moved-from state. */
   RunLifecycleAdmissionHandle() noexcept = default;
-  /** @brief Transfers one finalization obligation. */
-  RunLifecycleAdmissionHandle(RunLifecycleAdmissionHandle&&) noexcept = default;
-  /** @brief Replaces this handle by transfer. */
+  /**
+   * @brief Transfers the sole finalization obligation.
+   * @param other Active or inactive handle made inactive.
+   * @throws Nothing.
+   */
+  RunLifecycleAdmissionHandle(RunLifecycleAdmissionHandle&& other) noexcept;
+  /**
+   * @brief Prevents overwriting an unresolved finalization obligation.
+   * @param other Handle that cannot replace this authority.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
   RunLifecycleAdmissionHandle& operator=(
-      RunLifecycleAdmissionHandle&&) noexcept = default;
+      RunLifecycleAdmissionHandle&& other) noexcept = delete;
   /** @brief Releases an inactive or already-finalized scalar value. */
   ~RunLifecycleAdmissionHandle() noexcept = default;
 
@@ -499,16 +508,18 @@ class RunLifecycleRegistry final {
 
   /**
    * @brief Completes terminal/quiescent settlement and unregisters one bundle.
-   * @param handle Exact installed bundle; consumed on success.
+   * @param handle Exact installed bundle; cleared only on success.
    * @return Nothing only after every registry Run lease is the sole lease and
    * every child record has left the registry.
    * @throws std::invalid_argument for an inactive/foreign handle.
    * @throws std::logic_error before every child is terminal.
    * @throws std::system_error when registry or Run waiting fails.
-   * @note This method never waits while holding the lifecycle fence. Callers
-   * must complete commit/discard and root resource release first.
+   * @note This method never waits while holding the lifecycle fence. A
+   * terminal-not-ready or synchronization failure leaves the same handle active
+   * for retry; no by-value duplicate authority is created. Callers must
+   * complete commit/discard and root resource release first.
    */
-  void finalize_admission(RunLifecycleAdmissionHandle handle);
+  void finalize_admission(RunLifecycleAdmissionHandle& handle);
 
   /**
    * @brief Validates one visible commit under graph-state then lifecycle order.

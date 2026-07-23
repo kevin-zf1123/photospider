@@ -33,12 +33,14 @@ void remember_dispatch_compute_plan(GraphModel& graph,
 
 }  // namespace
 
+/** @copydoc ComputeDispatchPlanBuilder::ComputeDispatchPlanBuilder */
 ComputeDispatchPlanBuilder::ComputeDispatchPlanBuilder(
     GraphTraversalService& traversal)
     : traversal_(traversal) {}
 
+/** @copydoc ComputeDispatchPlanBuilder::build_high_precision_plan */
 ComputePlan ComputeDispatchPlanBuilder::build_high_precision_plan(
-    GraphModel& graph, int node_id) const {
+    GraphModel& graph, int node_id, bool publish_inspection) const {
   const std::vector<int> execution_order =
       traversal_.topo_postorder_from(graph, node_id);
   NodeCacheTaskGraphPruner node_cache_pruner;
@@ -48,8 +50,16 @@ ComputePlan ComputeDispatchPlanBuilder::build_high_precision_plan(
       get_or_expand_full_task_graph(graph, request.intent);
   ComputePlan compute_plan =
       node_cache_pruner.prune(*full_graph, request, execution_order, graph);
-  remember_dispatch_compute_plan(graph, compute_plan);
+  if (publish_inspection) {
+    remember_dispatch_compute_plan(graph, compute_plan);
+  }
   return compute_plan;
+}
+
+/** @copydoc ComputeDispatchPlanBuilder::publish_plan_inspection */
+void ComputeDispatchPlanBuilder::publish_plan_inspection(
+    GraphModel& graph, const ComputePlan& compute_plan) {
+  remember_dispatch_compute_plan(graph, compute_plan);
 }
 
 }  // namespace ps::compute

@@ -170,28 +170,47 @@ std::uint64_t ExecutionLifecycleTelemetry::publish_service_stopped(
     throw std::invalid_argument(
         "Execution lifecycle shutdown generation must be nonzero.");
   }
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (service_state_ == ExecutionLifecycleServiceState::Stopped) {
-      if (shutdown_generation_ != shutdown_generation) {
-        throw std::invalid_argument(
-            "Execution lifecycle shutdown generation changed.");
-      }
-      return final_stop_sequence_;
-    }
-    if (service_state_ != ExecutionLifecycleServiceState::Stopping) {
-      throw std::logic_error(
-          "Execution lifecycle telemetry must be Stopping before Stopped.");
-    }
+  bool timestamp_saturated = false;
+  const std::uint64_t timestamp = elapsed_microseconds(
+      std::chrono::steady_clock::now() - origin_, &timestamp_saturated);
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (service_state_ == ExecutionLifecycleServiceState::Stopped) {
     if (shutdown_generation_ != shutdown_generation) {
       throw std::invalid_argument(
           "Execution lifecycle shutdown generation changed.");
     }
+    return final_stop_sequence_;
   }
-  return publish_at(ExecutionLifecycleEventKind::ServiceStopped,
-                    ExecutionLifecycleCategory::None, 0U, 0U, 0U,
-                    shutdown_generation, counters,
-                    std::chrono::steady_clock::now() - origin_, true);
+  if (service_state_ != ExecutionLifecycleServiceState::Stopping) {
+    throw std::logic_error(
+        "Execution lifecycle telemetry must be Stopping before Stopped.");
+  }
+  if (shutdown_generation_ != shutdown_generation) {
+    throw std::invalid_argument(
+        "Execution lifecycle shutdown generation changed.");
+  }
+  if (next_sequence_ == std::numeric_limits<std::uint64_t>::max()) {
+    record_drop_locked();
+    return 0U;
+  }
+
+  const std::uint64_t sequence = next_sequence_;
+  ExecutionLifecycleEvent event;
+  event.sequence = sequence;
+  event.timestamp_us = timestamp;
+  event.timestamp_saturated = timestamp_saturated;
+  event.service_instance_id = service_instance_id_;
+  event.telemetry_epoch = telemetry_epoch_;
+  event.generation = shutdown_generation;
+  event.kind = ExecutionLifecycleEventKind::ServiceStopped;
+  event.category = ExecutionLifecycleCategory::None;
+  event.counters = complete_counters_locked(counters);
+  append_locked(event);
+  counters_ = event.counters;
+  service_state_ = ExecutionLifecycleServiceState::Stopped;
+  final_stop_sequence_ = sequence;
+  next_sequence_ = std::numeric_limits<std::uint64_t>::max();
+  return sequence;
 }
 
 /** @copydoc ExecutionLifecycleTelemetry::publish_at */

@@ -2,16 +2,149 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <future>
 #include <memory>
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "compute/dirty_sibling_commit_gate.hpp"
 #include "compute/run_lifecycle_registry.hpp"
 #include "photospider/core/graph_error.hpp"
+
+namespace allocation_probe {
+
+/** @brief Disabled current-thread allocation-failure sentinel. */
+constexpr std::int64_t kDisabled = -1;
+
+/** @brief Current-thread one-shot allocation countdown. */
+thread_local std::int64_t countdown = kDisabled;
+
+/** @brief Whether the armed probe intercepted one allocation. */
+thread_local bool fired = false;
+
+/**
+ * @brief Arms one current-thread allocation failure.
+ * @param allocation_index Zero-based allocation that must fail.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void arm(std::int64_t allocation_index) noexcept {
+  countdown = allocation_index;
+  fired = false;
+}
+
+/**
+ * @brief Restores ordinary allocation for the current thread.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void disarm() noexcept {
+  countdown = kDisabled;
+}
+
+/**
+ * @brief Reports whether one armed allocation was attempted.
+ * @return True only after the one-shot probe fired.
+ * @throws Nothing.
+ */
+bool did_fire() noexcept {
+  return fired;
+}
+
+/**
+ * @brief Applies the current-thread allocation failure decision.
+ * @return Nothing.
+ * @throws std::bad_alloc when the countdown reaches zero.
+ */
+void maybe_fail() {
+  if (countdown < 0) {
+    return;
+  }
+  if (countdown == 0) {
+    countdown = kDisabled;
+    fired = true;
+    throw std::bad_alloc{};
+  }
+  --countdown;
+}
+
+}  // namespace allocation_probe
+
+/**
+ * @brief Supplies scalar allocation with deterministic test injection.
+ * @param size Requested byte count.
+ * @return malloc-compatible storage.
+ * @throws std::bad_alloc when injected or allocation fails.
+ */
+void* operator new(std::size_t size) {
+  allocation_probe::maybe_fail();
+  if (void* memory = std::malloc(size == 0U ? 1U : size)) {
+    return memory;
+  }
+  throw std::bad_alloc{};
+}
+
+/**
+ * @brief Supplies array allocation through the scalar test operator.
+ * @param size Requested byte count.
+ * @return malloc-compatible storage.
+ * @throws std::bad_alloc when injected or allocation fails.
+ */
+void* operator new[](std::size_t size) {
+  return ::operator new(size);
+}
+
+/**
+ * @brief Releases scalar storage from the test allocation operator.
+ * @param memory Nullable storage.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void operator delete(void* memory) noexcept {
+  std::free(memory);
+}
+
+/**
+ * @brief Releases array storage from the test allocation operator.
+ * @param memory Nullable storage.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void operator delete[](void* memory) noexcept {
+  std::free(memory);
+}
+
+/**
+ * @brief Releases sized scalar storage from the test allocation operator.
+ * @param memory Nullable storage.
+ * @param size Original byte count, unused by free().
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void operator delete(void* memory, std::size_t size) noexcept {
+  (void)size;
+  std::free(memory);
+}
+
+/**
+ * @brief Releases sized array storage from the test allocation operator.
+ * @param memory Nullable storage.
+ * @param size Original byte count, unused by free().
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void operator delete[](void* memory, std::size_t size) noexcept {
+  (void)size;
+  std::free(memory);
+}
 
 namespace ps::compute {
 namespace {
@@ -138,6 +271,9 @@ TEST(RunLifecycleRegistry, RollsBackCandidatesAndNeverReusesIdentity) {
 }
 
 TEST(RunLifecycleRegistry, InstallsAndFinalizesStandaloneBeforeRowRemoval) {
+  static_assert(
+      !std::is_move_assignable_v<RunLifecycleAdmissionHandle>,
+      "an unresolved finalization obligation must not be overwritten");
   ExecutionLifecycleTelemetry telemetry;
   RunLifecycleRegistry registry(telemetry);
   auto anchor = register_graph(registry, GraphInstanceId{201U});
@@ -153,8 +289,16 @@ TEST(RunLifecycleRegistry, InstallsAndFinalizesStandaloneBeforeRowRemoval) {
                                               run.descriptor().id()));
   EXPECT_EQ(registry.counters().admitted_standalone_run_count, 1U);
 
+  const std::uint64_t bundle_id = handle.bundle_id();
+  RunLifecycleAdmissionHandle moved_handle(std::move(handle));
+  EXPECT_FALSE(handle.active());
+  EXPECT_THROW((void)handle.bundle_id(), std::logic_error);
+  EXPECT_TRUE(moved_handle.active());
+  EXPECT_EQ(moved_handle.bundle_id(), bundle_id);
+
   ASSERT_TRUE(run.publish_succeeded());
-  registry.finalize_admission(std::move(handle));
+  registry.finalize_admission(moved_handle);
+  EXPECT_FALSE(moved_handle.active());
   EXPECT_EQ(registry.counters().admitted_standalone_run_count, 0U);
   registry.close_graph(anchor->graph_instance_id(),
                        ComputeRunCancellationReason::GraphClose);
@@ -201,7 +345,7 @@ TEST(RunLifecycleRegistry, RealtimeBundleAppearsAndRetiresAtomically) {
   ASSERT_TRUE(group.hp_run().publish_succeeded());
   ASSERT_TRUE(group.rt_run().publish_succeeded());
   group.release_lifecycle_leases();
-  registry.finalize_admission(std::move(handle));
+  registry.finalize_admission(handle);
   const ExecutionLifecycleCounters settled = registry.counters();
   EXPECT_EQ(settled.admitted_run_group_count, 0U);
   EXPECT_EQ(settled.admitted_child_run_count, 0U);
@@ -227,7 +371,7 @@ TEST(RunLifecycleRegistry, AdmissionAndCloseHaveExactTwoRaceOutcomes) {
     EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
     EXPECT_FALSE(registry.permits_visible_commit(anchor->graph_instance_id(),
                                                  run.descriptor().id()));
-    registry.finalize_admission(std::move(handle));
+    registry.finalize_admission(handle);
     registry.finish_graph_close(anchor->graph_instance_id());
     anchor->mark_retired();
   }
@@ -254,6 +398,112 @@ TEST(RunLifecycleRegistry, AdmissionAndCloseHaveExactTwoRaceOutcomes) {
     registry.finish_graph_close(anchor->graph_instance_id());
     anchor->mark_retired();
   }
+}
+
+TEST(RunLifecycleRegistry,
+     GraphCloseUsesPreallocatedFanoutAndContainsCallbackFailure) {
+  ExecutionLifecycleTelemetry telemetry;
+  RunLifecycleRegistry registry(telemetry);
+  auto anchor = register_graph(registry, GraphInstanceId{451U});
+  ComputeRun first(make_standalone_submission(anchor->graph_instance_id(), 21));
+  ComputeRun second(
+      make_standalone_submission(anchor->graph_instance_id(), 22));
+  auto first_cancellation =
+      std::make_shared<ComputeRequestCancellationSource>();
+  auto second_cancellation =
+      std::make_shared<ComputeRequestCancellationSource>();
+  first_cancellation->attach(first);
+  second_cancellation->attach(second);
+
+  const std::exception_ptr callback_failure =
+      std::make_exception_ptr(std::runtime_error("injected close cleanup"));
+  ComputeRunCancellationRegistration failing_registration;
+  {
+    ComputeRunLease lease = first.acquire_lease();
+    failing_registration = lease.register_cancellation_notification(
+        [callback_failure](ComputeRunCancellationReason) {
+          std::rethrow_exception(callback_failure);
+        });
+  }
+
+  RunLifecycleAdmissionHandle first_handle = registry.commit_standalone(
+      registry.begin_graph_admission(anchor->graph_instance_id()),
+      first.acquire_lease(), first_cancellation);
+  RunLifecycleAdmissionHandle second_handle = registry.commit_standalone(
+      registry.begin_graph_admission(anchor->graph_instance_id()),
+      second.acquire_lease(), second_cancellation);
+
+  std::exception_ptr transition_failure;
+  std::uint64_t generation = 0U;
+  allocation_probe::arm(0);
+  try {
+    generation = registry.begin_graph_close(
+        anchor->graph_instance_id(), ComputeRunCancellationReason::GraphClose);
+  } catch (...) {
+    transition_failure = std::current_exception();
+  }
+  const bool attempted_allocation = allocation_probe::did_fire();
+  allocation_probe::disarm();
+
+  EXPECT_FALSE(attempted_allocation);
+  ASSERT_FALSE(transition_failure);
+  EXPECT_NE(generation, 0U);
+  ASSERT_TRUE(first.terminal_outcome().has_value());
+  ASSERT_TRUE(second.terminal_outcome().has_value());
+  EXPECT_EQ(first.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(second.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+
+  registry.finalize_admission(first_handle);
+  registry.finalize_admission(second_handle);
+  registry.finish_graph_close(anchor->graph_instance_id());
+  anchor->mark_retired();
+
+  const ExecutionLifecyclePage page = telemetry.snapshot(0U, 64U);
+  EXPECT_EQ(
+      std::count_if(page.records.begin(), page.records.end(),
+                    [](const ExecutionLifecycleEvent& event) {
+                      return event.kind ==
+                             ExecutionLifecycleEventKind::CancellationRequested;
+                    }),
+      2);
+}
+
+TEST(RunLifecycleRegistry,
+     ProcessShutdownUsesPreallocatedFanoutAfterStoppingTransition) {
+  ExecutionLifecycleTelemetry telemetry;
+  RunLifecycleRegistry registry(telemetry);
+  auto anchor = register_graph(registry, GraphInstanceId{452U});
+  ComputeRun run(make_standalone_submission(anchor->graph_instance_id(), 23));
+  auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+  cancellation->attach(run);
+  RunLifecycleAdmissionHandle handle = registry.commit_standalone(
+      registry.begin_graph_admission(anchor->graph_instance_id()),
+      run.acquire_lease(), cancellation);
+
+  std::exception_ptr transition_failure;
+  std::uint64_t generation = 0U;
+  allocation_probe::arm(0);
+  try {
+    generation = registry.begin_service_shutdown();
+  } catch (...) {
+    transition_failure = std::current_exception();
+  }
+  const bool attempted_allocation = allocation_probe::did_fire();
+  allocation_probe::disarm();
+
+  EXPECT_FALSE(attempted_allocation);
+  ASSERT_FALSE(transition_failure);
+  EXPECT_NE(generation, 0U);
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(run.terminal_outcome()->cancellation_reason,
+            ComputeRunCancellationReason::ProcessShutdown);
+
+  registry.finalize_admission(handle);
+  registry.finish_graph_close(anchor->graph_instance_id());
+  anchor->mark_retired();
+  registry.wait_until_empty();
+  EXPECT_NE(registry.mark_service_stopped({}), 0U);
 }
 
 TEST(RunLifecycleRegistry, ProcessShutdownIsIdempotentAndStopsAfterEmptyRows) {

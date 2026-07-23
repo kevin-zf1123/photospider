@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -20,6 +21,73 @@ namespace ps::compute {
 class ComputeRun;
 class ComputeRunLease;
 class ExecutionService;
+struct PreparedComputeDispatchState;
+
+/**
+ * @brief Move-only unpublished full-HP plan and physical batch.
+ *
+ * The preparation owns a copied lifecycle lease, the Run-owned plan's stable
+ * address, the fully reserved ExecutionService batch, and all route/commit
+ * inputs needed after lifecycle installation. It publishes no ready entry or
+ * Graph result before execute_prepared() consumes it.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note Destruction before execution rolls back the physical reservation and
+ * staged ready/index nodes. The value grants no registry-admission authority.
+ */
+class PreparedComputeDispatch final {
+ public:
+  /** @brief Creates an inactive moved-from preparation. */
+  PreparedComputeDispatch() noexcept = default;
+
+  /**
+   * @brief Transfers unpublished dispatch ownership.
+   * @param other Preparation made inactive.
+   * @throws Nothing.
+   */
+  PreparedComputeDispatch(PreparedComputeDispatch&& other) noexcept;
+
+  /**
+   * @brief Replaces only an inactive preparation by transfer.
+   * @param other Preparation made inactive.
+   * @return Reference to this preparation.
+   * @throws Nothing; replacing active ownership terminates.
+   */
+  PreparedComputeDispatch& operator=(PreparedComputeDispatch&& other) noexcept;
+
+  /**
+   * @brief Releases any unpublished physical batch.
+   * @throws Nothing; trusted cleanup failure terminates.
+   */
+  ~PreparedComputeDispatch() noexcept;
+
+  /** @brief Prevents duplicate publication and reservation ownership. */
+  PreparedComputeDispatch(const PreparedComputeDispatch&) = delete;
+
+  /** @brief Prevents duplicate publication and reservation assignment. */
+  PreparedComputeDispatch& operator=(const PreparedComputeDispatch&) = delete;
+
+  /**
+   * @brief Reports whether this value still owns a prepared dispatch.
+   * @return True until movement or execute_prepared().
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend class ComputeTaskDispatcher;
+
+  /**
+   * @brief Owns one fully prepared dispatcher state.
+   * @param state Complete unpublished state.
+   * @throws Nothing.
+   */
+  explicit PreparedComputeDispatch(
+      std::unique_ptr<PreparedComputeDispatchState> state) noexcept;
+
+  /** @brief Complete unpublished dispatcher and physical batch ownership. */
+  std::unique_ptr<PreparedComputeDispatchState> state_;
+};
 
 /**
  * @brief Dispatches the GlobalHighPrecision compute task graph through a
@@ -163,6 +231,47 @@ class ComputeTaskDispatcher {
                       const std::string& execution_type,
                       const ComputeDispatchRequest& request, ComputeRun& run,
                       const ComputeRunLease& lifecycle_lease);
+
+  /**
+   * @brief Prepares one service-backed full-HP dispatch off-registry.
+   *
+   * @param graph Graph whose captured plan and temporary output state are
+   * retained by run.
+   * @param execution_service Process execution owner that reserves the whole
+   * physical batch without publishing it.
+   * @param host Active route/trace context retained through synchronous
+   * execution.
+   * @param execution_type Immutable copied private route identity.
+   * @param request Full-HP cache and telemetry options.
+   * @param run Candidate Run retaining the plan and task runner.
+   * @param lifecycle_lease Candidate lease retained by callbacks and staging.
+   * @return Move-only complete unpublished dispatch.
+   * @throws GraphError or standard exceptions from validation, planning,
+   * operation resolution, resource estimation/reservation, and staging.
+   * @throws std::bad_alloc unchanged from any off-registry allocation.
+   * @note The method may mutate only request-local Graph planning/cache state.
+   * It does not advance Run phase, publish a ready entry, execute an operation,
+   * commit a result, or install lifecycle admission.
+   */
+  PreparedComputeDispatch prepare(GraphModel& graph,
+                                  ExecutionService& execution_service,
+                                  ExecutionHostContext& host,
+                                  const std::string& execution_type,
+                                  const ComputeDispatchRequest& request,
+                                  ComputeRun& run,
+                                  const ComputeRunLease& lifecycle_lease);
+
+  /**
+   * @brief Publishes, executes, and commits one installed prepared dispatch.
+   *
+   * @param prepared Active local preparation returned by prepare().
+   * @return Mutable target high-precision output committed to graph.
+   * @throws GraphError or standard exceptions from cancellation, execution,
+   * cache commit, telemetry, or target validation.
+   * @note The caller must atomically install the matching lifecycle bundle
+   * before entry. This method consumes publication ownership exactly once.
+   */
+  NodeOutput& execute_prepared(PreparedComputeDispatch prepared);
 
   /**
    * @brief Runs dirty task handles with source-before-downstream ordering.

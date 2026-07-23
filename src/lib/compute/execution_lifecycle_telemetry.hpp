@@ -349,7 +349,10 @@ class ExecutionLifecycleTelemetry final {
    * @throws std::invalid_argument for a zero/mismatched generation.
    * @throws std::logic_error when called directly from Accepting.
    * @throws std::system_error when telemetry locking fails.
-   * @note The current next sequence, including reserved UINT64_MAX-1, is used;
+   * @note Validation, final append, Stopped publication, and idempotent replay
+   * share one telemetry critical section. Concurrent callers therefore return
+   * the same final sequence without recording a spurious post-stop drop. The
+   * current next sequence, including reserved UINT64_MAX-1, is used;
    * next_sequence becomes UINT64_MAX afterward.
    */
   std::uint64_t publish_service_stopped(

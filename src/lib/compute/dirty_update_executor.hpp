@@ -23,6 +23,87 @@ namespace ps::compute {
 class ComputeRun;
 class DirtySiblingCommitGate;
 class RealtimeProxyGraph;
+struct PreparedHighPrecisionDirtyRunState;
+struct PreparedRealTimeDirtyRunState;
+
+/**
+ * @brief Move-only fully staged HP dirty candidate.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note Planning, operation lookup, write-buffer allocation, synchronization,
+ * both physical phase reservations, and ready/index staging are complete, but
+ * no provider or ready publication occurs before execute_prepared().
+ */
+class PreparedHighPrecisionDirtyRun final {
+ public:
+  /** @brief Creates an inactive moved-from preparation. */
+  PreparedHighPrecisionDirtyRun() noexcept;
+  /** @brief Transfers unpublished HP dirty ownership. */
+  PreparedHighPrecisionDirtyRun(PreparedHighPrecisionDirtyRun&& other) noexcept;
+  /** @brief Replaces only inactive ownership by transfer. */
+  PreparedHighPrecisionDirtyRun& operator=(
+      PreparedHighPrecisionDirtyRun&& other) noexcept;
+  /** @brief Releases unpublished HP dirty resources. */
+  ~PreparedHighPrecisionDirtyRun() noexcept;
+
+  /** @brief Prevents duplicate staging/publication ownership. */
+  PreparedHighPrecisionDirtyRun(const PreparedHighPrecisionDirtyRun&) = delete;
+  /** @brief Prevents duplicate staging/publication assignment. */
+  PreparedHighPrecisionDirtyRun& operator=(
+      const PreparedHighPrecisionDirtyRun&) = delete;
+
+  /** @brief Returns true while an unpublished preparation is owned. */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend class HighPrecisionDirtyExecutor;
+
+  /** @brief Adopts one complete unpublished HP dirty state. */
+  explicit PreparedHighPrecisionDirtyRun(
+      std::unique_ptr<PreparedHighPrecisionDirtyRunState> state) noexcept;
+
+  /** @brief Complete unpublished HP dirty ownership. */
+  std::unique_ptr<PreparedHighPrecisionDirtyRunState> state_;
+};
+
+/**
+ * @brief Move-only fully staged RT dirty candidate.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note Planning, operation lookup, proxy-write staging, synchronization, both
+ * physical reservations, and ready/index nodes are complete without provider
+ * or ready publication.
+ */
+class PreparedRealTimeDirtyRun final {
+ public:
+  /** @brief Creates an inactive moved-from preparation. */
+  PreparedRealTimeDirtyRun() noexcept;
+  /** @brief Transfers unpublished RT dirty ownership. */
+  PreparedRealTimeDirtyRun(PreparedRealTimeDirtyRun&& other) noexcept;
+  /** @brief Replaces only inactive ownership by transfer. */
+  PreparedRealTimeDirtyRun& operator=(
+      PreparedRealTimeDirtyRun&& other) noexcept;
+  /** @brief Releases unpublished RT dirty resources. */
+  ~PreparedRealTimeDirtyRun() noexcept;
+
+  /** @brief Prevents duplicate staging/publication ownership. */
+  PreparedRealTimeDirtyRun(const PreparedRealTimeDirtyRun&) = delete;
+  /** @brief Prevents duplicate staging/publication assignment. */
+  PreparedRealTimeDirtyRun& operator=(const PreparedRealTimeDirtyRun&) = delete;
+
+  /** @brief Returns true while an unpublished preparation is owned. */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend class RealTimeDirtyExecutor;
+
+  /** @brief Adopts one complete unpublished RT dirty state. */
+  explicit PreparedRealTimeDirtyRun(
+      std::unique_ptr<PreparedRealTimeDirtyRunState> state) noexcept;
+
+  /** @brief Complete unpublished RT dirty ownership. */
+  std::unique_ptr<PreparedRealTimeDirtyRunState> state_;
+};
 
 /**
  * @brief One HP result produced during connected-parameter stabilization.
@@ -213,7 +294,8 @@ class StabilizedDirtyParameters {
                                        ExecutionTaskRuntime*, ExecutionService*,
                                        ExecutionHostContext*, ComputeRun*,
                                        const ComputeRunLease*,
-                                       const std::string&);
+                                       const std::string&,
+                                       const std::vector<Device>*);
 
   /** @brief Generation shared by every domain of one dirty request. */
   uint64_t request_generation_ = 0;
@@ -267,6 +349,8 @@ class StabilizedDirtyParameters {
  * required with execution_service.
  * @param run_lease Optional borrowed lifecycle lease observed before/after
  * each preflight node and tiled operation chunk.
+ * @param available_devices_override Optional immutable route inventory used
+ * for operation selection while provider execution remains inline.
  * @return Immutable shared request snapshot. An empty producer set means no
  * connected-parameter preflight was needed, but generation identity remains.
  * @throws GraphError for missing targets, dependencies, operations, or empty
@@ -290,7 +374,8 @@ stabilize_connected_dirty_parameters(
     ExecutionService* execution_service = nullptr,
     ExecutionHostContext* host = nullptr, ComputeRun* run = nullptr,
     const ComputeRunLease* run_lease = nullptr,
-    const std::string& execution_type = "cpu");
+    const std::string& execution_type = "cpu",
+    const std::vector<Device>* available_devices_override = nullptr);
 
 /**
  * @brief Immutable options for one dirty update executor call.
@@ -449,6 +534,37 @@ class HighPrecisionDirtyExecutor {
                       ExecutionService* execution_service = nullptr,
                       const ComputeRunLease* run_lease = nullptr);
 
+  /**
+   * @brief Prepares a complete HP dirty domain before lifecycle installation.
+   * @param graph Request-local Graph snapshot.
+   * @param proxy_graph Staged RT proxy used for optional downsample planning.
+   * @param runtime Optional route/trace owner.
+   * @param request Complete dirty request.
+   * @param run Optional candidate HP Run owning staging.
+   * @param execution_service Optional process service reserving both phases.
+   * @param run_lease Candidate lease retained by staging and callbacks.
+   * @return Complete unpublished HP dirty preparation.
+   * @throws GraphError or standard exceptions from planning, operation
+   * resolution, resource reservation, and staging.
+   * @note The method executes no provider, advances no Run phase, publishes no
+   * ready entry, and commits no Graph/proxy output.
+   */
+  PreparedHighPrecisionDirtyRun prepare(
+      GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
+      const DirtyUpdateRequest& request, ComputeRun* run = nullptr,
+      ExecutionService* execution_service = nullptr,
+      const ComputeRunLease* run_lease = nullptr);
+
+  /**
+   * @brief Executes and commits an installed HP dirty preparation.
+   * @param prepared Active preparation returned by prepare().
+   * @return Mutable committed HP target output.
+   * @throws GraphError or standard exceptions from cancellation, execution,
+   * sibling gating, commit, downsample, or validation.
+   * @note The caller must install the matching lifecycle bundle before entry.
+   */
+  NodeOutput& execute_prepared(PreparedHighPrecisionDirtyRun prepared);
+
  private:
   /**
    * @brief Clears HP cache metadata for nodes selected by one dirty plan.
@@ -538,6 +654,37 @@ class RealTimeDirtyExecutor {
                       ComputeRun* run = nullptr,
                       ExecutionService* execution_service = nullptr,
                       const ComputeRunLease* run_lease = nullptr);
+
+  /**
+   * @brief Prepares a complete RT dirty domain before lifecycle installation.
+   * @param graph Request-local Graph snapshot.
+   * @param proxy_graph Staged proxy receiving eventual RT commit.
+   * @param runtime Optional route/trace owner.
+   * @param request Complete RT dirty request.
+   * @param run Optional candidate RT Run.
+   * @param execution_service Optional process service reserving both phases.
+   * @param run_lease Candidate lease retained by staging and callbacks.
+   * @return Complete unpublished RT dirty preparation.
+   * @throws GraphError or standard exceptions from planning, operation
+   * resolution, resource reservation, and staging.
+   * @note The method executes no provider, advances no Run phase, publishes no
+   * ready entry, and commits no proxy output.
+   */
+  PreparedRealTimeDirtyRun prepare(
+      GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
+      const DirtyUpdateRequest& request, ComputeRun* run = nullptr,
+      ExecutionService* execution_service = nullptr,
+      const ComputeRunLease* run_lease = nullptr);
+
+  /**
+   * @brief Executes and commits an installed RT dirty preparation.
+   * @param prepared Active preparation returned by prepare().
+   * @return Mutable committed RT target output.
+   * @throws GraphError or standard exceptions from cancellation, execution,
+   * proxy commit, or validation.
+   * @note The caller must install the matching lifecycle bundle before entry.
+   */
+  NodeOutput& execute_prepared(PreparedRealTimeDirtyRun prepared);
 
  private:
   /**

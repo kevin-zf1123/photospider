@@ -51,14 +51,17 @@ class TaskSubmissionPlan {
    * @param traversal Traversal service used by ComputeDispatchPlanBuilder.
    * @param node_id Target node id for the GlobalHighPrecision request.
    * @param available_devices Devices exposed by the active execution runtime.
+   * @param publish_plan_inspection Whether planning immediately updates graph
+   * diagnostics; admission-aware callers defer it until installation.
    * @throws GraphError or standard exceptions from plan construction, graph
    * lookup, allocation, or operation resolution.
-   * @note The underlying ComputePlan is recorded on GraphModel by the planning
-   * unit before dependency state is constructed.
+   * @note The underlying ComputePlan remains owned by this value regardless of
+   * diagnostic publication timing.
    */
   TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
                      GraphTraversalService& traversal, int node_id,
-                     std::vector<Device> available_devices);
+                     std::vector<Device> available_devices,
+                     bool publish_plan_inspection = true);
 
   /**
    * @brief Reports whether the pruned plan contains no executable tasks.
@@ -376,7 +379,9 @@ class TaskSubmissionPlan {
    *
    * @return Nothing.
    * @throws std::bad_alloc from registry candidate or result storage.
-   * @note Missing variants remain empty for worker-time GraphError context.
+   * @note Missing variants remain empty so callers that only exercise
+   * Run-owned storage retain worker-time error semantics. Admission-aware
+   * production preparation validates the complete vector before installation.
    */
   void resolve_operations();
 

@@ -132,17 +132,20 @@ void settle_rejected_bootstrap(ExecutionTaskRuntime& task_runtime,
  * @param traversal Traversal service used by plan construction.
  * @param node_id Requested target node.
  * @param available_devices Execution-runtime device labels.
+ * @param publish_plan_inspection Whether construction immediately updates graph
+ * diagnostics.
  * @throws GraphError or standard exceptions from planning and allocation.
  */
 TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
                                        GraphTraversalService& traversal,
                                        int node_id,
-                                       std::vector<Device> available_devices)
+                                       std::vector<Device> available_devices,
+                                       bool publish_plan_inspection)
     : run_id_(run_id),
       graph_(graph),
       compute_plan_(
           ComputeDispatchPlanBuilder(traversal).build_high_precision_plan(
-              graph, node_id)),
+              graph, node_id, publish_plan_inspection)),
       execution_order_(compute_plan_.planned_nodes),
       available_devices_(std::move(available_devices)),
       dependency_state_(execution_order_, compute_plan_.task_graph) {

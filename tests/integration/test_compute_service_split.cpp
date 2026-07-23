@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "benchmark/benchmark_types.hpp"
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_metrics_recorder.hpp"
@@ -2000,6 +2001,121 @@ TEST(ComputeRunProductPath, HpAndRealtimeChildrenValidateBeforePlanning) {
   realtime_request.intent = ComputeIntent::RealTimeUpdate;
   EXPECT_THROW((void)service.compute(graph, realtime_request),
                std::invalid_argument);
+
+  const compute::ExecutionLifecyclePage lifecycle =
+      execution_service.lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(lifecycle.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_run_group_count, 0U);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::CandidateBegan;
+                }),
+            2);
+  EXPECT_EQ(
+      std::count_if(
+          lifecycle.records.begin(), lifecycle.records.end(),
+          [](const compute::ExecutionLifecycleEvent& event) {
+            return event.kind ==
+                   compute::ExecutionLifecycleEventKind::CandidateRolledBack;
+          }),
+      2);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::BundleAdmitted;
+                }),
+            0);
+}
+
+/**
+ * @brief Proves failed full-HP preparation publishes no diagnostics or sink
+ * reset.
+ *
+ * @return Nothing; GoogleTest assertions report candidate, inspection, or
+ * caller-owned benchmark mutations.
+ * @throws Runtime, graph, planning, or test setup failures unchanged.
+ * @note Both inline and route-backed paths build a valid task graph for an
+ * operation key that has no executable callback. Resolution therefore fails
+ * after planning but before lifecycle installation. The existing benchmark
+ * record and all plan histories must remain unchanged.
+ */
+TEST(ComputeRunProductPath,
+     FullHpPreparationFailureLeavesInspectionAndBenchmarkUnpublished) {
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-full-hp-preparation-rollback");
+  GraphRuntime::Info info;
+  info.name = "full-hp-preparation-rollback";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node unresolved = make_node(1, "unregistered", "candidate_preparation");
+  unresolved.parameters["width"] = 8;
+  unresolved.parameters["height"] = 8;
+  graph.add_node(unresolved);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+  std::vector<BenchmarkEvent> benchmark_events(1U);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  request.telemetry.benchmark_events = &benchmark_events;
+
+  const auto expect_unpublished_failure = [&](bool parallel) {
+    SCOPED_TRACE(parallel ? "parallel" : "inline");
+    EXPECT_THROW(parallel ? static_cast<void>(service.compute_parallel(
+                                graph, runtime, request))
+                          : static_cast<void>(service.compute(graph, request)),
+                 GraphError);
+    EXPECT_EQ(benchmark_events.size(), 1U);
+    EXPECT_FALSE(graph.last_compute_plan.has_value());
+    EXPECT_FALSE(graph.last_compute_plan_summary.has_value());
+    EXPECT_TRUE(graph.recent_compute_plan_summaries.empty());
+  };
+  expect_unpublished_failure(false);
+  expect_unpublished_failure(true);
+
+  const compute::ExecutionLifecyclePage lifecycle =
+      execution_service.lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(lifecycle.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::CandidateBegan;
+                }),
+            2);
+  EXPECT_EQ(
+      std::count_if(
+          lifecycle.records.begin(), lifecycle.records.end(),
+          [](const compute::ExecutionLifecycleEvent& event) {
+            return event.kind ==
+                   compute::ExecutionLifecycleEventKind::CandidateRolledBack;
+          }),
+      2);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::BundleAdmitted;
+                }),
+            0);
+  runtime.stop();
 }
 
 TEST(ComputeServiceSplit,

@@ -3002,6 +3002,74 @@ TEST(ComputeRunCancellation,
 }
 
 /**
+ * @brief Verifies callback exceptions cannot truncate cancellation fan-out.
+ *
+ * @return Nothing; GoogleTest assertions report missing notifications,
+ * terminal children, or first-exception identity.
+ * @throws Run, callback, or request-source setup exceptions unchanged.
+ * @note One Run has a throwing callback followed by a peer callback, and the
+ * request has a second child Run. The first exact failure is rethrown only
+ * after both the same-Run peer and the second child become cancelled.
+ */
+TEST(ComputeRunCancellation, CallbackFailureDoesNotTruncateRunOrRequestFanout) {
+  ComputeRun first(make_test_submission("cancellation-fanout-first", 131, 141));
+  ComputeRun second(
+      make_test_submission("cancellation-fanout-second", 132, 142));
+  ComputeRequestCancellationSource request_source;
+  request_source.attach(first);
+  request_source.attach(second);
+  const std::exception_ptr callback_failure =
+      std::make_exception_ptr(std::runtime_error("injected cleanup failure"));
+  std::atomic_int first_peer_notifications{0};
+  std::atomic_int second_notifications{0};
+
+  {
+    ComputeRunLease first_lease = first.acquire_lease();
+    ComputeRunLease second_lease = second.acquire_lease();
+    ComputeRunCancellationRegistration failing_registration =
+        first_lease.register_cancellation_notification(
+            [callback_failure](ComputeRunCancellationReason) {
+              std::rethrow_exception(callback_failure);
+            });
+    ComputeRunCancellationRegistration first_peer_registration =
+        first_lease.register_cancellation_notification(
+            [&first_peer_notifications](ComputeRunCancellationReason) {
+              first_peer_notifications.fetch_add(1, std::memory_order_relaxed);
+            });
+    ComputeRunCancellationRegistration second_registration =
+        second_lease.register_cancellation_notification(
+            [&second_notifications](ComputeRunCancellationReason) {
+              second_notifications.fetch_add(1, std::memory_order_relaxed);
+            });
+
+    std::exception_ptr observed_failure;
+    try {
+      (void)request_source.request_cancellation(
+          ComputeRunCancellationReason::ProcessShutdown);
+    } catch (...) {
+      observed_failure = std::current_exception();
+    }
+
+    EXPECT_TRUE(observed_failure == callback_failure);
+    EXPECT_EQ(first_peer_notifications.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(second_notifications.load(std::memory_order_relaxed), 1);
+    ASSERT_TRUE(first_lease.terminal_outcome().has_value());
+    ASSERT_TRUE(second_lease.terminal_outcome().has_value());
+    EXPECT_EQ(first_lease.terminal_outcome()->kind,
+              ComputeRunTerminalKind::Cancelled);
+    EXPECT_EQ(second_lease.terminal_outcome()->kind,
+              ComputeRunTerminalKind::Cancelled);
+    EXPECT_EQ(first_lease.terminal_outcome()->cancellation_reason,
+              ComputeRunCancellationReason::ProcessShutdown);
+    EXPECT_EQ(second_lease.terminal_outcome()->cancellation_reason,
+              ComputeRunCancellationReason::ProcessShutdown);
+  }
+
+  EXPECT_TRUE(first.is_quiescent());
+  EXPECT_TRUE(second.is_quiescent());
+}
+
+/**
  * @brief Verifies an injected monotonic deadline wins without wall-clock sleep.
  *
  * @return Nothing; GoogleTest assertions report deadline-arbiter failures.
@@ -3828,7 +3896,7 @@ TEST(DirtyExecutionCommon,
 }
 
 /**
- * @brief Proves dirty source charges its live outer callable copy exactly once.
+ * @brief Proves both dirty phase callables are staged before publication.
  *
  * @return Nothing.
  * @throws Standard plan, Run, context, estimator, or service exceptions
@@ -3842,15 +3910,16 @@ TEST(DirtyExecutionCommon,
  * the exact vector must execute and settle. A downstream-only production call
  * then succeeds at the independently calculated single-target vector. A
  * combined source-to-downstream call directly observes two targets during
- * source demand, one outer target between phases, one context target before
- * downstream admission, and zero targets after settlement. This preserves
- * product-path integration coverage, while the source-preserving holder test
- * on the same production helper supplies the implementation-independent reset
- * proof. Removing the production source addition makes the reduced-cap
- * endpoint execute and fails this test.
+ * source demand, two context-owned targets during downstream demand because
+ * both roots are prepared together, one downstream target at the execution
+ * boundary after source settlement, and zero targets after settlement. This
+ * locks the candidate-era requirement that complete source/downstream
+ * reservation and staging precede lifecycle installation without retaining an
+ * uncharged third callable copy. Removing the production source addition makes
+ * the reduced-cap endpoint execute and fails this test.
  */
 TEST(ExecutionServiceProductResources,
-     DirtySourceChargesOuterCallableCopyWithoutDownstreamDoubleCount) {
+     DirtySourcePreparesBothPhaseCallablesWithoutUntrackedCopy) {
   constexpr int kNodeId = 131;
   constexpr std::uint64_t kAdditionalSharedBytes = 173U;
   const std::string graph_identity = "dirty-callable-cap";
@@ -3989,7 +4058,7 @@ TEST(ExecutionServiceProductResources,
   EXPECT_EQ(phase_observation_index, phase_live_targets.size());
   EXPECT_EQ(phase_live_targets.at(0U), 2);
   EXPECT_EQ(between_phase_live_targets, 1);
-  EXPECT_EQ(phase_live_targets.at(1U), 1);
+  EXPECT_EQ(phase_live_targets.at(1U), 2);
   EXPECT_EQ(combined_probe.callback_entries.load(std::memory_order_relaxed), 2);
   EXPECT_EQ(combined_probe.live_targets.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(combined_service.resource_snapshot().reserved, ResourceVector{});

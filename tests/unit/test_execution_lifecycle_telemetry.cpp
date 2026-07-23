@@ -405,6 +405,53 @@ TEST(ExecutionLifecycleTelemetry, ReservesFinalSequenceAndSentinelSemantics) {
 }
 
 TEST(ExecutionLifecycleTelemetry,
+     ConcurrentServiceStopPublishesOneFinalEventWithoutDrops) {
+  ExecutionLifecycleTelemetry telemetry;
+  constexpr std::uint64_t kShutdownGeneration = 17U;
+  constexpr std::size_t kCallerCount = 16U;
+  telemetry.mark_stopping(kShutdownGeneration, {});
+
+  std::atomic<std::size_t> ready_count{0U};
+  std::atomic<bool> start{false};
+  std::vector<std::uint64_t> sequences(kCallerCount, 0U);
+  std::vector<std::thread> callers;
+  callers.reserve(kCallerCount);
+  for (std::size_t index = 0U; index < kCallerCount; ++index) {
+    callers.emplace_back(
+        [&telemetry, &ready_count, &start, &sequences, index]() {
+          ready_count.fetch_add(1U, std::memory_order_release);
+          while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+          }
+          sequences[index] =
+              telemetry.publish_service_stopped(kShutdownGeneration, {});
+        });
+  }
+  while (ready_count.load(std::memory_order_acquire) != kCallerCount) {
+    std::this_thread::yield();
+  }
+  start.store(true, std::memory_order_release);
+  for (std::thread& caller : callers) {
+    caller.join();
+  }
+
+  ASSERT_NE(sequences.front(), 0U);
+  EXPECT_TRUE(std::all_of(sequences.begin(), sequences.end(),
+                          [&sequences](std::uint64_t sequence) {
+                            return sequence == sequences.front();
+                          }));
+  const ExecutionLifecyclePage page = telemetry.snapshot(0U, 64U);
+  EXPECT_EQ(page.service_state, ExecutionLifecycleServiceState::Stopped);
+  EXPECT_EQ(page.global_dropped_total, 0U);
+  EXPECT_EQ(std::count_if(page.records.begin(), page.records.end(),
+                          [](const ExecutionLifecycleEvent& event) {
+                            return event.kind ==
+                                   ExecutionLifecycleEventKind::ServiceStopped;
+                          }),
+            1);
+}
+
+TEST(ExecutionLifecycleTelemetry,
      DropSaturationFlagBecomesStickyAfterBoundary) {
   ExecutionLifecycleTelemetry telemetry;
   testing::ExecutionLifecycleTelemetryTestAccess::set_drop_state(

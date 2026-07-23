@@ -16,6 +16,286 @@
 
 namespace ps::compute {
 
+/**
+ * @brief Complete unpublished source-first dirty dispatch state.
+ *
+ * @throws std::bad_alloc when copied request/callable or inline dependency
+ * storage allocates.
+ * @note The normalized observation lease has a stable heap address referenced
+ * by request. Both service roots remain reserved together until execute() or
+ * rollback consumes the state.
+ */
+struct PreparedDirtySourceFirstRunState final {
+  /**
+   * @brief Captures one dirty request and normalizes its observation lease.
+   * @param source_request Complete route and planning inputs.
+   * @param task_callable Owned type-erased task function.
+   * @throws std::bad_alloc when copied request/callable storage allocates.
+   * @throws std::logic_error if a direct Run is already terminal.
+   */
+  PreparedDirtySourceFirstRunState(
+      const DirtySourceFirstRunRequest& source_request,
+      std::function<void(int)> task_callable)
+      : request(source_request), run_task(std::move(task_callable)) {
+    if (request.run_lease != nullptr) {
+      observation_lease.emplace(*request.run_lease);
+    } else if (request.run != nullptr) {
+      observation_lease.emplace(request.run->acquire_lease());
+    }
+    request.run_lease =
+        observation_lease.has_value() ? &*observation_lease : nullptr;
+  }
+
+  /** @brief Copied pointers/options with normalized lease address. */
+  DirtySourceFirstRunRequest request;
+  /** @brief Strong observation lease retained across both phase roots. */
+  std::optional<ComputeRunLease> observation_lease;
+  /** @brief Inline task callable; service preparation transfers copies. */
+  std::function<void(int)> run_task;
+  /** @brief Complete unpublished source phase, when nonempty. */
+  PreparedExecutionRun source_run;
+  /** @brief Complete unpublished downstream phase, when nonempty. */
+  PreparedExecutionRun downstream_run;
+  /** @brief Preallocated inline downstream dependency counters. */
+  std::unique_ptr<TaskDependencyState> inline_dependency_state;
+  /** @brief Preallocated inline ready LIFO with total-task capacity. */
+  std::vector<int> inline_ready_stack;
+};
+
+namespace {
+
+/**
+ * @brief Rejects one dirty boundary after accepted Run cancellation.
+ * @param state Prepared dirty state with normalized observer.
+ * @return Nothing while cancellation has not won.
+ * @throws GraphError after accepted cancellation.
+ */
+void observe_prepared_dirty_cancellation(
+    const PreparedDirtySourceFirstRunState& state) {
+  std::optional<ComputeRunCancellationReason> reason;
+  if (state.request.run_lease != nullptr) {
+    reason = state.request.run_lease->observe_cancellation();
+  } else if (state.request.run != nullptr) {
+    reason = state.request.run->observe_cancellation();
+  }
+  if (reason.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "ComputeRun cancelled during dirty dispatch.");
+  }
+}
+
+/**
+ * @brief Computes complete shared demand for one prepared dirty phase.
+ * @param request Prepared source-first request.
+ * @param task_ids Exact phase task ids.
+ * @return Checked retained bytes.
+ * @throws GraphError when checked arithmetic overflows.
+ * @throws Any phase callback exception unchanged.
+ */
+std::uint64_t prepared_dirty_phase_retained_bytes(
+    const DirtySourceFirstRunRequest& request,
+    const std::vector<int>& task_ids) {
+  RetainedMemoryEstimator estimate("dirty phase retained demand");
+  estimate.add_bytes(request.additional_shared_retained_memory_bytes);
+  if (request.phase_shared_retained_memory_bytes) {
+    estimate.add_bytes(request.phase_shared_retained_memory_bytes(task_ids));
+  }
+  return estimate.bytes();
+}
+
+}  // namespace
+
+/** @copydoc PreparedDirtySourceFirstRun::PreparedDirtySourceFirstRun */
+PreparedDirtySourceFirstRun::PreparedDirtySourceFirstRun() noexcept = default;
+
+/** @copydoc PreparedDirtySourceFirstRun::PreparedDirtySourceFirstRun */
+PreparedDirtySourceFirstRun::PreparedDirtySourceFirstRun(
+    std::unique_ptr<PreparedDirtySourceFirstRunState> state) noexcept
+    : state_(std::move(state)) {}
+
+/** @copydoc PreparedDirtySourceFirstRun::PreparedDirtySourceFirstRun */
+PreparedDirtySourceFirstRun::PreparedDirtySourceFirstRun(
+    PreparedDirtySourceFirstRun&& other) noexcept = default;  // NOLINT
+
+/** @copydoc PreparedDirtySourceFirstRun::operator= */
+PreparedDirtySourceFirstRun& PreparedDirtySourceFirstRun::operator=(
+    PreparedDirtySourceFirstRun&& other) noexcept {
+  if (this != &other) {
+    if (state_) {
+      std::terminate();
+    }
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+/** @copydoc PreparedDirtySourceFirstRun::~PreparedDirtySourceFirstRun */
+PreparedDirtySourceFirstRun::~PreparedDirtySourceFirstRun() noexcept = default;
+
+/** @copydoc prepare_dirty_source_first */
+PreparedDirtySourceFirstRun prepare_dirty_source_first(
+    const DirtySourceFirstRunRequest& request,
+    std::function<void(int)> run_task, std::uint64_t run_task_capture_bytes) {
+  if (!run_task || request.compute_plan == nullptr ||
+      request.source_task_ids == nullptr ||
+      request.downstream_task_ids == nullptr ||
+      request.task_devices == nullptr ||
+      request.task_devices->size() !=
+          request.compute_plan->task_graph.tasks.size()) {
+    throw std::invalid_argument(
+        "Dirty source-first preparation requires complete plan and task "
+        "inputs.");
+  }
+
+  auto state = std::make_unique<PreparedDirtySourceFirstRunState>(
+      request, std::move(run_task));
+  observe_prepared_dirty_cancellation(*state);
+  const ComputePlan& compute_plan = *state->request.compute_plan;
+  const std::vector<int>& source_task_ids = *state->request.source_task_ids;
+  const std::vector<int>& downstream_task_ids =
+      *state->request.downstream_task_ids;
+
+  if (state->request.execution_service != nullptr) {
+    if (state->request.host == nullptr || state->request.run == nullptr ||
+        state->request.run_lease == nullptr) {
+      throw std::invalid_argument(
+          "Dirty process-service preparation requires host, Run, and lease.");
+    }
+    const std::uint64_t run_task_retained_memory_bytes =
+        owned_callable_retained_memory_bytes(run_task_capture_bytes);
+    std::function<void(int)> owned_run_task = std::move(state->run_task);
+    const ComputeRunLease phase_lease = *state->request.run_lease;
+
+    if (!source_task_ids.empty()) {
+      auto source_context = std::make_shared<DirtyReadyTaskContext>(
+          compute_plan, state->request.selection, source_task_ids,
+          *state->request.task_devices, owned_run_task,
+          run_task_retained_memory_bytes, phase_lease, false,
+          ExecutionTaskPriority::High);
+      std::vector<ReadyTaskSubmission> source_submissions =
+          source_context->make_submissions(source_task_ids, true);
+      RetainedMemoryEstimator source_phase_retained(
+          "dirty source phase retained demand");
+      source_phase_retained.add_bytes(
+          prepared_dirty_phase_retained_bytes(state->request, source_task_ids));
+      source_phase_retained.add_bytes(run_task_retained_memory_bytes);
+      state->source_run = state->request.execution_service->prepare_run(
+          *state->request.host, state->request.execution_type,
+          std::move(source_submissions),
+          static_cast<int>(source_task_ids.size()),
+          source_context->run_resource_demand(source_phase_retained.bytes()));
+    }
+
+    if (!downstream_task_ids.empty()) {
+      std::vector<int> initial_downstream_ids;
+      if (state->request.selection != nullptr) {
+        initial_downstream_ids =
+            state->request.selection->initial_downstream_task_ids;
+      } else {
+        TaskGraphReadyChecker ready_checker;
+        initial_downstream_ids = ready_checker.initial_ready_task_ids(
+            compute_plan.task_graph, &downstream_task_ids);
+      }
+      auto downstream_context = make_dirty_context_and_release_outer_callable(
+          owned_run_task, [&](std::function<void(int)> transferred_run_task) {
+            return std::make_shared<DirtyReadyTaskContext>(
+                compute_plan, state->request.selection, downstream_task_ids,
+                *state->request.task_devices, std::move(transferred_run_task),
+                run_task_retained_memory_bytes, phase_lease, true,
+                state->request.intent == ComputeIntent::RealTimeUpdate
+                    ? ExecutionTaskPriority::High
+                    : ExecutionTaskPriority::Normal);
+          });
+      std::vector<ReadyTaskSubmission> downstream_submissions =
+          downstream_context->make_submissions(initial_downstream_ids, true);
+      state->downstream_run = state->request.execution_service->prepare_run(
+          *state->request.host, state->request.execution_type,
+          std::move(downstream_submissions),
+          static_cast<int>(downstream_task_ids.size()),
+          downstream_context->run_resource_demand(
+              prepared_dirty_phase_retained_bytes(state->request,
+                                                  downstream_task_ids)));
+    }
+    return PreparedDirtySourceFirstRun(std::move(state));
+  }
+
+  state->inline_dependency_state =
+      state->request.selection != nullptr
+          ? std::make_unique<TaskDependencyState>(
+                compute_plan.execution_order, compute_plan.task_graph,
+                downstream_task_ids,
+                state->request.selection->dependency_task_ids)
+          : std::make_unique<TaskDependencyState>(compute_plan.execution_order,
+                                                  compute_plan.task_graph,
+                                                  downstream_task_ids);
+  std::vector<int> initial_downstream_ids;
+  if (state->request.selection != nullptr) {
+    initial_downstream_ids =
+        state->request.selection->initial_downstream_task_ids;
+  } else {
+    TaskGraphReadyChecker ready_checker;
+    initial_downstream_ids = ready_checker.initial_ready_task_ids(
+        compute_plan.task_graph, &downstream_task_ids);
+  }
+  state->inline_ready_stack.reserve(downstream_task_ids.size());
+  state->inline_ready_stack.assign(initial_downstream_ids.rbegin(),
+                                   initial_downstream_ids.rend());
+  return PreparedDirtySourceFirstRun(std::move(state));
+}
+
+/** @copydoc PreparedDirtySourceFirstRun::execute */
+void PreparedDirtySourceFirstRun::execute() {
+  if (!state_) {
+    throw std::invalid_argument(
+        "Dirty source-first execution requires active preparation.");
+  }
+  std::unique_ptr<PreparedDirtySourceFirstRunState> state = std::move(state_);
+  observe_prepared_dirty_cancellation(*state);
+
+  if (state->request.execution_service != nullptr) {
+    if (state->source_run.active()) {
+      state->request.execution_service->execute_prepared_run(
+          std::move(state->source_run));
+      observe_prepared_dirty_cancellation(*state);
+    }
+    if (state->request.before_downstream) {
+      observe_prepared_dirty_cancellation(*state);
+      state->request.before_downstream();
+      observe_prepared_dirty_cancellation(*state);
+    }
+    if (state->downstream_run.active()) {
+      state->request.execution_service->execute_prepared_run(
+          std::move(state->downstream_run));
+      observe_prepared_dirty_cancellation(*state);
+    }
+    return;
+  }
+
+  for (int source_task_id : *state->request.source_task_ids) {
+    observe_prepared_dirty_cancellation(*state);
+    state->run_task(source_task_id);
+    observe_prepared_dirty_cancellation(*state);
+  }
+  if (state->request.before_downstream) {
+    observe_prepared_dirty_cancellation(*state);
+    state->request.before_downstream();
+    observe_prepared_dirty_cancellation(*state);
+  }
+  while (!state->inline_ready_stack.empty()) {
+    const int task_id = state->inline_ready_stack.back();
+    state->inline_ready_stack.pop_back();
+    observe_prepared_dirty_cancellation(*state);
+    state->run_task(task_id);
+    observe_prepared_dirty_cancellation(*state);
+    std::vector<int> ready_ids =
+        state->inline_dependency_state->release_dependents(task_id);
+    for (auto iterator = ready_ids.rbegin(); iterator != ready_ids.rend();
+         ++iterator) {
+      state->inline_ready_stack.push_back(*iterator);
+    }
+  }
+}
+
 /** @copydoc DirtyNodeSynchronization::DirtyNodeSynchronization */
 DirtyNodeSynchronization::DirtyNodeSynchronization(
     const std::vector<int>& node_ids) {

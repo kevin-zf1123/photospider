@@ -185,6 +185,79 @@ struct CpuRunResourceDemand final {
   ReadyTaskResourceDemand task;
 };
 
+class ExecutionService;
+struct PreparedExecutionRunState;
+
+/**
+ * @brief Move-only pre-publication ownership for one physical Run batch.
+ *
+ * ExecutionService prepares route validation, complete resource reservation,
+ * cancellation cleanup, Run state, ready grants, queue entries, and ready-store
+ * index/list nodes before lifecycle installation. The value publishes nothing
+ * until ExecutionService::execute_prepared_run() is called after successful
+ * registry installation.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note Destruction before publication releases the complete reservation,
+ * staged grants, callbacks, and leases exactly once. The value grants no
+ * lifecycle admission authority and never crosses an installed API or ABI.
+ */
+class PreparedExecutionRun final {
+ public:
+  /** @brief Creates an inactive moved-from preparation. */
+  PreparedExecutionRun() noexcept;
+
+  /**
+   * @brief Transfers complete unpublished batch ownership.
+   * @param other Preparation made inactive.
+   * @throws Nothing.
+   */
+  PreparedExecutionRun(PreparedExecutionRun&& other) noexcept;
+
+  /**
+   * @brief Replaces only an inactive preparation by transfer.
+   * @param other Preparation made inactive.
+   * @return Reference to this value.
+   * @throws Nothing; overwriting an active preparation terminates as an
+   * ownership invariant breach.
+   */
+  PreparedExecutionRun& operator=(PreparedExecutionRun&& other) noexcept;
+
+  /**
+   * @brief Releases an unpublished batch without ready publication.
+   * @throws Nothing; trusted cleanup failure terminates.
+   */
+  ~PreparedExecutionRun() noexcept;
+
+  /** @brief Prevents duplicating reservation/publication ownership. */
+  PreparedExecutionRun(const PreparedExecutionRun&) = delete;
+
+  /** @brief Prevents assigning duplicate reservation/publication ownership. */
+  PreparedExecutionRun& operator=(const PreparedExecutionRun&) = delete;
+
+  /**
+   * @brief Reports whether this value owns an unpublished batch.
+   * @return True before movement or execute_prepared_run().
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend class ExecutionService;
+
+  /**
+   * @brief Owns one fully staged service-private batch.
+   * @param state Complete prepared state.
+   * @throws Nothing.
+   */
+  explicit PreparedExecutionRun(
+      std::unique_ptr<PreparedExecutionRunState> state) noexcept;
+
+  /** @brief Complete unpublished reservation, entries, and cleanup ownership.
+   */
+  std::unique_ptr<PreparedExecutionRunState> state_;
+};
+
 /**
  * @brief Immutable execution metadata copied into one ready submission.
  *
@@ -827,11 +900,12 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Waits for full Run ownership settlement and unregisters a bundle.
-   * @param handle Exact installed standalone/group handle.
+   * @param handle Exact installed standalone/group handle, cleared on success.
    * @return Nothing after every child record leaves the registry.
-   * @throws RunLifecycleRegistry finalization errors unchanged.
+   * @throws RunLifecycleRegistry finalization errors unchanged; the same handle
+   * remains active for retry.
    */
-  void finalize_graph_admission(RunLifecycleAdmissionHandle handle);
+  void finalize_graph_admission(RunLifecycleAdmissionHandle& handle);
 
   /**
    * @brief Tests exact Graph/Open and registered-Run commit permission.
@@ -928,6 +1002,42 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       CpuRunResourceDemand run_resource_demand) const;
 
   /**
+   * @brief Prepares one complete ready-only Run without queue publication.
+   *
+   * @param host Active Graph runtime observation context retained through later
+   * synchronous execution.
+   * @param execution_type Exact private route selected by the Graph binding.
+   * @param initial_submissions Dispatcher-discovered initial ready values from
+   * one Run.
+   * @param total_task_count Complete positive logical planned-task count.
+   * @param run_resource_demand Shared and per-task structural demand.
+   * @return Move-only reservation/publication staging consumed after lifecycle
+   * installation.
+   * @throws The validation, route, checked-estimation, policy, ledger,
+   * allocation, and synchronization errors documented by execute_run().
+   * @note This performs every fallible initial-publication preparation:
+   * complete root reservation, cancellation registration, RunState creation,
+   * ready grants/QueueEntry construction, and ready-store map/list node
+   * allocation. It publishes no ready entry or worker notification.
+   */
+  PreparedExecutionRun prepare_run(
+      ExecutionHostContext& host, const std::string& execution_type,
+      std::vector<ReadyTaskSubmission> initial_submissions,
+      int total_task_count, CpuRunResourceDemand run_resource_demand = {});
+
+  /**
+   * @brief Publishes and synchronously settles one prepared physical Run.
+   * @param prepared Active matching preparation created by this service.
+   * @return Nothing after every callback and exact reservation settle.
+   * @throws std::invalid_argument for inactive/foreign preparation.
+   * @throws The exact first worker exception after settlement.
+   * @note Lifecycle installation must already have succeeded. Initial ready
+   * publication consumes only preallocated store nodes and grants. Cancellation
+   * visible before publication discards the prepared batch without visibility.
+   */
+  void execute_prepared_run(PreparedExecutionRun prepared);
+
+  /**
    * @brief Executes one complete ready-only Run on a private physical route.
    *
    * @param host Active Graph runtime observation context, borrowed only until
@@ -949,7 +1059,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * complete Run vector.
    * @throws std::bad_alloc or std::system_error from pool/store setup.
    * @throws The exact first worker task exception after settlement.
-   * @note Independent calls may overlap. Run-local state is removed only after
+   * @note This compatibility method composes prepare_run() immediately with
+   * execute_prepared_run(). Admission-aware callers retain the preparation
+   * across registry installation. Independent calls may overlap. Run-local
+   * state is removed only after
    * queued work is retired and every in-flight callback has exited. Accepted
    * cancellation purges only this exact Run's queued entries, rejects later
    * dependent publication, and settles only after its running callbacks drain;
@@ -1076,6 +1189,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
  private:
   friend class ::ps::testing::ExecutionServiceTestAccess;
+  friend struct PreparedExecutionRunState;
 
   /** @brief Per-Run completion, failure, trace, and settlement state. */
   struct RunState;

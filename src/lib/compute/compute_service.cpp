@@ -218,23 +218,6 @@ compute::DirtyUpdateRequest make_dirty_update_request(
 }
 
 /**
- * @brief Creates the legacy HP-only request used inside intent callbacks.
- *
- * @param request Intent-aware request being coordinated.
- * @return Copy of request with intent and dirty ROI cleared.
- * @throws std::bad_alloc if copying cache precision allocates.
- * @note IntentUpdateCoordinator calls this through HP fallback callbacks; the
- * cleared intent prevents recursion back into intent coordination.
- */
-ComputeService::Request make_global_high_precision_request(
-    const ComputeService::Request& request) {
-  ComputeService::Request hp_request = request;
-  hp_request.intent = std::nullopt;
-  hp_request.dirty_roi = std::nullopt;
-  return hp_request;
-}
-
-/**
  * @brief Creates an HP dirty update request that suppresses benchmark output.
  *
  * @param request Dirty intent request whose semantic and cache options are
@@ -287,6 +270,20 @@ bool is_realtime_request(const ComputeService::Request& request) {
 }
 
 /**
+ * @brief Reports whether one request selects ordinary full-frame HP dispatch.
+ * @param request Service request whose optional intent and ROI select flow.
+ * @return True for legacy HP and explicit GlobalHighPrecision without ROI.
+ * @throws Nothing.
+ * @note Explicit GlobalHighPrecision with any ROI remains a dirty-plan request,
+ * including invalid/empty ROIs that the existing dirty path diagnoses.
+ */
+bool is_full_high_precision_request(const ComputeService::Request& request) {
+  return !request.intent.has_value() ||
+         (*request.intent == ComputeIntent::GlobalHighPrecision &&
+          !request.dirty_roi.has_value());
+}
+
+/**
  * @brief Resolves one private source owner for the current service request.
  * @param request Request that may carry a caller-retained source.
  * @return Existing source or a newly allocated request-local coordinator.
@@ -300,6 +297,21 @@ cancellation_source_for_request(const ComputeService::Request& request) {
     return request.cancellation_source;
   }
   return std::make_shared<compute::ComputeRequestCancellationSource>();
+}
+
+/**
+ * @brief Releases one caller-owned Run lease before registry finalization.
+ * @param lease Active request lease made inactive by movement.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Registry finalization waits until its own lease is the only active
+ * lease. Moving through this helper gives the temporary a narrower lifetime
+ * than the following finalization call without adding an empty public
+ * ComputeRunLease constructor.
+ */
+void release_request_lifecycle_lease(compute::ComputeRunLease& lease) noexcept {
+  compute::ComputeRunLease released(std::move(lease));
+  (void)released;
 }
 
 /**
@@ -551,8 +563,8 @@ void commit_real_time_if_requested(const compute::ComputeRunLease& run_lease,
  * @tparam Commit Callable publishing the staged HP domain after execution.
  * @param run Run whose admission and exactly-one terminal outcome are owned by
  * this wrapper.
- * @param request_cancellation Request coordinator that attaches private
- * cancellation authority before admission.
+ * @param lifecycle_lease Candidate lease already attached to request
+ * cancellation before off-registry preparation.
  * @param execute Sequential, full route, or standalone dirty HP callback.
  * @param commit Commit-policy callback invoked only after CommitPending.
  * @return Mutable target output returned by execute.
@@ -561,18 +573,15 @@ void commit_real_time_if_requested(const compute::ComputeRunLease& run_lease,
  * normal current-path return.
  * @note A normal return publishes success only after the callback has validated
  * committed or reusable target output. Failure publication retains the
- * original std::exception_ptr before rethrow. Lifecycle lease acquisition
- * precedes cancellation-source attachment; accepted cancellation skips later
- * execution or commit and is translated from the Run-owned reason.
+ * original std::exception_ptr before rethrow. The caller must attach
+ * cancellation, finish preparation, and install lifecycle admission before
+ * entering this wrapper.
  */
 template <typename Execute, typename Commit>
 NodeOutput& execute_request_owned_hp_run(
-    compute::ComputeRun& run,
-    compute::ComputeRequestCancellationSource& request_cancellation,
+    compute::ComputeRun& run, const compute::ComputeRunLease& lifecycle_lease,
     Execute&& execute, Commit&& commit) {
-  compute::ComputeRunLease lifecycle_lease = run.acquire_lease();
   try {
-    request_cancellation.attach(run);
     observe_open_run_or_throw(lifecycle_lease);
     if (!run.advance_to(compute::ComputeRunPhase::Admitted)) {
       observe_open_run_or_throw(lifecycle_lease);
@@ -648,13 +657,9 @@ NodeOutput& execute_request_owned_realtime_runs(compute::RunGroup& run_group,
                                                 Execute&& execute) {
   compute::ComputeRun& hp_run = run_group.hp_run();
   compute::ComputeRun& rt_run = run_group.rt_run();
-  compute::ComputeRequestCancellationSource& request_cancellation =
-      run_group.cancellation_source();
   const compute::ComputeRunLease& hp_lifecycle_lease = run_group.hp_lease();
   const compute::ComputeRunLease& rt_lifecycle_lease = run_group.rt_lease();
   try {
-    request_cancellation.attach(rt_run);
-    request_cancellation.attach(hp_run);
     observe_open_run_or_throw(hp_lifecycle_lease);
     observe_open_run_or_throw(rt_lifecycle_lease);
     if (!hp_run.advance_to(compute::ComputeRunPhase::Admitted)) {
@@ -693,7 +698,134 @@ NodeOutput& execute_request_owned_realtime_runs(compute::RunGroup& run_group,
   }
 }
 
+/**
+ * @brief Settles one single-domain Run after off-registry preparation fails.
+ * @param run Candidate Run that has not been installed.
+ * @param lease Active request lease used for stable terminal translation.
+ * @param failure Exact preparation exception to retain when failure wins.
+ * @return Never returns.
+ * @throws The stable Run failure or translated cancellation outcome.
+ * @note Candidate destruction still performs registry rollback. This helper
+ * only settles private Run state so cancellation accepted during planning
+ * cannot be replaced by a route-local diagnostic.
+ */
+[[noreturn]] void rethrow_hp_preparation_failure(
+    compute::ComputeRun& run, const compute::ComputeRunLease& lease,
+    const std::exception_ptr& failure) {
+  if (!run.is_terminal()) {
+    (void)run.publish_failed(failure);
+  }
+  throw_if_run_unsuccessful(lease);
+  std::rethrow_exception(failure);
+}
+
+/**
+ * @brief Settles both child Runs after realtime preparation fails.
+ * @param run_group Candidate HP/RT group that has not been installed.
+ * @param failure Exact preparation exception retained by unsettled children.
+ * @return Never returns.
+ * @throws The deterministic aggregate failure or translated cancellation.
+ * @note A request cancellation that won either child remains authoritative;
+ * otherwise both open children retain the same preparation failure before
+ * candidate rollback destroys the group.
+ */
+[[noreturn]] void rethrow_realtime_preparation_failure(
+    compute::RunGroup& run_group, const std::exception_ptr& failure) {
+  if (!run_group.hp_run().is_terminal()) {
+    (void)run_group.hp_run().publish_failed(failure);
+  }
+  if (!run_group.rt_run().is_terminal()) {
+    (void)run_group.rt_run().publish_failed(failure);
+  }
+  const compute::ComputeRunTerminalOutcome aggregate =
+      run_group.aggregate_terminal_outcome();
+  if (aggregate.kind != compute::ComputeRunTerminalKind::Succeeded) {
+    throw_terminal_outcome(aggregate);
+  }
+  std::rethrow_exception(failure);
+}
+
 }  // namespace
+
+/**
+ * @brief Complete unpublished dirty intent orchestration state.
+ *
+ * @throws std::bad_alloc from copied request, lease, gate, parameter snapshot,
+ * synchronization, or prepared dirty-domain ownership.
+ * @note HP/RT physical roots and ready/index nodes are owned by the two
+ * prepared domain values. The state publishes no lifecycle or caller-visible
+ * result and remains heap-stable across concurrent sibling callbacks.
+ */
+struct PreparedIntentUpdateState final {
+  /**
+   * @brief Captures immutable orchestration inputs and stable child leases.
+   * @param active_graph Request-local Graph snapshot.
+   * @param execution_strategy Inline or route-backed policy.
+   * @param service_request Complete copied request.
+   * @param hp_child Candidate HP Run.
+   * @param rt_child Optional candidate RT Run.
+   * @param hp_child_lease Candidate HP lease.
+   * @param rt_child_lease Optional candidate RT lease.
+   * @param commit_gate Optional realtime sibling gate.
+   * @throws std::bad_alloc when request or shared ownership copying allocates.
+   */
+  PreparedIntentUpdateState(
+      GraphModel& active_graph,
+      const ComputeService::ExecutionStrategy& execution_strategy,
+      const ComputeService::Request& service_request,
+      compute::ComputeRun& hp_child, compute::ComputeRun* rt_child,
+      const compute::ComputeRunLease& hp_child_lease,
+      const compute::ComputeRunLease* rt_child_lease,
+      std::shared_ptr<compute::DirtySiblingCommitGate> commit_gate)
+      : graph(&active_graph),
+        strategy(execution_strategy),
+        request(service_request),
+        hp_run(&hp_child),
+        rt_run(rt_child),
+        hp_lease(hp_child_lease),
+        rt_lease(rt_child_lease != nullptr
+                     ? std::optional<compute::ComputeRunLease>(*rt_child_lease)
+                     : std::nullopt),
+        sibling_commit_gate(std::move(commit_gate)) {}
+
+  /** @brief Request-local Graph snapshot. */
+  GraphModel* graph = nullptr;
+  /** @brief Copied runtime/route policy. */
+  ComputeService::ExecutionStrategy strategy;
+  /** @brief Complete copied request and commit policy owners. */
+  ComputeService::Request request;
+  /** @brief Candidate HP Run. */
+  compute::ComputeRun* hp_run = nullptr;
+  /** @brief Candidate RT Run, or null for standalone HP dirty. */
+  compute::ComputeRun* rt_run = nullptr;
+  /** @brief Stable HP lease used by preparation and execution. */
+  compute::ComputeRunLease hp_lease;
+  /** @brief Stable RT lease for realtime groups. */
+  std::optional<compute::ComputeRunLease> rt_lease;
+  /** @brief Shared RT-first commit gate for realtime groups. */
+  std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate;
+  /** @brief Route-selected HP execution type. */
+  std::string hp_execution_type = "cpu";
+  /** @brief Route-selected RT execution type. */
+  std::string rt_execution_type = "cpu";
+  /** @brief Whether sibling callbacks may run concurrently. */
+  bool can_submit_concurrently = false;
+  /** @brief Immutable connected-parameter preflight result. */
+  std::shared_ptr<const compute::StabilizedDirtyParameters>
+      stabilized_parameters;
+  /** @brief Shared HP/RT node synchronization for concurrent siblings. */
+  std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization;
+  /** @brief Staged proxy graph used by RT and optional HP downsample. */
+  compute::RealtimeProxyGraph* proxy_graph = nullptr;
+  /** @brief Complete unpublished HP dirty domain. */
+  compute::PreparedHighPrecisionDirtyRun hp_prepared;
+  /** @brief Complete unpublished RT dirty domain for realtime. */
+  compute::PreparedRealTimeDirtyRun rt_prepared;
+  /** @brief RT-to-HP cancellation/gate propagation registration. */
+  compute::ComputeRunCancellationRegistration rt_cancellation_registration;
+  /** @brief Fully allocated coordinator callbacks bound before installation. */
+  compute::IntentUpdateCallbacks callbacks;
+};
 
 /**
  * @brief Computes one node output through recursive sequential execution.
@@ -768,13 +900,11 @@ NodeOutput& ComputeService::compute_internal(
     target_node.last_input_size_hp = execution_node.last_input_size_hp;
     monolithic_inputs = resolved_inputs.image_inputs;
 
-    auto op_opt = OpRegistry::instance().resolve_for_intent(
-        execution_node.type, execution_node.subtype,
-        ComputeIntent::GlobalHighPrecision);
-    if (!op_opt) {
-      throw GraphError(
-          GraphErrc::NoOperation,
-          "No op for " + execution_node.type + ":" + execution_node.subtype);
+    const auto resolved_operation = context.resolved_operations.find(node_id);
+    if (resolved_operation == context.resolved_operations.end()) {
+      throw GraphError(GraphErrc::NoOperation, "No prepared op for " +
+                                                   execution_node.type + ":" +
+                                                   execution_node.subtype);
     }
 
     current_event.execution_start_time =
@@ -786,7 +916,8 @@ NodeOutput& ComputeService::compute_internal(
       observe_open_run_or_throw(run_lease);
     };
     NodeOutput computed_output = compute::NodeExecutor::execute(
-        graph, execution_node, *op_opt, monolithic_inputs, tiled_config);
+        graph, execution_node, resolved_operation->second, monolithic_inputs,
+        tiled_config);
     observe_open_run_or_throw(context.run_lease);
     target_node.cached_output_high_precision = std::move(computed_output);
 
@@ -856,107 +987,6 @@ NodeOutput& ComputeService::compute_internal(
 }
 
 /**
- * @brief Delegates HP dirty ROI execution to HighPrecisionDirtyExecutor.
- *
- * @param graph Graph whose HP dirty state and cache are updated.
- * @param proxy_graph RT proxy graph that may receive GlobalHighPrecision
- * downsample output after HP commit.
- * @param strategy Execution strategy that may supply route observation.
- * @param request Request carrying target, cache, telemetry, and dirty ROI.
- * @param sibling_commit_gate Optional RealTimeUpdate gate that delays HP graph
- * commit until RT proxy commit succeeds.
- * @param stabilized_parameters Optional immutable connected-parameter snapshot.
- * @param run GlobalHighPrecision Run that owns dirty HP staging, task leases,
- * and phase state.
- * @param run_lease Optional borrowed lifecycle lease observed by the delegated
- * dirty executor.
- * @return Mutable target HP output stored in the graph.
- * @throws std::bad_alloc unchanged when dirty planning, task, cache, or output
- * storage exhausts memory.
- * @throws GraphError from dirty planning, execution-service dispatch, or
- * target output validation; std::bad_optional_access if dirty_roi is missing
- * before coordinator validation.
- * @note This method intentionally contains no node-level dirty execution logic;
- * ComputeService remains only the internal orchestration boundary; C++
- * `public:` access on its backend members does not make them product Host API.
- * The delegated executor observes cancellation across planning/provider/commit
- * boundaries and leaves partial request-owned staging unpublished when it wins.
- */
-NodeOutput& ComputeService::compute_high_precision_update(
-    GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
-    const ExecutionStrategy& strategy, const Request& request,
-    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate,
-    std::shared_ptr<const compute::StabilizedDirtyParameters>
-        stabilized_parameters,
-    compute::ComputeRun* run, const compute::ComputeRunLease* run_lease) {
-  compute::ExecutionService* cpu_service = nullptr;
-  if (strategy.use_parallel_executor) {
-    if (!strategy.runtime || !run || !execution_service_.is_configured()) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Parallel HP dirty compute requires runtime, Run, and "
-                       "configured ExecutionService.");
-    }
-    cpu_service = &execution_service_;
-  }
-  compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
-  return executor.execute(
-      graph, proxy_graph, strategy.runtime,
-      make_dirty_update_request(request, false, std::move(sibling_commit_gate),
-                                std::move(stabilized_parameters)),
-      run, cpu_service, run_lease);
-}
-
-/**
- * @brief Delegates RT dirty ROI execution to RealTimeDirtyExecutor.
- *
- * @param graph Graph used for topology, parameters, and HP fallback output.
- * @param proxy_graph RT proxy graph whose low-resolution state is updated.
- * @param strategy Execution strategy that may supply route observation.
- * @param request Request carrying target, cache, telemetry, and dirty ROI.
- * @param stabilized_parameters Optional immutable connected-parameter snapshot.
- * @param node_synchronization Optional per-node critical sections shared with
- * the concurrent HP sibling of the same RealTimeUpdate transaction.
- * @param run RealTimeUpdate child Run owning task leases and lifecycle state.
- * @param run_lease Optional borrowed lifecycle lease observed by the delegated
- * dirty executor.
- * @return Mutable target RT output stored in the proxy graph.
- * @throws std::bad_alloc unchanged when dirty planning, task, proxy, or output
- * storage exhausts memory.
- * @throws GraphError from dirty planning, execution-service dispatch, or
- * target output validation; std::bad_optional_access if dirty_roi is missing
- * before coordinator validation.
- * @note RT dirty output stays outside GraphModel and does not become reusable
- * HP cache authority. The synchronization owner is request-scoped and is not
- * stored in GraphModel, GraphRuntime, or process state. Cancellation before
- * the RT commit contender prevents visible proxy publication and denies the
- * paired HP sibling gate.
- */
-NodeOutput& ComputeService::compute_real_time_update(
-    GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
-    const ExecutionStrategy& strategy, const Request& request,
-    std::shared_ptr<const compute::StabilizedDirtyParameters>
-        stabilized_parameters,
-    std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization,
-    compute::ComputeRun* run, const compute::ComputeRunLease* run_lease) {
-  compute::ExecutionService* cpu_service = nullptr;
-  if (strategy.use_parallel_executor) {
-    if (!strategy.runtime || !run || !execution_service_.is_configured()) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Parallel RT dirty compute requires runtime, Run, and "
-                       "configured ExecutionService.");
-    }
-    cpu_service = &execution_service_;
-  }
-  compute::RealTimeDirtyExecutor executor(traversal_, events_);
-  return executor.execute(
-      graph, proxy_graph, strategy.runtime,
-      make_dirty_update_request(request, false, nullptr,
-                                std::move(stabilized_parameters),
-                                std::move(node_synchronization)),
-      run, cpu_service, run_lease);
-}
-
-/**
  * @brief Resolves runtime-owned or service-owned RT proxy graph storage.
  *
  * @param graph Graph address used as the inline proxy map key.
@@ -982,41 +1012,6 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
     proxy = std::make_unique<compute::RealtimeProxyGraph>();
   }
   return *proxy;
-}
-
-/**
- * @brief Executes one full execution-bound HP request through its Run.
- *
- * @param graph Graph being computed.
- * @param runtime Graph runtime that publishes the HP route binding and receives
- * execution observations.
- * @param request Full HP target, cache, and telemetry options.
- * @param run Request observer for leased plan, runner, callback, temporary
- * result, exception, and lifecycle state.
- * @param run_lease Retained lifecycle lease copied into the selected
- * dispatcher route.
- * @return Mutable target HP output stored in the graph.
- * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
- * cache, telemetry, Run storage, or result storage exhausts memory.
- * @throws GraphError from route lookup, task dispatch, cache access, or
- * missing target output, including accepted cancellation.
- * @note Every supported physical route uses the injected fixed process
- * ExecutionService. Dispatch settles synchronously while full-HP callbacks own
- * Run leases and composite identity without borrowed ExecutionTaskExecutor
- * pointers.
- * Cancellation observed before the matching boundaries suppresses dependent
- * release and final cache commit; built-in CPU also removes only the matching
- * Run's queued entries after accepted cancellation.
- */
-NodeOutput& ComputeService::compute_parallel_hp_impl(
-    GraphModel& graph, GraphRuntime& runtime, const Request& request,
-    compute::ComputeRun& run, const compute::ComputeRunLease& run_lease) {
-  compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
-  const GraphRuntime::ExecutionRouteBinding route =
-      runtime.execution_route(ComputeIntent::GlobalHighPrecision);
-  return executor.execute(graph, execution_service_, runtime,
-                          route.execution_type, make_dispatch_request(request),
-                          run, run_lease);
 }
 
 /**
@@ -1060,6 +1055,21 @@ NodeOutput& ComputeService::compute_parallel(
         make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision),
         make_run_submission(graph, request, ComputeIntent::RealTimeUpdate),
         request_cancellation);
+    run_group.cancellation_source().attach(run_group.rt_run());
+    run_group.cancellation_source().attach(run_group.hp_run());
+    observe_open_run_or_throw(run_group.hp_lease());
+    observe_open_run_or_throw(run_group.rt_lease());
+    std::unique_ptr<PreparedIntentUpdateState> prepared_intent = [&]() {
+      try {
+        return prepare_intent_update(
+            graph, ExecutionStrategy{&runtime, true}, request,
+            &run_group.hp_run(), &run_group.rt_run(), &run_group.hp_lease(),
+            &run_group.rt_lease(), run_group.sibling_commit_gate());
+      } catch (...) {
+        rethrow_realtime_preparation_failure(run_group,
+                                             std::current_exception());
+      }
+    }();
     compute::RunLifecycleAdmissionHandle admission =
         execution_service_.commit_graph_admission_group(
             std::move(admission_candidate), run_group.id(),
@@ -1067,292 +1077,302 @@ NodeOutput& ComputeService::compute_parallel(
             compute::ComputeRunLease(run_group.rt_lease()),
             run_group.cancellation_source_owner(),
             run_group.sibling_commit_gate());
-    compute::ComputeRun& hp_run = run_group.hp_run();
-    compute::ComputeRun& rt_run = run_group.rt_run();
     try {
       NodeOutput& output = execute_request_owned_realtime_runs(
           run_group,
           [&](const compute::ComputeRunLease& hp_lease,
               const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
-            return compute_intent_update_impl(
-                graph, ExecutionStrategy{&runtime, true}, request, &hp_run,
-                &rt_run, &hp_lease, &rt_lease, run_group.sibling_commit_gate());
+            (void)hp_lease;
+            (void)rt_lease;
+            return execute_prepared_intent_update(std::move(prepared_intent));
           });
+      prepared_intent.reset();
       run_group.release_lifecycle_leases();
-      execution_service_.finalize_graph_admission(std::move(admission));
+      execution_service_.finalize_graph_admission(admission);
       return output;
     } catch (...) {
       const std::exception_ptr failure = std::current_exception();
+      prepared_intent.reset();
       run_group.release_lifecycle_leases();
-      execution_service_.finalize_graph_admission(std::move(admission));
+      execution_service_.finalize_graph_admission(admission);
       std::rethrow_exception(failure);
     }
   }
 
   compute::ComputeRun run(
       make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision));
+  compute::ComputeRunLease lifecycle_lease = run.acquire_lease();
+  request_cancellation->attach(run);
+  observe_open_run_or_throw(lifecycle_lease);
+  if (is_full_high_precision_request(request)) {
+    compute::ComputeTaskDispatcher dispatcher(traversal_, cache_, events_);
+    const GraphRuntime::ExecutionRouteBinding route =
+        runtime.execution_route(ComputeIntent::GlobalHighPrecision);
+    std::optional<compute::PreparedComputeDispatch> prepared;
+    try {
+      prepared.emplace(dispatcher.prepare(
+          graph, execution_service_, runtime, route.execution_type,
+          make_dispatch_request(request), run, lifecycle_lease));
+    } catch (...) {
+      rethrow_hp_preparation_failure(run, lifecycle_lease,
+                                     std::current_exception());
+    }
+    compute::RunLifecycleAdmissionHandle admission =
+        execution_service_.commit_graph_admission(
+            std::move(admission_candidate), run.acquire_lease(),
+            request_cancellation);
+    try {
+      NodeOutput& output = execute_request_owned_hp_run(
+          run, lifecycle_lease,
+          [&](const compute::ComputeRunLease&) -> NodeOutput& {
+            if (request.intent.has_value()) {
+              const Node* coordinator_node = graph.find_node(request.node_id);
+              events_.push(
+                  request.node_id,
+                  coordinator_node ? coordinator_node->name : std::string(),
+                  "intent_coordinator_global_high_precision", 0.0);
+            }
+            return dispatcher.execute_prepared(std::move(*prepared));
+          },
+          [&](const compute::ComputeRunLease& run_lease) {
+            commit_high_precision_if_requested(
+                run_lease, graph, request.staged_realtime_proxy, request);
+          });
+      prepared.reset();
+      release_request_lifecycle_lease(lifecycle_lease);
+      execution_service_.finalize_graph_admission(admission);
+      return output;
+    } catch (...) {
+      const std::exception_ptr failure = std::current_exception();
+      prepared.reset();
+      release_request_lifecycle_lease(lifecycle_lease);
+      execution_service_.finalize_graph_admission(admission);
+      std::rethrow_exception(failure);
+    }
+  }
+
+  std::unique_ptr<PreparedIntentUpdateState> prepared_intent = [&]() {
+    try {
+      return prepare_intent_update(graph, ExecutionStrategy{&runtime, true},
+                                   request, &run, nullptr, &lifecycle_lease,
+                                   nullptr, nullptr);
+    } catch (...) {
+      rethrow_hp_preparation_failure(run, lifecycle_lease,
+                                     std::current_exception());
+    }
+  }();
   compute::RunLifecycleAdmissionHandle admission =
       execution_service_.commit_graph_admission(std::move(admission_candidate),
                                                 run.acquire_lease(),
                                                 request_cancellation);
   try {
     NodeOutput& output = execute_request_owned_hp_run(
-        run, *request_cancellation,
+        run, lifecycle_lease,
         [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
-          if (request.intent) {
-            return compute_intent_update_impl(
-                graph, ExecutionStrategy{&runtime, true}, request, &run,
-                nullptr, &run_lease, nullptr, nullptr);
-          }
-          return compute_parallel_hp_impl(graph, runtime, request, run,
-                                          run_lease);
+          (void)run_lease;
+          return execute_prepared_intent_update(std::move(prepared_intent));
         },
         [&](const compute::ComputeRunLease& run_lease) {
           commit_high_precision_if_requested(
               run_lease, graph, request.staged_realtime_proxy, request);
         });
-    execution_service_.finalize_graph_admission(std::move(admission));
+    prepared_intent.reset();
+    release_request_lifecycle_lease(lifecycle_lease);
+    execution_service_.finalize_graph_admission(admission);
     return output;
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
-    execution_service_.finalize_graph_admission(std::move(admission));
+    prepared_intent.reset();
+    release_request_lifecycle_lease(lifecycle_lease);
+    execution_service_.finalize_graph_admission(admission);
     std::rethrow_exception(failure);
   }
 }
 
-/**
- * @brief Coordinates intent semantics and binds ComputeService callbacks.
- *
- * @param graph Graph being computed.
- * @param strategy Runtime and route-backed execution policy.
- * @param request Intent-aware request carrying target, cache, telemetry, and
- * optional dirty ROI.
- * @param hp_run Request-owned HP Run. Realtime requests supply their HP child.
- * @param rt_run Request-owned RT child Run, or null for
- * GlobalHighPrecision.
- * @param hp_run_lease Borrowed lifecycle lease for HP preflight, execution,
- * and commit coordination.
- * @param rt_run_lease Borrowed lifecycle lease for RT execution, sibling
- * cancellation, and commit coordination, or null for HP-only requests.
- * @return Mutable output selected by IntentUpdateCoordinator.
- * @throws std::bad_alloc unchanged when callback, dispatch, dirty, cache, or
- * output storage exhausts memory.
- * @throws GraphError from intent validation, callback execution, route
- * lookup, missing target output, or accepted child cancellation.
- * @note The coordinator owns HP/RT dual-path semantics; ComputeService only
- * supplies the concrete execution callbacks. Explicit GlobalHighPrecision
- * callbacks reuse hp_run and never recurse through a Run-creating public
- * entry. Realtime callbacks settle separate HP and RT children. RT
- * cancellation before proxy commit denies HP publication through the sibling
- * gate; already committed RT output is not rolled back by later HP failure.
- */
-NodeOutput& ComputeService::compute_intent_update_impl(
+/** @copydoc ComputeService::prepare_intent_update */
+std::unique_ptr<PreparedIntentUpdateState>
+ComputeService::prepare_intent_update(
     GraphModel& graph, const ExecutionStrategy& strategy,
     const Request& request, compute::ComputeRun* hp_run,
     compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
     const compute::ComputeRunLease* rt_run_lease,
     std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate) {
-  compute::IntentUpdateCallbacks callbacks;
-  const ComputeIntent intent = request.intent.value();
+  if (!request.intent.has_value()) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Prepared intent update requires an explicit intent.");
+  }
+  const ComputeIntent intent = *request.intent;
   compute::IntentUpdateCoordinator::validate(intent, request.dirty_roi);
   if (intent == ComputeIntent::GlobalHighPrecision &&
       (hp_run == nullptr || hp_run_lease == nullptr || rt_run != nullptr ||
-       rt_run_lease != nullptr)) {
+       rt_run_lease != nullptr || !request.dirty_roi.has_value())) {
     throw GraphError(
         GraphErrc::ComputeError,
-        "GlobalHighPrecision intent requires only its HP ComputeRun.");
+        "Prepared GlobalHighPrecision dirty update requires only its HP Run "
+        "and an ROI.");
   }
   if (intent == ComputeIntent::RealTimeUpdate &&
       (hp_run == nullptr || rt_run == nullptr || hp_run_lease == nullptr ||
-       rt_run_lease == nullptr)) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "RealTimeUpdate requires separate HP and RT child Runs.");
+       rt_run_lease == nullptr || !sibling_commit_gate)) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Prepared RealTimeUpdate requires both child Runs and commit gate.");
   }
 
-  std::string hp_execution_type = "cpu";
-  std::string rt_execution_type = "cpu";
+  auto state = std::make_unique<PreparedIntentUpdateState>(
+      graph, strategy, request, *hp_run, rt_run, *hp_run_lease, rt_run_lease,
+      std::move(sibling_commit_gate));
   bool uses_process_service = false;
-  bool can_submit_concurrently = false;
   if (strategy.use_parallel_executor) {
-    if (!strategy.runtime || !execution_service_.is_configured()) {
+    if (strategy.runtime == nullptr || !execution_service_.is_configured()) {
       throw GraphError(GraphErrc::ComputeError,
-                       "Parallel intent compute requires runtime and a "
+                       "Parallel intent preparation requires runtime and "
                        "configured ExecutionService.");
     }
     uses_process_service = true;
-    hp_execution_type =
+    state->hp_execution_type =
         strategy.runtime->execution_route(ComputeIntent::GlobalHighPrecision)
             .execution_type;
     if (intent == ComputeIntent::RealTimeUpdate) {
-      rt_execution_type =
+      state->rt_execution_type =
           strategy.runtime->execution_route(ComputeIntent::RealTimeUpdate)
               .execution_type;
-      can_submit_concurrently = hp_execution_type != "serial_debug" &&
-                                rt_execution_type != "serial_debug";
+      state->can_submit_concurrently =
+          state->hp_execution_type != "serial_debug" &&
+          state->rt_execution_type != "serial_debug";
     }
   }
 
-  std::shared_ptr<const compute::StabilizedDirtyParameters>
-      stabilized_parameters;
-  std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization;
-  if (request.dirty_roi && request.dirty_roi->width > 0 &&
-      request.dirty_roi->height > 0) {
-    ExecutionTaskRuntime* preflight_runtime = nullptr;
-    compute::ExecutionService* preflight_service = nullptr;
-    ExecutionHostContext* preflight_host = nullptr;
-    if (uses_process_service) {
-      preflight_service = &execution_service_;
-      preflight_host = strategy.runtime;
-    }
-    uint64_t request_generation = 0;
-    uint64_t topology_generation = 0;
+  if (request.dirty_roi->width > 0 && request.dirty_roi->height > 0) {
+    uint64_t request_generation = 0U;
+    uint64_t topology_generation = 0U;
     {
       std::lock_guard<std::mutex> lock(graph.graph_mutex_);
       request_generation = ++graph.dirty_generation_counter;
       topology_generation = graph.topology_generation();
-      if (intent == ComputeIntent::RealTimeUpdate && can_submit_concurrently) {
-        node_synchronization =
+      if (intent == ComputeIntent::RealTimeUpdate &&
+          state->can_submit_concurrently) {
+        state->node_synchronization =
             std::make_shared<compute::DirtyNodeSynchronization>(
                 graph.node_ids());
       }
     }
-    stabilized_parameters = compute::stabilize_connected_dirty_parameters(
-        graph, traversal_, request.node_id, request_generation,
-        topology_generation, preflight_runtime, preflight_service,
-        preflight_host, hp_run, hp_run_lease, hp_execution_type);
+    std::vector<Device> preflight_devices;
+    const std::vector<Device>* preflight_devices_override = nullptr;
+    if (uses_process_service) {
+      preflight_devices = execution_service_.available_devices(
+          *strategy.runtime, state->hp_execution_type);
+      preflight_devices_override = &preflight_devices;
+    }
+    state->stabilized_parameters =
+        compute::stabilize_connected_dirty_parameters(
+            graph, traversal_, request.node_id, request_generation,
+            topology_generation, nullptr, nullptr, nullptr, hp_run,
+            &state->hp_lease, state->hp_execution_type,
+            preflight_devices_override);
   }
 
-  compute::RealtimeProxyGraph& rt_proxy_graph =
-      realtime_proxy_graph_for(graph, strategy, request);
-  compute::ComputeRunCancellationRegistration rt_cancellation_registration;
+  state->proxy_graph = &realtime_proxy_graph_for(graph, strategy, request);
+  compute::ExecutionService* physical_service =
+      uses_process_service ? &execution_service_ : nullptr;
   if (intent == ComputeIntent::RealTimeUpdate) {
-    if (!sibling_commit_gate) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Realtime RunGroup has no sibling commit gate.");
-    }
-    callbacks.sibling_commit_gate = sibling_commit_gate;
     const compute::ComputeRunCancellationSource hp_cancellation =
         hp_run->cancellation_source();
-    rt_cancellation_registration =
-        rt_run_lease->register_cancellation_notification(
-            [sibling_commit_gate,
+    state->rt_cancellation_registration =
+        state->rt_lease->register_cancellation_notification(
+            [gate = state->sibling_commit_gate,
              hp_cancellation](compute::ComputeRunCancellationReason reason) {
-              sibling_commit_gate->abort_hp_commit();
+              gate->abort_hp_commit();
               (void)hp_cancellation.request_cancellation(reason);
             });
-    (void)rt_run_lease->observe_cancellation();
-  }
-  const Node* coordinator_node = graph.find_node(request.node_id);
-  const std::string coordinator_node_name =
-      coordinator_node ? coordinator_node->name : std::string();
-  callbacks.run_global_high_precision = [&]() -> NodeOutput& {
-    const Request hp_request = make_global_high_precision_request(request);
-    if (!hp_run) {
-      throw GraphError(
-          GraphErrc::ComputeError,
-          "GlobalHighPrecision callback has no request-owned ComputeRun.");
-    }
-    if (strategy.use_parallel_executor) {
-      if (!strategy.runtime) {
-        throw GraphError(GraphErrc::ComputeError,
-                         "Parallel HP compute requires a runtime.");
-      }
-      return compute_parallel_hp_impl(graph, *strategy.runtime, hp_request,
-                                      *hp_run, *hp_run_lease);
-    }
-    return compute_sequential_impl(graph, hp_request, *hp_run, *hp_run_lease);
-  };
-  callbacks.run_global_high_precision_dirty_update = [&]() -> NodeOutput& {
-    return compute_high_precision_update(
-        graph, rt_proxy_graph, strategy, request, nullptr,
-        stabilized_parameters, hp_run, hp_run_lease);
-  };
-  callbacks.run_high_precision_update = [&]() {
-    if (!hp_run) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Realtime HP callback has no child Run.");
-    }
+    (void)state->rt_lease->observe_cancellation();
+
     const Request silent_request = make_silent_dirty_request(request);
+    compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
+    state->hp_prepared = hp_executor.prepare(
+        graph, *state->proxy_graph, strategy.runtime,
+        make_dirty_update_request(
+            silent_request, true, state->sibling_commit_gate,
+            state->stabilized_parameters, state->node_synchronization),
+        hp_run, physical_service, &state->hp_lease);
+    compute::RealTimeDirtyExecutor rt_executor(traversal_, events_);
+    state->rt_prepared = rt_executor.prepare(
+        graph, *state->proxy_graph, strategy.runtime,
+        make_dirty_update_request(request, false, nullptr,
+                                  state->stabilized_parameters,
+                                  state->node_synchronization),
+        rt_run, physical_service, &*state->rt_lease);
+  } else {
+    compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
+    state->hp_prepared = hp_executor.prepare(
+        graph, *state->proxy_graph, strategy.runtime,
+        make_dirty_update_request(request, false, nullptr,
+                                  state->stabilized_parameters),
+        hp_run, physical_service, &state->hp_lease);
+  }
+
+  PreparedIntentUpdateState* state_ptr = state.get();
+  state->callbacks.sibling_commit_gate = state->sibling_commit_gate;
+  state->callbacks.run_global_high_precision_dirty_update =
+      [this, state_ptr]() -> NodeOutput& {
+    compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
+    return executor.execute_prepared(std::move(state_ptr->hp_prepared));
+  };
+  state->callbacks.run_high_precision_update = [this, state_ptr]() {
     (void)execute_realtime_child_run(
-        *hp_run, *hp_run_lease,
-        [&]() -> NodeOutput& {
+        *state_ptr->hp_run, state_ptr->hp_lease,
+        [this, state_ptr]() -> NodeOutput& {
           compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
-          return executor.execute(
-              graph, rt_proxy_graph, strategy.runtime,
-              make_dirty_update_request(
-                  silent_request, true, sibling_commit_gate,
-                  stabilized_parameters, node_synchronization),
-              hp_run, uses_process_service ? &execution_service_ : nullptr,
-              hp_run_lease);
+          return executor.execute_prepared(std::move(state_ptr->hp_prepared));
         },
-        [&](const compute::ComputeRunLease& commit_lease) {
-          commit_high_precision_if_requested(commit_lease, graph,
-                                             &rt_proxy_graph, request);
+        [state_ptr](const compute::ComputeRunLease& commit_lease) {
+          commit_high_precision_if_requested(commit_lease, *state_ptr->graph,
+                                             state_ptr->proxy_graph,
+                                             state_ptr->request);
         });
   };
-  callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    if (!rt_run) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Realtime RT callback has no child Run.");
-    }
+  state->callbacks.run_real_time_update = [this, state_ptr]() -> NodeOutput& {
     NodeOutput& output = execute_realtime_child_run(
-        *rt_run, *rt_run_lease,
-        [&]() -> NodeOutput& {
-          return compute_real_time_update(
-              graph, rt_proxy_graph, strategy, request, stabilized_parameters,
-              node_synchronization, rt_run, rt_run_lease);
+        *state_ptr->rt_run, *state_ptr->rt_lease,
+        [this, state_ptr]() -> NodeOutput& {
+          compute::RealTimeDirtyExecutor executor(traversal_, events_);
+          return executor.execute_prepared(std::move(state_ptr->rt_prepared));
         },
-        [&](const compute::ComputeRunLease& commit_lease) {
-          commit_real_time_if_requested(commit_lease, graph, rt_proxy_graph,
-                                        request);
+        [state_ptr](const compute::ComputeRunLease& commit_lease) {
+          commit_real_time_if_requested(commit_lease, *state_ptr->graph,
+                                        *state_ptr->proxy_graph,
+                                        state_ptr->request);
         });
-    if (sibling_commit_gate) {
-      sibling_commit_gate->mark_rt_committed();
-    }
+    state_ptr->sibling_commit_gate->mark_rt_committed();
     return output;
   };
-  callbacks.real_time_output = [&]() -> NodeOutput& {
-    return rt_proxy_graph.require_output(request.node_id);
+  state->callbacks.real_time_output = [state_ptr]() -> NodeOutput& {
+    return state_ptr->proxy_graph->require_output(state_ptr->request.node_id);
   };
-  callbacks.record_stage = [&,
-                            coordinator_node_name](const std::string& stage) {
-    events_.push(request.node_id, coordinator_node_name, stage, 0.0);
+  const Node* coordinator_node = graph.find_node(request.node_id);
+  const std::string coordinator_node_name =
+      coordinator_node != nullptr ? coordinator_node->name : std::string();
+  state->callbacks.record_stage = [this, state_ptr, coordinator_node_name](
+                                      const std::string& stage) {
+    events_.push(state_ptr->request.node_id, coordinator_node_name, stage, 0.0);
   };
-
-  return compute::IntentUpdateCoordinator::coordinate_intent_update(
-      intent, can_submit_concurrently, request.dirty_roi, callbacks);
+  return state;
 }
 
-/**
- * @brief Executes an intent-aware request without a GraphRuntime.
- *
- * @param graph Graph being computed.
- * @param request Intent-aware request carrying target, cache, telemetry, and
- * optional dirty ROI.
- * @param hp_run Request-owned HP Run. Realtime requests supply their HP child.
- * @param rt_run Request-owned RT child Run, or null for
- * GlobalHighPrecision.
- * @param hp_run_lease Borrowed lifecycle lease for the HP child.
- * @param rt_run_lease Borrowed lifecycle lease for the RT child, or null for
- * GlobalHighPrecision.
- * @return Mutable output selected by IntentUpdateCoordinator.
- * @throws std::bad_alloc unchanged when coordination, dirty execution, cache,
- * or output storage exhausts memory.
- * @throws GraphError from intent validation or execution.
- * @note Dirty HP and RT callbacks still use the dirty executors, but run node
- * work inline because no queued execution runtime is available. The realtime
- * path receives separate HP and RT child Runs without a mixed-domain owner.
- * Cooperative observations still bracket inline providers and commit even
- * though no execution queue exists.
- */
-NodeOutput& ComputeService::compute_with_intent_impl(
-    GraphModel& graph, const Request& request, compute::ComputeRun* hp_run,
-    compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
-    const compute::ComputeRunLease* rt_run_lease,
-    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate) {
-  return compute_intent_update_impl(graph, ExecutionStrategy{}, request, hp_run,
-                                    rt_run, hp_run_lease, rt_run_lease,
-                                    std::move(sibling_commit_gate));
+/** @copydoc ComputeService::execute_prepared_intent_update */
+NodeOutput& ComputeService::execute_prepared_intent_update(
+    std::unique_ptr<PreparedIntentUpdateState> prepared) {
+  if (!prepared || prepared->graph == nullptr ||
+      !prepared->request.intent.has_value() ||
+      !prepared->hp_prepared.active() ||
+      (*prepared->request.intent == ComputeIntent::RealTimeUpdate &&
+       !prepared->rt_prepared.active())) {
+    throw std::invalid_argument(
+        "Prepared intent execution requires complete active state.");
+  }
+  return compute::IntentUpdateCoordinator::coordinate_intent_update(
+      *prepared->request.intent, prepared->can_submit_concurrently,
+      prepared->request.dirty_roi, prepared->callbacks);
 }
 
 /**
@@ -1389,6 +1409,21 @@ NodeOutput& ComputeService::compute(
         make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision),
         make_run_submission(graph, request, ComputeIntent::RealTimeUpdate),
         request_cancellation);
+    run_group.cancellation_source().attach(run_group.rt_run());
+    run_group.cancellation_source().attach(run_group.hp_run());
+    observe_open_run_or_throw(run_group.hp_lease());
+    observe_open_run_or_throw(run_group.rt_lease());
+    std::unique_ptr<PreparedIntentUpdateState> prepared_intent = [&]() {
+      try {
+        return prepare_intent_update(
+            graph, ExecutionStrategy{}, request, &run_group.hp_run(),
+            &run_group.rt_run(), &run_group.hp_lease(), &run_group.rt_lease(),
+            run_group.sibling_commit_gate());
+      } catch (...) {
+        rethrow_realtime_preparation_failure(run_group,
+                                             std::current_exception());
+      }
+    }();
     compute::RunLifecycleAdmissionHandle admission =
         execution_service_.commit_graph_admission_group(
             std::move(admission_candidate), run_group.id(),
@@ -1396,62 +1431,161 @@ NodeOutput& ComputeService::compute(
             compute::ComputeRunLease(run_group.rt_lease()),
             run_group.cancellation_source_owner(),
             run_group.sibling_commit_gate());
-    compute::ComputeRun& hp_run = run_group.hp_run();
-    compute::ComputeRun& rt_run = run_group.rt_run();
     try {
       NodeOutput& output = execute_request_owned_realtime_runs(
           run_group,
           [&](const compute::ComputeRunLease& hp_lease,
               const compute::ComputeRunLease& rt_lease) -> NodeOutput& {
-            return compute_with_intent_impl(graph, request, &hp_run, &rt_run,
-                                            &hp_lease, &rt_lease,
-                                            run_group.sibling_commit_gate());
+            (void)hp_lease;
+            (void)rt_lease;
+            return execute_prepared_intent_update(std::move(prepared_intent));
           });
+      prepared_intent.reset();
       run_group.release_lifecycle_leases();
-      execution_service_.finalize_graph_admission(std::move(admission));
+      execution_service_.finalize_graph_admission(admission);
       return output;
     } catch (...) {
       const std::exception_ptr failure = std::current_exception();
+      prepared_intent.reset();
       run_group.release_lifecycle_leases();
-      execution_service_.finalize_graph_admission(std::move(admission));
+      execution_service_.finalize_graph_admission(admission);
       std::rethrow_exception(failure);
     }
   }
 
   compute::ComputeRun run(
       make_run_submission(graph, request, ComputeIntent::GlobalHighPrecision));
+  compute::ComputeRunLease lifecycle_lease = run.acquire_lease();
+  request_cancellation->attach(run);
+  observe_open_run_or_throw(lifecycle_lease);
+  if (is_full_high_precision_request(request)) {
+    PreparedSequentialCompute prepared = [&]() {
+      try {
+        return prepare_sequential_compute(graph, request, lifecycle_lease);
+      } catch (...) {
+        rethrow_hp_preparation_failure(run, lifecycle_lease,
+                                       std::current_exception());
+      }
+    }();
+    compute::RunLifecycleAdmissionHandle admission =
+        execution_service_.commit_graph_admission(
+            std::move(admission_candidate), run.acquire_lease(),
+            request_cancellation);
+    try {
+      NodeOutput& output = execute_request_owned_hp_run(
+          run, lifecycle_lease,
+          [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
+            if (request.intent.has_value()) {
+              const Node* coordinator_node = graph.find_node(request.node_id);
+              events_.push(
+                  request.node_id,
+                  coordinator_node ? coordinator_node->name : std::string(),
+                  "intent_coordinator_global_high_precision", 0.0);
+            }
+            return compute_sequential_impl(graph, request, std::move(prepared),
+                                           run, run_lease);
+          },
+          [&](const compute::ComputeRunLease& run_lease) {
+            commit_high_precision_if_requested(
+                run_lease, graph, request.staged_realtime_proxy, request);
+          });
+      release_request_lifecycle_lease(lifecycle_lease);
+      execution_service_.finalize_graph_admission(admission);
+      return output;
+    } catch (...) {
+      const std::exception_ptr failure = std::current_exception();
+      release_request_lifecycle_lease(lifecycle_lease);
+      execution_service_.finalize_graph_admission(admission);
+      std::rethrow_exception(failure);
+    }
+  }
+
+  std::unique_ptr<PreparedIntentUpdateState> prepared_intent = [&]() {
+    try {
+      return prepare_intent_update(graph, ExecutionStrategy{}, request, &run,
+                                   nullptr, &lifecycle_lease, nullptr, nullptr);
+    } catch (...) {
+      rethrow_hp_preparation_failure(run, lifecycle_lease,
+                                     std::current_exception());
+    }
+  }();
   compute::RunLifecycleAdmissionHandle admission =
       execution_service_.commit_graph_admission(std::move(admission_candidate),
                                                 run.acquire_lease(),
                                                 request_cancellation);
   try {
     NodeOutput& output = execute_request_owned_hp_run(
-        run, *request_cancellation,
+        run, lifecycle_lease,
         [&](const compute::ComputeRunLease& run_lease) -> NodeOutput& {
-          if (request.intent) {
-            return compute_with_intent_impl(graph, request, &run, nullptr,
-                                            &run_lease, nullptr, nullptr);
-          }
-          return compute_sequential_impl(graph, request, run, run_lease);
+          (void)run_lease;
+          return execute_prepared_intent_update(std::move(prepared_intent));
         },
         [&](const compute::ComputeRunLease& run_lease) {
           commit_high_precision_if_requested(
               run_lease, graph, request.staged_realtime_proxy, request);
         });
-    execution_service_.finalize_graph_admission(std::move(admission));
+    prepared_intent.reset();
+    release_request_lifecycle_lease(lifecycle_lease);
+    execution_service_.finalize_graph_admission(admission);
     return output;
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
-    execution_service_.finalize_graph_admission(std::move(admission));
+    prepared_intent.reset();
+    release_request_lifecycle_lease(lifecycle_lease);
+    execution_service_.finalize_graph_admission(admission);
     std::rethrow_exception(failure);
   }
 }
 
+/** @copydoc ComputeService::prepare_sequential_compute */
+ComputeService::PreparedSequentialCompute
+ComputeService::prepare_sequential_compute(
+    GraphModel& graph, const Request& request,
+    const compute::ComputeRunLease& run_lease) {
+  observe_open_run_or_throw(run_lease);
+  if (!graph.has_node(request.node_id)) {
+    throw GraphError(
+        GraphErrc::NotFound,
+        "Node " + std::to_string(request.node_id) + " not found in graph.");
+  }
+
+  std::vector<int> execution_order =
+      traversal_.topo_postorder_from(graph, request.node_id);
+  const compute::ComputeRequest planning_request =
+      make_planning_request(request, false);
+  compute::ComputePlan compute_plan = prune_facade_node_cache_task_graph(
+      graph, planning_request, execution_order);
+  observe_open_run_or_throw(run_lease);
+  execution_order = compute_plan.planned_nodes;
+
+  std::unordered_map<int, OpRegistry::OpVariant> resolved_operations;
+  resolved_operations.reserve(execution_order.size());
+  std::unordered_map<int, bool> visiting;
+  visiting.reserve(execution_order.size());
+  for (int node_id : execution_order) {
+    const Node& node = graph.node(node_id);
+    std::optional<OpRegistry::OpVariant> operation =
+        OpRegistry::instance().resolve_for_intent(
+            node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+    if (!operation.has_value()) {
+      throw GraphError(GraphErrc::NoOperation,
+                       "No op for " + node.type + ":" + node.subtype);
+    }
+    resolved_operations.emplace(node_id, std::move(*operation));
+    visiting.emplace(node_id, false);
+  }
+
+  return PreparedSequentialCompute{
+      std::move(compute_plan), std::move(execution_order),
+      std::move(resolved_operations), std::move(visiting)};
+}
+
 /**
- * @brief Implements sequential high-precision compute with plan inspection.
+ * @brief Implements one prepared sequential high-precision compute.
  *
  * @param graph Graph being computed.
  * @param request Legacy HP request with target, cache, and telemetry options.
+ * @param prepared Complete plan and operation lookup built before admission.
  * @param run Request-owned HP descriptor and terminal/storage owner.
  * @param run_lease Retained lifecycle lease observed by recursive nodes and
  * tiled-provider boundaries.
@@ -1470,61 +1604,37 @@ NodeOutput& ComputeService::compute(
  * already entered remains non-preemptible.
  */
 NodeOutput& ComputeService::compute_sequential_impl(
-    GraphModel& graph, const Request& request, compute::ComputeRun& run,
+    GraphModel& graph, const Request& request,
+    PreparedSequentialCompute prepared, compute::ComputeRun& run,
     const compute::ComputeRunLease& run_lease) {
   observe_open_run_or_throw(run_lease);
-  if (!graph.has_node(request.node_id)) {
-    throw GraphError(
-        GraphErrc::NotFound,
-        "Node " + std::to_string(request.node_id) + " not found in graph.");
-  }
-
-  if (request.telemetry.benchmark_events) {
-    request.telemetry.benchmark_events->clear();
-  }
-
-  if (request.telemetry.enable_timing) {
-    clear_timing_results(graph);
-  }
-
-  if (request.cache.force_recache) {
-    graph.clear_full_task_graph_cache();
-  }
-
   if (!run.advance_to(compute::ComputeRunPhase::Running)) {
     observe_open_run_or_throw(run_lease);
   }
   observe_open_run_or_throw(run_lease);
-  std::vector<int> execution_order;
-  try {
-    execution_order = traversal_.topo_postorder_from(graph, request.node_id);
-  } catch (const GraphError&) {
-    throw;
+  if (request.telemetry.benchmark_events) {
+    request.telemetry.benchmark_events->clear();
   }
-  const compute::ComputeRequest planning_request =
-      make_planning_request(request, false);
-  const compute::ComputePlan compute_plan = prune_facade_node_cache_task_graph(
-      graph, planning_request, execution_order);
-  observe_open_run_or_throw(run_lease);
-  remember_facade_compute_plan(graph, compute_plan);
-  execution_order = compute_plan.planned_nodes;
-
+  if (request.telemetry.enable_timing) {
+    clear_timing_results(graph);
+  }
   if (request.cache.force_recache) {
-    std::lock_guard<std::mutex> lk(graph.graph_mutex_);
-    for (int nid : execution_order) {
-      auto& node = graph.mutable_node(nid);
-      node.cached_output_high_precision.reset();
+    graph.clear_full_task_graph_cache();
+    std::lock_guard<std::mutex> lock(graph.graph_mutex_);
+    for (int node_id : prepared.execution_order) {
+      graph.mutable_node(node_id).cached_output_high_precision.reset();
     }
   }
-
-  std::unordered_map<int, bool> visiting;
+  remember_facade_compute_plan(graph, prepared.compute_plan);
+  observe_open_run_or_throw(run_lease);
   const bool allow_disk_cache =
       !request.cache.disable_disk_cache && !request.cache.force_recache;
   const RecursiveComputeContext context{request.cache.precision,
-                                        visiting,
+                                        prepared.visiting,
                                         request.telemetry.enable_timing,
                                         allow_disk_cache,
                                         request.telemetry.benchmark_events,
+                                        prepared.resolved_operations,
                                         run_lease};
   NodeOutput& result = compute_internal(graph, request.node_id, context);
   observe_open_run_or_throw(run_lease);

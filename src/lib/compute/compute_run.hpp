@@ -32,6 +32,7 @@ class TaskSubmissionPlan;
 class ComputeRun;
 class ExecutionService;
 class ExecutionLifecycleTelemetry;
+class RunLifecycleRegistry;
 
 /**
  * @brief Opaque stable identity for one request-owned compute Run.
@@ -592,6 +593,8 @@ class ComputeRunCancellationSource {
    * @throws Any exception from a registered cleanup callback after
    * cancellation becomes terminal.
    * @note Cleanup notifications run after the terminal mutex is released.
+   * Every selected notification is attempted; the first callback exception is
+   * rethrown only after the remaining slots have been invoked.
    */
   bool request_cancellation(ComputeRunCancellationReason reason) const;
 
@@ -631,7 +634,8 @@ class ComputeRunCancellationSource {
  * result; a realtime RunGroup composes it with independent child ownership and
  * terminal aggregation.
  *
- * @throws std::bad_alloc when coordinator or child-source storage grows.
+ * @throws std::bad_alloc when coordinator or child-source storage grows during
+ * attachment.
  * @throws std::system_error when coordinator or child Run locking fails.
  * @note Child sources are weak with respect to Run lifetime. The class is a
  * private launch seam and never enters an installed request or IPC value.
@@ -662,13 +666,15 @@ class ComputeRequestCancellationSource final {
    * @param reason Explicit, supersession, deadline, close, or shutdown reason
    * proposed by the trusted request owner.
    * @return True only for the first request-level acceptance.
-   * @throws std::bad_alloc when a temporary child-source snapshot allocates.
    * @throws std::system_error when coordinator or child Run locking fails.
    * @throws Any exception from a child cleanup callback after the request
    * reason becomes stable.
-   * @note The no-argument form remains explicit cancellation. A true result
-   * does not imply every child was still open; each child arbitrates the stable
-   * first request reason independently.
+   * @note The no-argument form remains explicit cancellation. The first call
+   * transfers already attached weak child sources into an allocation-free local
+   * snapshot before fan-out. Every child is attempted and the first child
+   * exception is rethrown afterward. A true result does not imply every child
+   * was still open; each child arbitrates the stable first request reason
+   * independently.
    */
   bool request_cancellation(ComputeRunCancellationReason reason =
                                 ComputeRunCancellationReason::ExplicitRequest);
@@ -880,6 +886,93 @@ class ComputeRunCommitContender final {
   void abandon() noexcept;
 
   /** @brief Matching control while this contender remains unresolved. */
+  std::shared_ptr<ComputeRunControl> control_;
+};
+
+/**
+ * @brief Non-authoritative strong observer for registry settlement waits.
+ *
+ * The observer retains one Run control block without incrementing its active
+ * lease count. It exists so RunLifecycleRegistry can release its lifecycle
+ * fence before terminal, quiescence, and resource-settlement waits without
+ * retaining a pointer into mutable registry storage or manufacturing another
+ * execution/commit lease.
+ *
+ * @throws std::system_error when Run synchronization or waiting fails.
+ * @note Only a matching ComputeRunLease can mint this source-private value.
+ * Copying retains control lifetime but grants no task, commit, cancellation,
+ * resource, or finalization authority.
+ */
+class ComputeRunSettlementObserver final {
+ public:
+  /** @brief Creates an inactive observer for fixed-size registry staging. */
+  ComputeRunSettlementObserver() noexcept = default;
+
+  /** @brief Retains the same non-authoritative Run observation. */
+  ComputeRunSettlementObserver(const ComputeRunSettlementObserver&) noexcept =
+      default;
+
+  /** @brief Replaces this value with the same retained observation. */
+  ComputeRunSettlementObserver& operator=(
+      const ComputeRunSettlementObserver&) noexcept = default;
+
+  /** @brief Transfers one retained observation. */
+  ComputeRunSettlementObserver(ComputeRunSettlementObserver&&) noexcept =
+      default;
+
+  /** @brief Replaces this value by transfer. */
+  ComputeRunSettlementObserver& operator=(
+      ComputeRunSettlementObserver&&) noexcept = default;
+
+  /** @brief Releases passive Run-control observation. */
+  ~ComputeRunSettlementObserver() noexcept = default;
+
+  /**
+   * @brief Returns the current immutable terminal outcome.
+   * @return Outcome snapshot, or nullopt before terminal publication.
+   * @throws std::logic_error for an inactive observer.
+   * @throws std::system_error when Run synchronization fails.
+   */
+  std::optional<ComputeRunTerminalOutcome> terminal_outcome() const;
+
+  /**
+   * @brief Waits until only the registry's authoritative lease remains.
+   * @return Nothing after callback, queue, continuation, and caller leases
+   * release.
+   * @throws std::logic_error for an inactive observer or nonterminal Run.
+   * @throws std::system_error when Run synchronization or waiting fails.
+   * @note This observer is deliberately absent from active lease accounting.
+   */
+  void wait_until_registry_lease() const;
+
+  /**
+   * @brief Waits for all physical root reservations to settle.
+   * @return Nothing after pending and live root counts both reach zero.
+   * @throws std::logic_error for an inactive observer or nonterminal Run.
+   * @throws std::system_error when Run synchronization or waiting fails.
+   */
+  void wait_for_resource_settlement() const;
+
+  /**
+   * @brief Reports whether this value retains one Run control block.
+   * @return True for an active observer.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return control_ != nullptr; }
+
+ private:
+  friend class ComputeRunLease;
+
+  /**
+   * @brief Retains one lease-validated Run control without lease authority.
+   * @param control Matching Run control.
+   * @throws Nothing.
+   */
+  explicit ComputeRunSettlementObserver(
+      std::shared_ptr<ComputeRunControl> control) noexcept
+      : control_(std::move(control)) {}
+
+  /** @brief Strong passive Run-control lifetime retained across waits. */
   std::shared_ptr<ComputeRunControl> control_;
 };
 
@@ -1138,6 +1231,7 @@ class ComputeRunLease {
   friend class ComputeRun;
   friend class ComputeRunControl;
   friend class ExecutionService;
+  friend class RunLifecycleRegistry;
 
   /**
    * @brief Mints the first active lease for one Run control block.
@@ -1163,6 +1257,17 @@ class ComputeRunLease {
    * @throws Nothing.
    */
   void release() noexcept;
+
+  /**
+   * @brief Mints a passive strong observer for registry settlement.
+   * @return Observer retaining this Run without incrementing active leases.
+   * @throws Nothing.
+   * @note Only RunLifecycleRegistry uses this bridge; it grants no execution or
+   * commit authority.
+   */
+  ComputeRunSettlementObserver settlement_observer() const noexcept {
+    return ComputeRunSettlementObserver(control_);
+  }
 
   /**
    * @brief Registers one pending physical root before ledger admission.
@@ -1435,6 +1540,8 @@ class ComputeRun {
    * @param node_id Target node id.
    * @param available_devices Devices exposed by the active execution route,
    * copied into the Run-owned plan.
+   * @param publish_plan_inspection Whether plan construction immediately
+   * updates GraphModel diagnostics.
    * @return Mutable Run-owned plan retained by the shared control block.
    * @throws std::logic_error when a plan already exists or the Run is terminal.
    * @throws GraphError or standard exceptions from plan construction.
@@ -1442,7 +1549,8 @@ class ComputeRun {
    */
   TaskSubmissionPlan& emplace_submission_plan(
       GraphModel& graph, GraphTraversalService& traversal, int node_id,
-      std::vector<Device> available_devices);
+      std::vector<Device> available_devices,
+      bool publish_plan_inspection = true);
 
   /**
    * @brief Returns the Run-owned submission plan when installed.
