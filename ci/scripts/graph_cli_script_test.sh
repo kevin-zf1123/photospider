@@ -57,7 +57,26 @@ printf 'Graph document missing-source contract: %s\n' \
   tee "$CI_ARTIFACT_DIR/capability.log"
 
 ensure_ci_configured cmake_configure
-ensure_ci_targets build_graph_cli graph_cli cpu_work_stealing_example_plugin serial_debug_example_plugin
+capture_ci_target_inventory
+runtime_contract=$(ci_runtime_contract)
+case "$runtime_contract" in
+  legacy_scheduler)
+    run_logged validate_graph_cli_targets require_ci_targets \
+      graph_cli \
+      cpu_work_stealing_example_plugin \
+      serial_debug_example_plugin
+    ensure_ci_targets build_graph_cli \
+      graph_cli \
+      cpu_work_stealing_example_plugin \
+      serial_debug_example_plugin
+    ;;
+  policy_execution)
+    run_logged validate_graph_cli_targets require_ci_targets \
+      graph_cli \
+      fifo_policy
+    ensure_ci_targets build_graph_cli graph_cli fifo_policy
+    ;;
+esac
 
 fixture_path="$REPO_ROOT/tests/fixtures/graphs/propagation_linear_test.yaml"
 runtime_root=$(mktemp -d "$CI_ARTIFACT_DIR/graph_cli_runtime.XXXXXX")
@@ -85,7 +104,7 @@ mkdir -p "$CI_ARTIFACT_DIR/cache" \
   "$invalid_target_runtime/home"
 
 config_path="$CI_ARTIFACT_DIR/graph_cli_config.yaml"
-write_cli_config "$config_path" "$CI_ARTIFACT_DIR/cache"
+write_cli_config "$config_path" "$CI_ARTIFACT_DIR/cache" "$runtime_contract"
 
 positive_script="$CI_ARTIFACT_DIR/graph_cli_positive.repl"
 cat > "$positive_script" <<EOF

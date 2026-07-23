@@ -46,15 +46,22 @@ case "$CI_BUILD_PROFILE" in
     unset PHOTOSPIDER_BUILD_IPC || true
     ensure_ci_configured cmake_configure
     run_logged validate_profile_cache require_ci_profile_cache
-    ensure_ci_targets build_required_targets \
+    capture_ci_target_inventory
+    runtime_contract=$(ci_runtime_contract)
+    printf 'runtime_contract=%s\n' "$runtime_contract" |
+      tee "$CI_ARTIFACT_DIR/runtime_contract.log"
+    run_logged validate_required_targets require_ci_targets \
+      photospider_kernel \
       graph_cli \
       test_propagation \
       lifecycle_op_plugin \
-      override_lifecycle_op_plugin \
-      destroy_count_scheduler_plugin \
-      cpu_work_stealing_example_plugin \
-      gpu_pipeline_example_plugin \
-      serial_debug_example_plugin
+      override_lifecycle_op_plugin
+    ensure_ci_targets build_required_targets \
+      photospider_kernel \
+      graph_cli \
+      test_propagation \
+      lifecycle_op_plugin \
+      override_lifecycle_op_plugin
     ensure_ci_all build_all
 
     # @var build_smoke_matrix_file
@@ -79,8 +86,10 @@ case "$CI_BUILD_PROFILE" in
     #   line breaks are forbidden again by emit_output.
     build_smoke_matrix=$(<"$build_smoke_matrix_file")
     emit_output build_smoke_matrix "$build_smoke_matrix"
-    echo "Default profile build and build-smoke inventory completed." |
-      tee "$CI_ARTIFACT_DIR/summary.log"
+    {
+      echo "Default profile build and build-smoke inventory completed."
+      echo "Runtime validation contract: $runtime_contract"
+    } | tee "$CI_ARTIFACT_DIR/summary.log"
     ;;
   *)
     echo "Unsupported CI_BUILD_PROFILE: $CI_BUILD_PROFILE" >&2

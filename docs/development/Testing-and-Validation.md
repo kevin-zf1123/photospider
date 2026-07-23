@@ -975,6 +975,20 @@ could leave a configured required check pending. Stable gates take the same
 repository-identity decision: only a same-repository `CI/**` pull request can
 report intentional deduplication; fork or missing identity fails closed.
 
+During the scheduler-to-policy/execution transition, configured CMake target
+help is the validation capability boundary. Trusted CI accepts only the
+complete legacy marker set (`test_scheduler`,
+`test_scheduler_plugin_loader`, and `destroy_count_scheduler_plugin`) or the
+complete new marker set (`test_policy_execution`, `test_policy_registry`, and
+`test_policy_plugin`), never a partial or mixed set. Build integrity requires
+the stable `photospider_kernel` aggregate rather than architecture-specific
+implementation targets and still builds the complete tree. Full CTest remains
+the authority for ordinary registered tests, while plugin, CLI,
+`execution-repeat`, and sanitizer shards select contract-specific assertions.
+The generated CLI configuration is mutually exclusive: CI does not pass
+removed scheduler keys to a policy/execution revision or introduce a product
+compatibility translation.
+
 `healthcheck-published-image` is a container job, and published-image
 healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
@@ -1015,8 +1029,8 @@ detection without emitting a false negative route.
 The maintained entry points are:
 
 - `ci/scripts/healthcheck.sh` for fail-closed changed-path inventory, diff,
-  format, cpplint, the build-smoke inventory regression, and both durable shell
-  regressions.
+  format, cpplint, the build-smoke inventory regression, runtime-capability
+  regression, and both durable routing shell regressions.
 - `ci/scripts/change_classification.sh` and
   `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
   routing and its durable event/path regression matrix.
@@ -1030,8 +1044,9 @@ The maintained entry points are:
   published/local job-scoped pull-request exact-base and `CI/**`
   cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
   allow-empty configuration preflight, strict post-build matrix job output,
-  empty-output-safe `fromJSON`, full-CTest/fallback routing; newline-path
-  artifacts; and detector/reader/producer failure propagation. It
+  empty-output-safe `fromJSON`, full-CTest/fallback routing,
+  architecture-neutral `execution-repeat` routing; newline-path artifacts; and
+  detector/reader/producer failure propagation. It
   executes the production trust block with an isolated HOME/repository and
   requires exactly that repository in the resulting global trust list. It also
   executes both production main-fetch blocks, while an isolated Git history
@@ -1045,20 +1060,21 @@ The maintained entry points are:
   exact index-based execution, absent/disabled/commandless selections stopping
   before a second subprocess, and a real configure-placeholder-to-post-build
   discovery fixture.
+- `ci/scripts/runtime_capability_test.sh` for exact Make/Ninja target parsing,
+  complete legacy and policy/execution profiles, partial/mixed/absent
+  fail-closed behavior, required-target validation, and mutually exclusive CLI
+  configuration.
 - `ci/scripts/integration_plan.sh` for allow-empty exact-label configuration
   preflight without authoritative matrix output.
 - `ci/scripts/build_integrity.sh` for the default producer profile, including
-  required-target/full builds, strict post-build labelled CTest validation, and
-  the authoritative matrix job output.
+  runtime-contract detection, architecture-neutral required-target/full builds,
+  strict post-build labelled CTest validation, and the authoritative matrix job
+  output.
 - `ci/scripts/ctest_full.sh` for the main CTest suite with the exact
   `build-smoke` label excluded.
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
   running every post-build-discovered build smoke alongside full CTest, CLI,
-  propagation, and plugin coverage. Its protected trusted-CI revision still
-  references the removed scheduler suite; the base-repository CI owner must
-  replace that block with current policy/execution coverage before Issue #75
-  can pass the remote integration gate. An ordinary feature branch does not
-  modify that protected script.
+  propagation, plugin, and capability-selected execution coverage.
 
 CI source inventories and exclusion lists must describe maintained tests and
 current source paths. Migration-only harness names must not be retained as
