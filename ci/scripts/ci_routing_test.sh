@@ -736,7 +736,7 @@ assert_gate_checks_all_results() {
         scripted-cli
         propagation-script
         plugin-load
-        scheduler-repeat
+        execution-repeat
       )
       ;;
     *)
@@ -858,6 +858,51 @@ validate_build_smoke_matrix_contract() {
   assert_file_not_contains "$workflow" '  ipc-disabled-install-smoke:'
 
   pass integration-label-driven-build-smoke-matrix
+}
+
+# @brief Validate architecture-neutral repeat routing and capability regression.
+# @param $1 Integration workflow YAML path.
+# @return Zero when workflow, local suite, and healthcheck use the new contract.
+# @throws Nothing; missing or stale source contracts exit through fail.
+# @note This source-level check preserves the existing DAG while preventing the
+#   removed scheduler-only shard name from re-entering trusted CI.
+validate_runtime_capability_routing() {
+  local workflow=$1
+  local repeat_job="$TEST_ROOT/integration-execution-repeat-job.yml"
+  local local_image_job="$TEST_ROOT/integration-local-image-job.yml"
+  local local_suite="$REPO_ROOT/ci/scripts/integration_suite.sh"
+  local healthcheck_script="$REPO_ROOT/ci/scripts/healthcheck.sh"
+
+  extract_job_block "$workflow" execution-repeat "$repeat_job" ||
+    fail "execution-repeat job could not be extracted"
+  extract_job_block "$workflow" local-image-integration "$local_image_job" ||
+    fail "local-image-integration job could not be extracted"
+
+  assert_file_contains "$repeat_job" \
+    'run: bash ci/scripts/execution_repeat_test.sh'
+  assert_file_contains "$repeat_job" \
+    'CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/execution-repeat'
+  assert_file_contains "$repeat_job" 'EXECUTION_REPEAT: 5'
+  assert_file_contains "$repeat_job" 'LEGACY_GPU_REPEAT: 3'
+  assert_file_contains "$repeat_job" 'name: execution-repeat-results'
+  assert_file_contains "$repeat_job" 'path: CI-results/execution-repeat'
+
+  assert_file_contains "$local_image_job" '-e EXECUTION_REPEAT=5 \'
+  assert_file_contains "$local_image_job" '-e LEGACY_GPU_REPEAT=3 \'
+  assert_file_contains "$local_suite" \
+    'bash "$SCRIPT_DIR/execution_repeat_test.sh"'
+  assert_file_contains "$local_suite" \
+    'CI_ARTIFACT_DIR="$CI_ARTIFACT_ROOT/execution-repeat"'
+  assert_file_contains "$healthcheck_script" \
+    'bash "$SCRIPT_DIR/runtime_capability_test.sh"'
+
+  assert_file_not_contains "$workflow" 'scheduler-repeat'
+  assert_file_not_contains "$workflow" 'SCHEDULER_REPEAT'
+  assert_file_not_contains "$workflow" 'GPU_PIPELINE_REPEAT'
+  assert_file_not_contains "$workflow" 'scheduler_repeat_test.sh'
+  assert_file_not_contains "$local_suite" 'scheduler_repeat_test.sh'
+
+  pass integration-runtime-capability-routing
 }
 
 # @brief Validate the canonical protected condition and executable gate contracts.
@@ -1487,6 +1532,7 @@ main() {
   validate_workflow_contract "$health_workflow" "Report healthcheck gate"
   validate_workflow_contract "$integration_workflow" "Report integration gate"
   validate_build_smoke_matrix_contract "$integration_workflow"
+  validate_runtime_capability_routing "$integration_workflow"
   validate_published_image_base_fetch "$health_workflow"
   validate_published_image_fetch_shells "$health_workflow"
   validate_published_image_workspace_trust "$health_workflow"

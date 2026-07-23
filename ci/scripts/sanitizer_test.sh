@@ -28,45 +28,55 @@ source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
-run_gtest_checked() {
-  local name=$1
-  local binary=$2
-  local filter=${3:-}
-  local list_log="$CI_ARTIFACT_DIR/${name}_list.log"
-  local -a list_cmd=("$binary" --gtest_list_tests)
-  local -a run_cmd=("$binary")
-  if [[ -n "$filter" ]]; then
-    list_cmd+=(--gtest_filter="$filter")
-    run_cmd+=(--gtest_filter="$filter")
-  fi
-  "${list_cmd[@]}" > "$list_log" 2>&1
-  local selected_count
-  selected_count=$(grep -Ec '^  [A-Za-z0-9_]' "$list_log" || true)
-  if [[ "$selected_count" -le 0 ]]; then
-    echo "No GoogleTest cases selected for $name." >&2
-    cat "$list_log" >&2
-    exit 1
-  fi
-  echo "$selected_count GoogleTest case(s) selected for $name." |
-    tee "$CI_ARTIFACT_DIR/${name}_selected.log"
-  run_logged "$name" "${run_cmd[@]}"
-}
-
 ensure_ci_configured "cmake_configure_$SANITIZER"
-ensure_ci_targets "build_sanitizer_$SANITIZER" \
-  test_scheduler \
-  test_compute_service_split \
-  test_propagation_contracts
+capture_ci_target_inventory
+runtime_contract=$(ci_runtime_contract)
+case "$runtime_contract" in
+  legacy_scheduler)
+    run_logged "validate_sanitizer_targets_$SANITIZER" require_ci_targets \
+      test_scheduler \
+      test_compute_service_split \
+      test_propagation_contracts
+    ensure_ci_targets "build_sanitizer_$SANITIZER" \
+      test_scheduler \
+      test_compute_service_split \
+      test_propagation_contracts
 
-run_gtest_checked "sanitizer_scheduler_$SANITIZER" \
-  "$BUILD_DIR/tests/test_scheduler" \
-  "SchedulerDirtyReadyTasks.SourceFirstOrderOnSerialAndCpuSchedulers:SchedulerTestM33.ParallelComputeWithNewScheduler"
+    run_gtest_checked "sanitizer_scheduler_$SANITIZER" \
+      "$BUILD_DIR/tests/test_scheduler" \
+      "SchedulerDirtyReadyTasks.SourceFirstOrderOnSerialAndCpuSchedulers:SchedulerTestM33.ParallelComputeWithNewScheduler"
+    ;;
+  policy_execution)
+    run_logged "validate_sanitizer_targets_$SANITIZER" require_ci_targets \
+      test_policy_execution \
+      test_compute_run \
+      test_resource_admission \
+      test_compute_service_split \
+      test_propagation_contracts
+    ensure_ci_targets "build_sanitizer_$SANITIZER" \
+      test_policy_execution \
+      test_compute_run \
+      test_resource_admission \
+      test_compute_service_split \
+      test_propagation_contracts
+
+    run_gtest_checked "sanitizer_policy_execution_$SANITIZER" \
+      "$BUILD_DIR/tests/test_policy_execution" \
+      "PhysicalExecutionIntegration.*:PolicyExecutionFixture.*:ExecutionServiceReservedStart.*"
+    run_gtest_checked "sanitizer_execution_policy_$SANITIZER" \
+      "$BUILD_DIR/tests/test_compute_run" \
+      "ExecutionServicePolicy.*:Issue75DeviceRouting.*"
+    run_gtest_checked "sanitizer_resource_admission_$SANITIZER" \
+      "$BUILD_DIR/tests/test_resource_admission" ""
+    ;;
+esac
 
 run_gtest_checked "sanitizer_compute_$SANITIZER" \
   "$BUILD_DIR/tests/test_compute_service_split" \
   "ComputeGeometrySplit.*:ComputeCachePolicySplit.*:TaskGraphPlanningSplit.PreservesSequentialParallelPlanParity:IntentUpdateCoordinatorSplit.ValidatesRtDirtyRoiAndCoordinatesRtFirstConcurrency"
 
 run_gtest_checked "sanitizer_propagation_$SANITIZER" \
-  "$BUILD_DIR/tests/test_propagation_contracts"
+  "$BUILD_DIR/tests/test_propagation_contracts" ""
 
-echo "$SANITIZER sanitizer checks passed." | tee "$CI_ARTIFACT_DIR/summary.log"
+echo "$runtime_contract $SANITIZER sanitizer checks passed." |
+  tee "$CI_ARTIFACT_DIR/summary.log"

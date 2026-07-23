@@ -23,6 +23,11 @@ BUILD_TESTING=${BUILD_TESTING:-ON}
 BUILD_SMOKE_LABEL=build-smoke
 readonly BUILD_SMOKE_LABEL
 CI_BUILD_STAMP="$BUILD_DIR/.photospider-ci-build-complete"
+# @var CI_TARGET_INVENTORY_FILE
+# @brief Artifact containing the configured generator's build-target inventory.
+# @note The inventory is refreshed after configuration and parsed by exact
+#   target identity; callers may override the path only for isolated tests.
+CI_TARGET_INVENTORY_FILE=${CI_TARGET_INVENTORY_FILE:-"$CI_ARTIFACT_DIR/cmake_target_inventory.log"}
 
 mkdir -p "$CI_ARTIFACT_DIR"
 
@@ -242,10 +247,161 @@ ensure_ci_all() {
   run_logged "$name" build_ci_all
 }
 
+# @brief Capture the configured generator's complete target-help output.
+# @return Zero when CMake emits the inventory, otherwise its command status.
+# @throws Nothing; configuration and generator failures return nonzero.
+# @note This read-only query works for both fresh and reusable build trees.
+capture_ci_target_inventory() {
+  run_logged cmake_target_inventory \
+    cmake --build "$BUILD_DIR" --target help
+}
+
+# @brief Check one exact target in the captured CMake target inventory.
+# @param $1 Exact CMake target name.
+# @return Zero when present, one when absent, or two without an inventory.
+# @throws Nothing; malformed or missing input is represented by status.
+# @note Both Makefile `... target` and Ninja `target: rule` help forms are
+#   accepted without interpreting the target as a regular expression.
+ci_target_exists() {
+  local target=$1
+  if [[ ! -f "$CI_TARGET_INVENTORY_FILE" ]]; then
+    echo "CMake target inventory is missing: $CI_TARGET_INVENTORY_FILE" >&2
+    return 2
+  fi
+  awk -v expected="$target" '
+    {
+      candidate = $1
+      if (candidate == "...") {
+        candidate = $2
+      }
+      sub(/:$/, "", candidate)
+      if (candidate == expected) {
+        found = 1
+      }
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$CI_TARGET_INVENTORY_FILE"
+}
+
+# @brief Require every supplied CMake target to exist in the captured inventory.
+# @param $@ Exact target names.
+# @return Zero when all targets exist, otherwise one after listing every miss.
+# @throws Nothing; missing inventory and targets are status failures.
+# @note This validates configuration capability before any build is requested.
+require_ci_targets() {
+  local target
+  local missing_count=0
+  if [[ ! -f "$CI_TARGET_INVENTORY_FILE" ]]; then
+    echo "CMake target inventory is missing: $CI_TARGET_INVENTORY_FILE" >&2
+    return 1
+  fi
+  for target in "$@"; do
+    if ! ci_target_exists "$target"; then
+      echo "Required configured CMake target is missing: $target" >&2
+      missing_count=$((missing_count + 1))
+    fi
+  done
+  ((missing_count == 0))
+}
+
+# @brief Classify the configured runtime validation contract.
+# @return Prints `legacy_scheduler` or `policy_execution` for one exact profile.
+# @throws Nothing; partial, mixed, or absent capability markers return nonzero.
+# @note The markers identify complete test/plugin surfaces. They do not restore
+#   removed scheduler products or translate configuration across architectures.
+ci_runtime_contract() {
+  local marker
+  local legacy_count=0
+  local policy_count=0
+  local -a legacy_markers=(
+    test_scheduler
+    test_scheduler_plugin_loader
+    destroy_count_scheduler_plugin
+  )
+  local -a policy_markers=(
+    test_policy_execution
+    test_policy_registry
+    test_policy_plugin
+  )
+  for marker in "${legacy_markers[@]}"; do
+    if ci_target_exists "$marker"; then
+      legacy_count=$((legacy_count + 1))
+    fi
+  done
+  for marker in "${policy_markers[@]}"; do
+    if ci_target_exists "$marker"; then
+      policy_count=$((policy_count + 1))
+    fi
+  done
+  if ((legacy_count == ${#legacy_markers[@]} && policy_count == 0)); then
+    printf 'legacy_scheduler\n'
+    return
+  fi
+  if ((policy_count == ${#policy_markers[@]} && legacy_count == 0)); then
+    printf 'policy_execution\n'
+    return
+  fi
+  printf 'Invalid runtime capability inventory: legacy=%d/%d policy=%d/%d\n' \
+    "$legacy_count" "${#legacy_markers[@]}" \
+    "$policy_count" "${#policy_markers[@]}" >&2
+  return 1
+}
+
+# @brief Run a nonempty GoogleTest selection with optional execution arguments.
+# @param $1 Stable log name.
+# @param $2 GoogleTest binary path.
+# @param $3 Optional GoogleTest filter; an empty value selects the whole binary.
+# @param $@ Remaining arguments are forwarded only to the real execution.
+# @return Zero when discovery is nonempty and the selected tests pass.
+# @throws Nothing; list, selection, and test failures return nonzero.
+# @note Discovery runs once without repeat/shuffle arguments so an empty filter
+#   cannot become a successful no-op.
+run_gtest_checked() {
+  local name=$1
+  local binary=$2
+  local filter=$3
+  shift 3
+  local list_log="$CI_ARTIFACT_DIR/${name}_list.log"
+  local selected_count
+  local -a list_cmd=("$binary" --gtest_list_tests)
+  local -a run_cmd=("$binary")
+  if [[ -n "$filter" ]]; then
+    list_cmd+=(--gtest_filter="$filter")
+    run_cmd+=(--gtest_filter="$filter")
+  fi
+  run_cmd+=("$@")
+  "${list_cmd[@]}" > "$list_log" 2>&1
+  selected_count=$(grep -Ec '^  [A-Za-z0-9_]' "$list_log" || true)
+  if [[ "$selected_count" -le 0 ]]; then
+    echo "No GoogleTest cases selected for $name." >&2
+    sed -n '1,240p' "$list_log" >&2
+    return 1
+  fi
+  echo "$selected_count GoogleTest case(s) selected for $name." |
+    tee "$CI_ARTIFACT_DIR/${name}_selected.log"
+  run_logged "$name" "${run_cmd[@]}"
+}
+
+# @brief Write one architecture-correct graph_cli configuration.
+# @param $1 Destination YAML path.
+# @param $2 Cache directory used by the scripted CLI runtime.
+# @param $3 Optional detected runtime contract.
+# @return Zero after writing a supported profile, otherwise nonzero.
+# @throws Nothing; filesystem failures and unsupported profiles return nonzero.
+# @note Profiles are emitted independently: removed scheduler keys never enter
+#   policy/execution configuration, and no product-side translation is used.
 write_cli_config() {
   local config_path=$1
   local cache_dir=$2
-  cat > "$config_path" <<EOF
+  local runtime_contract=${3:-}
+  if [[ -z "$runtime_contract" ]]; then
+    runtime_contract=$(ci_runtime_contract)
+  fi
+  case "$runtime_contract" in
+    legacy_scheduler)
+      cat > "$config_path" <<EOF
 cache_root_dir: "$cache_dir"
 cache_precision: int8
 plugin_dirs:
@@ -270,6 +426,41 @@ scheduler_hp_type: cpu_work_stealing
 scheduler_rt_type: cpu_work_stealing
 scheduler_worker_count: 0
 EOF
+      ;;
+    policy_execution)
+      cat > "$config_path" <<EOF
+cache_root_dir: "$cache_dir"
+cache_precision: int8
+plugin_dirs:
+  - "$BUILD_DIR/plugins"
+policy_dirs:
+  - "$BUILD_DIR/policies"
+history_size: 10
+default_print_mode: full
+default_traversal_arg: n
+default_cache_clear_arg: md
+default_exit_save_path: "$CI_ARTIFACT_DIR/graph_out.yaml"
+exit_prompt_sync: false
+config_save_behavior: current
+editor_save_behavior: ask
+default_timer_log_path: "$CI_ARTIFACT_DIR/timer.yaml"
+default_ops_list_mode: all
+ops_plugin_path_mode: name_only
+default_compute_args: ""
+switch_after_load: true
+session_warning: false
+policy_interactive_type: fifo
+policy_throughput_type: fifo
+execution_hp_type: cpu
+execution_rt_type: cpu
+execution_worker_count: 0
+EOF
+      ;;
+    *)
+      echo "Unsupported CI runtime contract: $runtime_contract" >&2
+      return 2
+      ;;
+  esac
 }
 
 require_grep() {
