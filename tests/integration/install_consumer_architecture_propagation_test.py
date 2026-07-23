@@ -1097,8 +1097,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
         self.assertEqual(set(observation), ARCHIVE_SYMBOL_OBSERVATION_KEYS)
         self.assertEqual(observation["tool_source"], "xcrun llvm-nm")
         self.assertTrue(observation["covers_product_seams"])
-        self.assertEqual(observation["required_anchor_count"], 3)
-        self.assertEqual(observation["required_anchor_total"], 3)
+        self.assertEqual(observation["required_anchor_count"], 4)
+        self.assertEqual(observation["required_anchor_total"], 4)
         self.assertEqual(observation["prohibited_symbol_count"], 1)
         self.assertEqual(
             observation["prohibited_symbols"], {forbidden_symbol: 1}
@@ -1290,7 +1290,7 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
     def test_darwin_unusable_path_llvm_nm_falls_back_to_nm(self) -> None:
         """@brief Try PATH nm when earlier discovery/scan candidates fail.
 
-        @return None after nm supplies all three required anchors.
+        @return None after nm supplies all four required anchors.
         @throws AssertionError If a zero-exit but anchor-blind tool is accepted.
         @note This models a PATH llvm-nm that cannot inspect the installed
           archive format despite exiting successfully.
@@ -1327,8 +1327,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
                 {
                     "tool_source": "PATH llvm-nm",
                     "reason": "inspection missed required anchors",
-                    "missing_anchor_count": 3,
-                    "required_anchor_total": 3,
+                    "missing_anchor_count": 4,
+                    "required_anchor_total": 4,
                 },
                 {
                     "tool_source": "PATH nm",
@@ -1453,8 +1453,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
                 {
                     "tool_source": "PATH nm",
                     "reason": "inspection missed required anchors",
-                    "missing_anchor_count": 3,
-                    "required_anchor_total": 3,
+                    "missing_anchor_count": 4,
+                    "required_anchor_total": 4,
                 },
             ],
         )

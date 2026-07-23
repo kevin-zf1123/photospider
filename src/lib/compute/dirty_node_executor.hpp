@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "compute/dirty_execution_common.hpp"
@@ -22,6 +22,30 @@ namespace ps::compute {
 
 class ComputeRunLease;
 class StabilizedDirtyParameters;
+
+/**
+ * @brief Immutable operation/device snapshot for one dirty-plan node.
+ *
+ * The dirty executor resolves this value before service admission so callback
+ * execution cannot observe a different registry revision or device inventory.
+ * The callable copy retains any plugin DSO lease carried by the registry
+ * wrapper.
+ *
+ * @throws std::bad_alloc when copying callable ownership allocates.
+ * @note The selected device names the private execution lane used by every
+ * task materialized for the node. CPU fallback remains explicit.
+ */
+struct DirtyResolvedOperation {
+  /** @brief Selected monolithic or tiled callable snapshot. */
+  OpRegistry::OpVariant operation;
+
+  /** @brief Device whose private lane must execute the callable. */
+  Device device = Device::CPU;
+};
+
+/** @brief Node-id index of immutable dirty operation/device snapshots. */
+using DirtyResolvedOperationMap = std::unordered_map<
+    int, DirtyResolvedOperation>;  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Borrowed execution context shared by HP and RT dirty node executors.
@@ -49,6 +73,9 @@ struct DirtyNodeExecutionContext {
 
   /** @brief Dirty snapshot that marks source boundary nodes. */
   const DirtyRegionSnapshot& snapshot;
+
+  /** @brief Frozen operation/device snapshots indexed by graph node id. */
+  const DirtyResolvedOperationMap& resolved_operations;
 
   /** @brief Dirty generation used to reject stale source callbacks. */
   uint64_t dirty_generation;
@@ -130,22 +157,22 @@ class HighPrecisionDirtyNodeExecutor {
   ResolvedNodeInputs resolve_inputs(Node& node) const;
 
   /**
-   * @brief Executes the best available HP operation for one node.
+   * @brief Executes the frozen HP operation for one node.
    *
    * @param node Node being computed.
    * @param entry HP ROI and extent metadata.
    * @param image_inputs_ready Resolved HP image inputs.
+   * @param operation Planning-time selected operation snapshot.
    * @return Nothing.
    * @throws std::bad_alloc when operation execution or staging exhausts
    * memory.
-   * @throws GraphError when no HP tiled/monolithic operation exists or an
-   * operation returns no output.
-   * @note Tiled HP implementations remain preferred over monolithic HP
-   * implementations, preserving the previous dirty path selection order.
+   * @throws GraphError when an operation returns no output.
+   * @note Selection and device routing already completed before admission.
    */
   void execute_operation(
       Node& node, const HpPlanEntry& entry,
-      const std::vector<const NodeOutput*>& image_inputs_ready) const;
+      const std::vector<const NodeOutput*>& image_inputs_ready,
+      const OpRegistry::OpVariant& operation) const;
 
   /**
    * @brief Ensures the HP cache image buffer can receive tiled dirty output.
@@ -241,6 +268,9 @@ class HighPrecisionDirtyNodeExecutor {
   /** @brief Dirty snapshot that marks source boundary nodes. */
   const DirtyRegionSnapshot& snapshot_;
 
+  /** @brief Frozen operation/device snapshots for the current dirty plan. */
+  const DirtyResolvedOperationMap& resolved_operations_;
+
   /** @brief Dirty generation used to detect stale source callbacks. */
   uint64_t dirty_generation_;
 
@@ -313,18 +343,6 @@ class RealTimeDirtyNodeExecutor {
    * serial compatibility fallback.
    */
   ResolvedNodeInputs resolve_inputs(Node& node) const;
-
-  /**
-   * @brief Resolves the operation used for RT dirty execution.
-   *
-   * @param node Node whose operation implementation is requested.
-   * @return RT implementation, or HP implementation as fallback.
-   * @throws Nothing directly.
-   * @note Returning nullopt lets execute() raise the same NoOperation error
-   * message as the previous combined dirty executor.
-   */
-  std::optional<OpRegistry::OpVariant> resolve_operation(
-      const Node& node) const;
 
   /**
    * @brief Ensures the staged RT proxy buffer matches the planned RT extent.
@@ -457,6 +475,9 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Dirty snapshot that marks source boundary nodes. */
   const DirtyRegionSnapshot& snapshot_;
+
+  /** @brief Frozen operation/device snapshots for the current dirty plan. */
+  const DirtyResolvedOperationMap& resolved_operations_;
 
   /** @brief Dirty generation used to detect stale source callbacks. */
   uint64_t dirty_generation_;

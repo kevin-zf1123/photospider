@@ -94,9 +94,9 @@ Host composition 的 resource ledger 不对这些 lane worker 或固定 service 
 | `DirtySnapshotTaskGraphPruner` | 从既有 plan 选择活动 dirty work | task expansion |
 | `IntentUpdateCoordinator` | HP-only 或 HP/RT sibling 语义 | 物理优先级或 worker 所有权 |
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit、policy ranking 或物理执行 |
-| `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、variant、结果槽与 callback owner | execution-route worker、Run terminal state 或 dirty-path execution |
-| `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
-| `ExecutionService` | 一个 Host-owned 固定 CPU domain、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、policy-aware 有界 ready storage、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority、lifecycle admission registry 或 visible commit |
+| `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、冻结的 implementation/device snapshot、结果槽与 callback owner | execution-route worker、Run terminal state 或 dirty-path execution |
+| `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、selected `Device`、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
+| `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、policy-aware 有界 ready storage、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority、lifecycle admission registry 或 visible commit |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | execution trace 所有权 |
 | `PolicyRegistry` 与 policy binding | 验证 built-in/DSO policy type，拥有进程级 context 与 DSO lease，并为 Host-authored 不可变 candidate snapshot 排序 | worker、queue、resource grant、Run、Graph、completion 或 start authority |
@@ -230,9 +230,10 @@ Policy callback 与私有 route 都不会收到 `GraphModel`、`ComputeTaskGraph
 `TaskSubmissionPlan` 作为另一个 `ReadyTaskSubmission` 释放；只有 Host 能验证 candidate、提交
 start，并把 callback 所有权转移到复制的 Graph route binding。
 
-Issue #70 与 #71 的 CPU service 在 Kernel 之前显式组合，并直接拥有一个固定 worker pool、一个 Host
-权威 ledger 和一个有界 ready store。配置只会解析并冻结一次 `[1,8]` 个基础设施 worker；Graph
-load、replacement、Run execution 与 dirty 阶段都不会调整其大小。每个 Run 在发布前原子预留
+Issue #70 与 #71 的 CPU service 在 Kernel 之前显式组合，并直接拥有一个固定 CPU worker pool、
+一个私有 Metal worker lane、一个 Host 权威 ledger 和一个有界 ready store。配置只会解析并
+冻结一次 `[1,8]` 个 CPU 基础设施 worker；Graph load、replacement、Run execution 与 dirty
+阶段都不会调整任一 lane 的大小。每个 Run 在发布前原子预留
 完整且经过检查的 CPU/retained/scratch/ready vector。Initial 与 dependency-released work 都
 必须持有匹配的 ready-entry/byte grant，并进入同一个 policy route；从队列移除时会把该 grant
 交换为 CPU/memory/scratch 执行权。Completion、failure 与所有异常路径都恰好释放一次精确 vector。
@@ -261,6 +262,13 @@ ready admission、只清除其 queued entry，并等待已经运行的 callback 
 `gpu_pipeline` 实现，并对三者应用相同的 ledger/reserved-start 边界。Route replacement 会验证
 并发布新的 generation，不构造 per-Graph executor 或 reservation。Ledger 不会虚构 device、I/O
 或 plugin-specific dimension。
+
+规范 inventory 同时感知 route 与 Host：`cpu` 和 `serial_debug` 只暴露 CPU；Metal 可用时，
+`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与 connected-preflight
+planning 会在准入前冻结选中的 implementation 与 device。CPU work 进入固定 pool，Metal work
+进入单一 GPU lane；二者仍消耗同一个 Run root grant 和 maximum-parallelism ceiling。不可用
+device 会在 active Run 发布前被拒绝；completion、exception、cancellation、reuse、shutdown 与
+drainage 会退役精确的公共 ledger/Run state。
 
 ## OpenCV Operation 并发
 

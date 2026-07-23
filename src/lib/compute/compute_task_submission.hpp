@@ -536,6 +536,9 @@ class TaskSubmissionPlan {
   /** @brief Devices available for operation implementation selection. */
   std::vector<Device> available_devices_;
 
+  /** @brief Selected operation devices aligned with execution_order_. */
+  std::vector<Device> execution_devices_;
+
   /** @brief Runtime dependency counters and dense node-id mapping. */
   TaskDependencyState dependency_state_;
 

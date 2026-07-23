@@ -1,6 +1,5 @@
 #include "compute/compute_task_dispatcher.hpp"
 
-#include <algorithm>
 #include <exception>
 #include <mutex>
 #include <optional>
@@ -222,13 +221,11 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
 
   ComputeRunLease dispatcher_lease = lifecycle_lease;
   observe_dispatch_cancellation(dispatcher_lease);
-  std::vector<Device> available_devices = task_runtime.available_devices();
-  if (execution_type != nullptr && *execution_type == "gpu_pipeline" &&
-      host != nullptr && host->is_device_available(Device::GPU_METAL) &&
-      std::find(available_devices.begin(), available_devices.end(),
-                Device::GPU_METAL) == available_devices.end()) {
-    available_devices.insert(available_devices.begin(), Device::GPU_METAL);
-  }
+  std::vector<Device> available_devices =
+      execution_service != nullptr && host != nullptr &&
+              execution_type != nullptr
+          ? execution_service->available_devices(*host, *execution_type)
+          : task_runtime.available_devices();
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal_, node_id, std::move(available_devices));
   if (request.force_recache) {

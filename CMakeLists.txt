@@ -684,12 +684,14 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These three translation units own the Issue #72 deterministic observation
-# seams. The installable archive always receives their production objects;
+# These four translation units own the Issue #72 and Issue #75 deterministic
+# observation seams. The installable archive always receives their production
+# objects;
 # focused tests receive a non-installed variant while reusing every common
 # object. Keeping the split at translation-unit granularity avoids compiling a
 # second copy of the complete embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
+    src/lib/compute/execution_service.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
     src/lib/runtime/kernel_compute.cpp)
@@ -707,7 +709,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the three-source test object target.
+# the caller only to the four-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -784,6 +786,7 @@ add_library(photospider STATIC
 configure_photospider_product_archive(photospider)
 
 set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
+    PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
@@ -804,7 +807,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 # Fail configuration if a future refactor accidentally restores an Issue #72
-# test definition on any production product target.
+# or Issue #75 test definition on any production product target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -1616,8 +1619,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_link_libraries(test_policy_registry PRIVATE ${CMAKE_DL_LIBS})
     add_dependencies(test_policy_registry test_policy_plugin
         missing_api_policy_plugin mismatched_abi_policy_plugin)
-    add_ps_test(test_policy_execution tests/unit/test_policy_execution.cpp)
+    add_ps_test(test_policy_execution tests/unit/test_policy_execution.cpp
+        photospider_internal_test_product)
     target_compile_definitions(test_policy_execution PRIVATE
+        PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>")
     target_link_libraries(test_policy_execution PRIVATE ${CMAKE_DL_LIBS})
     add_dependencies(test_policy_execution test_policy_plugin)
@@ -1968,7 +1973,8 @@ if(TARGET photospider_internal_test_product)
         endif()
     endforeach()
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
-        test_kernel_contracts)
+        test_kernel_contracts
+        test_policy_execution)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         list(APPEND PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
             test_host_adapter)

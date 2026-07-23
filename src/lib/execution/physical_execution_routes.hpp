@@ -5,15 +5,33 @@
 #include <string_view>
 #include <vector>
 
+#include "photospider/core/device.hpp"
+
 namespace ps::execution {
+
+/**
+ * @brief Fixed worker lane owned by the private execution service.
+ *
+ * @throws Nothing for value construction and comparison.
+ * @note The enum is source-tree private. It does not create a public device
+ * executor or policy capability.
+ */
+enum class PhysicalExecutionLane : std::uint8_t {
+  /** @brief Process CPU worker pool lane. */
+  Cpu = 0U,
+
+  /** @brief Single service-owned GPU pipeline worker lane. */
+  Gpu = 1U,
+};
 
 /**
  * @brief Host-owned state for the three private physical execution routes.
  *
  * The owner centralizes route discovery plus allocation-free start/finish
- * admission. CPU and GPU-pipeline work may overlap on the process worker pool;
- * serial-debug work is restricted to worker zero and one in-flight callback.
- * No route is installed, exported, or supplied by a policy DSO.
+ * admission. CPU work uses the fixed process pool, while selected GPU work on
+ * `gpu_pipeline` uses one independent service-owned lane. Serial-debug work is
+ * restricted to CPU worker zero and one in-flight callback. No route is
+ * installed, exported, or supplied by a policy DSO.
  *
  * @throws Nothing for state transitions. Copied discovery/description values
  * may throw `std::bad_alloc`.
@@ -51,21 +69,28 @@ class PhysicalExecutionRoutes final {
   /**
    * @brief Tests route-local start constraints without changing state.
    * @param type_name Exact route selected by the Graph binding.
-   * @param worker_id Stable zero-based process worker id.
+   * @param device Device selected with the owned operation implementation.
+   * @param lane Fixed physical lane attempting the start.
+   * @param worker_id Stable zero-based private worker id.
    * @param run_in_flight Number of callbacks already entered for this Run.
    * @return True when this route can accept the callback now.
    * @throws Nothing.
    * @note Run cancellation, maximum parallelism, resource grants, and policy
-   * admissibility are validated by `ExecutionService` before this route-local
-   * check. Serial-debug additionally requires worker zero, an idle global
-   * serial route, and no callback already in flight for the same Run.
+   * admissibility and Host device availability are validated by
+   * `ExecutionService` before this route-local check. CPU and serial-debug
+   * reject GPU devices. `gpu_pipeline` maps CPU fallback work to the CPU lane
+   * and Metal work to its single GPU lane. Serial-debug additionally
+   * requires worker zero, an idle global serial route, and no callback already
+   * in flight for the same Run.
    */
-  bool can_start(std::string_view type_name, int worker_id,
+  bool can_start(std::string_view type_name, Device device,
+                 PhysicalExecutionLane lane, int worker_id,
                  std::uint64_t run_in_flight) const noexcept;
 
   /**
    * @brief Commits one route-local callback start.
    * @param type_name Exact route already accepted by `can_start()`.
+   * @param device Device whose matching lane is being committed.
    * @return True after incrementing the matching in-flight counter; false when
    * the route became unavailable, shutdown began, or its counter is exhausted.
    * @throws Nothing.
@@ -73,16 +98,17 @@ class PhysicalExecutionRoutes final {
    * ready-store reserved-start transition. No allocation or external callback
    * occurs here.
    */
-  bool commit_start(std::string_view type_name) noexcept;
+  bool commit_start(std::string_view type_name, Device device) noexcept;
 
   /**
    * @brief Retires one previously committed route-local callback.
    * @param type_name Exact route whose callback exited or was suppressed.
+   * @param device Device retained by the committed ready submission.
    * @return True after decrementing the matching counter; false for an unknown
    * route or unmatched finish.
    * @throws Nothing.
    */
-  bool finish(std::string_view type_name) noexcept;
+  bool finish(std::string_view type_name, Device device) noexcept;
 
   /**
    * @brief Stops future starts while allowing committed callbacks to retire.
@@ -95,7 +121,7 @@ class PhysicalExecutionRoutes final {
 
   /**
    * @brief Reports whether every committed route callback has retired.
-   * @return True only when all three in-flight counters are zero.
+   * @return True only when every route/lane in-flight counter is zero.
    * @throws Nothing.
    */
   bool drained() const noexcept;
@@ -114,8 +140,11 @@ class PhysicalExecutionRoutes final {
   /** @brief Committed process CPU-route callbacks. */
   std::uint64_t cpu_in_flight_ = 0U;
 
-  /** @brief Committed Host GPU-pipeline-route callbacks. */
-  std::uint64_t gpu_pipeline_in_flight_ = 0U;
+  /** @brief Committed GPU-pipeline CPU-fallback callbacks. */
+  std::uint64_t gpu_pipeline_cpu_in_flight_ = 0U;
+
+  /** @brief Committed callbacks on the single GPU pipeline lane. */
+  std::uint64_t gpu_pipeline_gpu_in_flight_ = 0U;
 
   /** @brief Committed deterministic serial-debug callbacks. */
   std::uint64_t serial_debug_in_flight_ = 0U;

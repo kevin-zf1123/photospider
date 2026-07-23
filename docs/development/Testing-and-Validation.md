@@ -65,19 +65,22 @@ All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
 `BUILD_TESTING` controls availability of internal test products, not how the
-installed `photospider` archive compiles the Issue #72 observation seams. The
+installed `photospider` archive compiles the Issue #72/#75 observation seams. The
 product source inventory is divided into common objects, compiled once, and
-production objects for `graph_cache_service.cpp`,
+production objects for `execution_service.cpp`, `graph_cache_service.cpp`,
 `graph_state_executor.cpp`, and `kernel_compute.cpp`. The real archive always
-uses the production form of those three translation units, with no
+uses the production form of those four translation units, with no
+`PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, or
 `PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` declarations, globals, branches,
 or symbols. Focused tests link a non-installed
 `photospider_internal_test_product` that reuses the same common objects and
-recompiles only those three translation units with the deterministic seams.
+recompiles only those four translation units with the deterministic seams.
 No target links both complete archives, and the test product is absent from
-install and export sets.
+install and export sets. The Issue #75 probe declarations are source-tree-
+private free functions, so the macro does not change the production
+`ExecutionService` class definition or object layout.
 
 `StaticProductConsumerSmoke` enforces that boundary for both
 `BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
@@ -86,7 +89,7 @@ real product is installed, Darwin first invokes and validates
 non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
 that order. Canonically identical executable paths run once. A candidate is
 usable only when it starts, exits successfully, emits symbols, and exposes
-defined anchors from all three production seam objects. Otherwise the smoke
+defined anchors from all four production seam objects. Otherwise the smoke
 records a path-free failure reason and tries the next candidate; no candidate
 or all unusable candidates fail closed. The first usable full symbol table is
 authoritative and rejects every hook function/helper/global fragment. The
@@ -566,6 +569,20 @@ continue to own Host-authored cost, class/frontier/fairness, aging, headroom,
 three-to-one progress, dependent re-entry, saturation, and exact grant release
 through reserved start.
 
+`test_physical_execution_routes` owns allocation-free route/lane state:
+CPU/Metal overlap, Metal single-flight, serial worker-zero single-flight,
+shutdown rejection, and committed-work drainage. `test_policy_execution`
+uses a deterministic fake-Metal Host to prove the canonical per-route device
+inventory, rejection before Run publication, distinct fixed CPU/GPU workers,
+Metal exception publication/recovery, route reuse, cancellation, and reserved-
+start rollback without candidate/version ABA or leaked grants. The rollback
+probe is fixed-size atomic state compiled only into the non-installed test
+product; production has no observer typedef, object field, class-layout change,
+worker hot-path callback/runtime branch, or symbol. `Issue75DeviceRouting.*` in
+`test_compute_run`
+proves that full HP, dirty HP/RT, and connected preflight freeze the chosen
+Metal implementation/device and use CPU fallback when Metal is absent.
+
 `test_cli_policy_execution_config` locks transactional policy/execution config
 parsing and exact Host application. `test_host_adapter` loads real operation
 ABI-v2 and pure-C policy ABI-v1 fixtures, configures both extensions, validates
@@ -587,10 +604,14 @@ Run the focused policy/execution boundary with:
 
 ```bash
 cmake --build build \
-  --target test_policy_registry test_resource_admission \
+  --target test_policy_registry test_policy_execution \
+  test_physical_execution_routes test_compute_run test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
+./build/tests/test_policy_execution
+./build/tests/test_physical_execution_routes
+./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
   --gtest_filter='CliPolicyExecutionConfigParsing.*:CliPolicyExecutionConfigApply.*'

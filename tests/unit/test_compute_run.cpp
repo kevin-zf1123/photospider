@@ -238,6 +238,15 @@ std::atomic_int g_resource_dirty_hp_operation_calls{0};
  */
 std::atomic_int g_resource_dirty_rt_operation_calls{0};
 
+/** @brief Counts Issue #75 CPU implementation entries. */
+std::atomic_int g_issue75_cpu_operation_calls{0};
+
+/** @brief Counts Issue #75 fake-Metal implementation entries. */
+std::atomic_int g_issue75_gpu_operation_calls{0};
+
+/** @brief Records the worker id that entered the latest fake-Metal callback. */
+std::atomic_int g_issue75_gpu_worker_id{-1};
+
 /** @brief Serializes process-global legacy cancellation callback configuration.
  */
 std::mutex g_legacy_cancellation_source_mutex;
@@ -405,6 +414,41 @@ NodeOutput make_resource_dirty_output(int value) {
 }
 
 /**
+ * @brief Registers deterministic CPU and fake-Metal operation candidates.
+ *
+ * @return Nothing.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note Registration is process-persistent and idempotent. Both candidates
+ * return the same shaped output while distinct values/counters expose the
+ * selected implementation and the GPU callback records its private worker.
+ */
+void ensure_issue75_device_operations_registered() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    OpMetadata metadata;
+    metadata.cost_score = 1;
+    OpRegistry::instance().register_impl(
+        "issue75_device_route", "source", Device::CPU,
+        MonolithicOpFunc([](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+          g_issue75_cpu_operation_calls.fetch_add(1, std::memory_order_relaxed);
+          return make_resource_dirty_output(75);
+        }),
+        metadata);
+    OpRegistry::instance().register_impl(
+        "issue75_device_route", "source", Device::GPU_METAL,
+        MonolithicOpFunc([](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+          g_issue75_gpu_operation_calls.fetch_add(1, std::memory_order_relaxed);
+          g_issue75_gpu_worker_id.store(GraphRuntime::this_worker_id(),
+                                        std::memory_order_relaxed);
+          return make_resource_dirty_output(76);
+        }),
+        metadata);
+  });
+}
+
+/**
  * @brief Registers deterministic operations used by product-adapter tests.
  *
  * @return Nothing.
@@ -532,6 +576,35 @@ class ScopedResourceRuntimeDirectory final {
  private:
   /** @brief Test-owned root removed at destruction. */
   std::filesystem::path path_;
+};
+
+/**
+ * @brief GraphRuntime test double with deterministic fake Metal capability.
+ *
+ * @throws Standard GraphRuntime construction exceptions unchanged.
+ * @note The runtime still owns real graph, trace, route, and proxy state. Only
+ * capability discovery is overridden; no native Metal object is fabricated.
+ */
+class FakeMetalGraphRuntime final : public GraphRuntime {
+ public:
+  /**
+   * @brief Constructs a runtime with controlled fake Metal availability.
+   * @param info Ordinary graph-runtime ownership configuration.
+   * @param metal_available Whether `GPU_METAL` is reported available.
+   * @throws Standard GraphRuntime construction exceptions unchanged.
+   */
+  FakeMetalGraphRuntime(const Info& info, bool metal_available)
+      : GraphRuntime(info), metal_available_(metal_available) {}
+
+  /** @copydoc GraphRuntime::is_device_available */
+  bool is_device_available(Device device) const noexcept override {
+    return device == Device::CPU ||
+           (metal_available_ && device == Device::GPU_METAL);
+  }
+
+ private:
+  /** @brief Controlled fake Metal capability. */
+  bool metal_available_ = false;
 };
 
 /**
@@ -820,6 +893,14 @@ class CompletionTrackingRuntime final : public ExecutionTaskRuntime {
 class ExecutionServiceHost final : public ExecutionHostContext {
  public:
   /**
+   * @brief Creates a trace Host with optional fake Metal capability.
+   * @param metal_available Whether `GPU_METAL` is reported available.
+   * @throws Nothing.
+   */
+  explicit ExecutionServiceHost(bool metal_available = false) noexcept
+      : metal_available_(metal_available) {}
+
+  /**
    * @brief Complete immutable execution trace tuple observed by one Host.
    *
    * @throws Nothing for scalar value construction and movement.
@@ -841,24 +922,25 @@ class ExecutionServiceHost final : public ExecutionHostContext {
 
   /**
    * @brief Reports the fixture's only physical capability.
-   * @param device Capability requested by the CPU execution service.
-   * @return True only for CPU.
+   * @param device Capability requested by the execution service.
+   * @return True for CPU and for the configured fake Metal capability.
    * @throws Nothing.
    */
   bool is_device_available(Device device) const noexcept override {
-    return device == Device::CPU;
+    return device == Device::CPU ||
+           (metal_available_ && device == Device::GPU_METAL);
   }
 
   /**
    * @brief Records one worker-context entry.
-   * @param worker_id CPU worker id, ignored after service validation.
+   * @param worker_id Fixed private CPU or GPU worker id.
    * @param epoch Active nonzero execution epoch.
    * @return Nothing.
    * @throws Nothing.
    */
   void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
-    (void)worker_id;
     (void)epoch;
+    last_worker_id_.store(worker_id, std::memory_order_relaxed);
     context_entries_.fetch_add(1, std::memory_order_relaxed);
   }
 
@@ -936,6 +1018,15 @@ class ExecutionServiceHost final : public ExecutionHostContext {
   }
 
   /**
+   * @brief Returns the latest fixed worker id observed at callback entry.
+   * @return Worker id, or -1 before any callback enters.
+   * @throws Nothing.
+   */
+  int last_worker_id() const noexcept {
+    return last_worker_id_.load(std::memory_order_relaxed);
+  }
+
+  /**
    * @brief Returns a thread-safe snapshot of every forwarded trace tuple.
    * @return Complete trace events in Host observation order.
    * @throws std::bad_alloc when snapshot storage cannot allocate.
@@ -956,11 +1047,17 @@ class ExecutionServiceHost final : public ExecutionHostContext {
   }
 
  private:
+  /** @brief Controlled fake Metal capability. */
+  bool metal_available_ = false;
+
   /** @brief Top-level CPU callback context entries. */
   std::atomic_int context_entries_{0};
 
   /** @brief Balanced top-level CPU callback context exits. */
   std::atomic_int context_exits_{0};
+
+  /** @brief Latest fixed private worker id. */
+  std::atomic_int last_worker_id_{-1};
 
   /** @brief Serializes concurrent trace publication and snapshot copying. */
   mutable std::mutex trace_mutex_;
@@ -1864,8 +1961,10 @@ ResourceVector independently_estimate_large_dirty_phase_resources(
   LargeDirtyPhaseTaskProbe task_probe;
   const std::uint64_t callable_bytes = owned_callable_retained_memory_bytes(
       static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
+  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
+                                         Device::CPU);
   auto context = std::make_shared<DirtyReadyTaskContext>(
-      compute_plan, nullptr, phase_task_ids,
+      compute_plan, nullptr, phase_task_ids, task_devices,
       std::function<void(int)>(LargeDirtyPhaseTask(task_probe)), callable_bytes,
       run.acquire_lease(), !source_phase,
       source_phase ? ExecutionTaskPriority::High
@@ -1921,12 +2020,15 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
       source_phase ? phase_task_ids : std::vector<int>{};
   std::vector<int> downstream_task_ids =
       source_phase ? std::vector<int>{} : phase_task_ids;
+  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
+                                         Device::CPU);
   DirtySourceFirstRunRequest request;
   request.intent = ComputeIntent::GlobalHighPrecision;
   request.execution_service = &service;
   request.host = &host;
   request.run = &run;
   request.compute_plan = &compute_plan;
+  request.task_devices = &task_devices;
   request.additional_shared_retained_memory_bytes = additional_shared_bytes;
   request.source_task_ids = &source_task_ids;
   request.downstream_task_ids = &downstream_task_ids;
@@ -2220,6 +2322,180 @@ ComputeRunSubmission make_dirty_resource_submission(
                            ? ComputeRunQuality::Interactive
                            : ComputeRunQuality::Full;
   return submission;
+}
+
+/**
+ * @brief Verifies full planning freezes the selected implementation device.
+ *
+ * @return Nothing; GoogleTest reports selection or fallback failures.
+ * @throws Registry, graph, planning, or callback exceptions unchanged.
+ * @note The test calls the frozen operation snapshots directly and inspects
+ * ready metadata; it does not require a native GPU backend or service worker.
+ */
+TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
+  ensure_issue75_device_operations_registered();
+  g_issue75_cpu_operation_calls.store(0, std::memory_order_relaxed);
+  g_issue75_gpu_operation_calls.store(0, std::memory_order_relaxed);
+  GraphTraversalService traversal;
+
+  GraphModel gpu_graph("cache/issue75-full-gpu");
+  Node gpu_node = make_plan_node(501);
+  gpu_node.type = "issue75_device_route";
+  gpu_node.subtype = "source";
+  gpu_graph.add_node(std::move(gpu_node));
+  gpu_graph.validate_topology();
+  ComputeRun gpu_run(make_test_submission("issue75-full-gpu",
+                                          gpu_graph.revision().value(), 501));
+  ASSERT_TRUE(gpu_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& gpu_plan = gpu_run.emplace_submission_plan(
+      gpu_graph, traversal, 501,
+      std::vector<Device>{Device::GPU_METAL, Device::CPU});
+  std::vector<ReadyTaskSubmission> gpu_ready =
+      gpu_plan.make_initial_ready_submissions(gpu_run.acquire_lease());
+  ASSERT_EQ(gpu_ready.size(), 1U);
+  EXPECT_EQ(gpu_ready.front().metadata().device(), Device::GPU_METAL);
+  ASSERT_EQ(gpu_plan.resolved_ops().size(), 1U);
+  ASSERT_TRUE(gpu_plan.resolved_ops().front().has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(
+      *gpu_plan.resolved_ops().front()));
+  const NodeOutput gpu_output = std::get<MonolithicOpFunc>(
+      *gpu_plan.resolved_ops().front())(gpu_graph.node(501), {});
+  EXPECT_EQ(gpu_output.data.at("value").as_int64(), 76);
+
+  GraphModel cpu_graph("cache/issue75-full-cpu");
+  Node cpu_node = make_plan_node(502);
+  cpu_node.type = "issue75_device_route";
+  cpu_node.subtype = "source";
+  cpu_graph.add_node(std::move(cpu_node));
+  cpu_graph.validate_topology();
+  ComputeRun cpu_run(make_test_submission("issue75-full-cpu",
+                                          cpu_graph.revision().value(), 502));
+  ASSERT_TRUE(cpu_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& cpu_plan = cpu_run.emplace_submission_plan(
+      cpu_graph, traversal, 502, std::vector<Device>{Device::CPU});
+  std::vector<ReadyTaskSubmission> cpu_ready =
+      cpu_plan.make_initial_ready_submissions(cpu_run.acquire_lease());
+  ASSERT_EQ(cpu_ready.size(), 1U);
+  EXPECT_EQ(cpu_ready.front().metadata().device(), Device::CPU);
+  ASSERT_TRUE(cpu_plan.resolved_ops().front().has_value());
+  const NodeOutput cpu_output = std::get<MonolithicOpFunc>(
+      *cpu_plan.resolved_ops().front())(cpu_graph.node(502), {});
+  EXPECT_EQ(cpu_output.data.at("value").as_int64(), 75);
+  EXPECT_EQ(g_issue75_gpu_operation_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_issue75_cpu_operation_calls.load(std::memory_order_relaxed), 1);
+}
+
+/**
+ * @brief Verifies dirty HP and RT execute frozen GPU operations on the GPU
+ * lane.
+ *
+ * @return Nothing; GoogleTest reports output, worker, or ledger failures.
+ * @throws Filesystem, graph, planning, registry, or service exceptions
+ * unchanged.
+ * @note Each domain uses a fresh fake-Metal GraphRuntime and real source-first
+ * service dispatch, so HP cache state cannot seed RT selection.
+ */
+TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
+  ensure_issue75_device_operations_registered();
+  g_issue75_cpu_operation_calls.store(0, std::memory_order_relaxed);
+  g_issue75_gpu_operation_calls.store(0, std::memory_order_relaxed);
+  g_issue75_gpu_worker_id.store(-1, std::memory_order_relaxed);
+
+  for (const ComputeIntent intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    SCOPED_TRACE(intent == ComputeIntent::RealTimeUpdate ? "rt" : "hp");
+    const std::string suffix = intent == ComputeIntent::RealTimeUpdate
+                                   ? "issue75-dirty-rt"
+                                   : "issue75-dirty-hp";
+    ScopedResourceRuntimeDirectory directory(suffix);
+    GraphRuntime::Info info;
+    info.name = suffix;
+    info.root = directory.path();
+    info.cache_root = directory.path() / "cache";
+    info.hp_execution_type = "gpu_pipeline";
+    info.rt_execution_type = "gpu_pipeline";
+    FakeMetalGraphRuntime runtime(info, true);
+    GraphModel& graph = runtime.model();
+    Node node = make_resource_dirty_product_node(503, "source");
+    node.type = "issue75_device_route";
+    graph.add_node(std::move(node));
+    graph.validate_topology();
+
+    DirtyUpdateRequest request;
+    request.node_id = 503;
+    request.cache_precision = "float32";
+    request.disable_disk_cache = true;
+    request.dirty_roi = PixelRect{0, 0, 8, 8};
+    request.suppress_graph_downsample = true;
+    GraphTraversalService traversal;
+    GraphEventService events;
+    ExecutionService service(1U);
+    ComputeRun run(make_dirty_resource_submission(
+        suffix, graph.revision().value(), 503, intent));
+    ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+
+    if (intent == ComputeIntent::RealTimeUpdate) {
+      RealTimeDirtyExecutor executor(traversal, events);
+      const NodeOutput& output =
+          executor.execute(graph, runtime.realtime_proxy_graph(), &runtime,
+                           request, &run, &service);
+      EXPECT_EQ(output.data.at("value").as_int64(), 76);
+    } else {
+      HighPrecisionDirtyExecutor executor(traversal, events);
+      const NodeOutput& output =
+          executor.execute(graph, runtime.realtime_proxy_graph(), &runtime,
+                           request, &run, &service);
+      EXPECT_EQ(output.data.at("value").as_int64(), 76);
+    }
+    EXPECT_EQ(g_issue75_gpu_worker_id.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  }
+
+  EXPECT_EQ(g_issue75_gpu_operation_calls.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(g_issue75_cpu_operation_calls.load(std::memory_order_relaxed), 0);
+}
+
+/**
+ * @brief Verifies connected-parameter preflight uses route-aware GPU selection.
+ *
+ * @return Nothing; GoogleTest reports snapshot, worker, or ledger failures.
+ * @throws Graph, registry, service, or callback exceptions unchanged.
+ * @note A fake-Metal Host drives the real preflight service path without a
+ * native backend; the selected callback remains a normal host function.
+ */
+TEST(Issue75DeviceRouting, ConnectedParameterPreflightUsesGpuLane) {
+  ensure_issue75_device_operations_registered();
+  g_issue75_cpu_operation_calls.store(0, std::memory_order_relaxed);
+  g_issue75_gpu_operation_calls.store(0, std::memory_order_relaxed);
+
+  GraphModel graph("cache/issue75-preflight-gpu");
+  Node producer = make_plan_node(504);
+  producer.type = "issue75_device_route";
+  producer.subtype = "source";
+  Node target = make_plan_node(505);
+  target.parameter_inputs.push_back({504, "value", "radius"});
+  graph.add_node(std::move(producer));
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  ExecutionService service(1U);
+  ExecutionServiceHost host(true);
+  ComputeRun run(make_test_submission("issue75-preflight-gpu",
+                                      graph.revision().value(), 505));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+
+  std::shared_ptr<const StabilizedDirtyParameters> stabilized =
+      stabilize_connected_dirty_parameters(
+          graph, traversal, 505, 1U, graph.topology_generation(), nullptr,
+          &service, &host, &run, nullptr, "gpu_pipeline");
+  ASSERT_TRUE(stabilized);
+  const NodeOutput* output = stabilized->find_parameter_output(504);
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(output->data.at("value").as_int64(), 76);
+  EXPECT_EQ(g_issue75_gpu_operation_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_issue75_cpu_operation_calls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(host.last_worker_id(), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
@@ -3342,6 +3618,8 @@ TEST(DirtyExecutionCommon,
 
   const std::uint64_t callable_bytes = owned_callable_retained_memory_bytes(
       static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
+  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
+                                         Device::CPU);
   LargeDirtyPhaseTaskProbe success_probe;
   MovePreservingDirtyCallableHolder outer_holder{
       LargeDirtyPhaseTask(success_probe)};
@@ -3357,7 +3635,7 @@ TEST(DirtyExecutionCommon,
         factory_live_targets =
             success_probe.live_targets.load(std::memory_order_relaxed);
         return std::make_shared<DirtyReadyTaskContext>(
-            compute_plan, nullptr, task_ids,
+            compute_plan, nullptr, task_ids, task_devices,
             std::move(transferred_holder).release_for_context(), callable_bytes,
             run.acquire_lease(), true, ExecutionTaskPriority::Normal);
       });
@@ -3514,6 +3792,8 @@ TEST(ExecutionServiceProductResources,
   combined_plan.task_graph.initial_task_ids = {0, 1};
   const std::vector<int> source_task_ids{0};
   const std::vector<int> downstream_task_ids{1};
+  const std::vector<Device> task_devices(combined_plan.task_graph.tasks.size(),
+                                         Device::CPU);
 
   ExecutionService combined_service(1U);
   ExecutionServiceHost combined_host;
@@ -3533,6 +3813,7 @@ TEST(ExecutionServiceProductResources,
   combined_request.host = &combined_host;
   combined_request.run = &combined_run;
   combined_request.compute_plan = &combined_plan;
+  combined_request.task_devices = &task_devices;
   combined_request.phase_shared_retained_memory_bytes =
       [&combined_probe, &phase_live_targets,
        &phase_observation_index](const std::vector<int>&) {
@@ -3858,6 +4139,8 @@ TEST(ExecutionServiceProductResources,
   compute_plan.task_graph.tasks[1].node_id = kSourceNodeId;
   compute_plan.task_graph.tasks[2].task_id = 2;
   compute_plan.task_graph.tasks[2].node_id = kMissingNodeId;
+  const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
+                                         Device::CPU);
 
   ComputeRun run(make_test_submission(graph_identity, graph.revision().value(),
                                       kMissingNodeId));
@@ -3871,7 +4154,7 @@ TEST(ExecutionServiceProductResources,
 
   std::atomic_int source_calls{0};
   auto source_context = std::make_shared<DirtyReadyTaskContext>(
-      compute_plan, nullptr, std::vector<int>{0},
+      compute_plan, nullptr, std::vector<int>{0}, task_devices,
       [&graph, &hp_buffer, &source_calls](int) {
         (void)hp_buffer.ensure_output(graph.node(kSourceNodeId));
         source_calls.fetch_add(1, std::memory_order_relaxed);
@@ -3913,7 +4196,7 @@ TEST(ExecutionServiceProductResources,
   std::atomic_int downstream_calls{0};
   const std::vector<int> downstream_task_ids{1, 2};
   auto downstream_context = std::make_shared<DirtyReadyTaskContext>(
-      compute_plan, nullptr, downstream_task_ids,
+      compute_plan, nullptr, downstream_task_ids, task_devices,
       [&downstream_calls](int) {
         downstream_calls.fetch_add(1, std::memory_order_relaxed);
       },

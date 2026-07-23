@@ -24,7 +24,8 @@ Host. It owns:
 - the bounded ready store and its complete ready-byte charges;
 - one Interactive and one Throughput policy binding;
 - process fairness and three-to-one class arbitration state;
-- the fixed CPU service plus private `serial_debug` and `gpu_pipeline` routes;
+- the fixed CPU worker pool, one service-owned Metal worker lane, and private
+  `serial_debug` and `gpu_pipeline` routes;
 - Host-authored candidate, Graph, Run, entry-version, enqueue, snapshot, and
   selection identities;
 - ready-to-execution resource exchange and in-flight callback ownership.
@@ -189,9 +190,9 @@ The route vocabulary is closed:
 
 | Route | Ownership and behavior |
 | --- | --- |
-| `cpu` | Host-lifetime fixed worker pool with reusable multi-entry execution |
-| `serial_debug` | private serial route with one callback in flight |
-| `gpu_pipeline` | private GPU/CPU pipeline and device-aware completion adapter |
+| `cpu` | Host-lifetime fixed CPU worker pool with reusable multi-entry execution; exposes CPU only |
+| `serial_debug` | CPU worker zero with one callback in flight; exposes CPU only |
+| `gpu_pipeline` | the same fixed CPU pool for CPU fallback plus one service-owned Metal lane; exposes Metal then CPU when the Host reports Metal, otherwise CPU only |
 
 `heterogeneous` is not an alias. Execution routes are not plugins and cannot be
 scanned or loaded.
@@ -205,6 +206,17 @@ request is rejected. Existing Graph sessions keep their route bindings.
 ownerless binding, serializes against active same-session requests, and
 publishes a new nonzero generation. A same-name replacement also advances the
 generation. Failure preserves the old route.
+
+Operation selection freezes both the implementation callable and its `Device`
+before Run admission. Full HP, dirty HP/RT, and connected-parameter preflight
+all consume the same route-aware inventory. Every ready submission carries the
+frozen device, and `ExecutionService` rejects a device outside the configured
+route/Host inventory before publishing the Run. CPU submissions enter the
+fixed CPU pool; Metal submissions enter the single GPU lane. Both lanes share
+the common ready store, policy decision, reserved-start transaction, Host
+ledger, Run maximum-parallelism grant, cancellation, completion, exception,
+reuse, shutdown, and drainage rules; no second device-capacity authority or
+per-Graph executor is created.
 
 Full HP, dirty HP/RT, connected preflight, initial ready work, and
 dependency-released work all enter the common ready-store, policy,

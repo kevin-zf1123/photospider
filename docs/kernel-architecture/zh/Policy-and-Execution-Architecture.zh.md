@@ -19,7 +19,8 @@
 - 有界就绪存储，以及其中完整的就绪字节计费；
 - Interactive 和 Throughput 各一个策略绑定；
 - 进程公平性状态和三比一类别仲裁状态；
-- 固定 CPU 服务，以及私有 `serial_debug` 和 `gpu_pipeline` 路由；
+- 固定 CPU 工作线程池、一个由 service 拥有的 Metal 工作线程 lane，以及私有
+  `serial_debug` 和 `gpu_pipeline` 路由；
 - 由 Host 生成的候选项、Graph、Run、条目版本、入队、快照和选择身份；
 - 从就绪到执行的资源交换，以及飞行中回调的所有权。
 
@@ -163,9 +164,9 @@ Run 结算同样只释放一次各自授权。
 
 | 路由 | 所有权与行为 |
 | --- | --- |
-| `cpu` | Host 生命周期固定工作线程池，支持可复用的多条目执行 |
-| `serial_debug` | 私有串行路由，只允许一个回调处于飞行中 |
-| `gpu_pipeline` | 私有 GPU/CPU 流水线及设备感知完成适配器 |
+| `cpu` | Host 生命周期固定 CPU 工作线程池，支持可复用的多条目执行；只暴露 CPU |
+| `serial_debug` | CPU 工作线程零，只允许一个回调处于飞行中；只暴露 CPU |
+| `gpu_pipeline` | CPU fallback 使用同一个固定 CPU 池，Metal 使用一个由 service 拥有的 lane；Host 报告 Metal 时依次暴露 Metal、CPU，否则只暴露 CPU |
 
 `heterogeneous` 不是别名。执行路由不是插件，不能扫描或加载。
 
@@ -176,6 +177,15 @@ Run 结算同样只释放一次各自授权。
 `replace_execution` 校验封闭词汇表中的路由，在不创建所有者的情况下准备新绑定，
 与同一会话的活动请求串行化，并发布新的非零代次。同名替换同样推进代次。
 失败时保留旧路由。
+
+操作选择会在 Run 准入前同时冻结实现 callback 及其 `Device`。完整 HP、dirty HP/RT
+和连接参数预检都使用同一份 route-aware inventory。每个 ready submission 都携带冻结
+的 device；如果 device 不在已配置 route/Host inventory 中，`ExecutionService` 会在
+发布 Run 前拒绝它。CPU submission 进入固定 CPU 池，Metal submission 进入单一 GPU
+lane。两个 lane 共用 ready store、policy decision、reserved-start transaction、Host
+ledger、Run maximum-parallelism grant、cancellation、completion、exception、reuse、
+shutdown 与 drainage 规则；不会创建第二套 device-capacity authority 或 per-Graph
+executor。
 
 完整 HP、dirty HP/RT、连通性预检、初始就绪工作和依赖释放工作，都会进入同一套
 就绪存储、策略、预留后启动、私有路由及 Run 租约完成路径。

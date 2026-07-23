@@ -47,21 +47,24 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 并在运行后丢弃；仓库不会为该测试保留逐次运行报告。
 
 `BUILD_TESTING` 只控制内部 test product 是否可用，不控制已安装 `photospider` archive 如何编译
-Issue #72 observation seam。Product source inventory 被拆为只编译一次的 common object，以及
-`graph_cache_service.cpp`、`graph_state_executor.cpp` 与 `kernel_compute.cpp` 的 production object。
-真实 archive 始终使用这三个 translation unit 的 production 形式，其中不存在
+Issue #72/#75 observation seam。Product source inventory 被拆为只编译一次的 common object，以及
+`execution_service.cpp`、`graph_cache_service.cpp`、`graph_state_executor.cpp` 与
+`kernel_compute.cpp` 的 production object。真实 archive 始终使用这四个 translation unit 的
+production 形式，其中不存在
+`PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING` 或
 `PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` 的 declaration、global、branch 或 symbol。Focused
 test 会链接不安装的 `photospider_internal_test_product`；它复用同一批 common object，只以
-deterministic seam 重新编译这三个 translation unit。没有 target 同时链接两个完整 archive，test
-product 也不会进入 install 或 export set。
+deterministic seam 重新编译这四个 translation unit。没有 target 同时链接两个完整 archive，test
+product 也不会进入 install 或 export set。Issue #75 probe declaration 是 source-tree-private 的
+free function，因此该宏不会改变 production `ExecutionService` class definition 或 object layout。
 
 `StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
 configuration 强制执行这条边界。真实 product 安装后，Darwin 会先调用并验证
 `xcrun --find llvm-nm`，然后依次回退到 PATH `llvm-nm` 与 PATH `nm`；非 Darwin 平台绝不会
 调用 `xcrun`，只按上述顺序使用两个 PATH candidate。Canonical path 相同的 executable 只运行
-一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露三个 production seam object 的
+一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露四个 production seam object 的
 全部 defined anchor 时才可用；否则 smoke 会记录不含路径的 failure reason 并尝试下一项。没有
 candidate 或全部 candidate 都不可用时必须 fail closed。第一个可用的完整 symbol table 是权威
 结果，并用于拒绝任何 hook function/helper/global fragment；raw table 只在内存中参与该判定，
@@ -437,6 +440,17 @@ fault stability。`test_resource_admission` 负责精确封闭的
 headroom、three-to-one progress、dependent re-entry、saturation，以及 reserved start 期间的精确
 grant release。
 
+`test_physical_execution_routes` 负责 allocation-free route/lane state：CPU/Metal overlap、Metal
+single-flight、serial worker-zero single-flight、shutdown rejection 与 committed-work drainage。
+`test_policy_execution` 使用 deterministic fake-Metal Host，证明规范的逐 route device inventory、
+Run 发布前拒绝、彼此独立的固定 CPU/GPU worker、Metal exception publication/recovery、route
+reuse、cancellation，以及不会产生 candidate/version ABA 或 grant leak 的 reserved-start rollback。
+Rollback probe 是只编译进不安装 test product 的固定大小 atomic state；production 不含 observer
+typedef、object field、class-layout change、worker hot-path callback/runtime branch 或 symbol。
+`test_compute_run` 中的
+`Issue75DeviceRouting.*` 证明 full HP、dirty HP/RT 与 connected preflight 会冻结选中的 Metal
+implementation/device，并在 Metal 不存在时使用 CPU fallback。
+
 `test_cli_policy_execution_config` 固定事务型 policy/execution config parsing 与精确 Host
 application。`test_host_adapter` 会加载真实 operation ABI-v2 与纯 C policy ABI-v1 fixture，配置两种
 extension、验证其 snapshot，并通过私有 CPU route 完成 compute。`GraphCliPluginComputeSmoke`
@@ -453,10 +467,14 @@ Installed Host、CLI 与 IPC protocol-v2 surface 仍不暴露 cancellation comma
 
 ```bash
 cmake --build build \
-  --target test_policy_registry test_resource_admission \
+  --target test_policy_registry test_policy_execution \
+  test_physical_execution_routes test_compute_run test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
+./build/tests/test_policy_execution
+./build/tests/test_physical_execution_routes
+./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
   --gtest_filter='CliPolicyExecutionConfigParsing.*:CliPolicyExecutionConfigApply.*'

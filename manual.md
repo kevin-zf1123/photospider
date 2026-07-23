@@ -364,9 +364,16 @@ Execution routes are fixed Host implementation values, not plugins:
 
 | Type | Description |
 | --- | --- |
-| `cpu` | Shared Host-owned CPU execution service. |
-| `serial_debug` | Single-threaded private route useful for debugging. |
-| `gpu_pipeline` | Private GPU/CPU pipeline route. |
+| `cpu` | Shared Host-owned CPU execution service; CPU only. |
+| `serial_debug` | CPU worker-zero single-flight route for debugging; CPU only. |
+| `gpu_pipeline` | Private Metal/CPU route: Metal then CPU when Metal is available, otherwise CPU only. |
+
+The process service freezes the selected operation implementation and device
+before admitting full HP, dirty HP/RT, or connected-parameter preflight work.
+CPU fallback uses the fixed CPU pool; Metal work uses one dedicated private
+lane. Both lanes share the same Run limit, resource ledger, cancellation,
+completion, exception, reuse, and shutdown behavior. A Graph stores only its
+copied route id and generation and never owns either lane.
 
 Example:
 

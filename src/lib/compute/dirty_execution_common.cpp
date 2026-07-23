@@ -52,7 +52,8 @@ std::uint64_t DirtyNodeSynchronization::retained_memory_bytes() const {
 /** @copydoc DirtyReadyTaskContext::DirtyReadyTaskContext */
 DirtyReadyTaskContext::DirtyReadyTaskContext(
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
-    const std::vector<int>& active_task_ids, std::function<void(int)> run_task,
+    const std::vector<int>& active_task_ids,
+    const std::vector<Device>& task_devices, std::function<void(int)> run_task,
     std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
     bool release_dependents, ExecutionTaskPriority priority)
     : compute_plan_(compute_plan),
@@ -60,6 +61,7 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
                      ? std::optional<DirtyTaskSelectionOverlay>(*selection)
                      : std::nullopt),
       active_task_ids_(active_task_ids),
+      task_devices_(task_devices),
       active_task_id_set_(active_task_ids.begin(), active_task_ids.end()),
       run_task_(std::move(run_task)),
       run_task_retained_memory_bytes_(run_task_retained_memory_bytes),
@@ -69,6 +71,10 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
   if (!run_task_) {
     throw std::invalid_argument(
         "DirtyReadyTaskContext requires an owned task callable.");
+  }
+  if (task_devices_.size() != compute_plan_.task_graph.tasks.size()) {
+    throw std::invalid_argument(
+        "DirtyReadyTaskContext requires one device per planned task.");
   }
   if (selection_) {
     dependency_state_ = std::make_unique<TaskDependencyState>(
@@ -93,6 +99,8 @@ std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
   }
   estimate.add_objects<int>(
       static_cast<std::uint64_t>(active_task_ids_.capacity()));
+  estimate.add_objects<Device>(
+      static_cast<std::uint64_t>(task_devices_.capacity()));
   estimate.add_objects<void*>(
       static_cast<std::uint64_t>(active_task_id_set_.bucket_count()));
   estimate.add_objects<decltype(active_task_id_set_)::value_type>(
@@ -147,7 +155,8 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
         },
         priority_,
         owned_callback_resource_demand(
-            static_cast<std::uint64_t>(sizeof(self))));
+            static_cast<std::uint64_t>(sizeof(self))),
+        task_devices_.at(static_cast<std::size_t>(task_id)));
   }
   return submissions;
 }

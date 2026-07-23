@@ -74,12 +74,12 @@ bool implementation_shape_compatible(const OpImplementation& impl,
  * @param node Graph node whose operation is being resolved.
  * @param available_devices Devices exposed by the execution runtime.
  * @param require_tiled Whether the task graph requires TileOpFunc.
- * @return Selected operation variant, or nullopt.
+ * @return Selected implementation snapshot, or nullopt.
  * @throws std::bad_alloc if registry candidate storage allocates
  * unsuccessfully.
  * @note Device priority and cost scoring remain registry policy.
  */
-std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
+std::optional<OpImplementation> select_device_aware_hp_implementation(
     const Node& node, const std::vector<Device>& available_devices,
     bool require_tiled) {
   const OpRegistry& registry = OpRegistry::instance();
@@ -92,7 +92,7 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
   if (!best) {
     return std::nullopt;
   }
-  return best->func;
+  return best;
 }
 
 /**
@@ -211,6 +211,8 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       static_cast<std::uint64_t>(execution_order_.capacity()));
   estimate.add_objects<Device>(
       static_cast<std::uint64_t>(available_devices_.capacity()));
+  estimate.add_objects<Device>(
+      static_cast<std::uint64_t>(execution_devices_.capacity()));
   estimate.add_bytes(dependency_state_.dynamic_retained_memory_bytes());
   estimate.add_objects<void*>(
       static_cast<std::uint64_t>(submitted_initial_task_ids_.bucket_count()));
@@ -295,13 +297,18 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
       static_cast<std::size_t>(identity.local_task_id().value());
   const int trace_node_id =
       compute_plan_.task_graph.tasks.at(task_index).node_id;
-  return ReadyTaskSubmission(lease, identity, trace_node_id, is_initial_ready,
-                             [](ComputeRunLease& ready_lease,
-                                const ComputeRunTaskIdentity& ready_identity,
-                                ExecutionTaskRuntime& task_runtime) {
-                               ready_lease.execute_task(ready_identity,
-                                                        task_runtime);
-                             });
+  const std::size_t execution_index =
+      static_cast<std::size_t>(dependency_state_.id_to_idx().at(trace_node_id));
+  return ReadyTaskSubmission(
+      lease, identity, trace_node_id, is_initial_ready,
+      [](ComputeRunLease& ready_lease,
+         const ComputeRunTaskIdentity& ready_identity,
+         ExecutionTaskRuntime& task_runtime) {
+        ready_lease.execute_task(ready_identity, task_runtime);
+      },
+      ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(),
+      execution_devices_.at(execution_index));
 }
 
 /**
@@ -488,6 +495,7 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
  */
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
+  execution_devices_.assign(execution_order_.size(), Device::CPU);
   for (std::size_t i = 0; i < execution_order_.size(); ++i) {
     const auto& node = graph_.node(execution_order_[i]);
     const bool has_tile_task = std::any_of(
@@ -496,9 +504,10 @@ void TaskSubmissionPlan::resolve_operations() {
           return task.node_id == node.id && task.kind == PlannedTaskKind::Tile;
         });
     if (has_tile_task) {
-      if (auto device_op =
-              select_device_aware_hp_op(node, available_devices_, true)) {
-        resolved_ops_[i] = std::move(*device_op);
+      if (auto implementation = select_device_aware_hp_implementation(
+              node, available_devices_, true)) {
+        execution_devices_[i] = implementation->metadata.device_preference;
+        resolved_ops_[i] = std::move(implementation->func);
         continue;
       }
       const auto impls =
@@ -508,9 +517,10 @@ void TaskSubmissionPlan::resolve_operations() {
         continue;
       }
     }
-    if (auto device_op =
-            select_device_aware_hp_op(node, available_devices_, false)) {
-      resolved_ops_[i] = std::move(*device_op);
+    if (auto implementation = select_device_aware_hp_implementation(
+            node, available_devices_, false)) {
+      execution_devices_[i] = implementation->metadata.device_preference;
+      resolved_ops_[i] = std::move(implementation->func);
       continue;
     }
     resolved_ops_[i] = OpRegistry::instance().resolve_for_intent(

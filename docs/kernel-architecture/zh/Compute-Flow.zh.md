@@ -53,7 +53,9 @@ CLI/REPL 前端是固定的批处理取向界面。它不暴露 RT intent 命令
 与 kernel/test caller 使用，但 CLI 不暴露这些能力，也不应被视为生产 realtime 控制面。
 
 固定 service thread 属于基础设施，不是 per-Run reservation。Execution 配置会把 `0` 解析
-为 bounded automatic value，或保留显式 `1..8`，随后冻结 CPU service 数量并启动固定 pool。
+为 bounded automatic value，或保留显式 `1..8`，随后冻结 CPU service 数量、启动固定 CPU
+pool，并启动一个私有 Metal worker lane。Host 不暴露 Metal 时，该 lane 保持空闲；它不是可
+独立配置的 worker grant。
 之后的零或相同请求保持幂等，冲突的正数请求会被拒绝。发布 work 前，每个 Run 都会从
 service-owned Host ledger 原子预留完整的 CPU、retained-memory、scratch、ready-entry 与
 ready-byte vector。Graph load 只复制 route ID 与 generation，不拥有 worker grant。该契约不
@@ -87,8 +89,10 @@ interactive quality、显式 QoS 与不可变 supersession identity。Topology g
 task-shape cache key，不再充当 Run revision provenance。Sequential、parallel 与 dirty execution strategy 共享此边界。Full HP Run control 拥有 materialized plan
 与 runner；每个真实 ready task 在 execution、dependency release、validation 与 commit 期间都会
 保留不可伪造的 Run lease 与 `(RunId, RunLocalTaskId)`。Full HP、connected-parameter preflight 与 dirty HP/RT 会把 dependency-ready work 包装为
-move-only `ReadyTaskSubmission`，并发送到固定 multi-Run service。Dirty 阶段使用 heap-owned
-context，因此没有 stack executor pointer 跨越该边界。每个私有 route 都保留相同 Run lease
+move-only `ReadyTaskSubmission`，并发送到固定 multi-Run service。Planning 会在准入前冻结选中
+的 operation implementation 与 device；每个 submission 会让该 device 稳定穿过 ready storage
+与 dependency release。Dirty 阶段使用 heap-owned context，因此没有 stack executor pointer
+跨越该边界。每个私有 route 都保留相同 Run lease
 与 Host-authored completion identity。Realtime child 通过 request-owned `RunGroup` settle；其稳定 control 拥有两个
 observation lease、RT-first gate、cancellation fan-out 与确定性 aggregate outcome。
 
@@ -135,8 +139,11 @@ work 协调二者，不会创建 cross-domain task dependency。
 | `GlobalHighPrecision` | 完整质量 HP 计算，拥有高精度输出。非 realtime 计算只启用这条 HP 路径。 |
 | `RealTimeUpdate` | 交互式 realtime 更新，需要 dirty ROI，并启用 HP/RT 双路径。 |
 
-意图模型是正式的。`ComputeService` 仍是 compute facade 和 planning boundary。私有 route metadata 会选择物理路径。CPU、serial-debug、GPU、connected-parameter preflight、
-full 与 dirty 阶段都使用固定注入 service；GraphRuntime 只保存复制的 route ID 与 generation。
+意图模型是正式的。`ComputeService` 仍是 compute facade 和 planning boundary。私有 route
+metadata 会选择物理路径。`cpu` 与 `serial_debug` route 只暴露 CPU；Host 报告 Metal 时，
+`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。CPU、serial-debug、GPU、
+connected-parameter preflight、full 与 dirty 阶段都使用固定注入 service；GraphRuntime 只保存
+复制的 route ID 与 generation。
 
 HP/RT 双路径语义属于 realtime intent，而不是 parallel 执行模式。Realtime 模式下，HP
 计算完整尺寸的权威 node 工作，RT 计算降采样代理版本，目前为宽高各四分之一，也就是像素数的
@@ -170,15 +177,17 @@ parallelism 都不会推断 class、deadline 或 weight。
 并行计算先展开完整 task graph，再从 `topo_postorder_from` 通过 `NodeCacheTaskGraphPruner`
 裁剪得到 `ComputePlan`。`ComputeDispatchPlanBuilder` 会记录这个 cache-pruned plan 供检查使用。
 Request `ComputeRun` 拥有 `TaskSubmissionPlan`；后者把 plan 中的 `ComputeTaskGraph`
-materialize 为 dependency counter、ready value、operation variant 和临时结果槽。Dispatcher 会创建不可变、由 lease 支撑的 `ReadyTaskSubmission`，并把一个 initial ready
+materialize 为 dependency counter、ready value、operation variant、selected device 和临时结果槽。Dispatcher 会创建不可变、由 lease 支撑的 `ReadyTaskSubmission`，并把一个 initial ready
 batch 提交到注入的 `ExecutionService`；dependent completion 会通过同一个 active Run 创建
 后续 submission，并进入同一个有界 store。Tiled 操作可能产生微任务，并减少选中私有 route
 的 logical completion count。
 
 Run 发布前，service 会原子预留完整且经过检查的 CPU、retained-memory、scratch、ready-entry
 与 ready-byte vector。Initial 与 dependent entry 持有 child ready grant；reserved start 会在
-进入私有 route 前把该 authority 交换为 CPU/memory/scratch。Failure、queue purge 与成功
-settlement 都会精确释放容量。固定 pool 绝不会按 Run 调整大小。Execution inspection 与
+进入 submission 所冻结的 CPU 或 Metal lane 前，把该 authority 交换为 CPU/memory/scratch。
+如果 device 不在已配置 route/Host inventory 中，service 会在发布 Run 前拒绝它。Failure、
+queue purge 与成功 settlement 都会精确释放容量。固定 lane 绝不会按 Run 调整大小，CPU/Metal
+callback 共用该 Run 已准入的 parallelism ceiling。Execution inspection 与
 replacement 和 compute 共用 per-graph compute-request lane，使复制的 route generation 保持
 一致。Replacement 会校验封闭词汇中的 route，并在一个 transaction 中发布新的非零
 generation；失败保留旧 binding。

@@ -66,7 +66,9 @@ a production realtime control surface.
 
 Fixed service threads are infrastructure rather than per-Run reservations.
 Execution configuration resolves `0` to a bounded automatic value or preserves
-an explicit `1..8`, freezes the CPU service count, and starts one fixed pool.
+an explicit `1..8`, freezes the CPU service count, starts one fixed CPU pool,
+and starts one private Metal worker lane. The Metal lane is idle when the Host
+does not expose Metal and is not a separately configurable worker grant.
 Later zero/equal requests are idempotent; a conflicting positive request is
 rejected. Before publishing work, each Run atomically reserves its complete
 CPU, retained-memory, scratch, ready-entry, and ready-byte vector from the
@@ -112,8 +114,10 @@ real ready task retains a non-forgeable Run lease and
 `(RunId, RunLocalTaskId)` through execution, dependency release, validation,
 and commit. Full HP, connected-parameter preflight, and dirty HP/RT package
 dependency-ready work as move-only `ReadyTaskSubmission` values for the fixed
-multi-Run service. Dirty phases use heap-owned contexts, so no stack executor
-pointer crosses that boundary. Every private route retains the same Run lease
+multi-Run service. Planning freezes the selected operation implementation and
+device before admission; each submission preserves that device through ready
+storage and dependency release. Dirty phases use heap-owned contexts, so no
+stack executor pointer crosses that boundary. Every private route retains the same Run lease
 and Host-authored completion identity. Realtime children settle through
 the request-owned `RunGroup`, whose stable control owns both observation leases,
 the RT-first gate, cancellation fan-out, and deterministic aggregate outcome.
@@ -173,9 +177,11 @@ The kernel recognizes two formal compute intents:
 | `RealTimeUpdate` | Interactive realtime update. Requires a dirty ROI and enables the HP/RT dual path. |
 
 The intent model is formal. `ComputeService` remains the compute facade and
-planning boundary. Private route metadata selects the physical path. CPU, serial-debug, GPU,
-connected-parameter preflight, full, and dirty phases all use the fixed injected
-service; GraphRuntime stores only copied route ids and generations.
+planning boundary. Private route metadata selects the physical path. The `cpu`
+and `serial_debug` routes expose CPU only. `gpu_pipeline` exposes Metal then CPU
+when the Host reports Metal, and CPU only otherwise. CPU, serial-debug, GPU,
+connected-parameter preflight, full, and dirty phases all use the fixed
+injected service; GraphRuntime stores only copied route ids and generations.
 
 HP/RT dual path semantics belong to realtime intent, not to the parallel
 execution mode. In realtime mode, HP computes the full-size authoritative node
@@ -215,7 +221,7 @@ then pruning it with `NodeCacheTaskGraphPruner` from `topo_postorder_from`.
 `ComputeDispatchPlanBuilder` records that cache-pruned plan for inspection.
 The request `ComputeRun` owns the `TaskSubmissionPlan` that materializes the
 plan's `ComputeTaskGraph` into dependency counters, ready values, operation
-variants, and temporary result slots. The dispatcher creates immutable, lease-backed `ReadyTaskSubmission` values
+variants, selected devices, and temporary result slots. The dispatcher creates immutable, lease-backed `ReadyTaskSubmission` values
 and submits one initial ready batch to the injected `ExecutionService`;
 dependent completion creates further submissions through the same active Run
 and bounded store. Tiled operations may spawn micro-tasks and retire the
@@ -224,9 +230,12 @@ selected private route's logical completion count.
 Before a Run is published, the service atomically reserves its complete
 checked CPU, retained-memory, scratch, ready-entry, and ready-byte vector.
 Initial and dependent entries hold child ready grants; reserved start exchanges
-that authority for CPU/memory/scratch before entering a private route. Failure,
-queue purge, and successful settlement release exact capacity. The fixed pool
-never resizes per Run. Execution inspection and replacement share the per-graph
+that authority for CPU/memory/scratch before entering the submission's fixed
+CPU or Metal lane. The service rejects a device outside the configured
+route/Host inventory before Run publication. Failure, queue purge, and
+successful settlement release exact capacity. The fixed lanes never resize
+per Run, and CPU/Metal callbacks share the Run's admitted parallelism ceiling.
+Execution inspection and replacement share the per-graph
 compute-request lane with compute, so copied route generations remain coherent.
 Replacement validates one closed-vocabulary route and publishes a new nonzero
 generation in one transaction; failure preserves the old binding.

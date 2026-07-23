@@ -3,7 +3,7 @@
 ## Status
 
 Accepted as a target architecture. Issues #70 through #75 implement the current
-CPU execution/resource, policy, and private-route slice: each embedded
+execution/resource, policy, and private-route slice: each embedded
 composition root explicitly creates and injects one fixed `ExecutionService`;
 built-in CPU HP and RT work, including connected-parameter preflight and dirty
 source/downstream phases, enters it only as ready, lease-backed submissions.
@@ -24,7 +24,8 @@ bounded ticket-backed coalescing on the existing compute-lane worker, and
 current-generation commit authority. Issue #75 removes the worker-owning
 scheduler SDK/ABI and adds pure-C policy ABI v1, atomic binding replacement,
 generation-local sticky faults, reserved start, and closed private execution
-routes. The final lifecycle registry/graph-close/process-shutdown/telemetry
+routes, including one fixed CPU pool and one private Metal lane. The final
+lifecycle registry/graph-close/process-shutdown/telemetry
 contract (#76) and public Host/CLI/IPC cancellation controls remain future
 behavior. ADR 0007 supersedes this ADR only as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
@@ -37,9 +38,17 @@ The route vocabulary is closed to `cpu`, `serial_debug`, and
 `gpu_pipeline`; their physical workers, queues, device routing, completion, and
 exceptions remain private to Host execution modules. Policy binding is
 process/service state and never Graph state. The service freezes one CPU worker
-count from composition-root configuration, keeps isolated
+count from composition-root configuration, owns one fixed Metal worker lane,
+and keeps isolated
 completion/failure/trace state per Run, and permits independent HP and RT Runs
 from multiple Graphs to overlap.
+
+The canonical device inventory is route aware. `cpu` and `serial_debug` expose
+CPU only. `gpu_pipeline` exposes Metal then CPU when the Host reports Metal,
+otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
+the selected implementation and device before admission. CPU and Metal work
+use distinct fixed lanes but the same ready store, Run parallelism ceiling,
+ledger grants, cancellation, completion, exception, reuse, and drainage state.
 
 Current software uses each Host ledger's default 32-slot CPU dimension for Run
 execution grants. Fixed service workers and route machinery are
@@ -93,6 +102,10 @@ Physical execution is divided into resource executors:
 - a plugin invocation adapter backed by a separate
   `PluginRuntimeSupervisor` for process, IPC, security, and failure isolation.
 
+The current #75 slice realizes the CPU executor and one service-owned Metal
+lane. It does not expose a device-executor API or add a second device-capacity
+ledger; later resource executors remain target architecture.
+
 The worker-owning scheduler plugin ABI, SDK target, `IScheduler` hierarchy, and
 per-Graph physical owners have been removed as a complete breaking migration.
 No compatibility adapter or forwarding layer remains.
@@ -131,8 +144,9 @@ purges only the matching Run's queued entries, suppresses dependent re-entry,
 and waits for non-preemptible running callbacks to drain; it does not become
 cancellation authority or visible-commit owner.
 
-Composition-root execution configuration resolves and freezes the service
-worker count; it is not a policy-plugin grant. Every Host ledger has immutable
+Composition-root execution configuration resolves and freezes the service CPU
+worker count; the single Metal lane is fixed infrastructure, not a policy-plugin
+grant. Every Host ledger has immutable
 composition limits. Run admission commits one complete vector before queue
 publication; initial and dependent submissions enter the same policy-aware
 bounded store and retain the same Run fairness row across temporary emptiness.

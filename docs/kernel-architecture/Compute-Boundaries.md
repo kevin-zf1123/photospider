@@ -110,9 +110,9 @@ Host-owned reserved-start transaction.
 | `DirtySnapshotTaskGraphPruner` | Active dirty work selected from an existing plan | Task expansion |
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
-| `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, variants, result slots, and callback owner for one full HP request | Execution-route workers, Run terminal state, or dirty-path execution |
-| `ReadyTaskSubmission` | Move-only immutable metadata, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One Host-owned fixed CPU domain, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, lifecycle admission registry, or visible commit |
+| `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, and callback owner for one full HP request | Execution-route workers, Run terminal state, or dirty-path execution |
+| `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
+| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, lifecycle admission registry, or visible commit |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
@@ -284,10 +284,10 @@ dependent work is released by `TaskSubmissionPlan` as another
 start, and transfers callback ownership to the copied Graph route binding.
 
 The CPU service delivered by Issues #70 and #71 is explicitly composed before
-Kernel and owns one
-direct fixed worker pool, one host-authoritative ledger, and one bounded ready
-store. Configuration resolves and freezes `[1,8]` infrastructure workers once;
-Graph load, replacement, Run execution, and dirty phases never resize it.
+Kernel and owns one direct fixed CPU worker pool, one private Metal worker lane,
+one host-authoritative ledger, and one bounded ready store. Configuration
+resolves and freezes `[1,8]` CPU infrastructure workers once; Graph load,
+replacement, Run execution, and dirty phases never resize either lane.
 Every Run reserves its complete checked CPU/retained/scratch/ready vector
 before publication. Initial and dependency-released work both require matching
 ready-entry/byte grants and enter the same policy route. Queue removal
@@ -327,6 +327,15 @@ same ledger/reserved-start boundary to all of them. Route replacement validates
 and publishes a fresh generation without constructing a per-Graph executor or
 reservation. The ledger does not invent device, I/O, or plugin-specific
 dimensions.
+
+The canonical inventory is route and Host aware: `cpu` and `serial_debug`
+expose CPU only; `gpu_pipeline` exposes Metal then CPU when Metal is available,
+otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
+the chosen implementation and device before admission. CPU work enters the
+fixed pool and Metal work enters the single GPU lane, while both consume the
+same Run root grants and maximum-parallelism ceiling. An unavailable device is
+rejected before active-Run publication, and completion, exception, cancellation,
+reuse, shutdown, and drainage retire the exact common ledger/Run state.
 
 ## OpenCV Operation Concurrency
 

@@ -101,6 +101,7 @@ HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
       runtime_(context.runtime),
       events_(context.events),
       snapshot_(context.snapshot),
+      resolved_operations_(context.resolved_operations),
       dirty_generation_(context.dirty_generation),
       hp_write_buffer_(hp_write_buffer),
       node_synchronization_(context.node_synchronization),
@@ -127,36 +128,14 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
     resolved_inputs = resolve_inputs(node_for_exec);
   }
 
-  const auto impls = OpRegistry::instance().get_implementations(
-      node_for_exec.type, node_for_exec.subtype);
-  const TileOpFunc* hp_tile_fn =
-      (impls && impls->tiled_hp) ? &*impls->tiled_hp : nullptr;
-  const MonolithicOpFunc* hp_mono_fn =
-      (impls && impls->monolithic_hp) ? &*impls->monolithic_hp : nullptr;
-
-  if (hp_tile_fn) {
-    ImageBuffer* hp_buffer = nullptr;
-    {
-      std::lock_guard<std::mutex> lock(node_mutex(node.id));
-      hp_buffer = &ensure_hp_buffer(node, entry, resolved_inputs.image_inputs);
-    }
-    execute_tiled(node_for_exec, *hp_tile_fn, entry,
-                  resolved_inputs.image_inputs, *hp_buffer);
-  } else if (hp_mono_fn) {
-    NodeOutput result =
-        (*hp_mono_fn)(node_for_exec, resolved_inputs.image_inputs);
-    if (!has_image_payload(result.image_buffer) && result.data.empty()) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Monolithic HP operator produced no output for " +
-                           node_for_exec.type + ":" + node_for_exec.subtype);
-    }
-    std::lock_guard<std::mutex> lock(node_mutex(node.id));
-    hp_write_buffer_.ensure_output(node) = std::move(result);
-  } else {
+  const auto operation_it = resolved_operations_.find(node.id);
+  if (operation_it == resolved_operations_.end()) {
     throw GraphError(GraphErrc::NoOperation,
                      "No suitable HP operator (tiled or monolithic) for " +
                          node_for_exec.type + ":" + node_for_exec.subtype);
   }
+  execute_operation(node_for_exec, entry, resolved_inputs.image_inputs,
+                    operation_it->second.operation);
 
   observe_dirty_node_cancellation(run_lease_);
   {
@@ -184,41 +163,35 @@ ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
 }
 
 /**
- * @brief Executes the preferred HP implementation for one dirty node.
+ * @brief Executes the planning-time frozen HP implementation for one node.
  *
  * @param node Node being computed.
  * @param entry HP dirty ROI and extent metadata.
  * @param image_inputs_ready Resolved HP image inputs.
+ * @param operation Planning-time selected monolithic or tiled operation.
  * @return Nothing.
  * @throws std::bad_alloc when staging or selected operation execution exhausts
  * memory.
- * @throws GraphError when no HP implementation exists or execution otherwise
- * fails.
- * @note Tiled HP remains preferred over monolithic HP, and output stays staged
- * until the dirty write buffer commits.
+ * @throws GraphError when the frozen operation fails or returns no output.
+ * @note Device-aware selection, including tiled preference, completed before
+ * Run admission. Output stays staged until the dirty write buffer commits.
  */
 void HighPrecisionDirtyNodeExecutor::execute_operation(
     Node& node, const HpPlanEntry& entry,
-    const std::vector<const NodeOutput*>& image_inputs_ready) const {
-  const auto impls =
-      OpRegistry::instance().get_implementations(node.type, node.subtype);
-  const TileOpFunc* hp_tile_fn =
-      (impls && impls->tiled_hp) ? &*impls->tiled_hp : nullptr;
-  const MonolithicOpFunc* hp_mono_fn =
-      (impls && impls->monolithic_hp) ? &*impls->monolithic_hp : nullptr;
-
-  if (hp_tile_fn) {
-    ImageBuffer& hp_buffer = ensure_hp_buffer(node, entry, image_inputs_ready);
-    execute_tiled(node, *hp_tile_fn, entry, image_inputs_ready, hp_buffer);
+    const std::vector<const NodeOutput*>& image_inputs_ready,
+    const OpRegistry::OpVariant& operation) const {
+  if (std::holds_alternative<TileOpFunc>(operation)) {
+    ImageBuffer* hp_buffer = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(node_mutex(node.id));
+      hp_buffer = &ensure_hp_buffer(node, entry, image_inputs_ready);
+    }
+    execute_tiled(node, std::get<TileOpFunc>(operation), entry,
+                  image_inputs_ready, *hp_buffer);
     return;
   }
-  if (hp_mono_fn) {
-    execute_monolithic(node, *hp_mono_fn, image_inputs_ready);
-    return;
-  }
-  throw GraphError(GraphErrc::NoOperation,
-                   "No suitable HP operator (tiled or monolithic) for " +
-                       node.type + ":" + node.subtype);
+  execute_monolithic(node, std::get<MonolithicOpFunc>(operation),
+                     image_inputs_ready);
 }
 
 ImageBuffer& HighPrecisionDirtyNodeExecutor::ensure_hp_buffer(
@@ -277,6 +250,7 @@ void HighPrecisionDirtyNodeExecutor::execute_monolithic(
                      "Monolithic HP operator produced no output for " +
                          node.type + ":" + node.subtype);
   }
+  std::lock_guard<std::mutex> lock(node_mutex(node.id));
   hp_write_buffer_.ensure_output(node) = std::move(result);
 }
 
@@ -312,6 +286,7 @@ RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
       runtime_(context.runtime),
       events_(context.events),
       snapshot_(context.snapshot),
+      resolved_operations_(context.resolved_operations),
       dirty_generation_(context.dirty_generation),
       stabilized_parameters_(context.stabilized_parameters),
       proxy_graph_(proxy_graph),
@@ -338,15 +313,15 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
     node_for_exec = node;
     resolved_inputs = resolve_inputs(node_for_exec);
   }
-  std::optional<OpRegistry::OpVariant> op_variant =
-      resolve_operation(node_for_exec);
-  if (!op_variant) {
+  const auto operation_it = resolved_operations_.find(node.id);
+  if (operation_it == resolved_operations_.end()) {
     throw GraphError(GraphErrc::NoOperation,
                      "No operator registered for node " + node_for_exec.type +
                          ":" + node_for_exec.subtype);
   }
-  if (std::holds_alternative<MonolithicOpFunc>(*op_variant)) {
-    NodeOutput result = std::get<MonolithicOpFunc>(*op_variant)(
+  const OpRegistry::OpVariant& operation = operation_it->second.operation;
+  if (std::holds_alternative<MonolithicOpFunc>(operation)) {
+    NodeOutput result = std::get<MonolithicOpFunc>(operation)(
         node_for_exec, resolved_inputs.image_inputs);
     if (!has_image_payload(result.image_buffer) && result.data.empty()) {
       throw GraphError(GraphErrc::ComputeError,
@@ -369,7 +344,7 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
       std::lock_guard<std::mutex> lock(node_mutex(node.id));
       rt_buffer = &ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
     }
-    execute_tiled(node_for_exec, std::get<TileOpFunc>(*op_variant), entry,
+    execute_tiled(node_for_exec, std::get<TileOpFunc>(operation), entry,
                   resolved_inputs.image_inputs, *rt_buffer);
   }
 
@@ -410,17 +385,6 @@ ResolvedNodeInputs RealTimeDirtyNodeExecutor::resolve_inputs(Node& node) const {
                                     "RT update");
 }
 
-std::optional<OpRegistry::OpVariant>
-RealTimeDirtyNodeExecutor::resolve_operation(const Node& node) const {
-  auto op_variant = OpRegistry::instance().resolve_for_intent(
-      node.type, node.subtype, ComputeIntent::RealTimeUpdate);
-  if (op_variant) {
-    return op_variant;
-  }
-  return OpRegistry::instance().resolve_for_intent(
-      node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
-}
-
 ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
     const Node& node, const RtPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
@@ -447,13 +411,14 @@ ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
  * @param entry RT dirty ROI and extent metadata.
  * @param image_inputs_ready Resolved RT image inputs.
  * @param rt_buffer Staged destination proxy buffer.
- * @param op_variant Selected monolithic or tiled operation.
+ * @param op_variant Planning-time selected monolithic or tiled operation.
  * @return Nothing.
  * @throws std::bad_alloc when operation execution or staging exhausts memory.
  * @throws GraphError preserving operation errors and wrapping other standard
  * or selected image-processing failures with node context.
- * @note Resource exhaustion retains its type through dirty execution and the
- * public Host boundary; ordinary failures retain RT diagnostic wrapping.
+ * @note Device-aware selection completed before Run admission. Resource
+ * exhaustion retains its type through dirty execution and the public Host
+ * boundary; ordinary failures retain RT diagnostic wrapping.
  */
 void RealTimeDirtyNodeExecutor::execute_operation(
     Node& node, const RtPlanEntry& entry,

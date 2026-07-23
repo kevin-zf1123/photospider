@@ -64,14 +64,23 @@ ComputeRunSubmission make_submission(
 /**
  * @brief Minimal thread-safe Host observation context for route integration.
  * @throws std::bad_alloc only when copied worker-id observations grow.
- * @note GPU-pipeline is a private route over the same process workers, so the
- * fixture intentionally reports the CPU capability for every route test.
+ * @note Tests opt into a deterministic fake Metal capability; no native
+ * backend, command queue, or platform probe is required.
  */
 class TestHostContext final : public ExecutionHostContext {
  public:
+  /**
+   * @brief Creates a Host context with optional fake Metal availability.
+   * @param metal_available Whether `GPU_METAL` should be reported available.
+   * @throws Nothing.
+   */
+  explicit TestHostContext(bool metal_available = false) noexcept
+      : metal_available_(metal_available) {}
+
   /** @copydoc ExecutionHostContext::is_device_available */
   bool is_device_available(Device device) const noexcept override {
-    return device == Device::CPU;
+    return device == Device::CPU ||
+           (metal_available_ && device == Device::GPU_METAL);
   }
 
   /** @copydoc ExecutionHostContext::set_task_context */
@@ -139,6 +148,9 @@ class TestHostContext final : public ExecutionHostContext {
   }
 
  private:
+  /** @brief Deterministic fake Metal capability. */
+  bool metal_available_ = false;
+
   /** @brief Current entered callback contexts. */
   std::atomic_int active_contexts_{0};
 
@@ -164,15 +176,19 @@ class TestHostContext final : public ExecutionHostContext {
  * @param local_task_id Dense Run-local task id.
  * @param trace_node_id Diagnostic trace node.
  * @param executable Test callback entered by a physical route.
+ * @param device Private lane selected for the callback.
  * @return Move-owned ready submission.
  * @throws Standard callback, metadata, or function ownership exceptions.
  */
 ReadyTaskSubmission make_ready(ComputeRunLease lease,
                                std::uint64_t local_task_id, int trace_node_id,
-                               ReadyTaskSubmission::Executable executable) {
+                               ReadyTaskSubmission::Executable executable,
+                               Device device = Device::CPU) {
   const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
-  return ReadyTaskSubmission(std::move(lease), identity, trace_node_id, true,
-                             std::move(executable));
+  return ReadyTaskSubmission(
+      std::move(lease), identity, trace_node_id, true, std::move(executable),
+      ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), device);
 }
 
 /**
@@ -183,21 +199,24 @@ ReadyTaskSubmission make_ready(ComputeRunLease lease,
  * @param revision Nonzero Graph revision.
  * @param entered Callback entry counter.
  * @param host Host observation destination.
+ * @param device Private lane selected for the task.
  * @return Nothing after synchronous settlement.
  * @throws Any service or callback exception unchanged.
  */
 void execute_successful_run(ExecutionService& service, const std::string& route,
                             const std::string& label, std::uint64_t revision,
-                            std::atomic_int& entered, TestHostContext& host) {
+                            std::atomic_int& entered, TestHostContext& host,
+                            Device device = Device::CPU) {
   ComputeRun run(make_submission(label, revision, 1));
   std::vector<ReadyTaskSubmission> ready;
-  ready.push_back(
-      make_ready(run.acquire_lease(), 0U, 1,
-                 [&entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
-                            ExecutionTaskRuntime& runtime) {
-                   entered.fetch_add(1, std::memory_order_relaxed);
-                   runtime.dec_tasks_to_complete();
-                 }));
+  ready.push_back(make_ready(
+      run.acquire_lease(), 0U, 1,
+      [&entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                 ExecutionTaskRuntime& runtime) {
+        entered.fetch_add(1, std::memory_order_relaxed);
+        runtime.dec_tasks_to_complete();
+      },
+      device));
   service.execute_run(host, route, std::move(ready), 1);
 }
 
@@ -316,52 +335,36 @@ class ScopedHookRelease final {
 };
 
 /**
- * @brief Captures two reserved-start attempts and aborts only the first.
- * @throws Nothing for construction and callback use.
+ * @brief Disarms the separate test-product rollback probe on every exit.
  */
-struct ReservedStartProbe final {
-  /** @brief Number of observer entries. */
-  unsigned int calls = 0U;
-
-  /** @brief First two candidate identities. */
-  std::uint64_t candidate_ids[2] = {0U, 0U};
-
-  /** @brief First two nonreused entry versions. */
-  std::uint64_t entry_versions[2] = {0U, 0U};
-
-  /** @brief First two immutable route generations. */
-  std::uint64_t route_generations[2] = {0U, 0U};
-
-  /** @brief First two staged child-grant vectors. */
-  ResourceVector resources[2];
-
+class ScopedReservedStartProbe final {
+ public:
   /**
-   * @brief Records one attempt and forces only the first to roll back.
-   * @param context Nonnull probe owned through synchronous Run settlement.
-   * @param candidate_id Current nonzero candidate identity.
-   * @param entry_version Current nonzero entry version.
-   * @param route_generation Current immutable route generation.
-   * @param execution_resources Exact staged child grant.
-   * @return True only for the first observer entry.
+   * @brief Arms the probe for one isolated service.
+   * @param service Service whose next reserved start is inspected.
    * @throws Nothing.
    */
-  static bool observe(void* context, std::uint64_t candidate_id,
-                      std::uint64_t entry_version,
-                      std::uint64_t route_generation,
-                      const ResourceVector& execution_resources) noexcept {
-    auto* probe = static_cast<ReservedStartProbe*>(context);
-    if (probe == nullptr) {
-      return false;
-    }
-    const unsigned int index = probe->calls++;
-    if (index < 2U) {
-      probe->candidate_ids[index] = candidate_id;
-      probe->entry_versions[index] = entry_version;
-      probe->route_generations[index] = route_generation;
-      probe->resources[index] = execution_resources;
-    }
-    return index == 0U;
+  explicit ScopedReservedStartProbe(ExecutionService& service) noexcept
+      : service_(&service) {
+    ::ps::testing::ExecutionServiceTestAccess::
+        arm_reserved_start_rollback_probe(service);
   }
+
+  /** @brief Disarms the probe without invoking production callbacks. */
+  ~ScopedReservedStartProbe() noexcept {
+    ::ps::testing::ExecutionServiceTestAccess::
+        disarm_reserved_start_rollback_probe(*service_);
+  }
+
+  /** @brief Prevents duplicate disarm ownership. */
+  ScopedReservedStartProbe(const ScopedReservedStartProbe&) = delete;
+
+  /** @brief Prevents duplicate disarm assignment. */
+  ScopedReservedStartProbe& operator=(const ScopedReservedStartProbe&) = delete;
+
+ private:
+  /** @brief Borrowed isolated service used only for test ownership. */
+  ExecutionService* service_;
 };
 
 /**
@@ -388,6 +391,116 @@ class PolicyExecutionFixture : public ::testing::Test {
 };
 
 /**
+ * @brief Verifies route-aware device discovery has deterministic fallback.
+ */
+TEST(PhysicalExecutionIntegration, PublishesRouteAwareDeviceInventory) {
+  ExecutionService service(2U);
+  TestHostContext cpu_only_host;
+  TestHostContext metal_host(true);
+
+  EXPECT_EQ(service.available_devices(cpu_only_host, "cpu"),
+            (std::vector<Device>{Device::CPU}));
+  EXPECT_EQ(service.available_devices(metal_host, "serial_debug"),
+            (std::vector<Device>{Device::CPU}));
+  EXPECT_EQ(service.available_devices(cpu_only_host, "gpu_pipeline"),
+            (std::vector<Device>{Device::CPU}));
+  EXPECT_EQ(service.available_devices(metal_host, "gpu_pipeline"),
+            (std::vector<Device>{Device::GPU_METAL, Device::CPU}));
+  EXPECT_THROW(service.available_devices(metal_host, "heterogeneous"),
+               GraphError);
+}
+
+/**
+ * @brief Verifies unavailable submission devices fail before Run publication.
+ */
+TEST(PhysicalExecutionIntegration, RejectsDeviceOutsideRouteInventory) {
+  ExecutionService service(1U);
+  TestHostContext host;
+  ComputeRun run(make_submission("invalid-device-route", 71U, 1));
+  std::atomic_int entered{0};
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(make_ready(
+      run.acquire_lease(), 0U, 1,
+      [&entered](ComputeRunLease&, const ComputeRunTaskIdentity&,
+                 ExecutionTaskRuntime& runtime) {
+        entered.fetch_add(1, std::memory_order_relaxed);
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+
+  EXPECT_THROW(service.execute_run(host, "cpu", std::move(ready), 1),
+               std::invalid_argument);
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(host.exits(), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Verifies CPU fallback and Metal work overlap on distinct fixed lanes.
+ */
+TEST(PhysicalExecutionIntegration, CpuAndGpuPipelineLanesOverlapAndDrain) {
+  ExecutionService service(2U);
+  TestHostContext host(true);
+  ComputeRun run(make_submission("cpu-gpu-overlap", 70U, 1));
+  std::promise<void> cpu_entered_promise;
+  std::future<void> cpu_entered = cpu_entered_promise.get_future();
+  std::promise<void> gpu_entered_promise;
+  std::future<void> gpu_entered = gpu_entered_promise.get_future();
+  std::promise<void> release_promise;
+  const std::shared_future<void> release = release_promise.get_future().share();
+
+  std::vector<ReadyTaskSubmission> ready;
+  ready.push_back(make_ready(
+      run.acquire_lease(), 0U, 1,
+      [&cpu_entered_promise, release](ComputeRunLease&,
+                                      const ComputeRunTaskIdentity&,
+                                      ExecutionTaskRuntime& runtime) {
+        cpu_entered_promise.set_value();
+        release.wait();
+        runtime.dec_tasks_to_complete();
+      }));
+  ready.push_back(make_ready(
+      run.acquire_lease(), 1U, 1,
+      [&gpu_entered_promise, release](ComputeRunLease&,
+                                      const ComputeRunTaskIdentity&,
+                                      ExecutionTaskRuntime& runtime) {
+        gpu_entered_promise.set_value();
+        release.wait();
+        runtime.dec_tasks_to_complete();
+      },
+      Device::GPU_METAL));
+
+  std::future<void> completion = std::async(
+      std::launch::async,
+      [&service, &host, ready = std::move(ready)]() mutable {
+        service.execute_run(host, "gpu_pipeline", std::move(ready), 2);
+      });
+  const bool cpu_started =
+      cpu_entered.wait_for(kTestTimeout) == std::future_status::ready;
+  const bool gpu_started =
+      gpu_entered.wait_for(kTestTimeout) == std::future_status::ready;
+  release_promise.set_value();
+  const std::future_status completion_status =
+      completion.wait_for(kTestTimeout);
+  if (completion_status == std::future_status::ready) {
+    EXPECT_NO_THROW(completion.get());
+  }
+
+  EXPECT_TRUE(cpu_started);
+  EXPECT_TRUE(gpu_started);
+  ASSERT_EQ(completion_status, std::future_status::ready);
+  EXPECT_EQ(host.maximum_contexts(), 2);
+  EXPECT_EQ(host.exits(), 2);
+  EXPECT_FALSE(host.observation_failed());
+  std::vector<int> workers = host.worker_ids();
+  std::sort(workers.begin(), workers.end());
+  ASSERT_EQ(workers.size(), 2U);
+  EXPECT_LT(workers.front(), 2);
+  EXPECT_EQ(workers.back(), 2);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
  * @brief Verifies all three routes execute repeatedly and recover after fault.
  */
 TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
@@ -408,15 +521,16 @@ TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
     EXPECT_EQ(second_host.exits(), 1);
   }
 
-  TestHostContext failure_host;
+  TestHostContext failure_host(true);
   ComputeRun failing(make_submission("gpu-failure", revision++, 1));
   std::vector<ReadyTaskSubmission> failing_ready;
-  failing_ready.push_back(
-      make_ready(failing.acquire_lease(), 0U, 1,
-                 [](ComputeRunLease&, const ComputeRunTaskIdentity&,
-                    ExecutionTaskRuntime&) {
-                   throw std::runtime_error("exact gpu-pipeline failure");
-                 }));
+  failing_ready.push_back(make_ready(
+      failing.acquire_lease(), 0U, 1,
+      [](ComputeRunLease&, const ComputeRunTaskIdentity&,
+         ExecutionTaskRuntime&) {
+        throw std::runtime_error("exact gpu-pipeline failure");
+      },
+      Device::GPU_METAL));
   try {
     service.execute_run(failure_host, "gpu_pipeline", std::move(failing_ready),
                         1);
@@ -425,10 +539,10 @@ TEST(PhysicalExecutionIntegration, ExecutesAndReusesEveryPrivateRoute) {
     EXPECT_STREQ(error.what(), "exact gpu-pipeline failure");
   }
   std::atomic_int recovered{0};
-  TestHostContext recovery_host;
+  TestHostContext recovery_host(true);
   EXPECT_NO_THROW(execute_successful_run(service, "gpu_pipeline",
                                          "gpu-recovery", revision++, recovered,
-                                         recovery_host));
+                                         recovery_host, Device::GPU_METAL));
   EXPECT_EQ(recovered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -627,15 +741,14 @@ TEST_F(PolicyExecutionFixture,
 TEST(ExecutionServiceReservedStart,
      RollsBackGrantWithoutCandidateVersionAbaOrResourceLeak) {
   ExecutionService service(1U);
-  ReservedStartProbe probe;
-  testing::ExecutionServiceTestAccess::set_reserved_start_rollback_observer(
-      service, &ReservedStartProbe::observe, &probe);
+  ScopedReservedStartProbe probe_guard(service);
   std::atomic_int entered{0};
   TestHostContext host;
   execute_successful_run(service, "cpu", "reserved-start-rollback", 60U,
                          entered, host);
-  testing::ExecutionServiceTestAccess::clear_reserved_start_rollback_observer(
-      service);
+  const compute::testing::ReservedStartRollbackProbeSnapshot probe =
+      ::ps::testing::ExecutionServiceTestAccess::
+          reserved_start_rollback_probe_snapshot(service);
 
   ASSERT_EQ(probe.calls, 2U);
   EXPECT_NE(probe.candidate_ids[0], 0U);

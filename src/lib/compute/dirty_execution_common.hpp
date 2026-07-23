@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -176,6 +177,14 @@ struct DirtySourceFirstRunRequest {
   const DirtyTaskSelectionOverlay* selection = nullptr;
 
   /**
+   * @brief Selected devices aligned with `compute_plan->task_graph.tasks`.
+   * @note Required for every request. Process-service submissions use the
+   * value to enter the matching private CPU or GPU lane; inline execution
+   * retains the same immutable planning snapshot without queue routing.
+   */
+  const std::vector<Device>* task_devices = nullptr;
+
+  /**
    * @brief Other request-owned structural bytes retained across phase service
    * settlement.
    *
@@ -243,6 +252,7 @@ class DirtyReadyTaskContext final
    * @param compute_plan Immutable task graph copied into context ownership.
    * @param selection Optional dirty dependency overlay copied into ownership.
    * @param active_task_ids Exact task ids active in this phase.
+   * @param task_devices Selected devices aligned with compute-plan task ids.
    * @param run_task Owned callable that executes one dense task id.
    * @param run_task_retained_memory_bytes Audited capture/allocation bytes
    * owned by run_task beyond its inline `std::function` object. This value
@@ -259,6 +269,7 @@ class DirtyReadyTaskContext final
   DirtyReadyTaskContext(const ComputePlan& compute_plan,
                         const DirtyTaskSelectionOverlay* selection,
                         const std::vector<int>& active_task_ids,
+                        const std::vector<Device>& task_devices,
                         std::function<void(int)> run_task,
                         std::uint64_t run_task_retained_memory_bytes,
                         ComputeRunLease lease, bool release_dependents,
@@ -328,6 +339,9 @@ class DirtyReadyTaskContext final
 
   /** @brief Exact active ids retained for dependency-state construction. */
   std::vector<int> active_task_ids_;
+
+  /** @brief Selected devices aligned with dense compute-plan task ids. */
+  std::vector<Device> task_devices_;
 
   /** @brief Fast active membership guard for composite identity validation. */
   std::unordered_set<int> active_task_id_set_;
@@ -777,6 +791,12 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
   const ComputePlan& compute_plan = *request.compute_plan;
   const std::vector<int>& source_task_ids = *request.source_task_ids;
   const std::vector<int>& downstream_task_ids = *request.downstream_task_ids;
+  if (request.task_devices == nullptr ||
+      request.task_devices->size() != compute_plan.task_graph.tasks.size()) {
+    throw std::invalid_argument(
+        "Dirty source-first routing requires one device per planned task.");
+  }
+  const std::vector<Device>& task_devices = *request.task_devices;
   const auto observe_cancellation = [&request]() {
     std::optional<ComputeRunCancellationReason> reason;
     if (request.run_lease != nullptr) {
@@ -816,8 +836,8 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
 
     if (!source_task_ids.empty()) {
       auto source_context = std::make_shared<DirtyReadyTaskContext>(
-          compute_plan, request.selection, source_task_ids, owned_run_task,
-          run_task_retained_memory_bytes, phase_lease, false,
+          compute_plan, request.selection, source_task_ids, task_devices,
+          owned_run_task, run_task_retained_memory_bytes, phase_lease, false,
           ExecutionTaskPriority::High);
       std::vector<ReadyTaskSubmission> source_submissions =
           source_context->make_submissions(source_task_ids, true);
@@ -851,8 +871,8 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
           owned_run_task, [&](std::function<void(int)> transferred_run_task) {
             return std::make_shared<DirtyReadyTaskContext>(
                 compute_plan, request.selection, downstream_task_ids,
-                std::move(transferred_run_task), run_task_retained_memory_bytes,
-                phase_lease, true,
+                task_devices, std::move(transferred_run_task),
+                run_task_retained_memory_bytes, phase_lease, true,
                 request.intent == ComputeIntent::RealTimeUpdate
                     ? ExecutionTaskPriority::High
                     : ExecutionTaskPriority::Normal);

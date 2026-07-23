@@ -23,6 +23,10 @@ class PolicyBinding;
 class PolicyRegistry;
 }  // namespace policy
 
+namespace execution {
+enum class PhysicalExecutionLane : std::uint8_t;
+}  // namespace execution
+
 namespace testing {
 
 /**
@@ -259,6 +263,15 @@ class ReadyTaskMetadata final {
   int trace_node_id() const noexcept { return trace_node_id_; }
 
   /**
+   * @brief Returns the device selected with the owned operation snapshot.
+   * @return CPU or one private-route GPU label.
+   * @throws Nothing.
+   * @note The value selects a physical service lane but grants no native
+   * device handle or execution authority.
+   */
+  Device device() const noexcept { return device_; }
+
+  /**
    * @brief Reports whether this submission belongs to the initial ready set.
    * @return True for dispatcher-discovered initial work.
    * @throws Nothing.
@@ -275,12 +288,13 @@ class ReadyTaskMetadata final {
    * lease.
    * @param trace_node_id Planned node id used only for trace attribution.
    * @param is_initial_ready Whether the dispatcher selected initial readiness.
+   * @param device Device frozen with the selected operation implementation.
    * @throws std::bad_alloc when graph identity storage cannot allocate.
    * @note Construction receives no mutable Run, Graph, plan, or dependency
    * state.
    */
   ReadyTaskMetadata(const ComputeRunDescriptor& descriptor, int trace_node_id,
-                    bool is_initial_ready);
+                    bool is_initial_ready, Device device);
 
   /** @brief Opaque Run namespace copied from the matching descriptor. */
   ComputeRunId run_id_;
@@ -309,6 +323,9 @@ class ReadyTaskMetadata final {
   /** @brief Planned node id used only for execution-trace publication. */
   int trace_node_id_ = -1;
 
+  /** @brief Device selected before physical ready-store admission. */
+  Device device_ = Device::CPU;
+
   /** @brief Whether this task was in the initial dependency-ready set. */
   bool is_initial_ready_ = false;
 };
@@ -317,9 +334,9 @@ class ReadyTaskMetadata final {
  * @brief Move-owned ready-only work accepted by `ExecutionService`.
  *
  * A submission owns immutable metadata, a composite Run/local identity, one
- * matching non-forgeable Run lease, trusted resource demand, and an
- * executable. It contains no borrowed Graph, plan, task executor, dependency
- * map, result slot, or commit callback.
+ * matching non-forgeable Run lease, trusted resource demand, a frozen device,
+ * and an executable. It contains no borrowed Graph, plan, task executor,
+ * dependency map, result slot, or commit callback.
  *
  * @throws std::invalid_argument when the executable is empty or identity and
  * lease name different Runs.
@@ -355,6 +372,7 @@ class ReadyTaskSubmission final {
    * @param priority Private high/normal ready-store ordering hint.
    * @param resource_demand Trusted immutable retained, scratch, ready-byte,
    * and positive work declaration.
+   * @param device Device selected with the retained operation implementation.
    * @throws std::invalid_argument when executable is empty or the identity Run
    * differs from the lease Run.
    * @throws std::bad_alloc when metadata or executable storage allocates.
@@ -365,7 +383,8 @@ class ReadyTaskSubmission final {
       ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
       bool is_initial_ready, Executable executable,
       ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
-      ReadyTaskResourceDemand resource_demand = default_resource_demand());
+      ReadyTaskResourceDemand resource_demand = default_resource_demand(),
+      Device device = Device::CPU);
 
   /**
    * @brief Returns the empty adapter-owned demand.
@@ -515,13 +534,14 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
 };
 
 /**
- * @brief Owns one fixed Host CPU execution domain for concurrent Runs.
+ * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
- * The service owns a fixed worker pool and accepts only
- * `ReadyTaskSubmission`. Each active Run has isolated completion, exception,
- * trace-target, and settlement state while independent Runs may overlap. The
- * service also exclusively owns the host-authoritative resource ledger and
- * policy-aware entry/byte-bounded ready store. Two private policy strategies
+ * The service owns a fixed CPU worker pool plus one private Metal worker lane
+ * and accepts only `ReadyTaskSubmission`. Each active Run has isolated
+ * completion, exception, trace-target, and settlement state while independent
+ * Runs may overlap. The service also exclusively owns the host-authoritative
+ * resource ledger and policy-aware entry/byte-bounded ready store. Two private
+ * policy strategies
  * rank explicit interactive/throughput QoS with checked work/byte service,
  * Graph/Run fairness, dispatch aging, admission headroom, and bounded batch
  * progress. Policies own no physical or resource authority. The service owns
@@ -564,8 +584,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
    * @throws std::invalid_argument if the request exceeds eight.
    * @throws std::bad_alloc or std::system_error if pool construction fails.
-   * @note The fixed pool is infrastructure. Individual Runs reserve CPU
-   * execution rights and other private owners reserve their own slots.
+   * @note The fixed CPU pool and Metal lane are infrastructure. Individual
+   * Runs reserve the common CPU execution rights that bound both lanes.
    */
   explicit ExecutionService(unsigned int worker_count);
 
@@ -582,7 +602,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
                    ExecutionResourceLimits resource_limits);
 
   /**
-   * @brief Joins and releases service-owned CPU workers.
+   * @brief Joins and releases service-owned CPU and Metal workers.
    * @throws Nothing.
    * @note Kernel and every injected ComputeService must already be drained.
    */
@@ -615,13 +635,14 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::bad_alloc or std::system_error if worker construction fails.
    * @note A later zero request preserves an existing fixed value and an equal
    * positive request is idempotent. Graph load, replacement, Run execution,
-   * and dirty phases never resize the pool.
+   * and dirty phases never resize the CPU pool or Metal lane.
    */
   void configure_worker_count(unsigned int worker_count);
 
   /**
-   * @brief Returns the fixed service worker count.
-   * @return Zero before configuration, otherwise a value in `[1,8]`.
+   * @brief Returns the fixed CPU worker count.
+   * @return Zero before configuration, otherwise a value in `[1,8]`; the
+   * dedicated Metal worker is not included.
    * @throws std::system_error if private state locking fails.
    */
   unsigned int worker_count() const;
@@ -634,8 +655,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   bool is_configured() const;
 
   /**
-   * @brief Copies service CPU execution diagnostics.
-   * @return Text containing fixed workers, active Runs, and queued work.
+   * @brief Copies service execution diagnostics.
+   * @return Text containing fixed CPU/GPU lanes, active Runs, and queued work.
    * @throws std::bad_alloc if formatting storage cannot allocate.
    * @throws std::system_error if private state locking fails.
    * @note The snapshot grants no worker, queue, Run, or lifecycle authority.
@@ -773,7 +794,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * additional declaration for every logical task.
    * @return Nothing after every callback in the batch settles.
    * @throws std::invalid_argument for invalid counts, empty active batches,
-   * mixed Run ids, or zero work.
+   * mixed Run ids, zero work, or a device unavailable on the selected route.
    * @throws std::logic_error before fixed pool configuration, for duplicate
    * active Run ids, or for invalid generic runtime use.
    * @throws GraphError with `GraphErrc::ComputeError` when checked aggregation
@@ -801,11 +822,26 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   void submit_ready_submission(ReadyTaskSubmission submission) override;
 
   /**
-   * @brief Reports the CPU-only capability exposed by the migrated slice.
-   * @return One-element CPU device list.
+   * @brief Reports the route-less compatibility capability.
+   * @return One-element CPU device list; route-aware callers use the overload.
    * @throws std::bad_alloc when result storage cannot allocate.
    */
   std::vector<Device> available_devices() const override;
+
+  /**
+   * @brief Reports devices exposed by one exact private route and Host.
+   * @param host Borrowed process capability observer.
+   * @param execution_type Exact `cpu`, `gpu_pipeline`, or `serial_debug` id.
+   * @return `gpu_pipeline` returns Metal then CPU when Metal is available;
+   * CPU and serial-debug return CPU only.
+   * @throws GraphError with `GraphErrc::NotFound` for an unknown route.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   * @note The copied labels contain no native handle. This is the canonical
+   * inventory for full, preflight, and dirty operation selection.
+   */
+  std::vector<Device> available_devices(
+      const ExecutionHostContext& host,
+      const std::string& execution_type) const;
 
   /**
    * @brief Rejects borrowed task-handle initial batches.
@@ -919,24 +955,6 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   struct CpuRunAdmissionEstimate;
 
   /**
-   * @brief Test-only decision at the reserved-start rollback boundary.
-   * @param context Opaque repository-test state.
-   * @param candidate_id Nonzero ready-entry identity retained by the pin.
-   * @param entry_version Nonzero nonreused entry version retained by the pin.
-   * @param route_generation Immutable Run route generation retained by the pin.
-   * @param execution_resources Exact child grant staged for this start.
-   * @return True to abort this attempt as obsolete before every route, ready,
-   * fairness, or in-flight mutation; false to continue production commit.
-   * @throws Nothing; observers must be allocation-free and noexcept.
-   * @note The bridge definition lives under tests/support. Production leaves
-   * this pointer null, and no public or installed API exposes the seam.
-   */
-  using ReservedStartRollbackObserver =
-      bool (*)(void* context, std::uint64_t candidate_id,
-               std::uint64_t entry_version, std::uint64_t route_generation,
-               const ResourceVector& execution_resources) noexcept;
-
-  /**
    * @brief Test-only observer invoked at the initial-storage retirement seam.
    *
    * @param context Opaque repository-test context installed by the private
@@ -1016,18 +1034,21 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Runs the shared worker loop until service shutdown.
-   * @param worker_id Stable zero-based id in the fixed service pool.
+   * @param worker_id Stable zero-based id across CPU and GPU lanes.
+   * @param lane Fixed physical lane owned by this worker.
    * @return Nothing.
    * @throws Nothing; task exceptions are routed into matching Run state.
    */
-  void worker_loop(int worker_id) noexcept;
+  void worker_loop(int worker_id,
+                   execution::PhysicalExecutionLane lane) noexcept;
 
   /**
    * @brief Enqueues one owned ready submission for a registered Run.
    * @param run Matching active Run state.
    * @param submission Ready value transferred into service queue ownership.
    * @return Nothing.
-   * @throws std::invalid_argument when Run identity does not match.
+   * @throws std::invalid_argument when Run identity does not match or the
+   * selected device is unavailable on the Run route.
    * @throws GraphError when declared or reserved ready capacity is invalid.
    * @throws std::logic_error when the Run or service no longer accepts work.
    * @throws std::bad_alloc if store ownership cannot allocate.
@@ -1040,7 +1061,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param run Matching active Run whose envelope was admitted.
    * @param submission Initial or dependency-released submission to transfer.
    * @return Shared queue entry carrying the exact ready grant.
-   * @throws std::invalid_argument for mismatched Run identity.
+   * @throws std::invalid_argument for mismatched Run identity or a device
+   * unavailable on the selected route.
    * @throws GraphError for demand mismatch or unavailable reserved capacity.
    * @throws std::bad_alloc when queue-entry ownership cannot allocate.
    * @note Initial and dependent publication both use this helper so neither
@@ -1150,19 +1172,6 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * that can invoke the observer.
    */
   void* initial_submission_storage_observer_context_ = nullptr;
-
-  /**
-   * @brief Optional repository-test callback after child-grant staging.
-   * @note A true result exercises normal RAII grant rollback before any
-   * observable start mutation. Production composition leaves this null.
-   */
-  ReservedStartRollbackObserver reserved_start_rollback_observer_ = nullptr;
-
-  /**
-   * @brief Opaque context paired with the reserved-start observer.
-   * @note The private bridge guarantees lifetime through the observed Run.
-   */
-  void* reserved_start_rollback_observer_context_ = nullptr;
 
   /** @brief Current service-worker Run context, null outside callbacks. */
   static thread_local RunState* tls_run_state_;

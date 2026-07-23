@@ -1,6 +1,7 @@
 #include "compute/execution_service.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,9 @@
 #include <vector>
 
 #include "compute/resource_demand_estimator.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
 #include "execution/physical_execution_routes.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
@@ -53,7 +57,8 @@ ReadyTaskResourceDemand owned_callback_resource_demand(
 
 /** @copydoc ReadyTaskMetadata::ReadyTaskMetadata */
 ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
-                                     int trace_node_id, bool is_initial_ready)
+                                     int trace_node_id, bool is_initial_ready,
+                                     Device device)
     : run_id_(descriptor.id()),
       graph_identity_(descriptor.graph_identity()),
       graph_instance_id_(descriptor.graph_instance_id()),
@@ -63,6 +68,7 @@ ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
       quality_(descriptor.quality()),
       qos_(descriptor.qos()),
       trace_node_id_(trace_node_id),
+      device_(device),
       is_initial_ready_(is_initial_ready) {
 }  // NOLINT(whitespace/indent_namespace)
 
@@ -70,8 +76,9 @@ ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
 ReadyTaskSubmission::ReadyTaskSubmission(
     ComputeRunLease lease, ComputeRunTaskIdentity identity, int trace_node_id,
     bool is_initial_ready, Executable executable,
-    ExecutionTaskPriority priority, ReadyTaskResourceDemand resource_demand)
-    : metadata_(lease.descriptor(), trace_node_id, is_initial_ready),
+    ExecutionTaskPriority priority, ReadyTaskResourceDemand resource_demand,
+    Device device)
+    : metadata_(lease.descriptor(), trace_node_id, is_initial_ready, device),
       identity_(identity),
       lease_(std::move(lease)),
       executable_(std::move(executable)),
@@ -111,6 +118,49 @@ void ReadyTaskSubmission::execute(ExecutionTaskRuntime& task_runtime) {
   }
 }
 
+namespace {
+
+/**
+ * @brief Tests a frozen private-route inventory for one selected device.
+ * @param execution_type Exact private route id.
+ * @param metal_available Metal capability captured before Run publication.
+ * @param device Device frozen with the operation snapshot.
+ * @return True only for CPU on every route or available Metal on
+ * `gpu_pipeline`.
+ * @throws Nothing.
+ * @note The scalar snapshot avoids Host virtual calls while service and Run
+ * locks are held.
+ */
+bool route_inventory_exposes_device(const std::string& execution_type,
+                                    bool metal_available,
+                                    Device device) noexcept {
+  if (device == Device::CPU) {
+    return execution::PhysicalExecutionRoutes::is_supported(execution_type);
+  }
+  return execution_type == "gpu_pipeline" && device == Device::GPU_METAL &&
+         metal_available;
+}
+
+/**
+ * @brief Captures whether one Host-aware private route exposes a device.
+ * @param host Borrowed process capability observer.
+ * @param execution_type Exact private route id.
+ * @param device Device requested for the inventory snapshot.
+ * @return True when the route and current Host capability expose the device.
+ * @throws Nothing.
+ * @note Callers invoke this boundary before acquiring service or Run locks.
+ */
+bool route_exposes_device(const ExecutionHostContext& host,
+                          const std::string& execution_type,
+                          Device device) noexcept {
+  const bool metal_available = execution_type == "gpu_pipeline" &&
+                               host.is_device_available(Device::GPU_METAL);
+  return route_inventory_exposes_device(execution_type, metal_available,
+                                        device);
+}
+
+}  // namespace
+
 /**
  * @brief Owns isolated completion and observation state for one active Run.
  *
@@ -128,6 +178,7 @@ struct ExecutionService::RunState final
    * @param qos Explicit immutable service-class, deadline, and weight inputs.
    * @param host_context Borrowed Graph observation target.
    * @param execution_type Private physical route fixed for this Run.
+   * @param metal_available Metal capability captured before publication.
    * @param total_task_count Positive logical completion count.
    * @param task_resources Uniform adapter declaration for every submission.
    * @param ready_task_bytes Complete service-plus-adapter ready charge.
@@ -138,7 +189,8 @@ struct ExecutionService::RunState final
   RunState(ComputeRunId run_id, std::string graph_identity,
            std::string graph_key, ComputeRunQos qos,
            ExecutionHostContext& host_context, std::string execution_type,
-           int total_task_count, ReadyTaskResourceDemand task_resources,
+           bool metal_available, int total_task_count,
+           ReadyTaskResourceDemand task_resources,
            std::uint64_t ready_task_bytes, std::uint64_t execution_task_bytes,
            ResourceLedger::Reservation run_reservation) noexcept
       : id(run_id),
@@ -147,11 +199,24 @@ struct ExecutionService::RunState final
         policy_qos(std::move(qos)),
         host(&host_context),
         route(std::move(execution_type)),
+        route_metal_available(metal_available),
         resource_demand(task_resources),
         ready_bytes_per_task(ready_task_bytes),
         execution_retained_bytes_per_task(execution_task_bytes),
         reservation(std::move(run_reservation)),
         tasks_to_complete(total_task_count) {}
+
+  /**
+   * @brief Tests the immutable route/Host inventory captured for this Run.
+   * @param device Device retained by one ready submission.
+   * @return True when the frozen inventory exposes the device.
+   * @throws Nothing.
+   * @note This method performs no Host callback and is safe under pool/Run
+   * locks during frontier formation and reserved-start revalidation.
+   */
+  bool exposes_device(Device device) const noexcept {
+    return route_inventory_exposes_device(route, route_metal_available, device);
+  }
 
   /**
    * @brief Tests whether the caller-side Run wait may finish.
@@ -191,6 +256,9 @@ struct ExecutionService::RunState final
   /** @brief Immutable private execution route used by every Run callback. */
   const std::string route;
 
+  /** @brief Host Metal capability captured before active-Run publication. */
+  const bool route_metal_available;
+
   /** @brief Nonzero route generation captured when this Run was admitted. */
   const std::uint64_t route_generation = 1U;
 
@@ -204,9 +272,11 @@ struct ExecutionService::RunState final
   const std::uint64_t execution_retained_bytes_per_task;
 
   /**
-   * @brief Complete Run vector retained until all queued/executing grants end.
+   * @brief Complete Run vector closed explicitly after synchronous settlement.
+   * @note Optional ownership lets `execute_run()` return Host capacity before
+   * a worker releases its final non-authoritative `shared_ptr<RunState>`.
    */
-  ResourceLedger::Reservation reservation;
+  std::optional<ResourceLedger::Reservation> reservation;
 
   /** @brief Guards completion, failure, admission, and in-flight state. */
   mutable std::mutex mutex;
@@ -611,6 +681,97 @@ class ExecutionService::ThroughputBuiltinPolicy final
   }
 };
 
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+namespace {
+
+/**
+ * @brief Allocation-free storage for one test-product start attempt.
+ * @throws Nothing for atomic initialization and access.
+ */
+struct ReservedStartProbeAttempt final {
+  /** @brief Ready-entry candidate identity. */
+  std::atomic<std::uint64_t> candidate_id{0U};
+  /** @brief Nonreused ready-entry version. */
+  std::atomic<std::uint64_t> entry_version{0U};
+  /** @brief Immutable copied route generation. */
+  std::atomic<std::uint64_t> route_generation{0U};
+  /** @brief Staged CPU execution slots. */
+  std::atomic<std::uint64_t> cpu_slots{0U};
+  /** @brief Staged retained-memory bytes. */
+  std::atomic<std::uint64_t> retained_memory_bytes{0U};
+  /** @brief Staged scratch bytes. */
+  std::atomic<std::uint64_t> scratch_bytes{0U};
+  /** @brief Staged ready-entry units. */
+  std::atomic<std::uint64_t> ready_entries{0U};
+  /** @brief Staged ready bytes. */
+  std::atomic<std::uint64_t> ready_bytes{0U};
+};
+
+/**
+ * @brief Process-local state compiled only into the non-installed test product.
+ * @throws Nothing for atomic access.
+ * @note GoogleTest executes the owning case with one isolated service; no
+ * production object stores or references this state.
+ */
+struct ReservedStartProbeState final {
+  /** @brief Enables the single deterministic first-attempt rollback. */
+  std::atomic_bool armed{false};
+  /** @brief Total attempts observed while armed. */
+  std::atomic<std::uint64_t> calls{0U};
+  /** @brief First two fixed-size observations. */
+  ReservedStartProbeAttempt attempts[2];
+};
+
+/**
+ * @brief Returns the unique test-product probe state.
+ * @return Process-lifetime allocation-free storage.
+ * @throws Nothing.
+ */
+ReservedStartProbeState& reserved_start_probe_state() noexcept {
+  static ReservedStartProbeState state;
+  return state;
+}
+
+/**
+ * @brief Records a staged child grant and rolls back the first armed attempt.
+ * @param candidate_id Current ready-entry identity.
+ * @param entry_version Current nonreused ready-entry version.
+ * @param route_generation Immutable route generation.
+ * @param resources Exact staged execution child grant.
+ * @return True only for the first attempt after arming.
+ * @throws Nothing.
+ * @note This function is absent from the production translation unit. It uses
+ * atomics only and cannot call service code while pool and Run locks are held.
+ */
+bool record_reserved_start_attempt_for_testing(
+    std::uint64_t candidate_id, std::uint64_t entry_version,
+    std::uint64_t route_generation, const ResourceVector& resources) noexcept {
+  ReservedStartProbeState& state = reserved_start_probe_state();
+  if (!state.armed.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const std::uint64_t index =
+      state.calls.fetch_add(1U, std::memory_order_acq_rel);
+  if (index < 2U) {
+    ReservedStartProbeAttempt& attempt = state.attempts[index];
+    attempt.candidate_id.store(candidate_id, std::memory_order_relaxed);
+    attempt.entry_version.store(entry_version, std::memory_order_relaxed);
+    attempt.route_generation.store(route_generation, std::memory_order_relaxed);
+    attempt.cpu_slots.store(resources.cpu_slots, std::memory_order_relaxed);
+    attempt.retained_memory_bytes.store(resources.retained_memory_bytes,
+                                        std::memory_order_relaxed);
+    attempt.scratch_bytes.store(resources.scratch_bytes,
+                                std::memory_order_relaxed);
+    attempt.ready_entries.store(resources.ready_entries,
+                                std::memory_order_relaxed);
+    attempt.ready_bytes.store(resources.ready_bytes, std::memory_order_release);
+  }
+  return index == 0U;
+}
+
+}  // namespace
+#endif
+
 /**
  * @brief Owns one policy-aware entry/byte-bounded service ready store.
  *
@@ -833,6 +994,7 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Builds one bounded immutable plugin snapshot from current state.
    * @param worker_id Worker attempting a start.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return Current class/frontier and fresh callback generations; a frontier
    * larger than the ABI bound returns `plugin_eligible == false` and no copied
@@ -843,16 +1005,17 @@ class ExecutionService::BoundedReadyStore final {
    * the returned ABI records.
    */
   PolicySnapshot make_policy_snapshot(
-      int worker_id, const execution::PhysicalExecutionRoutes& routes) {
+      int worker_id, execution::PhysicalExecutionLane lane,
+      const execution::PhysicalExecutionRoutes& routes) {
     PolicySnapshot snapshot;
     const std::optional<ComputeRunQosClass> selected_class =
-        choose_class(worker_id, routes);
+        choose_class(worker_id, lane, routes);
     if (!selected_class.has_value()) {
       return snapshot;
     }
     snapshot.service_class = *selected_class;
     std::vector<CandidateRecord> frontier =
-        build_frontier(*selected_class, worker_id, routes);
+        build_frontier(*selected_class, worker_id, lane, routes);
     if (frontier.empty()) {
       return snapshot;
     }
@@ -880,6 +1043,7 @@ class ExecutionService::BoundedReadyStore final {
    * @param candidate_id Nonzero identity validated against the original call.
    * @param service_class Original Host-selected class.
    * @param worker_id Worker attempting the reserved start.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return Exact current pin, or an empty value when Host state made the
    * decision obsolete.
@@ -889,14 +1053,15 @@ class ExecutionService::BoundedReadyStore final {
    */
   SelectionPin resolve_current(
       std::uint64_t candidate_id, ComputeRunQosClass service_class,
-      int worker_id, const execution::PhysicalExecutionRoutes& routes) {
+      int worker_id, execution::PhysicalExecutionLane lane,
+      const execution::PhysicalExecutionRoutes& routes) {
     const std::optional<ComputeRunQosClass> current_class =
-        choose_class(worker_id, routes);
+        choose_class(worker_id, lane, routes);
     if (!current_class.has_value() || *current_class != service_class) {
       return {};
     }
     std::vector<CandidateRecord> frontier =
-        build_frontier(service_class, worker_id, routes);
+        build_frontier(service_class, worker_id, lane, routes);
     const auto found =
         std::find_if(frontier.begin(), frontier.end(),
                      [candidate_id](const auto& candidate) {
@@ -908,6 +1073,7 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Chooses the deterministic built-in directly from full Host state.
    * @param worker_id Worker attempting a start.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return Current exact pin or empty when no route is startable.
    * @throws Nothing.
@@ -916,15 +1082,15 @@ class ExecutionService::BoundedReadyStore final {
    * identical to choosing from the reduced admissible frontier.
    */
   SelectionPin select_builtin_current(
-      int worker_id,
+      int worker_id, execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
     const std::optional<ComputeRunQosClass> selected_class =
-        choose_class(worker_id, routes);
+        choose_class(worker_id, lane, routes);
     if (!selected_class.has_value()) {
       return {};
     }
     const SelectedEntry selected =
-        select_from_class(policy_for(*selected_class), worker_id, routes);
+        select_from_class(policy_for(*selected_class), worker_id, lane, routes);
     if (selected.entry == nullptr || selected.run_state == nullptr) {
       return {};
     }
@@ -935,9 +1101,8 @@ class ExecutionService::BoundedReadyStore final {
    * @brief Commits one Host-owned reserved start without partial mutation.
    * @param pin Exact current object and projected fairness values.
    * @param worker_id Worker that will enter the callback after return.
+   * @param lane Fixed physical lane owned by the calling worker.
    * @param routes Host-owned route state updated by the no-throw commit.
-   * @param rollback_observer Optional repository-test rollback decision.
-   * @param rollback_context Opaque context passed to `rollback_observer`.
    * @return Started, obsolete, unavailable grant, or identity exhaustion.
    * @throws std::system_error only while staging the reservation child grant;
    * exceptional exits precede every ready/fairness/in-flight mutation.
@@ -945,27 +1110,26 @@ class ExecutionService::BoundedReadyStore final {
    * then its reservation through `try_grant`, preserving the frozen order.
    */
   StartResult commit_start(SelectionPin& pin, int worker_id,
-                           execution::PhysicalExecutionRoutes& routes,
-                           ReservedStartRollbackObserver rollback_observer,
-                           void* rollback_context) {
+                           execution::PhysicalExecutionLane lane,
+                           execution::PhysicalExecutionRoutes& routes) {
     if (!pin.entry || !pin.entry->run) {
       return StartResult::Obsolete;
     }
     const bool throughput_ready =
-        has_startable(ComputeRunQosClass::Throughput, worker_id, routes);
+        has_startable(ComputeRunQosClass::Throughput, worker_id, lane, routes);
     const auto run_found = run_states_.find(pin.entry->run->id.value());
     if (run_found == run_states_.end()) {
       return StartResult::Obsolete;
     }
     PolicyRunState& run_state = run_found->second;
     if (run_state.run != pin.entry->run.get() || run_state.graph == nullptr ||
-        !pin_matches(pin, run_state)) {
+        !pin_matches(pin, run_state, worker_id, lane, routes)) {
       return StartResult::Obsolete;
     }
 
     std::lock_guard<std::mutex> run_lock(pin.entry->run->mutex);
     RunState& run = *pin.entry->run;
-    if (!route_startable(run, worker_id, routes) ||
+    if (!route_startable(run, *pin.entry, worker_id, lane, routes) ||
         run.route_generation != pin.route_generation ||
         class_dispatch_count(pin.service_class) ==
             std::numeric_limits<std::uint64_t>::max() ||
@@ -989,17 +1153,23 @@ class ExecutionService::BoundedReadyStore final {
         0U,
         0U,
     };
+    if (!run.reservation.has_value()) {
+      std::terminate();
+    }
     std::optional<ResourceLedger::Grant> staged_grant =
-        run.reservation.try_grant(execution_resources);
+        run.reservation->try_grant(execution_resources);
     if (!staged_grant.has_value()) {
       return StartResult::GrantUnavailable;
     }
-    if (rollback_observer != nullptr &&
-        rollback_observer(rollback_context, pin.candidate_id, pin.entry_version,
-                          pin.route_generation, execution_resources)) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    if (record_reserved_start_attempt_for_testing(
+            pin.candidate_id, pin.entry_version, pin.route_generation,
+            execution_resources)) {
       return StartResult::Obsolete;
     }
-    if (!routes.commit_start(run.route)) {
+#endif
+    const Device device = pin.entry->submission.metadata().device();
+    if (!routes.commit_start(run.route, device)) {
       return StartResult::Obsolete;
     }
 
@@ -1023,14 +1193,15 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Tests whether one worker has any currently startable route.
    * @param worker_id Worker attempting selection.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return True when class arbitration can choose at least one entry.
    * @throws Nothing.
    */
   bool has_startable_work(
-      int worker_id,
+      int worker_id, execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
-    return choose_class(worker_id, routes).has_value();
+    return choose_class(worker_id, lane, routes).has_value();
   }
 
   /**
@@ -1301,13 +1472,16 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Tests immutable and Run-local conditions for one physical start.
    * @param run Run whose mutex is held by the caller.
+   * @param entry Ready entry whose selected device fixes the physical lane.
    * @param worker_id Stable worker id.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return True only for a live, uncancelled, class/route-capable Run.
    * @throws Nothing.
    */
   static bool route_startable(
-      const RunState& run, int worker_id,
+      const RunState& run, const QueueEntry& entry, int worker_id,
+      execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
     if (!run.accepting || run.cancelled || run.first_exception != nullptr) {
       return false;
@@ -1317,7 +1491,11 @@ class ExecutionService::BoundedReadyStore final {
             *run.policy_qos.maximum_parallelism) {
       return false;
     }
-    return routes.can_start(run.route, worker_id,
+    const Device device = entry.submission.metadata().device();
+    if (!run.exposes_device(device)) {
+      return false;
+    }
+    return routes.can_start(run.route, device, lane, worker_id,
                             static_cast<std::uint64_t>(run.in_flight));
   }
 
@@ -1325,21 +1503,22 @@ class ExecutionService::BoundedReadyStore final {
    * @brief Tests whether one class currently contains startable ready work.
    * @param service_class Class already independent from intent and route.
    * @param worker_id Worker attempting a start.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return True when at least one live Run exposes one lane head.
    * @throws Nothing.
    */
   bool has_startable(
       ComputeRunQosClass service_class, int worker_id,
+      execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
     for (auto& row : run_states_) {
       PolicyRunState& state = row.second;
-      if (state.run->policy_qos.service_class != service_class ||
-          candidate_entry(state) == nullptr) {
+      if (state.run->policy_qos.service_class != service_class) {
         continue;
       }
       std::lock_guard<std::mutex> run_lock(state.run->mutex);
-      if (route_startable(*state.run, worker_id, routes)) {
+      if (candidate_entry_for_lane(state, worker_id, lane, routes) != nullptr) {
         return true;
       }
     }
@@ -1349,17 +1528,18 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Applies the fixed three-to-one inter-class arbitration rule.
    * @param worker_id Worker attempting a start.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return Selected class, or null when this worker has no startable route.
    * @throws Nothing.
    */
   std::optional<ComputeRunQosClass> choose_class(
-      int worker_id,
+      int worker_id, execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
     const bool interactive_ready =
-        has_startable(ComputeRunQosClass::Interactive, worker_id, routes);
+        has_startable(ComputeRunQosClass::Interactive, worker_id, lane, routes);
     const bool throughput_ready =
-        has_startable(ComputeRunQosClass::Throughput, worker_id, routes);
+        has_startable(ComputeRunQosClass::Throughput, worker_id, lane, routes);
     if (!interactive_ready && !throughput_ready) {
       return std::nullopt;
     }
@@ -1421,6 +1601,7 @@ class ExecutionService::BoundedReadyStore final {
    * @brief Reduces current base candidates to the exact admissible frontier.
    * @param service_class Class chosen before aging.
    * @param worker_id Worker attempting a start.
+   * @param lane Fixed physical lane owned by the worker.
    * @param routes Host-owned route state used only for startability checks.
    * @return At most one current candidate per live Run after age/deadline and
    * one-quantum Graph/Run bands.
@@ -1430,6 +1611,7 @@ class ExecutionService::BoundedReadyStore final {
    */
   std::vector<CandidateRecord> build_frontier(
       ComputeRunQosClass service_class, int worker_id,
+      execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) {
     std::vector<CandidateRecord> candidates;
     candidates.reserve(run_states_.size());
@@ -1438,12 +1620,10 @@ class ExecutionService::BoundedReadyStore final {
       if (state.run->policy_qos.service_class != service_class) {
         continue;
       }
-      QueueEntry* entry = candidate_entry(state);
-      if (entry == nullptr) {
-        continue;
-      }
       std::lock_guard<std::mutex> run_lock(state.run->mutex);
-      if (route_startable(*state.run, worker_id, routes)) {
+      QueueEntry* entry =
+          candidate_entry_for_lane(state, worker_id, lane, routes);
+      if (entry != nullptr) {
         candidates.push_back(make_candidate(state, *entry));
       }
     }
@@ -1576,18 +1756,24 @@ class ExecutionService::BoundedReadyStore final {
    * @brief Revalidates exact object, nonreused identities, lane head, and row.
    * @param pin Candidate retained after policy return.
    * @param state Matching current Run policy row.
+   * @param worker_id Stable worker id.
+   * @param lane Fixed physical lane owned by the worker.
+   * @param routes Host-owned route state used for startability checks.
    * @return True only while the identical visible object remains eligible.
    * @throws Nothing.
    */
-  bool pin_matches(const SelectionPin& pin,
-                   PolicyRunState& state) const noexcept {
+  bool pin_matches(
+      const SelectionPin& pin, PolicyRunState& state, int worker_id,
+      execution::PhysicalExecutionLane lane,
+      const execution::PhysicalExecutionRoutes& routes) const noexcept {
     return pin.entry->store_owned &&
            pin.entry->candidate_id == pin.candidate_id &&
            pin.entry->entry_version == pin.entry_version &&
            pin.entry->enqueue_sequence == pin.enqueue_sequence &&
            pin.entry->run->route_generation == pin.route_generation &&
            pin.entry->run.get() == state.run &&
-           candidate_entry(state) == pin.entry.get() &&
+           candidate_entry_for_lane(state, worker_id, lane, routes) ==
+               pin.entry.get() &&
            *pin.entry->store_position == pin.entry;
   }
 
@@ -1704,6 +1890,67 @@ class ExecutionService::BoundedReadyStore final {
   }
 
   /**
+   * @brief Returns the first entry in one priority FIFO usable by a worker.
+   * @param state Active Run policy row whose Run mutex is held.
+   * @param head Oldest entry in one intrusive priority FIFO.
+   * @param worker_id Stable worker id.
+   * @param lane Fixed physical lane owned by the worker.
+   * @param routes Host-owned route state used for startability checks.
+   * @return First startable entry, or null when this FIFO belongs to another
+   * physical lane.
+   * @throws Nothing.
+   * @note Skipping an opposite-device head does not mutate FIFO order; each
+   * physical lane independently observes its oldest compatible entry.
+   */
+  QueueEntry* first_startable_entry(
+      PolicyRunState& state, QueueEntry* head, int worker_id,
+      execution::PhysicalExecutionLane lane,
+      const execution::PhysicalExecutionRoutes& routes) const noexcept {
+    for (QueueEntry* entry = head; entry != nullptr; entry = entry->run_next) {
+      if (route_startable(*state.run, *entry, worker_id, lane, routes)) {
+        return entry;
+      }
+    }
+    return nullptr;
+  }
+
+  /**
+   * @brief Returns the same-Run candidate for one fixed physical lane.
+   * @param state Active Run policy row whose Run mutex is held.
+   * @param worker_id Stable worker id.
+   * @param lane Fixed physical lane owned by the worker.
+   * @param routes Host-owned route state used for startability checks.
+   * @return Oldest compatible aged head, otherwise compatible high work first.
+   * @throws Nothing.
+   * @note Device filtering happens before the existing high/normal aging rule;
+   * opposite-lane entries remain published for their owning worker.
+   */
+  QueueEntry* candidate_entry_for_lane(
+      PolicyRunState& state, int worker_id,
+      execution::PhysicalExecutionLane lane,
+      const execution::PhysicalExecutionRoutes& routes) const noexcept {
+    QueueEntry* high =
+        first_startable_entry(state, state.high.head, worker_id, lane, routes);
+    QueueEntry* normal = first_startable_entry(state, state.normal.head,
+                                               worker_id, lane, routes);
+    if (high == nullptr) {
+      return normal;
+    }
+    if (normal == nullptr) {
+      return high;
+    }
+    const bool high_aged = is_aged(*high);
+    const bool normal_aged = is_aged(*normal);
+    if (high_aged != normal_aged) {
+      return normal_aged ? normal : high;
+    }
+    if (high_aged) {
+      return normal->enqueue_sequence < high->enqueue_sequence ? normal : high;
+    }
+    return high;
+  }
+
+  /**
    * @brief Tests one entry's deterministic dispatch-count age.
    * @param entry Published entry.
    * @return True after at least eight later successful dispatches.
@@ -1737,6 +1984,9 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Selects one entry within a policy's explicit service class.
    * @param policy Stateless built-in ranking strategy.
+   * @param worker_id Stable worker id.
+   * @param lane Fixed physical lane owned by the worker.
+   * @param routes Host-owned route state used for startability checks.
    * @return Complete chosen row/entry and next accounting scores.
    * @throws Nothing.
    * @note Aged candidates precede ordinary comparison only within the class
@@ -1744,6 +1994,7 @@ class ExecutionService::BoundedReadyStore final {
    */
   SelectedEntry select_from_class(
       const BuiltinPolicy& policy, int worker_id,
+      execution::PhysicalExecutionLane lane,
       const execution::PhysicalExecutionRoutes& routes) noexcept {
     SelectedEntry best;
     BuiltinPolicy::Candidate best_snapshot;
@@ -1756,12 +2007,10 @@ class ExecutionService::BoundedReadyStore final {
       if (state.run->policy_qos.service_class != policy.service_class()) {
         continue;
       }
-      QueueEntry* entry = candidate_entry(state);
-      if (entry == nullptr) {
-        continue;
-      }
       std::lock_guard<std::mutex> run_lock(state.run->mutex);
-      if (!route_startable(*state.run, worker_id, routes)) {
+      QueueEntry* entry =
+          candidate_entry_for_lane(state, worker_id, lane, routes);
+      if (entry == nullptr) {
         continue;
       }
       const std::uint64_t dispatch_count =
@@ -1785,12 +2034,10 @@ class ExecutionService::BoundedReadyStore final {
       if (state.run->policy_qos.service_class != policy.service_class()) {
         continue;
       }
-      QueueEntry* entry = candidate_entry(state);
-      if (entry == nullptr) {
-        continue;
-      }
       std::lock_guard<std::mutex> run_lock(state.run->mutex);
-      if (!route_startable(*state.run, worker_id, routes)) {
+      QueueEntry* entry =
+          candidate_entry_for_lane(state, worker_id, lane, routes);
+      if (entry == nullptr) {
         continue;
       }
       const std::uint64_t graph_score = saturating_add(
@@ -2206,7 +2453,7 @@ class ExecutionService::PoolState final {
   /** @brief Active Run states keyed by non-reused numeric Run id. */
   std::unordered_map<uint64_t, std::weak_ptr<RunState>> active_runs;
 
-  /** @brief Fixed service-owned worker threads. */
+  /** @brief Fixed CPU workers followed by one GPU-pipeline worker. */
   std::vector<std::thread> workers;
 
   /** @brief Frozen worker count, or zero before complete configuration. */
@@ -2222,6 +2469,62 @@ thread_local ExecutionService::RunState* ExecutionService::tls_run_state_ =
 
 /** @brief Current service worker id, or -1 outside callbacks. */
 thread_local int ExecutionService::tls_worker_id_ = -1;
+
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+namespace testing {
+
+/** @copydoc arm_reserved_start_rollback_probe_for_testing */
+void arm_reserved_start_rollback_probe_for_testing() noexcept {
+  ReservedStartProbeState& state = reserved_start_probe_state();
+  state.armed.store(false, std::memory_order_release);
+  state.calls.store(0U, std::memory_order_relaxed);
+  for (ReservedStartProbeAttempt& attempt : state.attempts) {
+    attempt.candidate_id.store(0U, std::memory_order_relaxed);
+    attempt.entry_version.store(0U, std::memory_order_relaxed);
+    attempt.route_generation.store(0U, std::memory_order_relaxed);
+    attempt.cpu_slots.store(0U, std::memory_order_relaxed);
+    attempt.retained_memory_bytes.store(0U, std::memory_order_relaxed);
+    attempt.scratch_bytes.store(0U, std::memory_order_relaxed);
+    attempt.ready_entries.store(0U, std::memory_order_relaxed);
+    attempt.ready_bytes.store(0U, std::memory_order_relaxed);
+  }
+  state.armed.store(true, std::memory_order_release);
+}
+
+/** @copydoc reserved_start_rollback_probe_snapshot_for_testing */
+ReservedStartRollbackProbeSnapshot
+reserved_start_rollback_probe_snapshot_for_testing() noexcept {
+  ReservedStartProbeState& state = reserved_start_probe_state();
+  ReservedStartRollbackProbeSnapshot snapshot;
+  snapshot.calls = state.calls.load(std::memory_order_acquire);
+  for (std::size_t index = 0U; index < 2U; ++index) {
+    const ReservedStartProbeAttempt& attempt = state.attempts[index];
+    const std::uint64_t ready_bytes =
+        attempt.ready_bytes.load(std::memory_order_acquire);
+    snapshot.candidate_ids[index] =
+        attempt.candidate_id.load(std::memory_order_relaxed);
+    snapshot.entry_versions[index] =
+        attempt.entry_version.load(std::memory_order_relaxed);
+    snapshot.route_generations[index] =
+        attempt.route_generation.load(std::memory_order_relaxed);
+    snapshot.resources[index] = ResourceVector{
+        attempt.cpu_slots.load(std::memory_order_relaxed),
+        attempt.retained_memory_bytes.load(std::memory_order_relaxed),
+        attempt.scratch_bytes.load(std::memory_order_relaxed),
+        attempt.ready_entries.load(std::memory_order_relaxed),
+        ready_bytes,
+    };
+  }
+  return snapshot;
+}
+
+/** @copydoc disarm_reserved_start_rollback_probe_for_testing */
+void disarm_reserved_start_rollback_probe_for_testing() noexcept {
+  reserved_start_probe_state().armed.store(false, std::memory_order_release);
+}
+
+}  // namespace testing
+#endif
 
 /** @copydoc ExecutionService::default_resource_limits */
 ExecutionResourceLimits ExecutionService::default_resource_limits() noexcept {
@@ -2319,13 +2622,17 @@ void ExecutionService::configure_worker_count(unsigned int worker_count) {
   }
 
   std::vector<std::thread> staged_workers;
-  staged_workers.reserve(resolved_workers);
+  staged_workers.reserve(static_cast<std::size_t>(resolved_workers) + 1U);
   pool_->configured_workers = resolved_workers;
   try {
     for (unsigned int index = 0; index < resolved_workers; ++index) {
       staged_workers.emplace_back(&ExecutionService::worker_loop, this,
-                                  static_cast<int>(index));
+                                  static_cast<int>(index),
+                                  execution::PhysicalExecutionLane::Cpu);
     }
+    staged_workers.emplace_back(&ExecutionService::worker_loop, this,
+                                static_cast<int>(resolved_workers),
+                                execution::PhysicalExecutionLane::Gpu);
   } catch (...) {
     const std::exception_ptr failure = std::current_exception();
     pool_->stopping = true;
@@ -2356,7 +2663,8 @@ unsigned int ExecutionService::worker_count() const {
 bool ExecutionService::is_configured() const {
   std::lock_guard<std::mutex> lock(pool_->mutex);
   return pool_->configured_workers != 0U && !pool_->stopping &&
-         pool_->workers.size() == pool_->configured_workers;
+         pool_->workers.size() ==
+             static_cast<std::size_t>(pool_->configured_workers) + 1U;
 }
 
 /** @copydoc ExecutionService::get_stats */
@@ -2364,7 +2672,7 @@ std::string ExecutionService::get_stats() const {
   std::lock_guard<std::mutex> lock(pool_->mutex);
   const ResourceLedger::Snapshot resources = pool_->ledger.snapshot();
   std::ostringstream stream;
-  stream << "Workers: " << pool_->configured_workers
+  stream << "Workers: " << pool_->configured_workers << ", GPU lanes: 1"
          << ", Active runs: " << pool_->active_runs.size()
          << ", Ready tasks: " << pool_->ready_store.entry_count()
          << ", Ready bytes: " << pool_->ready_store.byte_count()
@@ -2566,6 +2874,8 @@ void ExecutionService::execute_run(
     throw std::invalid_argument(
         "ExecutionService initial ready count exceeds total task count.");
   }
+  const bool route_metal_available =
+      route_exposes_device(host, execution_type, Device::GPU_METAL);
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
   ComputeRunLease service_lease = initial_submissions.front().lease_;
   if (service_lease.observe_cancellation().has_value()) {
@@ -2579,6 +2889,11 @@ void ExecutionService::execute_run(
     if (submission.resource_demand() != run_resource_demand.task) {
       throw std::invalid_argument(
           "ExecutionService initial batch resource declaration mismatch.");
+    }
+    if (!route_inventory_exposes_device(execution_type, route_metal_available,
+                                        submission.metadata().device())) {
+      throw std::invalid_argument(
+          "ExecutionService submission device is unavailable on its route.");
     }
   }
 
@@ -2619,7 +2934,7 @@ void ExecutionService::execute_run(
       run_id, std::move(admission.policy_graph_identity),
       std::move(admission.policy_graph_key),
       initial_submissions.front().metadata().qos(), host, execution_type,
-      total_task_count, run_resource_demand.task,
+      route_metal_available, total_task_count, run_resource_demand.task,
       admission.ready_bytes_per_task,
       admission.execution_retained_bytes_per_task, std::move(*reservation));
 
@@ -2708,6 +3023,7 @@ void ExecutionService::execute_run(
       }
     }
     pool_->ready_store.retire_run(run);
+    run->reservation.reset();
   }
 
   if (failure) {
@@ -2748,10 +3064,18 @@ ExecutionService::make_queue_entry(const std::shared_ptr<RunState>& run,
         GraphErrc::ComputeError,
         "ReadyTaskSubmission resource declaration differs from Run admission.");
   }
+  if (!run->exposes_device(submission.metadata().device())) {
+    throw std::invalid_argument(
+        "ReadyTaskSubmission device is unavailable on its routed Run.");
+  }
   const ResourceVector ready_resources{0U, 0U, 0U, 1U,
                                        run->ready_bytes_per_task};
+  if (!run->reservation.has_value()) {
+    throw std::logic_error(
+        "ReadyTaskSubmission Run reservation is already closed.");
+  }
   std::optional<ResourceLedger::Grant> ready_grant =
-      run->reservation.try_grant(ready_resources);
+      run->reservation->try_grant(ready_resources);
   if (!ready_grant.has_value()) {
     throw GraphError(
         GraphErrc::ComputeError,
@@ -2834,6 +3158,23 @@ void ExecutionService::submit_ready_submission(ReadyTaskSubmission submission) {
 /** @copydoc ExecutionService::available_devices */
 std::vector<Device> ExecutionService::available_devices() const {
   return {Device::CPU};
+}
+
+/** @copydoc ExecutionService::available_devices(const ExecutionHostContext&,
+ * const std::string&) */
+std::vector<Device> ExecutionService::available_devices(
+    const ExecutionHostContext& host, const std::string& execution_type) const {
+  if (execution_type == "gpu_pipeline") {
+    if (route_exposes_device(host, execution_type, Device::GPU_METAL)) {
+      return {Device::GPU_METAL, Device::CPU};
+    }
+    return {Device::CPU};
+  }
+  if (execution_type == "cpu" || execution_type == "serial_debug") {
+    return {Device::CPU};
+  }
+  throw GraphError(GraphErrc::NotFound,
+                   "Unknown private execution route: " + execution_type);
 }
 
 /** @copydoc ExecutionService::submit_initial_task_handles */
@@ -2975,7 +3316,8 @@ void ExecutionService::cancel_run(
 }
 
 /** @copydoc ExecutionService::worker_loop */
-void ExecutionService::worker_loop(int worker_id) noexcept {
+void ExecutionService::worker_loop(
+    int worker_id, execution::PhysicalExecutionLane lane) noexcept {
   for (;;) {
     std::shared_ptr<QueueEntry> entry;
     std::exception_ptr selection_failure;
@@ -2988,9 +3330,10 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
       std::shared_ptr<policy::PolicyBinding> binding;
       {
         std::unique_lock<std::mutex> lock(pool_->mutex);
-        pool_->ready_cv.wait(lock, [this, worker_id]() {
-          return pool_->stopping || pool_->ready_store.has_startable_work(
-                                        worker_id, pool_->physical_routes);
+        pool_->ready_cv.wait(lock, [this, worker_id, lane]() {
+          return pool_->stopping ||
+                 pool_->ready_store.has_startable_work(worker_id, lane,
+                                                       pool_->physical_routes);
         });
         if (pool_->stopping) {
           return;
@@ -2999,7 +3342,7 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
         if (!force_builtin) {
           try {
             snapshot = pool_->ready_store.make_policy_snapshot(
-                worker_id, pool_->physical_routes);
+                worker_id, lane, pool_->physical_routes);
           } catch (const std::bad_alloc&) {
             force_builtin = true;
           } catch (...) {
@@ -3015,7 +3358,7 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
 
         if (force_builtin && !selection_failure) {
           BoundedReadyStore::SelectionPin pin =
-              pool_->ready_store.select_builtin_current(worker_id,
+              pool_->ready_store.select_builtin_current(worker_id, lane,
                                                         pool_->physical_routes);
           if (!pin.entry) {
             force_builtin = false;
@@ -3024,10 +3367,8 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
           failed_run = pin.entry->run;
           try {
             const BoundedReadyStore::StartResult result =
-                pool_->ready_store.commit_start(
-                    pin, worker_id, pool_->physical_routes,
-                    reserved_start_rollback_observer_,
-                    reserved_start_rollback_observer_context_);
+                pool_->ready_store.commit_start(pin, worker_id, lane,
+                                                pool_->physical_routes);
             if (result == BoundedReadyStore::StartResult::Started) {
               entry = std::move(pin.entry);
             } else if (result ==
@@ -3094,7 +3435,7 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
         try {
           pin = pool_->ready_store.resolve_current(
               snapshot.candidates.front().candidate_id, snapshot.service_class,
-              worker_id, pool_->physical_routes);
+              worker_id, lane, pool_->physical_routes);
         } catch (...) {
         }
         failed_run = pin.entry ? pin.entry->run : nullptr;
@@ -3116,7 +3457,7 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
         } else {
           try {
             pin = pool_->ready_store.resolve_current(
-                decision.candidate_id, snapshot.service_class, worker_id,
+                decision.candidate_id, snapshot.service_class, worker_id, lane,
                 pool_->physical_routes);
           } catch (const std::bad_alloc&) {
             obsolete = true;
@@ -3132,10 +3473,8 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
           failed_run = pin.entry->run;
           try {
             const BoundedReadyStore::StartResult result =
-                pool_->ready_store.commit_start(
-                    pin, worker_id, pool_->physical_routes,
-                    reserved_start_rollback_observer_,
-                    reserved_start_rollback_observer_context_);
+                pool_->ready_store.commit_start(pin, worker_id, lane,
+                                                pool_->physical_routes);
             if (result == BoundedReadyStore::StartResult::Started) {
               entry = std::move(pin.entry);
             } else if (result ==
@@ -3196,7 +3535,8 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
         }
         entry->execution_grant.reset();
         --run->in_flight;
-        if (!pool_->physical_routes.finish(run->route)) {
+        if (!pool_->physical_routes.finish(
+                run->route, entry->submission.metadata().device())) {
           std::terminate();
         }
         if (run->settled()) {
@@ -3235,7 +3575,8 @@ void ExecutionService::worker_loop(int worker_id) noexcept {
       }
       entry->execution_grant.reset();
       --run->in_flight;
-      if (!pool_->physical_routes.finish(run->route)) {
+      if (!pool_->physical_routes.finish(
+              run->route, entry->submission.metadata().device())) {
         std::terminate();
       }
       if (run->settled()) {

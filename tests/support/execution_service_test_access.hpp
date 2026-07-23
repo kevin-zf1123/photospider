@@ -5,6 +5,9 @@
 #include <vector>
 
 #include "compute/execution_service.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
 
 namespace ps::testing {
 
@@ -16,21 +19,6 @@ namespace ps::testing {
  */
 class ExecutionServiceTestAccess final {
  public:
-  /**
-   * @brief Repository-test callback after one execution grant is staged.
-   * @param context Opaque fixture state that outlives the observed Run.
-   * @param candidate_id Nonzero ready-entry identity retained by the pin.
-   * @param entry_version Nonzero nonreused entry version retained by the pin.
-   * @param route_generation Immutable Run route generation retained by the pin.
-   * @param execution_resources Exact staged child-grant resources.
-   * @return True to force pre-commit rollback; false to continue the start.
-   * @throws Nothing.
-   */
-  using ReservedStartRollbackObserver =
-      bool (*)(void* context, std::uint64_t candidate_id,
-               std::uint64_t entry_version, std::uint64_t route_generation,
-               const ResourceVector& execution_resources) noexcept;
-
   /**
    * @brief Repository-test callback for one production retirement boundary.
    * @param context Opaque fixture state that outlives the observed Run.
@@ -89,34 +77,47 @@ class ExecutionServiceTestAccess final {
     service.initial_submission_storage_observer_context_ = nullptr;
   }
 
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
   /**
-   * @brief Installs one observer on an isolated reserved-start boundary.
-   * @param service Private service whose next starts are observed.
-   * @param observer Allocation-free decision callback, or null to disable.
-   * @param context Opaque callback context, or null when disabling.
+   * @brief Arms the separate test-product reserved-start rollback probe.
+   * @param service Isolated service used only to document test ownership.
    * @return Nothing.
    * @throws Nothing.
-   * @note Installation and clearing happen outside concurrent configuration;
-   * the observer itself runs while the private pool and Run locks are held.
+   * @note The first child grant is discarded without invoking a callback. The
+   * production archive contains no probe state or branch.
    */
-  static void set_reserved_start_rollback_observer(
-      compute::ExecutionService& service,
-      ReservedStartRollbackObserver observer, void* context) noexcept {
-    service.reserved_start_rollback_observer_context_ = context;
-    service.reserved_start_rollback_observer_ = observer;
+  static void arm_reserved_start_rollback_probe(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::arm_reserved_start_rollback_probe_for_testing();
   }
 
   /**
-   * @brief Clears the reserved-start observer after the observed Run settles.
-   * @param service Isolated service whose observer is removed.
+   * @brief Copies the separate test-product reserved-start observation.
+   * @param service Isolated service whose synchronous Run has settled.
+   * @return First two attempts and total call count.
+   * @throws Nothing.
+   */
+  static compute::testing::ReservedStartRollbackProbeSnapshot
+  reserved_start_rollback_probe_snapshot(
+      const compute::ExecutionService& service) noexcept {
+    (void)service;
+    return compute::testing::
+        reserved_start_rollback_probe_snapshot_for_testing();
+  }
+
+  /**
+   * @brief Disarms the separate test-product probe during cleanup.
+   * @param service Isolated service whose test ownership is ending.
    * @return Nothing.
    * @throws Nothing.
    */
-  static void clear_reserved_start_rollback_observer(
+  static void disarm_reserved_start_rollback_probe(
       compute::ExecutionService& service) noexcept {
-    service.reserved_start_rollback_observer_ = nullptr;
-    service.reserved_start_rollback_observer_context_ = nullptr;
+    (void)service;
+    compute::testing::disarm_reserved_start_rollback_probe_for_testing();
   }
+#endif
 
   /**
    * @brief Copies active built-in Throughput reservation charges.
