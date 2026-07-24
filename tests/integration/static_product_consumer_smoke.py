@@ -65,6 +65,7 @@ REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS = (
     "GraphStateExecutor15close_and_drain",
     "Kernel11close_graph",
     "Kernel30execute_staged_compute_request",
+    "Kernel8shutdown",
 )
 EXPORTED_TARGET = "Photospider::photospider"
 IPC_EXPORTED_TARGET = "Photospider::photospider_ipc_client"

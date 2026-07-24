@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -184,6 +185,144 @@ class ShutdownCancellationProbe final {
   bool released_ = false;
 };
 
+/**
+ * @brief Captures a real worker callback's attempted Kernel shutdown.
+ *
+ * @throws Nothing for construction.
+ * @note One installed operation callback writes this record. Completion of the
+ * enclosing synchronous compute establishes the happens-before edge required
+ * before the owning test reads the non-atomic result fields.
+ */
+class KernelShutdownPreflightProbe final {
+ public:
+  /**
+   * @brief Binds the exact Kernel whose publication gate must remain open.
+   * @param kernel Kernel invoked from its own execution-service worker.
+   * @throws Nothing.
+   */
+  explicit KernelShutdownPreflightProbe(Kernel& kernel) noexcept
+      : kernel_(kernel) {}
+
+  /**
+   * @brief Attempts shutdown and records the exact recoverable outcome.
+   * @return Nothing after containing the expected or unexpected result.
+   * @throws Nothing because all shutdown outcomes are translated into fields.
+   */
+  void invoke() noexcept {
+    try {
+      kernel_.shutdown();
+      returned_ = true;
+    } catch (const std::logic_error& error) {
+      logic_error_ = true;
+      try {
+        message_ = error.what();
+      } catch (...) {
+        unexpected_error_ = true;
+      }
+    } catch (...) {
+      unexpected_error_ = true;
+    }
+  }
+
+  /**
+   * @brief Reports whether Kernel shutdown returned from its worker callback.
+   * @return True only when the forbidden shutdown unexpectedly returned.
+   * @throws Nothing.
+   */
+  bool returned() const noexcept { return returned_; }
+
+  /**
+   * @brief Reports whether the callback observed std::logic_error.
+   * @return True only for the expected recoverable exception class.
+   * @throws Nothing.
+   */
+  bool logic_error() const noexcept { return logic_error_; }
+
+  /**
+   * @brief Reports whether translation observed another failure.
+   * @return True for an unexpected exception or message-copy failure.
+   * @throws Nothing.
+   */
+  bool unexpected_error() const noexcept { return unexpected_error_; }
+
+  /**
+   * @brief Returns the exact captured preflight diagnostic.
+   * @return Borrowed message valid for this probe lifetime.
+   * @throws Nothing.
+   */
+  const std::string& message() const noexcept { return message_; }
+
+ private:
+  /** @brief Exact Kernel invoked by the registered worker operation. */
+  Kernel& kernel_;
+  /** @brief Whether the forbidden call unexpectedly returned. */
+  bool returned_ = false;
+  /** @brief Whether the exact recoverable exception class was observed. */
+  bool logic_error_ = false;
+  /** @brief Whether any non-contract outcome was observed. */
+  bool unexpected_error_ = false;
+  /** @brief Owned exact diagnostic copied before the callback returns. */
+  std::string message_;
+};
+
+/**
+ * @brief Process-local target borrowed by the shutdown-preflight operation.
+ *
+ * @note Publication and removal use release/acquire ordering. Only the exact
+ * test graph invokes this operation while the target is installed.
+ */
+std::atomic<KernelShutdownPreflightProbe*> g_shutdown_preflight_probe{nullptr};
+
+/**
+ * @brief Installs one shutdown-preflight probe for an exact test scope.
+ *
+ * @throws std::logic_error when another probe is already installed.
+ * @note The owning test must settle its synchronous compute before destruction.
+ */
+class ScopedKernelShutdownPreflightProbe final {
+ public:
+  /**
+   * @brief Publishes the borrowed probe.
+   * @param probe Probe retained by the calling test.
+   * @throws std::logic_error when serialized ownership is violated.
+   */
+  explicit ScopedKernelShutdownPreflightProbe(
+      KernelShutdownPreflightProbe& probe) {
+    KernelShutdownPreflightProbe* expected = nullptr;
+    if (!g_shutdown_preflight_probe.compare_exchange_strong(
+            expected, &probe, std::memory_order_release,
+            std::memory_order_relaxed)) {
+      throw std::logic_error(
+          "Kernel shutdown preflight probe is already installed.");
+    }
+  }
+
+  /**
+   * @brief Removes the borrowed probe after compute settlement.
+   * @throws Nothing.
+   */
+  ~ScopedKernelShutdownPreflightProbe() noexcept {
+    g_shutdown_preflight_probe.store(nullptr, std::memory_order_release);
+  }
+
+  /**
+   * @brief Prevents duplicate process-local probe ownership.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing because this operation is deleted.
+   */
+  ScopedKernelShutdownPreflightProbe(
+      const ScopedKernelShutdownPreflightProbe& other) = delete;
+
+  /**
+   * @brief Prevents duplicate process-local probe assignment.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing because this operation is deleted.
+   */
+  ScopedKernelShutdownPreflightProbe& operator=(
+      const ScopedKernelShutdownPreflightProbe& other) = delete;
+};
+
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
 /**
  * @brief Coordinates deterministic Kernel close owner, joiner, and tail
@@ -341,6 +480,10 @@ class KernelCloseProbe final {
    * @throws The exact configured owner or joiner exception.
    */
   void observe(testing::KernelCloseTestEvent event) {
+    if (event ==
+        testing::KernelCloseTestEvent::ShutdownGateClosedBeforeTransition) {
+      return;
+    }
     if (event == testing::KernelCloseTestEvent::JoinerSelectedBeforeWait) {
       std::unique_lock<std::mutex> lock(mutex_);
       ++joiner_events_;
@@ -544,6 +687,24 @@ void register_contract_ops() {
                   width, height, 1, DataType::FLOAT32);
               cv::Mat mat = toCvMat(output.image_buffer);
               mat.setTo(1.0f);
+              return output;
+            }));
+
+    registry.register_op_hp_monolithic(
+        "kernel_contract_test", "shutdown_preflight",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              KernelShutdownPreflightProbe* probe =
+                  g_shutdown_preflight_probe.load(std::memory_order_acquire);
+              if (probe == nullptr) {
+                throw std::logic_error(
+                    "Kernel shutdown preflight probe is not installed.");
+              }
+              probe->invoke();
+              NodeOutput output;
+              output.image_buffer =
+                  make_aligned_cpu_image_buffer(1, 1, 1, DataType::FLOAT32);
+              toCvMat(output.image_buffer).setTo(1.0f);
               return output;
             }));
 
@@ -789,6 +950,24 @@ void write_missing_op_graph(const std::filesystem::path& path) {
   parameters:
     width: 8
     height: 8
+)YAML");
+}
+
+/**
+ * @brief Writes a graph whose worker operation attempts Kernel shutdown.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure from
+ * directory creation or file writing.
+ * @note The operation catches the expected shutdown preflight exception and
+ * still produces a valid image, so successful compute proves worker survival.
+ */
+void write_shutdown_preflight_graph(const std::filesystem::path& path) {
+  write_text(path, R"YAML(
+- id: 1
+  name: shutdown_preflight
+  type: kernel_contract_test
+  subtype: shutdown_preflight
 )YAML");
 }
 
@@ -5007,6 +5186,73 @@ TEST(ComputeContracts, ExecutionObservationAndReplacementWaitForCompute) {
 }
 
 /**
+ * @brief Proves Kernel rejects worker-originated shutdown before mutation.
+ *
+ * @return Nothing; GoogleTest reports exception identity, publication-gate,
+ * telemetry, worker-survival, or cleanup divergence.
+ * @throws Standard fixture, filesystem, compute, and snapshot exceptions.
+ * @note The registered operation runs on the Kernel-owned ExecutionService
+ * worker and calls `Kernel::shutdown()` directly. The exact logic_error is
+ * contained by the operation, compute completes, telemetry stays Accepting
+ * with generation zero, and a second Graph can still publish.
+ */
+TEST(ComputeContracts, WorkerShutdownPreflightLeavesPublicationOpen) {
+  register_contract_ops();
+  const std::string graph_name = "contract_worker_shutdown_preflight";
+  const std::string peer_name = "contract_worker_shutdown_peer";
+  const auto root =
+      clean_temp_path("photospider-contract-worker-shutdown-root");
+  const auto peer_root =
+      clean_temp_path("photospider-contract-worker-shutdown-peer-root");
+  const auto yaml_path = temp_path("photospider-contract-worker-shutdown.yaml");
+  write_shutdown_preflight_graph(yaml_path);
+
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
+  const auto execution_service =
+      testing::KernelTestAccess::execution_service_owner(kernel);
+  KernelShutdownPreflightProbe probe(kernel);
+  ScopedKernelShutdownPreflightProbe scoped_probe(probe);
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.execution.parallel = true;
+  EXPECT_TRUE(kernel.compute(request));
+
+  EXPECT_FALSE(probe.returned());
+  EXPECT_TRUE(probe.logic_error());
+  EXPECT_FALSE(probe.unexpected_error());
+  EXPECT_EQ(probe.message(),
+            "ExecutionService shutdown cannot run from its worker or policy "
+            "callback.");
+  const compute::ExecutionLifecyclePage page =
+      execution_service->lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(page.service_state,
+            compute::ExecutionLifecycleServiceState::Accepting);
+  EXPECT_EQ(page.shutdown_generation, 0U);
+  EXPECT_EQ(page.counters.registered_graph_count, 1U);
+  EXPECT_EQ(page.counters.open_graph_count, 1U);
+  EXPECT_EQ(page.counters.closing_graph_count, 0U);
+  EXPECT_EQ(page.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(page.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(page.counters.entered_callback_count, 0U);
+
+  EXPECT_TRUE(kernel.load_graph(peer_name, peer_root.string(), "").has_value());
+  EXPECT_EQ(kernel.list_graphs(),
+            (std::vector<std::string>{peer_name, graph_name}));
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  EXPECT_TRUE(kernel.close_graph(peer_name));
+  std::filesystem::remove_all(root);
+  std::filesystem::remove_all(peer_root);
+  std::filesystem::remove(yaml_path);
+}
+
+/**
  * @brief Proves process-shutdown cancellation fanout never owns the graph
  * registry lock.
  *
@@ -5098,6 +5344,110 @@ TEST(ComputeContracts, ShutdownFanoutLeavesGraphRegistryAvailable) {
  * caller has selected the same generation as a joiner.
  */
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+/**
+ * @brief Injects one failure after Kernel publication closes for shutdown.
+ *
+ * @throws The preallocated failure after proving a late Graph cannot publish.
+ * @note Any unexpected late-load result exits the death-test child without the
+ * required terminate marker, preventing false-positive fail-stop evidence.
+ */
+struct KernelShutdownPostGateFault final {
+  /** @brief Kernel whose closed publication gate is probed. */
+  Kernel& kernel;
+  /** @brief Preallocated Graph label for the losing publication. */
+  const std::string& late_name;
+  /** @brief Preallocated root path for the losing publication. */
+  const std::string& late_root;
+  /** @brief Exact exception injected after the closed-gate proof. */
+  std::exception_ptr failure;
+
+  /**
+   * @brief Probes the closed gate and injects the post-gate failure.
+   * @param context Borrowed KernelShutdownPostGateFault retained by the child.
+   * @param event Exact Kernel lifecycle checkpoint.
+   * @return Nothing for unrelated close events.
+   * @throws The exact preallocated exception at the shutdown checkpoint.
+   */
+  static void invoke(void* context, testing::KernelCloseTestEvent event) {
+    if (event !=
+        testing::KernelCloseTestEvent::ShutdownGateClosedBeforeTransition) {
+      return;
+    }
+    auto* fault = static_cast<KernelShutdownPostGateFault*>(context);
+    if (fault == nullptr || !fault->failure) {
+      std::_Exit(2);
+    }
+    try {
+      const auto late =
+          fault->kernel.load_graph(fault->late_name, fault->late_root, "");
+      if (late.has_value()) {
+        std::_Exit(3);
+      }
+    } catch (...) {
+      std::_Exit(4);
+    }
+    std::rethrow_exception(fault->failure);
+  }
+};
+
+/**
+ * @brief Runs the post-publication-gate shutdown fault in a death-test child.
+ *
+ * @return Never returns; the terminate handler exits with a unique marker.
+ * @throws Nothing to the parent process because every alternate path exits.
+ * @note A five-second alarm detects a hang. Gate-open publication, unexpected
+ * load exceptions, ordinary propagation, and normal return all exit without
+ * the required marker.
+ */
+[[noreturn]] void run_kernel_shutdown_post_gate_fault_watchdog() {
+  (void)::alarm(5U);
+  const std::string graph_name = "contract_shutdown_post_gate";
+  const std::string late_name = "contract_shutdown_post_gate_late";
+  const auto root =
+      clean_temp_path("photospider-contract-shutdown-post-gate-root");
+  const auto late_root_path =
+      clean_temp_path("photospider-contract-shutdown-post-gate-late-root");
+  const std::string late_root = late_root_path.string();
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  if (!kernel.load_graph(graph_name, root.string(), "").has_value()) {
+    std::_Exit(5);
+  }
+  KernelShutdownPostGateFault fault{
+      kernel, late_name, late_root,
+      std::make_exception_ptr(
+          std::runtime_error("injected post-gate shutdown failure"))};
+  const testing::KernelCloseTestHook hook{&fault,
+                                          &KernelShutdownPostGateFault::invoke};
+  testing::set_kernel_close_test_hook(&hook);
+  std::set_terminate([] {
+    std::fputs("kernel shutdown post-gate fail-stop\n", stderr);
+    std::fflush(stderr);
+    std::_Exit(86);
+  });
+  try {
+    kernel.shutdown();
+  } catch (...) {
+    std::_Exit(6);
+  }
+  std::_Exit(7);
+}
+
+/**
+ * @brief Proves post-gate Kernel shutdown failure is process-fatal.
+ *
+ * @return Nothing; the child must emit the unique terminate marker before its
+ * watchdog alarm.
+ * @throws Nothing to the parent process.
+ * @note The fault first proves a late load loses the already-closed
+ * publication gate, then throws inside Kernel's fail-stop region.
+ */
+TEST(ComputeContracts, ShutdownPostGateFailureTerminatesProcess) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  ASSERT_DEATH(
+      { run_kernel_shutdown_post_gate_fault_watchdog(); },
+      "kernel shutdown post-gate fail-stop");
+}
+
 TEST(ComputeContracts, CloseOwnerFailureReachesJoinerAndFreshRetrySucceeds) {
   const std::string graph_name = "contract_close_owner_failure";
   const auto root =

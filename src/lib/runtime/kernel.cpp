@@ -69,7 +69,7 @@ namespace testing {
 namespace {
 
 /**
- * @brief Borrowed close hook published only in test-enabled builds.
+ * @brief Borrowed Kernel lifecycle hook published only in test-enabled builds.
  * @throws Nothing for atomic initialization and pointer publication.
  * @note Tests join every callback before clearing and destroying the hook.
  */
@@ -461,6 +461,10 @@ void Kernel::shutdown() {
     shutdown_started_ = true;
   }
   try {
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+    testing::notify_kernel_close_test_hook(
+        testing::KernelCloseTestEvent::ShutdownGateClosedBeforeTransition);
+#endif
     (void)execution_service_->begin_shutdown();
   } catch (...) {
     std::terminate();

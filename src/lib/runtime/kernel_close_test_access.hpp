@@ -1,6 +1,6 @@
 /**
  * @file kernel_close_test_access.hpp
- * @brief Declares test-only Kernel close-generation observation hooks.
+ * @brief Declares test-only Kernel lifecycle observation hooks.
  */
 #pragma once
 
@@ -9,7 +9,8 @@
 namespace ps::testing {
 
 /**
- * @brief Stable close boundary observed by repository-only integration tests.
+ * @brief Stable lifecycle boundary observed by repository-only integration
+ * tests.
  *
  * @throws Nothing for value construction and comparison.
  * @note These events expose no production or installed API surface.
@@ -28,17 +29,25 @@ enum class KernelCloseTestEvent {
    * @brief Owner drained the runtime immediately before atomic erase/success.
    */
   OwnerReadyToEraseAndPublish,
+  /**
+   * @brief Process publication closed before execution-service transition.
+   *
+   * @note Throwing from this checkpoint exercises the monotonic shutdown
+   * fail-stop boundary after the recoverable caller preflight has completed.
+   */
+  ShutdownGateClosedBeforeTransition,
 };
 
 /**
- * @brief Borrowed callback installed by one serialized Kernel close test.
+ * @brief Borrowed callback installed by one serialized Kernel lifecycle test.
  *
  * @throws Any exception selected by invoke().
  * @note The test must keep both this record and context alive until every
- * observed close caller has returned and the hook is cleared. A joiner
+ * observed lifecycle caller has returned and the hook is cleared. A joiner
  * observer exception is rethrown only after its exact generation result is
- * consumed. Throwing from OwnerReadyToEraseAndPublish occurs after lifecycle
- * linearization and therefore exercises the production fail-stop boundary.
+ * consumed. Throwing from OwnerReadyToEraseAndPublish or
+ * ShutdownGateClosedBeforeTransition occurs after monotonic lifecycle state
+ * changed and therefore exercises a production fail-stop boundary.
  */
 struct KernelCloseTestHook final {
   /** @brief Opaque borrowed test context. */
@@ -46,7 +55,7 @@ struct KernelCloseTestHook final {
   /**
    * @brief Optional observer that may block or throw at an observed boundary.
    * @param context Borrowed value from this record.
-   * @param event Exact owner/joiner/final-publication boundary.
+   * @param event Exact close or process-shutdown boundary.
    * @return Nothing.
    * @throws Any test-selected exception unchanged.
    */
@@ -54,7 +63,7 @@ struct KernelCloseTestHook final {
 };
 
 /**
- * @brief Replaces the borrowed process-global close hook.
+ * @brief Replaces the borrowed process-global Kernel lifecycle hook.
  * @param hook Nullable serialized-test owner.
  * @return Nothing.
  * @throws Nothing.
@@ -64,8 +73,8 @@ struct KernelCloseTestHook final {
 void set_kernel_close_test_hook(const KernelCloseTestHook* hook) noexcept;
 
 /**
- * @brief Invokes the current test hook at one close boundary.
- * @param event Exact owner/joiner/final-publication boundary.
+ * @brief Invokes the current test hook at one Kernel lifecycle boundary.
+ * @param event Exact close or process-shutdown boundary.
  * @return Nothing when no hook is installed or the observer returns.
  * @throws Any observer exception unchanged.
  * @note Kernel consumes an already selected Joiner claim before propagating a

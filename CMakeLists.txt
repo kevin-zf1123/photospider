@@ -783,8 +783,8 @@ add_library(photospider_product_seam_objects OBJECT
 configure_photospider_product_objects(photospider_product_seam_objects)
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # The existing required-target observer spans Kernel facade translation
-    # units. Preserve its full-suite linkage while keeping the Issue #76 close
-    # observer absent from this production object variant.
+    # units. Preserve its full-suite linkage while keeping the Issue #76 Kernel
+    # close/shutdown observer absent from this production object variant.
     target_compile_definitions(photospider_product_seam_objects PRIVATE
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 endif()

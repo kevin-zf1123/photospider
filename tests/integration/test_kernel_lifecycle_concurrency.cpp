@@ -119,8 +119,8 @@ class ConcurrentStartGate final {
  * @throws Standard filesystem, future, Kernel, or synchronization exceptions
  * when the fixture cannot execute.
  * @note This binary links the installable production archive and deliberately
- * has no close observer seam. The service pool is configured before worker
- * launch so this test isolates graph-registry publication rather than
+ * has no Kernel lifecycle observer seam. The service pool is configured before
+ * worker launch so this test isolates graph-registry publication rather than
  * composition-time execution configuration. Repetition broadens interleavings
  * while explicit gates avoid relying on fixed operation sleeps.
  */
