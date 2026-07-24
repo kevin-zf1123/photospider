@@ -21,6 +21,7 @@
 #include "execution/execution_task_runtime.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"
+#include "photospider/core/graph_error.hpp"
 #include "runtime/graph_event_service.hpp"
 
 #ifdef __OBJC__
@@ -81,6 +82,22 @@ class GraphRuntime : public ExecutionHostContext {
 
     /** @brief Nonzero generation advanced by every successful replacement. */
     std::uint64_t generation = 1U;
+  };
+
+  /**
+   * @brief Owned best-effort diagnostic for one exact Graph runtime.
+   *
+   * @throws Nothing for default construction; copying or assigning the owned
+   * message may throw `std::bad_alloc`.
+   * @note The value belongs to this runtime's diagnostic slot. It is never
+   * indexed by a reusable graph name or retained in a process-global table.
+   */
+  struct LastError final {
+    /** @brief Exact graph-domain category captured at the failure boundary. */
+    GraphErrc code = GraphErrc::Unknown;
+
+    /** @brief Owned diagnostic text captured by the same failed operation. */
+    std::string message;
   };
 
   /**
@@ -310,6 +327,42 @@ class GraphRuntime : public ExecutionHostContext {
       const noexcept {
     return lifetime_anchor_;
   }
+
+  /**
+   * @brief Removes this runtime's best-effort diagnostic snapshot.
+   *
+   * @return Nothing.
+   * @throws std::system_error if diagnostic locking fails.
+   * @note Calling-thread result translation may clear this slot after graph
+   * close removed the runtime name. Such a delayed clear remains confined to
+   * the retained old runtime and cannot target a same-name replacement.
+   */
+  void clear_last_error();
+
+  /**
+   * @brief Replaces this runtime's best-effort diagnostic snapshot.
+   *
+   * @param error Fully constructed diagnostic moved into the runtime slot.
+   * @return Nothing.
+   * @throws std::system_error if diagnostic locking fails.
+   * @note Moving the fully constructed value performs no map insertion.
+   * Calling-thread result translation may store after name removal, but the
+   * slot remains owned by the exact retained runtime and is destroyed with its
+   * final shared owner.
+   */
+  void store_last_error(LastError error);
+
+  /**
+   * @brief Copies this runtime's best-effort diagnostic snapshot.
+   *
+   * @return Owned diagnostic, or nullopt when no failure is recorded.
+   * @throws std::bad_alloc if copying the diagnostic text fails.
+   * @throws std::system_error if diagnostic locking fails.
+   * @note The copy completes under `last_error_mutex_`; no borrowed string or
+   * optional reference escapes. Public name lookup retains the current runtime
+   * before invoking this method, so old and replacement slots never alias.
+   */
+  std::optional<LastError> last_error() const;
 
   /**
    * @brief Returns the runtime-owned mutable graph model.
@@ -647,6 +700,23 @@ class GraphRuntime : public ExecutionHostContext {
    * destruction retires it after both lane owners.
    */
   std::shared_ptr<compute::GraphLifetimeAnchor> lifetime_anchor_;
+  /**
+   * @brief Serializes access to this runtime's diagnostic slot.
+   *
+   * @note This mutex is independent of graph-state, compute-request,
+   * graph-registry, lifecycle, and execution-service locks. No such lock is
+   * acquired while it is held.
+   */
+  mutable std::mutex last_error_mutex_;
+  /**
+   * @brief Best-effort diagnostic bound to this exact runtime lifetime.
+   *
+   * @note The slot is declared before both lane owners so reverse member
+   * destruction keeps it alive through lane teardown. A retained old caller
+   * may update it after close, and the slot disappears when the last shared
+   * runtime owner releases.
+   */
+  std::optional<LastError> last_error_;
   /** @brief Serial executor governing mutable graph model access. */
   GraphStateExecutor graph_state_;
   /**

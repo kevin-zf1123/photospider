@@ -186,37 +186,6 @@ Kernel::~Kernel() noexcept {
   }
 }
 
-/**
- * @copydoc Kernel::clear_last_error
- */
-void Kernel::clear_last_error(GraphInstanceId graph_instance_id) {
-  std::lock_guard<std::mutex> lock(last_error_mutex_);
-  last_errors_by_instance_.erase(graph_instance_id.value());
-}
-
-/**
- * @copydoc Kernel::store_last_error
- */
-void Kernel::store_last_error(GraphInstanceId graph_instance_id,
-                              LastError error) {
-  std::lock_guard<std::mutex> lock(last_error_mutex_);
-  last_errors_by_instance_.insert_or_assign(graph_instance_id.value(),
-                                            std::move(error));
-}
-
-/**
- * @copydoc Kernel::copy_last_error
- */
-std::optional<Kernel::LastError> Kernel::copy_last_error(
-    GraphInstanceId graph_instance_id) const {
-  std::lock_guard<std::mutex> lock(last_error_mutex_);
-  auto it = last_errors_by_instance_.find(graph_instance_id.value());
-  if (it == last_errors_by_instance_.end()) {
-    return std::nullopt;
-  }
-  return it->second;
-}
-
 /** @copydoc Kernel::acquire_runtime */
 std::shared_ptr<GraphRuntime> Kernel::acquire_runtime(const std::string& name) {
   std::lock_guard<std::mutex> lock(graphs_mutex_);
@@ -461,7 +430,6 @@ bool Kernel::close_graph_with_reason(
     runtime->close_compute_requests();
     runtime->graph_state().close_and_drain();
     runtime->stop();
-    clear_last_error(*graph_instance_id);
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
     testing::notify_kernel_close_test_hook(
         testing::KernelCloseTestEvent::OwnerReadyToEraseAndPublish);

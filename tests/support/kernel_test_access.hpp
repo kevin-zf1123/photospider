@@ -140,57 +140,54 @@ class KernelTestAccess {
    * @brief Pauses an old runtime's diagnostic store after its graph-state
    * boundary.
    *
-   * @param kernel Kernel whose identity-keyed diagnostic mirror is updated.
    * @param runtime Exact retained runtime supplying immutable identity and the
-   * serialized graph-state boundary.
+   * runtime-owned diagnostic slot after the serialized graph-state boundary.
    * @param error Owned diagnostic to publish after release.
    * @param boundary_reached Promise fulfilled after accepted graph-state work
    * completes and before diagnostic publication.
    * @param release Shared signal that permits the delayed publication.
-   * @return Nothing after publishing against the retained runtime identity.
+   * @return Nothing after publishing into the retained runtime-owned slot.
    * @throws Graph-state, future, diagnostic-allocation, or synchronization
    * errors unchanged.
    * @note Real LastError wrappers translate a completed graph-state future on
    * the calling thread after leaving the executor lane. Holding this exact
-   * window lets close drain the old lane and a same-name replacement publish
-   * before the retained old caller stores its result.
+   * window lets close drain the old lane and a same-name replacement publish.
+   * The delayed store then remains confined to the old runtime until its final
+   * shared owner releases.
    */
   static void store_last_error_after_graph_state(
-      Kernel& kernel, const std::shared_ptr<GraphRuntime>& runtime,
-      Kernel::LastError error, std::promise<void>& boundary_reached,
+      const std::shared_ptr<GraphRuntime>& runtime, Kernel::LastError error,
+      std::promise<void>& boundary_reached,
       const std::shared_future<void>& release) {
-    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     runtime->graph_state().submit([](GraphModel&) {}).get();
     boundary_reached.set_value();
     release.get();
-    kernel.store_last_error(graph_instance_id, std::move(error));
+    runtime->store_last_error(std::move(error));
   }
 
   /**
    * @brief Pauses an old runtime's diagnostic clear after its graph-state
    * boundary.
    *
-   * @param kernel Kernel whose identity-keyed diagnostic mirror is updated.
    * @param runtime Exact retained runtime supplying immutable identity and the
-   * serialized graph-state boundary.
+   * runtime-owned diagnostic slot after the serialized graph-state boundary.
    * @param boundary_reached Promise fulfilled after accepted graph-state work
    * completes and before diagnostic removal.
    * @param release Shared signal that permits the delayed removal.
-   * @return Nothing after clearing against the retained runtime identity.
+   * @return Nothing after clearing only the retained runtime-owned slot.
    * @throws Graph-state, future, or synchronization errors unchanged.
    * @note This models the success path of the same real wrapper window as
    * store_last_error_after_graph_state(). A delayed old clear must not erase a
    * same-name replacement's diagnostic.
    */
   static void clear_last_error_after_graph_state(
-      Kernel& kernel, const std::shared_ptr<GraphRuntime>& runtime,
+      const std::shared_ptr<GraphRuntime>& runtime,
       std::promise<void>& boundary_reached,
       const std::shared_future<void>& release) {
-    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     runtime->graph_state().submit([](GraphModel&) {}).get();
     boundary_reached.set_value();
     release.get();
-    kernel.clear_last_error(graph_instance_id);
+    runtime->clear_last_error();
   }
 
   /**

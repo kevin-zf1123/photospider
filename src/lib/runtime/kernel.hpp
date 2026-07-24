@@ -82,8 +82,9 @@ class KernelTestAccess;
  * exact GraphError categories through `with_required_graph_state()` so absence
  * is not conflated with content or parameter failures. Public Host methods
  * translate those results into copied status/value types. Compute and
- * ROI/dirty APIs also store per-graph LastError details when their service
- * boundary reports GraphError or std::exception.
+ * ROI/dirty APIs also store LastError details in the exact retained
+ * GraphRuntime when their service boundary reports GraphError or
+ * std::exception.
  */
 class Kernel {
  public:
@@ -121,18 +122,14 @@ class Kernel {
   ~Kernel() noexcept;
 
   /**
-   * @brief Last backend error recorded for one graph session.
+   * @brief Last backend error recorded in one exact runtime-owned slot.
    *
    * @note The value is best-effort diagnostic state. Missing graphs and helper
    * APIs that historically returned only false/nullopt do not always update it.
+   * The source-private alias preserves the existing Kernel value vocabulary
+   * while ownership lives exclusively in `GraphRuntime`.
    */
-  struct LastError {
-    /** @brief Exact graph-domain category captured at the failure boundary. */
-    GraphErrc code = GraphErrc::Unknown;
-
-    /** @brief Owned diagnostic text captured by the same failed operation. */
-    std::string message;
-  };
+  using LastError = GraphRuntime::LastError;
 
   /**
    * @brief Immutable outcome produced by one asynchronous compute work item.
@@ -616,11 +613,12 @@ class Kernel {
    * @return Owned LastError snapshot, or nullopt when none is recorded.
    * @throws std::bad_alloc if copying the diagnostic text fails.
    * @throws std::system_error if graph-registry or diagnostic locking fails.
-   * @note Name lookup first captures the currently published runtime's exact
-   * GraphInstanceId, then releases `graphs_mutex_` before copying its
-   * diagnostic. A retained old runtime can neither overwrite nor clear the
-   * diagnostic of a same-name replacement. Async compute futures never derive
-   * their result from this mutable snapshot.
+   * @note Name lookup first retains the currently published runtime, then
+   * releases `graphs_mutex_` before copying that runtime's diagnostic slot.
+   * A retained old runtime can neither overwrite nor clear a same-name
+   * replacement, and its slot is destroyed with its final shared runtime
+   * owner. Async compute futures never derive their result from this mutable
+   * snapshot.
    */
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
@@ -1286,36 +1284,33 @@ class Kernel {
     if (!runtime) {
       return std::nullopt;
     }
-    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     try {
       if (start_runtime && !runtime->running()) {
         runtime->start();
       }
       auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
-      clear_last_error(graph_instance_id);
+      runtime->clear_last_error();
       return result;
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const GraphError& ge) {
-      store_last_error(graph_instance_id, LastError{ge.code(), ge.what()});
+      runtime->store_last_error(LastError{ge.code(), ge.what()});
       return std::nullopt;
     } catch (const std::exception& e) {
-      store_last_error(graph_instance_id,
-                       LastError{GraphErrc::Unknown,
-                                 std::string(exception_prefix) + e.what()});
+      runtime->store_last_error(LastError{
+          GraphErrc::Unknown, std::string(exception_prefix) + e.what()});
       return std::nullopt;
     } catch (...) {
-      store_last_error(
-          graph_instance_id,
-          LastError{GraphErrc::Unknown, std::string(exception_prefix) +
-                                            "unknown non-standard exception"});
+      runtime->store_last_error(LastError{
+          GraphErrc::Unknown,
+          std::string(exception_prefix) + "unknown non-standard exception"});
       return std::nullopt;
     }
   }
 
   /**
    * @brief Executes one required serialized graph-state operation while
-   *        preserving its exact exception and LastError mirror.
+   *        preserving its exact exception and runtime-owned LastError slot.
    *
    * @tparam Fn Callable accepted by GraphStateExecutor as `op(GraphModel&)`.
    * @param name Required graph session name.
@@ -1346,69 +1341,24 @@ class Kernel {
     if (!runtime) {
       throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
     }
-    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     try {
       if (start_runtime && !runtime->running()) {
         runtime->start();
       }
       auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
-      clear_last_error(graph_instance_id);
+      runtime->clear_last_error();
       return result;
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const GraphError& error) {
-      store_last_error(graph_instance_id,
-                       LastError{error.code(), error.what()});
+      runtime->store_last_error(LastError{error.code(), error.what()});
       throw;
     } catch (const std::exception& error) {
-      store_last_error(graph_instance_id,
-                       LastError{GraphErrc::Unknown,
-                                 std::string(exception_prefix) + error.what()});
+      runtime->store_last_error(LastError{
+          GraphErrc::Unknown, std::string(exception_prefix) + error.what()});
       throw;
     }
   }
-
-  /**
-   * @brief Removes one graph's best-effort diagnostic snapshot.
-   *
-   * @param graph_instance_id Exact runtime identity whose diagnostic is
-   * cleared.
-   * @return Nothing.
-   * @throws std::system_error if locking the diagnostic mutex fails.
-   * @note Every access to `last_errors_by_instance_`, including accesses from
-   *       retained old graph-state executors, uses the same mutex through these
-   *       helpers. No graph-registry lock is acquired here.
-   */
-  void clear_last_error(GraphInstanceId graph_instance_id);
-
-  /**
-   * @brief Publishes one owned best-effort diagnostic snapshot.
-   *
-   * @param graph_instance_id Exact runtime identity whose diagnostic is
-   * replaced.
-   * @param error Fully constructed diagnostic moved into the shared map.
-   * @return Nothing.
-   * @throws std::bad_alloc if the map node cannot be allocated.
-   * @throws std::system_error if locking the diagnostic mutex fails.
-   * @note Async callers retain a separate owned result; this mirror exists only
-   *       for the legacy `last_error()` observation surface. Identity keying
-   *       prevents a late old-runtime result from affecting a same-name
-   *       replacement without requiring graph/diagnostic nested locking.
-   */
-  void store_last_error(GraphInstanceId graph_instance_id, LastError error);
-
-  /**
-   * @brief Copies one graph's best-effort diagnostic snapshot.
-   *
-   * @param graph_instance_id Exact runtime identity to inspect.
-   * @return Copied diagnostic, or nullopt when no failure is recorded.
-   * @throws std::bad_alloc if copying the diagnostic text fails.
-   * @throws std::system_error if locking the diagnostic mutex fails.
-   * @note The copy is completed while holding `last_error_mutex_`; no map
-   *       iterator or borrowed string escapes the protected region.
-   */
-  std::optional<LastError> copy_last_error(
-      GraphInstanceId graph_instance_id) const;
 
   /**
    * @brief Runs internal synchronous compute from an adapter request object.
@@ -1566,27 +1516,6 @@ class Kernel {
    */
   bool shutdown_started_ = false;
 
-  /**
-   * @brief Serializes all reads, writes, and erases of
-   * `last_errors_by_instance_`.
-   *
-   * @note The mutex is independent of per-graph GraphStateExecutor instances
-   *       because asynchronous computes for different sessions may publish
-   *       diagnostics concurrently. It is never held while graph-state or
-   *       execution-service work executes.
-   */
-  mutable std::mutex last_error_mutex_;
-
-  /**
-   * @brief Best-effort per-runtime diagnostic mirror for legacy inspection.
-   *
-   * @note Access is permitted only through clear_last_error(),
-   *       store_last_error(), and copy_last_error() while
-   *       `last_error_mutex_` is held. Keys are exact nonzero GraphInstanceId
-   *       scalar values rather than reusable session labels. Async operation
-   *       results never derive their final status from this map.
-   */
-  std::map<std::uint64_t, LastError> last_errors_by_instance_;
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
   /**

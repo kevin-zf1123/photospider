@@ -210,6 +210,24 @@ GraphRuntime::~GraphRuntime() noexcept {
   lifetime_anchor_->mark_retired();
 }
 
+/** @copydoc GraphRuntime::clear_last_error */
+void GraphRuntime::clear_last_error() {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_.reset();
+}
+
+/** @copydoc GraphRuntime::store_last_error */
+void GraphRuntime::store_last_error(LastError error) {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_ = std::move(error);
+}
+
+/** @copydoc GraphRuntime::last_error */
+std::optional<GraphRuntime::LastError> GraphRuntime::last_error() const {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  return last_error_;
+}
+
 /** @copydoc GraphRuntime::this_worker_id */
 int GraphRuntime::this_worker_id() noexcept {
   if (tls_worker_id_ >= 0) {

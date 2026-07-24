@@ -59,7 +59,7 @@ std::optional<Kernel::LastError> Kernel::last_error(
   if (!runtime) {
     return std::nullopt;
   }
-  return copy_last_error(runtime->lifetime_anchor()->graph_instance_id());
+  return runtime->last_error();
 }
 
 std::optional<std::vector<int>> Kernel::ending_nodes(const std::string& name) {

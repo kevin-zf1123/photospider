@@ -3073,59 +3073,48 @@ TEST(ComputeContracts, OverlappingAsyncFailuresOwnExactKernelResults) {
 }
 
 /**
- * @brief Proves retained old-runtime diagnostics cannot cross same-name reload.
+ * @brief Proves a late diagnostic store stays owned by its retained runtime.
  *
  * @return Nothing; GoogleTest reports graph-state boundary, identity, stale
- * store, stale clear, or timeout divergence.
+ * store isolation, runtime-slot ownership, or timeout divergence.
  * @throws Standard fixture, filesystem, future, or synchronization exceptions.
- * @note Both old callers complete their real GraphStateExecutor work and pause
- * during calling-thread result translation. Close can therefore drain the old
- * lanes and publish a replacement before either delayed diagnostic mutation.
+ * @note The old caller completes real GraphStateExecutor work and pauses in
+ * the calling-thread translation window that lies outside close drainage.
+ * Close removes the old name, a same-name replacement publishes its own error,
+ * and only then does the old caller store. No compensating clear runs; the old
+ * slot disappears only when the final retained runtime owner releases.
  */
-TEST(ComputeContracts, LastErrorUsesExactGraphIdentityAcrossSameNameReload) {
+TEST(ComputeContracts, LastErrorSlotFollowsRuntimeAcrossSameNameReload) {
   const std::string graph_name = "contract_last_error_identity";
   const auto root =
       clean_temp_path("photospider-contract-last-error-identity-root");
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
   ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), "").has_value());
-  const auto old_runtime =
+  auto old_runtime =
       testing::KernelTestAccess::runtime_owner(kernel, graph_name);
+  const std::weak_ptr<GraphRuntime> old_runtime_observer = old_runtime;
   const GraphInstanceId old_instance_id = old_runtime->model().instance_id();
 
   std::promise<void> store_boundary;
-  std::promise<void> clear_boundary;
   auto store_boundary_ready = store_boundary.get_future();
-  auto clear_boundary_ready = clear_boundary.get_future();
   std::promise<void> release_store;
-  std::promise<void> release_clear;
   const std::shared_future<void> store_release =
       release_store.get_future().share();
-  const std::shared_future<void> clear_release =
-      release_clear.get_future().share();
   const Kernel::LastError stale_error{GraphErrc::Unknown,
                                       "stale retained-runtime diagnostic"};
-  auto stale_store = std::async(std::launch::async, [&] {
+  auto stale_store = std::async(std::launch::async, [&, old_runtime] {
     testing::KernelTestAccess::store_last_error_after_graph_state(
-        kernel, old_runtime, stale_error, store_boundary, store_release);
-  });
-  auto stale_clear = std::async(std::launch::async, [&] {
-    testing::KernelTestAccess::clear_last_error_after_graph_state(
-        kernel, old_runtime, clear_boundary, clear_release);
+        old_runtime, stale_error, store_boundary, store_release);
   });
 
   const auto store_status =
       store_boundary_ready.wait_for(std::chrono::seconds(2));
-  const auto clear_status =
-      clear_boundary_ready.wait_for(std::chrono::seconds(2));
-  if (store_status != std::future_status::ready ||
-      clear_status != std::future_status::ready) {
+  if (store_status != std::future_status::ready) {
     release_store.set_value();
-    release_clear.set_value();
     stale_store.wait();
-    stale_clear.wait();
     (void)kernel.close_graph(graph_name);
     std::filesystem::remove_all(root);
-    FAIL() << "old diagnostic callers did not reach translation boundary";
+    FAIL() << "old diagnostic caller did not reach translation boundary";
     return;
   }
 
@@ -3133,9 +3122,7 @@ TEST(ComputeContracts, LastErrorUsesExactGraphIdentityAcrossSameNameReload) {
   const auto replacement = kernel.load_graph(graph_name, root.string(), "");
   if (!old_closed || !replacement.has_value()) {
     release_store.set_value();
-    release_clear.set_value();
     stale_store.wait();
-    stale_clear.wait();
     std::filesystem::remove_all(root);
     FAIL() << "same-name replacement could not be published";
     return;
@@ -3147,9 +3134,7 @@ TEST(ComputeContracts, LastErrorUsesExactGraphIdentityAcrossSameNameReload) {
   const auto current_error = kernel.last_error(graph_name);
   if (!current_error.has_value()) {
     release_store.set_value();
-    release_clear.set_value();
     stale_store.wait();
-    stale_clear.wait();
     (void)kernel.close_graph(graph_name);
     std::filesystem::remove_all(root);
     FAIL() << "replacement failure did not publish its diagnostic";
@@ -3159,9 +3144,7 @@ TEST(ComputeContracts, LastErrorUsesExactGraphIdentityAcrossSameNameReload) {
   release_store.set_value();
   const auto stale_store_status = stale_store.wait_for(std::chrono::seconds(2));
   if (stale_store_status != std::future_status::ready) {
-    release_clear.set_value();
     stale_store.wait();
-    stale_clear.wait();
     (void)kernel.close_graph(graph_name);
     std::filesystem::remove_all(root);
     FAIL() << "stale diagnostic store did not complete";
@@ -3169,21 +3152,85 @@ TEST(ComputeContracts, LastErrorUsesExactGraphIdentityAcrossSameNameReload) {
   }
   stale_store.get();
   const auto after_stale_store = kernel.last_error(graph_name);
-
-  release_clear.set_value();
-  const auto stale_clear_status = stale_clear.wait_for(std::chrono::seconds(2));
-  ASSERT_EQ(stale_clear_status, std::future_status::ready);
-  stale_clear.get();
-  const auto after_stale_clear = kernel.last_error(graph_name);
+  const auto old_slot_error = old_runtime->last_error();
 
   EXPECT_NE(current_error->message, stale_error.message);
   ASSERT_TRUE(after_stale_store.has_value());
   EXPECT_EQ(after_stale_store->code, current_error->code);
   EXPECT_EQ(after_stale_store->message, current_error->message);
+  ASSERT_TRUE(old_slot_error.has_value());
+  EXPECT_EQ(old_slot_error->code, stale_error.code);
+  EXPECT_EQ(old_slot_error->message, stale_error.message);
+  EXPECT_FALSE(old_runtime_observer.expired());
+
+  old_runtime.reset();
+  EXPECT_TRUE(old_runtime_observer.expired());
+  const auto after_old_release = kernel.last_error(graph_name);
+  ASSERT_TRUE(after_old_release.has_value());
+  EXPECT_EQ(after_old_release->code, current_error->code);
+  EXPECT_EQ(after_old_release->message, current_error->message);
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves a retained old runtime can clear only its own diagnostic slot.
+ *
+ * @return Nothing; GoogleTest reports replacement mutation or timeout
+ * divergence.
+ * @throws Standard fixture, filesystem, future, or synchronization exceptions.
+ * @note This companion isolates the success-translation path. Its delayed
+ * clear runs after same-name replacement publication and therefore cannot
+ * erase the replacement runtime's independent diagnostic.
+ */
+TEST(ComputeContracts, LastErrorClearStaysWithRetainedRuntime) {
+  const std::string graph_name = "contract_last_error_clear_identity";
+  const auto root =
+      clean_temp_path("photospider-contract-last-error-clear-root");
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), "").has_value());
+  auto old_runtime =
+      testing::KernelTestAccess::runtime_owner(kernel, graph_name);
+  EXPECT_FALSE(kernel.reload_graph_document(graph_name, ""));
+  ASSERT_TRUE(old_runtime->last_error().has_value());
+
+  std::promise<void> clear_boundary;
+  auto clear_boundary_ready = clear_boundary.get_future();
+  std::promise<void> release_clear;
+  const std::shared_future<void> clear_release =
+      release_clear.get_future().share();
+  auto stale_clear = std::async(std::launch::async, [&, old_runtime] {
+    testing::KernelTestAccess::clear_last_error_after_graph_state(
+        old_runtime, clear_boundary, clear_release);
+  });
+  if (clear_boundary_ready.wait_for(std::chrono::seconds(2)) !=
+      std::future_status::ready) {
+    release_clear.set_value();
+    stale_clear.wait();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "old clear caller did not reach translation boundary";
+    return;
+  }
+
+  ASSERT_TRUE(kernel.close_graph(graph_name));
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), "").has_value());
+  EXPECT_FALSE(kernel.reload_graph_document(graph_name, ""));
+  const auto current_error = kernel.last_error(graph_name);
+  ASSERT_TRUE(current_error.has_value());
+
+  release_clear.set_value();
+  ASSERT_EQ(stale_clear.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  stale_clear.get();
+  EXPECT_FALSE(old_runtime->last_error().has_value());
+  const auto after_stale_clear = kernel.last_error(graph_name);
   ASSERT_TRUE(after_stale_clear.has_value());
   EXPECT_EQ(after_stale_clear->code, current_error->code);
   EXPECT_EQ(after_stale_clear->message, current_error->message);
 
+  old_runtime.reset();
   EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
 }
