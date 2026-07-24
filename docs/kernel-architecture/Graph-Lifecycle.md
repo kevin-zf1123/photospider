@@ -279,12 +279,12 @@ Clear advances topology generation and authoritative revision, then leaves the
 model in quiet mode. It does not close or destroy the owning `GraphRuntime`; the
 session remains loaded. It also does not delete disk-cache files, clear
 runtime-owned event/trace rings, directly clear `RealtimeProxyGraph`, or clear
-Kernel-owned `LastError`. `RealtimeProxyGraph` invalidates itself when its next
-synchronization observes the advanced topology generation; an older staged
-compute is rejected by revision validation. Diagnostic record, snapshot, reset,
-clone, and staged exchange all use one encapsulated no-throw mutex contract, so
-clear can overlap worker diagnostic traffic without unsynchronized
-optional/path/string access.
+the runtime-owned `LastError` diagnostic slot. `RealtimeProxyGraph` invalidates
+itself when its next synchronization observes the advanced topology
+generation; an older staged compute is rejected by revision validation.
+Diagnostic record, snapshot, reset, clone, and staged exchange all use one
+encapsulated no-throw mutex contract, so clear can overlap worker diagnostic
+traffic without unsynchronized optional/path/string access.
 
 ## Close and Lifetime
 

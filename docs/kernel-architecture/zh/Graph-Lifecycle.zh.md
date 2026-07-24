@@ -219,11 +219,12 @@ category，`std::bad_alloc` 原样传播。
 Clear 会推进 topology generation 与 authoritative revision，并让 model 保持 quiet
 mode。它不会关闭或销毁所属 `GraphRuntime`；session 仍处于 loaded 状态。它也不会
 删除 disk-cache file、清除 runtime-owned event/trace ring、直接清除
-`RealtimeProxyGraph`，或清除 Kernel-owned `LastError`。`RealtimeProxyGraph` 会在下一次
-synchronization 观察到已推进的 topology generation 时自行失效；较旧的 staged compute
-会被 revision validation 拒绝。Diagnostic record、snapshot、reset、clone 与 staged exchange
-全部使用同一个封装的 no-throw mutex 契约，因此 clear 可以与 worker diagnostic traffic 重叠，而
-不会无同步访问 optional/path/string。
+`RealtimeProxyGraph`，或清除 runtime-owned `LastError` diagnostic slot。
+`RealtimeProxyGraph` 会在下一次 synchronization 观察到已推进的 topology generation
+时自行失效；较旧的 staged compute 会被 revision validation 拒绝。Diagnostic record、
+snapshot、reset、clone 与 staged exchange 全部使用同一个封装的 no-throw mutex 契约，
+因此 clear 可以与 worker diagnostic traffic 重叠，而不会无同步访问
+optional/path/string。
 
 ## Close 与 Lifetime
 

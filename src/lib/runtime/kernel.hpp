@@ -136,8 +136,10 @@ class Kernel {
    *
    * @throws Nothing for destruction; constructing the owned diagnostic may
    *         throw std::bad_alloc inside the asynchronous work item.
-   * @note A failed value owns the exact error captured by that work item. It is
-   *       never reconstructed from the mutable per-session LastError map.
+   * @note A failed value owns the exact error captured by that work item. The
+   *       result is never reconstructed from or read back from the
+   *       runtime-owned mutable best-effort LastError slot; that slot is only
+   *       a diagnostic mirror.
    */
   struct AsyncComputeResult {
     /** @brief True only when the associated compute completed successfully. */
