@@ -20,6 +20,11 @@ enum class KernelCloseTestEvent {
   /** @brief Exact joiner was selected before waiting for the owner result. */
   JoinerSelectedBeforeWait,
   /**
+   * @brief A failed generation was observed after releasing the graph
+   * registry lock and immediately before waiting for retry eligibility.
+   */
+  RetryPendingBeforeWait,
+  /**
    * @brief Owner drained the runtime immediately before atomic erase/success.
    */
   OwnerReadyToEraseAndPublish,

@@ -54,6 +54,7 @@
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 #include "runtime/kernel_compute_test_access.hpp"  // NOLINT(build/include_subdir)
 #endif
+#include "support/compute_request_cancellation_source_test_access.hpp"
 #include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 #include "support/graph_model_test_access.hpp"
@@ -84,6 +85,105 @@ std::atomic<int> g_parameter_value_source_calls{0};
 /** @brief Counts effective-parameter consumer invocations. */
 std::atomic<int> g_parameter_value_consumer_calls{0};
 
+/**
+ * @brief Builds one standalone Run submission for a loaded Kernel runtime.
+ * @param graph_instance_id Exact registered runtime identity.
+ * @return Valid full-quality HP submission used only by lifecycle tests.
+ * @throws std::bad_alloc when owned identity storage cannot allocate.
+ */
+compute::ComputeRunSubmission make_kernel_shutdown_submission(
+    GraphInstanceId graph_instance_id) {
+  return compute::ComputeRunSubmission{
+      "kernel-shutdown-graph",
+      graph_instance_id,
+      GraphRevision::initial(),
+      1,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
+                             std::nullopt, 1U, std::nullopt},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey(1, ComputeIntent::GlobalHighPrecision),
+          compute::SupersessionGeneration(1U)}};
+}
+
+/**
+ * @brief Blocks one lifecycle cancellation after service transition
+ * linearization and before child fanout.
+ *
+ * @throws Standard synchronization errors from test coordination.
+ * @note The observer is installed on one isolated request source. Its wait
+ * makes registry accessibility during Kernel shutdown deterministic without
+ * blocking a worker or graph-state lane.
+ */
+class ShutdownCancellationProbe final {
+ public:
+  /**
+   * @brief Adapts the cancellation test seam to this probe.
+   * @param context Borrowed ShutdownCancellationProbe.
+   * @return Nothing after explicit release.
+   * @throws Nothing; synchronization failure terminates through the production
+   * no-unwind cancellation boundary.
+   */
+  static void observe(void* context) {
+    auto* probe = static_cast<ShutdownCancellationProbe*>(context);
+    if (probe == nullptr) {
+      std::terminate();
+    }
+    probe->wait_for_release();
+  }
+
+  /**
+   * @brief Waits until cancellation reaches the post-linearization boundary.
+   * @param timeout Maximum deterministic wait.
+   * @return True when the observer is blocked.
+   * @throws std::system_error from test synchronization.
+   */
+  bool wait_until_entered(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this]() { return entered_; });
+  }
+
+  /**
+   * @brief Releases the blocked cancellation observer exactly once.
+   * @return Nothing.
+   * @throws Nothing; synchronization failure terminates the test process.
+   */
+  void release() noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_ = true;
+      }
+      changed_.notify_all();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /**
+   * @brief Publishes observer entry and waits for the test release.
+   * @return Nothing.
+   * @throws std::system_error from test synchronization.
+   */
+  void wait_for_release() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    entered_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this]() { return released_; });
+  }
+
+  /** @brief Serializes observer entry and release. */
+  std::mutex mutex_;
+  /** @brief Wakes the test and blocked lifecycle caller. */
+  std::condition_variable changed_;
+  /** @brief True after lifecycle fanout reaches the observer. */
+  bool entered_ = false;
+  /** @brief True after the test permits child cancellation fanout. */
+  bool released_ = false;
+};
+
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
 /**
  * @brief Coordinates deterministic Kernel close owner, joiner, and tail
@@ -104,17 +204,20 @@ class KernelCloseProbe final {
    * joiner callback.
    * @param block_tail Whether the first final-publication boundary waits for
    * explicit release.
+   * @param block_joiner Whether the first joiner callback waits before
+   * consuming its selected generation.
    * @throws Nothing.
    * @note Exception pointers, when present, must remain non-null for the probe
    * lifetime.
    */
   KernelCloseProbe(std::exception_ptr owner_failure, bool block_owner,
                    std::exception_ptr joiner_failure = nullptr,
-                   bool block_tail = false) noexcept
+                   bool block_tail = false, bool block_joiner = false) noexcept
       : owner_failure_(std::move(owner_failure)),
         joiner_failure_(std::move(joiner_failure)),
         block_owner_(block_owner),
-        block_tail_(block_tail) {}
+        block_tail_(block_tail),
+        block_joiner_(block_joiner) {}
 
   /**
    * @brief Adapts the borrowed Kernel hook to this probe.
@@ -156,6 +259,18 @@ class KernelCloseProbe final {
   }
 
   /**
+   * @brief Waits until a failed-generation retry reaches its external wait.
+   * @param timeout Maximum deterministic wait.
+   * @return True when retry waiting was observed after graph-lock release.
+   * @throws std::system_error from test synchronization.
+   */
+  bool wait_for_retry(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout,
+                             [this]() { return retry_events_ != 0U; });
+  }
+
+  /**
    * @brief Waits until the owner reaches final erase/success publication.
    * @param timeout Maximum deterministic wait.
    * @return True when the boundary was observed.
@@ -177,6 +292,23 @@ class KernelCloseProbe final {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         release_owner_ = true;
+      }
+      changed_.notify_all();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Releases a blocked first joiner exactly once.
+   * @return Nothing.
+   * @throws Nothing; synchronization failure terminates the test process.
+   */
+  void release_joiner() noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_joiner_ = true;
       }
       changed_.notify_all();
     } catch (...) {
@@ -210,14 +342,26 @@ class KernelCloseProbe final {
    */
   void observe(testing::KernelCloseTestEvent event) {
     if (event == testing::KernelCloseTestEvent::JoinerSelectedBeforeWait) {
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++joiner_events_;
-      }
+      std::unique_lock<std::mutex> lock(mutex_);
+      ++joiner_events_;
+      const bool first_joiner = joiner_events_ == 1U;
       changed_.notify_all();
+      if (first_joiner && block_joiner_) {
+        changed_.wait(lock, [this]() { return release_joiner_; });
+      }
+      lock.unlock();
       if (joiner_failure_) {
         std::rethrow_exception(joiner_failure_);
       }
+      return;
+    }
+
+    if (event == testing::KernelCloseTestEvent::RetryPendingBeforeWait) {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++retry_events_;
+      }
+      changed_.notify_all();
       return;
     }
 
@@ -254,6 +398,9 @@ class KernelCloseProbe final {
   const bool block_owner_;
   /** @brief Whether first final-publication event waits for release. */
   const bool block_tail_;
+  /** @brief Whether first joiner observation waits before result consumption.
+   */
+  const bool block_joiner_;
   /** @brief Serializes deterministic event/release state. */
   std::mutex mutex_;
   /** @brief Wakes test and owner waiters after state changes. */
@@ -262,10 +409,14 @@ class KernelCloseProbe final {
   std::uint64_t owner_events_ = 0U;
   /** @brief Number of joiner boundaries observed. */
   std::uint64_t joiner_events_ = 0U;
+  /** @brief Number of failed-generation external retry waits observed. */
+  std::uint64_t retry_events_ = 0U;
   /** @brief Number of final-publication boundaries observed. */
   std::uint64_t tail_events_ = 0U;
   /** @brief True after the test permits first-owner failure publication. */
   bool release_owner_ = false;
+  /** @brief True after the test permits first-joiner result consumption. */
+  bool release_joiner_ = false;
   /** @brief True after the test permits final erase/success publication. */
   bool release_tail_ = false;
 };
@@ -2922,6 +3073,122 @@ TEST(ComputeContracts, OverlappingAsyncFailuresOwnExactKernelResults) {
 }
 
 /**
+ * @brief Proves retained old-runtime diagnostics cannot cross same-name reload.
+ *
+ * @return Nothing; GoogleTest reports graph-state boundary, identity, stale
+ * store, stale clear, or timeout divergence.
+ * @throws Standard fixture, filesystem, future, or synchronization exceptions.
+ * @note Both old callers complete their real GraphStateExecutor work and pause
+ * during calling-thread result translation. Close can therefore drain the old
+ * lanes and publish a replacement before either delayed diagnostic mutation.
+ */
+TEST(ComputeContracts, LastErrorUsesExactGraphIdentityAcrossSameNameReload) {
+  const std::string graph_name = "contract_last_error_identity";
+  const auto root =
+      clean_temp_path("photospider-contract-last-error-identity-root");
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), "").has_value());
+  const auto old_runtime =
+      testing::KernelTestAccess::runtime_owner(kernel, graph_name);
+  const GraphInstanceId old_instance_id = old_runtime->model().instance_id();
+
+  std::promise<void> store_boundary;
+  std::promise<void> clear_boundary;
+  auto store_boundary_ready = store_boundary.get_future();
+  auto clear_boundary_ready = clear_boundary.get_future();
+  std::promise<void> release_store;
+  std::promise<void> release_clear;
+  const std::shared_future<void> store_release =
+      release_store.get_future().share();
+  const std::shared_future<void> clear_release =
+      release_clear.get_future().share();
+  const Kernel::LastError stale_error{GraphErrc::Unknown,
+                                      "stale retained-runtime diagnostic"};
+  auto stale_store = std::async(std::launch::async, [&] {
+    testing::KernelTestAccess::store_last_error_after_graph_state(
+        kernel, old_runtime, stale_error, store_boundary, store_release);
+  });
+  auto stale_clear = std::async(std::launch::async, [&] {
+    testing::KernelTestAccess::clear_last_error_after_graph_state(
+        kernel, old_runtime, clear_boundary, clear_release);
+  });
+
+  const auto store_status =
+      store_boundary_ready.wait_for(std::chrono::seconds(2));
+  const auto clear_status =
+      clear_boundary_ready.wait_for(std::chrono::seconds(2));
+  if (store_status != std::future_status::ready ||
+      clear_status != std::future_status::ready) {
+    release_store.set_value();
+    release_clear.set_value();
+    stale_store.wait();
+    stale_clear.wait();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "old diagnostic callers did not reach translation boundary";
+    return;
+  }
+
+  const bool old_closed = kernel.close_graph(graph_name);
+  const auto replacement = kernel.load_graph(graph_name, root.string(), "");
+  if (!old_closed || !replacement.has_value()) {
+    release_store.set_value();
+    release_clear.set_value();
+    stale_store.wait();
+    stale_clear.wait();
+    std::filesystem::remove_all(root);
+    FAIL() << "same-name replacement could not be published";
+    return;
+  }
+  const auto new_runtime =
+      testing::KernelTestAccess::runtime_owner(kernel, graph_name);
+  EXPECT_NE(new_runtime->model().instance_id(), old_instance_id);
+  EXPECT_FALSE(kernel.reload_graph_document(graph_name, ""));
+  const auto current_error = kernel.last_error(graph_name);
+  if (!current_error.has_value()) {
+    release_store.set_value();
+    release_clear.set_value();
+    stale_store.wait();
+    stale_clear.wait();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "replacement failure did not publish its diagnostic";
+    return;
+  }
+
+  release_store.set_value();
+  const auto stale_store_status = stale_store.wait_for(std::chrono::seconds(2));
+  if (stale_store_status != std::future_status::ready) {
+    release_clear.set_value();
+    stale_store.wait();
+    stale_clear.wait();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "stale diagnostic store did not complete";
+    return;
+  }
+  stale_store.get();
+  const auto after_stale_store = kernel.last_error(graph_name);
+
+  release_clear.set_value();
+  const auto stale_clear_status = stale_clear.wait_for(std::chrono::seconds(2));
+  ASSERT_EQ(stale_clear_status, std::future_status::ready);
+  stale_clear.get();
+  const auto after_stale_clear = kernel.last_error(graph_name);
+
+  EXPECT_NE(current_error->message, stale_error.message);
+  ASSERT_TRUE(after_stale_store.has_value());
+  EXPECT_EQ(after_stale_store->code, current_error->code);
+  EXPECT_EQ(after_stale_store->message, current_error->message);
+  ASSERT_TRUE(after_stale_clear.has_value());
+  EXPECT_EQ(after_stale_clear->code, current_error->code);
+  EXPECT_EQ(after_stale_clear->message, current_error->message);
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+
+/**
  * @brief Proves parallel stale output cannot overwrite a completed Graph clear.
  *
  * @return Nothing; GoogleTest assertions report revision or publication
@@ -4693,6 +4960,88 @@ TEST(ComputeContracts, ExecutionObservationAndReplacementWaitForCompute) {
 }
 
 /**
+ * @brief Proves process-shutdown cancellation fanout never owns the graph
+ * registry lock.
+ *
+ * @return Nothing; GoogleTest reports publication-gate, listing, cancellation,
+ * settlement, or timeout divergence.
+ * @throws Standard fixture, filesystem, future, or synchronization exceptions.
+ * @note One installed Run blocks after ServiceStopping linearizes and before
+ * child fanout. During that block the existing graph remains listable and a
+ * late fully constructed runtime loses the already-closed publication gate
+ * without waiting for fanout.
+ */
+TEST(ComputeContracts, ShutdownFanoutLeavesGraphRegistryAvailable) {
+  const std::string graph_name = "contract_shutdown_registry";
+  const std::string late_name = "contract_shutdown_late";
+  const auto root =
+      clean_temp_path("photospider-contract-shutdown-registry-root");
+  const auto late_root =
+      clean_temp_path("photospider-contract-shutdown-late-root");
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), "").has_value());
+  const auto runtime =
+      testing::KernelTestAccess::runtime_owner(kernel, graph_name);
+  const auto execution_service =
+      testing::KernelTestAccess::execution_service_owner(kernel);
+  compute::ComputeRun run(
+      make_kernel_shutdown_submission(runtime->model().instance_id()));
+  auto cancellation =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  cancellation->attach(run);
+  ShutdownCancellationProbe probe;
+  testing::ComputeRequestCancellationSourceTestAccess::
+      set_after_linearization_observer(
+          *cancellation, &ShutdownCancellationProbe::observe, &probe);
+  compute::RunLifecycleAdmissionHandle admission =
+      execution_service->commit_graph_admission(
+          execution_service->begin_graph_admission(
+              runtime->model().instance_id()),
+          run.acquire_lease(), cancellation);
+
+  auto shutdown =
+      std::async(std::launch::async, [&kernel]() { kernel.shutdown(); });
+  const bool fanout_blocked = probe.wait_until_entered(std::chrono::seconds(2));
+  auto listing = std::async(std::launch::async,
+                            [&kernel]() { return kernel.list_graphs(); });
+  auto late_publication = std::async(std::launch::async, [&] {
+    return kernel.load_graph(late_name, late_root.string(), "");
+  });
+  const auto listing_status = listing.wait_for(std::chrono::milliseconds(250));
+  const auto publication_status =
+      late_publication.wait_for(std::chrono::seconds(1));
+
+  probe.release();
+  EXPECT_TRUE(fanout_blocked);
+  EXPECT_EQ(listing_status, std::future_status::ready);
+  EXPECT_EQ(publication_status, std::future_status::ready);
+  EXPECT_EQ(shutdown.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  execution_service->finalize_graph_admission(admission);
+  ASSERT_EQ(shutdown.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  shutdown.get();
+  ASSERT_EQ(listing.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(late_publication.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const auto listed_names = listing.get();
+  EXPECT_EQ(listed_names, std::vector<std::string>{graph_name});
+  EXPECT_FALSE(late_publication.get().has_value());
+  EXPECT_TRUE(kernel.list_graphs().empty());
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind,
+            compute::ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(run.terminal_outcome()->cancellation_reason,
+            compute::ComputeRunCancellationReason::ProcessShutdown);
+  testing::ComputeRequestCancellationSourceTestAccess::
+      set_after_linearization_observer(*cancellation, nullptr, nullptr);
+  std::filesystem::remove_all(root);
+  std::filesystem::remove_all(late_root);
+}
+
+/**
  * @brief Proves pre-linearization close failure reaches every exact joiner.
  *
  * @return Nothing; GoogleTest reports exception identity, retry, or timeout
@@ -4738,6 +5087,99 @@ TEST(ComputeContracts, CloseOwnerFailureReachesJoinerAndFreshRetrySucceeds) {
   EXPECT_EQ(joiner.get(), expected);
   EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves a failed close retry never waits under the graph registry lock.
+ *
+ * @return Nothing; GoogleTest reports exception identity, registry starvation,
+ * runtime-identity drift, retry failure, or timeout divergence.
+ * @throws Standard fixture, filesystem, future, or synchronization exceptions.
+ * @note The old joiner is held after claim selection but before consuming the
+ * failed generation. A fresh retry must expose its retry-wait boundary only
+ * after releasing `graphs_mutex_`, so unrelated listing and publication remain
+ * available. After the old joiner consumes the exact failure, retry
+ * revalidates and closes the same target runtime.
+ */
+TEST(ComputeContracts, FailedCloseRetryLeavesGraphRegistryAvailable) {
+  const std::string target_name = "contract_close_retry_target";
+  const std::string peer_name = "contract_close_retry_peer";
+  const std::string late_name = "contract_close_retry_late";
+  const auto target_root =
+      clean_temp_path("photospider-contract-close-retry-target-root");
+  const auto peer_root =
+      clean_temp_path("photospider-contract-close-retry-peer-root");
+  const auto late_root =
+      clean_temp_path("photospider-contract-close-retry-late-root");
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(
+      kernel.load_graph(target_name, target_root.string(), "").has_value());
+  ASSERT_TRUE(kernel.load_graph(peer_name, peer_root.string(), "").has_value());
+
+  const std::exception_ptr expected = std::make_exception_ptr(
+      std::system_error(std::make_error_code(std::errc::io_error),
+                        "injected retry-lock close failure"));
+  KernelCloseProbe probe(expected, true, nullptr, false, true);
+  ScopedKernelCloseTestHook hook(probe);
+  auto capture_close = [&kernel, &target_name]() {
+    try {
+      (void)kernel.close_graph(target_name);
+    } catch (...) {
+      return std::current_exception();
+    }
+    return std::exception_ptr{};
+  };
+
+  auto owner = std::async(std::launch::async, capture_close);
+  const bool owner_entered = probe.wait_for_owner(std::chrono::seconds(2));
+  auto old_joiner = std::async(std::launch::async, capture_close);
+  const bool joiner_entered = probe.wait_for_joiner(std::chrono::seconds(2));
+  probe.release_owner();
+  const auto owner_status = owner.wait_for(std::chrono::seconds(2));
+  EXPECT_TRUE(owner_entered);
+  EXPECT_TRUE(joiner_entered);
+  ASSERT_EQ(owner_status, std::future_status::ready);
+  EXPECT_EQ(owner.get(), expected);
+
+  auto retry = std::async(std::launch::async, [&kernel, &target_name]() {
+    return kernel.close_graph(target_name);
+  });
+  const bool retry_waiting = probe.wait_for_retry(std::chrono::seconds(2));
+  auto listing = std::async(std::launch::async,
+                            [&kernel]() { return kernel.list_graphs(); });
+  auto publication = std::async(std::launch::async, [&] {
+    return kernel.load_graph(late_name, late_root.string(), "");
+  });
+  const auto listing_status = listing.wait_for(std::chrono::milliseconds(250));
+  const auto publication_status =
+      publication.wait_for(std::chrono::milliseconds(250));
+
+  probe.release_joiner();
+  EXPECT_TRUE(retry_waiting);
+  EXPECT_EQ(listing_status, std::future_status::ready);
+  EXPECT_EQ(publication_status, std::future_status::ready);
+  ASSERT_EQ(old_joiner.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(retry.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  ASSERT_EQ(listing.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(publication.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(old_joiner.get(), expected);
+  EXPECT_TRUE(retry.get());
+  const auto names = listing.get();
+  EXPECT_NE(std::find(names.begin(), names.end(), target_name), names.end());
+  EXPECT_NE(std::find(names.begin(), names.end(), peer_name), names.end());
+  const auto late_loaded = publication.get();
+  EXPECT_TRUE(late_loaded.has_value());
+  EXPECT_EQ(kernel.list_graphs(),
+            (std::vector<std::string>{late_name, peer_name}));
+
+  EXPECT_TRUE(kernel.close_graph(late_name));
+  EXPECT_TRUE(kernel.close_graph(peer_name));
+  std::filesystem::remove_all(target_root);
+  std::filesystem::remove_all(peer_root);
+  std::filesystem::remove_all(late_root);
 }
 
 /**

@@ -293,15 +293,30 @@ void publish_committed_transition(Publish&& publish) noexcept {
 
 /** @copydoc GraphCloseCoordinator::begin */
 GraphCloseCoordinator::Claim GraphCloseCoordinator::begin() {
-  std::unique_lock<std::mutex> lock(mutex_);
-  cv_.wait(lock, [this]() { return state_ != State::Failed; });
+  while (true) {
+    const Selection selection = try_begin();
+    if (selection.status == SelectionStatus::Selected) {
+      return selection.claim;
+    }
+    wait_until_retry_ready(selection.retry);
+  }
+}
+
+/** @copydoc GraphCloseCoordinator::try_begin */
+GraphCloseCoordinator::Selection GraphCloseCoordinator::try_begin() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (state_ == State::Failed) {
+    return Selection{SelectionStatus::RetryPending, Claim{},
+                     RetryWaitToken{generation_}};
+  }
   if (state_ == State::Idle) {
     if (generation_ == std::numeric_limits<std::uint64_t>::max()) {
       throw std::overflow_error("Graph close generation exhausted.");
     }
     ++generation_;
     state_ = State::InProgress;
-    return Claim{Role::Owner, generation_};
+    return Selection{SelectionStatus::Selected, Claim{Role::Owner, generation_},
+                     RetryWaitToken{}};
   }
   if (state_ == State::InProgress) {
     if (pending_joiners_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -309,7 +324,25 @@ GraphCloseCoordinator::Claim GraphCloseCoordinator::begin() {
     }
     ++pending_joiners_;
   }
-  return Claim{Role::Joiner, generation_};
+  return Selection{SelectionStatus::Selected, Claim{Role::Joiner, generation_},
+                   RetryWaitToken{}};
+}
+
+/** @copydoc GraphCloseCoordinator::wait_until_retry_ready */
+void GraphCloseCoordinator::wait_until_retry_ready(
+    const RetryWaitToken& retry) {
+  if (retry.generation == 0U) {
+    throw std::logic_error(
+        "Graph close retry wait requires one nonzero generation.");
+  }
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (retry.generation > generation_) {
+    throw std::logic_error(
+        "Graph close retry wait cannot target a future generation.");
+  }
+  cv_.wait(lock, [this, retry]() {
+    return generation_ != retry.generation || state_ != State::Failed;
+  });
 }
 
 /** @copydoc GraphCloseCoordinator::complete_success */

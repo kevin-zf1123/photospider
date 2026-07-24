@@ -713,6 +713,7 @@ bool Kernel::compute_request(const ComputeRequest& request) {
   if (!runtime) {
     return false;
   }
+  const GraphInstanceId graph_instance_id = runtime->model().instance_id();
 
   try {
     PreparedProductCompute product = prepare_product_compute(*runtime, request);
@@ -737,21 +738,23 @@ bool Kernel::compute_request(const ComputeRequest& request) {
         });
     settled.get();
 
-    clear_last_error(request.name);
+    clear_last_error(graph_instance_id);
     return true;
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& ge) {
-    store_last_error(request.name, LastError{ge.code(), ge.what()});
+    store_last_error(graph_instance_id, LastError{ge.code(), ge.what()});
     return false;
   } catch (const std::exception& e) {
-    store_last_error(request.name, LastError{GraphErrc::Unknown,
-                                             make_sync_exception_message(
-                                                 request.node_id, e.what())});
+    store_last_error(
+        graph_instance_id,
+        LastError{GraphErrc::Unknown,
+                  make_sync_exception_message(request.node_id, e.what())});
     return false;
   } catch (...) {
-    store_last_error(request.name, LastError{GraphErrc::Unknown,
-                                             std::string("unknown error")});
+    store_last_error(
+        graph_instance_id,
+        LastError{GraphErrc::Unknown, std::string("unknown error")});
     return false;
   }
 }
@@ -789,6 +792,7 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
   if (!runtime) {
     return std::nullopt;
   }
+  const GraphInstanceId graph_instance_id = runtime->model().instance_id();
 
   try {
     PreparedProductCompute product = prepare_product_compute(*runtime, request);
@@ -816,24 +820,26 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     NodeOutput output = settled.get();
 
     if (output.image_buffer.width == 0) {
-      clear_last_error(request.name);
+      clear_last_error(graph_instance_id);
       return std::nullopt;
     }
-    clear_last_error(request.name);
+    clear_last_error(graph_instance_id);
     return image_processing::clone_cpu_image_buffer(output.image_buffer);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& ge) {
-    store_last_error(request.name, LastError{ge.code(), ge.what()});
+    store_last_error(graph_instance_id, LastError{ge.code(), ge.what()});
     return std::nullopt;
   } catch (const std::exception& e) {
-    store_last_error(request.name, LastError{GraphErrc::Unknown,
-                                             make_sync_exception_message(
-                                                 request.node_id, e.what())});
+    store_last_error(
+        graph_instance_id,
+        LastError{GraphErrc::Unknown,
+                  make_sync_exception_message(request.node_id, e.what())});
     return std::nullopt;
   } catch (...) {
-    store_last_error(request.name, LastError{GraphErrc::Unknown,
-                                             std::string("unknown error")});
+    store_last_error(
+        graph_instance_id,
+        LastError{GraphErrc::Unknown, std::string("unknown error")});
     return std::nullopt;
   }
 }
@@ -877,26 +883,27 @@ Kernel::compute_async_request(ComputeRequest request) {
   if (!runtime) {
     return std::nullopt;
   }
+  const GraphInstanceId graph_instance_id = runtime->model().instance_id();
 
   PreparedProductCompute product =
       prepare_product_compute(*runtime, std::move(request));
   auto completion = std::make_shared<CandidateCompletion<AsyncComputeResult>>();
   std::future<AsyncComputeResult> settled = completion->take_future();
   ComputeRequest candidate_request = std::move(product.request);
-  const std::string graph_name = candidate_request.name;
   runtime->publish_compute_request(
       std::move(product.prepared), std::move(product.cancellation),
-      [this, runtime, request = std::move(candidate_request), completion] {
+      [this, runtime, graph_instance_id, request = std::move(candidate_request),
+       completion] {
         try {
           execute_staged_compute_request(*runtime, request);
-          clear_last_error(request.name);
+          clear_last_error(graph_instance_id);
           completion->set_value(AsyncComputeResult{true, std::nullopt});
         } catch (const std::bad_alloc&) {
           completion->set_exception(std::current_exception());
         } catch (const GraphError& ge) {
           try {
             LastError error{ge.code(), ge.what()};
-            store_last_error(request.name, error);
+            store_last_error(graph_instance_id, error);
             completion->set_value(AsyncComputeResult{false, std::move(error)});
           } catch (...) {
             completion->set_exception(std::current_exception());
@@ -906,7 +913,7 @@ Kernel::compute_async_request(ComputeRequest request) {
             LastError error{GraphErrc::Unknown, make_async_exception_message(
                                                     request.intent.has_value(),
                                                     request.node_id, e.what())};
-            store_last_error(request.name, error);
+            store_last_error(graph_instance_id, error);
             completion->set_value(AsyncComputeResult{false, std::move(error)});
           } catch (...) {
             completion->set_exception(std::current_exception());
@@ -914,20 +921,20 @@ Kernel::compute_async_request(ComputeRequest request) {
         } catch (...) {
           try {
             LastError error{GraphErrc::Unknown, std::string("unknown error")};
-            store_last_error(request.name, error);
+            store_last_error(graph_instance_id, error);
             completion->set_value(AsyncComputeResult{false, std::move(error)});
           } catch (...) {
             completion->set_exception(std::current_exception());
           }
         }
       },
-      [this, graph_name, completion] {
+      [this, graph_instance_id, completion] {
         try {
           LastError error{
               GraphErrc::ComputeError,
               std::string(
                   "Compute request was superseded by a newer generation.")};
-          store_last_error(graph_name, error);
+          store_last_error(graph_instance_id, error);
           completion->set_value(AsyncComputeResult{false, std::move(error)});
         } catch (...) {
           completion->set_exception(std::current_exception());

@@ -1034,12 +1034,23 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
                              ComputeRunCancellationReason reason);
 
   /**
+   * @brief Rejects process shutdown from a same-service execution callback.
+   * @return Nothing for a caller that may start or join shutdown.
+   * @throws std::logic_error from a same-service worker or policy callback.
+   * @note This preflight performs no lifecycle, admission, resource, route,
+   * worker, binding, or telemetry mutation. Kernel uses it before closing its
+   * separate Graph publication gate.
+   */
+  void validate_shutdown_caller() const;
+
+  /**
    * @brief Starts the monotonic process shutdown admission transition.
    * @return Stable nonzero shutdown generation.
    * @throws std::logic_error from a same-service worker/policy callback before
    * any mutation.
    * @throws RunLifecycleRegistry transition errors unchanged.
-   * @note Kernel retains Graph lanes and finishes Graph close after this call.
+   * @note The caller check completes before registry mutation. Kernel retains
+   * Graph lanes and finishes Graph close after this call.
    */
   std::uint64_t begin_shutdown();
 

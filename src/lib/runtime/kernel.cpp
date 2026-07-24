@@ -189,27 +189,29 @@ Kernel::~Kernel() noexcept {
 /**
  * @copydoc Kernel::clear_last_error
  */
-void Kernel::clear_last_error(const std::string& name) {
+void Kernel::clear_last_error(GraphInstanceId graph_instance_id) {
   std::lock_guard<std::mutex> lock(last_error_mutex_);
-  last_error_.erase(name);
+  last_errors_by_instance_.erase(graph_instance_id.value());
 }
 
 /**
  * @copydoc Kernel::store_last_error
  */
-void Kernel::store_last_error(const std::string& name, LastError error) {
+void Kernel::store_last_error(GraphInstanceId graph_instance_id,
+                              LastError error) {
   std::lock_guard<std::mutex> lock(last_error_mutex_);
-  last_error_.insert_or_assign(name, std::move(error));
+  last_errors_by_instance_.insert_or_assign(graph_instance_id.value(),
+                                            std::move(error));
 }
 
 /**
  * @copydoc Kernel::copy_last_error
  */
 std::optional<Kernel::LastError> Kernel::copy_last_error(
-    const std::string& name) const {
+    GraphInstanceId graph_instance_id) const {
   std::lock_guard<std::mutex> lock(last_error_mutex_);
-  auto it = last_error_.find(name);
-  if (it == last_error_.end()) {
+  auto it = last_errors_by_instance_.find(graph_instance_id.value());
+  if (it == last_errors_by_instance_.end()) {
     return std::nullopt;
   }
   return it->second;
@@ -401,16 +403,39 @@ bool Kernel::close_graph_with_reason(
     const std::string& name, compute::ComputeRunCancellationReason reason) {
   std::shared_ptr<GraphRuntime> runtime;
   std::shared_ptr<compute::GraphCloseCoordinator> close;
+  std::optional<GraphInstanceId> graph_instance_id;
   compute::GraphCloseCoordinator::Claim claim;
-  {
-    std::lock_guard<std::mutex> lock(graphs_mutex_);
-    const auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
-      return false;
+  while (true) {
+    compute::GraphCloseCoordinator::Selection selection;
+    {
+      std::lock_guard<std::mutex> lock(graphs_mutex_);
+      const auto it = graphs_.find(name);
+      if (!runtime) {
+        if (it == graphs_.end()) {
+          return false;
+        }
+        runtime = it->second;
+        graph_instance_id.emplace(runtime->model().instance_id());
+        close = runtime->lifetime_anchor()->close_coordinator();
+      } else if (it == graphs_.end() || it->second != runtime ||
+                 it->second->model().instance_id() != *graph_instance_id) {
+        if (!close->completed()) {
+          std::terminate();
+        }
+        return true;
+      }
+      selection = close->try_begin();
     }
-    runtime = it->second;
-    close = runtime->lifetime_anchor()->close_coordinator();
-    claim = close->begin();
+    if (selection.status ==
+        compute::GraphCloseCoordinator::SelectionStatus::Selected) {
+      claim = selection.claim;
+      break;
+    }
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+    testing::notify_kernel_close_test_hook(
+        testing::KernelCloseTestEvent::RetryPendingBeforeWait);
+#endif
+    close->wait_until_retry_ready(selection.retry);
   }
 
   if (claim.role == compute::GraphCloseCoordinator::Role::Joiner) {
@@ -428,16 +453,15 @@ bool Kernel::close_graph_with_reason(
     testing::notify_kernel_close_test_hook(
         testing::KernelCloseTestEvent::OwnerSelectedBeforeLifecycle);
 #endif
-    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
-    (void)execution_service_->begin_graph_close_lifecycle(graph_instance_id,
+    (void)execution_service_->begin_graph_close_lifecycle(*graph_instance_id,
                                                           reason);
     lifecycle_linearized = true;
     runtime->stop_compute_request_admission();
-    execution_service_->finish_graph_close_lifecycle(graph_instance_id);
+    execution_service_->finish_graph_close_lifecycle(*graph_instance_id);
     runtime->close_compute_requests();
     runtime->graph_state().close_and_drain();
     runtime->stop();
-    clear_last_error(name);
+    clear_last_error(*graph_instance_id);
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
     testing::notify_kernel_close_test_hook(
         testing::KernelCloseTestEvent::OwnerReadyToEraseAndPublish);
@@ -463,10 +487,15 @@ bool Kernel::close_graph_with_reason(
 
 /** @copydoc Kernel::shutdown */
 void Kernel::shutdown() {
+  execution_service_->validate_shutdown_caller();
   {
     std::lock_guard<std::mutex> lock(graphs_mutex_);
-    (void)execution_service_->begin_shutdown();
     shutdown_started_ = true;
+  }
+  try {
+    (void)execution_service_->begin_shutdown();
+  } catch (...) {
+    std::terminate();
   }
   while (true) {
     std::optional<std::string> name;

@@ -3513,25 +3513,25 @@ void ExecutionService::close_graph_lifecycle(
   lifecycle_registry_->close_graph(graph_instance_id, reason);
 }
 
-/** @copydoc ExecutionService::begin_shutdown */
-std::uint64_t ExecutionService::begin_shutdown() {
+/** @copydoc ExecutionService::validate_shutdown_caller */
+void ExecutionService::validate_shutdown_caller() const {
   if (tls_service_ == this ||
       policy::PolicyRegistry::callback_active_on_current_thread(this)) {
     throw std::logic_error(
         "ExecutionService shutdown cannot run from its worker or policy "
         "callback.");
   }
+}
+
+/** @copydoc ExecutionService::begin_shutdown */
+std::uint64_t ExecutionService::begin_shutdown() {
+  validate_shutdown_caller();
   return lifecycle_registry_->begin_service_shutdown();
 }
 
 /** @copydoc ExecutionService::shutdown */
 void ExecutionService::shutdown() {
-  if (tls_service_ == this ||
-      policy::PolicyRegistry::callback_active_on_current_thread(this)) {
-    throw std::logic_error(
-        "ExecutionService shutdown cannot run from its worker or policy "
-        "callback.");
-  }
+  validate_shutdown_caller();
   (void)begin_shutdown();
 
   {

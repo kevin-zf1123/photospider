@@ -363,6 +363,52 @@ TEST(GraphCloseCoordinator, StartsFreshGenerationAfterOldFailureIsConsumed) {
 }
 
 /**
+ * @brief Proves failed-generation selection returns a nonwaiting retry token.
+ *
+ * @return Nothing; GoogleTest reports blocking selection, premature retry
+ * readiness, or generation reuse.
+ * @throws Standard future or synchronization exceptions from the fixture.
+ * @note The explicit wait runs on a separate thread to model callers releasing
+ * an unrelated graph-registry lock between try_begin() and the retry barrier.
+ */
+TEST(GraphCloseCoordinator, FailedGenerationSelectionWaitsOnlyAfterTryBegin) {
+  GraphCloseCoordinator coordinator;
+  const GraphCloseCoordinator::Claim owner = coordinator.begin();
+  const GraphCloseCoordinator::Claim old_joiner = coordinator.begin();
+  const std::exception_ptr expected =
+      std::make_exception_ptr(std::runtime_error("retry barrier failure"));
+  coordinator.complete_failure(owner, expected);
+
+  const GraphCloseCoordinator::Selection selection = coordinator.try_begin();
+  ASSERT_EQ(selection.status,
+            GraphCloseCoordinator::SelectionStatus::RetryPending);
+  EXPECT_EQ(selection.claim.generation, 0U);
+  EXPECT_EQ(selection.retry.generation, owner.generation);
+
+  auto retry_ready =
+      std::async(std::launch::async, [&coordinator, retry = selection.retry]() {
+        coordinator.wait_until_retry_ready(retry);
+      });
+  EXPECT_EQ(retry_ready.wait_for(std::chrono::milliseconds(25)),
+            std::future_status::timeout);
+  try {
+    coordinator.wait_for_completion(old_joiner);
+    FAIL() << "failed generation joiner unexpectedly returned success";
+  } catch (...) {
+    EXPECT_EQ(std::current_exception(), expected);
+  }
+  EXPECT_EQ(retry_ready.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  retry_ready.get();
+
+  const GraphCloseCoordinator::Selection retry = coordinator.try_begin();
+  ASSERT_EQ(retry.status, GraphCloseCoordinator::SelectionStatus::Selected);
+  EXPECT_EQ(retry.claim.role, GraphCloseCoordinator::Role::Owner);
+  EXPECT_GT(retry.claim.generation, owner.generation);
+  coordinator.complete_success(retry.claim);
+}
+
+/**
  * @brief Proves failure publication itself performs no dynamic allocation.
  *
  * @return Nothing; GoogleTest reports an intercepted allocation.

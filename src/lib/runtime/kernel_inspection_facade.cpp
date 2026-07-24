@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/run_lifecycle_registry.hpp"
 #include "graph/in_memory_graph_document_adapter.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/kernel.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
@@ -54,7 +55,11 @@ std::optional<GraphInspectionSnapshot> Kernel::inspect_graph(
 /** @copydoc Kernel::last_error */
 std::optional<Kernel::LastError> Kernel::last_error(
     const std::string& name) const {
-  return copy_last_error(name);
+  const auto runtime = acquire_runtime(name);
+  if (!runtime) {
+    return std::nullopt;
+  }
+  return copy_last_error(runtime->lifetime_anchor()->graph_instance_id());
 }
 
 std::optional<std::vector<int>> Kernel::ending_nodes(const std::string& name) {

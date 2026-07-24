@@ -69,6 +69,45 @@ class GraphCloseCoordinator final {
   };
 
   /**
+   * @brief Distinguishes an immediately selected claim from a failed
+   * generation whose old joiners must finish consuming their result.
+   * @throws Nothing for value construction and comparison.
+   */
+  enum class SelectionStatus {
+    /** @brief `Selection::claim` is ready for owner or joiner progression. */
+    Selected,
+    /** @brief `Selection::retry` must be awaited outside caller-owned locks. */
+    RetryPending,
+  };
+
+  /**
+   * @brief Immutable identity for one failed generation's retry barrier.
+   *
+   * @throws Nothing for value construction and comparison.
+   * @note Generation zero is never returned by try_begin().
+   */
+  struct RetryWaitToken final {
+    /** @brief Failed nonzero generation that was observed without waiting. */
+    std::uint64_t generation = 0U;
+  };
+
+  /**
+   * @brief Allocation-free result of one nonwaiting close selection attempt.
+   *
+   * @throws Nothing for value construction and comparison.
+   * @note Exactly one of `claim` or `retry` carries a nonzero generation,
+   * according to `status`.
+   */
+  struct Selection final {
+    /** @brief Whether claim progression or retry waiting is required. */
+    SelectionStatus status = SelectionStatus::RetryPending;
+    /** @brief Exact Owner/Joiner claim when status is Selected. */
+    Claim claim;
+    /** @brief Exact failed-generation barrier when status is RetryPending. */
+    RetryWaitToken retry;
+  };
+
+  /**
    * @brief Preallocates an idle generation record.
    * @throws Nothing.
    * @note No generation identity exists until the first begin().
@@ -99,6 +138,30 @@ class GraphCloseCoordinator final {
    * generation ABA before retry.
    */
   Claim begin();
+
+  /**
+   * @brief Attempts close selection without waiting for an old failed
+   * generation.
+   * @return Selected Owner/Joiner claim, or an exact RetryPending token.
+   * @throws std::overflow_error before generation or joiner-count reuse.
+   * @throws std::system_error when record locking fails.
+   * @note This operation never waits. Callers holding an unrelated registry
+   * lock must use this method, release that lock, and then call
+   * wait_until_retry_ready() when RetryPending is returned.
+   */
+  Selection try_begin();
+
+  /**
+   * @brief Waits until one observed failed generation no longer blocks retry.
+   * @param retry Exact nonzero token returned by try_begin().
+   * @return Nothing once retry selection may be attempted again.
+   * @throws std::logic_error for a zero or impossible future generation.
+   * @throws std::system_error when record locking or waiting fails.
+   * @note Another caller may select the next generation before this wait
+   * returns. The caller must therefore revalidate its external object identity
+   * and call try_begin() again instead of assuming Owner status.
+   */
+  void wait_until_retry_ready(const RetryWaitToken& retry);
 
   /**
    * @brief Publishes successful completion for every selected joiner.

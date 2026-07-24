@@ -348,11 +348,15 @@ class Kernel {
    * @throws std::logic_error when invoked from a same-service worker/policy
    * callback before mutation.
    * @throws std::system_error from lifecycle/lane synchronization.
-   * @note Repeated control-thread calls are harmless. Once process shutdown
-   *       admission succeeds, the registry rejects every late graph
-   *       publication and drains all runtimes that won publication earlier.
-   *       This is the composition root path; no Host or IPC process-shutdown
-   *       method is exposed.
+   * @note Repeated control-thread calls are harmless. Caller validation occurs
+   *       before a short graph-registry transaction monotonically closes the
+   *       publication gate. Service lifecycle transition and cancellation
+   *       fanout then execute without `graphs_mutex_`; any unexpected failure
+   *       after the gate closes terminates because publication cannot safely
+   *       reopen. The lifecycle fence orders already-started publication
+   *       against ServiceStopping, while every later publication loses the
+   *       closed gate. This is the composition root path; no Host or IPC
+   *       process-shutdown method is exposed.
    */
   void shutdown();
 
@@ -611,9 +615,12 @@ class Kernel {
    * @param name Graph/session name whose diagnostic is observed.
    * @return Owned LastError snapshot, or nullopt when none is recorded.
    * @throws std::bad_alloc if copying the diagnostic text fails.
-   * @throws std::system_error if the diagnostic mutex cannot be locked.
-   * @note All map access is serialized by last_error_mutex_. Async compute
-   * futures never derive their result from this mutable snapshot.
+   * @throws std::system_error if graph-registry or diagnostic locking fails.
+   * @note Name lookup first captures the currently published runtime's exact
+   * GraphInstanceId, then releases `graphs_mutex_` before copying its
+   * diagnostic. A retained old runtime can neither overwrite nor clear the
+   * diagnostic of a same-name replacement. Async compute futures never derive
+   * their result from this mutable snapshot.
    */
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
@@ -1279,27 +1286,29 @@ class Kernel {
     if (!runtime) {
       return std::nullopt;
     }
+    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     try {
       if (start_runtime && !runtime->running()) {
         runtime->start();
       }
       auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
-      clear_last_error(name);
+      clear_last_error(graph_instance_id);
       return result;
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const GraphError& ge) {
-      store_last_error(name, LastError{ge.code(), ge.what()});
+      store_last_error(graph_instance_id, LastError{ge.code(), ge.what()});
       return std::nullopt;
     } catch (const std::exception& e) {
-      store_last_error(name,
+      store_last_error(graph_instance_id,
                        LastError{GraphErrc::Unknown,
                                  std::string(exception_prefix) + e.what()});
       return std::nullopt;
     } catch (...) {
-      store_last_error(name, LastError{GraphErrc::Unknown,
-                                       std::string(exception_prefix) +
-                                           "unknown non-standard exception"});
+      store_last_error(
+          graph_instance_id,
+          LastError{GraphErrc::Unknown, std::string(exception_prefix) +
+                                            "unknown non-standard exception"});
       return std::nullopt;
     }
   }
@@ -1337,20 +1346,22 @@ class Kernel {
     if (!runtime) {
       throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
     }
+    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     try {
       if (start_runtime && !runtime->running()) {
         runtime->start();
       }
       auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
-      clear_last_error(name);
+      clear_last_error(graph_instance_id);
       return result;
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const GraphError& error) {
-      store_last_error(name, LastError{error.code(), error.what()});
+      store_last_error(graph_instance_id,
+                       LastError{error.code(), error.what()});
       throw;
     } catch (const std::exception& error) {
-      store_last_error(name,
+      store_last_error(graph_instance_id,
                        LastError{GraphErrc::Unknown,
                                  std::string(exception_prefix) + error.what()});
       throw;
@@ -1360,38 +1371,44 @@ class Kernel {
   /**
    * @brief Removes one graph's best-effort diagnostic snapshot.
    *
-   * @param name Graph/session name whose diagnostic is cleared.
+   * @param graph_instance_id Exact runtime identity whose diagnostic is
+   * cleared.
    * @return Nothing.
    * @throws std::system_error if locking the diagnostic mutex fails.
-   * @note Every access to `last_error_`, including accesses from independent
-   *       graph-state executors, uses the same mutex through these helpers.
+   * @note Every access to `last_errors_by_instance_`, including accesses from
+   *       retained old graph-state executors, uses the same mutex through these
+   *       helpers. No graph-registry lock is acquired here.
    */
-  void clear_last_error(const std::string& name);
+  void clear_last_error(GraphInstanceId graph_instance_id);
 
   /**
    * @brief Publishes one owned best-effort diagnostic snapshot.
    *
-   * @param name Graph/session name whose diagnostic is replaced.
+   * @param graph_instance_id Exact runtime identity whose diagnostic is
+   * replaced.
    * @param error Fully constructed diagnostic moved into the shared map.
    * @return Nothing.
-   * @throws std::bad_alloc if the graph key or map node cannot be allocated.
+   * @throws std::bad_alloc if the map node cannot be allocated.
    * @throws std::system_error if locking the diagnostic mutex fails.
    * @note Async callers retain a separate owned result; this mirror exists only
-   *       for the legacy `last_error()` observation surface.
+   *       for the legacy `last_error()` observation surface. Identity keying
+   *       prevents a late old-runtime result from affecting a same-name
+   *       replacement without requiring graph/diagnostic nested locking.
    */
-  void store_last_error(const std::string& name, LastError error);
+  void store_last_error(GraphInstanceId graph_instance_id, LastError error);
 
   /**
    * @brief Copies one graph's best-effort diagnostic snapshot.
    *
-   * @param name Graph/session name to inspect.
+   * @param graph_instance_id Exact runtime identity to inspect.
    * @return Copied diagnostic, or nullopt when no failure is recorded.
    * @throws std::bad_alloc if copying the diagnostic text fails.
    * @throws std::system_error if locking the diagnostic mutex fails.
    * @note The copy is completed while holding `last_error_mutex_`; no map
    *       iterator or borrowed string escapes the protected region.
    */
-  std::optional<LastError> copy_last_error(const std::string& name) const;
+  std::optional<LastError> copy_last_error(
+      GraphInstanceId graph_instance_id) const;
 
   /**
    * @brief Runs internal synchronous compute from an adapter request object.
@@ -1475,14 +1492,16 @@ class Kernel {
    * @return True when a runtime existed and completed close; false if absent.
    * @throws std::logic_error or std::system_error before authoritative close
    * linearization; an invariant failure afterward terminates.
-   * @note Map lookup and close-claim selection are one registry-locked
-   * transaction. Pre-linearization failure is published to exact-generation
-   * joiners before rethrow and permits a later fresh-generation retry after all
-   * old joiners observe it. Registry row removal precedes compute-request lane
-   * drain, then graph-state drain and route/model retirement. Final graph-map
-   * removal and successful close publication are one registry-locked
-   * transaction, so no caller observes an absent name before the generation is
-   * complete.
+   * @note Map lookup and nonwaiting close-claim selection are one
+   * registry-locked transaction. A retry blocked by an old failed generation
+   * waits without `graphs_mutex_`, then revalidates the exact shared runtime
+   * and GraphInstanceId before selecting again. Pre-linearization failure is
+   * published to exact-generation joiners before rethrow and permits a later
+   * fresh-generation retry after all old joiners observe it. Registry row
+   * removal precedes compute-request lane drain, then graph-state drain and
+   * route/model retirement. Final graph-map removal and successful close
+   * publication are one registry-locked transaction, so no caller observes an
+   * absent name before the generation is complete.
    */
   bool close_graph_with_reason(const std::string& name,
                                compute::ComputeRunCancellationReason reason);
@@ -1518,10 +1537,11 @@ class Kernel {
    * @brief Serializes graph-name lookup, publication, removal, and shutdown
    * admission.
    *
-   * @note The lock is never held while filesystem IO, lane work, Run
-   * settlement, runtime drainage, or route/model destruction executes. The
-   * only nested synchronization is graph-registry then close-coordinator or
-   * lifecycle-registry publication; no inverse nested acquisition is allowed.
+   * @note The lock is never held while filesystem IO, close-generation retry
+   * waiting, lifecycle cancellation fanout, lane work, Run settlement, runtime
+   * drainage, or route/model destruction executes. Nested close-coordinator
+   * access is restricted to nonwaiting selection/result checks and final
+   * success publication; no inverse nested acquisition is allowed.
    */
   mutable std::mutex graphs_mutex_;
 
@@ -1539,14 +1559,16 @@ class Kernel {
   /**
    * @brief Monotonic rejection flag for late graph publication.
    *
-   * @note Access is protected by `graphs_mutex_`. It changes only after
-   * `ExecutionService::begin_shutdown()` succeeds, preserving the
-   * same-service-worker fail-before-mutation contract.
+   * @note Access is protected by `graphs_mutex_`. The ExecutionService caller
+   * check completes before this flag changes. Once true it is never reopened;
+   * the service transition and cancellation fanout execute after releasing the
+   * graph registry lock.
    */
   bool shutdown_started_ = false;
 
   /**
-   * @brief Serializes all reads, writes, and erases of `last_error_`.
+   * @brief Serializes all reads, writes, and erases of
+   * `last_errors_by_instance_`.
    *
    * @note The mutex is independent of per-graph GraphStateExecutor instances
    *       because asynchronous computes for different sessions may publish
@@ -1556,14 +1578,15 @@ class Kernel {
   mutable std::mutex last_error_mutex_;
 
   /**
-   * @brief Best-effort per-session diagnostic mirror for legacy inspection.
+   * @brief Best-effort per-runtime diagnostic mirror for legacy inspection.
    *
    * @note Access is permitted only through clear_last_error(),
    *       store_last_error(), and copy_last_error() while
-   *       `last_error_mutex_` is held. Async operation results never derive
-   *       their final status from this map.
+   *       `last_error_mutex_` is held. Keys are exact nonzero GraphInstanceId
+   *       scalar values rather than reusable session labels. Async operation
+   *       results never derive their final status from this map.
    */
-  std::map<std::string, LastError> last_error_;
+  std::map<std::uint64_t, LastError> last_errors_by_instance_;
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
   /**
