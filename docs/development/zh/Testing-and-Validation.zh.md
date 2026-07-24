@@ -574,9 +574,17 @@ physical counter selector，以及最终 `ServiceStopped` zero-counter event。
 - `test_compute_run`、`test_compute_service_split` 与 `test_kernel_contracts` 覆盖 full、dirty、
   preflight、no-op、realtime child、admission race、visible commit、精确 finalization 与无关 Graph
   行为。`test_kernel_contracts` 还固定精确 close owner/joiner generation、抛异常 observer 的 claim
-  消费，以及最终 name removal/success publication 的原子边界。
-- `test_kernel_lifecycle_concurrency` 链接真实 production archive，在编译期拒绝 close observer
-  macro，并重复并发 same-name publication、listing、direct close 与 shutdown admission。
+  消费，以及最终 name removal/success publication 的原子边界。其 same-name reload
+  回归会在 graph-state completion 后暂停真实 calling-thread diagnostic store，不运行
+  compensating clear，证明 replacement slot 不变，再释放旧 runtime 的最后一个 owner。
+  另一个回归单独隔离迟到 old-runtime clear。一个真实 worker operation 会调用
+  `Kernel::shutdown()`，证明精确 recoverable preflight 让 telemetry 保持 `Accepting`、
+  generation 为零且 Graph publication 保持 open。watchdog death 回归则证明 publication
+  gate 关闭后的注入 failure 会终止进程。
+- `test_kernel_lifecycle_concurrency` 链接真实 production archive，在编译期拒绝 Kernel
+  lifecycle observer macro，并重复并发 same-name publication、listing、direct close 与
+  shutdown admission。静态 archive inspection 同时要求 close 与 shutdown product anchor，
+  并拒绝全部 observer hook symbol。
 - `test_resource_ledger` 与 `test_policy_execution` 覆盖 root/child 精确释放、
   ready/callback/policy/binding counter、route drainage、同一 service 的 worker/policy-callback
   shutdown rejection、跨 service shutdown、重复 shutdown 与最终 counter/event 顺序。

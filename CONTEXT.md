@@ -70,13 +70,18 @@ runtime roots: lookup and nonwaiting close-generation selection are atomic, a
 failed-generation retry waits outside the registry lock and revalidates the
 exact runtime identity, long lifecycle/lane work runs outside the registry
 lock, and final name removal plus success publication are one transaction.
-Shutdown first validates the caller, closes only the runtime-publication gate
-under that lock, then performs the service transition and cancellation fanout
-without it; a racing load is therefore either published and drained or never
-registered while listing remains available. Kernel diagnostic mirrors are
-keyed by exact `GraphInstanceId`, so a retained old runtime cannot overwrite or
-clear a same-name replacement's `LastError`. Worker settlement retires its
-local queue, callable, lease, and grant owners before publishing quiescence;
+Shutdown first validates the caller without mutation; rejection leaves the
+runtime-publication gate open and the service `Accepting` at generation zero.
+It then closes only that gate under the graph-registry lock and performs the
+service transition and cancellation fanout without the lock, so a racing load
+is either published and drained or never registered while listing remains
+available. Gate closure is the irreversible fail-stop boundary. Each exact
+`GraphRuntime` owns its mutex-protected optional `LastError` slot; there is no
+process-global Kernel diagnostic table. Delayed translation retained from an
+old runtime can mutate only that old slot, which disappears with the final
+shared runtime owner, and cannot affect a same-name replacement. Worker
+settlement retires its local queue, callable, lease, and grant owners before
+publishing quiescence;
 persistent finalization authority and irreversible close/shutdown cancellation
 fail stop rather than silently lose cleanup obligations. The general `Value`
 model, heterogeneous executors, server control plane, and isolated plugin

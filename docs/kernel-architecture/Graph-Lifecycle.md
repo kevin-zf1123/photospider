@@ -233,13 +233,14 @@ construct library geometry only locally at an actual matrix operation; that
 representation does not enter the graph-state work item or its retained state.
 
 Existing-session propagation exceptions continue to update Kernel's
-best-effort `LastError` mirror, but the current Host result comes directly from
-the same required operation. It is never reconstructed by reading shared
-diagnostic state after the operation. The mirror is keyed by the exact
-`GraphInstanceId`, not the reusable session label. Public name lookup first
-retains the current runtime identity and then copies only that identity's
-diagnostic, so delayed result translation from a retained old runtime can
-neither overwrite nor clear a same-name replacement's state.
+best-effort `LastError` observation, but the current Host result comes directly
+from the same required operation. It is never reconstructed by reading shared
+diagnostic state after the operation. Each exact `GraphRuntime` exclusively
+owns one mutex-protected optional diagnostic slot; Kernel has no process-global
+identity-to-error table. Public name lookup first retains the current runtime
+and then copies only that runtime's slot. Delayed store or clear translation
+retained from an old runtime can mutate only the old slot, which is destroyed
+with the final shared runtime owner, and cannot affect a same-name replacement.
 
 ## Injected Persistence Lifetime
 
@@ -362,14 +363,17 @@ remaining rows to `Closing`, drains every installed Run, then stops ready and
 route admission, joins physical executors, retires policy invocations and
 current/displaced bindings, and publishes `ServiceStopped` only with all
 lifecycle/resource counters zero. Kernel first rejects a same-service worker or
-policy-callback caller without mutation. A short graph-registry transaction
-then closes the monotonic late-publication gate and releases the mutex before
-the service transition and cancellation fanout. The lifecycle fence orders a
+policy-callback caller without mutation; that recoverable preflight leaves the
+publication gate open, telemetry `Accepting`, and shutdown generation zero. A
+short graph-registry transaction then closes the monotonic late-publication
+gate and releases the mutex before the service transition and cancellation
+fanout. The lifecycle fence orders a
 load that already passed construction against `ServiceStopping`: it either
 publishes first and is drained, or loses the closed gate and never registers a
 lifecycle row. Graph listing and unrelated name lookup remain available while
-fanout blocks. Because the publication gate cannot safely reopen, an unexpected
-transition failure after it closes is fail-stop. Direct internal Kernel owners
+fanout blocks. Gate closure is the irreversible boundary: because publication
+cannot safely reopen, any unexpected observer or service-transition failure
+after it closes is fail-stop. Direct internal Kernel owners
 have the same duty to stop concurrent callers before destruction. The joined
 boundaries are also the lifetime fence for each live or staged `GraphModel`
 diagnostic store; the store owns no thread or detached lifetime.
@@ -439,7 +443,9 @@ taxonomy.
   lifecycle transition/cancellation fanout run after releasing it. Its nested
   order is graph registry before nonwaiting close-coordinator access or
   lifecycle registration; no lifecycle/lane wait holds it and no inverse
-  nested acquisition is permitted.
+  nested acquisition is permitted. Repository-only focused tests may
+  recompile this seam with a lifecycle observer; the installed production
+  archive contains neither that observer state nor its branches.
 - Graph route bindings are copied, resource-neutral values; physical execution
   and policy contexts remain Host/process owned.
 

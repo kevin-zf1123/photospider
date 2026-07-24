@@ -286,7 +286,10 @@ cancellation. Shutdown keeps already admitted ready/execution/completion paths
 alive until every Run settles, then joins physical workers and retires policy
 bindings before publishing `ServiceStopped` with all 15 counters zero. A
 nonreturning callback can therefore keep shutdown honestly blocked; it is not
-made recoverable. General-data heterogeneous execution belongs to Issue #77;
+made recoverable. A same-service worker or policy caller is rejected by a
+mutation-free preflight; after Kernel closes its publication gate, unexpected
+transition failure is fail-stop because that gate cannot reopen. General-data
+heterogeneous execution belongs to Issue #77;
 process-isolated plugin supervision belongs to Issue #91.
 
 ## Implementation and Validation Entry Points

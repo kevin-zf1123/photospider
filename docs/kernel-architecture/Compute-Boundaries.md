@@ -524,8 +524,11 @@ surfaces expose no cancellation entry; IPC jobs continue to report
   admission and close every Graph row, requests `ProcessShutdown`
   cancellation, drains every admitted Run, then retires ready work, routes,
   policy invocations/bindings, and physical workers. Same-service worker or
-  policy-callback shutdown is rejected; repeated external shutdown joins the
-  one monotonic generation.
+  policy-callback shutdown is rejected before mutation, leaving the Kernel
+  publication gate open and the service `Accepting` at generation zero.
+  Closing that gate starts the irreversible region; later unexpected
+  transition failure is fail-stop. Repeated external shutdown joins the one
+  monotonic generation.
 
 ## Boundary Rationale
 

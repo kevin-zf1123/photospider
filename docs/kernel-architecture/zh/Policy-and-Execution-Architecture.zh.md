@@ -240,7 +240,9 @@ CLI 或 protocol v2。
 `RunLifecycleRegistry` 现在驱动 Graph-close 与 process-shutdown cancellation。Shutdown 会让已
 admission 的 ready/execution/completion path 保持可用，直至所有 Run settle；随后 join 物理 worker、
 retire policy binding，并在 15 个 counter 全部为零时发布 `ServiceStopped`。因此，永不返回的
-callback 会如实阻塞 shutdown，而不会被伪装成可恢复状态。通用数据异构执行属于 Issue #77；
+callback 会如实阻塞 shutdown，而不会被伪装成可恢复状态。同一 service 的 worker 或 policy
+caller 会被 mutation-free preflight 拒绝；Kernel 一旦关闭 publication gate，意外 transition
+failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执行属于 Issue #77；
 进程隔离的插件监管属于 Issue #91。
 
 ## 实现与验证入口

@@ -524,11 +524,12 @@ timestamp, execution time, device, and optional range checks.
 ## Error Handling
 
 Compute failures throw `GraphError` with `GraphErrc` categories where possible.
-Synchronous Kernel paths store a mutex-protected per-graph `LastError` for
-best-effort observation. An asynchronous work item instead returns its own
+Synchronous Kernel paths store `LastError` in the exact `GraphRuntime`'s
+mutex-protected optional slot for best-effort observation. No process-global
+Kernel error table exists. An asynchronous work item instead returns its own
 `AsyncComputeResult` containing the exact failure code/message and only mirrors
-that value into `LastError`; its Host future never reconstructs status from the
-mutable mirror. The embedded adapter maps these values to public
+that value into its retained runtime's slot; its Host future never reconstructs
+status from the mutable observation. The embedded adapter maps these values to public
 `OperationStatus`, `Result<T>`, or `ps::Host::last_error()` values. Frontends
 observe only the public Host surface and never inspect Kernel or
 `InteractionService` directly.

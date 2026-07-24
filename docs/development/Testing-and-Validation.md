@@ -729,10 +729,19 @@ The existing product-boundary targets carry integration ownership:
   admission-race, visible-commit, exact finalization, and unrelated-Graph
   behavior. `test_kernel_contracts` also fixes the exact close owner/joiner
   generation, throwing-observer claim consumption, and atomic final
-  name-removal/success-publication boundaries.
+  name-removal/success-publication boundaries. Its same-name reload regression
+  pauses a real calling-thread diagnostic store after graph-state completion,
+  runs no compensating clear, proves the replacement slot is unchanged, and
+  releases the final old-runtime owner. A separate regression isolates delayed
+  old-runtime clear. A real worker operation invokes `Kernel::shutdown()` and
+  proves the exact recoverable preflight leaves telemetry `Accepting`,
+  generation zero, and Graph publication open. A watchdog death regression
+  proves an injected failure after publication-gate closure terminates.
 - `test_kernel_lifecycle_concurrency` links the real production archive, with
-  the close observer macro rejected at compile time, and repeatedly races
-  same-name publication, listing, direct close, and shutdown admission.
+  the Kernel lifecycle observer macro rejected at compile time, and repeatedly
+  races same-name publication, listing, direct close, and shutdown admission.
+  Static archive inspection requires both close and shutdown product anchors
+  while rejecting every observer hook symbol.
 - `test_resource_ledger` and `test_policy_execution` cover exact root/child
   release, ready/callback/policy/binding counters, route drainage, same-service
   worker/policy-callback shutdown rejection, cross-service shutdown, repeated

@@ -408,7 +408,9 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 - Process execution shutdown 使用同一个 registry fence 停止全局 admission 并关闭每个 Graph
   row，请求 `ProcessShutdown` cancellation，排空全部 admitted Run，然后 retire ready work、
   route、policy invocation/binding 与物理 worker。同一 service 的 worker 或 policy callback
-  发起 shutdown 会被拒绝；外部重复 shutdown 会加入同一个单调 generation。
+  发起 shutdown 会在 mutation 前被拒绝，使 Kernel publication gate 保持 open、service 保持
+  `Accepting` 且 generation 为零。关闭 gate 即进入不可逆区域；之后的意外 transition failure
+  会 fail-stop。外部重复 shutdown 会加入同一个单调 generation。
 
 ## 边界原理
 

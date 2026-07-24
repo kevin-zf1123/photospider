@@ -559,11 +559,13 @@ drainage also run without that lock. The only nested order is graph registry
 before nonwaiting close-coordinator access or lifecycle registration; no
 inverse nested acquisition is allowed.
 
-Kernel's best-effort `LastError` mirror uses that same exact
-`GraphInstanceId`, not the reusable graph-name key. Public inspection resolves
-the current runtime first and copies only its identity's diagnostic, so
-calling-thread result translation retained from an old runtime can neither
-overwrite nor clear a same-name replacement.
+Kernel's best-effort `LastError` observation is stored in the exact
+`GraphRuntime`, not in a process-global identity-keyed map or under the
+reusable graph-name key. Public inspection retains the current runtime first
+and copies only its mutex-protected optional slot. Calling-thread result
+translation retained from an old runtime can mutate only that old slot; the
+slot is destroyed with the final shared runtime owner and cannot overwrite or
+clear a same-name replacement.
 
 1. under the lifecycle-registry fence changes the graph row to `Closing`, stops
    new/pending Run admission and ordinary external graph-state admission for
@@ -602,15 +604,17 @@ process-owned routes, and there is no post-marker reopen.
 Current process execution-domain shutdown (#76):
 
 Kernel first validates that shutdown is not called by a same-service worker or
-policy callback, with no mutation. It then holds the graph-registry lock only
-long enough to publish monotonic rejection of late GraphRuntime registration.
-The service transition and preallocated cancellation fanout run after releasing
-that lock. The lifecycle fence orders any already-constructed load against
+policy callback, with no mutation. Rejection leaves the Kernel publication
+gate open and lifecycle telemetry `Accepting` with shutdown generation zero.
+Kernel then holds the graph-registry lock only long enough to publish monotonic
+rejection of late GraphRuntime registration. The service transition and
+preallocated cancellation fanout run after releasing that lock. The lifecycle
+fence orders any already-constructed load against
 `ServiceStopping`: it either publishes first and is included in drainage, or
 loses the closed publication gate and never registers a lifecycle row. Graph
-listing remains available while cancellation fanout blocks. An unexpected
-transition failure after the gate closes is fail-stop because publication
-cannot safely reopen.
+listing remains available while cancellation fanout blocks. Gate closure is
+the irreversible boundary: an unexpected observer or transition failure after
+it closes is fail-stop because publication cannot safely reopen.
 
 1. under the same lifecycle-registry fence changes the service to `Stopping`, changes
    every graph row to `Closing`, and stops global admission of new Runs and
