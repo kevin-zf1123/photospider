@@ -709,22 +709,21 @@ bool Kernel::compute(const ComputeRequest& request) {
  *       to false and LastError.
  */
 bool Kernel::compute_request(const ComputeRequest& request) {
-  auto it = graphs_.find(request.name);
-  if (it == graphs_.end()) {
+  auto runtime = acquire_runtime(request.name);
+  if (!runtime) {
     return false;
   }
 
   try {
-    auto& runtime = *it->second;
-    PreparedProductCompute product = prepare_product_compute(runtime, request);
+    PreparedProductCompute product = prepare_product_compute(*runtime, request);
     auto completion = std::make_shared<CandidateCompletion<void>>();
     std::future<void> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
-    runtime.publish_compute_request(
+    runtime->publish_compute_request(
         std::move(product.prepared), std::move(product.cancellation),
-        [this, &runtime, request = std::move(candidate_request), completion] {
+        [this, runtime, request = std::move(candidate_request), completion] {
           try {
-            execute_staged_compute_request(runtime, request);
+            execute_staged_compute_request(*runtime, request);
             completion->set_value();
           } catch (...) {
             completion->set_exception(std::current_exception());
@@ -786,23 +785,23 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image(
  */
 std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     const ComputeRequest& request) {
-  auto it = graphs_.find(request.name);
-  if (it == graphs_.end()) {
+  auto runtime = acquire_runtime(request.name);
+  if (!runtime) {
     return std::nullopt;
   }
 
   try {
-    auto& runtime = *it->second;
-    PreparedProductCompute product = prepare_product_compute(runtime, request);
+    PreparedProductCompute product = prepare_product_compute(*runtime, request);
     auto completion = std::make_shared<CandidateCompletion<NodeOutput>>();
     std::future<NodeOutput> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
-    runtime.publish_compute_request(
+    runtime->publish_compute_request(
         std::move(product.prepared), std::move(product.cancellation),
-        [this, &runtime, request = std::move(candidate_request), completion] {
+        [this, runtime, request = std::move(candidate_request), completion] {
           try {
             NodeOutput committed_output;
-            execute_staged_compute_request(runtime, request, &committed_output);
+            execute_staged_compute_request(*runtime, request,
+                                           &committed_output);
             completion->set_value(std::move(committed_output));
           } catch (...) {
             completion->set_exception(std::current_exception());
@@ -874,23 +873,22 @@ std::optional<std::future<Kernel::AsyncComputeResult>> Kernel::compute_async(
  */
 std::optional<std::future<Kernel::AsyncComputeResult>>
 Kernel::compute_async_request(ComputeRequest request) {
-  auto it = graphs_.find(request.name);
-  if (it == graphs_.end()) {
+  auto runtime = acquire_runtime(request.name);
+  if (!runtime) {
     return std::nullopt;
   }
 
-  GraphRuntime* const runtime_ptr = it->second.get();
   PreparedProductCompute product =
-      prepare_product_compute(*runtime_ptr, std::move(request));
+      prepare_product_compute(*runtime, std::move(request));
   auto completion = std::make_shared<CandidateCompletion<AsyncComputeResult>>();
   std::future<AsyncComputeResult> settled = completion->take_future();
   ComputeRequest candidate_request = std::move(product.request);
   const std::string graph_name = candidate_request.name;
-  runtime_ptr->publish_compute_request(
+  runtime->publish_compute_request(
       std::move(product.prepared), std::move(product.cancellation),
-      [this, runtime_ptr, request = std::move(candidate_request), completion] {
+      [this, runtime, request = std::move(candidate_request), completion] {
         try {
-          execute_staged_compute_request(*runtime_ptr, request);
+          execute_staged_compute_request(*runtime, request);
           clear_last_error(request.name);
           completion->set_value(AsyncComputeResult{true, std::nullopt});
         } catch (const std::bad_alloc&) {

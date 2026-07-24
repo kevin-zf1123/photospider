@@ -92,6 +92,42 @@ void notify_kernel_close_test_hook(KernelCloseTestEvent event) {
 }
 
 }  // namespace testing
+
+namespace {
+
+/**
+ * @brief Runs the joiner observer without abandoning its selected claim.
+ *
+ * @param close Exact runtime close coordinator retained by the caller.
+ * @param claim Exact-generation Joiner claim already selected under the graph
+ * registry lock.
+ * @return Nothing after the observed generation succeeds.
+ * @throws Any test-observer exception unchanged after the generation result is
+ * consumed.
+ * @throws The exact owner failure when the observer returns normally.
+ * @note If the observer throws, this helper still waits for and consumes the
+ * owner result before rethrowing the observer exception. This prevents a
+ * test-only callback from leaving `pending_joiners_` nonzero and permanently
+ * blocking a fresh close generation.
+ */
+void observe_close_joiner_and_wait(
+    const std::shared_ptr<compute::GraphCloseCoordinator>& close,
+    const compute::GraphCloseCoordinator::Claim& claim) {
+  try {
+    testing::notify_kernel_close_test_hook(
+        testing::KernelCloseTestEvent::JoinerSelectedBeforeWait);
+  } catch (...) {
+    const std::exception_ptr observer_failure = std::current_exception();
+    try {
+      close->wait_for_completion(claim);
+    } catch (...) {
+    }
+    std::rethrow_exception(observer_failure);
+  }
+  close->wait_for_completion(claim);
+}
+
+}  // namespace
 #endif
 
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
@@ -179,12 +215,28 @@ std::optional<Kernel::LastError> Kernel::copy_last_error(
   return it->second;
 }
 
+/** @copydoc Kernel::acquire_runtime */
+std::shared_ptr<GraphRuntime> Kernel::acquire_runtime(const std::string& name) {
+  std::lock_guard<std::mutex> lock(graphs_mutex_);
+  const auto it = graphs_.find(name);
+  return it == graphs_.end() ? nullptr : it->second;
+}
+
+/** @copydoc Kernel::acquire_runtime */
+std::shared_ptr<const GraphRuntime> Kernel::acquire_runtime(
+    const std::string& name) const {
+  std::lock_guard<std::mutex> lock(graphs_mutex_);
+  const auto it = graphs_.find(name);
+  return it == graphs_.end() ? nullptr : it->second;
+}
+
+/** @copydoc Kernel::get_metal_device */
 id Kernel::get_metal_device(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
+  const auto runtime = acquire_runtime(name);
+  if (!runtime) {
     return nullptr;
   }
-  return it->second->get_metal_device();
+  return runtime->get_metal_device();
 }
 
 /** @copydoc Kernel::policy_available_types */
@@ -232,8 +284,11 @@ std::optional<std::string> Kernel::load_graph(
     const std::string& name, const std::string& root_dir,
     const std::string& yaml_path, const std::string& config_path,
     const std::string& cache_root_dir) {
-  if (graphs_.count(name)) {
-    return std::nullopt;
+  {
+    std::lock_guard<std::mutex> lock(graphs_mutex_);
+    if (shutdown_started_ || graphs_.count(name) != 0U) {
+      return std::nullopt;
+    }
   }
 
   if (!yaml_path.empty() &&
@@ -265,7 +320,7 @@ std::optional<std::string> Kernel::load_graph(
   info.cache_root = effective_cache_root;
   info.hp_execution_type = execution_config_.hp_type;
   info.rt_execution_type = execution_config_.rt_type;
-  auto runtime = std::make_unique<GraphRuntime>(info);
+  auto runtime = std::make_shared<GraphRuntime>(info);
   try {
     std::filesystem::create_directories(info.root);
     const auto yaml_target = info.root / "content.yaml";
@@ -313,18 +368,24 @@ std::optional<std::string> Kernel::load_graph(
   }
 
   std::optional<std::string> loaded_name(std::in_place, name);
-  std::map<std::string, std::unique_ptr<GraphRuntime>> staged_graph;
+  std::map<std::string, std::shared_ptr<GraphRuntime>> staged_graph;
   staged_graph.emplace(name, std::move(runtime));
   auto staged_node = staged_graph.extract(staged_graph.begin());
   const GraphInstanceId graph_instance_id =
       staged_node.mapped()->model().instance_id();
-  execution_service_->register_graph_lifecycle(
-      staged_node.mapped()->lifetime_anchor());
-  const auto inserted = graphs_.insert(std::move(staged_node));
-  if (!inserted.inserted) {
-    execution_service_->rollback_graph_lifecycle_registration(
-        graph_instance_id);
-    return std::nullopt;
+  {
+    std::lock_guard<std::mutex> lock(graphs_mutex_);
+    if (shutdown_started_ || graphs_.count(name) != 0U) {
+      return std::nullopt;
+    }
+    execution_service_->register_graph_lifecycle(
+        staged_node.mapped()->lifetime_anchor());
+    const auto inserted = graphs_.insert(std::move(staged_node));
+    if (!inserted.inserted) {
+      execution_service_->rollback_graph_lifecycle_registration(
+          graph_instance_id);
+      return std::nullopt;
+    }
   }
   return loaded_name;
 }
@@ -338,21 +399,26 @@ bool Kernel::close_graph(const std::string& name) {
 /** @copydoc Kernel::close_graph_with_reason */
 bool Kernel::close_graph_with_reason(
     const std::string& name, compute::ComputeRunCancellationReason reason) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return false;
+  std::shared_ptr<GraphRuntime> runtime;
+  std::shared_ptr<compute::GraphCloseCoordinator> close;
+  compute::GraphCloseCoordinator::Claim claim;
+  {
+    std::lock_guard<std::mutex> lock(graphs_mutex_);
+    const auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+      return false;
+    }
+    runtime = it->second;
+    close = runtime->lifetime_anchor()->close_coordinator();
+    claim = close->begin();
   }
 
-  GraphRuntime& runtime = *it->second;
-  const std::shared_ptr<compute::GraphCloseCoordinator> close =
-      runtime.lifetime_anchor()->close_coordinator();
-  const compute::GraphCloseCoordinator::Claim claim = close->begin();
   if (claim.role == compute::GraphCloseCoordinator::Role::Joiner) {
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
-    testing::notify_kernel_close_test_hook(
-        testing::KernelCloseTestEvent::JoinerSelectedBeforeWait);
-#endif
+    observe_close_joiner_and_wait(close, claim);
+#else
     close->wait_for_completion(claim);
+#endif
     return true;
   }
 
@@ -362,18 +428,29 @@ bool Kernel::close_graph_with_reason(
     testing::notify_kernel_close_test_hook(
         testing::KernelCloseTestEvent::OwnerSelectedBeforeLifecycle);
 #endif
-    const GraphInstanceId graph_instance_id = runtime.model().instance_id();
+    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
     (void)execution_service_->begin_graph_close_lifecycle(graph_instance_id,
                                                           reason);
     lifecycle_linearized = true;
-    runtime.stop_compute_request_admission();
+    runtime->stop_compute_request_admission();
     execution_service_->finish_graph_close_lifecycle(graph_instance_id);
-    runtime.close_compute_requests();
-    runtime.graph_state().close_and_drain();
-    runtime.stop();
-    graphs_.erase(it);
+    runtime->close_compute_requests();
+    runtime->graph_state().close_and_drain();
+    runtime->stop();
     clear_last_error(name);
-    close->complete_success(claim);
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+    testing::notify_kernel_close_test_hook(
+        testing::KernelCloseTestEvent::OwnerReadyToEraseAndPublish);
+#endif
+    {
+      std::lock_guard<std::mutex> lock(graphs_mutex_);
+      const auto it = graphs_.find(name);
+      if (it == graphs_.end() || it->second != runtime) {
+        std::terminate();
+      }
+      graphs_.erase(it);
+      close->complete_success(claim);
+    }
     return true;
   } catch (...) {
     if (lifecycle_linearized) {
@@ -386,16 +463,31 @@ bool Kernel::close_graph_with_reason(
 
 /** @copydoc Kernel::shutdown */
 void Kernel::shutdown() {
-  (void)execution_service_->begin_shutdown();
-  while (!graphs_.empty()) {
-    const std::string name = graphs_.begin()->first;
+  {
+    std::lock_guard<std::mutex> lock(graphs_mutex_);
+    (void)execution_service_->begin_shutdown();
+    shutdown_started_ = true;
+  }
+  while (true) {
+    std::optional<std::string> name;
+    {
+      std::lock_guard<std::mutex> lock(graphs_mutex_);
+      if (!graphs_.empty()) {
+        name.emplace(graphs_.begin()->first);
+      }
+    }
+    if (!name) {
+      break;
+    }
     (void)close_graph_with_reason(
-        name, compute::ComputeRunCancellationReason::ProcessShutdown);
+        *name, compute::ComputeRunCancellationReason::ProcessShutdown);
   }
   execution_service_->shutdown();
 }
 
+/** @copydoc Kernel::list_graphs */
 std::vector<std::string> Kernel::list_graphs() const {
+  std::lock_guard<std::mutex> lock(graphs_mutex_);
   std::vector<std::string> names;
   names.reserve(graphs_.size());
   for (const auto& [graph_name, _] : graphs_) {

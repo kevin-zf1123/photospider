@@ -1,6 +1,7 @@
 #pragma once
 
 #include <future>
+#include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -81,22 +82,61 @@ class KernelTestAccess {
   }
 
   /**
+   * @brief Acquires a mutable runtime owner for a close-racing test.
+   *
+   * @param kernel Kernel whose private graph registry is inspected.
+   * @param name Graph name to resolve.
+   * @return Shared runtime owner retaining the exact published instance.
+   * @throws std::runtime_error when the graph is not loaded.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note Tests that overlap runtime access with close must retain this owner
+   *       for their full access interval. It preserves object lifetime but
+   *       does not bypass stopped lane admission.
+   */
+  static std::shared_ptr<GraphRuntime> runtime_owner(Kernel& kernel,
+                                                     const std::string& name) {
+    auto runtime = kernel.acquire_runtime(name);
+    if (!runtime) {
+      throw std::runtime_error("Graph not found: " + name);
+    }
+    return runtime;
+  }
+
+  /**
+   * @brief Acquires a const runtime owner for a close-racing test.
+   *
+   * @param kernel Kernel whose private graph registry is inspected.
+   * @param name Graph name to resolve.
+   * @return Shared const runtime owner retaining the exact published instance.
+   * @throws std::runtime_error when the graph is not loaded.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note Prefer copied Host values unless the assertion needs an internal
+   *       runtime collaborator.
+   */
+  static std::shared_ptr<const GraphRuntime> runtime_owner(
+      const Kernel& kernel, const std::string& name) {
+    auto runtime = kernel.acquire_runtime(name);
+    if (!runtime) {
+      throw std::runtime_error("Graph not found: " + name);
+    }
+    return runtime;
+  }
+
+  /**
    * @brief Resolves a mutable runtime owned by a Kernel test fixture.
    *
    * @param kernel Kernel whose private graph map should be inspected.
    * @param name Graph name to resolve.
    * @return Mutable runtime for the named graph.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note This is a test-only internal boundary. Prefer copied public
-   * `ps::Host` inspection values when a test validates frontend-visible
-   * behavior and does not need runtime-only collaborators.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note This borrowed-reference convenience requires the caller to exclude
+   * concurrent close. Use runtime_owner() when close can overlap. Prefer copied
+   * public `ps::Host` inspection values when a test validates
+   * frontend-visible behavior and does not need runtime-only collaborators.
    */
   static GraphRuntime& runtime(Kernel& kernel, const std::string& name) {
-    auto it = kernel.graphs_.find(name);
-    if (it == kernel.graphs_.end()) {
-      throw std::runtime_error("Graph not found: " + name);
-    }
-    return *it->second;
+    return *runtime_owner(kernel, name);
   }
 
   /**
@@ -106,16 +146,14 @@ class KernelTestAccess {
    * @param name Graph name to resolve.
    * @return Const runtime for the named graph.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note This helper is intended for read-only assertions that cannot yet be
-   * expressed through a stable value inspection API.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note This borrowed-reference helper requires the caller to exclude
+   * concurrent close. It is intended for read-only assertions that cannot yet
+   * be expressed through a stable value inspection API.
    */
   static const GraphRuntime& runtime(const Kernel& kernel,
                                      const std::string& name) {
-    auto it = kernel.graphs_.find(name);
-    if (it == kernel.graphs_.end()) {
-      throw std::runtime_error("Graph not found: " + name);
-    }
-    return *it->second;
+    return *runtime_owner(kernel, name);
   }
 
   /**
@@ -125,8 +163,10 @@ class KernelTestAccess {
    * @param name Graph name to resolve.
    * @return Mutable GraphModel owned by the named runtime.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note Callers are responsible for avoiding concurrent mutation unless they
-   * use submit_graph_state(), which serializes through GraphStateExecutor.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note Callers are responsible for excluding concurrent close and mutation
+   * unless they use submit_graph_state(), which serializes through
+   * GraphStateExecutor and retains accepted work through close drainage.
    */
   static GraphModel& model(Kernel& kernel, const std::string& name) {
     return runtime(kernel, name).model();
@@ -141,6 +181,8 @@ class KernelTestAccess {
    * @param fn Callable forwarded to GraphStateExecutor::submit().
    * @return Future for the callable result.
    * @throws std::runtime_error when the graph is not loaded.
+   * @throws std::system_error if graph-registry or graph-state synchronization
+   * fails.
    * @note This replaces the removed Kernel::post() test escape hatch for tests
    * that must assert graph-state serialization behavior directly. It is not a
    * production or public Host operation.
@@ -149,7 +191,8 @@ class KernelTestAccess {
   static auto submit_graph_state(Kernel& kernel, const std::string& name,
                                  Fn&& fn)
       -> std::future<std::invoke_result_t<Fn, GraphModel&>> {
-    return runtime(kernel, name).graph_state().submit(std::forward<Fn>(fn));
+    auto runtime = runtime_owner(kernel, name);
+    return runtime->graph_state().submit(std::forward<Fn>(fn));
   }
 
   /**
@@ -163,6 +206,8 @@ class KernelTestAccess {
    * @throws std::runtime_error when the graph is not loaded.
    * @throws std::bad_alloc if task, precision, or future-state allocation
    * fails.
+   * @throws std::system_error if graph-registry or graph-state synchronization
+   * fails.
    * @note The submitted closure intentionally borrows `kernel.cache_service_`
    * through the real graph-state lane. It is a private lifetime-regression
    * seam, not a production cache API or an alternate ownership wrapper.
@@ -171,10 +216,10 @@ class KernelTestAccess {
                                              const std::string& name,
                                              int node_id,
                                              std::string precision) {
-    return runtime(kernel, name)
-        .graph_state()
-        .submit([&kernel, node_id,
-                 precision = std::move(precision)](GraphModel& graph) {
+    auto runtime = runtime_owner(kernel, name);
+    return runtime->graph_state().submit(
+        [&kernel, node_id,
+         precision = std::move(precision)](GraphModel& graph) {
           kernel.cache_service_.save_cache_if_configured(
               graph, graph.node(node_id), precision);
         });
@@ -186,11 +231,12 @@ class KernelTestAccess {
    * @param kernel Kernel whose runtime trace should be reset.
    * @param name Graph name to resolve.
    * @throws std::runtime_error when the graph is not loaded.
+   * @throws std::system_error if graph-registry or trace synchronization fails.
    * @note Production callers can read copied execution trace values through
    * public `ps::Host`; clearing trace remains a test-only setup operation.
    */
   static void clear_execution_trace(Kernel& kernel, const std::string& name) {
-    runtime(kernel, name).clear_execution_trace();
+    runtime_owner(kernel, name)->clear_execution_trace();
   }
 
   /**
@@ -204,13 +250,15 @@ class KernelTestAccess {
    * @throws std::runtime_error when the graph is not loaded.
    * @throws std::invalid_argument for invalid bounds or a future cursor.
    * @throws std::bad_alloc if bounded page allocation fails.
+   * @throws std::system_error if graph-registry or trace synchronization fails.
    * @note Prefer `ps::Host::execution_trace()` for frontend-visible value-level
    * assertions. This helper exposes no unbounded production getter.
    */
   static GraphRuntime::ExecutionEventPage execution_trace(
       Kernel& kernel, const std::string& name, uint64_t after_sequence = 0,
       std::size_t limit = kExecutionTraceMaxLimit) {
-    return runtime(kernel, name).execution_trace_page(after_sequence, limit);
+    return runtime_owner(kernel, name)
+        ->execution_trace_page(after_sequence, limit);
   }
 };
 

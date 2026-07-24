@@ -686,16 +686,16 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These four translation units own the Issue #72 and Issue #75 deterministic
-# observation seams. The installable archive always receives their production
-# objects;
-# focused tests receive a non-installed variant while reusing every common
-# object. Keeping the split at translation-unit granularity avoids compiling a
-# second copy of the complete embedded product.
+# These five translation units own the Issue #72, Issue #75, and Issue #76
+# deterministic observation seams. The installable archive always receives
+# their production objects; focused tests receive a non-installed variant while
+# reusing every common object. Keeping the split at translation-unit
+# granularity avoids compiling a second copy of the complete embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
     src/lib/compute/execution_service.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
+    src/lib/runtime/kernel.cpp
     src/lib/runtime/kernel_compute.cpp)
 foreach(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
         IN LISTS PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES)
@@ -711,7 +711,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the four-source test object target.
+# the caller only to the five-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -774,7 +774,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
-        PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
         PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 endif()
@@ -782,6 +781,13 @@ endif()
 add_library(photospider_product_seam_objects OBJECT
     ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES})
 configure_photospider_product_objects(photospider_product_seam_objects)
+if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+    # The existing required-target observer spans Kernel facade translation
+    # units. Preserve its full-suite linkage while keeping the Issue #76 close
+    # observer absent from this production object variant.
+    target_compile_definitions(photospider_product_seam_objects PRIVATE
+        PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+endif()
 
 add_library(photospider STATIC
     $<TARGET_OBJECTS:photospider_product_common_objects>
@@ -792,6 +798,7 @@ set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
     PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+    PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
     PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     add_library(photospider_internal_test_product_seam_objects OBJECT
@@ -801,6 +808,11 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     target_compile_definitions(
         photospider_internal_test_product_seam_objects PRIVATE
         ${PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS})
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+        target_compile_definitions(
+            photospider_internal_test_product_seam_objects PRIVATE
+            PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+    endif()
 
     add_library(photospider_internal_test_product STATIC
         $<TARGET_OBJECTS:photospider_product_common_objects>
@@ -809,8 +821,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         photospider_internal_test_product)
 endif()
 
-# Fail configuration if a future refactor accidentally restores an Issue #72
-# or Issue #75 test definition on any production product target.
+# Fail configuration if a future refactor accidentally restores an Issue #72,
+# Issue #75, or Issue #76 test definition on any production product target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -1343,10 +1355,10 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     target_compile_definitions(test_kernel_contracts PRIVATE
         PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+        PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
         PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(test_kernel_contracts PRIVATE
-            PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
             PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     endif()
 
@@ -1357,6 +1369,14 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         PROPERTIES
             LABELS kernel-concurrency
             TIMEOUT 20)
+
+    add_ps_test(test_kernel_lifecycle_concurrency
+        tests/integration/test_kernel_lifecycle_concurrency.cpp)
+    gtest_discover_tests(test_kernel_lifecycle_concurrency
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS kernel-concurrency
+            TIMEOUT 60)
 
     add_ps_test(test_optional_opencv_operation_provider
         tests/integration/test_optional_opencv_operation_provider.cpp)

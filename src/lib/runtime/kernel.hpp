@@ -63,12 +63,15 @@ class KernelTestAccess;
  * @brief Internal multi-graph coordinator for lifecycle, graph-state commands,
  * compute, execution-route access, policy access, and plugin management.
  *
- * Kernel owns one GraphRuntime per graph name and keeps its internal adapter
- * contract stable while delegating graph IO, traversal, inspection, cache, ROI,
- * dirty control, and compute work to narrower services. The embedded Host
- * adapter maps public Host values to these internal operations; frontend code
- * neither includes nor constructs Kernel types. Visible Graph capture,
- * mutation, commit predicates, and publication run through each runtime's
+ * Kernel owns one shared GraphRuntime lifetime root per graph name and keeps
+ * its internal adapter contract stable while delegating graph IO, traversal,
+ * inspection, cache, ROI, dirty control, and compute work to narrower
+ * services. A short registry mutex serializes name publication, lookup, close
+ * claim selection, and final removal; admitted operations retain a shared
+ * runtime owner after leaving that critical section. The embedded Host adapter
+ * maps public Host values to these internal operations; frontend code neither
+ * includes nor constructs Kernel types. Visible Graph capture, mutation,
+ * commit predicates, and publication run through each runtime's
  * GraphStateExecutor. Operation execution uses request-owned snapshots outside
  * that lane, while a private compute-request lane serializes same-Graph compute
  * and route-binding access. The Host-lifetime ExecutionService receives ready
@@ -106,13 +109,14 @@ class Kernel {
   /**
    * @brief Drains every owned graph runtime before releasing Kernel services.
    * @throws Nothing.
-   * @note Destruction clears `graphs_` explicitly while cache, traversal,
+   * @note Destruction closes `graphs_` explicitly while cache, traversal,
    * diagnostic, IO, and ROI collaborators are still alive. Each
    * `GraphRuntime` first drains its compute-request lane, then drains
    * graph-state and joins both workers, so work items that captured this Kernel
-   * cannot observe destroyed collaborators. External callers must stop Kernel
-   * API admission before destruction; concurrent unadmitted public calls are
-   * unsupported.
+   * cannot observe destroyed collaborators. The registry lock protects map
+   * structure and runtime-owner acquisition, but external callers must still
+   * stop Kernel object admission before destruction because the `Kernel`
+   * object itself is not reference counted.
    */
   ~Kernel() noexcept;
 
@@ -280,8 +284,8 @@ class Kernel {
    *        session before load.
    * @param config_path Optional config file copied into the session.
    * @param cache_root_dir Optional external cache-root directory.
-   * @return Loaded graph name, or nullopt only when the name is already
-   *         published or loses the final map-insertion race.
+   * @return Loaded graph name, or nullopt when shutdown has started, the name
+   *         is already published, or this caller loses final publication.
    * @throws std::bad_alloc if path, runtime, route, graph, or diagnostic
    *         allocation exhausts memory.
    * @throws GraphError with `GraphErrc::Io` for explicit-source or session
@@ -300,7 +304,9 @@ class Kernel {
    *       transactionally. An empty yaml_path loads existing
    *       `<root_dir>/<name>/content.yaml` or intentionally publishes an empty
    *       graph; a nonempty source is explicit and never falls back. Complete
-   *       document validation precedes map insertion. The return label is
+   *       document validation precedes map insertion. Final shutdown/name
+   *       validation, lifecycle registration, and map insertion are one short
+   *       registry-locked publication transaction. The return label is
    *       allocated before the runtime enters the owned graph map, and
    *       returning it after insertion uses only noexcept moves.
    */
@@ -319,17 +325,19 @@ class Kernel {
    * @throws Run lifecycle or lane synchronization errors before authoritative
    *         close linearization; no exception is thrown when the graph name is
    *         unknown.
-   * @note The first caller owns the preallocated close generation; concurrent
-   *       callers join its exact result. A failure before lifecycle
-   *       linearization is rethrown identically to every selected joiner; only
-   *       after those joiners consume it may a later caller own a fresh
-   *       generation. Close changes the exact registry row to Closing and
-   *       requests GraphClose, stops external compute-request admission,
-   *       settles and unregisters every indexed Run/candidate, removes the
-   *       empty row, drains and joins compute-request while graph-state remains
-   *       available for commit denial/discard, then drains graph-state and
-   *       removes runtime/routes. After lifecycle linearization the Graph is
-   *       never reopened.
+   * @note Registry lookup and close-generation selection are atomic under the
+   *       graph registry lock. The first caller owns the preallocated close
+   *       generation; concurrent callers join its exact result. A failure
+   *       before lifecycle linearization is rethrown identically to every
+   *       selected joiner; only after those joiners consume it may a later
+   *       caller own a fresh generation. Close changes the exact lifecycle row
+   *       to Closing and requests GraphClose, stops external compute-request
+   *       admission, settles and unregisters every indexed Run/candidate,
+   *       removes the empty row, drains and joins compute-request while
+   *       graph-state remains available for commit denial/discard, then drains
+   *       graph-state and removes runtime/routes. Final map removal and success
+   *       publication are atomic to later name lookups. After lifecycle
+   *       linearization the Graph is never reopened.
    */
   bool close_graph(const std::string& name);
 
@@ -340,11 +348,24 @@ class Kernel {
    * @throws std::logic_error when invoked from a same-service worker/policy
    * callback before mutation.
    * @throws std::system_error from lifecycle/lane synchronization.
-   * @note Repeated control-thread calls are harmless. This is the composition
-   * root path; no Host or IPC process-shutdown method is exposed.
+   * @note Repeated control-thread calls are harmless. Once process shutdown
+   *       admission succeeds, the registry rejects every late graph
+   *       publication and drains all runtimes that won publication earlier.
+   *       This is the composition root path; no Host or IPC process-shutdown
+   *       method is exposed.
    */
   void shutdown();
 
+  /**
+   * @brief Copies the currently published graph/session names.
+   * @return Lexically ordered owned name snapshot.
+   * @throws std::bad_alloc if snapshot storage or a copied name exhausts
+   * memory.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note The complete copy is made under `graphs_mutex_`; no map iterator,
+   * string reference, or runtime owner escapes. A closing name remains visible
+   * until final erase and close-generation success publish together.
+   */
   std::vector<std::string> list_graphs() const;
 
   /**
@@ -377,13 +398,14 @@ class Kernel {
    * @throws std::runtime_error if compute-request admission has stopped.
    * @throws std::system_error if request-lane or graph-state synchronization
    *         fails.
-   * @note The future owns the request copy, but benchmark_events remains
-   * caller-owned and must outlive future completion. Calling get() on the
-   * returned future may rethrow std::bad_alloc from compute execution or
-   * failure-diagnostic allocation inside the async work item. Recoverable
-   * failures are captured in AsyncComputeResult by that same work item. Runtime
-   * start and snapshot capture occur in a nested graph-state work item rather
-   * than during request-lane admission.
+   * @note The accepted callback retains a shared runtime owner independently
+   * of graph-map removal. The future owns the request copy, but
+   * benchmark_events remains caller-owned and must outlive future completion.
+   * Calling get() on the returned future may rethrow std::bad_alloc from
+   * compute execution or failure-diagnostic allocation inside the async work
+   * item. Recoverable failures are captured in AsyncComputeResult by that same
+   * work item. Runtime start and snapshot capture occur in a nested graph-state
+   * work item rather than during request-lane admission.
    */
   std::optional<std::future<AsyncComputeResult>> compute_async(
       ComputeRequest request);
@@ -835,7 +857,16 @@ class Kernel {
   PluginManager& plugins() { return PluginManager::process_instance(); }
   std::optional<double> get_last_io_time(const std::string& name);
 
-  // [新增] 暴露 Metal 设备访问器
+  /**
+   * @brief Copies the platform Metal device handle for one published runtime.
+   * @param name Graph/session name to resolve.
+   * @return Runtime device handle, or null when the name is absent.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note Kernel retains a shared runtime owner while copying the handle, so a
+   * concurrent close cannot destroy the runtime during lookup. The returned
+   * platform handle follows the existing platform ownership contract and does
+   * not grant Graph admission.
+   */
   id get_metal_device(const std::string& name);
 
   /**
@@ -1105,19 +1136,21 @@ class Kernel {
    * @return Optional operation result, or nullopt when the graph is missing or
    * the operation throws a recoverable failure.
    * @throws std::bad_alloc if the runtime operation exhausts memory.
+   * @throws std::system_error if graph-registry locking fails.
    * @note This helper is for historically quiet runtime accessors. APIs that
    * must update LastError keep their explicit GraphError/std::exception
-   * handling.
+   * handling. It retains a shared runtime owner and releases the registry lock
+   * before invoking op.
    */
   template <typename Fn>
   auto with_runtime(const std::string& name, Fn&& op)
       -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphRuntime&>>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      return std::forward<Fn>(op)(*it->second);
+      return std::forward<Fn>(op)(*runtime);
     } catch (const std::bad_alloc&) {
       throw;
     } catch (...) {
@@ -1133,16 +1166,18 @@ class Kernel {
    * @return Optional operation result, or nullopt when the graph is missing or
    * the operation throws a recoverable failure.
    * @throws std::bad_alloc if the const runtime operation exhausts memory.
-   * @note Used by const inspection APIs that need copied runtime values.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note Used by const inspection APIs that need copied runtime values. It
+   * retains a shared const runtime owner outside the registry lock.
    */
   template <typename Fn>
   auto with_runtime(GraphName name, Fn&& op) const -> ConstRuntimeResult<Fn> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      return std::forward<Fn>(op)(*it->second);
+      return std::forward<Fn>(op)(*runtime);
     } catch (const std::bad_alloc&) {
       throw;
     } catch (...) {
@@ -1162,22 +1197,24 @@ class Kernel {
    *         exists, or any GraphError raised by the operation unchanged.
    * @throws std::bad_alloc if lookup diagnostics, submission, or operation
    *         execution exhausts memory.
+   * @throws std::system_error if graph-registry or graph-state synchronization
+   *         fails.
    * @throws std::exception for other submission, future, or operation
    *         failures.
-   * @note Callers that can race Kernel::close_graph() must retain an equivalent
-   *       runtime-lifetime admission across this helper. Embedded Host checked
-   *       operations use its lifecycle admission gate. Model validation and
-   *       mutation belong in the single submitted callable, avoiding a
-   *       check-then-act gap between graph-state work items.
+   * @note The helper retains a shared runtime owner outside the graph-registry
+   *       lock; Embedded Host checked operations additionally use its lifecycle
+   *       admission gate. Model validation and mutation belong in the single
+   *       submitted callable, avoiding a check-then-act gap between graph-state
+   *       work items.
    */
   template <typename Fn>
   auto with_required_graph_state(const std::string& name, Fn&& op)
       -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
     }
-    return it->second->graph_state().submit(std::forward<Fn>(op)).get();
+    return runtime->graph_state().submit(std::forward<Fn>(op)).get();
   }
 
   /**
@@ -1191,19 +1228,20 @@ class Kernel {
    * recoverable submit/get/op failure occurs.
    * @throws std::bad_alloc if submission, future consumption, or the operation
    *         exhausts memory.
+   * @throws std::system_error if graph-registry locking fails.
    * @note This helper preserves the facade contract for graph-state commands:
-   * they remain serialized by GraphStateExecutor and are not routed through
-   * physical execution workers.
+   * they retain a shared runtime owner, remain serialized by
+   * GraphStateExecutor, and are not routed through physical execution workers.
    */
   template <typename Fn>
   auto with_graph_state(const std::string& name, Fn&& op)
       -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      return it->second->graph_state().submit(std::forward<Fn>(op)).get();
+      return runtime->graph_state().submit(std::forward<Fn>(op)).get();
     } catch (const std::bad_alloc&) {
       throw;
     } catch (...) {
@@ -1223,27 +1261,29 @@ class Kernel {
    * the operation reports a handled failure.
    * @throws std::bad_alloc if runtime startup, submission, the operation, or
    *         handled-failure LastError construction exhausts memory.
+   * @throws std::system_error if graph-registry, graph-state, or LastError
+   *         synchronization fails.
    * @note Use this helper for facade APIs whose existing contract exposes
    * best-effort LastError details. Historically quiet accessors should keep
    * using with_graph_state so they continue to hide diagnostic state.
    * GraphError, standard exceptions, and non-standard exceptions otherwise
-   * become nullopt with exact or Unknown LastError state.
+   * become nullopt with exact or Unknown LastError state. The shared runtime
+   * owner remains retained through result/error translation.
    */
   template <typename Fn>
   auto with_graph_state_last_error(const std::string& name,
                                    const char* exception_prefix, Fn&& op,
                                    bool start_runtime = false)
       -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      if (start_runtime && !it->second->running()) {
-        it->second->start();
+      if (start_runtime && !runtime->running()) {
+        runtime->start();
       }
-      auto result =
-          it->second->graph_state().submit(std::forward<Fn>(op)).get();
+      auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
       clear_last_error(name);
       return result;
     } catch (const std::bad_alloc&) {
@@ -1280,27 +1320,28 @@ class Kernel {
    *         absent, or any GraphError raised inside the work item unchanged.
    * @throws std::bad_alloc if startup, submission, operation, or diagnostic
    *         recording exhausts memory.
+   * @throws std::system_error if graph-registry, graph-state, or LastError
+   *         synchronization fails.
    * @throws std::exception for other runtime, executor, or operation failures.
    * @note Missing sessions do not create LastError state. Existing-session
    *       success clears stale state; GraphError and ordinary exceptions are
-   *       recorded before rethrow. Callers that can race close must retain an
-   *       equivalent runtime-lifetime admission across this helper.
+   *       recorded before rethrow. The helper retains a shared runtime owner
+   *       through submission and exact error translation.
    */
   template <typename Fn>
   auto with_required_graph_state_last_error(const std::string& name,
                                             const char* exception_prefix,
                                             Fn&& op, bool start_runtime = false)
       -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
     }
     try {
-      if (start_runtime && !it->second->running()) {
-        it->second->start();
+      if (start_runtime && !runtime->running()) {
+        runtime->start();
       }
-      auto result =
-          it->second->graph_state().submit(std::forward<Fn>(op)).get();
+      auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
       clear_last_error(name);
       return result;
     } catch (const std::bad_alloc&) {
@@ -1377,9 +1418,11 @@ class Kernel {
    *         fails while submitting compute-request work.
    * @throws std::runtime_error if the compute-request lane stopped admission.
    * @throws std::system_error if request-lane synchronization fails.
-   * @note The returned future owns the request copy. benchmark_events remains
-   * caller-owned and must outlive future completion. Future get() may rethrow
-   * std::bad_alloc from compute execution or exact diagnostic construction.
+   * @note The accepted callback retains a shared runtime owner independently
+   * of graph-map removal, and the returned future owns the request copy.
+   * benchmark_events remains caller-owned and must outlive future completion.
+   * Future get() may rethrow std::bad_alloc from compute execution or exact
+   * diagnostic construction.
    */
   std::optional<std::future<AsyncComputeResult>> compute_async_request(
       ComputeRequest request);
@@ -1400,17 +1443,46 @@ class Kernel {
       const ComputeRequest& request);
 
   /**
+   * @brief Acquires one mutable runtime lifetime owner by graph name.
+   *
+   * @param name Graph/session name to resolve.
+   * @return Shared runtime owner, or empty when the name is not published.
+   * @throws std::system_error if registry locking fails.
+   * @note The map lookup and owner copy occur under `graphs_mutex_`; callers
+   *       perform all runtime work after the lock is released. The returned
+   *       owner prevents destruction when close concurrently removes the map
+   *       entry, but it does not reopen stopped lane admission.
+   */
+  std::shared_ptr<GraphRuntime> acquire_runtime(const std::string& name);
+
+  /**
+   * @brief Acquires one const runtime lifetime owner by graph name.
+   *
+   * @param name Graph/session name to resolve.
+   * @return Shared const runtime owner, or empty when the name is not
+   *         published.
+   * @throws std::system_error if registry locking fails.
+   * @note This overload uses the same short registry critical section as the
+   *       mutable form and exposes no mutable runtime access to const callers.
+   */
+  std::shared_ptr<const GraphRuntime> acquire_runtime(
+      const std::string& name) const;
+
+  /**
    * @brief Executes the monotonic close sequence with one exact reason.
    * @param name Graph session label used only for map lookup.
    * @param reason GraphClose for direct close or ProcessShutdown for root stop.
    * @return True when a runtime existed and completed close; false if absent.
    * @throws std::logic_error or std::system_error before authoritative close
    * linearization; an invariant failure afterward terminates.
-   * @note Pre-linearization failure is published to exact-generation joiners
-   * before rethrow and permits a later fresh-generation retry after all old
-   * joiners observe it. Registry row removal precedes compute-request lane
-   * drain, then graph-state drain, route/model destruction, and public
-   * completion.
+   * @note Map lookup and close-claim selection are one registry-locked
+   * transaction. Pre-linearization failure is published to exact-generation
+   * joiners before rethrow and permits a later fresh-generation retry after all
+   * old joiners observe it. Registry row removal precedes compute-request lane
+   * drain, then graph-state drain and route/model retirement. Final graph-map
+   * removal and successful close publication are one registry-locked
+   * transaction, so no caller observes an absent name before the generation is
+   * complete.
    */
   bool close_graph_with_reason(const std::string& name,
                                compute::ComputeRunCancellationReason reason);
@@ -1443,13 +1515,35 @@ class Kernel {
                                       NodeOutput* committed_output = nullptr);
 
   /**
-   * @brief Graph-name map owning every runtime and both admitted serial lanes.
-   * @note `Kernel::~Kernel()` clears this map explicitly before ordinary member
-   * destruction so runtime drainage completes while every borrowed Kernel
-   * collaborator remains alive. External lifecycle admission must already have
-   * stopped calls that could access this unsynchronized map.
+   * @brief Serializes graph-name lookup, publication, removal, and shutdown
+   * admission.
+   *
+   * @note The lock is never held while filesystem IO, lane work, Run
+   * settlement, runtime drainage, or route/model destruction executes. The
+   * only nested synchronization is graph-registry then close-coordinator or
+   * lifecycle-registry publication; no inverse nested acquisition is allowed.
    */
-  std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
+  mutable std::mutex graphs_mutex_;
+
+  /**
+   * @brief Graph-name map retaining every published runtime lifetime root.
+   *
+   * @note Every access is protected by `graphs_mutex_`. Operations copy one
+   * shared owner before leaving the critical section, so close may remove a
+   * name without destroying a runtime still used by an already admitted
+   * caller. `Kernel::~Kernel()` drains these runtimes before ordinary member
+   * teardown reaches borrowed collaborators.
+   */
+  std::map<std::string, std::shared_ptr<GraphRuntime>> graphs_;
+
+  /**
+   * @brief Monotonic rejection flag for late graph publication.
+   *
+   * @note Access is protected by `graphs_mutex_`. It changes only after
+   * `ExecutionService::begin_shutdown()` succeeds, preserving the
+   * same-service-worker fail-before-mutation contract.
+   */
+  bool shutdown_started_ = false;
 
   /**
    * @brief Serializes all reads, writes, and erases of `last_error_`.

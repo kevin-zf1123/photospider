@@ -19,6 +19,10 @@ enum class KernelCloseTestEvent {
   OwnerSelectedBeforeLifecycle,
   /** @brief Exact joiner was selected before waiting for the owner result. */
   JoinerSelectedBeforeWait,
+  /**
+   * @brief Owner drained the runtime immediately before atomic erase/success.
+   */
+  OwnerReadyToEraseAndPublish,
 };
 
 /**
@@ -26,7 +30,10 @@ enum class KernelCloseTestEvent {
  *
  * @throws Any exception selected by invoke().
  * @note The test must keep both this record and context alive until every
- * observed close caller has returned and the hook is cleared.
+ * observed close caller has returned and the hook is cleared. A joiner
+ * observer exception is rethrown only after its exact generation result is
+ * consumed. Throwing from OwnerReadyToEraseAndPublish occurs after lifecycle
+ * linearization and therefore exercises the production fail-stop boundary.
  */
 struct KernelCloseTestHook final {
   /** @brief Opaque borrowed test context. */
@@ -34,7 +41,7 @@ struct KernelCloseTestHook final {
   /**
    * @brief Optional observer that may block or throw at an observed boundary.
    * @param context Borrowed value from this record.
-   * @param event Exact owner/joiner boundary.
+   * @param event Exact owner/joiner/final-publication boundary.
    * @return Nothing.
    * @throws Any test-selected exception unchanged.
    */
@@ -53,9 +60,11 @@ void set_kernel_close_test_hook(const KernelCloseTestHook* hook) noexcept;
 
 /**
  * @brief Invokes the current test hook at one close boundary.
- * @param event Exact owner/joiner boundary.
+ * @param event Exact owner/joiner/final-publication boundary.
  * @return Nothing when no hook is installed or the observer returns.
  * @throws Any observer exception unchanged.
+ * @note Kernel consumes an already selected Joiner claim before propagating a
+ * JoinerSelectedBeforeWait observer exception.
  */
 void notify_kernel_close_test_hook(KernelCloseTestEvent event);
 

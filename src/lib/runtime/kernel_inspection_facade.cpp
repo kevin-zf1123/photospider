@@ -200,21 +200,21 @@ void Kernel::set_node_document(const std::string& name, int node_id,
 /** @copydoc Kernel::drain_compute_events */
 std::optional<ComputeEventBatch> Kernel::drain_compute_events(
     const std::string& name, std::size_t limit) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
+  auto runtime = acquire_runtime(name);
+  if (!runtime) {
     return std::nullopt;
   }
-  return it->second->drain_compute_events_now(limit);
+  return runtime->drain_compute_events_now(limit);
 }
 
 /** @copydoc Kernel::execution_trace */
 std::optional<GraphRuntime::ExecutionEventPage> Kernel::execution_trace(
     const std::string& name, uint64_t after_sequence, std::size_t limit) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
+  auto runtime = acquire_runtime(name);
+  if (!runtime) {
     return std::nullopt;
   }
-  return it->second->execution_trace_page(after_sequence, limit);
+  return runtime->execution_trace_page(after_sequence, limit);
 }
 
 std::optional<std::string> Kernel::dirty_region_snapshot_debug(
