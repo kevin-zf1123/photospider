@@ -235,7 +235,11 @@ representation does not enter the graph-state work item or its retained state.
 Existing-session propagation exceptions continue to update Kernel's
 best-effort `LastError` mirror, but the current Host result comes directly from
 the same required operation. It is never reconstructed by reading shared
-diagnostic state after the operation.
+diagnostic state after the operation. The mirror is keyed by the exact
+`GraphInstanceId`, not the reusable session label. Public name lookup first
+retains the current runtime identity and then copies only that identity's
+diagnostic, so delayed result translation from a retained old runtime can
+neither overwrite nor clear a same-name replacement's state.
 
 ## Injected Persistence Lifetime
 
@@ -291,12 +295,16 @@ admission check through atomic standalone/realtime-bundle installation or
 rollback, so close cannot miss planning that began before its marker.
 
 Direct Kernel close resolves the name, retains the exact shared runtime root,
-and selects owner or joiner while holding the graph-registry mutex. Lookup and
-generation selection are therefore one transaction: a caller cannot observe
-the old name and accidentally join a replacement runtime, and the owner keeps
-the retired runtime alive after map removal. Every later runtime operation
+and performs a nonwaiting owner/joiner selection while holding the
+graph-registry mutex. Lookup and selection are therefore one transaction: a
+caller cannot observe the old name and accidentally join a replacement
+runtime, and the owner keeps the retired runtime alive after map removal. If a
+failed generation still owes its result to an old joiner, selection returns an
+explicit retry token instead of waiting. The caller releases the graph-registry
+mutex, waits for that token, then revalidates both the retained shared runtime
+and `GraphInstanceId` before selecting again. Every later runtime operation
 uses the same short lookup-and-retain rule; no graph-registry lock is held
-while lifecycle settlement or either Graph-owned lane runs.
+while retry waiting, lifecycle settlement, or either Graph-owned lane runs.
 
 Embedded Host close first selects or joins that one close generation and marks
 the public session closing. New compute, execution, reload, required save,
@@ -353,14 +361,18 @@ shutdown exactly once. That shutdown changes the service to `Stopping` and all
 remaining rows to `Closing`, drains every installed Run, then stops ready and
 route admission, joins physical executors, retires policy invocations and
 current/displaced bindings, and publishes `ServiceStopped` only with all
-lifecycle/resource counters zero. Kernel holds the graph-registry mutex across
-the initial service-shutdown transition and its monotonic
-late-publication-rejection flag, so load either publishes before shutdown and
-is drained, or observes rejection and never registers a lifecycle row. Direct
-internal Kernel owners have the same duty to stop concurrent callers before
-destruction. The joined boundaries are also the lifetime fence for each live
-or staged `GraphModel` diagnostic store; the store owns no thread or detached
-lifetime.
+lifecycle/resource counters zero. Kernel first rejects a same-service worker or
+policy-callback caller without mutation. A short graph-registry transaction
+then closes the monotonic late-publication gate and releases the mutex before
+the service transition and cancellation fanout. The lifecycle fence orders a
+load that already passed construction against `ServiceStopping`: it either
+publishes first and is drained, or loses the closed gate and never registers a
+lifecycle row. Graph listing and unrelated name lookup remain available while
+fanout blocks. Because the publication gate cannot safely reopen, an unexpected
+transition failure after it closes is fail-stop. Direct internal Kernel owners
+have the same duty to stop concurrent callers before destruction. The joined
+boundaries are also the lifetime fence for each live or staged `GraphModel`
+diagnostic store; the store owns no thread or detached lifetime.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
@@ -422,10 +434,12 @@ taxonomy.
   same-Graph compute and execution-route access while long-running operation
   execution uses request-owned snapshots outside graph-state.
 - The graph registry lock serializes only runtime-root lookup/publication,
-  close-generation selection, final erase/success publication, and shutdown
-  publication rejection. Its nested order is graph registry before close
-  coordinator or lifecycle registration; no lifecycle/lane wait holds it and
-  no inverse nested acquisition is permitted.
+  nonwaiting close-generation selection, final erase/success publication, and
+  shutdown publication rejection. Failed-generation retry waiting and process
+  lifecycle transition/cancellation fanout run after releasing it. Its nested
+  order is graph registry before nonwaiting close-coordinator access or
+  lifecycle registration; no lifecycle/lane wait holds it and no inverse
+  nested acquisition is permitted.
 - Graph route bindings are copied, resource-neutral values; physical execution
   and policy contexts remain Host/process owned.
 

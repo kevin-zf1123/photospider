@@ -66,15 +66,21 @@ output-dependent dirty planning stays inside the installed Run. Before graph
 close linearizes, an owner failure is handed to every already joined caller by
 one non-reused close generation; a fresh retry cannot begin until those
 joiners consume it. Kernel's mutex-protected graph-name registry retains shared
-runtime roots: lookup and close-generation selection are atomic, long
-lifecycle/lane work runs outside the registry lock, and final name removal plus
-success publication are one transaction. Shutdown atomically rejects late
-runtime publication, so a racing load is either published and drained or never
-registered. Worker settlement retires its local queue, callable, lease, and
-grant owners before publishing quiescence; persistent finalization authority
-and irreversible close/shutdown cancellation fail stop rather than silently
-lose cleanup obligations. The general `Value` model, heterogeneous executors,
-server control plane, and isolated plugin workers remain later target work.
+runtime roots: lookup and nonwaiting close-generation selection are atomic, a
+failed-generation retry waits outside the registry lock and revalidates the
+exact runtime identity, long lifecycle/lane work runs outside the registry
+lock, and final name removal plus success publication are one transaction.
+Shutdown first validates the caller, closes only the runtime-publication gate
+under that lock, then performs the service transition and cancellation fanout
+without it; a racing load is therefore either published and drained or never
+registered while listing remains available. Kernel diagnostic mirrors are
+keyed by exact `GraphInstanceId`, so a retained old runtime cannot overwrite or
+clear a same-name replacement's `LastError`. Worker settlement retires its
+local queue, callable, lease, and grant owners before publishing quiescence;
+persistent finalization authority and irreversible close/shutdown cancellation
+fail stop rather than silently lose cleanup obligations. The general `Value`
+model, heterogeneous executors, server control plane, and isolated plugin
+workers remain later target work.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains
