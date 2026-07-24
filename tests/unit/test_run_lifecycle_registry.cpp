@@ -279,21 +279,110 @@ struct FinalizationWaitFault final {
 
 TEST(GraphCloseCoordinator, SelectsOneOwnerAndJoinsOneGeneration) {
   GraphCloseCoordinator coordinator;
-  EXPECT_EQ(coordinator.begin(), GraphCloseCoordinator::Role::Owner);
-  EXPECT_EQ(coordinator.begin(), GraphCloseCoordinator::Role::Joiner);
+  const GraphCloseCoordinator::Claim owner = coordinator.begin();
+  const GraphCloseCoordinator::Claim joiner = coordinator.begin();
+  EXPECT_EQ(owner.role, GraphCloseCoordinator::Role::Owner);
+  EXPECT_EQ(joiner.role, GraphCloseCoordinator::Role::Joiner);
+  EXPECT_EQ(owner.generation, joiner.generation);
   EXPECT_TRUE(coordinator.started());
   EXPECT_FALSE(coordinator.completed());
 
-  auto waiter = std::async(std::launch::async, [&coordinator]() {
-    coordinator.wait_for_success();
+  auto waiter = std::async(std::launch::async, [&coordinator, joiner]() {
+    coordinator.wait_for_completion(joiner);
     return true;
   });
   EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(25)),
             std::future_status::timeout);
-  coordinator.complete_success();
+  coordinator.complete_success(owner);
   EXPECT_TRUE(waiter.get());
   EXPECT_TRUE(coordinator.completed());
-  EXPECT_THROW(coordinator.complete_success(), std::logic_error);
+  EXPECT_THROW(coordinator.complete_success(owner), std::logic_error);
+}
+
+/**
+ * @brief Proves every old joiner receives the exact owner exception identity.
+ *
+ * @return Nothing; GoogleTest reports generation or exception divergence.
+ * @throws Standard future or synchronization exceptions from the fixture.
+ */
+TEST(GraphCloseCoordinator, PublishesExactFailureToEverySelectedJoiner) {
+  GraphCloseCoordinator coordinator;
+  const GraphCloseCoordinator::Claim owner = coordinator.begin();
+  const GraphCloseCoordinator::Claim first_joiner = coordinator.begin();
+  const GraphCloseCoordinator::Claim second_joiner = coordinator.begin();
+  const std::exception_ptr expected = std::make_exception_ptr(
+      std::system_error(std::make_error_code(std::errc::io_error),
+                        "injected close owner failure"));
+
+  auto wait_for_failure = [&coordinator](GraphCloseCoordinator::Claim claim) {
+    try {
+      coordinator.wait_for_completion(claim);
+    } catch (...) {
+      return std::current_exception();
+    }
+    return std::exception_ptr{};
+  };
+  auto first = std::async(std::launch::async, wait_for_failure, first_joiner);
+  auto second = std::async(std::launch::async, wait_for_failure, second_joiner);
+  coordinator.complete_failure(owner, expected);
+
+  EXPECT_EQ(first.get(), expected);
+  EXPECT_EQ(second.get(), expected);
+  EXPECT_FALSE(coordinator.completed());
+}
+
+/**
+ * @brief Proves retry cannot overtake unconsumed failed-generation joiners.
+ *
+ * @return Nothing; GoogleTest reports premature retry or generation reuse.
+ * @throws Standard future or synchronization exceptions from the fixture.
+ */
+TEST(GraphCloseCoordinator, StartsFreshGenerationAfterOldFailureIsConsumed) {
+  GraphCloseCoordinator coordinator;
+  const GraphCloseCoordinator::Claim owner = coordinator.begin();
+  const GraphCloseCoordinator::Claim old_joiner = coordinator.begin();
+  const std::exception_ptr expected =
+      std::make_exception_ptr(std::runtime_error("retryable close failure"));
+  coordinator.complete_failure(owner, expected);
+
+  auto retry = std::async(std::launch::async,
+                          [&coordinator]() { return coordinator.begin(); });
+  EXPECT_EQ(retry.wait_for(std::chrono::milliseconds(25)),
+            std::future_status::timeout);
+  try {
+    coordinator.wait_for_completion(old_joiner);
+    FAIL() << "failed generation joiner unexpectedly returned success";
+  } catch (...) {
+    EXPECT_EQ(std::current_exception(), expected);
+  }
+
+  const GraphCloseCoordinator::Claim retry_owner = retry.get();
+  EXPECT_EQ(retry_owner.role, GraphCloseCoordinator::Role::Owner);
+  EXPECT_GT(retry_owner.generation, owner.generation);
+  coordinator.complete_success(retry_owner);
+}
+
+/**
+ * @brief Proves failure publication itself performs no dynamic allocation.
+ *
+ * @return Nothing; GoogleTest reports an intercepted allocation.
+ * @throws Standard exception construction before the probe is armed.
+ */
+TEST(GraphCloseCoordinator, FailurePublicationIsAllocationFree) {
+  GraphCloseCoordinator coordinator;
+  const GraphCloseCoordinator::Claim owner = coordinator.begin();
+  const std::exception_ptr failure =
+      std::make_exception_ptr(std::runtime_error("preallocated failure"));
+
+  allocation_probe::arm(0);
+  coordinator.complete_failure(owner, failure);
+  allocation_probe::disarm();
+  EXPECT_FALSE(allocation_probe::did_fire());
+
+  const GraphCloseCoordinator::Claim retry_owner = coordinator.begin();
+  EXPECT_EQ(retry_owner.role, GraphCloseCoordinator::Role::Owner);
+  EXPECT_GT(retry_owner.generation, owner.generation);
+  coordinator.complete_success(retry_owner);
 }
 
 TEST(RunLifecycleRegistry, RollsBackCandidatesAndNeverReusesIdentity) {

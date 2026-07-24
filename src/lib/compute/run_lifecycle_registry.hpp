@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,11 +30,13 @@ struct RunLifecycleAdmissionCandidateControl;
 struct RunLifecycleAdmissionHandleControl;
 
 /**
- * @brief Preallocated one-generation Graph close completion coordinator.
+ * @brief Preallocated generation-safe Graph close completion coordinator.
  *
  * One complete GraphRuntime creates this record before registry publication.
- * The first close caller owns backend progression; concurrent callers join the
- * same monotonic success. No ordinary Run failure can reset the record.
+ * The first close caller owns backend progression; concurrent callers join
+ * that exact generation. Success is monotonic. Failure before lifecycle
+ * linearization is published to every already selected joiner, after which a
+ * later caller may own a fresh non-reused generation.
  *
  * @throws std::system_error when synchronization primitives fail.
  * @note This record owns no Graph row, Run, lane, route, resource, callback, or
@@ -53,40 +56,82 @@ class GraphCloseCoordinator final {
   };
 
   /**
+   * @brief Immutable claim for one exact close generation.
+   *
+   * @throws Nothing for value construction and comparison.
+   * @note Generation zero is never returned by begin().
+   */
+  struct Claim final {
+    /** @brief Backend owner or exact-generation joiner role. */
+    Role role = Role::Joiner;
+    /** @brief Nonzero monotonically increasing close generation. */
+    std::uint64_t generation = 0U;
+  };
+
+  /**
    * @brief Preallocates an idle generation record.
    * @throws Nothing.
+   * @note No generation identity exists until the first begin().
    */
   GraphCloseCoordinator() noexcept = default;
 
-  /** @brief Prevents duplicating one close owner/result. */
+  /**
+   * @brief Prevents duplicating one close owner/result.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
   GraphCloseCoordinator(const GraphCloseCoordinator&) = delete;
-  /** @brief Prevents assigning one close owner/result. */
+  /**
+   * @brief Prevents assigning one close owner/result.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
   GraphCloseCoordinator& operator=(const GraphCloseCoordinator&) = delete;
 
   /**
    * @brief Selects the backend owner or joins the live generation.
-   * @return Owner once, otherwise Joiner.
-   * @throws std::system_error when record locking fails.
-   * @note Selection is monotonic and allocates nothing.
+   * @return Exact generation-bearing Owner or Joiner claim.
+   * @throws std::overflow_error before generation or joiner-count reuse.
+   * @throws std::system_error when record locking or waiting fails.
+   * @note Selection allocates nothing. A caller arriving after a failed owner
+   * waits until every old joiner has consumed the same failure, preventing
+   * generation ABA before retry.
    */
-  Role begin();
+  Claim begin();
 
   /**
    * @brief Publishes successful completion for every selected joiner.
+   * @param owner Exact current-generation Owner claim.
    * @return Nothing.
-   * @throws std::logic_error before owner selection or on duplicate completion.
+   * @throws std::logic_error for a stale/non-owner claim or duplicate result.
    * @throws std::system_error when record locking fails.
    */
-  void complete_success();
+  void complete_success(const Claim& owner);
 
   /**
-   * @brief Waits without a finite bound for the owner result.
-   * @return Nothing after successful completion.
-   * @throws std::logic_error before any owner was selected.
-   * @throws std::system_error when record waiting fails.
-   * @note A nonreturning entered callback honestly leaves this wait unbounded.
+   * @brief Publishes one pre-linearization owner failure without allocation.
+   * @param owner Exact current-generation Owner claim.
+   * @param failure Non-null exact exception being rethrown by the owner.
+   * @return Nothing.
+   * @throws Nothing; invalid claims or synchronization failure terminate.
+   * @note Every already selected joiner receives this same exception identity.
+   * A generation with no joiners becomes retryable immediately.
    */
-  void wait_for_success();
+  void complete_failure(const Claim& owner,
+                        std::exception_ptr failure) noexcept;
+
+  /**
+   * @brief Waits without a finite bound for one exact owner result.
+   * @param joiner Exact Joiner claim returned by begin().
+   * @return Nothing after successful completion.
+   * @throws The owner's exact pre-linearization exception after failure.
+   * @throws std::logic_error for a non-Joiner claim before synchronization.
+   * @note Synchronization or generation-invariant failure after a valid joiner
+   * claim terminates so an unconsumed claim cannot strand future retries. A
+   * nonreturning owner honestly leaves this wait unbounded.
+   */
+  void wait_for_completion(const Claim& joiner);
 
   /**
    * @brief Reports whether backend progression has been selected.
@@ -103,14 +148,34 @@ class GraphCloseCoordinator final {
   bool completed() const;
 
  private:
+  /**
+   * @brief Current generation result state.
+   * @throws Nothing for value construction and comparison.
+   */
+  enum class State {
+    /** @brief No generation is active; the next caller becomes Owner. */
+    Idle,
+    /** @brief One owner is progressing and callers may join it. */
+    InProgress,
+    /** @brief The current generation completed successfully. */
+    Succeeded,
+    /** @brief Old joiners must consume the exact stored failure. */
+    Failed,
+  };
+
   /** @brief Serializes selection and result publication. */
   mutable std::mutex mutex_;
-  /** @brief Wakes every live generation joiner. */
+  /** @brief Wakes result joiners and retry callers after failure consumption.
+   */
   std::condition_variable cv_;
-  /** @brief True after exactly one caller becomes Owner. */
-  bool started_ = false;
-  /** @brief True after the owner publishes monotonic success. */
-  bool completed_ = false;
+  /** @brief Current retry/success state. */
+  State state_ = State::Idle;
+  /** @brief Last selected nonzero generation, never reused. */
+  std::uint64_t generation_ = 0U;
+  /** @brief Exact live Joiner claims still owed the current failure. */
+  std::uint64_t pending_joiners_ = 0U;
+  /** @brief Exact pre-linearization failure retained for old joiners. */
+  std::exception_ptr failure_;
 };
 
 /**

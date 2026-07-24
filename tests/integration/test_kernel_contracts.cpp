@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -19,6 +21,10 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+#include <unistd.h>
+#endif
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
@@ -42,6 +48,9 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+#include "runtime/kernel_close_test_access.hpp"
+#endif
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
 #include "runtime/kernel_compute_test_access.hpp"  // NOLINT(build/include_subdir)
 #endif
@@ -74,6 +83,178 @@ std::atomic<int> g_parameter_value_source_calls{0};
 
 /** @brief Counts effective-parameter consumer invocations. */
 std::atomic<int> g_parameter_value_consumer_calls{0};
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+/**
+ * @brief Deterministic one-shot failure at Kernel close owner selection.
+ *
+ * @throws Standard synchronization errors from test coordination.
+ * @note The first owner optionally blocks until an exact joiner is observed,
+ * then rethrows the preallocated exception identity. Later owners return.
+ */
+class KernelCloseFailureProbe final {
+ public:
+  /**
+   * @brief Configures the exact first-owner failure.
+   * @param failure Non-null exception rethrown by the first owner callback.
+   * @param block_owner Whether the first owner waits for explicit release.
+   * @throws Nothing.
+   * @note failure must remain non-null for the probe lifetime.
+   */
+  KernelCloseFailureProbe(std::exception_ptr failure, bool block_owner) noexcept
+      : failure_(std::move(failure)), block_owner_(block_owner) {}
+
+  /**
+   * @brief Adapts the borrowed Kernel hook to this probe.
+   * @param context Borrowed KernelCloseFailureProbe.
+   * @param event Exact owner/joiner boundary.
+   * @return Nothing for later-owner and joiner events.
+   * @throws The preallocated first-owner exception unchanged.
+   */
+  static void invoke(void* context, testing::KernelCloseTestEvent event) {
+    auto* probe = static_cast<KernelCloseFailureProbe*>(context);
+    if (probe == nullptr) {
+      throw std::logic_error("Kernel close failure probe is missing.");
+    }
+    probe->observe(event);
+  }
+
+  /**
+   * @brief Waits until the first owner reaches the injected boundary.
+   * @param timeout Maximum deterministic wait.
+   * @return True when the boundary was observed.
+   * @throws std::system_error from test synchronization.
+   */
+  bool wait_for_owner(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout,
+                             [this]() { return owner_events_ != 0U; });
+  }
+
+  /**
+   * @brief Waits until one exact-generation joiner reaches its wait boundary.
+   * @param timeout Maximum deterministic wait.
+   * @return True when the joiner was observed.
+   * @throws std::system_error from test synchronization.
+   */
+  bool wait_for_joiner(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout,
+                             [this]() { return joiner_events_ != 0U; });
+  }
+
+  /**
+   * @brief Releases a blocked first owner exactly once.
+   * @return Nothing.
+   * @throws Nothing; synchronization failure terminates the test process.
+   */
+  void release_owner() noexcept {
+    try {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_owner_ = true;
+      }
+      changed_.notify_all();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  /**
+   * @brief Records one boundary and injects the configured first-owner result.
+   * @param event Exact owner/joiner boundary.
+   * @return Nothing for joiners and later owners.
+   * @throws The exact configured exception for the first owner.
+   */
+  void observe(testing::KernelCloseTestEvent event) {
+    if (event == testing::KernelCloseTestEvent::JoinerSelectedBeforeWait) {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++joiner_events_;
+      }
+      changed_.notify_all();
+      return;
+    }
+
+    bool first_owner = false;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      ++owner_events_;
+      first_owner = owner_events_ == 1U;
+      changed_.notify_all();
+      if (first_owner && block_owner_) {
+        changed_.wait(lock, [this]() { return release_owner_; });
+      }
+    }
+    if (first_owner) {
+      std::rethrow_exception(failure_);
+    }
+  }
+
+  /** @brief Exact first-owner exception identity. */
+  const std::exception_ptr failure_;
+  /** @brief Whether first-owner injection waits for external release. */
+  const bool block_owner_;
+  /** @brief Serializes deterministic event/release state. */
+  std::mutex mutex_;
+  /** @brief Wakes test and owner waiters after state changes. */
+  std::condition_variable changed_;
+  /** @brief Number of owner boundaries observed. */
+  std::uint64_t owner_events_ = 0U;
+  /** @brief Number of joiner boundaries observed. */
+  std::uint64_t joiner_events_ = 0U;
+  /** @brief True after the test permits first-owner failure publication. */
+  bool release_owner_ = false;
+};
+
+/**
+ * @brief Installs and clears one borrowed Kernel close hook.
+ *
+ * @throws Nothing from construction and destruction.
+ * @note The owner must join all close callers before this guard is destroyed.
+ */
+class ScopedKernelCloseTestHook final {
+ public:
+  /**
+   * @brief Publishes a hook backed by one stable probe.
+   * @param probe Borrowed probe outliving this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedKernelCloseTestHook(KernelCloseFailureProbe& probe) noexcept
+      : hook_{&probe, &KernelCloseFailureProbe::invoke} {
+    testing::set_kernel_close_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the borrowed hook before its owner is destroyed.
+   * @throws Nothing.
+   * @note Every observed close caller must already be joined by the test.
+   */
+  ~ScopedKernelCloseTestHook() noexcept {
+    testing::set_kernel_close_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Prevents duplicate global-hook ownership.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  ScopedKernelCloseTestHook(const ScopedKernelCloseTestHook&) = delete;
+  /**
+   * @brief Prevents duplicate global-hook assignment.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  ScopedKernelCloseTestHook& operator=(const ScopedKernelCloseTestHook&) =
+      delete;
+
+ private:
+  /** @brief Stable borrowed hook record. */
+  testing::KernelCloseTestHook hook_;
+};
+#endif
 
 /**
  * @brief Configures the blocking contract op release signal for one test.
@@ -4448,6 +4629,100 @@ TEST(ComputeContracts, ExecutionObservationAndReplacementWaitForCompute) {
   EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
 }
+
+/**
+ * @brief Proves pre-linearization close failure reaches every exact joiner.
+ *
+ * @return Nothing; GoogleTest reports exception identity, retry, or timeout
+ * divergence.
+ * @throws Standard fixture, filesystem, future, or synchronization exceptions.
+ * @note The owner is held before lifecycle linearization until the second
+ * caller has selected the same generation as a joiner.
+ */
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+TEST(ComputeContracts, CloseOwnerFailureReachesJoinerAndFreshRetrySucceeds) {
+  const std::string graph_name = "contract_close_owner_failure";
+  const auto root =
+      clean_temp_path("photospider-contract-close-owner-failure-root");
+  Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), "").has_value());
+
+  const std::exception_ptr expected = std::make_exception_ptr(
+      std::system_error(std::make_error_code(std::errc::io_error),
+                        "injected Kernel close owner failure"));
+  KernelCloseFailureProbe probe(expected, true);
+  ScopedKernelCloseTestHook hook(probe);
+  auto capture_close = [&kernel, &graph_name]() {
+    try {
+      (void)kernel.close_graph(graph_name);
+    } catch (...) {
+      return std::current_exception();
+    }
+    return std::exception_ptr{};
+  };
+
+  auto owner = std::async(std::launch::async, capture_close);
+  const bool owner_entered = probe.wait_for_owner(std::chrono::seconds(2));
+  auto joiner = std::async(std::launch::async, capture_close);
+  const bool joiner_entered = probe.wait_for_joiner(std::chrono::seconds(2));
+  probe.release_owner();
+
+  EXPECT_TRUE(owner_entered);
+  EXPECT_TRUE(joiner_entered);
+  ASSERT_EQ(owner.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  ASSERT_EQ(joiner.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(owner.get(), expected);
+  EXPECT_EQ(joiner.get(), expected);
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves Kernel destruction retries an unlinearized failed close.
+ *
+ * @return Nothing; the child must exit normally before its watchdog alarm.
+ * @throws Nothing to the parent process.
+ * @note The injected hook is cleared after the explicit failure, so the
+ * destructor's fresh generation executes the ordinary close path.
+ */
+TEST(ComputeContracts, DestructorRetriesPreLinearizationCloseFailure) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  ASSERT_EXIT(
+      {
+        (void)::alarm(5U);
+        const std::string graph_name = "contract_destructor_close_retry";
+        const auto root =
+            clean_temp_path("photospider-contract-destructor-close-retry-root");
+        const std::exception_ptr expected = std::make_exception_ptr(
+            std::system_error(std::make_error_code(std::errc::io_error),
+                              "injected destructor close failure"));
+        {
+          Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+          if (!kernel.load_graph(graph_name, root.string(), "").has_value()) {
+            std::_Exit(2);
+          }
+          {
+            KernelCloseFailureProbe probe(expected, false);
+            ScopedKernelCloseTestHook hook(probe);
+            std::exception_ptr observed;
+            try {
+              (void)kernel.close_graph(graph_name);
+            } catch (...) {
+              observed = std::current_exception();
+            }
+            if (observed != expected) {
+              std::_Exit(3);
+            }
+          }
+        }
+        std::filesystem::remove_all(root);
+        (void)::alarm(0U);
+        std::_Exit(0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+#endif
 
 /**
  * @brief Verifies Graph close cancels and drains accepted asynchronous work.

@@ -28,6 +28,9 @@
 #include "compute/execution_service.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+#include "runtime/kernel_close_test_access.hpp"
+#endif
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 #include "runtime/kernel_required_target_test_access.hpp"
 #endif
@@ -60,6 +63,36 @@ bool graph_lifecycle_path_exists(const std::filesystem::path& path,
 }
 
 }  // namespace
+
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+namespace testing {
+namespace {
+
+/**
+ * @brief Borrowed close hook published only in test-enabled builds.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Tests join every callback before clearing and destroying the hook.
+ */
+std::atomic<const KernelCloseTestHook*> g_kernel_close_test_hook{nullptr};
+
+}  // namespace
+
+/** @copydoc ps::testing::set_kernel_close_test_hook */
+void set_kernel_close_test_hook(const KernelCloseTestHook* hook) noexcept {
+  g_kernel_close_test_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc ps::testing::notify_kernel_close_test_hook */
+void notify_kernel_close_test_hook(KernelCloseTestEvent event) {
+  const KernelCloseTestHook* hook =
+      g_kernel_close_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->invoke != nullptr) {
+    hook->invoke(hook->context, event);
+  }
+}
+
+}  // namespace testing
+#endif
 
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 namespace testing {
@@ -313,13 +346,22 @@ bool Kernel::close_graph_with_reason(
   GraphRuntime& runtime = *it->second;
   const std::shared_ptr<compute::GraphCloseCoordinator> close =
       runtime.lifetime_anchor()->close_coordinator();
-  if (close->begin() == compute::GraphCloseCoordinator::Role::Joiner) {
-    close->wait_for_success();
+  const compute::GraphCloseCoordinator::Claim claim = close->begin();
+  if (claim.role == compute::GraphCloseCoordinator::Role::Joiner) {
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+    testing::notify_kernel_close_test_hook(
+        testing::KernelCloseTestEvent::JoinerSelectedBeforeWait);
+#endif
+    close->wait_for_completion(claim);
     return true;
   }
 
   bool lifecycle_linearized = false;
   try {
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+    testing::notify_kernel_close_test_hook(
+        testing::KernelCloseTestEvent::OwnerSelectedBeforeLifecycle);
+#endif
     const GraphInstanceId graph_instance_id = runtime.model().instance_id();
     (void)execution_service_->begin_graph_close_lifecycle(graph_instance_id,
                                                           reason);
@@ -331,12 +373,13 @@ bool Kernel::close_graph_with_reason(
     runtime.stop();
     graphs_.erase(it);
     clear_last_error(name);
-    close->complete_success();
+    close->complete_success(claim);
     return true;
   } catch (...) {
     if (lifecycle_linearized) {
       std::terminate();
     }
+    close->complete_failure(claim, std::current_exception());
     throw;
   }
 }

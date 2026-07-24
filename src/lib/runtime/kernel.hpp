@@ -320,13 +320,16 @@ class Kernel {
    *         close linearization; no exception is thrown when the graph name is
    *         unknown.
    * @note The first caller owns the preallocated close generation; concurrent
-   *       callers join its success. Close changes the exact registry row to
-   *       Closing and requests GraphClose, stops external compute-request
-   *       admission, settles and unregisters every indexed Run/candidate,
-   *       removes the empty row, drains and joins compute-request while
-   *       graph-state remains available for commit denial/discard, then drains
-   *       graph-state and removes runtime/routes. After lifecycle linearization
-   *       the Graph is never reopened.
+   *       callers join its exact result. A failure before lifecycle
+   *       linearization is rethrown identically to every selected joiner; only
+   *       after those joiners consume it may a later caller own a fresh
+   *       generation. Close changes the exact registry row to Closing and
+   *       requests GraphClose, stops external compute-request admission,
+   *       settles and unregisters every indexed Run/candidate, removes the
+   *       empty row, drains and joins compute-request while graph-state remains
+   *       available for commit denial/discard, then drains graph-state and
+   *       removes runtime/routes. After lifecycle linearization the Graph is
+   *       never reopened.
    */
   bool close_graph(const std::string& name);
 
@@ -1403,8 +1406,11 @@ class Kernel {
    * @return True when a runtime existed and completed close; false if absent.
    * @throws std::logic_error or std::system_error before authoritative close
    * linearization; an invariant failure afterward terminates.
-   * @note Registry row removal precedes compute-request lane drain, then
-   * graph-state drain, route/model destruction, and public completion.
+   * @note Pre-linearization failure is published to exact-generation joiners
+   * before rethrow and permits a later fresh-generation retry after all old
+   * joiners observe it. Registry row removal precedes compute-request lane
+   * drain, then graph-state drain, route/model destruction, and public
+   * completion.
    */
   bool close_graph_with_reason(const std::string& name,
                                compute::ComputeRunCancellationReason reason);

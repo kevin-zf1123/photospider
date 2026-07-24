@@ -784,8 +784,8 @@ struct PreparedConnectedDirtyNode final {
  * @throws std::bad_alloc when copied route, lease, result, or step ownership
  * grows.
  * @note The heap address remains stable while callbacks borrow its Run lease.
- * Prepared service roots are declared in the step vector and therefore retire
- * before the shared result and borrowed Graph/Run pointers.
+ * Prepared service roots retire before the shared result; that result retires
+ * before the once-per-preflight umbrella reservation and borrowed Run lease.
  */
 struct PreparedConnectedDirtyParametersState final {
   /**
@@ -819,9 +819,11 @@ struct PreparedConnectedDirtyParametersState final {
   ComputeRun* run = nullptr;
   /** @brief Stable lease observed by every provider boundary. */
   std::optional<ComputeRunLease> run_lease;
+  /** @brief Once-per-preflight Run/result/staging retained-memory root. */
+  std::optional<PreparedExecutionSharedReservation> shared_reservation;
   /** @brief Mutable result built only by topologically serialized callbacks. */
   std::shared_ptr<StabilizedDirtyParameters> result;
-  /** @brief Frozen topological callbacks and service roots. */
+  /** @brief Frozen topological callbacks and unique per-node service roots. */
   std::vector<PreparedConnectedDirtyNode> steps;
 };
 
@@ -884,6 +886,9 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
                                       execution_order.end());
   auto state = std::make_unique<PreparedConnectedDirtyParametersState>(
       graph, task_runtime, execution_service, run, run_lease);
+  if (execution_service != nullptr && !state->run_lease.has_value()) {
+    state->run_lease.emplace(run->acquire_lease());
+  }
   auto result = std::make_shared<StabilizedDirtyParameters>();
   state->result = result;
   result->request_generation_ = request_generation;
@@ -1041,9 +1046,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     if (execution_service) {
       auto owned_preflight = std::make_shared<std::function<void()>>(
           std::move(execute_preflight_node));
-      ComputeRunLease lease = state->run_lease.has_value()
-                                  ? *state->run_lease
-                                  : run->acquire_lease();
+      ComputeRunLease lease(*state->run_lease);
       const ComputeRunTaskIdentity identity = lease.task_identity(
           std::numeric_limits<uint64_t>::max() - preflight_task_id);
       auto service_callback = [owned_preflight, node_id](
@@ -1074,15 +1077,11 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
       const ReadyTaskResourceDemand task_demand =
           owned_callback_resource_demand(
               static_cast<std::uint64_t>(sizeof(service_callback)));
-      RetainedMemoryEstimator shared_demand("connected-parameter preflight");
-      shared_demand.add_bytes(lease.retained_memory_bytes());
-      shared_demand.add_bytes(result->retained_memory_bytes());
-      shared_demand.add_bytes(
-          result->missing_staged_output_entry_retained_memory_bytes(
-              anticipated_node_ids));
-      shared_demand.add_objects<std::function<void()>>();
-      shared_demand.add_shared_control_block();
-      shared_demand.add_bytes(owned_callable_retained_memory_bytes(
+      RetainedMemoryEstimator unique_shared_demand(
+          "connected-parameter preflight node callback");
+      unique_shared_demand.add_objects<std::function<void()>>();
+      unique_shared_demand.add_shared_control_block();
+      unique_shared_demand.add_bytes(owned_callable_retained_memory_bytes(
           static_cast<std::uint64_t>(sizeof(execute_preflight_node))));
       std::vector<ReadyTaskSubmission> submissions;
       submissions.emplace_back(std::move(lease), identity, node_id, true,
@@ -1091,12 +1090,25 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
                                selected_device);
       step.service_prepared.emplace(execution_service->prepare_run(
           *host, execution_type, std::move(submissions), 1,
-          CpuRunResourceDemand{shared_demand.bytes(), task_demand}));
+          CpuRunResourceDemand{unique_shared_demand.bytes(), task_demand}));
     } else {
       step.inline_task = std::move(execute_preflight_node);
     }
     state->steps.push_back(std::move(step));
     ++preflight_task_id;
+  }
+
+  if (execution_service != nullptr && !state->steps.empty()) {
+    RetainedMemoryEstimator shared_demand(
+        "connected-parameter preflight shared ownership");
+    shared_demand.add_bytes(state->run_lease->retained_memory_bytes());
+    shared_demand.add_bytes(result->retained_memory_bytes());
+    shared_demand.add_bytes(
+        result->missing_staged_output_entry_retained_memory_bytes(
+            anticipated_node_ids));
+    state->shared_reservation.emplace(
+        execution_service->prepare_shared_reservation(*state->run_lease,
+                                                      shared_demand.bytes()));
   }
 
   observe_dirty_run_or_throw(run, run_lease);
@@ -1116,6 +1128,12 @@ execute_prepared_connected_dirty_parameters(
   const ComputeRunLease* run_lease =
       state->run_lease.has_value() ? &*state->run_lease : nullptr;
   observe_dirty_run_or_throw(state->run, run_lease);
+  if (state->execution_service != nullptr && !state->steps.empty() &&
+      (!state->shared_reservation.has_value() ||
+       !state->shared_reservation->active())) {
+    throw std::logic_error(
+        "Connected-parameter service preflight has no shared reservation.");
+  }
 
   for (PreparedConnectedDirtyNode& step : state->steps) {
     if (state->execution_service != nullptr) {
@@ -1165,22 +1183,6 @@ execute_prepared_connected_dirty_parameters(
     }
   }
   return result;
-}
-
-/** @copydoc stabilize_connected_dirty_parameters */
-std::shared_ptr<const StabilizedDirtyParameters>
-stabilize_connected_dirty_parameters(
-    GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
-    uint64_t request_generation, uint64_t topology_generation,
-    ExecutionTaskRuntime* task_runtime, ExecutionService* execution_service,
-    ExecutionHostContext* host, ComputeRun* run,
-    const ComputeRunLease* run_lease, const std::string& execution_type,
-    const std::vector<Device>* available_devices_override) {
-  return execute_prepared_connected_dirty_parameters(
-      prepare_connected_dirty_parameters(
-          graph, traversal, target_node_id, request_generation,
-          topology_generation, task_runtime, execution_service, host, run,
-          run_lease, execution_type, available_devices_override));
 }
 
 /**

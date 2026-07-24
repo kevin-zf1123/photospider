@@ -292,46 +292,106 @@ void publish_committed_transition(Publish&& publish) noexcept {
 }  // namespace
 
 /** @copydoc GraphCloseCoordinator::begin */
-GraphCloseCoordinator::Role GraphCloseCoordinator::begin() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!started_) {
-    started_ = true;
-    return Role::Owner;
+GraphCloseCoordinator::Claim GraphCloseCoordinator::begin() {
+  std::unique_lock<std::mutex> lock(mutex_);
+  cv_.wait(lock, [this]() { return state_ != State::Failed; });
+  if (state_ == State::Idle) {
+    if (generation_ == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Graph close generation exhausted.");
+    }
+    ++generation_;
+    state_ = State::InProgress;
+    return Claim{Role::Owner, generation_};
   }
-  return Role::Joiner;
+  if (state_ == State::InProgress) {
+    if (pending_joiners_ == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Graph close joiner count exhausted.");
+    }
+    ++pending_joiners_;
+  }
+  return Claim{Role::Joiner, generation_};
 }
 
 /** @copydoc GraphCloseCoordinator::complete_success */
-void GraphCloseCoordinator::complete_success() {
+void GraphCloseCoordinator::complete_success(const Claim& owner) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!started_ || completed_) {
+    if (owner.role != Role::Owner || owner.generation != generation_ ||
+        state_ != State::InProgress) {
       throw std::logic_error("Graph close completion requires one live owner.");
     }
-    completed_ = true;
+    state_ = State::Succeeded;
   }
   cv_.notify_all();
 }
 
-/** @copydoc GraphCloseCoordinator::wait_for_success */
-void GraphCloseCoordinator::wait_for_success() {
-  std::unique_lock<std::mutex> lock(mutex_);
-  if (!started_) {
-    throw std::logic_error("Graph close join requires a selected owner.");
+/** @copydoc GraphCloseCoordinator::complete_failure */
+void GraphCloseCoordinator::complete_failure(
+    const Claim& owner, std::exception_ptr failure) noexcept {
+  try {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (owner.role != Role::Owner || owner.generation != generation_ ||
+          state_ != State::InProgress || !failure) {
+        std::terminate();
+      }
+      failure_ = std::move(failure);
+      state_ = pending_joiners_ == 0U ? State::Idle : State::Failed;
+      if (state_ == State::Idle) {
+        failure_ = nullptr;
+      }
+    }
+    cv_.notify_all();
+  } catch (...) {
+    std::terminate();
   }
-  cv_.wait(lock, [this]() { return completed_; });
+}
+
+/** @copydoc GraphCloseCoordinator::wait_for_completion */
+void GraphCloseCoordinator::wait_for_completion(const Claim& joiner) {
+  if (joiner.role != Role::Joiner || joiner.generation == 0U) {
+    throw std::logic_error("Graph close wait requires one Joiner claim.");
+  }
+  std::exception_ptr failure;
+  bool retry_ready = false;
+  try {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (joiner.generation != generation_) {
+      std::terminate();
+    }
+    cv_.wait(lock, [this]() { return state_ != State::InProgress; });
+    if (state_ == State::Succeeded) {
+      return;
+    }
+    if (state_ != State::Failed || pending_joiners_ == 0U || !failure_) {
+      std::terminate();
+    }
+    failure = failure_;
+    --pending_joiners_;
+    if (pending_joiners_ == 0U) {
+      failure_ = nullptr;
+      state_ = State::Idle;
+      retry_ready = true;
+    }
+  } catch (...) {
+    std::terminate();
+  }
+  if (retry_ready) {
+    cv_.notify_all();
+  }
+  std::rethrow_exception(failure);
 }
 
 /** @copydoc GraphCloseCoordinator::started */
 bool GraphCloseCoordinator::started() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return started_;
+  return generation_ != 0U;
 }
 
 /** @copydoc GraphCloseCoordinator::completed */
 bool GraphCloseCoordinator::completed() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return completed_;
+  return state_ == State::Succeeded;
 }
 
 /** @copydoc GraphLifetimeAnchor::GraphLifetimeAnchor */

@@ -26,8 +26,8 @@ class DirtySiblingCommitGate {
    *
    * @return Nothing after RT commit permanently permits HP publication.
    * @throws GraphError when abort_hp_commit() was called before RT commit.
-   * @throws Nothing; synchronization failure terminates because callers use
-   * this operation only after cancellation/failure is irreversible.
+   * @throws std::system_error when mutex or condition-variable synchronization
+   * fails.
    * @note HP dirty executor calls this immediately before committing staged HP
    * output to GraphModel.
    */
@@ -47,7 +47,8 @@ class DirtySiblingCommitGate {
    * @brief Prevents HP staged output from committing to GraphModel.
    *
    * @return Nothing.
-   * @throws std::system_error when synchronization fails.
+   * @throws Nothing; synchronization failure terminates because this noexcept
+   * denial path cannot leave sibling commit authority ambiguous.
    * @note The coordinator calls this when RT sibling execution throws before
    * successfully committing proxy output. Calling it after RT committed is a
    * no-op and cannot revoke an already permitted HP commit.

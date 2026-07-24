@@ -340,11 +340,11 @@ class StabilizedDirtyParameters {
 /**
  * @brief Move-only connected-parameter candidate prepared before installation.
  *
- * Operation variants, devices, provider callables, complete service
- * reservations, ready grants, queue entries, and route ownership are frozen
- * during preparation. No provider/plugin/user callback is entered until
- * execute_prepared_connected_dirty_parameters() consumes this value after
- * lifecycle installation.
+ * Operation variants, devices, provider callables, unique per-node service
+ * roots, one shared retained-memory umbrella, ready grants, queue entries, and
+ * route ownership are frozen during preparation. No provider/plugin/user
+ * callback is entered until execute_prepared_connected_dirty_parameters()
+ * consumes this value after lifecycle installation.
  *
  * @throws Nothing from movement and destruction.
  * @note Destruction before execution releases every prepared service root,
@@ -427,8 +427,10 @@ class PreparedConnectedDirtyParameters final {
  * @throws GraphError or standard exceptions from topology, operation
  * selection, retained-memory estimation, reservation, and queue staging.
  * @note Candidate preparation invokes no operation provider. With the process
- * service, every callback can start only from its pre-reserved prepared batch
- * after the caller installs the matching lifecycle bundle.
+ * service, shared Run/result/staging ownership is reserved once across all
+ * nodes, each callback root charges only its unique ownership, and provider
+ * start remains impossible until the caller installs the matching lifecycle
+ * bundle.
  */
 PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
@@ -455,60 +457,6 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
 std::shared_ptr<const StabilizedDirtyParameters>
 execute_prepared_connected_dirty_parameters(
     PreparedConnectedDirtyParameters prepared);
-
-/**
- * @brief Stabilizes connected parameter values before dirty intent dispatch.
- *
- * The pass finds every connected parameter producer in the target dependency
- * cone, expands their complete upstream closure, and force-executes that
- * closure once in topological HP order into request-local storage. It bypasses
- * memory and disk cache so a producer that consumes a changed image/source
- * observes this request's current operation result.
- *
- * @param graph Live graph whose topology and committed inputs are read.
- * @param traversal Traversal service used to derive target postorder.
- * @param target_node_id Dirty request target.
- * @param request_generation Non-zero identity reserved for the whole request.
- * @param topology_generation Topology identity captured with the generation.
- * @param task_runtime Optional HP execution runtime. When supplied, every
- * preflight node is opened as a high-priority single-handle initial batch and
- * its matching completion wait drains before the next topological node.
- * @param execution_service Optional process CPU service used instead of
- * task_runtime.
- * @param host Optional service trace target; required with execution_service.
- * @param run Optional HP child Run whose leases name owned preflight work;
- * required with execution_service.
- * @param run_lease Optional borrowed lifecycle lease observed before/after
- * each preflight node and tiled operation chunk.
- * @param available_devices_override Optional immutable route inventory used
- * for operation selection while provider execution remains inline.
- * @return Immutable shared request snapshot. An empty producer set means no
- * connected-parameter preflight was needed, but generation identity remains.
- * @throws GraphError for missing targets, dependencies, operations, or empty
- * operation results, including accepted Run cancellation at a preflight
- * boundary.
- * @throws std::bad_alloc unchanged from topology, operation, or output storage.
- * @note The caller must serialize graph topology/cache mutation for the call.
- * No GraphModel cache, RT proxy, timing, or event state is published. Operation
- * callbacks retain the existing non-rollbackable external side-effect
- * semantics. This compatibility helper composes prepare and execute
- * immediately; product ComputeService uses the two calls separately around
- * lifecycle installation. Each closure node executes at most once and is not
- * repeated by HP phase two. Cancellation is observed around every preflight
- * node and before each tiled provider chunk; a monolithic provider already
- * entered is non-preemptible, and its result is discarded when cancellation is
- * observed before staging.
- */
-std::shared_ptr<const StabilizedDirtyParameters>
-stabilize_connected_dirty_parameters(
-    GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
-    uint64_t request_generation, uint64_t topology_generation,
-    ExecutionTaskRuntime* task_runtime = nullptr,
-    ExecutionService* execution_service = nullptr,
-    ExecutionHostContext* host = nullptr, ComputeRun* run = nullptr,
-    const ComputeRunLease* run_lease = nullptr,
-    const std::string& execution_type = "cpu",
-    const std::vector<Device>* available_devices_override = nullptr);
 
 /**
  * @brief Immutable options for one dirty update executor call.

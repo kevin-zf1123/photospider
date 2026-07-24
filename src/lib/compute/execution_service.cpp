@@ -139,6 +139,90 @@ void complete_shutdown_action_or_terminate(Action&& action) noexcept {
 }
 
 /**
+ * @brief Joins and accounts every worker transferred out of PoolState.
+ *
+ * @throws Nothing from construction, completion, and destruction; join or
+ * telemetry failure terminates after the irreversible worker transfer.
+ * @note The guard is armed immediately after local worker ownership exists.
+ * Its destructor prevents any future recoverable validation or refactor from
+ * unwinding through a joinable std::thread.
+ */
+class ShutdownWorkerJoinGuard final {
+ public:
+  /**
+   * @brief Binds local workers to their exact shutdown telemetry generation.
+   * @param workers Local worker owners transferred from PoolState.
+   * @param telemetry Stable process execution telemetry.
+   * @param registry Stable lifecycle counter/generation authority.
+   * @throws Nothing.
+   * @note workers, telemetry, and registry must outlive this stack guard.
+   */
+  ShutdownWorkerJoinGuard(std::vector<std::thread>& workers,
+                          ExecutionLifecycleTelemetry& telemetry,
+                          RunLifecycleRegistry& registry) noexcept
+      : workers_(workers), telemetry_(telemetry), registry_(registry) {}
+
+  /**
+   * @brief Joins and publishes every not-yet-accounted local worker.
+   * @return Nothing.
+   * @throws Nothing; join or telemetry failure terminates.
+   * @note Repeated calls after successful completion are harmless.
+   */
+  void complete() noexcept {
+    if (!armed_) {
+      return;
+    }
+    while (next_worker_ < workers_.size()) {
+      std::thread& worker = workers_[next_worker_];
+      if (worker.joinable()) {
+        complete_shutdown_action_or_terminate([&worker]() { worker.join(); });
+      }
+      complete_shutdown_action_or_terminate([this]() {
+        telemetry_.publish(ExecutionLifecycleEventKind::WorkerJoined,
+                           ExecutionLifecycleCategory::None, 0U, 0U, 0U,
+                           registry_.shutdown_generation(),
+                           registry_.counters());
+      });
+      ++next_worker_;
+    }
+    armed_ = false;
+  }
+
+  /**
+   * @brief Completes any remaining local worker ownership before unwind.
+   * @throws Nothing; join or telemetry failure terminates.
+   * @note This is the final fence against std::thread destructor termination.
+   */
+  ~ShutdownWorkerJoinGuard() noexcept { complete(); }
+
+  /**
+   * @brief Prevents duplicating worker-recovery authority.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  ShutdownWorkerJoinGuard(const ShutdownWorkerJoinGuard&) = delete;
+  /**
+   * @brief Prevents assigning duplicate worker-recovery authority.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  ShutdownWorkerJoinGuard& operator=(const ShutdownWorkerJoinGuard&) = delete;
+
+ private:
+  /** @brief Local worker vector that outlives this guard. */
+  std::vector<std::thread>& workers_;
+  /** @brief Stable physical lifecycle telemetry owner. */
+  ExecutionLifecycleTelemetry& telemetry_;
+  /** @brief Stable shutdown generation and logical counter authority. */
+  RunLifecycleRegistry& registry_;
+  /** @brief First worker whose join event is not yet complete. */
+  std::size_t next_worker_ = 0U;
+  /** @brief True until every local worker is joined and accounted. */
+  bool armed_ = true;
+};
+
+/**
  * @brief Tests a frozen private-route inventory for one selected device.
  * @param execution_type Exact private route id.
  * @param metal_available Metal capability captured before Run publication.
@@ -2521,6 +2605,33 @@ struct PreparedExecutionRunState final {
   ComputeRunCancellationRegistration cancellation_registration;
 };
 
+/**
+ * @brief Complete retained-only root behind one shared phase reservation.
+ *
+ * @throws Nothing from destruction after successful construction.
+ * @note Declaration order releases the reservation before its Run lease. The
+ * owning service outlives every prepared shared reservation.
+ */
+struct PreparedExecutionSharedReservationState final {
+  /**
+   * @brief Captures one exact Run lease and ledger root.
+   * @param active_run_lease Matching Run settlement owner.
+   * @param active_reservation Retained-only physical authority.
+   * @throws Nothing.
+   * @note Declaration order makes reservation release precede lease release.
+   */
+  PreparedExecutionSharedReservationState(
+      ComputeRunLease active_run_lease,
+      ResourceLedger::Reservation active_reservation) noexcept
+      : run_lease(std::move(active_run_lease)),
+        reservation(std::move(active_reservation)) {}
+
+  /** @brief Matching Run retained through physical settlement. */
+  ComputeRunLease run_lease;
+  /** @brief Retained-only ledger root released before run_lease. */
+  ResourceLedger::Reservation reservation;
+};
+
 /** @copydoc PreparedExecutionRun::PreparedExecutionRun */
 PreparedExecutionRun::PreparedExecutionRun() noexcept = default;
 
@@ -2547,6 +2658,40 @@ PreparedExecutionRun& PreparedExecutionRun::operator=(
 
 /** @copydoc PreparedExecutionRun::~PreparedExecutionRun */
 PreparedExecutionRun::~PreparedExecutionRun() noexcept = default;
+
+/** @copydoc PreparedExecutionSharedReservation::
+ * PreparedExecutionSharedReservation */
+PreparedExecutionSharedReservation::
+    PreparedExecutionSharedReservation() noexcept = default;
+
+/** @copydoc PreparedExecutionSharedReservation::
+ * PreparedExecutionSharedReservation */
+PreparedExecutionSharedReservation::PreparedExecutionSharedReservation(
+    std::unique_ptr<PreparedExecutionSharedReservationState> state) noexcept
+    : state_(std::move(state)) {}
+
+/** @copydoc PreparedExecutionSharedReservation::
+ * PreparedExecutionSharedReservation */
+PreparedExecutionSharedReservation::PreparedExecutionSharedReservation(
+    PreparedExecutionSharedReservation&& other) noexcept = default;  // NOLINT
+
+/** @copydoc PreparedExecutionSharedReservation::operator= */
+PreparedExecutionSharedReservation&
+PreparedExecutionSharedReservation::operator=(
+    PreparedExecutionSharedReservation&& other) noexcept {
+  if (this != &other) {
+    if (state_) {
+      std::terminate();
+    }
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+/** @copydoc PreparedExecutionSharedReservation::
+ * ~PreparedExecutionSharedReservation */
+PreparedExecutionSharedReservation::
+    ~PreparedExecutionSharedReservation() noexcept = default;
 
 /** @copydoc ExecutionService::service_run_envelope_bytes */
 std::uint64_t ExecutionService::service_run_envelope_bytes(
@@ -3415,6 +3560,8 @@ void ExecutionService::shutdown() {
     std::vector<std::thread> workers;
     std::shared_ptr<policy::PolicyBinding> interactive_binding;
     std::shared_ptr<policy::PolicyBinding> throughput_binding;
+    ShutdownWorkerJoinGuard worker_join_guard(workers, *lifecycle_telemetry_,
+                                              *lifecycle_registry_);
     {
       std::lock_guard<std::mutex> lock(pool_->mutex);
       pool_->stopping = true;
@@ -3431,18 +3578,7 @@ void ExecutionService::shutdown() {
     }
     pool_->ready_cv.notify_all();
 
-    for (std::thread& worker : workers) {
-      if (worker.joinable()) {
-        complete_shutdown_action_or_terminate([&worker]() { worker.join(); });
-      }
-      complete_shutdown_action_or_terminate([this]() {
-        lifecycle_telemetry_->publish(
-            ExecutionLifecycleEventKind::WorkerJoined,
-            ExecutionLifecycleCategory::None, 0U, 0U, 0U,
-            lifecycle_registry_->shutdown_generation(),
-            lifecycle_registry_->counters());
-      });
-    }
+    worker_join_guard.complete();
 
     interactive_binding.reset();
     throughput_binding.reset();
@@ -3652,6 +3788,63 @@ PreparedExecutionRun ExecutionService::prepare_run(
   state->batch = std::move(batch);
   state->cancellation_registration = std::move(cancellation_registration);
   return PreparedExecutionRun(std::move(state));
+}
+
+/** @copydoc ExecutionService::prepare_shared_reservation */
+PreparedExecutionSharedReservation ExecutionService::prepare_shared_reservation(
+    const ComputeRunLease& run_lease, std::uint64_t retained_memory_bytes) {
+  if (retained_memory_bytes == 0U) {
+    throw std::invalid_argument(
+        "ExecutionService shared reservation requires retained memory.");
+  }
+  ComputeRunLease service_lease(run_lease);
+  {
+    std::lock_guard<std::mutex> lock(pool_->mutex);
+    if (pool_->configured_workers == 0U || pool_->workers.empty()) {
+      throw std::logic_error(
+          "ExecutionService worker count is not configured.");
+    }
+    if (pool_->stopping) {
+      throw std::logic_error("ExecutionService is stopping.");
+    }
+  }
+
+  RetainedMemoryEstimator complete_demand(
+      "ExecutionService shared reservation envelope");
+  complete_demand.add_bytes(retained_memory_bytes);
+  complete_demand.add_objects<PreparedExecutionSharedReservationState>();
+  complete_demand.add_bytes(
+      ResourceLedger::reservation_state_retained_memory_bytes());
+  const ResourceVector resources{0U, complete_demand.bytes(), 0U, 0U, 0U};
+  const ResourceLedger::ReservationSettlementObserver settlement_observer =
+      service_lease.begin_resource_settlement_observation(
+          *lifecycle_telemetry_);
+  std::optional<ResourceLedger::Reservation> reservation;
+  {
+    try {
+      std::lock_guard<std::mutex> lock(pool_->mutex);
+      if (pool_->stopping) {
+        throw std::logic_error("ExecutionService is stopping.");
+      }
+      reservation = pool_->try_reserve_for_policy(
+          resources, run_lease.descriptor().qos().service_class,
+          settlement_observer);
+    } catch (...) {
+      service_lease.cancel_resource_settlement_observation();
+      throw;
+    }
+  }
+  if (!reservation.has_value()) {
+    service_lease.cancel_resource_settlement_observation();
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "ExecutionService policy/ledger cannot admit shared Run ownership.");
+  }
+  service_lease.commit_resource_settlement_observation();
+
+  auto state = std::make_unique<PreparedExecutionSharedReservationState>(
+      std::move(service_lease), std::move(*reservation));
+  return PreparedExecutionSharedReservation(std::move(state));
 }
 
 /** @copydoc ExecutionService::execute_prepared_run */

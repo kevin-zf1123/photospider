@@ -187,6 +187,7 @@ struct CpuRunResourceDemand final {
 
 class ExecutionService;
 struct PreparedExecutionRunState;
+struct PreparedExecutionSharedReservationState;
 
 /**
  * @brief Move-only pre-publication ownership for one physical Run batch.
@@ -256,6 +257,89 @@ class PreparedExecutionRun final {
   /** @brief Complete unpublished reservation, entries, and cleanup ownership.
    */
   std::unique_ptr<PreparedExecutionRunState> state_;
+};
+
+/**
+ * @brief Move-only unpublished retained-memory umbrella for one Run phase.
+ *
+ * ExecutionService mints this root independently from per-node prepared
+ * physical batches. Connected preflight uses it to charge Run control, shared
+ * result state, and anticipated staging capacity exactly once while every
+ * per-node batch retains only its unique callback and service envelope.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note Destruction releases the retained-only ledger root before its matching
+ * Run lease. The value grants no ready entry, CPU start, callback, route,
+ * lifecycle admission, or public ABI authority.
+ */
+class PreparedExecutionSharedReservation final {
+ public:
+  /**
+   * @brief Creates an inactive moved-from reservation.
+   * @throws Nothing.
+   * @note active() remains false until service-private construction.
+   */
+  PreparedExecutionSharedReservation() noexcept;
+
+  /**
+   * @brief Transfers the complete unpublished root owner.
+   * @param other Reservation made inactive.
+   * @throws Nothing.
+   */
+  PreparedExecutionSharedReservation(
+      PreparedExecutionSharedReservation&& other) noexcept;
+
+  /**
+   * @brief Replaces only an inactive reservation by transfer.
+   * @param other Reservation made inactive.
+   * @return Reference to this value.
+   * @throws Nothing; overwriting active ownership terminates.
+   */
+  PreparedExecutionSharedReservation& operator=(
+      PreparedExecutionSharedReservation&& other) noexcept;
+
+  /**
+   * @brief Releases the unpublished retained-memory root.
+   * @throws Nothing; trusted ledger release failure terminates.
+   */
+  ~PreparedExecutionSharedReservation() noexcept;
+
+  /**
+   * @brief Prevents duplicate root ownership.
+   * @param other Unused source because construction is forbidden.
+   * @throws Nothing; this operation is deleted.
+   */
+  PreparedExecutionSharedReservation(
+      const PreparedExecutionSharedReservation&) = delete;
+  /**
+   * @brief Prevents duplicate root assignment.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  PreparedExecutionSharedReservation& operator=(
+      const PreparedExecutionSharedReservation&) = delete;
+
+  /**
+   * @brief Reports whether this value owns one retained-memory root.
+   * @return True before movement or destruction.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend class ExecutionService;
+
+  /**
+   * @brief Adopts one complete service-private shared root.
+   * @param state Stable root, settlement observer, and Run lease owner.
+   * @throws Nothing.
+   */
+  explicit PreparedExecutionSharedReservation(
+      std::unique_ptr<PreparedExecutionSharedReservationState> state) noexcept;
+
+  /** @brief Complete unpublished retained-only root ownership. */
+  std::unique_ptr<PreparedExecutionSharedReservationState> state_;
 };
 
 /**
@@ -967,7 +1051,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * mutation or when authoritative resource state is unexpectedly nonzero.
    * @throws std::system_error from control-thread synchronization.
    * @note Concurrent/repeated non-worker callers join or observe the same
-   * generation. This operation never reopens admission.
+   * generation. Once worker ownership transfers to local shutdown state, an
+   * armed guard joins and accounts every remaining thread before any unwind;
+   * no recoverable validation may destroy a joinable std::thread. This
+   * operation never reopens admission.
    */
   void shutdown();
 
@@ -1021,11 +1108,33 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * complete root reservation, cancellation registration, RunState creation,
    * ready grants/QueueEntry construction, and ready-store map/list node
    * allocation. It publishes no ready entry or worker notification.
+   * Multi-root adapters must put once-per-phase ownership in
+   * prepare_shared_reservation() and retain only unique per-root ownership in
+   * each call.
    */
   PreparedExecutionRun prepare_run(
       ExecutionHostContext& host, const std::string& execution_type,
       std::vector<ReadyTaskSubmission> initial_submissions,
       int total_task_count, CpuRunResourceDemand run_resource_demand = {});
+
+  /**
+   * @brief Reserves one retained-only shared Run interval before installation.
+   *
+   * @param run_lease Matching candidate Run whose QoS selects policy capacity.
+   * @param retained_memory_bytes Positive adapter-owned shared estimate.
+   * @return Move-only unpublished root held across all prepared phase batches.
+   * @throws std::invalid_argument for zero retained bytes.
+   * @throws std::logic_error before worker configuration or during shutdown.
+   * @throws GraphError when checked envelope arithmetic or policy/ledger
+   * capacity cannot admit the root.
+   * @throws std::bad_alloc or std::system_error from ledger admission.
+   * @note The root has zero CPU, scratch, ready-entry, and ready-byte demand.
+   * The service adds this carrier and the ledger reservation-state envelope,
+   * registers ordinary Run resource settlement, and publishes no callback or
+   * ready work; it therefore cannot start provider code.
+   */
+  PreparedExecutionSharedReservation prepare_shared_reservation(
+      const ComputeRunLease& run_lease, std::uint64_t retained_memory_bytes);
 
   /**
    * @brief Publishes and synchronously settles one prepared physical Run.
@@ -1192,6 +1301,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
  private:
   friend class ::ps::testing::ExecutionServiceTestAccess;
   friend struct PreparedExecutionRunState;
+  friend struct PreparedExecutionSharedReservationState;
 
   /** @brief Per-Run completion, failure, trace, and settlement state. */
   struct RunState;

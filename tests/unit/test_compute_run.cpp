@@ -44,6 +44,7 @@
 #include "support/execution_service_test_access.hpp"
 #include "support/graph_model_test_access.hpp"
 #include "support/graph_revision_test_access.hpp"
+#include "support/scoped_execution_graph_lifecycle.hpp"
 
 namespace ps::compute {
 namespace {
@@ -74,6 +75,23 @@ ComputeRunSubmission make_test_submission(std::string graph_identity,
       SupersessionIdentity{
           SupersessionKey(target_node_id, ComputeIntent::GlobalHighPrecision),
           SupersessionGeneration(1)}};
+}
+
+/**
+ * @brief Builds a submission matching one explicitly registered test Graph.
+ * @param graph Graph supplying exact instance identity and revision.
+ * @param graph_identity Stable test/session label.
+ * @param target_node_id Requested graph-local target.
+ * @return Valid HP submission accepted by the Graph lifecycle registry.
+ * @throws std::bad_alloc when graph identity ownership cannot allocate.
+ */
+ComputeRunSubmission make_registered_test_submission(const GraphModel& graph,
+                                                     std::string graph_identity,
+                                                     int target_node_id) {
+  ComputeRunSubmission submission = make_test_submission(
+      std::move(graph_identity), graph.revision().value(), target_node_id);
+  submission.graph_instance_id = graph.instance_id();
+  return submission;
 }
 
 /**
@@ -223,6 +241,14 @@ std::atomic_int g_resource_product_operation_calls{0};
  * synchronously drained.
  */
 std::atomic_int g_resource_preflight_operation_calls{0};
+
+/**
+ * @brief Counts the deterministic preflight callback that fails on entry two.
+ *
+ * @note The dedicated subtype is used only by one synchronously drained
+ * cleanup regression, which resets this counter before dispatch.
+ */
+std::atomic_int g_resource_preflight_failure_operation_calls{0};
 
 /**
  * @brief Counts real HP dirty product-operation entry.
@@ -478,6 +504,22 @@ void ensure_resource_product_operations_registered() {
             [](const Node&, const std::vector<const NodeOutput*>&) {
               g_resource_preflight_operation_calls.fetch_add(
                   1, std::memory_order_relaxed);
+              NodeOutput output;
+              output.data["value"] = 9;
+              return output;
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "compute_run_resource", "parameter_source_fail_second",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              const int call =
+                  g_resource_preflight_failure_operation_calls.fetch_add(
+                      1, std::memory_order_relaxed) +
+                  1;
+              if (call == 2) {
+                throw std::runtime_error(
+                    "injected connected-preflight provider failure");
+              }
               NodeOutput output;
               output.data["value"] = 9;
               return output;
@@ -1074,6 +1116,76 @@ class ExecutionServiceHost final : public ExecutionHostContext {
   std::atomic<const ComputeRunCancellationSource*> cancel_on_assignment_{
       nullptr};
 };
+
+/**
+ * @brief Releases one direct-test lifecycle lease before registry settlement.
+ * @param lease Active lease made inactive by movement.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The moved temporary is destroyed before this helper returns, matching
+ * the production ComputeService finalization order.
+ */
+void release_direct_test_lifecycle_lease(ComputeRunLease& lease) noexcept {
+  ComputeRunLease released(std::move(lease));
+  (void)released;
+}
+
+/**
+ * @brief Prepares, installs, executes, and settles one service preflight.
+ *
+ * @param graph Exact Graph registered for the helper scope.
+ * @param traversal Topology service used by connected preflight.
+ * @param target_node_id Dirty request target.
+ * @param request_generation Nonzero preflight generation.
+ * @param service Process execution service receiving the installed Run.
+ * @param host Worker trace/capability target.
+ * @param run Created HP Run matching graph.instance_id().
+ * @param execution_type Frozen private route.
+ * @return Immutable stabilized connected-parameter snapshot.
+ * @throws Exact preparation, admission, provider, or settlement exception.
+ * @note No provider can run before commit_graph_admission(). Both success and
+ * failure publish a terminal Run outcome and release the caller lease before
+ * finalization; there is no test-only lifecycle bypass.
+ */
+std::shared_ptr<const StabilizedDirtyParameters>
+execute_connected_preflight_with_lifecycle(
+    GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
+    std::uint64_t request_generation, ExecutionService& service,
+    ExecutionServiceHost& host, ComputeRun& run,
+    const std::string& execution_type = "cpu") {
+  ps::testing::ScopedExecutionGraphLifecycle graph_lifecycle(service, graph);
+  auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+  cancellation->attach(run);
+  RunLifecycleAdmissionCandidate candidate =
+      service.begin_graph_admission(graph.instance_id());
+  ComputeRunLease lifecycle_lease = run.acquire_lease();
+  PreparedConnectedDirtyParameters prepared =
+      prepare_connected_dirty_parameters(
+          graph, traversal, target_node_id, request_generation,
+          graph.topology_generation(), nullptr, &service, &host, &run,
+          &lifecycle_lease, execution_type);
+  RunLifecycleAdmissionHandle admission = service.commit_graph_admission(
+      std::move(candidate), run.acquire_lease(), cancellation);
+  try {
+    if (!run.advance_to(ComputeRunPhase::Admitted)) {
+      throw std::logic_error("Direct preflight Run could not enter Admitted.");
+    }
+    std::shared_ptr<const StabilizedDirtyParameters> result =
+        execute_prepared_connected_dirty_parameters(std::move(prepared));
+    if (!run.publish_succeeded()) {
+      throw std::logic_error("Direct preflight Run could not publish success.");
+    }
+    release_direct_test_lifecycle_lease(lifecycle_lease);
+    service.finalize_graph_admission(admission);
+    return result;
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    (void)run.publish_failed(failure);
+    release_direct_test_lifecycle_lease(lifecycle_lease);
+    service.finalize_graph_admission(admission);
+    std::rethrow_exception(failure);
+  }
+}
 
 /**
  * @brief Releases one promise-backed test gate exactly once during cleanup.
@@ -2616,14 +2728,12 @@ TEST(Issue75DeviceRouting, ConnectedParameterPreflightUsesGpuLane) {
   GraphTraversalService traversal;
   ExecutionService service(1U);
   ExecutionServiceHost host(true);
-  ComputeRun run(make_test_submission("issue75-preflight-gpu",
-                                      graph.revision().value(), 505));
-  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  ComputeRun run(
+      make_registered_test_submission(graph, "issue75-preflight-gpu", 505));
 
   std::shared_ptr<const StabilizedDirtyParameters> stabilized =
-      stabilize_connected_dirty_parameters(
-          graph, traversal, 505, 1U, graph.topology_generation(), nullptr,
-          &service, &host, &run, nullptr, "gpu_pipeline");
+      execute_connected_preflight_with_lifecycle(
+          graph, traversal, 505, 1U, service, host, run, "gpu_pipeline");
   ASSERT_TRUE(stabilized);
   const NodeOutput* output = stabilized->find_parameter_output(504);
   ASSERT_NE(output, nullptr);
@@ -4635,12 +4745,11 @@ TEST(ExecutionServiceProductResources,
   ExecutionService small_service(1U, execution_limits(service_only));
   ExecutionServiceHost small_host;
   ComputeRun small_run(
-      make_test_submission(graph_identity, graph.revision().value(), 202));
-  ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Admitted));
-  EXPECT_THROW((void)stabilize_connected_dirty_parameters(
-                   graph, traversal, 202, 1U, graph.topology_generation(),
-                   nullptr, &small_service, &small_host, &small_run),
-               GraphError);
+      make_registered_test_submission(graph, graph_identity, 202));
+  EXPECT_THROW(
+      (void)execute_connected_preflight_with_lifecycle(
+          graph, traversal, 202, 1U, small_service, small_host, small_run),
+      GraphError);
   EXPECT_EQ(
       g_resource_preflight_operation_calls.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(small_host.context_entries(), 0);
@@ -4660,12 +4769,11 @@ TEST(ExecutionServiceProductResources,
   ExecutionService large_service(1U);
   ExecutionServiceHost large_host;
   ComputeRun large_run(
-      make_test_submission(graph_identity, graph.revision().value(), 202));
-  ASSERT_TRUE(large_run.advance_to(ComputeRunPhase::Admitted));
+      make_registered_test_submission(graph, graph_identity, 202));
   std::shared_ptr<const StabilizedDirtyParameters> stabilized;
-  EXPECT_NO_THROW(stabilized = stabilize_connected_dirty_parameters(
-                      graph, traversal, 202, 2U, graph.topology_generation(),
-                      nullptr, &large_service, &large_host, &large_run));
+  EXPECT_NO_THROW(
+      stabilized = execute_connected_preflight_with_lifecycle(
+          graph, traversal, 202, 2U, large_service, large_host, large_run));
   ASSERT_TRUE(stabilized);
   EXPECT_TRUE(stabilized->has_connected_parameters());
   const NodeOutput* parameter_output = stabilized->find_parameter_output(201);
@@ -4676,6 +4784,178 @@ TEST(ExecutionServiceProductResources,
   EXPECT_EQ(large_host.context_entries(), 1);
   EXPECT_EQ(large_host.context_entries(), large_host.context_exits());
   EXPECT_EQ(large_service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves connected preflight charges shared ownership exactly once.
+ *
+ * @return Nothing; GoogleTest reports premature provider entry, overcharge,
+ * undercharge, or leaked capacity.
+ * @throws Standard graph, lifecycle, reservation, or provider exceptions.
+ * @note Two topological provider roots retain only their unique callback
+ * envelopes. One retained-only umbrella spans both roots. Exact capacity
+ * admits after lifecycle installation; one fewer retained byte rejects before
+ * any provider enters.
+ */
+TEST(ExecutionServiceProductResources,
+     ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold) {
+  ensure_resource_product_operations_registered();
+  g_resource_preflight_operation_calls.store(0, std::memory_order_relaxed);
+  const std::string graph_identity = "resource-preflight-shared-umbrella";
+  GraphModel graph("cache/resource-preflight-shared-umbrella");
+  Node first = make_resource_product_node(301);
+  first.subtype = "parameter_source";
+  Node second = make_resource_product_node(302);
+  second.subtype = "parameter_source";
+  second.parameter_inputs.push_back({301, "value", "seed"});
+  Node target = make_plan_node(303);
+  target.parameter_inputs.push_back({302, "value", "radius"});
+  graph.add_node(std::move(first));
+  graph.add_node(std::move(second));
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+
+  ResourceVector exact;
+  ExecutionService calibration_service(1U);
+  ExecutionServiceHost calibration_host;
+  {
+    ComputeRun run(make_registered_test_submission(graph, graph_identity, 303));
+    ps::testing::ScopedExecutionGraphLifecycle graph_lifecycle(
+        calibration_service, graph);
+    auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+    cancellation->attach(run);
+    RunLifecycleAdmissionCandidate candidate =
+        calibration_service.begin_graph_admission(graph.instance_id());
+    ComputeRunLease lease = run.acquire_lease();
+    PreparedConnectedDirtyParameters prepared =
+        prepare_connected_dirty_parameters(
+            graph, traversal, 303, 1U, graph.topology_generation(), nullptr,
+            &calibration_service, &calibration_host, &run, &lease);
+    exact = calibration_service.resource_snapshot().reserved;
+    EXPECT_EQ(
+        g_resource_preflight_operation_calls.load(std::memory_order_relaxed),
+        0);
+    EXPECT_GT(exact.cpu_slots, 0U);
+    EXPECT_GT(exact.retained_memory_bytes, 0U);
+    EXPECT_GT(exact.ready_entries, 0U);
+  }
+  EXPECT_EQ(calibration_service.resource_snapshot().reserved, ResourceVector{});
+
+  ResourceVector one_byte_short = exact;
+  ASSERT_GT(one_byte_short.retained_memory_bytes, 0U);
+  --one_byte_short.retained_memory_bytes;
+  ExecutionService rejected_service(1U, execution_limits(one_byte_short));
+  ExecutionServiceHost rejected_host;
+  {
+    ComputeRun run(make_registered_test_submission(graph, graph_identity, 303));
+    ps::testing::ScopedExecutionGraphLifecycle graph_lifecycle(rejected_service,
+                                                               graph);
+    auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+    cancellation->attach(run);
+    RunLifecycleAdmissionCandidate candidate =
+        rejected_service.begin_graph_admission(graph.instance_id());
+    ComputeRunLease lease = run.acquire_lease();
+    EXPECT_THROW((void)prepare_connected_dirty_parameters(
+                     graph, traversal, 303, 2U, graph.topology_generation(),
+                     nullptr, &rejected_service, &rejected_host, &run, &lease),
+                 GraphError);
+    EXPECT_EQ(rejected_service.resource_snapshot().reserved, ResourceVector{});
+  }
+  EXPECT_EQ(
+      g_resource_preflight_operation_calls.load(std::memory_order_relaxed), 0);
+
+  ExecutionService exact_service(1U, execution_limits(exact));
+  ExecutionServiceHost exact_host;
+  std::shared_ptr<const StabilizedDirtyParameters> stabilized;
+  std::exception_ptr execution_failure;
+  {
+    ComputeRun run(make_registered_test_submission(graph, graph_identity, 303));
+    ps::testing::ScopedExecutionGraphLifecycle graph_lifecycle(exact_service,
+                                                               graph);
+    auto cancellation = std::make_shared<ComputeRequestCancellationSource>();
+    cancellation->attach(run);
+    RunLifecycleAdmissionCandidate candidate =
+        exact_service.begin_graph_admission(graph.instance_id());
+    ComputeRunLease lease = run.acquire_lease();
+    PreparedConnectedDirtyParameters prepared =
+        prepare_connected_dirty_parameters(
+            graph, traversal, 303, 3U, graph.topology_generation(), nullptr,
+            &exact_service, &exact_host, &run, &lease);
+    EXPECT_EQ(exact_service.resource_snapshot().reserved, exact);
+    EXPECT_EQ(
+        g_resource_preflight_operation_calls.load(std::memory_order_relaxed),
+        0);
+    RunLifecycleAdmissionHandle admission =
+        exact_service.commit_graph_admission(std::move(candidate),
+                                             run.acquire_lease(), cancellation);
+    try {
+      if (!run.advance_to(ComputeRunPhase::Admitted)) {
+        throw std::logic_error("Exact preflight Run admission failed.");
+      }
+      stabilized =
+          execute_prepared_connected_dirty_parameters(std::move(prepared));
+      if (!run.publish_succeeded()) {
+        throw std::logic_error("Exact preflight Run success failed.");
+      }
+    } catch (...) {
+      execution_failure = std::current_exception();
+      (void)run.publish_failed(execution_failure);
+    }
+    release_direct_test_lifecycle_lease(lease);
+    exact_service.finalize_graph_admission(admission);
+  }
+  EXPECT_EQ(execution_failure, std::exception_ptr{});
+  ASSERT_TRUE(stabilized);
+  EXPECT_NE(stabilized->find_parameter_output(301), nullptr);
+  EXPECT_NE(stabilized->find_parameter_output(302), nullptr);
+  EXPECT_EQ(
+      g_resource_preflight_operation_calls.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(exact_host.context_entries(), 2);
+  EXPECT_EQ(exact_host.context_entries(), exact_host.context_exits());
+  EXPECT_EQ(exact_service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves provider failure releases every node root and shared umbrella.
+ *
+ * @return Nothing; GoogleTest reports missing failure or leaked capacity.
+ * @throws Standard graph/lifecycle setup exceptions.
+ * @note The second topological provider throws after lifecycle installation;
+ * the direct lifecycle helper publishes failure and finalizes before rethrow.
+ */
+TEST(ExecutionServiceProductResources,
+     ConnectedPreflightProviderFailureReleasesEveryReservation) {
+  ensure_resource_product_operations_registered();
+  g_resource_preflight_failure_operation_calls.store(0,
+                                                     std::memory_order_relaxed);
+  const std::string graph_identity = "resource-preflight-provider-failure";
+  GraphModel graph("cache/resource-preflight-provider-failure");
+  Node first = make_resource_product_node(311);
+  first.subtype = "parameter_source_fail_second";
+  Node second = make_resource_product_node(312);
+  second.subtype = "parameter_source_fail_second";
+  second.parameter_inputs.push_back({311, "value", "seed"});
+  Node target = make_plan_node(313);
+  target.parameter_inputs.push_back({312, "value", "radius"});
+  graph.add_node(std::move(first));
+  graph.add_node(std::move(second));
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_registered_test_submission(graph, graph_identity, 313));
+
+  EXPECT_THROW((void)execute_connected_preflight_with_lifecycle(
+                   graph, traversal, 313, 1U, service, host, run),
+               std::runtime_error);
+  EXPECT_EQ(g_resource_preflight_failure_operation_calls.load(
+                std::memory_order_relaxed),
+            2);
+  EXPECT_EQ(host.context_entries(), 2);
+  EXPECT_EQ(host.context_entries(), host.context_exits());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 
 /**
