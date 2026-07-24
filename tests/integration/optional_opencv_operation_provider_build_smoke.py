@@ -195,7 +195,7 @@ def validate_provider_disabled_inventory(
       build.
     @return None when only the intended focused tests and install smoke exist.
     @throws RuntimeError If a focused test is missing, a broad-suite test
-      remains registered, or a disk-cache concurrency property drifts.
+      remains registered, or a required concurrency property drifts.
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
@@ -215,13 +215,23 @@ def validate_provider_disabled_inventory(
             "SnapshotBadAllocReleasesScopedGuard"
         ),
     }
+    lifecycle_tests = {
+        (
+            "KernelLifecycleConcurrency."
+            "ConcurrentPublicationListingAndCloseUseProductionObjects"
+        ),
+        (
+            "KernelLifecycleConcurrency."
+            "ShutdownAndGraphPublicationShareOneProductionAdmissionBoundary"
+        ),
+    }
     expected = {
         "DependencyDisabledInstallSmoke",
         (
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
-    } | disk_cache_tests
+    } | disk_cache_tests | lifecycle_tests
     names = set(inventory)
     if names != expected:
         raise RuntimeError(
@@ -229,18 +239,28 @@ def validate_provider_disabled_inventory(
             f"expected {sorted(expected)}, got {sorted(names)}"
         )
 
+    expected_properties = {
+        **{
+            name: {"LABELS": ["kernel-concurrency"], "TIMEOUT": 20}
+            for name in disk_cache_tests
+        },
+        **{
+            name: {"LABELS": ["kernel-concurrency"], "TIMEOUT": 60}
+            for name in lifecycle_tests
+        },
+    }
     property_mismatches = {
         name: {
             "LABELS": inventory[name].get("LABELS"),
             "TIMEOUT": inventory[name].get("TIMEOUT"),
         }
-        for name in disk_cache_tests
-        if inventory[name].get("LABELS") != ["kernel-concurrency"]
-        or inventory[name].get("TIMEOUT") != 20
+        for name, expected_property in expected_properties.items()
+        if inventory[name].get("LABELS") != expected_property["LABELS"]
+        or inventory[name].get("TIMEOUT") != expected_property["TIMEOUT"]
     }
     if property_mismatches:
         raise RuntimeError(
-            "provider-disabled disk-cache CTest property mismatch: "
+            "provider-disabled concurrency CTest property mismatch: "
             f"{property_mismatches}"
         )
 
@@ -361,6 +381,7 @@ def main() -> int:
         "--target",
         "test_optional_opencv_operation_provider",
         "test_disk_cache_diagnostic_concurrency",
+        "test_kernel_lifecycle_concurrency",
         "-j",
         "4",
     ]
@@ -388,6 +409,7 @@ def main() -> int:
             "-R",
             (
                 "^(DiskCacheDiagnosticConcurrency\\..*|"
+                "KernelLifecycleConcurrency\\..*|"
                 "OptionalOpenCvOperationProvider\\."
                 "ReplacementExecutesAndRestores)$"
             ),

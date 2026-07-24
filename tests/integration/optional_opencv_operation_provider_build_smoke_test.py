@@ -30,6 +30,18 @@ DISK_CACHE_CTEST_NAMES = (
     ),
     "DiskCacheDiagnosticConcurrency.SnapshotBadAllocReleasesScopedGuard",
 )
+#: @brief Stable production lifecycle cases required in focused inventories.
+#: @note The tuple intentionally contains exactly the two registered cases.
+KERNEL_LIFECYCLE_CTEST_NAMES = (
+    (
+        "KernelLifecycleConcurrency."
+        "ConcurrentPublicationListingAndCloseUseProductionObjects"
+    ),
+    (
+        "KernelLifecycleConcurrency."
+        "ShutdownAndGraphPublicationShareOneProductionAdmissionBoundary"
+    ),
+)
 #: @brief Stable focused optional-provider case required by the nested profile.
 #: @note This exact value keeps the regression independent of production sets.
 OPTIONAL_PROVIDER_CTEST_NAME = (
@@ -67,15 +79,18 @@ def ctest_json_test(
 def provider_disabled_ctest_payload() -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
-    @return JSON payload containing two profile entries and three disk cases.
+    @return JSON payload containing two profile entries, three disk cases, and
+      two production lifecycle cases.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
-    @note Only disk cases receive `kernel-concurrency` and 20-second properties.
+    @note Disk cases receive a 20-second timeout; lifecycle cases receive a
+      60-second timeout. Both groups use the exact `kernel-concurrency` label.
     """
 
     names = {
         DEPENDENCY_DISABLED_CTEST_NAME,
         OPTIONAL_PROVIDER_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
+        *KERNEL_LIFECYCLE_CTEST_NAMES,
     }
     return json.dumps(
         {
@@ -84,8 +99,17 @@ def provider_disabled_ctest_payload() -> str:
                     name,
                     labels=["kernel-concurrency"]
                     if name in DISK_CACHE_CTEST_NAMES
+                    or name in KERNEL_LIFECYCLE_CTEST_NAMES
                     else None,
-                    timeout=20 if name in DISK_CACHE_CTEST_NAMES else None,
+                    timeout=(
+                        20
+                        if name in DISK_CACHE_CTEST_NAMES
+                        else (
+                            60
+                            if name in KERNEL_LIFECYCLE_CTEST_NAMES
+                            else None
+                        )
+                    ),
                 )
                 for name in sorted(names)
             ]
@@ -769,7 +793,8 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves five names and disk properties.
+        @return None after parsing preserves seven names and concurrency
+          properties.
         @throws AssertionError If parsing or validation rejects the contract.
         @note Exact labels exclude the build-smoke label from disk test cases.
         """
@@ -778,6 +803,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             DEPENDENCY_DISABLED_CTEST_NAME,
             OPTIONAL_PROVIDER_CTEST_NAME,
             *DISK_CACHE_CTEST_NAMES,
+            *KERNEL_LIFECYCLE_CTEST_NAMES,
         }
 
         inventory = subject.parse_ctest_inventory(
@@ -835,6 +861,18 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         ]
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
             subject.validate_provider_disabled_inventory(drifted_inventory)
+
+        drifted_lifecycle_inventory = {
+            name: dict(properties)
+            for name, properties in valid_inventory.items()
+        }
+        drifted_lifecycle_inventory[KERNEL_LIFECYCLE_CTEST_NAMES[-1]][
+            "TIMEOUT"
+        ] = 20
+        with self.assertRaisesRegex(RuntimeError, "property mismatch"):
+            subject.validate_provider_disabled_inventory(
+                drifted_lifecycle_inventory
+            )
 
         broad_inventory = {
             name: dict(properties)
