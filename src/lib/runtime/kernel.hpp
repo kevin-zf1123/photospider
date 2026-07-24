@@ -12,6 +12,7 @@
  * depending on Kernel, GraphRuntime, or compute-service ownership.
  */
 
+#include <cstdint>
 #include <future>
 #include <map>
 #include <memory>
@@ -37,6 +38,10 @@
 
 namespace ps {
 
+enum class PolicyClass;
+struct HostPolicyConfig;
+struct PolicyInfoSnapshot;
+
 namespace testing {
 
 /**
@@ -45,7 +50,7 @@ namespace testing {
  * KernelTestAccess is declared here only so Kernel can friend it. The
  * definition lives under tests/support and is not part of the Host API.
  * Frontends use `ps::Host`; the embedded Host adapter alone may translate Host
- * requests to Kernel operations such as inspect_graph, scheduler_trace,
+ * requests to Kernel operations such as inspect_graph, execution_trace,
  * compute, and compute_async. Neither path exposes runtime ownership details.
  *
  * @note This forward declaration intentionally exposes no operations.
@@ -56,25 +61,30 @@ class KernelTestAccess;
 
 /**
  * @brief Internal multi-graph coordinator for lifecycle, graph-state commands,
- * compute, scheduler access, and plugin management.
+ * compute, execution-route access, policy access, and plugin management.
  *
- * Kernel owns one GraphRuntime per graph name and keeps its internal adapter
- * contract stable while delegating graph IO, traversal, inspection, cache, ROI,
- * dirty control, and compute work to narrower services. The embedded Host
- * adapter maps public Host values to these internal operations; frontend code
- * neither includes nor constructs Kernel types. Graph-state operations run
- * through each runtime's GraphStateExecutor so topology and runtime metadata
- * remain serialized with compute, including scheduler-backed parallel compute.
- * Schedulers receive ready task callbacks; they do not own graph-state
- * operation dispatch.
+ * Kernel owns one shared GraphRuntime lifetime root per graph name and keeps
+ * its internal adapter contract stable while delegating graph IO, traversal,
+ * inspection, cache, ROI, dirty control, and compute work to narrower
+ * services. A short registry mutex serializes name publication, lookup, close
+ * claim selection, and final removal; admitted operations retain a shared
+ * runtime owner after leaving that critical section. The embedded Host adapter
+ * maps public Host values to these internal operations; frontend code neither
+ * includes nor constructs Kernel types. Visible Graph capture, mutation,
+ * commit predicates, and publication run through each runtime's
+ * GraphStateExecutor. Operation execution uses request-owned snapshots outside
+ * that lane, while a private compute-request lane serializes same-Graph compute
+ * and route-binding access. The Host-lifetime ExecutionService receives ready
+ * task callbacks but never owns graph-state operation dispatch.
  *
  * @note Historically quiet inspection/cache methods retain bool or
  * std::optional failure handling. Required Host mutation/projection paths keep
  * exact GraphError categories through `with_required_graph_state()` so absence
  * is not conflated with content or parameter failures. Public Host methods
  * translate those results into copied status/value types. Compute and
- * ROI/dirty APIs also store per-graph LastError details when their service
- * boundary reports GraphError or std::exception.
+ * ROI/dirty APIs also store LastError details in the exact retained
+ * GraphRuntime when their service boundary reports GraphError or
+ * std::exception.
  */
 class Kernel {
  public:
@@ -85,6 +95,7 @@ class Kernel {
    * @param metadata_codec Shared metadata owner used by graph cache operations.
    * @param document_reader Shared reader owner used by graph and node loads.
    * @param document_writer Shared writer owner used by graph and node saves.
+   * @param execution_service Explicit process CPU execution owner.
    * @throws std::invalid_argument when any required owner is empty.
    * @note The embedded product composition root selects concrete
    *       implementations. Kernel retains them through its cache and graph IO
@@ -93,41 +104,42 @@ class Kernel {
   Kernel(std::shared_ptr<const ImageArtifactCodec> image_codec,
          std::shared_ptr<const CacheMetadataCodec> metadata_codec,
          std::shared_ptr<const GraphDocumentReader> document_reader,
-         std::shared_ptr<const GraphDocumentWriter> document_writer);
+         std::shared_ptr<const GraphDocumentWriter> document_writer,
+         std::shared_ptr<compute::ExecutionService> execution_service);
 
   /**
    * @brief Drains every owned graph runtime before releasing Kernel services.
    * @throws Nothing.
-   * @note Destruction clears `graphs_` explicitly while cache, traversal,
+   * @note Destruction closes `graphs_` explicitly while cache, traversal,
    * diagnostic, IO, and ROI collaborators are still alive. Each
-   * `GraphRuntime` first stops graph-state admission, drains admitted work, and
-   * joins its worker, so work items that captured this Kernel cannot observe
-   * destroyed collaborators. External callers must stop Kernel API admission
-   * before destruction; concurrent unadmitted public calls are unsupported.
+   * `GraphRuntime` first drains its compute-request lane, then drains
+   * graph-state and joins both workers, so work items that captured this Kernel
+   * cannot observe destroyed collaborators. The registry lock protects map
+   * structure and runtime-owner acquisition, but external callers must still
+   * stop Kernel object admission before destruction because the `Kernel`
+   * object itself is not reference counted.
    */
   ~Kernel() noexcept;
 
   /**
-   * @brief Last backend error recorded for one graph session.
+   * @brief Last backend error recorded in one exact runtime-owned slot.
    *
    * @note The value is best-effort diagnostic state. Missing graphs and helper
    * APIs that historically returned only false/nullopt do not always update it.
+   * The source-private alias preserves the existing Kernel value vocabulary
+   * while ownership lives exclusively in `GraphRuntime`.
    */
-  struct LastError {
-    /** @brief Exact graph-domain category captured at the failure boundary. */
-    GraphErrc code = GraphErrc::Unknown;
-
-    /** @brief Owned diagnostic text captured by the same failed operation. */
-    std::string message;
-  };
+  using LastError = GraphRuntime::LastError;
 
   /**
    * @brief Immutable outcome produced by one asynchronous compute work item.
    *
    * @throws Nothing for destruction; constructing the owned diagnostic may
    *         throw std::bad_alloc inside the asynchronous work item.
-   * @note A failed value owns the exact error captured by that work item. It is
-   *       never reconstructed from the mutable per-session LastError map.
+   * @note A failed value owns the exact error captured by that work item. The
+   *       result is never reconstructed from or read back from the
+   *       runtime-owned mutable best-effort LastError slot; that slot is only
+   *       a diagnostic mirror.
    */
   struct AsyncComputeResult {
     /** @brief True only when the associated compute completed successfully. */
@@ -165,17 +177,27 @@ class Kernel {
   /**
    * @brief Execution-mode controls for one Kernel compute request.
    *
-   * ExecutionOptions separates scheduler and graph-output quiet-mode choices
+   * ExecutionOptions separates execution and graph-output quiet-mode choices
    * from cache and telemetry options. It is copied into async futures, so the
    * embedded adapter and backend callers should treat it as immutable once the
    * request is submitted.
    *
-   * @note parallel selects scheduler-backed compute where supported. quiet is
-   * applied to the graph model around the compute call.
+   * @note parallel selects execution-bound compute where supported.
+   * maximum_parallelism is optional positive per-Run QoS and never resizes the
+   * fixed service. quiet is applied to the graph model around the compute
+   * call.
    */
   struct ComputeExecutionOptions {
-    /** @brief Whether the request should use scheduler-backed execution. */
+    /** @brief Whether the request should use queued execution-service work. */
     bool parallel = false;
+
+    /**
+     * @brief Optional positive Run callback-concurrency cap.
+     * @note The value is copied from the Host request and never resizes the
+     *       fixed execution-service lanes. Inline execution uses an effective
+     *       cap of one.
+     */
+    std::optional<std::uint32_t> maximum_parallelism;
 
     /** @brief Whether graph output should be quiet during this request. */
     bool quiet = false;
@@ -222,7 +244,7 @@ class Kernel {
     /** @brief Cache precision, recache, disk-cache, and save controls. */
     ComputeCacheOptions cache;
 
-    /** @brief Scheduler and quiet-mode execution controls. */
+    /** @brief Route-service and quiet-mode execution controls. */
     ComputeExecutionOptions execution;
 
     /** @brief Timing and benchmark recording controls. */
@@ -233,6 +255,23 @@ class Kernel {
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
     std::optional<PixelRect> dirty_roi;
+
+    /**
+     * @brief Optional private current-request cancellation authority.
+     * @note Internal backend tests and future private launch owners may retain
+     * this source while compute is active. Embedded Host conversion leaves it
+     * null, and the field is absent from installed Host, CLI, and IPC values.
+     */
+    std::shared_ptr<compute::ComputeRequestCancellationSource>
+        cancellation_source;
+
+    /**
+     * @brief Product-assigned canonical key/generation before staging.
+     * @note Embedded Host conversion leaves this empty. Kernel assigns it at
+     * latest-wins publication and ComputeService copies it into every child
+     * Run descriptor. It is private and absent from Host, CLI, and IPC v1.
+     */
+    std::optional<compute::SupersessionIdentity> supersession;
   };
 
   /**
@@ -244,31 +283,31 @@ class Kernel {
    *        session before load.
    * @param config_path Optional config file copied into the session.
    * @param cache_root_dir Optional external cache-root directory.
-   * @return Loaded graph name, or nullopt only when the name is already
-   *         published or loses the final map-insertion race.
-   * @throws std::bad_alloc if path, runtime, scheduler, graph, or diagnostic
+   * @return Loaded graph name, or nullopt when shutdown has started, the name
+   *         is already published, or this caller loses final publication.
+   * @throws std::bad_alloc if path, runtime, route, graph, or diagnostic
    *         allocation exhausts memory.
-   * @throws GraphError with `GraphErrc::InvalidParameter` when either complete
-   *         scheduler intent cannot be planned, becomes unavailable, or
-   *         returns no scheduler instance before installation;
-   *         `GraphErrc::ComputeError` when the worker budget cannot admit the
-   *         scheduler pair; `GraphErrc::Io` for explicit-source or session
-   *         filesystem failure; `GraphErrc::InvalidYaml` for syntax/schema
-   *         rejection; `GraphErrc::MissingDependency` or `GraphErrc::Cycle`
-   *         for topology rejection; and `GraphErrc::Unknown` for unexpected
+   * @throws GraphError with `GraphErrc::Io` for explicit-source or session
+   *         filesystem failure;
+   *         `GraphErrc::InvalidYaml` for syntax/schema rejection;
+   *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
+   *         rejection; and `GraphErrc::Unknown` for unexpected
    *         document-ingestion failures.
-   * @throws std::exception for scheduler/runtime startup failures not
+   * @throws std::exception for execution-service/runtime startup failures not
    *         classified by Kernel; InteractionService normalizes them before
    *         the embedded Host boundary.
-   * @note Scheduler planning and pair reservation complete before either
-   *       scheduler is constructed, attached, or started. An empty yaml_path
-   *       loads existing `<root_dir>/<name>/content.yaml` or intentionally
-   *       publishes an empty graph; a nonempty source is explicit and never
-   *       falls back. Complete document validation precedes map insertion. The
-   *       return label is allocated before the runtime enters the owned graph
-   *       map, and returning it after insertion uses only noexcept moves, so a
-   *       failure or propagated exception never leaves a newly published
-   *       session or scheduler reservation.
+   * @note The first graph load configures the Kernel-lifetime ExecutionService
+   *       even if later document ingestion fails; its fixed workers are
+   *       process infrastructure and retain no per-Graph reservation. The
+   *       unpublished runtime and session publication still roll back
+   *       transactionally. An empty yaml_path loads existing
+   *       `<root_dir>/<name>/content.yaml` or intentionally publishes an empty
+   *       graph; a nonempty source is explicit and never falls back. Complete
+   *       document validation precedes map insertion. Final shutdown/name
+   *       validation, lifecycle registration, and map insertion are one short
+   *       registry-locked publication transaction. The return label is
+   *       allocated before the runtime enters the owned graph map, and
+   *       returning it after insertion uses only noexcept moves.
    */
   std::optional<std::string> load_graph(const std::string& name,
                                         const std::string& root_dir,
@@ -277,43 +316,59 @@ class Kernel {
                                         const std::string& cache_root_dir = "");
 
   /**
-   * @brief Stops one loaded graph's state-lane admission before Host drainage.
-   *
-   * @param name Graph session name whose lane must reject new submissions.
-   * @return true when a runtime exists and its lane is draining or closed;
-   *         false when the session name is unknown.
-   * @throws std::logic_error if invoked from the target lane worker.
-   * @throws std::overflow_error if the close-generation counter is exhausted.
-   * @throws std::system_error if executor lifecycle synchronization fails.
-   * @note This is the non-destructive first phase of embedded Host close. It
-   *       preserves the graph map entry, scheduler owners, model, admitted
-   *       FIFO work, and LastError state while waking producers blocked by the
-   *       full lane. `close_graph()` must perform the later drain/join/stop
-   *       phase after Host-level admitted callers and async publication have
-   *       settled.
-   */
-  bool stop_graph_admission(const std::string& name);
-
-  /**
-   * @brief Stops and removes a loaded graph runtime.
+   * @brief Monotonically closes and removes one loaded graph runtime.
    *
    * @param name Graph session name to close.
    * @return true when a runtime existed and was removed; false when the session
    *         name is unknown.
-   * @throws Any exception propagated while stopping the runtime; no exception
-   *         is thrown when the graph name is unknown.
-   * @note Close idempotently stops graph-state admission, drains all prior
-   *       serialized compute/mutation/inspection work, and joins the lane
-   *       worker. Scheduler shutdown begins only after that boundary. Embedded
-   *       Host first rejects new calls and drains pre-marker synchronous
-   *       admissions, calls `stop_graph_admission()`, then waits for async
-   *       scheduling/status publication before invoking this method. The
-   *       graph map entry and its mutex-protected LastError snapshot are erased
-   *       only after stop succeeds. If stop throws, one replacement lane worker
-   *       is created before rethrow so the retained session can be inspected or
-   *       closed again; replacement-worker failure is surfaced.
+   * @throws Run lifecycle or lane synchronization errors before authoritative
+   *         close linearization; no exception is thrown when the graph name is
+   *         unknown.
+   * @note Registry lookup and close-generation selection are atomic under the
+   *       graph registry lock. The first caller owns the preallocated close
+   *       generation; concurrent callers join its exact result. A failure
+   *       before lifecycle linearization is rethrown identically to every
+   *       selected joiner; only after those joiners consume it may a later
+   *       caller own a fresh generation. Close changes the exact lifecycle row
+   *       to Closing and requests GraphClose, stops external compute-request
+   *       admission, settles and unregisters every indexed Run/candidate,
+   *       removes the empty row, drains and joins compute-request while
+   *       graph-state remains available for commit denial/discard, then drains
+   *       graph-state and removes runtime/routes. Final map removal and success
+   *       publication are atomic to later name lookups. After lifecycle
+   *       linearization the Graph is never reopened.
    */
   bool close_graph(const std::string& name);
+
+  /**
+   * @brief Closes every Graph with ProcessShutdown and stops execution.
+   * @return Nothing after all registry rows, lanes, resources, routes, workers,
+   * and policy bindings retire.
+   * @throws std::logic_error when invoked from a same-service worker/policy
+   * callback before mutation.
+   * @throws std::system_error from lifecycle/lane synchronization.
+   * @note Repeated control-thread calls are harmless. Caller validation occurs
+   *       before a short graph-registry transaction monotonically closes the
+   *       publication gate. Service lifecycle transition and cancellation
+   *       fanout then execute without `graphs_mutex_`; any unexpected failure
+   *       after the gate closes terminates because publication cannot safely
+   *       reopen. The lifecycle fence orders already-started publication
+   *       against ServiceStopping, while every later publication loses the
+   *       closed gate. This is the composition root path; no Host or IPC
+   *       process-shutdown method is exposed.
+   */
+  void shutdown();
+
+  /**
+   * @brief Copies the currently published graph/session names.
+   * @return Lexically ordered owned name snapshot.
+   * @throws std::bad_alloc if snapshot storage or a copied name exhausts
+   * memory.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note The complete copy is made under `graphs_mutex_`; no map iterator,
+   * string reference, or runtime owner escapes. A closing name remains visible
+   * until final erase and close-generation success publish together.
+   */
   std::vector<std::string> list_graphs() const;
 
   /**
@@ -328,8 +383,9 @@ class Kernel {
    * @note The request object is not retained after the call. benchmark_events
    * remains caller-owned for the duration of the call. GraphError, ordinary
    * std::exception, and unknown compute failures otherwise become false plus
-   * best-effort last_error() state. Runtime start and compute both execute
-   * inside the graph-state boundary shared with scheduler lifecycle methods.
+   * best-effort last_error() state. The private compute-request lane retains
+   * the call; graph-state is used only for runtime start/snapshot capture and
+   * final revision-validated publication.
    */
   bool compute(const ComputeRequest& request);
 
@@ -341,17 +397,18 @@ class Kernel {
    * @return Future resolving to an owned exact outcome, or nullopt when the
    *         graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
-   *         fails while scheduling the graph-state work.
-   * @throws std::runtime_error if graph-state admission has stopped.
-   * @throws std::system_error if runtime startup or graph-state asynchronous
-   *         execution cannot launch.
-   * @note The future owns the request copy, but benchmark_events remains
-   * caller-owned and must outlive future completion. Calling get() on the
-   * returned future may rethrow std::bad_alloc from compute execution or
-   * failure-diagnostic allocation inside the async work item. Recoverable
-   * failures are captured in AsyncComputeResult by that same work item. Runtime
-   * start occurs inside the submitted graph-state closure rather than during
-   * admission.
+   *         fails while scheduling compute-request work.
+   * @throws std::runtime_error if compute-request admission has stopped.
+   * @throws std::system_error if request-lane or graph-state synchronization
+   *         fails.
+   * @note The accepted callback retains a shared runtime owner independently
+   * of graph-map removal. The future owns the request copy, but
+   * benchmark_events remains caller-owned and must outlive future completion.
+   * Calling get() on the returned future may rethrow std::bad_alloc from
+   * compute execution or failure-diagnostic allocation inside the async work
+   * item. Recoverable failures are captured in AsyncComputeResult by that same
+   * work item. Runtime start and snapshot capture occur in a nested graph-state
+   * work item rather than during request-lane admission.
    */
   std::optional<std::future<AsyncComputeResult>> compute_async(
       ComputeRequest request);
@@ -453,22 +510,93 @@ class Kernel {
    */
   void save_graph_document(const std::string& name,
                            const std::string& document_path);
+
+  /**
+   * @brief Invalidates the Graph revision and removes its disk cache.
+   * @param name Graph session whose cache root should be cleared.
+   * @return True on success; false when the graph is missing or an ordinary
+   *         cache/executor failure is handled by the quiet facade.
+   * @throws std::bad_alloc from revision preparation, submission, or cache
+   *         clearing.
+   * @note Revision overflow fails before filesystem mutation. After successful
+   *       preparation, the successor is published before removal begins and
+   *       is never rolled back if removal/recreation later fails partially.
+   */
   bool clear_drive_cache(const std::string& name);
+
+  /**
+   * @brief Invalidates the Graph revision and clears formal HP memory caches.
+   * @param name Graph session whose node caches should be cleared.
+   * @return True on success; false for a missing graph or handled ordinary
+   *         cache/executor failure.
+   * @throws std::bad_alloc from preparation, submission, or cache traversal.
+   * @note Revision overflow occurs before node mutation. Once the successor is
+   *       published, a later partial clear failure never restores the old
+   *       revision, preventing captured Runs from publishing stale output.
+   */
   bool clear_memory_cache(const std::string& name);
+
+  /**
+   * @brief Invalidates the Graph revision and clears disk plus memory caches.
+   * @param name Graph session whose cache authority should be cleared.
+   * @return True on success; false for a missing graph or handled ordinary
+   *         cache/executor failure.
+   * @throws std::bad_alloc from preparation, submission, or either clear phase.
+   * @note The successor revision is published before the disk phase. It stays
+   *       advanced if disk or memory clearing later fails after partial work.
+   */
   bool clear_cache(const std::string& name);
   bool cache_all_nodes(const std::string& name,
                        const std::string& cache_precision);
+
+  /**
+   * @brief Invalidates the Graph revision and frees non-ending HP caches.
+   * @param name Graph session whose transient caches should be released.
+   * @return True on success; false for a missing graph or handled ordinary
+   *         traversal/cache/executor failure.
+   * @throws std::bad_alloc from preparation, submission, or traversal.
+   * @note Revision overflow precedes mutation. A published successor is never
+   *       rolled back after any partially successful node-cache release.
+   */
   bool free_transient_memory(const std::string& name);
   bool synchronize_disk_cache(const std::string& name,
                               const std::string& cache_precision);
   bool clear_graph(const std::string& name);
 
+  /**
+   * @brief Clears disk cache with revision invalidation and removal counts.
+   * @param name Graph session whose disk cache should be cleared.
+   * @return Removal statistics, or nullopt for a missing graph or handled
+   *         ordinary failure.
+   * @throws std::bad_alloc from preparation, submission, or cache clearing.
+   * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
+   *       clear_drive_cache().
+   */
   std::optional<GraphModel::DriveClearResult> clear_drive_cache_stats(
       const std::string& name);
+
+  /**
+   * @brief Clears formal HP memory caches with revision invalidation and count.
+   * @param name Graph session whose memory cache should be cleared.
+   * @return Clear statistics, or nullopt for a missing graph or handled
+   *         ordinary failure.
+   * @throws std::bad_alloc from preparation, submission, or cache traversal.
+   * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
+   *       clear_memory_cache().
+   */
   std::optional<GraphModel::MemoryClearResult> clear_memory_cache_stats(
       const std::string& name);
   std::optional<GraphModel::CacheSaveResult> cache_all_nodes_stats(
       const std::string& name, const std::string& cache_precision);
+  /**
+   * @brief Frees transient HP caches with revision invalidation and count.
+   * @param name Graph session whose non-ending caches should be released.
+   * @return Clear statistics, or nullopt for a missing graph or handled
+   *         ordinary failure.
+   * @throws std::bad_alloc from preparation, submission, or traversal.
+   * @note Uses the same prepare-publish-clear ordering and no-rollback rule as
+   *       free_transient_memory().
+   */
   std::optional<GraphModel::MemoryClearResult> free_transient_memory_stats(
       const std::string& name);
   std::optional<GraphModel::DiskSyncResult> synchronize_disk_cache_stats(
@@ -486,9 +614,13 @@ class Kernel {
    * @param name Graph/session name whose diagnostic is observed.
    * @return Owned LastError snapshot, or nullopt when none is recorded.
    * @throws std::bad_alloc if copying the diagnostic text fails.
-   * @throws std::system_error if the diagnostic mutex cannot be locked.
-   * @note All map access is serialized by last_error_mutex_. Async compute
-   * futures never derive their result from this mutable snapshot.
+   * @throws std::system_error if graph-registry or diagnostic locking fails.
+   * @note Name lookup first retains the currently published runtime, then
+   * releases `graphs_mutex_` before copying that runtime's diagnostic slot.
+   * A retained old runtime can neither overwrite nor clear a same-name
+   * replacement, and its slot is destroyed with its final shared runtime
+   * owner. Async compute futures never derive their result from this mutable
+   * snapshot.
    */
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
@@ -526,7 +658,7 @@ class Kernel {
                                                         std::size_t limit);
 
   /**
-   * @brief Reads one bounded non-destructive scheduler-trace page.
+   * @brief Reads one bounded non-destructive execution-trace page.
    * @param name Loaded graph/session name.
    * @param after_sequence Exclusive sequence cursor.
    * @param limit Maximum trace entries to copy.
@@ -537,7 +669,7 @@ class Kernel {
    *       Runtime exceptions propagate unchanged; only a missing graph is
    *       represented by `std::nullopt`.
    */
-  std::optional<GraphRuntime::SchedulerEventPage> scheduler_trace(
+  std::optional<GraphRuntime::ExecutionEventPage> execution_trace(
       const std::string& name, uint64_t after_sequence, std::size_t limit);
   std::optional<std::string> dirty_region_snapshot_debug(
       const std::string& name);
@@ -597,7 +729,7 @@ class Kernel {
    * @throws std::bad_alloc when graph-state submission, planning, snapshot
    *         copying, or LastError construction exhausts memory.
    * @note The complete transition runs as one serialized graph-state work
-   *       item; it does not submit scheduler work itself.
+   *       item; it does not submit physical execution work itself.
    */
   std::optional<compute::DirtyControlLaneResult> begin_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain,
@@ -658,7 +790,7 @@ class Kernel {
    * @throws std::bad_alloc when graph-state submission, planning, snapshot
    *         copying, or LastError construction exhausts memory.
    * @note cutoff_after_downstream is derived only after serialized snapshot
-   *       rebuilding; this facade does not own a scheduler queue.
+   *       rebuilding; this facade does not own an execution queue.
    */
   std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain);
@@ -732,88 +864,204 @@ class Kernel {
   PluginManager& plugins() { return PluginManager::process_instance(); }
   std::optional<double> get_last_io_time(const std::string& name);
 
-  // [新增] 暴露 Metal 设备访问器
+  /**
+   * @brief Copies the platform Metal device handle for one published runtime.
+   * @param name Graph/session name to resolve.
+   * @return Runtime device handle, or null when the name is absent.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note Kernel retains a shared runtime owner while copying the handle, so a
+   * concurrent close cannot destroy the runtime during lookup. The returned
+   * platform handle follows the existing platform ownership contract and does
+   * not grant Graph admission.
+   */
   id get_metal_device(const std::string& name);
 
   /**
-   * @brief Scheduler planning defaults captured for future Graph loads.
-   *
-   * @throws std::bad_alloc If constructing or copying scheduler type storage
-   * exhausts memory.
-   * @note Type availability and aggregate capacity are deliberately validated
-   * by transactional Graph load, not while defaults are stored. Existing
-   * runtimes retain their installed schedulers.
+   * @brief Copies canonical policy types visible to this process domain.
+   * @return Lexically sorted built-in and DSO policy type names.
+   * @throws std::bad_alloc or std::system_error when observation storage or
+   *         synchronization fails.
+   * @note The copied values contain no registry, callback, context, or DSO
+   *       ownership capability.
    */
-  struct SchedulerConfig {
-    /** @brief Scheduler type planned for global high-precision compute. */
-    std::string hp_type = "cpu_work_stealing";
+  std::vector<std::string> policy_available_types() const;
 
-    /** @brief Scheduler type planned for real-time dirty-region updates. */
-    std::string rt_type = "cpu_work_stealing";
+  /**
+   * @brief Copies the description for one canonical policy type.
+   * @param type_name Canonical registered policy type name.
+   * @return Bounded Host-owned description text.
+   * @throws GraphError with `GraphErrc::NotFound` when the type is absent.
+   * @throws std::bad_alloc when copied storage exhausts memory.
+   * @note The returned text remains valid after later registry mutation.
+   */
+  std::string policy_description(const std::string& type_name) const;
+
+  /**
+   * @brief Scans caller-ordered directories for policy ABI-v1 DSOs.
+   * @param directories Directory strings processed in caller order.
+   * @return Number of complete DSOs atomically published by this scan.
+   * @throws GraphError using the policy loader's exact recoverable category.
+   * @throws std::bad_alloc for Host or synchronous plugin allocation failure.
+   * @note Each DSO is one all-or-nothing registry transaction; successful
+   *       earlier DSOs remain visible if a later candidate fails.
+   */
+  std::size_t policy_scan(const std::vector<std::string>& directories);
+
+  /**
+   * @brief Loads one policy ABI-v1 DSO as a registry transaction.
+   * @param path Nonempty dynamic-library path.
+   * @return Nothing after complete publication.
+   * @throws GraphError using the policy loader's exact error mapping.
+   * @throws std::bad_alloc for Host or synchronous plugin allocation failure.
+   * @note No policy type is visible until every exported row validates.
+   */
+  void policy_load(const std::string& path);
+
+  /**
+   * @brief Copies currently visible policy DSO labels.
+   * @return Globally nondecreasing Host-owned path labels.
+   * @throws std::bad_alloc or std::system_error while copying observation
+   *         state.
+   * @note Labels are diagnostic values, not native handles or leases.
+   */
+  std::vector<std::string> policy_loaded_plugins() const;
+
+  /**
+   * @brief Atomically replaces both process policy-class bindings.
+   * @param config Canonical Interactive and Throughput defaults.
+   * @return Nothing after both new generations are published together.
+   * @throws GraphError for invalid, unsupported, callback, or generation
+   *         failure.
+   * @throws std::bad_alloc when candidate preparation exhausts memory.
+   * @note Failure preserves both current bindings and their generations.
+   */
+  void configure_policy_defaults(const HostPolicyConfig& config);
+
+  /**
+   * @brief Copies one process policy binding and its immutable first fault.
+   * @param policy_class Interactive or Throughput.
+   * @return Complete Host-owned binding snapshot.
+   * @throws GraphError with `InvalidParameter` for an invalid enum value.
+   * @throws std::bad_alloc when copied observation storage exhausts memory.
+   * @note Read-only observation is permitted from a policy callback.
+   */
+  PolicyInfoSnapshot policy_info(PolicyClass policy_class) const;
+
+  /**
+   * @brief Replaces exactly one process policy-class binding.
+   * @param policy_class Interactive or Throughput.
+   * @param type Canonical type supporting the requested class.
+   * @return Nothing after the new nonzero generation is published.
+   * @throws GraphError for invalid, unsupported, callback, or generation
+   *         failure.
+   * @throws std::bad_alloc when candidate preparation exhausts memory.
+   * @note Same-name replacement still advances generation and retires the old
+   *       context exactly once.
+   */
+  void replace_policy(PolicyClass policy_class, const std::string& type);
+
+  /**
+   * @brief Private execution defaults captured for future Graph loads.
+   *
+   * @throws std::bad_alloc If constructing or copying route storage
+   * exhausts memory.
+   * @note Selecting built-in CPU may resolve and start the fixed service pool
+   * while defaults are stored. Pool workers are uncharged infrastructure.
+   * Route vocabulary is validated before publication, and existing runtimes
+   * retain their installed bindings.
+   */
+  struct ExecutionConfig {
+    /** @brief Private route for global high-precision compute. */
+    std::string hp_type = "cpu";
+
+    /** @brief Private route for real-time dirty-region updates. */
+    std::string rt_type = "cpu";
 
     /**
-     * @brief CPU/plugin worker request shared by both intent plans.
+     * @brief Process execution worker request shared by both intent routes.
      * @note Zero selects bounded automatic resolution; positive values must be
-     * no greater than `kSchedulerWorkerRequestMax` at public boundaries.
+     * no greater than `kExecutionWorkerRequestMax` at public boundaries.
      */
     unsigned int worker_count = 0;
   };
 
   /**
-   * @brief Replaces scheduler planning defaults for future Graph loads.
-   * @param config Type names and worker request copied into Kernel ownership.
-   * @return Nothing.
-   * @throws std::bad_alloc If scheduler type copying exhausts memory.
-   * @note The method creates no plan, reservation, scheduler, or worker. Type
-   * and aggregate-budget rejection occur transactionally during later load;
-   * existing Graphs remain unchanged.
+   * @brief Copies the complete private execution-route vocabulary.
+   * @return Exactly `cpu`, `gpu_pipeline`, and `serial_debug` in lexical
+   * order.
+   * @throws std::bad_alloc when result storage exhausts memory.
+   * @note Routes are fixed process implementation values, not plugins.
    */
-  void set_scheduler_config(const SchedulerConfig& config);
+  std::vector<std::string> execution_available_types() const;
 
   /**
-   * @brief Returns current future-Graph scheduler planning defaults.
+   * @brief Copies the description for one private execution route.
+   * @param type_name Exact route name.
+   * @return Host-owned display text.
+   * @throws GraphError with `GraphErrc::NotFound` when the route is unknown.
+   * @throws std::bad_alloc when result storage exhausts memory.
+   * @note The removed scheduler names and `heterogeneous` alias are rejected.
+   */
+  std::string execution_description(const std::string& type_name) const;
+
+  /**
+   * @brief Stores future Graph defaults and freezes CPU workers when selected.
+   * @param config Type names and worker request copied into Kernel ownership.
+   * @return Nothing.
+   * @throws std::invalid_argument If a positive worker request conflicts with
+   * the already fixed injected service count.
+   * @throws std::invalid_argument If the resolved fixed worker count exceeds
+   * the composition-root CPU limit.
+   * @throws std::bad_alloc or std::system_error If route copying or
+   * first fixed-pool construction fails.
+   * @note A configuration selecting built-in CPU freezes and starts the one
+   * injected service pool owned for this Kernel, but does not mint a pool
+   * ledger reservation. All supported routes share that fixed worker domain.
+   * Later zero/equal requests preserve the pool and a conflicting positive
+   * request is rejected. Graph load and replacement never resize a configured
+   * pool; existing Graph bindings remain unchanged.
+   */
+  void set_execution_config(const ExecutionConfig& config);
+
+  /**
+   * @brief Returns current future-Graph execution defaults.
    * @return Borrowed immutable configuration valid until the next setter call
    * or Kernel destruction.
    * @throws Nothing.
    * @note The snapshot may name a type that later becomes unavailable; Graph
-   * load always performs fresh planning before pair admission.
+   * load always performs fresh planning before pair admission. Once the CPU
+   * service is configured, worker_count contains its resolved fixed count.
    */
-  const SchedulerConfig& get_scheduler_config() const;
+  const ExecutionConfig& get_execution_config() const;
 
   /**
-   * @brief Replaces one session scheduler through a strong owner transaction.
+   * @brief Replaces one session execution route through an ownerless
+   * transaction.
    * @param name Graph session name.
-   * @param intent Compute intent whose scheduler is replaced.
-   * @param type Registered scheduler type name.
-   * @return True after candidate publication; false when the Graph or
-   * scheduler type is absent, a current plugin factory returns null, or a
-   * non-Graph lifecycle failure is handled.
-   * @throws GraphError With `GraphErrc::ComputeError` when the process budget
-   * cannot reserve candidate headroom.
-   * @throws std::bad_alloc if scheduler creation or graph-state submission
-   *         exhausts memory.
-   * @note Planning, single-candidate reservation, construction, preparation,
-   * and publication occur inside the graph-state boundary while the old
-   * scheduler remains attached, running, and fully reserved. Capacity or
-   * preparation failure therefore cannot stop or displace the old owner; only
-   * a successful no-throw publication swap begins its teardown and release.
-   * Candidate/plugin GraphError remains a handled false result to preserve the
-   * established Kernel bool boundary outside budget exhaustion.
+   * @param intent Compute intent whose route is replaced.
+   * @param type Exact private execution route name.
+   * @return True after publication; false for a missing Graph, unknown route,
+   * or handled request-lane lifecycle failure.
+   * @throws std::bad_alloc if copied route or request-lane storage exhausts
+   * memory.
+   * @note Validation precedes a nonzero generation update serialized with
+   * same-Graph compute requests. The transaction constructs no plugin, worker
+   * owner, route adapter, or resource reservation.
    */
-  bool replace_scheduler(const std::string& name, ComputeIntent intent,
+  bool replace_execution(const std::string& name, ComputeIntent intent,
                          const std::string& type);
 
   /**
-   * @brief Copies one coherent scheduler information snapshot.
+   * @brief Copies one coherent execution-route information snapshot.
    * @param name Graph session name.
-   * @param intent Compute intent whose scheduler is inspected.
-   * @return Owned scheduler name/statistics, or nullopt when unavailable.
-   * @throws std::bad_alloc if graph-state submission or copied text allocation
+   * @param intent Compute intent whose route is inspected.
+   * @return Owned route name/statistics, or nullopt when unavailable.
+   * @throws std::bad_alloc if request-lane submission or copied text allocation
    *         fails.
-   * @note Inspection uses the same graph-state serialization boundary as
-   *       compute and replacement; no scheduler pointer escapes the callback.
+   * @note Inspection uses the same compute-request serialization boundary as
+   *       compute and replacement; no executor pointer escapes the callback.
    */
-  std::optional<std::pair<std::string, std::string>> get_scheduler_info(
+  std::optional<std::pair<std::string, std::string>> get_execution_info(
       const std::string& name, ComputeIntent intent);
 
  private:
@@ -895,19 +1143,21 @@ class Kernel {
    * @return Optional operation result, or nullopt when the graph is missing or
    * the operation throws a recoverable failure.
    * @throws std::bad_alloc if the runtime operation exhausts memory.
+   * @throws std::system_error if graph-registry locking fails.
    * @note This helper is for historically quiet runtime accessors. APIs that
    * must update LastError keep their explicit GraphError/std::exception
-   * handling.
+   * handling. It retains a shared runtime owner and releases the registry lock
+   * before invoking op.
    */
   template <typename Fn>
   auto with_runtime(const std::string& name, Fn&& op)
       -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphRuntime&>>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      return std::forward<Fn>(op)(*it->second);
+      return std::forward<Fn>(op)(*runtime);
     } catch (const std::bad_alloc&) {
       throw;
     } catch (...) {
@@ -923,16 +1173,18 @@ class Kernel {
    * @return Optional operation result, or nullopt when the graph is missing or
    * the operation throws a recoverable failure.
    * @throws std::bad_alloc if the const runtime operation exhausts memory.
-   * @note Used by const inspection APIs such as scheduler metadata queries.
+   * @throws std::system_error if graph-registry locking fails.
+   * @note Used by const inspection APIs that need copied runtime values. It
+   * retains a shared const runtime owner outside the registry lock.
    */
   template <typename Fn>
   auto with_runtime(GraphName name, Fn&& op) const -> ConstRuntimeResult<Fn> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      return std::forward<Fn>(op)(*it->second);
+      return std::forward<Fn>(op)(*runtime);
     } catch (const std::bad_alloc&) {
       throw;
     } catch (...) {
@@ -952,22 +1204,24 @@ class Kernel {
    *         exists, or any GraphError raised by the operation unchanged.
    * @throws std::bad_alloc if lookup diagnostics, submission, or operation
    *         execution exhausts memory.
+   * @throws std::system_error if graph-registry or graph-state synchronization
+   *         fails.
    * @throws std::exception for other submission, future, or operation
    *         failures.
-   * @note Callers that can race Kernel::close_graph() must retain an equivalent
-   *       runtime-lifetime admission across this helper. Embedded Host checked
-   *       operations use its lifecycle admission gate. Model validation and
-   *       mutation belong in the single submitted callable, avoiding a
-   *       check-then-act gap between graph-state work items.
+   * @note The helper retains a shared runtime owner outside the graph-registry
+   *       lock; Embedded Host checked operations additionally use its lifecycle
+   *       admission gate. Model validation and mutation belong in the single
+   *       submitted callable, avoiding a check-then-act gap between graph-state
+   *       work items.
    */
   template <typename Fn>
   auto with_required_graph_state(const std::string& name, Fn&& op)
       -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
     }
-    return it->second->graph_state().submit(std::forward<Fn>(op)).get();
+    return runtime->graph_state().submit(std::forward<Fn>(op)).get();
   }
 
   /**
@@ -981,19 +1235,20 @@ class Kernel {
    * recoverable submit/get/op failure occurs.
    * @throws std::bad_alloc if submission, future consumption, or the operation
    *         exhausts memory.
+   * @throws std::system_error if graph-registry locking fails.
    * @note This helper preserves the facade contract for graph-state commands:
-   * they remain serialized by GraphStateExecutor and are not routed through
-   * scheduler task runtimes.
+   * they retain a shared runtime owner, remain serialized by
+   * GraphStateExecutor, and are not routed through physical execution workers.
    */
   template <typename Fn>
   auto with_graph_state(const std::string& name, Fn&& op)
       -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      return it->second->graph_state().submit(std::forward<Fn>(op)).get();
+      return runtime->graph_state().submit(std::forward<Fn>(op)).get();
     } catch (const std::bad_alloc&) {
       throw;
     } catch (...) {
@@ -1013,50 +1268,51 @@ class Kernel {
    * the operation reports a handled failure.
    * @throws std::bad_alloc if runtime startup, submission, the operation, or
    *         handled-failure LastError construction exhausts memory.
+   * @throws std::system_error if graph-registry, graph-state, or LastError
+   *         synchronization fails.
    * @note Use this helper for facade APIs whose existing contract exposes
    * best-effort LastError details. Historically quiet accessors should keep
    * using with_graph_state so they continue to hide diagnostic state.
    * GraphError, standard exceptions, and non-standard exceptions otherwise
-   * become nullopt with exact or Unknown LastError state.
+   * become nullopt with exact or Unknown LastError state. The shared runtime
+   * owner remains retained through result/error translation.
    */
   template <typename Fn>
   auto with_graph_state_last_error(const std::string& name,
                                    const char* exception_prefix, Fn&& op,
                                    bool start_runtime = false)
       -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       return std::nullopt;
     }
     try {
-      if (start_runtime && !it->second->running()) {
-        it->second->start();
+      if (start_runtime && !runtime->running()) {
+        runtime->start();
       }
-      auto result =
-          it->second->graph_state().submit(std::forward<Fn>(op)).get();
-      clear_last_error(name);
+      auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
+      runtime->clear_last_error();
       return result;
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const GraphError& ge) {
-      store_last_error(name, LastError{ge.code(), ge.what()});
+      runtime->store_last_error(LastError{ge.code(), ge.what()});
       return std::nullopt;
     } catch (const std::exception& e) {
-      store_last_error(name,
-                       LastError{GraphErrc::Unknown,
-                                 std::string(exception_prefix) + e.what()});
+      runtime->store_last_error(LastError{
+          GraphErrc::Unknown, std::string(exception_prefix) + e.what()});
       return std::nullopt;
     } catch (...) {
-      store_last_error(name, LastError{GraphErrc::Unknown,
-                                       std::string(exception_prefix) +
-                                           "unknown non-standard exception"});
+      runtime->store_last_error(LastError{
+          GraphErrc::Unknown,
+          std::string(exception_prefix) + "unknown non-standard exception"});
       return std::nullopt;
     }
   }
 
   /**
    * @brief Executes one required serialized graph-state operation while
-   *        preserving its exact exception and LastError mirror.
+   *        preserving its exact exception and runtime-owned LastError slot.
    *
    * @tparam Fn Callable accepted by GraphStateExecutor as `op(GraphModel&)`.
    * @param name Required graph session name.
@@ -1070,77 +1326,41 @@ class Kernel {
    *         absent, or any GraphError raised inside the work item unchanged.
    * @throws std::bad_alloc if startup, submission, operation, or diagnostic
    *         recording exhausts memory.
+   * @throws std::system_error if graph-registry, graph-state, or LastError
+   *         synchronization fails.
    * @throws std::exception for other runtime, executor, or operation failures.
    * @note Missing sessions do not create LastError state. Existing-session
    *       success clears stale state; GraphError and ordinary exceptions are
-   *       recorded before rethrow. Callers that can race close must retain an
-   *       equivalent runtime-lifetime admission across this helper.
+   *       recorded before rethrow. The helper retains a shared runtime owner
+   *       through submission and exact error translation.
    */
   template <typename Fn>
   auto with_required_graph_state_last_error(const std::string& name,
                                             const char* exception_prefix,
                                             Fn&& op, bool start_runtime = false)
       -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
+    auto runtime = acquire_runtime(name);
+    if (!runtime) {
       throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
     }
     try {
-      if (start_runtime && !it->second->running()) {
-        it->second->start();
+      if (start_runtime && !runtime->running()) {
+        runtime->start();
       }
-      auto result =
-          it->second->graph_state().submit(std::forward<Fn>(op)).get();
-      clear_last_error(name);
+      auto result = runtime->graph_state().submit(std::forward<Fn>(op)).get();
+      runtime->clear_last_error();
       return result;
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const GraphError& error) {
-      store_last_error(name, LastError{error.code(), error.what()});
+      runtime->store_last_error(LastError{error.code(), error.what()});
       throw;
     } catch (const std::exception& error) {
-      store_last_error(name,
-                       LastError{GraphErrc::Unknown,
-                                 std::string(exception_prefix) + error.what()});
+      runtime->store_last_error(LastError{
+          GraphErrc::Unknown, std::string(exception_prefix) + error.what()});
       throw;
     }
   }
-
-  /**
-   * @brief Removes one graph's best-effort diagnostic snapshot.
-   *
-   * @param name Graph/session name whose diagnostic is cleared.
-   * @return Nothing.
-   * @throws std::system_error if locking the diagnostic mutex fails.
-   * @note Every access to `last_error_`, including accesses from independent
-   *       graph-state executors, uses the same mutex through these helpers.
-   */
-  void clear_last_error(const std::string& name);
-
-  /**
-   * @brief Publishes one owned best-effort diagnostic snapshot.
-   *
-   * @param name Graph/session name whose diagnostic is replaced.
-   * @param error Fully constructed diagnostic moved into the shared map.
-   * @return Nothing.
-   * @throws std::bad_alloc if the graph key or map node cannot be allocated.
-   * @throws std::system_error if locking the diagnostic mutex fails.
-   * @note Async callers retain a separate owned result; this mirror exists only
-   *       for the legacy `last_error()` observation surface.
-   */
-  void store_last_error(const std::string& name, LastError error);
-
-  /**
-   * @brief Copies one graph's best-effort diagnostic snapshot.
-   *
-   * @param name Graph/session name to inspect.
-   * @return Copied diagnostic, or nullopt when no failure is recorded.
-   * @throws std::bad_alloc if copying the diagnostic text fails.
-   * @throws std::system_error if locking the diagnostic mutex fails.
-   * @note The copy is completed while holding `last_error_mutex_`; no map
-   *       iterator or borrowed string escapes the protected region.
-   */
-  std::optional<LastError> copy_last_error(const std::string& name) const;
 
   /**
    * @brief Runs internal synchronous compute from an adapter request object.
@@ -1164,12 +1384,14 @@ class Kernel {
    * @return Future that resolves to the work item's owned exact result, or
    *         nullopt when the graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
-   *         fails while submitting graph-state work.
-   * @throws std::runtime_error if the graph-state lane has stopped admission.
-   * @throws std::system_error if graph-state queue synchronization fails.
-   * @note The returned future owns the request copy. benchmark_events remains
-   * caller-owned and must outlive future completion. Future get() may rethrow
-   * std::bad_alloc from compute execution or exact diagnostic construction.
+   *         fails while submitting compute-request work.
+   * @throws std::runtime_error if the compute-request lane stopped admission.
+   * @throws std::system_error if request-lane synchronization fails.
+   * @note The accepted callback retains a shared runtime owner independently
+   * of graph-map removal, and the returned future owns the request copy.
+   * benchmark_events remains caller-owned and must outlive future completion.
+   * Future get() may rethrow std::bad_alloc from compute execution or exact
+   * diagnostic construction.
    */
   std::optional<std::future<AsyncComputeResult>> compute_async_request(
       ComputeRequest request);
@@ -1190,83 +1412,112 @@ class Kernel {
       const ComputeRequest& request);
 
   /**
-   * @brief Dispatches one request through the correct ComputeService path.
+   * @brief Acquires one mutable runtime lifetime owner by graph name.
    *
-   * @param compute_service Request-scoped ComputeService collaborator.
-   * @param runtime Runtime that owns scheduler/event services for the graph.
-   * @param graph Visible graph model to compute against.
-   * @param request Kernel compute request to translate into service options.
-   * @return Mutable output owned by the graph node cache.
-   * @throws GraphError if ComputeService rejects the graph request.
-   * @throws std::bad_alloc if request translation or ComputeService exhausts
-   *         memory.
-   * @throws std::exception for other failures propagated by ComputeService.
-   * @note intent=nullopt selects legacy HP-only overloads; otherwise intent and
-   * dirty_roi are forwarded to the intent-aware HP/RT path. Callers should
-   * invoke this only from a GraphStateExecutor work item when the graph is a
-   * visible runtime model.
+   * @param name Graph/session name to resolve.
+   * @return Shared runtime owner, or empty when the name is not published.
+   * @throws std::system_error if registry locking fails.
+   * @note The map lookup and owner copy occur under `graphs_mutex_`; callers
+   *       perform all runtime work after the lock is released. The returned
+   *       owner prevents destruction when close concurrently removes the map
+   *       entry, but it does not reopen stopped lane admission.
    */
-  NodeOutput& run_compute_request(ComputeService& compute_service,
-                                  GraphRuntime& runtime, GraphModel& graph,
-                                  const ComputeRequest& request);
+  std::shared_ptr<GraphRuntime> acquire_runtime(const std::string& name);
 
   /**
-   * @brief Atomically admits and installs both schedulers on an unpublished
-   * runtime.
+   * @brief Acquires one const runtime lifetime owner by graph name.
    *
-   * The method first plans HP and RT without side effects, reserves their
-   * aggregate process capacity with one commit, constructs both reservation-
-   * owned schedulers as local candidates, and only then attaches them to the
-   * caller-owned runtime. Successful installation clears stale diagnostics.
-   *
-   * @param name Graph/session label whose stale LastError is cleared only
-   *             after both candidates are installed.
-   * @param runtime Unpublished runtime that receives both scheduler owners.
-   * @return Nothing.
-   * @throws GraphError with `GraphErrc::InvalidParameter` when either type is
-   *         unsupported, a planned plugin becomes unavailable, or its factory
-   *         returns no scheduler instance.
-   * @throws GraphError with `GraphErrc::ComputeError` when aggregate process
-   *         capacity cannot admit both intent plans.
-   * @throws std::invalid_argument or std::overflow_error for invalid planning
-   *         inputs and arithmetic.
-   * @throws Any scheduler construction or attach failure unchanged.
-   * @note Every exceptional exit occurs before Graph-map publication. Local
-   *       candidates and the unpublished runtime release all transferred and
-   *       untransferred reservations through RAII; no scheduler is constructed
-   *       when planning or pair admission fails.
+   * @param name Graph/session name to resolve.
+   * @return Shared const runtime owner, or empty when the name is not
+   *         published.
+   * @throws std::system_error if registry locking fails.
+   * @note This overload uses the same short registry critical section as the
+   *       mutable form and exposes no mutable runtime access to const callers.
    */
-  void setup_schedulers_for_runtime(const std::string& name,
-                                    GraphRuntime& runtime);
+  std::shared_ptr<const GraphRuntime> acquire_runtime(
+      const std::string& name) const;
 
   /**
-   * @brief Graph-name map owning every runtime and admitted graph-state lane.
-   * @note `Kernel::~Kernel()` clears this map explicitly before ordinary member
-   * destruction so runtime drainage completes while every borrowed Kernel
-   * collaborator remains alive. External lifecycle admission must already have
-   * stopped calls that could access this unsynchronized map.
+   * @brief Executes the monotonic close sequence with one exact reason.
+   * @param name Graph session label used only for map lookup.
+   * @param reason GraphClose for direct close or ProcessShutdown for root stop.
+   * @return True when a runtime existed and completed close; false if absent.
+   * @throws std::logic_error or std::system_error before authoritative close
+   * linearization; an invariant failure afterward terminates.
+   * @note Map lookup and nonwaiting close-claim selection are one
+   * registry-locked transaction. A retry blocked by an old failed generation
+   * waits without `graphs_mutex_`, then revalidates the exact shared runtime
+   * and GraphInstanceId before selecting again. Pre-linearization failure is
+   * published to exact-generation joiners before rethrow and permits a later
+   * fresh-generation retry after all old joiners observe it. Registry row
+   * removal precedes compute-request lane drain, then graph-state drain and
+   * route/model retirement. Final graph-map removal and successful close
+   * publication are one registry-locked transaction, so no caller observes an
+   * absent name before the generation is complete.
    */
-  std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
+  bool close_graph_with_reason(const std::string& name,
+                               compute::ComputeRunCancellationReason reason);
 
   /**
-   * @brief Serializes all reads, writes, and erases of `last_error_`.
+   * @brief Captures, executes, and revision-commits one Kernel compute request.
    *
-   * @note The mutex is independent of per-graph GraphStateExecutor instances
-   *       because asynchronous computes for different sessions may publish
-   *       diagnostics concurrently. It is never held while graph-state or
-   *       scheduler work executes.
+   * @param runtime Runtime supplying the visible graph-state lane, staged RT
+   * proxy source, event service, and serialized route-binding lifetime.
+   * @param request Kernel request already retained by the compute-request lane.
+   * @param committed_output Optional destination for an owned copy of the exact
+   * staged target output after visible commit succeeds.
+   * @return Nothing after visible commit and any requested output copy succeed.
+   * @throws GraphError if snapshot capture, ComputeService execution, staged
+   * validation, persistence, or exact revision commit fails.
+   * @throws std::bad_alloc if snapshot, policy, request, or output state
+   * allocation fails.
+   * @throws std::exception for execution and operation failures propagated by
+   * ComputeService.
+   * @note Capture and final publication use GraphStateExecutor; operation work
+   * uses only request-owned Graph/proxy snapshots outside that lane. When
+   * committed_output is non-null, the copy is taken from that same staged
+   * domain before its lifetime ends, so an ordinary graph-state mutation cannot
+   * interleave between commit and result capture. The caller must already hold
+   * the runtime's compute-request lane so route bindings cannot be inspected
+   * or replaced concurrently.
    */
-  mutable std::mutex last_error_mutex_;
+  void execute_staged_compute_request(GraphRuntime& runtime,
+                                      const ComputeRequest& request,
+                                      NodeOutput* committed_output = nullptr);
 
   /**
-   * @brief Best-effort per-session diagnostic mirror for legacy inspection.
+   * @brief Serializes graph-name lookup, publication, removal, and shutdown
+   * admission.
    *
-   * @note Access is permitted only through clear_last_error(),
-   *       store_last_error(), and copy_last_error() while
-   *       `last_error_mutex_` is held. Async operation results never derive
-   *       their final status from this map.
+   * @note The lock is never held while filesystem IO, close-generation retry
+   * waiting, lifecycle cancellation fanout, lane work, Run settlement, runtime
+   * drainage, or route/model destruction executes. Nested close-coordinator
+   * access is restricted to nonwaiting selection/result checks and final
+   * success publication; no inverse nested acquisition is allowed.
    */
-  std::map<std::string, LastError> last_error_;
+  mutable std::mutex graphs_mutex_;
+
+  /**
+   * @brief Graph-name map retaining every published runtime lifetime root.
+   *
+   * @note Every access is protected by `graphs_mutex_`. Operations copy one
+   * shared owner before leaving the critical section, so close may remove a
+   * name without destroying a runtime still used by an already admitted
+   * caller. `Kernel::~Kernel()` drains these runtimes before ordinary member
+   * teardown reaches borrowed collaborators.
+   */
+  std::map<std::string, std::shared_ptr<GraphRuntime>> graphs_;
+
+  /**
+   * @brief Monotonic rejection flag for late graph publication.
+   *
+   * @note Access is protected by `graphs_mutex_`. The ExecutionService caller
+   * check completes before this flag changes. Once true it is never reopened;
+   * the service transition and cancellation fanout execute after releasing the
+   * graph registry lock.
+   */
+  bool shutdown_started_ = false;
+
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;
   /**
@@ -1285,8 +1536,17 @@ class Kernel {
   GraphIOService io_service_;
   RoiPropagationService roi_propagation_service_;
 
-  // [M3.4] 调度器配置
-  SchedulerConfig scheduler_config_;
+  /**
+   * @brief Explicitly injected process CPU execution owner.
+   *
+   * @note Kernel passes a reference to request-local ComputeService instances.
+   * The destructor body first drains and clears every Graph runtime, so no
+   * admitted work can retain a ComputeService when this owner releases.
+   */
+  std::shared_ptr<compute::ExecutionService> execution_service_;
+
+  /** @brief Future-Graph private route and process-worker defaults. */
+  ExecutionConfig execution_config_;
 };
 
 }  // namespace ps

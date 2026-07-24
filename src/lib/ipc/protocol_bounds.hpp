@@ -5,11 +5,11 @@
 namespace ps::ipc::internal {
 
 /**
- * @brief Maximum number of elements in one general version 1 wire page.
+ * @brief Maximum number of elements in one general version 2 wire page.
  *
  * @throws Nothing; this is an immutable compile-time value.
  * @note Event drain has the smaller public 1,024 limit; this value applies to
- *       scheduler traces and other general wire pages.
+ *       execution traces and other general wire pages.
  */
 inline constexpr std::size_t kGeneralPageMaxEntries = 4096;
 
@@ -32,7 +32,7 @@ inline constexpr std::size_t kSnapshotMaxEntries = 262144;
 inline constexpr std::size_t kSnapshotMaxBytes = 64U * 1024U * 1024U;
 
 /**
- * @brief Maximum byte size of one version 1 output artifact.
+ * @brief Maximum byte size of one version 2 output artifact.
  *
  * @throws Nothing; this is an immutable compile-time value.
  * @note Both daemon admission and direct Client metadata decoding enforce the

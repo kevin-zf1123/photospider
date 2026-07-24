@@ -12,6 +12,8 @@ class GraphRuntime;
 
 namespace ps::compute {
 
+class ComputeRunLease;
+
 /**
  * @brief Refreshes real-time proxy buffers from committed HP dirty outputs.
  *
@@ -53,14 +55,17 @@ class DownsampleExecutor {
    *
    * @param graph Graph containing committed HP node cache state.
    * @param proxy_graph RT proxy graph receiving downsampled output.
-   * @param runtime Optional runtime used only for scheduler trace events.
+   * @param runtime Optional runtime used only for execution trace events.
    * @param events Event service that receives downsample status events.
+   * @param run_lease Optional borrowed HP lifecycle lease used for cooperative
+   * cancellation observations between requests and before proxy publication.
    * @throws Nothing directly.
    * @note The executor stores borrowed references and performs no ownership
    * transfer.
    */
   DownsampleExecutor(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
-                     GraphRuntime* runtime, GraphEventService& events);
+                     GraphRuntime* runtime, GraphEventService& events,
+                     const ComputeRunLease* run_lease = nullptr);
 
   /**
    * @brief Executes all pending downsample requests in caller order.
@@ -72,6 +77,9 @@ class DownsampleExecutor {
    * @throws GraphError or OpenCV exceptions if image conversion or resize
    * otherwise fails unexpectedly.
    * @note Empty request vectors are valid and leave graph state unchanged.
+   * Cancellation is observed before and after every request; one resize already
+   * entered is non-preemptible, but its staged result is checked before proxy
+   * publication and later requests are not entered.
    */
   void execute(const std::vector<Request>& requests);
 
@@ -85,7 +93,10 @@ class DownsampleExecutor {
    * @throws GraphError or OpenCV exceptions from other buffer conversion or
    * resize failures.
    * @note Missing nodes, missing HP outputs, and stale generations are skipped
-   * to preserve the previous dirty update behavior.
+   * to preserve the previous dirty update behavior. Passthrough and resized
+   * paths both observe cancellation after staging and immediately before
+   * `RealtimeProxyGraph` commit; cancellation observed there prevents that
+   * node's staged proxy commit.
    */
   void execute_one(const Request& request);
 
@@ -177,11 +188,11 @@ class DownsampleExecutor {
                           int hp_version);
 
   /**
-   * @brief Emits a stale-generation scheduler trace event when possible.
+   * @brief Emits a stale-generation execution trace event when possible.
    *
    * @param node_id Node whose request was skipped.
    * @throws Any exception propagated by GraphRuntime::log_event.
-   * @note A null runtime intentionally suppresses scheduler trace output.
+   * @note A null runtime intentionally suppresses execution trace output.
    */
   void log_stale_generation(int node_id) const;
 
@@ -197,6 +208,10 @@ class DownsampleExecutor {
 
   /** @brief Borrowed event sink for downsample status events. */
   GraphEventService& events_;
+
+  /** @brief Optional borrowed HP lifecycle lease for cooperative observations.
+   */
+  const ComputeRunLease* run_lease_ = nullptr;
 };
 
 }  // namespace ps::compute

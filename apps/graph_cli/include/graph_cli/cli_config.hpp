@@ -23,8 +23,8 @@ struct CliConfig {
   std::string cache_root_dir = "cache";
   /** @brief Directories scanned for operation plugins at CLI startup. */
   std::vector<std::string> plugin_dirs = {"build/plugins"};
-  /** @brief Directories scanned for scheduler plugins at CLI startup. */
-  std::vector<std::string> scheduler_dirs = {"build/schedulers"};
+  /** @brief Directories scanned for policy plugins at CLI startup. */
+  std::vector<std::string> policy_dirs = {"build/policies"};
   /** @brief Default precision label used by cache operations. */
   std::string cache_precision = "int8";
   /** @brief Default dependency-tree rendering mode. */
@@ -56,40 +56,36 @@ struct CliConfig {
   /** @brief Whether overwriting an existing session emits a warning. */
   bool session_warning = true;
 
-  /** @brief Default scheduler type for HP high-precision computations.
-   *
-   * Built-in values are "cpu_work_stealing", "serial_debug",
-   * "gpu_pipeline", and "heterogeneous". Scheduler plugin names become valid
-   * after graph_cli scans scheduler_dirs or a user runs scheduler scan/load.
-   */
-  std::string scheduler_hp_type = "cpu_work_stealing";
+  /** @brief Process policy type bound to the Interactive service class. */
+  std::string policy_interactive_type = "interactive";
 
-  /** @brief Default scheduler type for RT real-time kernel intent work.
-   *
-   * This selects the scheduler attached to ComputeIntent::RealTimeUpdate for
-   * kernel/API callers. It does not make graph_cli expose RT compute commands
-   * or dirty source lifecycle commands.
-   */
-  std::string scheduler_rt_type = "cpu_work_stealing";
+  /** @brief Process policy type bound to the Throughput service class. */
+  std::string policy_throughput_type = "throughput";
 
-  /** @brief Worker count in `[0, 8]`; zero requests automatic resolution. */
-  int scheduler_worker_count = 0;
+  /** @brief Default private route for future high-precision sessions. */
+  std::string execution_hp_type = "cpu";
+
+  /** @brief Default private route for future real-time session updates. */
+  std::string execution_rt_type = "cpu";
+
+  /** @brief Process worker request in `[0, 8]`; zero selects automatic. */
+  int execution_worker_count = 0;
 };
 
 /**
- * @brief Validates one CLI scheduler worker-count value.
+ * @brief Validates one CLI execution worker-count value.
  *
  * @param worker_count Parsed or programmatically supplied CLI value.
  * @return Nothing.
  * @throws std::invalid_argument If `worker_count` is outside the inclusive
- * range from zero through the public scheduler request ceiling of eight.
+ * range from zero through the public execution request ceiling of eight.
  * @note Zero is preserved as automatic-resolution intent. The check performs
  * no Host call and mutates no configuration state.
  */
-void validate_cli_scheduler_worker_count(int worker_count);
+void validate_cli_execution_worker_count(int worker_count);
 
 /**
- * @brief Strictly parses one scheduler worker count entered in the CLI editor.
+ * @brief Strictly parses one execution worker count entered in the CLI editor.
  *
  * @param text Complete editor field text with no accepted trailing characters.
  * @return Parsed value in the inclusive range `[0, 8]`.
@@ -100,23 +96,25 @@ void validate_cli_scheduler_worker_count(int worker_count);
  * @note The parser performs no mutation, allowing the editor to retain its
  * previous configuration snapshot when validation fails.
  */
-int parse_cli_scheduler_worker_count(std::string_view text);
+int parse_cli_execution_worker_count(std::string_view text);
 
 /**
- * @brief Applies one validated CLI scheduler-default snapshot to a Host.
+ * @brief Applies validated CLI policy and execution defaults to a Host.
  *
- * @param host Borrowed Host that owns future Graph scheduler defaults.
+ * @param host Borrowed Host that owns process policy and future-session route
+ * defaults.
  * @param config Complete CLI configuration snapshot to translate.
  * @return Nothing.
  * @throws std::invalid_argument If the CLI worker count is outside `[0, 8]`.
  * @throws std::runtime_error If the Host rejects the otherwise valid candidate.
- * @throws std::bad_alloc If validation diagnostics, copied scheduler type
+ * @throws std::bad_alloc If validation diagnostics, copied policy/route
  * strings, Host result storage, or failure diagnostics cannot allocate.
- * @note The function calls `Host::configure_scheduler_defaults` exactly once
- * after validation. A thrown Host rejection leaves prior Host defaults intact
- * according to that public operation's transactional contract.
+ * @note All local syntax/range validation precedes the two Host calls. Each
+ * Host operation is transactional in its own domain; a policy success is not
+ * rolled back if the later execution-domain call reports an external race.
  */
-void apply_cli_scheduler_defaults(ps::Host& host, const CliConfig& config);
+void apply_cli_policy_execution_defaults(ps::Host& host,
+                                         const CliConfig& config);
 
 /**
  * @brief Serializes one CLI configuration to a YAML file.
@@ -163,5 +161,9 @@ void load_or_create_config(const std::string& config_path, CliConfig& config);
  * One outer catch chain translates recoverable standard exceptions. The
  * process entry point alone owns resource-exhaustion exit policy, so this
  * reusable boundary preserves `std::bad_alloc` unchanged.
+ * @note `getopt_long` and its cursor/result globals are process-wide. Repeated
+ * serialized in-process calls are supported, but concurrent calls are not;
+ * embedders must serialize every complete `run_graph_cli` invocation, even
+ * when argument vectors and Host instances are distinct.
  */
 int run_graph_cli(int argc, char** argv, ps::Host& host);

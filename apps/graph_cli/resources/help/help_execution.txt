@@ -1,0 +1,21 @@
+execution - Inspect and replace private physical execution routes
+
+SYNOPSIS
+  execution list
+  execution get [hp|rt|all]
+  execution set <hp|rt> <type>
+  execution set all <hp-type> <rt-type>
+  execution help
+
+DESCRIPTION
+  The fixed execution types are cpu, gpu_pipeline, and serial_debug. Routes are
+  private Host implementation values, not loadable plugins. get/set operate on
+  the current graph session. Replacing a route publishes a new generation even
+  when the type name is unchanged.
+
+CONFIGURATION
+  execution_hp_type: cpu
+  execution_rt_type: cpu
+  execution_worker_count: 0
+
+  Worker requests are 0..8. Zero selects bounded automatic resolution.

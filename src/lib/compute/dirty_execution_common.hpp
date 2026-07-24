@@ -5,6 +5,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -13,14 +15,16 @@
 #include "compute/compute_task_dependency_state.hpp"
 #include "compute/compute_task_dispatcher.hpp"
 #include "compute/dirty_region_planner.hpp"
+#include "compute/execution_service.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps {
 class GraphModel;
 class GraphRuntime;
+class ExecutionHostContext;
 }  // namespace ps
 
 namespace ps::compute {
@@ -28,18 +32,21 @@ namespace ps::compute {
 /**
  * @brief Owns per-node critical sections for one dirty update transaction.
  *
- * Dirty scheduler callbacks use these mutexes while copying a live `Node`,
+ * Dirty ready callbacks use these mutexes while copying a live `Node`,
  * resolving its format-neutral runtime parameters, and touching request-local
- * staging metadata. A scheduler-backed `RealTimeUpdate` shares one instance
+ * staging metadata. A route-backed `RealTimeUpdate` shares one instance
  * between its concurrent HP and RT siblings so both domains synchronize access
  * to the same live node without coupling their task graphs or output buffers.
  *
  * @throws std::bad_alloc If node-id or mutex storage cannot be allocated.
- * @note The node map is fully constructed before scheduler submission and is
+ * @throws GraphError If checked retained-memory estimation overflows.
+ * @note The node map is fully constructed before execution submission and is
  * immutable thereafter. Different node ids remain independent, and selected
  * operation execution occurs outside these critical sections. Ownership is
  * request-scoped; no instance is stored in GraphModel, GraphRuntime, or global
- * state.
+ * state. The retained-memory contract includes the shared allocation,
+ * immutable map, and every independently owned mutex while excluding
+ * allocator-private metadata.
  */
 class DirtyNodeSynchronization final {
  public:
@@ -48,7 +55,7 @@ class DirtyNodeSynchronization final {
    * @param node_ids Stable graph node identities; duplicate values are ignored.
    * @throws std::bad_alloc If the mutex map or one mutex cannot be allocated.
    * @note Construction must finish before HP/RT sibling callbacks start. The
-   * caller must keep this object alive until every scheduler callback drains.
+   * caller must keep this object alive until every ready callback drains.
    */
   explicit DirtyNodeSynchronization(const std::vector<int>& node_ids);
 
@@ -63,28 +70,24 @@ class DirtyNodeSynchronization final {
    */
   std::mutex& mutex_for(int node_id) const;
 
+  /**
+   * @brief Estimates complete Host-owned synchronization storage.
+   * @return Checked object, shared-control, unordered-map bucket/value/linkage,
+   * unique-owner, and independently allocated mutex bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The estimate includes one shared control block because callers retain
+   * this object through `std::shared_ptr`. The unique_ptr owner itself is
+   * already part of each unordered-map value; every pointee adds one
+   * `sizeof(std::mutex)`. Allocator-private node metadata and any opaque
+   * platform mutex allocation beyond the visible C++ object are excluded.
+   * The immutable map permits concurrent calls without additional locking.
+   */
+  std::uint64_t retained_memory_bytes() const;
+
  private:
   /** @brief Immutable node-id index of independently owned mutexes. */
   std::unordered_map<int, std::unique_ptr<std::mutex>> node_mutexes_;
 };
-
-/**
- * @brief Returns the running scheduler registered for one compute intent.
- *
- * This helper preserves the ComputeService scheduler contract used by full
- * graph dispatch and dirty ROI dispatch. It looks up the complete `IScheduler`
- * registered on the supplied GraphRuntime and starts it when necessary.
- *
- * @param runtime Per-graph runtime that owns intent-specific schedulers.
- * @param intent Compute intent whose scheduler should receive work.
- * @return Running scheduler for the requested intent.
- * @throws GraphError when no scheduler is registered.
- * @throws Any scheduler start exception unchanged.
- * @note The returned reference remains owned by GraphRuntime. Callers must not
- * store it beyond the active compute request.
- */
-IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
-                                     ComputeIntent intent);
 
 /**
  * @brief Bounded dirty planning result used by HP and RT executors.
@@ -92,11 +95,11 @@ IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
  * The prepared state packages the graph-scoped dirty snapshot, the
  * immutable node/cache-pruned compute plan, the generation-local dirty
  * selection overlay, and the materialized source/downstream task groups that
- * will be submitted to the scheduler. The dirty plan itself owns the per-node
- * HP or RT ROI entries used by node execution.
+ * will be submitted to the selected physical execution domain. The dirty plan
+ * itself owns the per-node HP or RT ROI entries used by node execution.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
- * @note The struct is request-local. It must not be stored after scheduler
+ * @note The struct is request-local. It must not be stored after execution
  * callbacks derived from it have drained.
  */
 template <typename DirtyPlan>
@@ -125,21 +128,87 @@ struct PreparedDirtyPlan {
  *
  * The request object lowers helper parameter count and makes the dispatch
  * contract explicit: source boundary work completes before downstream work.
- * Scheduler batches allocate their own epochs; dirty generation remains
- * separate snapshot and source-commit provenance.
+ * Injected runtime batches allocate their own epochs; process-service batches
+ * use Run identity. Dirty generation remains separate snapshot and
+ * source-commit provenance.
  */
 struct DirtySourceFirstRunRequest {
-  /** @brief Optional runtime that owns intent schedulers and trace events. */
+  /** @brief Optional Graph runtime owning route bindings and trace storage. */
   GraphRuntime* runtime = nullptr;
 
-  /** @brief Intent-specific scheduler task pool to target. */
+  /** @brief Intent whose physical execution domain receives the work. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+
+  /**
+   * @brief Injected process execution service, or null for inline routing.
+   */
+  ExecutionService* execution_service = nullptr;
+
+  /** @brief Exact private route used by every service batch in this request. */
+  std::string execution_type = "cpu";
+
+  /**
+   * @brief Observation target borrowed for process-service settlement.
+   *
+   * @note Required exactly when execution_service is non-null and valid until
+   * every synchronous service batch in this request has drained.
+   */
+  ExecutionHostContext* host = nullptr;
+
+  /**
+   * @brief Single-domain Run owning service submission leases.
+   *
+   * @note Required exactly when execution_service is non-null.
+   */
+  ComputeRun* run = nullptr;
+
+  /**
+   * @brief Existing lifecycle lease copied into phase/callback ownership.
+   * @note ComputeService supplies this before attaching request cancellation,
+   * eliminating terminal-time lease acquisition races. Direct private callers
+   * may omit it and retain the pre-cancellation acquisition behavior.
+   */
+  const ComputeRunLease* run_lease = nullptr;
 
   /** @brief Compute plan containing immutable dirty task graph metadata. */
   const ComputePlan* compute_plan = nullptr;
 
   /** @brief Dirty generation-local active task view for dependency release. */
   const DirtyTaskSelectionOverlay* selection = nullptr;
+
+  /**
+   * @brief Selected devices aligned with `compute_plan->task_graph.tasks`.
+   * @note Required for every request. Process-service submissions use the
+   * value to enter the matching private CPU or GPU lane; inline execution
+   * retains the same immutable planning snapshot without queue routing.
+   */
+  const std::vector<Device>* task_devices = nullptr;
+
+  /**
+   * @brief Other request-owned structural bytes retained across phase service
+   * settlement.
+   *
+   * @note This excludes the copied `DirtyReadyTaskContext` and matching Run
+   * control, which the adapter adds itself. Image pixels and opaque
+   * backend/plugin/device allocations must not be declared here without a
+   * trusted size contract.
+   */
+  std::uint64_t additional_shared_retained_memory_bytes = 0U;
+
+  /**
+   * @brief Computes phase-local retained bytes immediately before admission.
+   *
+   * @note The callback receives the exact source or downstream task ids for
+   * that synchronous segment after its owned context has been constructed.
+   * Before a downstream callback runs, the source-first adapter explicitly
+   * clears the moved-from outer task function so only the context-owned target
+   * remains live. The callback may inspect request-owned staging state to
+   * charge current storage plus predictable missing map entries without
+   * recounting keys created by an earlier source phase. It must not execute
+   * operations or mutate staging state.
+   */
+  std::function<std::uint64_t(const std::vector<int>&)>  // NOLINT
+      phase_shared_retained_memory_bytes;
 
   /** @brief Dirty source task ids submitted before downstream work. */
   const std::vector<int>* source_task_ids = nullptr;
@@ -150,14 +219,251 @@ struct DirtySourceFirstRunRequest {
   /**
    * @brief Dirty snapshot generation associated with this request.
    * @note The current source-first runner does not forward this value as the
-   *       scheduler epoch; scheduler initial batches allocate independent
-   *       scheduler-local epochs.
+   *       runtime epoch or service Run id; injected runtime initial batches
+   *       allocate independent local epochs.
    */
   uint64_t dirty_generation = 0;
 
   /** @brief Boundary validation invoked between source and downstream groups.
    */
   std::function<void()> before_downstream;
+};
+
+struct PreparedDirtySourceFirstRunState;
+
+/**
+ * @brief Move-only unpublished source/downstream dirty physical batches.
+ *
+ * The preparation owns every source/downstream context, ready submission,
+ * ready-store node, root reservation, and dependency bootstrap needed by one
+ * dirty domain. It publishes no service-ready work until execute() is called
+ * after lifecycle installation.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note Destruction before execution rolls back every prepared root and
+ * cancellation registration. The value has no lifecycle-admission authority.
+ */
+class PreparedDirtySourceFirstRun final {
+ public:
+  /** @brief Creates an inactive moved-from preparation. */
+  PreparedDirtySourceFirstRun() noexcept;
+
+  /**
+   * @brief Transfers complete dirty publication ownership.
+   * @param other Preparation made inactive.
+   * @throws Nothing.
+   */
+  PreparedDirtySourceFirstRun(PreparedDirtySourceFirstRun&& other) noexcept;
+
+  /**
+   * @brief Replaces only an inactive preparation by transfer.
+   * @param other Preparation made inactive.
+   * @return Reference to this value.
+   * @throws Nothing; replacing active ownership terminates.
+   */
+  PreparedDirtySourceFirstRun& operator=(
+      PreparedDirtySourceFirstRun&& other) noexcept;
+
+  /**
+   * @brief Releases unpublished dirty phases.
+   * @throws Nothing; trusted cleanup failure terminates.
+   */
+  ~PreparedDirtySourceFirstRun() noexcept;
+
+  /** @brief Prevents duplicate reservation/publication ownership. */
+  PreparedDirtySourceFirstRun(const PreparedDirtySourceFirstRun&) = delete;
+
+  /** @brief Prevents duplicate reservation/publication assignment. */
+  PreparedDirtySourceFirstRun& operator=(const PreparedDirtySourceFirstRun&) =
+      delete;
+
+  /**
+   * @brief Reports whether this value owns one unexecuted preparation.
+   * @return True until movement or execute().
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return state_ != nullptr; }
+
+  /**
+   * @brief Publishes and drains source then downstream work exactly once.
+   * @return Nothing.
+   * @throws GraphError or standard exceptions from cancellation, operation,
+   * boundary validation, dependency release, or physical settlement.
+   * @note The caller must install the matching lifecycle bundle before entry.
+   */
+  void execute();
+
+ private:
+  friend PreparedDirtySourceFirstRun prepare_dirty_source_first(
+      const DirtySourceFirstRunRequest&, std::function<void(int)>,
+      std::uint64_t);
+
+  /**
+   * @brief Owns one complete dirty preparation.
+   * @param state Complete unpublished state.
+   * @throws Nothing.
+   */
+  explicit PreparedDirtySourceFirstRun(
+      std::unique_ptr<PreparedDirtySourceFirstRunState> state) noexcept;
+
+  /** @brief Complete unpublished source/downstream state. */
+  std::unique_ptr<PreparedDirtySourceFirstRunState> state_;
+};
+
+/**
+ * @brief Prepares all dirty source/downstream work without publication.
+ *
+ * @param request Complete dirty route, plan, resource, and boundary inputs.
+ * @param run_task Type-erased task callable retained by prepared contexts.
+ * @param run_task_capture_bytes Audited concrete callable capture size before
+ * type erasure.
+ * @return Move-only preparation containing every physical root and ready node.
+ * @throws GraphError or standard exceptions from validation, dependency
+ * construction, resource estimation/reservation, and staging.
+ * @throws std::bad_alloc unchanged from any preparation allocation.
+ * @note For process-service routing both phase reservations remain live
+ * together until execution/rollback, so lifecycle installation observes the
+ * complete dirty-domain resource ownership rather than a later phase-local
+ * admission.
+ */
+PreparedDirtySourceFirstRun prepare_dirty_source_first(
+    const DirtySourceFirstRunRequest& request,
+    std::function<void(int)> run_task, std::uint64_t run_task_capture_bytes);
+
+/**
+ * @brief Heap-owned dirty phase context for process-service submissions.
+ *
+ * The context owns a copy of the immutable compute plan, optional dirty
+ * selection, active task membership, dependency counters, task callable, and
+ * one matching Run lease. Each materialized `ReadyTaskSubmission` retains this
+ * context and another matching lease, so no stack `ExecutionTaskExecutor*`
+ * crosses the process-service boundary.
+ *
+ * @throws std::bad_alloc if plan, selection, dependency, callable, or task
+ * ownership cannot allocate.
+ * @note Stable Graph/cache/staging references captured by the owned callable
+ * remain protected by Graph-state admission and synchronous Run settlement.
+ */
+class DirtyReadyTaskContext final
+    : public std::enable_shared_from_this<DirtyReadyTaskContext> {
+ public:
+  /**
+   * @brief Builds one owned source or downstream dirty phase.
+   *
+   * @param compute_plan Immutable task graph copied into context ownership.
+   * @param selection Optional dirty dependency overlay copied into ownership.
+   * @param active_task_ids Exact task ids active in this phase.
+   * @param task_devices Selected devices aligned with compute-plan task ids.
+   * @param run_task Owned callable that executes one dense task id.
+   * @param run_task_retained_memory_bytes Audited capture/allocation bytes
+   * owned by run_task beyond its inline `std::function` object. This value
+   * covers exactly the callable target moved into this context; a
+   * simultaneously live external copy must be declared separately by the
+   * owning phase.
+   * @param lease Matching Run lease retained for dependent submissions.
+   * @param release_dependents Whether completion releases dependency-ready
+   * work from this phase.
+   * @param priority Process queue hint for every phase submission.
+   * @throws std::invalid_argument if run_task is empty.
+   * @throws std::bad_alloc from owned state construction.
+   */
+  DirtyReadyTaskContext(const ComputePlan& compute_plan,
+                        const DirtyTaskSelectionOverlay* selection,
+                        const std::vector<int>& active_task_ids,
+                        const std::vector<Device>& task_devices,
+                        std::function<void(int)> run_task,
+                        std::uint64_t run_task_retained_memory_bytes,
+                        ComputeRunLease lease, bool release_dependents,
+                        ExecutionTaskPriority priority);
+
+  /**
+   * @brief Estimates complete context-owned structural storage.
+   * @return Checked copied plan/selection/dependency/callable/context bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The shared Run control is intentionally excluded and added once by
+   * `run_resource_demand()`. Borrowed Graph/cache/staging references and opaque
+   * output payloads are excluded.
+   */
+  std::uint64_t retained_memory_bytes() const;
+
+  /**
+   * @brief Builds the complete adapter declaration for this dirty phase.
+   * @param additional_shared_retained_memory_bytes Other request-owned
+   * structural bytes that remain live across phase settlement.
+   * @return Shared context/Run bytes plus uniform shared-pointer capture
+   * demand.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @throws std::system_error when matching Run storage locking fails.
+   */
+  CpuRunResourceDemand run_resource_demand(
+      std::uint64_t additional_shared_retained_memory_bytes) const;
+
+  /**
+   * @brief Materializes owned submissions for selected ready task ids.
+   *
+   * @param task_ids Dependency-ready ids within this phase.
+   * @param initial_ready Whether these values form the initial phase batch.
+   * @return Move-owned submissions retaining this context and matching leases.
+   * @throws std::invalid_argument for an inactive or invalid task id.
+   * @throws std::bad_alloc when output, executable, or lease storage allocates.
+   * @note Readiness is caller-established; this method performs membership and
+   * identity validation only.
+   */
+  std::vector<ReadyTaskSubmission> make_submissions(
+      const std::vector<int>& task_ids, bool initial_ready);
+
+ private:
+  /**
+   * @brief Executes one matching service callback and releases dependents.
+   *
+   * @param lease Submission-owned lease naming this context's Run.
+   * @param identity Composite identity whose local id selects the dirty task.
+   * @param task_runtime Active service runtime used for ready release,
+   * completion, and failure trace.
+   * @return Nothing.
+   * @throws std::invalid_argument for mismatched or inactive identity.
+   * @throws Exact task, dependency, submission, trace, or completion
+   * exception.
+   * @note Cancellation before provider entry or immediately after provider
+   * return retires this callback's logical completion unit and returns without
+   * releasing dependents. Cancellation during dependent publication stops the
+   * remaining submissions before the same exact-once completion retirement.
+   */
+  void execute(ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
+               ExecutionTaskRuntime& task_runtime);
+
+  /** @brief Immutable task shape copied into Run-phase ownership. */
+  ComputePlan compute_plan_;
+
+  /** @brief Optional copied dirty dependency and readiness overlay. */
+  std::optional<DirtyTaskSelectionOverlay> selection_;
+
+  /** @brief Exact active ids retained for dependency-state construction. */
+  std::vector<int> active_task_ids_;
+
+  /** @brief Selected devices aligned with dense compute-plan task ids. */
+  std::vector<Device> task_devices_;
+
+  /** @brief Fast active membership guard for composite identity validation. */
+  std::unordered_set<int> active_task_id_set_;
+
+  /** @brief Owned dependency counters and dependent adjacency. */
+  std::unique_ptr<TaskDependencyState> dependency_state_;
+
+  /** @brief Owned dirty node/task callable. */
+  std::function<void(int)> run_task_;
+
+  /** @brief Dynamic capture/allocation bytes owned by `run_task_`. */
+  std::uint64_t run_task_retained_memory_bytes_ = 0U;
+
+  /** @brief Base matching lease copied into every materialized submission. */
+  ComputeRunLease lease_;
+
+  /** @brief Whether task completion releases ready dependents. */
+  bool release_dependents_ = false;
+
+  /** @brief Process ready-queue hint for this phase. */
+  ExecutionTaskPriority priority_ = ExecutionTaskPriority::Normal;
 };
 
 /**
@@ -216,14 +522,15 @@ ComputePlan prune_dirty_snapshot_task_graph(const ComputePlan& node_cache_plan,
                                             const GraphModel& graph);
 
 /**
- * @brief Resolves task ids back to unique node ids for compatibility reports.
+ * @brief Resolves phase task ids to unique node ids for retained admission.
  *
  * @param compute_plan Plan containing task-to-node ownership.
- * @param task_ids Task ids selected by a work set or overlay.
- * @return Node ids in planned-work order with duplicates removed.
+ * @param task_ids Exact task ids selected for one service segment.
+ * @return Node ids in first-task occurrence order with duplicates removed.
+ * @throws std::out_of_range when a task id is outside the plan.
  * @throws std::bad_alloc if temporary set or vector allocation fails.
- * @note Dirty execution must not call this helper for scheduling. It exists
- * only for legacy diagnostics that need node-level labels.
+ * @note The result predicts Host-owned per-node staging entries only. It
+ * carries no scheduling, dependency, or execution authority.
  */
 std::vector<int> planned_nodes_for_task_ids(const ComputePlan& compute_plan,
                                             const std::vector<int>& task_ids);
@@ -237,7 +544,7 @@ std::vector<int> planned_nodes_for_task_ids(const ComputePlan& compute_plan,
  * @throws GraphError when a dirty source node is missing or its boundary
  * output is unavailable.
  * @note The check runs after source tasks and before downstream tasks to keep
- * dependency failures deterministic across inline and scheduler execution.
+ * dependency failures deterministic across inline and queued execution.
  */
 void validate_dirty_source_boundaries_ready(const GraphModel& graph,
                                             const DirtyRegionSnapshot& snapshot,
@@ -257,13 +564,13 @@ bool is_dirty_source_node(const DirtyRegionSnapshot& snapshot, int node_id);
 /**
  * @brief Logs generic and dirty-role execution events for one node.
  *
- * @param runtime Optional runtime that owns the scheduler trace log.
+ * @param runtime Optional runtime that owns the execution trace log.
  * @param node_id Node being executed.
  * @param dirty_source Whether the node is a source boundary or downstream
  * dirty work.
  * @throws Any exception propagated by GraphRuntime::log_event.
  * @note A null runtime preserves inline execution behavior by emitting no
- * scheduler trace entries.
+ * execution trace entries.
  */
 void log_dirty_node_execution(GraphRuntime* runtime, int node_id,
                               bool dirty_source);
@@ -271,7 +578,7 @@ void log_dirty_node_execution(GraphRuntime* runtime, int node_id,
 /**
  * @brief Logs and skips stale dirty source generations.
  *
- * @param runtime Optional runtime for scheduler trace events.
+ * @param runtime Optional runtime for execution trace events.
  * @param node_id Dirty source node id.
  * @param committed_generation Generation already committed for this source.
  * @param dirty_generation Generation being executed by the current request.
@@ -332,27 +639,19 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * dirty selection. It may be a stabilized shadow graph.
  * @param dirty_plan Dirty planner output for one intent domain.
  * @param request Compute request matching the same dirty domain.
- * @param inspection_graph Optional authoritative live graph receiving plan and
- * snapshot diagnostics; null uses graph.
  * @param externally_satisfied_node_ids Optional nodes already executed by
  * parameter stabilization and excluded from phase-two task selection.
  * @return Prepared plan with node groups ready for task construction.
  * @throws GraphError from task graph pruning or materialization.
- * @note The helper updates authoritative inspection fields before execution so
- * failed execution still leaves planning evidence visible. Summary topology
- * identity and cache keys always come from inspection_graph, never from an
- * artificial shadow-graph generation.
+ * @note The helper retains diagnostics without publishing them. The installed
+ * execution path calls publish_prepared_dirty_inspection() only after its
+ * first cancellation observation, so candidate rollback leaves authoritative
+ * inspection state unchanged.
  */
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
     GraphModel& graph, DirtyPlan&& dirty_plan, const ComputeRequest& request,
-    GraphModel* inspection_graph = nullptr,
     const std::unordered_set<int>* externally_satisfied_node_ids = nullptr) {
-  GraphModel& inspection = inspection_graph ? *inspection_graph : graph;
-  inspection.last_dirty_region_snapshot_debug =
-      DirtyRegionPlanner::describe_snapshot(dirty_plan.snapshot);
-  remember_dirty_snapshot(inspection, dirty_plan.snapshot);
-
   const ComputePlan node_cache_plan =
       prune_node_cache_task_graph(graph, request, dirty_plan.execution_order);
   DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
@@ -360,7 +659,6 @@ PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
       dirty_snapshot_pruner.select(node_cache_plan, dirty_plan.snapshot, graph,
                                    externally_satisfied_node_ids);
   apply_planned_work_rois(dirty_plan.entries, selection);
-  remember_compute_plan(inspection, node_cache_plan, &selection);
 
   DirtyUpdateWorkSet work_set = dirty_snapshot_pruner.materialize(selection);
   std::vector<int> source_task_ids = work_set.dirty_source_task_ids;
@@ -373,39 +671,65 @@ PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
 }
 
 /**
- * @brief Task-id backed TaskExecutor used by dirty update task handles.
+ * @brief Publishes one installed dirty preparation for graph inspection.
  *
- * The executor exposes compact TaskHandle entries and invokes one
+ * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
+ * @param graph Authoritative live graph receiving diagnostics.
+ * @param prepared Immutable prepared snapshot, plan, and active selection.
+ * @return Nothing.
+ * @throws std::bad_alloc when debug text or bounded histories grow.
+ * @note The caller holds graph.graph_mutex_. Publication occurs after
+ * lifecycle installation and the first execution-time cancellation check.
+ * Failed installed execution therefore retains its planning evidence, while a
+ * rejected candidate publishes nothing.
+ */
+template <typename DirtyPlan>
+void publish_prepared_dirty_inspection(
+    GraphModel& graph, const PreparedDirtyPlan<DirtyPlan>& prepared) {
+  graph.last_dirty_region_snapshot_debug =
+      DirtyRegionPlanner::describe_snapshot(prepared.dirty_plan.snapshot);
+  remember_dirty_snapshot(graph, prepared.dirty_plan.snapshot);
+  remember_compute_plan(graph, prepared.compute_plan, &prepared.selection);
+}
+
+/**
+ * @brief Task-id backed ExecutionTaskExecutor used by dirty update task
+ * handles.
+ *
+ * The executor exposes compact ExecutionTaskHandle entries and invokes one
  * request-local callable with the selected task id. For downstream dirty work
  * it also owns task-level TaskDependencyState so completed tasks release ready
  * dependents in batches.
  *
  * @note The executor is stack-owned by run_dirty_source_first() and must remain
- * alive until the matching SchedulerTaskRuntime::wait_for_completion() returns.
+ * alive until the matching ExecutionTaskRuntime::wait_for_completion() returns.
  * It does not allocate one std::function per active dirty task.
  */
 template <typename RunTask>
-class DirtyHandleTaskExecutor : public TaskExecutor {
+class DirtyHandleExecutionTaskExecutor : public ExecutionTaskExecutor {
  public:
   /**
-   * @brief Binds task runner, dependency state, and scheduler runtime.
+   * @brief Binds task runner, dependency state, and execution runtime.
    *
    * @param compute_plan Plan whose task graph owns immutable task metadata.
    * @param selection Optional dirty overlay with dependency overrides.
    * @param active_task_ids Task ids active in this source or downstream phase.
    * @param run_task Callable invoked with one active dirty task id.
    * @param task_runtime Runtime used for dependent handle submission.
+   * @param run_lease Optional read-only lease for cooperative cancellation.
    * @param release_dependents Whether completed tasks should release
    * downstream dependents.
    * @param priority Priority used when dependency release submits ready work.
    * @throws std::bad_alloc if dependency state allocation fails.
    */
-  DirtyHandleTaskExecutor(const ComputePlan& compute_plan,
-                          const DirtyTaskSelectionOverlay* selection,
-                          const std::vector<int>& active_task_ids,
-                          RunTask& run_task, SchedulerTaskRuntime& task_runtime,
-                          bool release_dependents,
-                          SchedulerTaskPriority priority)
+  DirtyHandleExecutionTaskExecutor(const ComputePlan& compute_plan,
+                                   const DirtyTaskSelectionOverlay* selection,
+                                   const std::vector<int>& active_task_ids,
+                                   RunTask& run_task,
+                                   ExecutionTaskRuntime& task_runtime,
+                                   const ComputeRunLease* run_lease,
+                                   bool release_dependents,
+                                   ExecutionTaskPriority priority)
       : compute_plan_(compute_plan),
         dependency_state_(
             selection
@@ -417,6 +741,8 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
                                       active_task_ids)),
         run_task_(run_task),
         task_runtime_(task_runtime),
+        run_lease_(run_lease ? std::optional<ComputeRunLease>(*run_lease)
+                             : std::nullopt),
         release_dependents_(release_dependents),
         priority_(priority) {
     task_handles_.resize(compute_plan_.task_graph.tasks.size());
@@ -426,19 +752,20 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
         continue;
       }
       task_handles_[task.task_id] =
-          TaskHandle{this, task.task_id, task.node_id};
+          ExecutionTaskHandle{this, task.task_id, task.node_id};
     }
   }
 
   /**
    * @brief Builds handles for selected task ids.
    *
-   * @param task_ids Task ids to expose as scheduler handles.
+   * @param task_ids Task ids to expose as execution handles.
    * @return Handles aligned with task_ids order, skipping invalid ids.
    * @throws std::bad_alloc if output allocation fails.
    */
-  std::vector<TaskHandle> handles_for(const std::vector<int>& task_ids) const {
-    std::vector<TaskHandle> handles;
+  std::vector<ExecutionTaskHandle> handles_for(
+      const std::vector<int>& task_ids) const {
+    std::vector<ExecutionTaskHandle> handles;
     handles.reserve(task_ids.size());
     for (int task_id : task_ids) {
       if (task_id < 0 || task_id >= static_cast<int>(task_handles_.size())) {
@@ -452,14 +779,29 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
   /**
    * @brief Executes one dirty task id and releases dependent task handles.
    *
-   * @param task_id Dirty task id selected by scheduler.
-   * @throws Any exception propagated by the dirty node executor.
-   * @note Completion accounting mirrors TaskSubmissionPlan::run_task().
+   * @param task_id Dirty task id selected by the execution runtime.
+   * @return Nothing.
+   * @throws GraphError when cancellation is observed before or after the dirty
+   * provider, or when the provider reports a graph-domain failure.
+   * @throws Any other provider, trace, dependency, submission, or completion
+   * exception unchanged.
+   * @note Only the normal path retires the runtime completion unit here;
+   * exception settlement remains owned by the execution runtime. Cancellation
+   * after provider return prevents dependency release, while a provider already
+   * entered is non-preemptible except at its own tile observations.
    */
   void run_task(int task_id) override {
     const auto& task = compute_plan_.task_graph.tasks.at(task_id);
     try {
+      if (run_lease_ && run_lease_->observe_cancellation().has_value()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "ComputeRun cancelled before dirty task.");
+      }
       run_task_(task_id);
+      if (run_lease_ && run_lease_->observe_cancellation().has_value()) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "ComputeRun cancelled after dirty task.");
+      }
       if (release_dependents_) {
         std::vector<int> ready_ids =
             dependency_state_.release_dependents(task_id);
@@ -467,7 +809,7 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
             handles_for(ready_ids), priority_);
       }
     } catch (...) {
-      task_runtime_.log_event(SchedulerTraceAction::RethrowException,
+      task_runtime_.log_event(ExecutionTraceAction::RethrowException,
                               task.node_id);
       throw;
     }
@@ -484,18 +826,52 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
   /** @brief Request-local dirty task runner called with a dense task id. */
   RunTask& run_task_;
 
-  /** @brief Scheduler runtime borrowed for ready release and completion. */
-  SchedulerTaskRuntime& task_runtime_;
+  /** @brief Execution runtime borrowed for ready release and completion. */
+  ExecutionTaskRuntime& task_runtime_;
+
+  /** @brief Optional retained Run observer for callback boundaries. */
+  std::optional<ComputeRunLease> run_lease_;
 
   /** @brief Ready handles aligned with task id. */
-  std::vector<TaskHandle> task_handles_;
+  std::vector<ExecutionTaskHandle> task_handles_;
 
   /** @brief Whether this executor releases downstream dependents. */
   bool release_dependents_ = false;
 
   /** @brief Priority used for ready dependent submissions. */
-  SchedulerTaskPriority priority_ = SchedulerTaskPriority::Normal;
+  ExecutionTaskPriority priority_ = ExecutionTaskPriority::Normal;
 };
+
+/**
+ * @brief Constructs a dirty context before releasing its outer callable owner.
+ *
+ * @tparam CallableHolder Move source accepted by ContextFactory and resettable
+ * through a non-throwing null assignment.
+ * @tparam ContextFactory Factory that accepts CallableHolder as an rvalue and
+ * returns an owning destination value.
+ * @param callable_holder Outer callable owner transferred to the destination.
+ * @param context_factory Factory that must finish destination construction
+ * before the outer owner is released.
+ * @return Owning destination returned by context_factory after the outer
+ * holder has been explicitly cleared.
+ * @throws Any exception propagated by context_factory or destination return
+ * movement.
+ * @note The null assignment is part of the successful construction boundary:
+ * no caller code can run between destination construction and outer release.
+ * If construction throws, the holder and every factory temporary unwind
+ * through RAII; the outer holder remains valid but may be moved from. This
+ * private source-tree helper adds no installed API or ABI.
+ */
+template <typename CallableHolder, typename ContextFactory>
+auto make_dirty_context_and_release_outer_callable(
+    CallableHolder& callable_holder, ContextFactory&& context_factory) {
+  static_assert(noexcept(callable_holder = nullptr),
+                "Dirty callable holder reset must not throw.");
+  auto context =
+      std::forward<ContextFactory>(context_factory)(std::move(callable_holder));
+  callable_holder = nullptr;
+  return context;
+}
 
 /**
  * @brief Runs dirty source tasks before downstream dirty tasks.
@@ -503,78 +879,33 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
  * @tparam RunTask Callable that executes one dirty task id.
  * @param request Source-first dispatch request and boundary validation.
  * @param run_task Task runner invoked with dense task ids.
+ * @return Nothing.
  * @throws Exceptions from task construction, task execution, boundary
- * validation, scheduler lookup, or scheduler submission.
- * @note Scheduler-backed execution delegates source-first submission to
- * ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first. The dirty
- * executor owns only request-local TaskExecutor construction and inline
- * fallback ordering.
+ * validation, runtime lookup, or execution submission.
+ * @note Injected runtime execution delegates source-first submission to
+ * ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first. Process
+ * service execution materializes heap-owned Run submissions. Its source
+ * context copies the outer `std::function`, so source admission charges both
+ * live callable targets until synchronous settlement. Downstream transfers
+ * that outer target through
+ * make_dirty_context_and_release_outer_callable(), which makes successful
+ * context construction and explicit release of the valid-but-unspecified
+ * moved-from function one boundary. Submission construction, retained-demand
+ * calculation, and admission therefore see only the context-owned target
+ * without depending on the standard library's moved-from representation. The
+ * dirty executor retains request-local inline fallback ordering. Cancellation
+ * is observed at phase entry, around every source/downstream provider and
+ * boundary callback, and before dependency publication. It prevents later
+ * phase entry and final staged publication; a monolithic callback already
+ * entered remains non-preemptible until it returns.
  */
 template <typename RunTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
                             RunTask run_task) {
-  const ComputePlan& compute_plan = *request.compute_plan;
-  const std::vector<int>& source_task_ids = *request.source_task_ids;
-  const std::vector<int>& downstream_task_ids = *request.downstream_task_ids;
-
-  if (request.runtime) {
-    IScheduler& dirty_task_runtime =
-        ensure_running_scheduler(*request.runtime, request.intent);
-    DirtyHandleTaskExecutor<RunTask> source_executor(
-        compute_plan, request.selection, source_task_ids, run_task,
-        dirty_task_runtime, false, SchedulerTaskPriority::High);
-    DirtyHandleTaskExecutor<RunTask> downstream_executor(
-        compute_plan, request.selection, downstream_task_ids, run_task,
-        dirty_task_runtime, true, SchedulerTaskPriority::Normal);
-    std::vector<int> initial_downstream_ids;
-    if (request.selection) {
-      initial_downstream_ids = request.selection->initial_downstream_task_ids;
-    } else {
-      TaskGraphReadyChecker ready_checker;
-      initial_downstream_ids = ready_checker.initial_ready_task_ids(
-          compute_plan.task_graph, &downstream_task_ids);
-    }
-    ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
-        dirty_task_runtime, source_executor.handles_for(source_task_ids),
-        static_cast<int>(source_task_ids.size()),
-        downstream_executor.handles_for(initial_downstream_ids),
-        static_cast<int>(downstream_task_ids.size()),
-        request.before_downstream);
-    return;
-  }
-
-  for (int source_task_id : source_task_ids) {
-    run_task(source_task_id);
-  }
-  if (request.before_downstream) {
-    request.before_downstream();
-  }
-  TaskDependencyState dependency_state =
-      request.selection
-          ? TaskDependencyState(compute_plan.execution_order,
-                                compute_plan.task_graph, downstream_task_ids,
-                                request.selection->dependency_task_ids)
-          : TaskDependencyState(compute_plan.execution_order,
-                                compute_plan.task_graph, downstream_task_ids);
-  std::vector<int> initial_downstream_ids;
-  if (request.selection) {
-    initial_downstream_ids = request.selection->initial_downstream_task_ids;
-  } else {
-    TaskGraphReadyChecker ready_checker;
-    initial_downstream_ids = ready_checker.initial_ready_task_ids(
-        compute_plan.task_graph, &downstream_task_ids);
-  }
-  std::vector<int> ready_stack(initial_downstream_ids.rbegin(),
-                               initial_downstream_ids.rend());
-  while (!ready_stack.empty()) {
-    const int task_id = ready_stack.back();
-    ready_stack.pop_back();
-    run_task(task_id);
-    std::vector<int> ready_ids = dependency_state.release_dependents(task_id);
-    for (auto it = ready_ids.rbegin(); it != ready_ids.rend(); ++it) {
-      ready_stack.push_back(*it);
-    }
-  }
+  prepare_dirty_source_first(request,
+                             std::function<void(int)>(std::move(run_task)),
+                             static_cast<std::uint64_t>(sizeof(RunTask)))
+      .execute();
 }
 
 }  // namespace ps::compute

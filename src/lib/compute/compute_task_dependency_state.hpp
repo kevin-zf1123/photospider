@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -14,13 +15,13 @@ namespace ps::compute {
  * @brief Dense runtime dependency state for a pruned ComputeTaskGraph.
  *
  * TaskDependencyState converts PlannedTask dependency_task_ids into compact
- * scheduler counters and dependent adjacency lists. It owns only per-dispatch
+ * execution counters and dependent adjacency lists. It owns only per-dispatch
  * runtime bookkeeping; the immutable ComputeTaskGraph remains owned by the
  * submission plan.
  *
  * @note The state is not thread-safe for topology mutation. Worker threads may
  * call release_dependents() after tasks are built, while the owning
- * TaskSubmissionPlan keeps the object alive until scheduler completion.
+ * TaskSubmissionPlan keeps the object alive until execution completion.
  */
 class TaskDependencyState {
  public:
@@ -73,6 +74,16 @@ class TaskDependencyState {
    * @note The reference remains valid only while this state object lives.
    */
   const std::unordered_map<int, int>& id_to_idx() const { return id_to_idx_; }
+
+  /**
+   * @brief Estimates dynamic Host-owned dependency-state storage.
+   * @return Checked map buckets/nodes, counter, adjacency, and active-bit
+   * bytes.
+   * @throws GraphError when checked structural arithmetic overflows.
+   * @note The result excludes `sizeof(TaskDependencyState)` so enclosing
+   * owners can account the inline object exactly once.
+   */
+  std::uint64_t dynamic_retained_memory_bytes() const;
 
   /**
    * @brief Checks whether a task can be submitted as initial work.

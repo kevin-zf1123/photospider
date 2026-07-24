@@ -24,10 +24,10 @@ namespace ps {
  * sources and are restored when an overriding plugin is unloaded.
  *
  * @note The manager serializes every load, unload, source/key inspection, and
- *       built-in seed operation. It is intentionally separate from scheduler
- *       plugin loading because operation plugins register process-global
- *       callbacks into `OpRegistry`, while scheduler plugins own live
- *       `IScheduler` instances and destroy functions.
+ *       built-in seed operation. It is intentionally separate from the policy
+ *       registry because operation plugins register process-global callbacks
+ *       into `OpRegistry`, while policy plugins expose authority-free pure-C
+ *       ranking contexts through independent DSO leases.
  */
 class PluginManager {
  public:

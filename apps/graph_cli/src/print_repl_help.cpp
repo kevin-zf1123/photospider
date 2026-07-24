@@ -86,11 +86,11 @@ void print_repl_help(const CliConfig& config) {
       << "  free\n"
       << "    Free memory used by non-essential intermediate nodes.\n\n"
 
-      << "  scheduler <list|get|set> [intent] [type]\n"
-      << "    Manage computation schedulers:\n"
-      << "      list:          List supported scheduler types.\n"
-      << "      get [hp|rt]:   Show scheduler info for current graph.\n"
-      << "      set <hp|rt> <type>: Switch scheduler for an intent.\n\n"
+      << "  policy <list|get|set|scan|load|plugins|help> ...\n"
+      << "    Inspect policy types, bindings, and policy plugins.\n\n"
+
+      << "  execution <list|get|set|help> ...\n"
+      << "    Inspect or replace hp/rt private execution routes.\n\n"
 
       << "  exit\n"
       << "    Quit the shell.\n"

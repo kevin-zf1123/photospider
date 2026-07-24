@@ -6,7 +6,7 @@ if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
 endif()
 # Define the project
-project(Photospider VERSION 0.1.0 LANGUAGES CXX)
+project(Photospider VERSION 0.1.0 LANGUAGES C CXX)
 # 开启 LTO (Link Time Optimization)
 include(CheckIPOSupported)
 check_ipo_supported(RESULT result OUTPUT output)
@@ -155,10 +155,8 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     plugin/node_view.hpp
     plugin/op_contract.hpp
     plugin/plugin_api.hpp
+    policy/policy_plugin_api.h
     public_boundary.hpp
-    scheduler/scheduler.hpp
-    scheduler/scheduler_plugin_api.hpp
-    scheduler/scheduler_task_runtime.hpp
 )
 set(PHOTOSPIDER_IPC_PUBLIC_HEADER_RELATIVE_PATHS
     ipc/client.hpp
@@ -171,7 +169,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 19)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 17)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -262,15 +260,16 @@ target_include_directories(photospider_operation_sdk INTERFACE
 target_link_libraries(photospider_operation_sdk INTERFACE
     Photospider::operation_runtime)
 
-# Public scheduler SDK: headers and language level only. Concrete plugins add
-# their own threading/runtime dependencies and never inherit the embedded
-# product's OpenCV, yaml-cpp, Metal, or host implementation dependencies.
-add_library(photospider_scheduler_sdk INTERFACE)
-add_library(Photospider::scheduler_sdk ALIAS photospider_scheduler_sdk)
-set_target_properties(photospider_scheduler_sdk PROPERTIES
-    EXPORT_NAME scheduler_sdk)
-target_compile_features(photospider_scheduler_sdk INTERFACE cxx_std_17)
-target_include_directories(photospider_scheduler_sdk INTERFACE
+# Public policy SDK: one dependency-neutral pure C ABI header. C11 producers
+# and C++17 producers/consumers receive only the generated/installed include
+# root; no Threads, OpenCV, yaml-cpp, Metal, embedded, IPC, or operation SDK
+# dependency crosses this target.
+add_library(photospider_policy_sdk INTERFACE)
+add_library(Photospider::policy_sdk ALIAS photospider_policy_sdk)
+set_target_properties(photospider_policy_sdk PROPERTIES
+    EXPORT_NAME policy_sdk)
+target_compile_features(photospider_policy_sdk INTERFACE c_std_11 cxx_std_17)
+target_include_directories(photospider_policy_sdk INTERFACE
     "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 
@@ -528,25 +527,30 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         photospider_opencv_operation_provider_internal)
 endif()
 
-# Module: built-in schedulers, scheduler factory, and scheduler DSO loader.
-set(PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES
-    src/lib/scheduler/cpu_work_stealing_scheduler.cpp
-    src/lib/scheduler/gpu_pipeline_scheduler.cpp
-    src/lib/scheduler/serial_debug_scheduler.cpp
-    src/lib/scheduler/scheduler_factory.cpp
-    src/lib/scheduler/scheduler_plugin_loader.cpp
-    src/lib/scheduler/scheduler_reservation_owner.cpp
-    src/lib/scheduler/scheduler_worker_budget.cpp
+# Module: process policy registry, pure-C DSO loader, bindings, and leases.
+set(PHOTOSPIDER_POLICY_INTERNAL_SOURCES
+    src/lib/policy/policy_registry.cpp)
+add_library(photospider_policy_internal STATIC
+    ${PHOTOSPIDER_POLICY_INTERNAL_SOURCES})
+target_include_directories(photospider_policy_internal PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+target_link_libraries(photospider_policy_internal PRIVATE
+    Photospider::policy_sdk
+    ${CMAKE_DL_LIBS})
+
+# Module: private physical execution resources and accounting.
+set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+    src/lib/execution/physical_execution_routes.cpp
+    src/lib/runtime/resource_ledger.cpp
 )
 
-add_library(photospider_scheduler_internal STATIC
-    ${PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES})
-target_include_directories(photospider_scheduler_internal PRIVATE
+add_library(photospider_execution_internal STATIC
+    ${PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES})
+target_include_directories(photospider_execution_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
-target_link_libraries(photospider_scheduler_internal PRIVATE
-    Photospider::scheduler_sdk
-    Threads::Threads
-    ${CMAKE_DL_LIBS})
+target_link_libraries(photospider_execution_internal PRIVATE
+    photospider_core_internal
+    Threads::Threads)
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
@@ -556,7 +560,7 @@ set(KERNEL_FACADE_SOURCES
     src/lib/runtime/kernel_dirty_roi_facade.cpp
     src/lib/runtime/kernel_inspection_facade.cpp
     src/lib/runtime/kernel_io_cache_facade.cpp
-    src/lib/runtime/kernel_scheduler_facade.cpp
+    src/lib/runtime/kernel_execution_facade.cpp
 )
 
 set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
@@ -565,9 +569,15 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_geometry.cpp
     src/lib/compute/compute_metrics_recorder.cpp
     src/lib/compute/compute_node_task_runner.cpp
+    src/lib/compute/compute_request_coordinator.cpp
     src/lib/compute/compute_result_committer.cpp
+    src/lib/compute/compute_run.cpp
+    src/lib/compute/compute_supersession.cpp
     src/lib/compute/compute_task_dependency_state.cpp
     src/lib/compute/compute_task_submission.cpp
+    src/lib/compute/execution_lifecycle_telemetry.cpp
+    src/lib/compute/execution_service.cpp
+    src/lib/compute/run_lifecycle_registry.cpp
     src/lib/compute/task_graph_planning.cpp
     src/lib/compute/task_population_strategy.cpp
     src/lib/compute/tiled_input_normalizer.cpp
@@ -584,6 +594,8 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/node_executor.cpp
     src/lib/compute/node_input_resolver.cpp
     src/lib/compute/realtime_proxy_graph.cpp
+    src/lib/compute/resource_demand_estimator.cpp
+    src/lib/compute/run_group.cpp
     src/lib/compute/compute_task_dispatcher.cpp
     src/lib/compute/compute_service.cpp
     src/lib/runtime/graph_event_service.cpp
@@ -605,7 +617,8 @@ target_link_libraries(photospider_compute_internal PRIVATE
     photospider_core_internal
     photospider_graph_internal
     photospider_plugin_host_internal
-    photospider_scheduler_internal
+    photospider_policy_internal
+    photospider_execution_internal
     Photospider::operation_sdk)
 
 # Module: private Kernel/Interaction facades and the embedded Host composition
@@ -620,7 +633,8 @@ target_link_libraries(photospider_host_internal PRIVATE
     photospider_core_internal
     photospider_graph_internal
     photospider_plugin_host_internal
-    photospider_scheduler_internal
+    photospider_policy_internal
+    photospider_execution_internal
     photospider_compute_internal
     Photospider::operation_sdk)
 if(PHOTOSPIDER_ENABLE_YAML)
@@ -638,7 +652,8 @@ add_dependencies(photospider_kernel
     photospider_core_internal
     photospider_graph_internal
     photospider_plugin_host_internal
-    photospider_scheduler_internal
+    photospider_policy_internal
+    photospider_execution_internal
     photospider_compute_internal
     photospider_host_internal)
 if(PHOTOSPIDER_ENABLE_YAML)
@@ -660,9 +675,10 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_GRAPH_INTERNAL_SOURCES}
     ${PHOTOSPIDER_CONFIGURED_PERSISTENCE_SOURCES}
     ${PHOTOSPIDER_PLUGIN_HOST_INTERNAL_SOURCES}
+    ${PHOTOSPIDER_POLICY_INTERNAL_SOURCES}
     ${PHOTOSPIDER_OPENCV_OPERATION_PROVIDER_SOURCES}
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES}
-    ${PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES}
+    ${PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES}
     ${KERNEL_FACADE_SOURCES}
 )
 if(PHOTOSPIDER_ENABLE_YAML)
@@ -670,57 +686,160 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-add_library(photospider STATIC ${PHOTOSPIDER_PRODUCT_SOURCES})
+# These five translation units own the Issue #72, Issue #75, and Issue #76
+# deterministic observation seams. The installable archive always receives
+# their production objects; focused tests receive a non-installed variant while
+# reusing every common object. Keeping the split at translation-unit
+# granularity avoids compiling a second copy of the complete embedded product.
+set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
+    src/lib/compute/execution_service.cpp
+    src/lib/graph/graph_cache_service.cpp
+    src/lib/graph/graph_state_executor.cpp
+    src/lib/runtime/kernel.cpp
+    src/lib/runtime/kernel_compute.cpp)
+foreach(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
+        IN LISTS PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES)
+    if(NOT PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE
+            IN_LIST PHOTOSPIDER_PRODUCT_SOURCES)
+        message(FATAL_ERROR
+            "Product test-seam source is absent from the product inventory: ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCE}")
+    endif()
+endforeach()
+set(PHOTOSPIDER_PRODUCT_COMMON_SOURCES ${PHOTOSPIDER_PRODUCT_SOURCES})
+list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
+    ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES})
 
-target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
-if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
-    target_compile_definitions(photospider PRIVATE
-        PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
-endif()
-if(PHOTOSPIDER_ENABLE_OPENCV)
-    target_compile_definitions(photospider PRIVATE PHOTOSPIDER_HAS_OPENCV)
-endif()
-if(PHOTOSPIDER_ENABLE_YAML)
-    target_compile_definitions(photospider PRIVATE PHOTOSPIDER_HAS_YAML)
-endif()
-if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
-    target_compile_definitions(photospider PRIVATE
-        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
-endif()
+# Apply the private compile environment shared by production and test-only
+# product object variants. Test-seam definitions are intentionally added by
+# the caller only to the five-source test object target.
+function(configure_photospider_product_objects TARGET_NAME)
+    target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
+    target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
+    target_link_libraries(${TARGET_NAME} PRIVATE
+        Photospider::operation_sdk
+        Photospider::operation_runtime
+        Photospider::policy_sdk
+        Threads::Threads
+        ${CMAKE_DL_LIBS})
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        target_compile_definitions(${TARGET_NAME} PRIVATE
+            PHOTOSPIDER_HAS_OPENCV_OPERATION_PROVIDER)
+    endif()
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_HAS_OPENCV)
+        target_include_directories(${TARGET_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(${TARGET_NAME} PRIVATE
+            Photospider::operation_opencv
+            ${OpenCV_LIBS})
+    endif()
+    if(PHOTOSPIDER_ENABLE_YAML)
+        target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_HAS_YAML)
+        target_link_libraries(${TARGET_NAME} PRIVATE yaml-cpp::yaml-cpp)
+    endif()
+endfunction()
+
+# Apply the public and link interface shared by both complete static archives.
+# Only `photospider` is installed or exported.
+function(configure_photospider_product_archive TARGET_NAME)
+    target_compile_definitions(${TARGET_NAME} PUBLIC PHOTOSPIDER_STATIC)
+    target_compile_features(${TARGET_NAME} PUBLIC cxx_std_17)
+    target_include_directories(${TARGET_NAME}
+        PUBLIC
+            "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
+            "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
+    target_link_libraries(${TARGET_NAME} PRIVATE
+        Photospider::operation_sdk
+        Photospider::operation_runtime
+        Photospider::policy_sdk
+        Threads::Threads
+        ${CMAKE_DL_LIBS})
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        target_link_libraries(${TARGET_NAME} PRIVATE
+            Photospider::operation_opencv
+            ${OpenCV_LIBS})
+    endif()
+    if(PHOTOSPIDER_ENABLE_YAML)
+        target_link_libraries(${TARGET_NAME} PRIVATE yaml-cpp::yaml-cpp)
+    endif()
+endfunction()
+
+add_library(photospider_product_common_objects OBJECT
+    ${PHOTOSPIDER_PRODUCT_COMMON_SOURCES})
+configure_photospider_product_objects(
+    photospider_product_common_objects)
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
-    target_compile_definitions(photospider PRIVATE
+    target_compile_definitions(photospider_product_common_objects PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_OPENCV_PROVIDER_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 endif()
-target_compile_features(photospider PUBLIC cxx_std_17)
 
-target_include_directories(photospider
-    PUBLIC
-        "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
-        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-    PRIVATE
-        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
-)
+add_library(photospider_product_seam_objects OBJECT
+    ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES})
+configure_photospider_product_objects(photospider_product_seam_objects)
+if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+    # The existing required-target observer spans Kernel facade translation
+    # units. Preserve its full-suite linkage while keeping the Issue #76 Kernel
+    # close/shutdown observer absent from this production object variant.
+    target_compile_definitions(photospider_product_seam_objects PRIVATE
+        PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+endif()
 
-target_link_libraries(photospider PRIVATE
-    Photospider::operation_sdk
-    Photospider::operation_runtime
-    Photospider::scheduler_sdk
-    Threads::Threads
-    ${CMAKE_DL_LIBS}
-)
-if(PHOTOSPIDER_ENABLE_OPENCV)
-    target_include_directories(photospider PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(photospider PRIVATE
-        Photospider::operation_opencv
-        ${OpenCV_LIBS})
+add_library(photospider STATIC
+    $<TARGET_OBJECTS:photospider_product_common_objects>
+    $<TARGET_OBJECTS:photospider_product_seam_objects>)
+configure_photospider_product_archive(photospider)
+
+set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
+    PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
+    PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
+    PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+    PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
+    PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
+    add_library(photospider_internal_test_product_seam_objects OBJECT
+        ${PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES})
+    configure_photospider_product_objects(
+        photospider_internal_test_product_seam_objects)
+    target_compile_definitions(
+        photospider_internal_test_product_seam_objects PRIVATE
+        ${PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS})
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+        target_compile_definitions(
+            photospider_internal_test_product_seam_objects PRIVATE
+            PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+    endif()
+
+    add_library(photospider_internal_test_product STATIC
+        $<TARGET_OBJECTS:photospider_product_common_objects>
+        $<TARGET_OBJECTS:photospider_internal_test_product_seam_objects>)
+    configure_photospider_product_archive(
+        photospider_internal_test_product)
 endif()
-if(PHOTOSPIDER_ENABLE_YAML)
-    target_link_libraries(photospider PRIVATE yaml-cpp::yaml-cpp)
-endif()
+
+# Fail configuration if a future refactor accidentally restores an Issue #72,
+# Issue #75, or Issue #76 test definition on any production product target.
+function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
+    get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
+        ${TARGET_NAME} COMPILE_DEFINITIONS)
+    foreach(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITION
+            IN LISTS PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS)
+        if(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITION
+                IN_LIST PHOTOSPIDER_TARGET_DEFINITIONS)
+            message(FATAL_ERROR
+                "Production target ${TARGET_NAME} contains test definition ${PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITION}")
+        endif()
+    endforeach()
+endfunction()
+assert_target_omits_internal_product_test_definitions(
+    photospider_product_common_objects)
+assert_target_omits_internal_product_test_definitions(
+    photospider_product_seam_objects)
+assert_target_omits_internal_product_test_definitions(photospider)
 
 # ==============================================================================
 # 2a. Versioned Local IPC Products (Unix only)
@@ -807,7 +926,7 @@ install(TARGETS photospider
 install(TARGETS
     photospider_operation_sdk
     photospider_operation_runtime
-    photospider_scheduler_sdk
+    photospider_policy_sdk
     EXPORT PhotospiderTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -974,94 +1093,57 @@ if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
 endif()
 
 # ==============================================================================
-# 6. Scheduler Plugins (Dynamic Loadable Schedulers)
+# 6. Policy Plugins (Dynamic Pure-C Ranking Extensions)
 # ==============================================================================
 
-set(SCHEDULER_PLUGIN_DIR ${CMAKE_BINARY_DIR}/schedulers)
-file(MAKE_DIRECTORY ${SCHEDULER_PLUGIN_DIR})
-
-# Production/demo scheduler plugins. Test-only fixtures are built into a
-# separate directory below so config.yaml's default scheduler_dirs does not
-# expose lifecycle test schedulers to users.
-file(GLOB SCHEDULER_PLUGIN_SOURCES
-    "plugins/schedulers/*_example_plugin.cpp")
-set(SCHEDULER_PLUGIN_TARGETS "")
-
-# Remove stale lifecycle fixture outputs left by older build trees.
-file(REMOVE
-    "${SCHEDULER_PLUGIN_DIR}/libdestroy_count_scheduler_plugin.dylib"
-    "${SCHEDULER_PLUGIN_DIR}/libdestroy_count_scheduler_plugin.so"
-    "${SCHEDULER_PLUGIN_DIR}/destroy_count_scheduler_plugin.dll"
-    "${SCHEDULER_PLUGIN_DIR}/libcpu_work_stealing_plugin.dylib"
-    "${SCHEDULER_PLUGIN_DIR}/libcpu_work_stealing_plugin.so"
-    "${SCHEDULER_PLUGIN_DIR}/cpu_work_stealing_plugin.dll"
-    "${SCHEDULER_PLUGIN_DIR}/libgpu_pipeline_plugin.dylib"
-    "${SCHEDULER_PLUGIN_DIR}/libgpu_pipeline_plugin.so"
-    "${SCHEDULER_PLUGIN_DIR}/gpu_pipeline_plugin.dll"
-    "${SCHEDULER_PLUGIN_DIR}/libserial_debug_plugin.dylib"
-    "${SCHEDULER_PLUGIN_DIR}/libserial_debug_plugin.so"
-    "${SCHEDULER_PLUGIN_DIR}/serial_debug_plugin.dll"
-)
-
-foreach(SCHEDULER_SOURCE ${SCHEDULER_PLUGIN_SOURCES})
-    get_filename_component(SCHEDULER_NAME ${SCHEDULER_SOURCE} NAME_WE)
-    add_library(${SCHEDULER_NAME} SHARED ${SCHEDULER_SOURCE})
-    list(APPEND SCHEDULER_PLUGIN_TARGETS ${SCHEDULER_NAME})
-    target_compile_definitions(${SCHEDULER_NAME} PRIVATE
-        PHOTOSPIDER_SCHEDULER_PLUGIN_BUILD)
-    
-    set_target_properties(${SCHEDULER_NAME} PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${SCHEDULER_PLUGIN_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${SCHEDULER_PLUGIN_DIR}"
-    )
-    
+set(POLICY_PLUGIN_DIR ${CMAKE_BINARY_DIR}/policies)
+file(MAKE_DIRECTORY ${POLICY_PLUGIN_DIR})
+file(GLOB POLICY_PLUGIN_SOURCES "plugins/policies/*.c")
+set(POLICY_PLUGIN_TARGETS "")
+foreach(POLICY_SOURCE ${POLICY_PLUGIN_SOURCES})
+    get_filename_component(POLICY_NAME ${POLICY_SOURCE} NAME_WE)
+    add_library(${POLICY_NAME} SHARED ${POLICY_SOURCE})
+    list(APPEND POLICY_PLUGIN_TARGETS ${POLICY_NAME})
+    set_target_properties(${POLICY_NAME} PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED YES
+        LIBRARY_OUTPUT_DIRECTORY "${POLICY_PLUGIN_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${POLICY_PLUGIN_DIR}")
     if(APPLE)
-        set_target_properties(${SCHEDULER_NAME} PROPERTIES
-            MACOSX_RPATH ON
-        )
+        set_target_properties(${POLICY_NAME} PROPERTIES MACOSX_RPATH ON)
     endif()
-    
-    target_include_directories(${SCHEDULER_NAME} PRIVATE
-        "${PROJECT_SOURCE_DIR}/plugins")
-    target_link_libraries(${SCHEDULER_NAME} PRIVATE
-        Photospider::scheduler_sdk
-        Threads::Threads)
+    target_link_libraries(${POLICY_NAME} PRIVATE Photospider::policy_sdk)
 endforeach()
 
 if(BUILD_TESTING)
-    set(TEST_SCHEDULER_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_schedulers)
+    set(TEST_POLICY_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_policies)
     set(TEST_OP_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_plugins)
-    file(MAKE_DIRECTORY ${TEST_SCHEDULER_PLUGIN_DIR})
+    file(MAKE_DIRECTORY ${TEST_POLICY_PLUGIN_DIR})
     file(MAKE_DIRECTORY ${TEST_OP_PLUGIN_DIR})
 
-    set(TEST_INCOMPATIBLE_SCHEDULER_PLUGIN_DIR
-        ${CMAKE_BINARY_DIR}/test_scheduler_incompatible)
-    file(MAKE_DIRECTORY ${TEST_INCOMPATIBLE_SCHEDULER_PLUGIN_DIR})
-
-    function(add_scheduler_fixture TARGET_NAME OUTPUT_DIRECTORY)
+    function(add_policy_fixture TARGET_NAME OUTPUT_DIRECTORY)
         add_library(${TARGET_NAME} SHARED
-            tests/fixtures/scheduler_plugins/destroy_count_scheduler_plugin.cpp)
+            tests/fixtures/policy_plugins/policy_fixture.c)
         target_compile_definitions(${TARGET_NAME} PRIVATE
-            PHOTOSPIDER_SCHEDULER_PLUGIN_BUILD
             ${ARGN})
         set_target_properties(${TARGET_NAME} PROPERTIES
+            C_STANDARD 11
+            C_STANDARD_REQUIRED YES
             LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}"
             RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIRECTORY}")
         if(APPLE)
             set_target_properties(${TARGET_NAME} PROPERTIES MACOSX_RPATH ON)
         endif()
-        target_link_libraries(${TARGET_NAME} PRIVATE
-            Photospider::scheduler_sdk)
+        target_link_libraries(${TARGET_NAME} PRIVATE Photospider::policy_sdk)
     endfunction()
 
-    add_scheduler_fixture(destroy_count_scheduler_plugin
-        "${TEST_SCHEDULER_PLUGIN_DIR}")
-    add_scheduler_fixture(missing_handshake_scheduler_plugin
-        "${TEST_INCOMPATIBLE_SCHEDULER_PLUGIN_DIR}/missing"
-        PHOTOSPIDER_SCHEDULER_FIXTURE_OMIT_HANDSHAKE)
-    add_scheduler_fixture(mismatched_abi_scheduler_plugin
-        "${TEST_INCOMPATIBLE_SCHEDULER_PLUGIN_DIR}/mismatch"
-        PHOTOSPIDER_SCHEDULER_FIXTURE_ABI_VERSION=1U)
+    add_policy_fixture(test_policy_plugin "${TEST_POLICY_PLUGIN_DIR}")
+    add_policy_fixture(missing_api_policy_plugin
+        "${TEST_POLICY_PLUGIN_DIR}/missing"
+        PHOTOSPIDER_POLICY_FIXTURE_OMIT_API)
+    add_policy_fixture(mismatched_abi_policy_plugin
+        "${TEST_POLICY_PLUGIN_DIR}/mismatch"
+        PHOTOSPIDER_POLICY_FIXTURE_ABI_VERSION=2U)
 
     add_library(lifecycle_op_plugin SHARED
         tests/fixtures/ops/lifecycle_op_plugin.cpp
@@ -1153,6 +1235,12 @@ if(APPLE)
         "-framework Metal"
         "-framework Foundation"
     )
+    if(TARGET photospider_internal_test_product)
+        target_link_libraries(photospider_internal_test_product PRIVATE
+            "-framework Metal"
+            "-framework Foundation"
+        )
+    endif()
 
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
         find_library(COREIMAGE_FRAMEWORK NAMES CoreImage)
@@ -1236,6 +1324,10 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     include(GoogleTest)
     find_package(GTest REQUIRED)
     macro(add_ps_test TEST_NAME SOURCE_FILE)
+        set(PHOTOSPIDER_TEST_PRODUCT_TARGET photospider)
+        if(NOT "${ARGV2}" STREQUAL "")
+            set(PHOTOSPIDER_TEST_PRODUCT_TARGET "${ARGV2}")
+        endif()
         add_executable(${TEST_NAME} ${SOURCE_FILE})
         set_target_properties(${TEST_NAME} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
@@ -1247,7 +1339,7 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
             "${PROJECT_SOURCE_DIR}/tests"
             ${OpenCV_INCLUDE_DIRS})
         target_link_libraries(${TEST_NAME} PRIVATE
-            photospider
+            ${PHOTOSPIDER_TEST_PRODUCT_TARGET}
             GTest::gtest
             GTest::gtest_main
             yaml-cpp::yaml-cpp
@@ -1258,13 +1350,33 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     # buildable when the repository OpenCV operation provider is disabled
     # without registering the provider-dependent broad suite.
     add_ps_test(test_kernel_contracts
-        tests/integration/test_kernel_contracts.cpp)
+        tests/integration/test_kernel_contracts.cpp
+        photospider_internal_test_product)
     target_compile_definitions(test_kernel_contracts PRIVATE
-        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+        PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
+        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+        PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING
+        PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         target_compile_definitions(test_kernel_contracts PRIVATE
             PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     endif()
+
+    add_ps_test(test_disk_cache_diagnostic_concurrency
+        tests/integration/test_disk_cache_diagnostic_concurrency.cpp)
+    gtest_discover_tests(test_disk_cache_diagnostic_concurrency
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS kernel-concurrency
+            TIMEOUT 20)
+
+    add_ps_test(test_kernel_lifecycle_concurrency
+        tests/integration/test_kernel_lifecycle_concurrency.cpp)
+    gtest_discover_tests(test_kernel_lifecycle_concurrency
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS kernel-concurrency
+            TIMEOUT 60)
 
     add_ps_test(test_optional_opencv_operation_provider
         tests/integration/test_optional_opencv_operation_provider.cpp)
@@ -1290,38 +1402,6 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
-    add_ps_test(test_scheduler tests/integration/test_scheduler.cpp)
-    target_link_libraries(test_scheduler PRIVATE nlohmann_json::nlohmann_json)
-
-    add_executable(test_scheduler_sdk_example
-        tests/unit/test_scheduler_sdk_example.cpp)
-    set_target_properties(test_scheduler_sdk_example PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
-    target_compile_definitions(test_scheduler_sdk_example PRIVATE
-        PHOTOSPIDER_SCHEDULER_EXAMPLE_TESTING)
-    target_include_directories(test_scheduler_sdk_example PRIVATE
-        "${PROJECT_SOURCE_DIR}/plugins")
-    target_link_libraries(test_scheduler_sdk_example PRIVATE
-        Photospider::scheduler_sdk
-        Threads::Threads
-        GTest::gtest
-        GTest::gtest_main)
-
-    add_executable(test_serial_debug_scheduler
-        tests/unit/test_serial_debug_scheduler.cpp
-        src/lib/scheduler/serial_debug_scheduler.cpp)
-    set_target_properties(test_serial_debug_scheduler PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
-    target_compile_definitions(test_serial_debug_scheduler PRIVATE
-        PHOTOSPIDER_INTERNAL_SCHEDULER_TESTING)
-    target_include_directories(test_serial_debug_scheduler PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/lib")
-    target_link_libraries(test_serial_debug_scheduler PRIVATE
-        Photospider::scheduler_sdk
-        Threads::Threads
-        GTest::gtest
-        GTest::gtest_main)
-
     if(PHOTOSPIDER_BUILD_IPC)
         add_executable(test_ipc_protocol tests/unit/test_ipc_protocol.cpp)
         set_target_properties(test_ipc_protocol PROPERTIES
@@ -1334,7 +1414,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             "${PROJECT_SOURCE_DIR}/tests"
             ${OpenCV_INCLUDE_DIRS})
         target_compile_definitions(test_ipc_protocol PRIVATE
-            PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>"
+            PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
             PS_TEST_OP_PLUGIN_DIR="$<TARGET_FILE_DIR:lifecycle_op_plugin>")
         target_link_libraries(test_ipc_protocol PRIVATE
             photospider_ipc_server_internal
@@ -1345,7 +1425,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             nlohmann_json::nlohmann_json
             Threads::Threads
             ${CMAKE_DL_LIBS})
-        add_dependencies(test_ipc_protocol destroy_count_scheduler_plugin
+        add_dependencies(test_ipc_protocol test_policy_plugin
             lifecycle_op_plugin)
 
         add_executable(test_ipc_host tests/unit/test_ipc_host.cpp)
@@ -1448,7 +1528,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PS_PHOTOSPIDERD_PATH="$<TARGET_FILE:photospiderd>"
             PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH="$<TARGET_FILE:ipc_output_fixture_daemon>"
             PS_TEST_OP_PLUGIN_DIR="$<TARGET_FILE_DIR:lifecycle_op_plugin>"
-            PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>")
+            PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>")
         target_include_directories(test_ipc_daemon PRIVATE
             "${PROJECT_SOURCE_DIR}/include"
             "${PROJECT_SOURCE_DIR}/src/lib"
@@ -1462,12 +1542,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             Threads::Threads)
         add_dependencies(test_ipc_daemon
             photospiderd ipc_output_fixture_daemon lifecycle_op_plugin
-            destroy_count_scheduler_plugin)
+            test_policy_plugin)
     endif()
 
-    add_ps_test(test_milestone2 tests/integration/test_milestone2.cpp)
-    add_ps_test(test_milestone3 tests/integration/test_milestone3.cpp)
-    add_ps_test(test_milestone34 tests/integration/test_milestone34.cpp)
     add_ps_test(test_propagation tests/integration/test_propagation.cpp)
     add_ps_test(test_propagation_contracts
         tests/unit/test_propagation_contracts.cpp)
@@ -1477,6 +1554,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_graph_document_adapter.cpp)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
+    add_ps_test(test_host_compute_request_contracts
+        tests/unit/test_host_compute_request_contracts.cpp)
     add_executable(test_stdlib_image_buffer_processing
         tests/unit/test_stdlib_image_buffer_processing.cpp
         src/lib/core/image_buffer_processing.cpp)
@@ -1495,27 +1574,34 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/unit/test_cli_compute_event_paging.cpp)
     target_include_directories(test_cli_compute_event_paging PRIVATE
         "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
-    add_ps_test(test_host_adapter tests/integration/test_host_adapter.cpp)
+    add_ps_test(test_cli_policy_execution_config
+        tests/integration/test_cli_policy_execution_config.cpp)
+    target_include_directories(test_cli_policy_execution_config PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
+    target_link_libraries(test_cli_policy_execution_config PRIVATE
+        photospider_cli_common)
+    add_ps_test(test_host_adapter tests/integration/test_host_adapter.cpp
+        photospider_internal_test_product)
     target_link_libraries(test_host_adapter PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(test_host_adapter PRIVATE
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
-        PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>"
+        PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin
-        override_lifecycle_op_plugin destroy_count_scheduler_plugin)
+        override_lifecycle_op_plugin test_policy_plugin)
     add_ps_test(test_graph_document_errors
         tests/integration/test_graph_document_errors.cpp)
     target_compile_definitions(test_graph_document_errors PRIVATE
         PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     add_ps_test(test_graph_document_injection
         tests/integration/test_graph_document_injection.cpp)
-    add_ps_test(test_scheduler_worker_budget
-        tests/integration/test_scheduler_worker_budget.cpp)
-    target_compile_definitions(test_scheduler_worker_budget PRIVATE
+    add_ps_test(test_resource_admission
+        tests/integration/test_resource_admission.cpp)
+    target_compile_definitions(test_resource_admission PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
         add_ps_test(test_opencv_operation_concurrency
@@ -1546,16 +1632,33 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             yaml-cpp::yaml-cpp
             ${OpenCV_LIBS})
     endif()
-    add_ps_test(test_scheduler_worker_budget_unit
-        tests/unit/test_scheduler_worker_budget.cpp)
-    add_ps_test(test_scheduler_factory_plan
-        tests/unit/test_scheduler_factory_plan.cpp)
-    add_ps_test(test_scheduler_reservation_owner
-        tests/unit/test_scheduler_reservation_owner.cpp)
-    add_ps_test(test_scheduler_instance_limits
-        tests/unit/test_scheduler_instance_limits.cpp)
-    target_compile_definitions(test_scheduler_instance_limits PRIVATE
-        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    add_ps_test(test_resource_ledger tests/unit/test_resource_ledger.cpp)
+    add_ps_test(test_physical_execution_routes
+        tests/unit/test_physical_execution_routes.cpp
+        photospider_execution_internal)
+    add_ps_test(test_policy_registry tests/unit/test_policy_registry.cpp
+        photospider_policy_internal)
+    target_compile_definitions(test_policy_registry PRIVATE
+        PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
+        PS_TEST_MISSING_API_POLICY_PLUGIN_PATH="$<TARGET_FILE:missing_api_policy_plugin>"
+        PS_TEST_MISMATCHED_ABI_POLICY_PLUGIN_PATH="$<TARGET_FILE:mismatched_abi_policy_plugin>")
+    target_link_libraries(test_policy_registry PRIVATE ${CMAKE_DL_LIBS})
+    add_dependencies(test_policy_registry test_policy_plugin
+        missing_api_policy_plugin mismatched_abi_policy_plugin)
+    add_ps_test(test_policy_execution tests/unit/test_policy_execution.cpp
+        photospider_internal_test_product)
+    target_compile_definitions(test_policy_execution PRIVATE
+        PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
+        PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>")
+    target_link_libraries(test_policy_execution PRIVATE ${CMAKE_DL_LIBS})
+    add_dependencies(test_policy_execution test_policy_plugin)
+    add_ps_test(test_compute_run tests/unit/test_compute_run.cpp)
+    add_ps_test(test_run_lifecycle_registry
+        tests/unit/test_run_lifecycle_registry.cpp)
+    add_ps_test(test_execution_lifecycle_telemetry
+        tests/unit/test_execution_lifecycle_telemetry.cpp)
+    add_ps_test(test_compute_supersession
+        tests/unit/test_compute_supersession.cpp)
     add_ps_test(test_bad_alloc_boundaries
         tests/integration/test_bad_alloc_boundaries.cpp)
     target_sources(test_bad_alloc_boundaries PRIVATE
@@ -1584,12 +1687,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
     target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
         photospider_cli_common)
-    add_ps_test(test_cli_scheduler_config
-        tests/integration/test_cli_scheduler_config.cpp)
-    target_include_directories(test_cli_scheduler_config PRIVATE
-        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
-    target_link_libraries(test_cli_scheduler_config PRIVATE
-        photospider_cli_common)
     add_ps_test(test_compute_service_split
         tests/integration/test_compute_service_split.cpp)
     add_ps_test(test_stride_aware_compute_paths
@@ -1614,33 +1711,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     )
     add_dependencies(test_plugin_manager lifecycle_op_plugin
         override_lifecycle_op_plugin v1_only_op_plugin ${OP_PLUGIN_TARGETS})
-
-    # [M3.5] GPU Pipeline 调度器测试
-    add_ps_test(test_gpu_pipeline_scheduler
-        tests/integration/test_gpu_pipeline_scheduler.cpp)
-
-    # Deterministic CPU/GPU exception-publication race and reuse coverage.
-    add_ps_test(test_scheduler_exception_publication
-        tests/unit/test_scheduler_exception_publication.cpp)
-    target_compile_definitions(test_scheduler_exception_publication PRIVATE
-        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-
-    # [M3.5] 调度器插件加载器测试
-    add_ps_test(test_scheduler_plugin_loader
-        tests/integration/test_scheduler_plugin_loader.cpp)
-    target_link_libraries(test_scheduler_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
-    target_compile_definitions(test_scheduler_plugin_loader PRIVATE
-        PS_SCHEDULER_PLUGIN_DIR="${SCHEDULER_PLUGIN_DIR}"
-        PS_TEST_SCHEDULER_PLUGIN_DIR="${TEST_SCHEDULER_PLUGIN_DIR}"
-        PS_TEST_SCHEDULER_MISSING_HANDSHAKE_PATH="$<TARGET_FILE:missing_handshake_scheduler_plugin>"
-        PS_TEST_SCHEDULER_MISMATCHED_ABI_PATH="$<TARGET_FILE:mismatched_abi_scheduler_plugin>"
-    )
-    add_dependencies(test_scheduler_plugin_loader
-        ${SCHEDULER_PLUGIN_TARGETS}
-        destroy_count_scheduler_plugin
-        missing_handshake_scheduler_plugin
-        mismatched_abi_scheduler_plugin
-    )
 
     set(PHOTOSPIDER_PUBLIC_HEADER_ROOT
         "${PROJECT_SOURCE_DIR}/include/photospider")
@@ -1670,7 +1740,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         endif()
     endforeach()
 
-    # Core, Host, IPC, operation-SDK, and scheduler headers must remain
+    # Core, Host, IPC, operation-SDK, and policy headers must remain
     # self-contained without inheriting the optional OpenCV component.
     add_library(public_header_self_containment_objects OBJECT
         ${PHOTOSPIDER_PUBLIC_HEADER_SELF_CONTAINMENT_SOURCES}
@@ -1810,7 +1880,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             "${PROJECT_SOURCE_DIR}/tests/integration/graph_cli_plugin_compute_smoke.py"
             --binary "$<TARGET_FILE:graph_cli>"
             --operation-plugin-dir "$<TARGET_FILE_DIR:lifecycle_op_plugin>"
-            --scheduler-plugin "$<TARGET_FILE:destroy_count_scheduler_plugin>"
+            --policy-plugin "$<TARGET_FILE:test_policy_plugin>"
             --work "${CMAKE_BINARY_DIR}/tests/graph_cli_plugin_compute_smoke"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(GraphCliPluginComputeSmoke PROPERTIES
@@ -1824,11 +1894,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         RUN_SERIAL TRUE
         TIMEOUT 300)
 
-    gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_scheduler_sdk_example
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_serial_debug_scheduler
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     if(PHOTOSPIDER_BUILD_IPC)
         gtest_discover_tests(test_ipc_protocol
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
@@ -1849,11 +1914,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
     endif()
-    gtest_discover_tests(test_milestone2 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_milestone3 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_plugin_manager WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
@@ -1862,13 +1924,19 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_graph_document_adapter
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_kernel_contracts
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_host_compute_request_contracts
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_stdlib_image_buffer_processing
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_event_stream_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_cli_compute_event_paging
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_cli_policy_execution_config
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_document_errors
@@ -1877,7 +1945,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_graph_document_injection
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_scheduler_worker_budget
+    gtest_discover_tests(test_resource_admission
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
@@ -1888,23 +1956,30 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 60)
     endif()
-    gtest_discover_tests(test_scheduler_worker_budget_unit
+    gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_scheduler_factory_plan
+    gtest_discover_tests(test_policy_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_scheduler_reservation_owner
+    gtest_discover_tests(test_policy_execution
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
-    gtest_discover_tests(test_scheduler_instance_limits
+    gtest_discover_tests(test_compute_run
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_run_lifecycle_registry
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_execution_lifecycle_telemetry
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_compute_supersession
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_bad_alloc_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_cli_dirty_snapshot_formatter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_cli_scheduler_config
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
@@ -1912,10 +1987,43 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_scheduler_exception_publication
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
+
+# The test-only product must have a closed direct-consumer set, and no target
+# may combine it with the installable archive. This assertion runs after all
+# root targets have been declared so later CMake edits cannot silently widen
+# the test seam or create a duplicate-definition link.
+if(TARGET photospider_internal_test_product)
+    get_property(PHOTOSPIDER_ROOT_TARGETS DIRECTORY
+        PROPERTY BUILDSYSTEM_TARGETS)
+    set(PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS "")
+    foreach(PHOTOSPIDER_ROOT_TARGET IN LISTS PHOTOSPIDER_ROOT_TARGETS)
+        get_target_property(PHOTOSPIDER_ROOT_TARGET_LINKS
+            ${PHOTOSPIDER_ROOT_TARGET} LINK_LIBRARIES)
+        if(photospider_internal_test_product
+                IN_LIST PHOTOSPIDER_ROOT_TARGET_LINKS)
+            if(photospider IN_LIST PHOTOSPIDER_ROOT_TARGET_LINKS)
+                message(FATAL_ERROR
+                    "Target ${PHOTOSPIDER_ROOT_TARGET} links both production and test products")
+            endif()
+            list(APPEND PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS
+                ${PHOTOSPIDER_ROOT_TARGET})
+        endif()
+    endforeach()
+    set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
+        test_kernel_contracts)
+    if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
+        list(APPEND PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
+            test_host_adapter
+            test_policy_execution)
+    endif()
+    list(SORT PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS)
+    list(SORT PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS)
+    if(NOT PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS STREQUAL
+            PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS)
+        message(FATAL_ERROR
+            "Unexpected internal test-product consumers: ${PHOTOSPIDER_INTERNAL_TEST_PRODUCT_CONSUMERS}")
+    endif()
 endif()
 
 # --- Summary ---
@@ -1929,7 +2037,7 @@ message(STATUS "  OpenCV Op Plugins : ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGI
 message(STATUS "  Output Bin        : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
-message(STATUS "  Scheduler Plugins : ${SCHEDULER_PLUGIN_DIR}")
+message(STATUS "  Policy Plugins    : ${POLICY_PLUGIN_DIR}")
 message(STATUS "  OpenCV Op Provider: ${PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER}")
 message(STATUS "  Focused Tests     : ${PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS}")
 message(STATUS "  Full Test Suite   : ${PHOTOSPIDER_BUILD_FULL_TEST_SUITE}")

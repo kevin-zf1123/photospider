@@ -847,6 +847,117 @@ TEST(ComputeRequestRegistryRetention, NeverExpiresActiveWork) {
 }
 
 TEST(ComputeRequestRegistryOutput,
+     EvictionCleanupPrecedesReplacementTerminalPublication) {
+  OpaqueSequence sessions_ids(1);
+  OpaqueSequence compute_ids(100);
+  SessionRegistry sessions([&] { return sessions_ids.next(); });
+  const IpcSessionId session =
+      activate_session(&sessions, "alpha", "private-alpha");
+  StepGate replacement_executor_gate;
+  StepGate cleanup_gate;
+  std::promise<void> cleanup_finished;
+  std::future<void> cleanup_finished_future = cleanup_finished.get_future();
+  std::atomic<bool> inspect_eviction{false};
+  std::atomic<bool> evicted_absent{false};
+  std::atomic<bool> replacement_found{false};
+  std::atomic<ComputeRequestState> replacement_state{
+      ComputeRequestState::Queued};
+  std::atomic<int> cleaned{0};
+  int published = 0;
+  ComputeRequestId evicted_id;
+  ComputeRequestId replacement_id;
+  ComputeRequestRegistry* registry_ptr = nullptr;
+  ComputeRequestRegistryLimits limits;
+  limits.terminal = 1;
+  ComputeRequestRegistry registry(
+      sessions, [](const HostComputeRequest&) { return ok_status(); },
+      [&](const HostComputeRequest& request) {
+        if (request.node.value == 2) {
+          replacement_executor_gate.enter_and_wait();
+        }
+        ImageBuffer image;
+        image.width = 1;
+        return Result<ImageBuffer>{ok_status(), std::move(image)};
+      },
+      [&](const ComputeRequestId&, ImageBuffer) {
+        const int sequence = ++published;
+        return ComputeOutputPublication{
+            ok_status(),
+            ComputeOutputOwnership(
+                "linearized-output-" + std::to_string(sequence),
+                [&, sequence](const std::optional<std::string>&) {
+                  const bool inspect =
+                      sequence == 1 &&
+                      inspect_eviction.load(std::memory_order_acquire);
+                  if (inspect) {
+                    const auto evicted = registry_ptr->status(evicted_id);
+                    evicted_absent.store(
+                        !evicted.status.ok &&
+                            evicted.status.code == kJobNotFoundCode,
+                        std::memory_order_release);
+                    const auto replacement =
+                        registry_ptr->status(replacement_id);
+                    replacement_found.store(replacement.status.ok,
+                                            std::memory_order_release);
+                    if (replacement.status.ok) {
+                      replacement_state.store(replacement.value.state,
+                                              std::memory_order_release);
+                    }
+                    cleanup_gate.enter_and_wait();
+                  }
+                  ++cleaned;
+                  if (inspect) {
+                    cleanup_finished.set_value();
+                  }
+                })};
+      },
+      limits, {}, [&] { return compute_ids.next(); });
+  registry_ptr = &registry;
+  ASSERT_TRUE(registry.start().ok);
+
+  const auto first =
+      registry.submit(session, request_for(1), ComputeResultMode::Image);
+  ASSERT_TRUE(first.status.ok);
+  evicted_id = first.value.compute_id;
+  ASSERT_EQ(wait_for_terminal(&registry, evicted_id).state,
+            ComputeRequestState::Succeeded);
+
+  const auto second =
+      registry.submit(session, request_for(2), ComputeResultMode::Image);
+  ASSERT_TRUE(second.status.ok);
+  replacement_id = second.value.compute_id;
+  const bool replacement_entered =
+      replacement_executor_gate.wait_until_entered();
+  EXPECT_TRUE(replacement_entered);
+  if (!replacement_entered) {
+    replacement_executor_gate.release();
+    return;
+  }
+  inspect_eviction.store(true, std::memory_order_release);
+  replacement_executor_gate.release();
+
+  const bool cleanup_entered = cleanup_gate.wait_until_entered();
+  EXPECT_TRUE(cleanup_entered);
+  if (cleanup_entered) {
+    const auto visible_replacement = registry.status(replacement_id);
+    EXPECT_TRUE(visible_replacement.status.ok);
+    if (visible_replacement.status.ok) {
+      EXPECT_EQ(visible_replacement.value.state, ComputeRequestState::Running);
+    }
+    EXPECT_TRUE(evicted_absent.load(std::memory_order_acquire));
+    EXPECT_TRUE(replacement_found.load(std::memory_order_acquire));
+    EXPECT_EQ(replacement_state.load(std::memory_order_acquire),
+              ComputeRequestState::Running);
+    EXPECT_EQ(cleaned.load(), 0);
+  }
+  cleanup_gate.release();
+  EXPECT_EQ(cleanup_finished_future.wait_for(2s), std::future_status::ready);
+  EXPECT_EQ(wait_for_terminal(&registry, replacement_id).state,
+            ComputeRequestState::Succeeded);
+  EXPECT_EQ(cleaned.load(), 1);
+}
+
+TEST(ComputeRequestRegistryOutput,
      CleansExactlyOnceOnEvictionReleaseAndExpiry) {
   OpaqueSequence sessions_ids(1);
   OpaqueSequence compute_ids(100);
@@ -912,6 +1023,13 @@ TEST(ComputeRequestRegistryOutput,
   EXPECT_EQ(cleaned.load(), 4);
 }
 
+/**
+ * @brief Verifies close marks before waiting and publishes one Owner result.
+ *
+ * @throws Nothing when futures, admissions, and generation state remain exact.
+ * @note The Owner crosses the Host boundary only after every admitted ordinary
+ * call releases; post-marker admission remains Graph NotFound.
+ */
 TEST(SessionRegistryLifecycle, CloseWaitsOrdinaryAdmissionAndRejectsNewWork) {
   OpaqueSequence sessions_ids(1);
   SessionRegistry sessions([&] { return sessions_ids.next(); });
@@ -934,34 +1052,65 @@ TEST(SessionRegistryLifecycle, CloseWaitsOrdinaryAdmissionAndRejectsNewWork) {
   auto claim = closing.get();
   ASSERT_TRUE(claim.status.ok);
   EXPECT_EQ(claim.value.host_session().value, "private-alpha");
-  claim.value.erase();
+  EXPECT_EQ(claim.value.role(), SessionRegistry::CloseClaim::Role::Owner);
+  EXPECT_EQ(claim.value.generation(), 1U);
+  claim.value.mark_host_close_started();
+  claim.value.complete_host_close(ok_status());
+  EXPECT_TRUE(claim.value.wait_result().ok);
   EXPECT_FALSE(sessions.admit_host_call(session).status.ok);
 }
 
-TEST(SessionRegistryLifecycle, RetryableCloseReopensAndSuccessfulCloseErases) {
+/**
+ * @brief Proves only a pre-invocation abort reopens and advances on retry.
+ *
+ * @throws Nothing when all claims observe exact immutable generation results.
+ * @note Live Joiners retain the first HostCloseNotStarted result. A new Owner
+ * is selectable only after every first-generation participant retires.
+ */
+TEST(SessionRegistryLifecycle,
+     PreInvocationAbortReopensAndSuccessfulRetryAdvancesGeneration) {
   OpaqueSequence sessions_ids(1);
   SessionRegistry sessions([&] { return sessions_ids.next(); });
   const IpcSessionId session =
       activate_session(&sessions, "alpha", "private-alpha");
 
-  {
-    auto claim = sessions.begin_close(session);
-    ASSERT_TRUE(claim.status.ok);
-    EXPECT_FALSE(sessions.admit_host_call(session).status.ok);
-  }
-  EXPECT_TRUE(sessions.admit_host_call(session).status.ok);
-  {
-    auto claim = sessions.begin_close(session);
-    ASSERT_TRUE(claim.status.ok);
-    claim.value.reopen();
-  }
-  EXPECT_TRUE(sessions.admit_host_call(session).status.ok);
-  {
-    auto claim = sessions.begin_close(session);
-    ASSERT_TRUE(claim.status.ok);
-    claim.value.erase();
-  }
+  auto owner = sessions.begin_close(session);
+  ASSERT_TRUE(owner.status.ok);
+  EXPECT_EQ(owner.value.role(), SessionRegistry::CloseClaim::Role::Owner);
+  EXPECT_EQ(owner.value.generation(), 1U);
   EXPECT_FALSE(sessions.admit_host_call(session).status.ok);
+
+  auto joiner = sessions.begin_close(session);
+  ASSERT_TRUE(joiner.status.ok);
+  EXPECT_EQ(joiner.value.role(), SessionRegistry::CloseClaim::Role::Joiner);
+  EXPECT_EQ(joiner.value.generation(), 1U);
+  EXPECT_FALSE(sessions.admit_host_call(session).status.ok);
+  owner.value = {};
+
+  const OperationStatus aborted = joiner.value.wait_result();
+  EXPECT_FALSE(aborted.ok);
+  EXPECT_EQ(aborted.domain, OperationErrorDomain::Daemon);
+  EXPECT_NE(aborted.message.find("HostCloseNotStarted"), std::string::npos);
+  EXPECT_TRUE(sessions.admit_host_call(session).status.ok);
+
+  auto retained_failure = sessions.begin_close(session);
+  ASSERT_TRUE(retained_failure.status.ok);
+  EXPECT_EQ(retained_failure.value.role(),
+            SessionRegistry::CloseClaim::Role::Joiner);
+  EXPECT_EQ(retained_failure.value.generation(), 1U);
+  EXPECT_EQ(retained_failure.value.wait_result().message, aborted.message);
+  retained_failure.value = {};
+  joiner.value = {};
+
+  auto retry = sessions.begin_close(session);
+  ASSERT_TRUE(retry.status.ok);
+  EXPECT_EQ(retry.value.role(), SessionRegistry::CloseClaim::Role::Owner);
+  EXPECT_EQ(retry.value.generation(), 2U);
+  retry.value.mark_host_close_started();
+  retry.value.complete_host_close(ok_status());
+  EXPECT_TRUE(retry.value.wait_result().ok);
+  EXPECT_FALSE(sessions.admit_host_call(session).status.ok);
+  EXPECT_FALSE(sessions.begin_close(session).status.ok);
 }
 
 TEST(SessionRegistryLifecycle, GlobalStopRejectsAndRestartRestoresAdmission) {
@@ -982,6 +1131,64 @@ TEST(SessionRegistryLifecycle, GlobalStopRejectsAndRestartRestoresAdmission) {
   EXPECT_TRUE(sessions.admit_host_call(beta).status.ok);
 }
 
+/**
+ * @brief Verifies shutdown bypasses global admission without bypassing close.
+ *
+ * @throws Nothing when Owner/Joiner claims preserve structured terminal state.
+ * @note A stopped daemon may select an Owner for an Active row or join an
+ * already Closing row, but it never mints a second Host caller.
+ */
+TEST(SessionRegistryLifecycle,
+     ShutdownCloseSelectsOrJoinsThePreallocatedGeneration) {
+  OpaqueSequence sessions_ids(1);
+  SessionRegistry sessions([&] { return sessions_ids.next(); });
+  const IpcSessionId alpha =
+      activate_session(&sessions, "alpha", "private-alpha");
+  const IpcSessionId beta = activate_session(&sessions, "beta", "private-beta");
+
+  auto request_owner = sessions.begin_close(alpha);
+  ASSERT_TRUE(request_owner.status.ok);
+  EXPECT_EQ(request_owner.value.role(),
+            SessionRegistry::CloseClaim::Role::Owner);
+  sessions.stop_admission();
+
+  auto shutdown_joiner = sessions.begin_shutdown_close(alpha);
+  ASSERT_TRUE(shutdown_joiner.status.ok);
+  EXPECT_EQ(shutdown_joiner.value.role(),
+            SessionRegistry::CloseClaim::Role::Joiner);
+  EXPECT_EQ(shutdown_joiner.value.generation(),
+            request_owner.value.generation());
+
+  const OperationStatus not_found =
+      failure_status(OperationErrorDomain::Graph,
+                     static_cast<std::int32_t>(GraphErrc::NotFound),
+                     "not_found", "Host mapping was already absent");
+  request_owner.value.mark_host_close_started();
+  request_owner.value.complete_host_close(not_found);
+  const OperationStatus joined = shutdown_joiner.value.wait_result();
+  EXPECT_FALSE(joined.ok);
+  EXPECT_EQ(joined.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(joined.code, static_cast<std::int32_t>(GraphErrc::NotFound));
+  EXPECT_FALSE(sessions.begin_shutdown_close(alpha).status.ok);
+
+  auto shutdown_owner = sessions.begin_shutdown_close(beta);
+  ASSERT_TRUE(shutdown_owner.status.ok);
+  EXPECT_EQ(shutdown_owner.value.role(),
+            SessionRegistry::CloseClaim::Role::Owner);
+  EXPECT_EQ(shutdown_owner.value.generation(), 1U);
+  shutdown_owner.value.mark_host_close_started();
+  shutdown_owner.value.complete_host_close(ok_status());
+  EXPECT_TRUE(shutdown_owner.value.wait_result().ok);
+  EXPECT_TRUE(sessions.active_sessions().empty());
+}
+
+/**
+ * @brief Verifies accepted jobs drain before one close generation enters Host.
+ *
+ * @throws Nothing when the queued job and close futures settle before timeout.
+ * @note Terminal job status remains readable after the opaque mapping is
+ * removed by the Owner's successful Host result.
+ */
 TEST(ComputeRequestRegistryLifecycle, CloseWaitsQueuedJobWithoutHostDeadlock) {
   OpaqueSequence sessions_ids(1);
   OpaqueSequence compute_ids(100);
@@ -1033,10 +1240,20 @@ TEST(ComputeRequestRegistryLifecycle, CloseWaitsQueuedJobWithoutHostDeadlock) {
   ASSERT_EQ(closing.wait_for(2s), std::future_status::ready);
   auto claim = closing.get();
   ASSERT_TRUE(claim.status.ok);
-  claim.value.erase();
+  EXPECT_EQ(claim.value.role(), SessionRegistry::CloseClaim::Role::Owner);
+  claim.value.mark_host_close_started();
+  claim.value.complete_host_close(ok_status());
+  EXPECT_TRUE(claim.value.wait_result().ok);
   EXPECT_TRUE(registry.result(queued.value.compute_id).status.ok);
 }
 
+/**
+ * @brief Verifies submit admission and first close marker have one winner.
+ *
+ * @throws Nothing when the controlled worker and close future settle exactly.
+ * @note The first Owner is intentionally abandoned before Host invocation, so
+ * the second close must own a strictly newer generation and remove the row.
+ */
 TEST(ComputeRequestRegistryLifecycle,
      SimultaneousSubmitAndCloseHaveOneAtomicSessionWinner) {
   OpaqueSequence sessions_ids(1);
@@ -1087,10 +1304,16 @@ TEST(ComputeRequestRegistryLifecycle,
   ASSERT_EQ(closing.wait_for(2s), std::future_status::ready);
   auto first_close = closing.get();
   ASSERT_TRUE(first_close.status.ok);
-  first_close.value.reopen();
+  EXPECT_EQ(first_close.value.role(), SessionRegistry::CloseClaim::Role::Owner);
+  EXPECT_EQ(first_close.value.generation(), 1U);
+  first_close.value = {};
   auto count_probe = sessions.begin_close(session);
   ASSERT_TRUE(count_probe.status.ok);
-  count_probe.value.erase();
+  EXPECT_EQ(count_probe.value.role(), SessionRegistry::CloseClaim::Role::Owner);
+  EXPECT_EQ(count_probe.value.generation(), 2U);
+  count_probe.value.mark_host_close_started();
+  count_probe.value.complete_host_close(ok_status());
+  EXPECT_TRUE(count_probe.value.wait_result().ok);
 }
 
 TEST(ComputeRequestRegistryLifecycle,
@@ -1198,6 +1421,13 @@ TEST(ComputeRequestRegistryLifecycle, ConcurrentShutdownSharesOneWorkerJoin) {
   registry.shutdown();
 }
 
+/**
+ * @brief Verifies compute-id collision retry and malformed-id rollback.
+ *
+ * @throws Nothing when accepted jobs publish terminal state before close.
+ * @note Final session cleanup uses the same explicit Host-start/completion
+ * protocol as daemon routing rather than bypassing the close generation.
+ */
 TEST(ComputeRequestRegistryIdentity,
      RetriesCollisionAndRollsBackMalformedAdmission) {
   OpaqueSequence sessions_ids(1);
@@ -1234,7 +1464,9 @@ TEST(ComputeRequestRegistryIdentity,
             ComputeRequestState::Succeeded);
   auto claim = sessions.begin_close(session);
   ASSERT_TRUE(claim.status.ok);
-  claim.value.erase();
+  claim.value.mark_host_close_started();
+  claim.value.complete_host_close(ok_status());
+  EXPECT_TRUE(claim.value.wait_result().ok);
 }
 
 TEST(ComputeRequestRegistryRace, ReleaseAndExpiryCleanOutputOnce) {

@@ -101,7 +101,7 @@ GraphRuntime::Info make_runtime_info(const ScopedRuntimeDirectory& directory) {
  * @throws Nothing.
  */
 bool trace_sequences_are_strictly_increasing(
-    const GraphRuntime::SchedulerEventPage& page) noexcept {
+    const GraphRuntime::ExecutionEventPage& page) noexcept {
   return std::adjacent_find(page.events.begin(), page.events.end(),
                             [](const auto& lhs, const auto& rhs) {
                               return lhs.sequence >= rhs.sequence;
@@ -113,9 +113,9 @@ TEST(EventStreamConstants, PublishExactLongLivedBounds) {
   EXPECT_EQ(kComputeEventDrainMaxLimit, 1024u);
   EXPECT_EQ(kComputeEventRingCapacity, 8192u);
   EXPECT_EQ(kComputeEventTextMaxBytes, 1024u);
-  EXPECT_EQ(kSchedulerTraceMinLimit, 1u);
-  EXPECT_EQ(kSchedulerTraceMaxLimit, 4096u);
-  EXPECT_EQ(kSchedulerTraceRingCapacity, 65536u);
+  EXPECT_EQ(kExecutionTraceMinLimit, 1u);
+  EXPECT_EQ(kExecutionTraceMaxLimit, 4096u);
+  EXPECT_EQ(kExecutionTraceRingCapacity, 65536u);
   EXPECT_EQ(kObservationSequenceExhausted,
             std::numeric_limits<uint64_t>::max());
 }
@@ -292,101 +292,101 @@ TEST(ComputeEventRing, ConcurrentProducersAndDrainerPreserveEverySequence) {
   EXPECT_EQ(observed.back(), observed.size());
 }
 
-TEST(SchedulerTraceRing, CapacityTwoPagesAreStableNonDestructiveAndExact) {
+TEST(ExecutionTraceRing, CapacityTwoPagesAreStableNonDestructiveAndExact) {
   ScopedRuntimeDirectory directory;
   GraphRuntime::Info info = make_runtime_info(directory);
-  info.scheduler_trace_capacity = 2;
+  info.execution_trace_capacity = 2;
   GraphRuntime runtime(info);
-  runtime.log_event(GraphRuntime::SchedulerEvent::EXECUTE, 1, 7, 11);
-  runtime.log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE, 2, 8, 12);
-  runtime.log_event(GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION, 3, 9, 13);
+  runtime.log_event(GraphRuntime::ExecutionEvent::EXECUTE, 1, 7, 11);
+  runtime.log_event(GraphRuntime::ExecutionEvent::EXECUTE_TILE, 2, 8, 12);
+  runtime.log_event(GraphRuntime::ExecutionEvent::RETHROW_EXCEPTION, 3, 9, 13);
 
-  EXPECT_THROW((void)runtime.scheduler_trace_page(0, 0), std::invalid_argument);
+  EXPECT_THROW((void)runtime.execution_trace_page(0, 0), std::invalid_argument);
   EXPECT_THROW(
-      (void)runtime.scheduler_trace_page(0, kSchedulerTraceMaxLimit + 1),
+      (void)runtime.execution_trace_page(0, kExecutionTraceMaxLimit + 1),
       std::invalid_argument);
-  EXPECT_THROW((void)runtime.scheduler_trace_page(4, 1), std::invalid_argument);
+  EXPECT_THROW((void)runtime.execution_trace_page(4, 1), std::invalid_argument);
 
-  GraphRuntime::SchedulerEventPage first = runtime.scheduler_trace_page(0, 1);
+  GraphRuntime::ExecutionEventPage first = runtime.execution_trace_page(0, 1);
   ASSERT_EQ(first.events.size(), 1u);
   EXPECT_EQ(first.events.front().sequence, 2u);
   EXPECT_EQ(first.next_sequence, 2u);
   EXPECT_TRUE(first.has_more);
   EXPECT_EQ(first.dropped_count, 1u);
 
-  GraphRuntime::SchedulerEventPage repeated =
-      runtime.scheduler_trace_page(0, 1);
+  GraphRuntime::ExecutionEventPage repeated =
+      runtime.execution_trace_page(0, 1);
   ASSERT_EQ(repeated.events.size(), 1u);
   EXPECT_EQ(repeated.events.front().sequence, 2u);
   EXPECT_EQ(repeated.dropped_count, 1u);
 
-  GraphRuntime::SchedulerEventPage second =
-      runtime.scheduler_trace_page(first.next_sequence, 1);
+  GraphRuntime::ExecutionEventPage second =
+      runtime.execution_trace_page(first.next_sequence, 1);
   ASSERT_EQ(second.events.size(), 1u);
   EXPECT_EQ(second.events.front().sequence, 3u);
   EXPECT_EQ(second.next_sequence, 3u);
   EXPECT_FALSE(second.has_more);
   EXPECT_EQ(second.dropped_count, 0u);
 
-  runtime.clear_scheduler_log();
-  GraphRuntime::SchedulerEventPage cleared = runtime.scheduler_trace_page(0, 1);
+  runtime.clear_execution_trace();
+  GraphRuntime::ExecutionEventPage cleared = runtime.execution_trace_page(0, 1);
   EXPECT_TRUE(cleared.events.empty());
   EXPECT_EQ(cleared.next_sequence, 0u);
   EXPECT_FALSE(cleared.has_more);
   EXPECT_EQ(cleared.dropped_count, 3u);
 }
 
-TEST(SchedulerTraceRing, EmptyAndExhaustedCursorsAreDeterministic) {
+TEST(ExecutionTraceRing, EmptyAndExhaustedCursorsAreDeterministic) {
   ScopedRuntimeDirectory empty_directory;
   GraphRuntime empty_runtime(make_runtime_info(empty_directory));
-  GraphRuntime::SchedulerEventPage empty =
-      empty_runtime.scheduler_trace_page(0, 1);
+  GraphRuntime::ExecutionEventPage empty =
+      empty_runtime.execution_trace_page(0, 1);
   EXPECT_TRUE(empty.events.empty());
   EXPECT_EQ(empty.next_sequence, 0u);
   EXPECT_FALSE(empty.has_more);
   EXPECT_EQ(empty.dropped_count, 0u);
-  EXPECT_THROW((void)empty_runtime.scheduler_trace_page(
+  EXPECT_THROW((void)empty_runtime.execution_trace_page(
                    kObservationSequenceExhausted, 1),
                std::invalid_argument);
 
   ScopedRuntimeDirectory exhausted_directory;
   GraphRuntime::Info info = make_runtime_info(exhausted_directory);
-  info.scheduler_trace_capacity = 2;
-  info.scheduler_trace_initial_sequence = kObservationSequenceExhausted - 1;
-  info.scheduler_trace_initial_dropped_count =
+  info.execution_trace_capacity = 2;
+  info.execution_trace_initial_sequence = kObservationSequenceExhausted - 1;
+  info.execution_trace_initial_dropped_count =
       kObservationSequenceExhausted - 1;
   GraphRuntime exhausted(info);
-  exhausted.log_event(GraphRuntime::SchedulerEvent::EXECUTE, 1, 0, 1);
-  exhausted.log_event(GraphRuntime::SchedulerEvent::EXECUTE, 2, 0, 1);
+  exhausted.log_event(GraphRuntime::ExecutionEvent::EXECUTE, 1, 0, 1);
+  exhausted.log_event(GraphRuntime::ExecutionEvent::EXECUTE, 2, 0, 1);
 
-  GraphRuntime::SchedulerEventPage final =
-      exhausted.scheduler_trace_page(kObservationSequenceExhausted - 2, 1);
+  GraphRuntime::ExecutionEventPage final =
+      exhausted.execution_trace_page(kObservationSequenceExhausted - 2, 1);
   ASSERT_EQ(final.events.size(), 1u);
   EXPECT_EQ(final.events.front().sequence, kObservationSequenceExhausted - 1);
   EXPECT_EQ(final.next_sequence, kObservationSequenceExhausted);
   EXPECT_FALSE(final.has_more);
   EXPECT_EQ(final.dropped_count, kObservationSequenceExhausted);
 
-  GraphRuntime::SchedulerEventPage repeated =
-      exhausted.scheduler_trace_page(kObservationSequenceExhausted - 2, 1);
+  GraphRuntime::ExecutionEventPage repeated =
+      exhausted.execution_trace_page(kObservationSequenceExhausted - 2, 1);
   EXPECT_EQ(repeated.events.size(), 1u);
   EXPECT_EQ(repeated.next_sequence, kObservationSequenceExhausted);
   EXPECT_EQ(repeated.dropped_count, kObservationSequenceExhausted);
 
-  GraphRuntime::SchedulerEventPage terminal =
-      exhausted.scheduler_trace_page(kObservationSequenceExhausted, 1);
+  GraphRuntime::ExecutionEventPage terminal =
+      exhausted.execution_trace_page(kObservationSequenceExhausted, 1);
   EXPECT_TRUE(terminal.events.empty());
   EXPECT_EQ(terminal.next_sequence, kObservationSequenceExhausted);
   EXPECT_FALSE(terminal.has_more);
   EXPECT_EQ(terminal.dropped_count, 0u);
 }
 
-TEST(SchedulerTraceRing, ProductionCapacityRetainsExactlyNewest65536) {
+TEST(ExecutionTraceRing, ProductionCapacityRetainsExactlyNewest65536) {
   ScopedRuntimeDirectory directory;
   GraphRuntime runtime(make_runtime_info(directory));
-  for (std::size_t index = 0; index < kSchedulerTraceRingCapacity + 1;
+  for (std::size_t index = 0; index < kExecutionTraceRingCapacity + 1;
        ++index) {
-    runtime.log_event(GraphRuntime::SchedulerEvent::EXECUTE,
+    runtime.log_event(GraphRuntime::ExecutionEvent::EXECUTE,
                       static_cast<int>(index), 0, 1);
   }
 
@@ -394,8 +394,8 @@ TEST(SchedulerTraceRing, ProductionCapacityRetainsExactlyNewest65536) {
   std::vector<uint64_t> observed;
   bool first_page = true;
   for (;;) {
-    GraphRuntime::SchedulerEventPage page =
-        runtime.scheduler_trace_page(cursor, kSchedulerTraceMaxLimit);
+    GraphRuntime::ExecutionEventPage page =
+        runtime.execution_trace_page(cursor, kExecutionTraceMaxLimit);
     EXPECT_TRUE(trace_sequences_are_strictly_increasing(page));
     if (first_page) {
       EXPECT_EQ(page.dropped_count, 1u);
@@ -412,22 +412,22 @@ TEST(SchedulerTraceRing, ProductionCapacityRetainsExactlyNewest65536) {
     }
   }
 
-  ASSERT_EQ(observed.size(), kSchedulerTraceRingCapacity);
+  ASSERT_EQ(observed.size(), kExecutionTraceRingCapacity);
   EXPECT_EQ(observed.front(), 2u);
-  EXPECT_EQ(observed.back(), kSchedulerTraceRingCapacity + 1);
-  GraphRuntime::SchedulerEventPage repeated =
-      runtime.scheduler_trace_page(0, 1);
+  EXPECT_EQ(observed.back(), kExecutionTraceRingCapacity + 1);
+  GraphRuntime::ExecutionEventPage repeated =
+      runtime.execution_trace_page(0, 1);
   ASSERT_EQ(repeated.events.size(), 1u);
   EXPECT_EQ(repeated.events.front().sequence, 2u);
   EXPECT_EQ(repeated.dropped_count, 1u);
 }
 
-TEST(SchedulerTraceRing, ConcurrentProducersAndReadersRemainCoherent) {
+TEST(ExecutionTraceRing, ConcurrentProducersAndReadersRemainCoherent) {
   constexpr int kProducerCount = 4;
   constexpr int kEventsPerProducer = 200;
   ScopedRuntimeDirectory directory;
   GraphRuntime::Info info = make_runtime_info(directory);
-  info.scheduler_trace_capacity = kProducerCount * kEventsPerProducer;
+  info.execution_trace_capacity = kProducerCount * kEventsPerProducer;
   GraphRuntime runtime(info);
   std::atomic<int> producers_remaining{kProducerCount};
   std::atomic<bool> reader_failed{false};
@@ -436,8 +436,8 @@ TEST(SchedulerTraceRing, ConcurrentProducersAndReadersRemainCoherent) {
   for (int reader = 0; reader < 3; ++reader) {
     readers.emplace_back([&] {
       while (producers_remaining.load(std::memory_order_acquire) != 0) {
-        GraphRuntime::SchedulerEventPage page =
-            runtime.scheduler_trace_page(0, 64);
+        GraphRuntime::ExecutionEventPage page =
+            runtime.execution_trace_page(0, 64);
         if (page.events.size() > 64 ||
             !trace_sequences_are_strictly_increasing(page)) {
           reader_failed.store(true, std::memory_order_release);
@@ -451,7 +451,7 @@ TEST(SchedulerTraceRing, ConcurrentProducersAndReadersRemainCoherent) {
   for (int producer = 0; producer < kProducerCount; ++producer) {
     producers.emplace_back([&, producer] {
       for (int index = 0; index < kEventsPerProducer; ++index) {
-        runtime.log_event(GraphRuntime::SchedulerEvent::EXECUTE,
+        runtime.log_event(GraphRuntime::ExecutionEvent::EXECUTE,
                           producer * kEventsPerProducer + index, producer, 1);
       }
       producers_remaining.fetch_sub(1, std::memory_order_release);
@@ -468,8 +468,8 @@ TEST(SchedulerTraceRing, ConcurrentProducersAndReadersRemainCoherent) {
   uint64_t cursor = 0;
   std::size_t observed_count = 0;
   for (;;) {
-    GraphRuntime::SchedulerEventPage page =
-        runtime.scheduler_trace_page(cursor, 64);
+    GraphRuntime::ExecutionEventPage page =
+        runtime.execution_trace_page(cursor, 64);
     EXPECT_TRUE(trace_sequences_are_strictly_increasing(page));
     observed_count += page.events.size();
     cursor = page.next_sequence;

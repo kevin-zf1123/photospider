@@ -64,6 +64,51 @@ child output, and assertion diagnostics to stdout/stderr for CTest to capture.
 All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
+`BUILD_TESTING` controls availability of internal test products, not how the
+installed `photospider` archive compiles the Issue #72/#75/#76 observation
+seams. The product source inventory is divided into common objects, compiled
+once, and production objects for `execution_service.cpp`,
+`graph_cache_service.cpp`, `graph_state_executor.cpp`, `kernel.cpp`, and
+`kernel_compute.cpp`. The real archive always uses the production form of those
+five translation units, with no
+`PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`,
+`PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`,
+`PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, or
+`PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING` or
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` close/compute declarations,
+globals, branches, or symbols. Focused tests link a non-installed
+`photospider_internal_test_product` that reuses the same common objects and
+recompiles only those five translation units with the deterministic seams.
+No target links both complete archives, and the test product is absent from
+install and export sets. The Issue #75 probe declarations are source-tree-
+private free functions, so the macro does not change the production
+`ExecutionService` class definition or object layout.
+
+`StaticProductConsumerSmoke` enforces that boundary for both
+`BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
+real product is installed, Darwin first invokes and validates
+`xcrun --find llvm-nm`, then falls back to PATH `llvm-nm` and PATH `nm`;
+non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
+that order. Canonically identical executable paths run once. A candidate is
+usable only when it starts, exits successfully, emits symbols, and exposes
+defined anchors from all five production seam objects. Otherwise the smoke
+records a path-free failure reason and tries the next candidate; no candidate
+or all unusable candidates fail closed. The first usable full symbol table is
+authoritative and rejects every hook function/helper/global fragment. The
+raw table is used only in memory for that decision; a forbidden symbol in the
+first usable table fails the verdict without trying a later candidate. The
+retained scan observation has a closed, path-free schema: stable `tool_source`,
+ordered structured attempt reasons, status and aggregate line/anchor/prohibited
+counts, plus counts keyed only by controlled symbol tokens. It retains no tool,
+archive, object, build, install, or workspace path; no raw symbol line or
+captured stdout/stderr; and no environment `PATH`. If aggregate package behavior
+fails, the JSON diagnostic is a whitelist projection of failed check labels,
+command statuses, and that sanitized scan observation rather than the complete
+transient observations. The smoke also rejects an installed test product
+archive, exported test target, or exported internal seam definition. This
+remains a labelled `build-smoke`; ordinary complete CTest selection does not
+make package construction part of runtime-test ownership.
+
 The smoke inspects every installed `Photospider*Targets*.cmake` file because
 the package separates base, OpenCV-dependent, and embedded-product targets
 into distinct export sets. Its dependency classifier recognizes only the exact
@@ -89,7 +134,8 @@ resolves only Threads and does not inherit the backend or JSON implementation
 target. That IPC-only consumer includes the installed protocol, Client, and Host-adapter headers,
 constructs `create_ipc_host()` without contacting a daemon, executes every
 safe public Client lifecycle symbol, and links a reference-only branch for all
-exact unique inventories of 55 typed Client calls plus all 53 non-destructor Host virtuals. Package
+exact unique inventories of 60 typed Client calls plus all 58 non-destructor
+Host virtuals. Package
 inspection also requires the IPC archive and exact three-header surface,
 permits only `Threads::Threads` in the exported IPC link interface, positively
 allows only the current C++ standard-library and installed `photospider/`
@@ -99,6 +145,16 @@ an exhaustive promise about every possible POSIX spelling. With backend
 discovery disabled, `COMPONENTS ipc_client OPTIONAL_COMPONENTS embedded`
 succeeds with only `ipc_client` found, and an unknown optional component
 remains not-found without invalidating the package.
+
+The same smoke independently configures a C11 project that requests only
+`COMPONENTS policy_sdk`, builds a pure-C ABI-v1 policy DSO against
+`Photospider::policy_sdk`, and rejects OpenCV, yaml-cpp, or Threads leakage.
+The generated source probes the exact policy ABI constants and layouts. The
+external embedded consumer then loads that installed policy DSO and an
+installed operation DSO, configures policy and execution defaults, validates
+their public snapshots, and computes through both extensions. No generated
+consumer receives a source-tree include directory.
+
 The durable
 `IpcDisabledInstallSmoke` configures a separate clean producer with
 `PHOTOSPIDER_BUILD_IPC=OFF` and `BUILD_TESTING=OFF`; it verifies that no IPC
@@ -161,9 +217,14 @@ not itself start CMake, CTest, an install, or a compile target.
 shard: it runs the three install-consumer drivers' real command-construction
 paths against disposable producer cache fixtures while replacing subprocess
 execution, so it verifies cache-to-child-argv propagation without launching a
-configure, build, or install. When CMake registers the safety test, it also
-supplies the current build tree, CTest executable, configuration, and Python
-launcher. The test queries that tree through
+configure, build, or install. The same process injects executable lookup,
+validation, and captured-command callbacks into the static-product driver's
+production archive-symbol helpers. It locks Darwin xcrun-first fallback,
+non-Darwin independence, all-candidate failure, and canonical path
+de-duplication without changing process PATH or replacing the real installed
+archive scan. When CMake registers the safety test, it also supplies the
+current build tree, CTest executable, configuration, and Python launcher. The
+test queries that tree through
 `ctest --show-only=json-v1` and the production inventory parser. It requires
 `DependencyDisabledInstallSmoke` and `IpcDisabledInstallSmoke` exactly once in
 every profile, requires `StaticProductConsumerSmoke` exactly once only when
@@ -234,33 +295,28 @@ phase name, migration-residue search, stale-term detector, source-layout
 completion check, or issue replay is not a software behavior test and must not
 be registered with CTest or invoked by CI.
 
-The CLI/Host and scheduler Doxygen AST tools are long-lived manual developer tools,
-not tests. Run them explicitly when the corresponding declarations,
-definitions, exception contracts, or target source closures change:
+The CLI/Host Doxygen AST tool is a long-lived manual developer tool, not a
+test. Run it explicitly when the corresponding declarations, definitions,
+exception contracts, or target source closures change:
 
 ```bash
 python3 tests/verification/codebase_structure/cli_host_doxygen_ast.py \
   --repo . --compile-commands build/compile_commands.json \
   --out /tmp/photospider-cli-host-doxygen
-python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
-  --repo . --compile-commands build/compile_commands.json \
-  --out /tmp/photospider-scheduler-doxygen
 ```
 
 The CLI/Host audit treats
-`apps/graph_cli/src/cli_config.cpp::apply_cli_scheduler_defaults` as the
-canonical scheduler-default definition and validates its complete Doxygen in
-that translation unit. It separately audits `run_graph_cli` and its
-resource-exhaustion policy. For `ConfigEditor::SyncUiStateToModel`, both parse
-chains must rethrow `std::bad_alloc`. Scheduler-worker validation handles
-`std::invalid_argument` specifically, while history-size `std::stoi` ignores
-its other errors through exactly one broad `catch (...)`; the catalog therefore
-expects one broad catch for that function, guarded by the preceding
-`std::bad_alloc` handler.
+`apps/graph_cli/src/cli_config.cpp::apply_cli_policy_execution_defaults` as the
+canonical policy/execution-default definition and validates its complete
+Doxygen in that translation unit. It also audits
+`load_configured_policy_plugins`, `run_graph_cli`, the root CLI
+resource-exhaustion policy, temporary-then-commit configuration parsing, and
+the complete catalog of CLI/benchmark broad catches. Every broad catch must be
+preceded on the same chain by an exact `std::bad_alloc` rethrow.
 
-Their files may remain in the primary repository because this document defines
-their lasting manual role. They must remain absent from CTest and GitHub CI.
-Their `--out` directories are disposable temporary working directories outside
+Its file may remain in the primary repository because this document defines
+its lasting manual role. It must remain absent from CTest and GitHub CI. Its
+`--out` directory is a disposable temporary working directory outside
 the repository and must not become a retained result tree.
 Issue-specific replay, provenance, helper, and output artifacts must neither
 enter the primary repository nor be retained as long-lived personal-overlay
@@ -278,15 +334,25 @@ environment.
 
 ## CLI Option-Action Validation
 
-`test_cli_scheduler_config` is the CTest-registered integration binary for the
-reusable `run_graph_cli` option boundary as well as scheduler configuration.
-Its option cases use a complete deterministic Host spy and the real ordered
-parser. Successful load/output and short-traversal cases preserve the
+`test_cli_policy_execution_config` is the CTest-registered integration binary
+for the reusable `run_graph_cli` option boundary plus policy/execution
+configuration. Its configuration cases enforce transactional YAML/editor
+parsing, the zero-through-eight execution-worker range, exact Host values, and
+startup failure on Host rejection. Its option cases use a complete
+deterministic Host spy and the real ordered parser. Successful load/output and
+short-traversal cases preserve the
 Host-returned session target and the argument-free `-t` grammar. Failure cases
 require load, output, dependency-tree print, traversal-order, and all-cache
 clear failures to return recoverable exit code 2 without printing the success
 footer or entering the REPL. The load case also captures the REPL banner,
 proving that a failed only action wins over the normal no-action fallback.
+Each in-process invocation fully reinitializes platform `getopt_long` state
+before both the configuration scan and ordered action replay. The cache-clear
+case first completes a traversal invocation with a different option shape, so
+its second invocation proves that hidden parser state cannot reorder or skip a
+later action. Because that parser state is process-global, the reusable
+boundary supports repeated serialized calls rather than concurrent calls;
+embedders must serialize every complete `run_graph_cli` invocation.
 
 Option replay remains ordered and may expose effects from successful actions
 before or after another recoverable action failure; it does not provide a
@@ -296,8 +362,8 @@ an explicit `--repl`. An invocation with no option action retains normal REPL
 entry. Run the focused boundary with:
 
 ```bash
-cmake --build build --target test_cli_scheduler_config -j
-./build/tests/test_cli_scheduler_config \
+cmake --build build --target test_cli_policy_execution_config -j
+./build/tests/test_cli_policy_execution_config \
   --gtest_filter='CliOptionActions.*'
 ```
 
@@ -311,8 +377,8 @@ explicit source paths, require the exact `GraphErrc` category for I/O, YAML,
 schema, topology, lifecycle, and unexpected failures, and prove that
 `std::bad_alloc` remains an exception. They also prove failed initial loads do
 not publish sessions, failed reloads preserve the complete prior Graph state,
-successful replacement advances topology generation and resets runtime state,
-and retry remains possible.
+successful replacement advances topology generation and authoritative
+`GraphRevision`, resets runtime state, and keeps retry possible.
 
 `test_host_adapter` owns the deterministic reload-versus-close lifetime
 regression. A real blocking compute and three explicit Host-operation gates
@@ -334,14 +400,277 @@ succeed. The const GraphIO boundary and serialized owner path provide the
 broader non-mutation guarantee. Production builds compile out the checkpoint
 and retain the single real writer.
 
+## Revision-Safe Compute Publication Validation
+
+Issue #72 uses four maintained test binaries to own the long-lived staged
+publication boundary. `test_compute_run` validates the checked nonzero strong
+`GraphInstanceId` and `GraphRevision` values, non-reused Graph identity,
+monotonic mutation revisions, and exact descriptor/snapshot provenance.
+`test_compute_service_split` proves `RealtimeProxyGraph` snapshot cloning is a
+deep isolation boundary and that complete prepared-state publication uses the
+documented no-throw swap path.
+
+`test_kernel_contracts` exercises the product Kernel boundary. Deterministic
+event gates hold operation execution outside graph-state while clear, same-label
+reload, or same-topology cache clear advances the live revision. Parallel and
+sequential stale results must return `GraphErrc::ComputeError`, preserve the
+newer visible state, and write no deferred cache artifact. A focused
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` checkpoint pauses after predicate
+validation inside the graph-state item, proving mutation cannot enter between
+validation and publication. The same checkpoint proves a valid RT proxy commit
+remains visible when the independently validated HP sibling later becomes
+stale. Together with `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING` and
+`PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, this macro is present only
+in the three-translation-unit test-product variant used by
+`test_kernel_contracts` and `test_host_adapter`. The installable product uses
+the matching production objects even when `BUILD_TESTING=ON`.
+
+The same binary proves the private compute-request lane serializes execution
+observation/route replacement with same-Graph compute, accepted async work
+survives a dropped caller future, and close drains compute-request work before
+graph-state without tearing down process-owned routes. These races use explicit
+gates and bounded waits, not timing sleeps. Every discovered
+`test_kernel_contracts` case also has a
+30-second CTest timeout.
+
+`test_disk_cache_diagnostic_concurrency` is the separate long-lived
+multithreaded fault-isolation binary. Production record/snapshot workers run
+while `GraphModel` clear, clone, and staged publication repeat; another case
+invokes the two-store exchange from both argument orders through an inline,
+source-tree-only bridge; a deterministic allocation failure proves a throwing
+snapshot copy releases the private scoped guard. Every discovered case carries
+the `kernel-concurrency` label and a 20-second CTest timeout. If a lock
+regression prevents worker recovery, CTest terminates that dedicated process;
+neither a `std::future` destructor nor a thread join can retain the broad
+kernel-contract process or wait for the CI job timeout. The sequential
+`CacheSemantics.DiskCacheDiagnosticStorePreservesClearReloadAndPublicationSemantics`
+case remains in `test_kernel_contracts` to prove failed reload preservation and
+successful clear/reload reset without duplicating the deadlock probe.
+Run the focused contract with:
+
+```bash
+cmake --build build \
+  --target test_compute_run test_compute_service_split test_kernel_contracts \
+  test_disk_cache_diagnostic_concurrency -j
+./build/tests/test_compute_run \
+  --gtest_filter='GraphRevision.*:ComputeRunDescriptor.CapturesIdRevisionIntentQualityAndQosWithoutReuse'
+./build/tests/test_compute_service_split \
+  --gtest_filter='RealtimeProxyGraph.*'
+./build/tests/test_kernel_contracts \
+  --gtest_filter='ComputeContracts.ParallelStaleComputeCannotOverwriteGraphClear:ComputeContracts.SequentialStaleComputeCannotOverwriteGraphClear:ComputeContracts.ReloadedDocumentRejectsOlderSameLabelCompute:ComputeContracts.SameTopologyCacheClearRejectsStaleMemoryAndDiskPublication:ComputeContracts.CommitPredicateAndPublicationExcludeMutationToctou:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.ExecutionObservationAndReplacementWaitForCompute:ComputeContracts.CloseWaitsForAcceptedAsyncComputeRequest:ComputeContracts.DroppedAsyncFutureRemainsOwnedUntilCloseDrain:CacheSemantics.DiskCacheDiagnosticStorePreservesClearReloadAndPublicationSemantics'
+ctest --test-dir build --output-on-failure \
+  -R '^DiskCacheDiagnosticConcurrency\.'
+```
+
+## Cooperative Run Cancellation Validation
+
+Issue #73 keeps cancellation coverage in maintained behavior tests rather than
+an issue-specific replay tool. `test_compute_run` owns the private Run source,
+stable first reason, injected monotonic deadline, terminal-before-quiescent
+state, request fan-out, and cancellation/failure/commit arbitration. The same
+binary exercises `ExecutionService` cancellation before active publication,
+exact queued-Run purge, the dequeue/pre-callback race, non-preemptible callback
+drainage, suppressed dependent re-entry, peer isolation, and exact grant/root
+release. Its legacy `A -> B` case proves cancellation after A returns retires
+the callback-owned and still-plan-owned units exactly once without entering B
+or publishing staged output; its companion exception branch proves a later
+provider failure cannot replace the already accepted cancellation.
+
+`test_kernel_contracts` owns the product boundary. Deterministic commit hooks
+prove cancellation before claim publishes no Graph/proxy/cache state and a
+request after claim cannot undo successful publication. The RT/HP case keeps a
+committed proxy visible when the HP sibling later becomes stale, while the
+sequential case proves provider return observes cancellation before staged
+publication, and the close case proves a logically cancelled request still
+drains its running provider and public `ComputeError` translation before Graph
+destruction. `test_compute_service_split` cancels from connected preflight on
+the private `serial_debug` route and proves that dirty HP and paired HP/RT requests enter
+neither the parameter dependent nor phase-two target work.
+
+Public non-expansion remains part of existing durable contracts:
+`test_ipc_protocol` locks the exact 60-method protocol-v2 inventory, rejects
+`compute.cancel`, round-trips every version-two status label, and requires
+`cancellable: false`; `test_compute_request_registry` locks the daemon job
+snapshot; `test_policy_registry` locks transactional ABI-v1 load rejection,
+binding-held DSO lifetime, and first-fault stability; and
+`StaticProductConsumerSmoke` compiles and runs the installed 58-virtual Host,
+60-call Client, operation ABI v2, and pure-C policy ABI v1 consumers. These
+tests must not gain a compatibility cancellation shim for this private change.
+
+Run the focused cancellation boundary with:
+
+```bash
+cmake --build build \
+  --target test_compute_run test_compute_service_split \
+  test_kernel_contracts test_ipc_protocol test_compute_request_registry \
+  test_policy_registry -j
+./build/tests/test_compute_run \
+  --gtest_filter='ComputeRunCancellation.*:ComputeRunCommitArbiter.LinearizesCancellationBeforeOrAfterCommitClaim:ExecutionServiceCancellation.*'
+./build/tests/test_compute_service_split \
+  --gtest_filter='ComputeServiceCancellation.ConnectedPreflightCancellationSuppressesDirtyAndSiblingPublication'
+./build/tests/test_kernel_contracts \
+  --gtest_filter='ComputeContracts.SequentialCancellationAfterProviderReturnSuppressesPublication:ComputeContracts.CancellationBeforeCommitClaimSuppressesPublication:ComputeContracts.CancellationAfterCommitClaimPreservesPublication:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.CancelledComputeStillDrainsBeforeGraphClose'
+./build/tests/test_ipc_protocol \
+  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionTwoMethods:EnumCodec.RoundTripsEveryDefinedVersionTwoLabel:HostRoutedGraphStateProtocolTest.ComputeLifecyclePreservesEveryTypedHostRequestFieldAndStableShapes'
+./build/tests/test_compute_request_registry \
+  --gtest_filter='ComputeRequestRegistrySubmission.PublishesQueuedCommitSnapshot'
+./build/tests/test_policy_registry
+```
+
+## Latest-Wins Supersession Validation
+
+Issue #74 keeps latest-wins and realtime-group coverage in maintained behavior
+tests. `test_compute_supersession` owns canonical absent/explicit HP key
+equality, checked nonzero generation overflow, exact 64-total compute-lane
+admission, persistent ticket FIFO/wake behavior, concurrent same-key ticket
+adoption, cross-target/intent/Graph isolation, close retirement, deterministic
+18,000- and 36,000-publication storms, and `RunGroup` cancellation/aggregate
+rules. The group cases distinguish a request-level accepted reason from a
+reason that actually wins an open child arbiter: late Superseded or
+ExplicitRequest after two child successes cannot replace aggregate success,
+while a winning cancellation retains the first reason below failure priority.
+CMake discovers all 15 cases through CTest with a 60-second per-case timeout.
+The stress cases assert one ticket, one logical active owner, at most one
+pending owner, exact displaced settlement, and only the final current
+generation remaining commit-eligible; they do not create a background runner
+or rely on timing sleeps.
+
+`test_kernel_contracts` owns the product boundary. It proves missing intent and
+explicit HP share one key, failed newest work does not resurrect an older
+prepared commit, already committed older output remains visible, and realtime
+supersession on both sides of RT publication denies the old HP sibling while
+preserving a valid old proxy. A post-commit checkpoint additionally blocks the
+old realtime caller after both child successes and visible publication but
+before group aggregation; newer generation publication records Superseded
+without changing that old caller's success. `test_compute_run` covers immutable
+supersession identity and child-local versus group-wide cancellation. Existing
+`test_compute_service_split`, `test_host_adapter`, and
+`test_bad_alloc_boundaries` remain focused regression companions for service,
+Host lifecycle, and allocation-failure boundaries.
+
+Run the focused supersession boundary with:
+
+```bash
+cmake --build build \
+  --target test_compute_supersession test_kernel_contracts test_compute_run \
+  test_compute_service_split test_host_adapter test_bad_alloc_boundaries -j
+./build/tests/test_compute_supersession
+./build/tests/test_kernel_contracts
+./build/tests/test_compute_run
+./build/tests/test_compute_service_split
+./build/tests/test_host_adapter
+./build/tests/test_bad_alloc_boundaries
+ctest --test-dir build --output-on-failure \
+  -R '^(SupersessionIdentity|GraphStateExecutorContinuation|ComputeRequestCoordinator|ComputeRequestCoordinatorStorm|RunGroup)\.'
+```
+
+## Policy Generation and Private Execution Validation
+
+Issue #75 keeps policy-generation and private-route coverage in maintained
+behavior tests. `test_policy_registry` owns the exact built-ins and class
+support, transactional rejection of a missing API or mismatched ABI, active
+binding/DSO lifetime across registry unload, and first-fault stability for one
+binding generation. `test_resource_admission` owns the exact closed
+`cpu`/`gpu_pipeline`/`serial_debug` route vocabulary, worker-limit rollback,
+one fixed pool per Host composition, and validation-first session route
+replacement. The `ExecutionServicePolicy.*` cases in `test_compute_run`
+continue to own Host-authored cost, class/frontier/fairness, aging, headroom,
+three-to-one progress, dependent re-entry, saturation, and exact grant release
+through reserved start.
+
+`test_physical_execution_routes` owns allocation-free route/lane state:
+CPU/Metal overlap, Metal single-flight, serial worker-zero single-flight,
+shutdown rejection, and committed-work drainage. `test_policy_execution`
+uses a deterministic fake-Metal Host to prove the canonical per-route device
+inventory, rejection before Run publication, distinct fixed CPU/GPU workers,
+Metal exception publication/recovery, route reuse, cancellation, and reserved-
+start rollback without candidate/version ABA or leaked grants. It also proves
+that a grant-blocked high-priority Run A cannot starve lower-priority independent
+Run B, that A's ready entry later executes exactly once, and that a sole blocked
+candidate has bounded policy-selection retries and wakes on cancellation.
+
+The reserved-start rollback probe is fixed-size atomic state compiled only into
+the non-installed test product. The Issue #75 probe macro changes no production
+class definition or layout, and the production object has no reserved-start-
+probe observer typedef, object field, callback, worker hot-path runtime branch,
+helper global, or symbol. This statement is limited to that probe; the
+pre-existing initial-submission storage observer is baseline behavior and is
+not removed or committed for migration in this phase. `Issue75DeviceRouting.*` in
+`test_compute_run`
+proves that full HP, dirty HP/RT, and connected preflight freeze the chosen
+Metal implementation/device and use CPU fallback when Metal is absent.
+
+`test_cli_policy_execution_config` locks transactional policy/execution config
+parsing and exact Host application. `test_host_adapter` loads real operation
+ABI-v2 and pure-C policy ABI-v1 fixtures, configures both extensions, validates
+their snapshots, and computes through the private CPU route.
+`GraphCliPluginComputeSmoke` repeats that vertical slice through the real REPL.
+`test_ipc_protocol` and `test_ipc_daemon` own protocol-v2 routing, process-owned
+policy state, generation-changing replacement, scan, and shared execution
+defaults. `StaticProductConsumerSmoke` independently builds the installed C11
+policy DSO and C++ operation DSO before executing the same external-consumer
+path.
+
+The installed Host, CLI, and IPC protocol-v2 surfaces still expose no
+cancellation command. IPC continues to reject `compute.cancel` and publish
+`cancellable: false`; supersession remains a private embedded-kernel behavior,
+not a new public control surface. The worker-owning scheduler ABI has no
+compatibility consumer.
+
+Run the focused policy/execution boundary with:
+
+```bash
+cmake --build build \
+  --target test_policy_registry test_policy_execution \
+  test_physical_execution_routes test_compute_run test_resource_admission \
+  test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
+  test_ipc_daemon graph_cli -j
+./build/tests/test_policy_registry
+./build/tests/test_policy_execution
+./build/tests/test_physical_execution_routes
+./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
+./build/tests/test_resource_admission
+./build/tests/test_cli_policy_execution_config \
+  --gtest_filter='CliPolicyExecutionConfigParsing.*:CliPolicyExecutionConfigApply.*'
+./build/tests/test_host_adapter \
+  --gtest_filter='EmbeddedHostAdapter.PolicyScanAndOperationPluginUseStatusValues:EmbeddedHostAdapter.ExternalOperationAndPolicyPluginsDriveParallelCompute'
+./build/tests/test_ipc_protocol \
+  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionTwoMethods:HostRoutedGraphStateProtocolTest.PolicyAndExecution*:ClientExecutionDefaults.*'
+./build/tests/test_ipc_daemon \
+  --gtest_filter='IpcDaemonExecution.*:IpcDaemonPolicy.*'
+ctest --test-dir build --output-on-failure \
+  -R '^(GraphCliPluginComputeSmoke|StaticProductConsumerSmoke)$'
+```
+
 Focused companion regressions own the remaining boundaries:
 
 - `test_kernel_contracts` drives the real `GraphIOService` stream through
   post-write, post-flush, and post-close failure states. Each phase must return
   `GraphErrc::Io`, and the created destination demonstrates the documented
   non-atomic post-open behavior.
-- `test_scheduler_worker_budget` proves an invalid input document releases both
-  already-started scheduler reservations without publishing a session.
+- `test_resource_ledger` proves checked vector arithmetic, independent
+  saturation and exact recovery for all five current dimensions, atomic
+  mixed-vector and pair admission, bounded child grants, deferred parent
+  release, move-only token contracts, and concurrent no-overcommit behavior.
+- `test_resource_admission` proves the exact private-route vocabulary,
+  worker-limit rollback, one fixed pool per Host with independent Host
+  compositions, and validation-first session route replacement that preserves
+  the previous copied route after an invalid candidate.
+- `test_compute_run` records complete action/node/worker/epoch tuples. It proves
+  two concurrent Runs that reuse local task id zero deliver only matching
+  Run/node epochs to their separate Hosts; cleanup releases a blocked first Run
+  on every assertion path so a serialization regression terminates as a test
+  failure. Realtime Full HP and Interactive RT children share one physical Host
+  and local task id zero, but distinct trace-node markers map each Host event
+  to the matching epoch and callback-retained descriptor/task identity.
+  This realtime case intentionally exercises `ExecutionService` directly:
+  worker-loop Host/epoch selection and retained callback identity are observable
+  at that boundary without adding a test-only GraphRuntime hook. Direct service
+  cases also cover whole-vector rejection and recovery for retained Host
+  memory, scratch, ready entries, and ready bytes; checked-overflow rejection;
+  shared CPU admission across concurrent Runs; initial ready-store backpressure
+  and priority ordering; dependent re-entry backpressure; and exact root
+  release after success or failure.
 - `test_ipc_protocol` proves exact Graph status propagation, one-call mutation
   behavior, and daemon session-name rollback after failed load.
 - `test_ipc_daemon` proves the real transport returns save `NotFound` and `Io`
@@ -352,15 +681,18 @@ Run the focused validation with:
 
 ```bash
 cmake --build build --target test_graph_document_errors test_host_adapter \
-  test_kernel_contracts test_scheduler_worker_budget test_ipc_protocol \
-  test_ipc_daemon -j
+  test_kernel_contracts test_resource_ledger test_resource_admission \
+  test_compute_run test_ipc_protocol test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.*Reload*'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='GraphIoContract.Save*'
-./build/tests/test_scheduler_worker_budget \
-  --gtest_filter=EmbeddedHostSchedulerBudget.InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce
+./build/tests/test_resource_ledger
+./build/tests/test_resource_admission \
+  --gtest_filter='EmbeddedHostExecutionConfiguration.*'
+./build/tests/test_compute_run \
+  --gtest_filter='ExecutionService.*'
 ./build/tests/test_ipc_protocol \
   --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
 ./build/tests/test_ipc_daemon \
@@ -378,6 +710,80 @@ inventory, and no current Graph. Its invalid-target case first loads the
 maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
+
+## Graph Close and Process Shutdown Validation
+
+Issue #76 keeps lifecycle correctness in maintained behavior tests rather than
+migration scans. `test_run_lifecycle_registry` owns Graph registration,
+candidate rollback/install races, atomic standalone/realtime-bundle admission,
+Graph-close isolation, process shutdown, and exact final unregistration.
+`test_execution_lifecycle_telemetry` owns schema-v1 fixed records, the
+65,536-entry ring, 1..4,096 page bounds, atomic cuts, cursor gap/drop/saturation
+semantics, all 15 counters, all six physical counter selectors, and the final
+`ServiceStopped` zero-counter event.
+
+The existing product-boundary targets carry integration ownership:
+
+- `test_compute_run`, `test_compute_service_split`, and
+  `test_kernel_contracts` cover full, dirty, preflight, no-op, realtime child,
+  admission-race, visible-commit, exact finalization, and unrelated-Graph
+  behavior. `test_kernel_contracts` also fixes the exact close owner/joiner
+  generation, throwing-observer claim consumption, and atomic final
+  name-removal/success-publication boundaries. Its same-name reload regression
+  pauses a real calling-thread diagnostic store after graph-state completion,
+  runs no compensating clear, proves the replacement slot is unchanged, and
+  releases the final old-runtime owner. A separate regression isolates delayed
+  old-runtime clear. A real worker operation invokes `Kernel::shutdown()` and
+  proves the exact recoverable preflight leaves telemetry `Accepting`,
+  generation zero, and Graph publication open. A watchdog death regression
+  proves an injected failure after publication-gate closure terminates.
+- `test_kernel_lifecycle_concurrency` links the real production archive, with
+  the Kernel lifecycle observer macro rejected at compile time, and repeatedly
+  races same-name publication, listing, direct close, and shutdown admission.
+  Static archive inspection requires both close and shutdown product anchors
+  while rejecting every observer hook symbol.
+- `test_resource_ledger` and `test_policy_execution` cover exact root/child
+  release, ready/callback/policy/binding counters, route drainage, same-service
+  worker/policy-callback shutdown rejection, cross-service shutdown, repeated
+  shutdown, and final counter/event order.
+- `test_host_adapter` covers coalesced direct Host close, post-marker
+  `NotFound`, close isolation, lane retirement order, and one composition-root
+  shutdown.
+- `test_compute_request_registry`, `test_ipc_protocol`, `test_ipc_host`, and
+  `test_ipc_daemon` cover preallocated daemon close generations,
+  pre-invocation-only `HostCloseNotStarted`, exactly one Host call, lost
+  response without replay/reopen, late `NotFound`, Client/IPC Host local-only
+  destruction, accepted-job drainage, signal shutdown, and Host lifetime.
+
+Run the focused lifecycle boundary with:
+
+```bash
+cmake --build build --target test_run_lifecycle_registry \
+  test_execution_lifecycle_telemetry test_compute_run \
+  test_compute_service_split test_kernel_contracts \
+  test_kernel_lifecycle_concurrency test_resource_ledger \
+  test_policy_execution test_host_adapter test_compute_request_registry \
+  test_ipc_protocol test_ipc_host test_ipc_daemon -j
+./build/tests/test_run_lifecycle_registry
+./build/tests/test_execution_lifecycle_telemetry
+./build/tests/test_compute_run
+./build/tests/test_compute_service_split
+./build/tests/test_kernel_contracts
+./build/tests/test_kernel_lifecycle_concurrency
+./build/tests/test_resource_ledger
+./build/tests/test_policy_execution
+./build/tests/test_host_adapter
+./build/tests/test_compute_request_registry
+./build/tests/test_ipc_protocol
+./build/tests/test_ipc_host
+./build/tests/test_ipc_daemon
+```
+
+The final delivery pass uses one clean native configure, one full build, one
+ordinary CTest/JUnit run excluding the exact `build-smoke` label, then strictly
+discovers and independently runs every post-build build-smoke entry. It does
+not register lifecycle provenance, stale-term searches, or source-quality
+audits as product tests.
 
 ## Injected Image Artifact Codec Validation
 
@@ -443,12 +849,16 @@ the public ABI.
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph
 CLI, and operation-plugin defaults remain enabled. The provider-aware broad
 suite gate is therefore off. The driver validates the exact CMake cache
-profile, builds only the provider-independent focused binary and its
-stdlib-only fixture, then queries the machine-readable CTest inventory. That
-inventory must contain exactly `DependencyDisabledInstallSmoke` and
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`; no broad
-provider-dependent test may remain registered. The driver runs the focused
-case through CTest. The disabled profile requires dependency-neutral
+profile, builds the provider-independent focused provider binary, its
+stdlib-only fixture, and the dedicated disk-cache diagnostic concurrency binary,
+then queries the machine-readable CTest inventory. That inventory must contain
+exactly `DependencyDisabledInstallSmoke`,
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, and the three
+`DiskCacheDiagnosticConcurrency.*` cases; every concurrency case must retain
+only the `kernel-concurrency` label and its 20-second timeout. No broad
+provider-dependent test may remain registered. The driver runs the optional
+provider case and all three concurrency cases through CTest. The disabled
+profile requires dependency-neutral
 analyzer/math operations to remain seeded, OpenCV-backed operation keys to be
 absent, and the replacement provider to publish, execute, and fully retire its
 resize key. The transient build is a long-lived product configuration check;
@@ -456,21 +866,44 @@ it emits commands/results to CTest and retains no per-run report. This stage
 disables the operation provider, not the separate OpenCV codec, normalization,
 adapter, or embedded-product dependencies.
 
-Before removing its transient tree, the nested-build driver derives an
-absolute work spelling without resolving it for deletion. It rejects parent
-traversal, the repository, every repository ancestor, filesystem roots, and
-every symlink in the final work path or an existing parent component. Canonical
-resolution is used only for protected-location comparison; the same checks are
-repeated immediately before recursive removal, which always receives the
-validated absolute spelling rather than a symlink target. Recursive-removal
-failures propagate, and an lstat-style postcondition verifies that no directory
-or dangling link remains.
+The OpenCV-provider and injected-codec nested-build drivers import the same
+destructive work-tree helper from `cmake_build_smoke_support.py`. Before
+removing a transient tree, that helper requires a nonempty absolute work
+spelling and rejects parent traversal, the repository, every repository
+ancestor, filesystem roots, and every untrusted symlink in the final work path
+or an existing parent component. On Darwin it recognizes exactly one
+platform-owned alias: `lstat("/tmp")` must report a root-owned symlink, strict
+canonical resolution must equal `/private/tmp`, and `lstat("/private/tmp")`
+must report a root-owned directory. Only then is a leading `/tmp` component
+rewritten to physical `/private/tmp`; the temporary root itself is still
+protected, and every later component is still inspected with `lstat`.
+Linux's ordinary `/tmp` keeps the ordinary path, while a non-Darwin, non-root,
+wrong-target, user-controlled, intermediate, or leaf symlink receives no
+special trust.
+
+This normalization is required at the driver boundary because CMake on macOS
+may serialize a physically selected `/private/tmp/...` binary directory as
+`/tmp/...` in `${CMAKE_BINARY_DIR}` and the generated CTest command. The raw
+CTest registration therefore remains executable without rewriting the
+registration or weakening arbitrary-symlink rejection. Canonical resolution
+is otherwise used only for protected-location comparison. The complete checks
+are repeated immediately before recursive removal, which receives the physical
+trusted-alias spelling or the original non-symlink spelling. Recursive-removal
+failures propagate, and an `lstat`-style postcondition verifies that no
+directory or dangling link remains. The check/delete sequence is not an atomic
+cross-platform filesystem transaction, so these drivers accept only
+caller-owned transient subtrees whose components are not concurrently replaced.
+
 `OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
 failure propagation, and postcondition only against a synthetic repository,
 ancestors, and unrelated symlink targets under a disposable temporary root.
-Its final-symlink and symlinked-parent cases require each unrelated target and
-marker to survive; the test never passes the real checkout or its parents to
-the remover. The driver also reads the nested
+It injects scalar Darwin ownership/type/target facts and a synthetic
+logical-to-physical mapping, so every platform covers the trusted-alias
+positive case without creating or replacing `/tmp`. It also locks both real
+consumer modules to the common remover. Its final-symlink, symlinked-parent,
+and post-normalization symlink cases require each unrelated target and marker
+to survive; the test never passes the real checkout or its parents to the
+remover. The driver also reads the nested
 `CMakeCache.txt`: a nonempty `CMAKE_CONFIGURATION_TYPES` selects
 `tests/<config>/`, while a single-config cache must contain the exact requested
 `CMAKE_BUILD_TYPE`. Missing or contradictory cache state fails explicitly, and
@@ -482,27 +915,45 @@ launches the child configure/build/CTest profile and carries `build-smoke`.
 ## OpenCV Operation Concurrency Validation
 
 `test_opencv_operation_concurrency` is a CTest-registered integration binary
-for the long-lived operation-provider and benchmark-worker contracts. It uses
+for the long-lived operation-provider and benchmark Run-concurrency contracts.
+It uses
 Host-boundary records and bounded callback gates rather than elapsed-time
 thresholds:
 
-- `BenchmarkAutoThreadsPublishResolvedGrantToHost` proves that automatic
-  selection is resolved once before Host configuration, publishes a nonzero
-  grant before Graph load, and reports that identical grant without repeating
-  hardware detection in the verdict.
-- `BenchmarkThreadsConfigureExactHostSchedulerWorkers` runs the real
-  `BenchmarkService`, Host scheduler configuration, Graph load, and registered
-  callback path for automatic and explicit `1/2/4/8` requests. It requires the
-  exact resolved number of callbacks and rejects a grant-plus-one callback.
+- `BenchmarkAutoThreadsPublishRunCapAndPreserveFixedPool` proves that automatic
+  selection is resolved once, process execution is prepared with
+  `worker_count=0`, Graph load follows preparation, and the resolved nonzero
+  Run cap reaches the Host compute request and benchmark result.
+- `BenchmarkRunAllSharesPoolAndPreservesMixedSessionCaps` proves that enabled
+  `1`, `2`, and automatic sessions share one preparation and retain distinct
+  compute caps, while a disabled out-of-range numeric thread value is not
+  range-validated or executed and an invalid enabled session is diagnosed and
+  skipped.
+- `BenchmarkProcessPreparationFailureRetainsDiagnosticAndCanRetry` proves that
+  process preparation failure precedes Graph load, preserves the Host
+  diagnostic, and leaves once-only preparation retryable.
+- `BenchmarkThreadsCapCallbacksOnOneFixedExecutionPool` runs the real
+  `BenchmarkService`, one explicitly fixed eight-lane Host pool, Graph load,
+  and registered callback path for automatic and explicit `1/2/4/8` Run caps.
+  It requires exact cap-sized callback overlap and rejects a cap-plus-one
+  callback.
 - `BenchmarkThreadsRejectOutOfDomainValuesBeforeGraphLoad` requires signed
-  negative and above-eight worker requests to fail before publishing a Graph
+  negative and above-eight Run-cap requests to fail before publishing a Graph
   session.
+- `HostComputeSurfacesRejectZeroMaximumParallelismAsInvalidParameter` requires
+  a present zero public Run cap to fail with `GraphErrc::InvalidParameter`
+  across synchronous, asynchronous, and image compute.
+- `IpcHostDispatch.MapsEveryCurrentHostVirtualWithoutFallback` and
+  `IpcHostCompute.RejectsZeroMaximumParallelismBeforeTransport` prove that the
+  IPC Host preserves a positive Run cap through all three compute conveniences
+  and rejects zero in the public Graph error domain before transport.
 - `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` repeats the built-in
-  tiled `curve_transform` path three times at each `1/2/4/8` grant and requires
-  exact callback overlap through a test-only observer.
-- `BuiltinCurveOutputMatchesBetweenOneAndEightWorkers` compares packed pixel
-  rows from the public Host result and requires one-worker and eight-worker
-  output to be bitwise equal.
+  tiled `curve_transform` path three times at each `1/2/4/8` Run cap on one
+  fixed eight-lane pool and requires exact callback overlap through a test-only
+  observer.
+- `BuiltinCurveOutputMatchesBetweenOneAndEightRunCaps` compares packed pixel
+  rows from the public Host result and requires one-cap and eight-cap output on
+  one fixed pool to be bitwise equal.
 
 The observer exists only in `BUILD_TESTING` builds, is private to the source
 tree, and is never installed. These cases prove reachable concurrency and
@@ -511,7 +962,7 @@ deterministic output; they do not claim a machine-independent speedup.
 `opencv_operation_concurrency_benchmark` is the corresponding long-lived
 manual measurement tool. It is intentionally absent from CTest and CI. The
 tool creates and removes a disposable temporary Graph root, executes the real
-Host/benchmark/scheduler/built-in-operation path, retains no result artifact,
+Host/benchmark/private-execution/built-in-operation path, retains no result artifact,
 and prints environment, raw wall-time samples, median wall time, throughput,
 speedup, and maximum callback concurrency to stdout. Build and run it with:
 
@@ -525,9 +976,9 @@ The native snapshot captured on 2026-07-15 used macOS `arm64`, Clang 21.0.0
 (`clang-2100.1.1.101`), OpenCV 4.12.0, reported hardware concurrency 10, and
 reported `opencv_internal_threads=1`. The workload was a chain of four built-in
 `curve_transform` nodes over a 2048-by-2048 FP32 image, with two warmups and
-seven samples per grant:
+seven samples per Run cap:
 
-| Workers | Median wall (ms) | Throughput (Mpix/s) | Speedup | Max in flight |
+| Run cap | Median wall (ms) | Throughput (Mpix/s) | Speedup | Max in flight |
 | ---: | ---: | ---: | ---: | ---: |
 | 1 | 27.450 | 611.188 | 1.000 | 1 |
 | 2 | 19.567 | 857.433 | 1.403 | 2 |
@@ -536,12 +987,12 @@ seven samples per grant:
 
 The raw wall-time samples in milliseconds were:
 
-- 1 worker: `27.694|27.134|27.450|27.183|27.869|27.250|28.035`
-- 2 workers: `19.021|19.567|19.774|19.497|19.435|20.427|20.997`
-- 4 workers: `16.059|15.688|15.992|15.727|15.600|14.692|14.649`
-- 8 workers: `16.436|16.610|16.512|15.008|14.859|14.064|14.760`
+- cap 1: `27.694|27.134|27.450|27.183|27.869|27.250|28.035`
+- cap 2: `19.021|19.567|19.774|19.497|19.435|20.427|20.997`
+- cap 4: `16.059|15.688|15.992|15.727|15.600|14.692|14.649`
+- cap 8: `16.436|16.610|16.512|15.008|14.859|14.064|14.760`
 
-This snapshot establishes that the requested grants reached the real callback
+This snapshot establishes that the requested Run caps reached the real callback
 path and that the tested machine benefited from removing outer serialization.
 It is not a permanent performance baseline or pass/fail threshold. Rerun the
 exact command when evaluating another machine, compiler, OpenCV version, or
@@ -580,7 +1031,8 @@ When only `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is disabled from that
 otherwise default test profile, CMake does not create or discover the broad
 suite. It keeps the provider-independent `test_kernel_contracts` target
 buildable for the injected-codec smoke and registers exactly the focused
-optional-provider GoogleTest plus `DependencyDisabledInstallSmoke`.
+optional-provider GoogleTest, the three dedicated disk-cache diagnostic
+concurrency cases, and `DependencyDisabledInstallSmoke`.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific
@@ -597,7 +1049,7 @@ cmake --build build --target photospider_ipc_client \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|PhotospiderdCapabilityHelp|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|ExecutionTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientExecutionDefaults|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonExecution|IpcDaemonPolicy|IpcObservationFixtureDaemon|PhotospiderdCapabilityHelp|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Temporary daemon processes, sockets, graph sessions, package prefixes, and

@@ -1,5 +1,8 @@
 #include "graph/graph_cache_service.hpp"
 
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+#include <atomic>
+#endif
 #include <chrono>
 #include <memory>
 #include <new>
@@ -9,6 +12,9 @@
 #include <utility>
 
 #include "graph/graph_traversal_service.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+#include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#endif
 
 namespace ps {
 
@@ -318,7 +324,7 @@ void record_disk_cache_load_result(GraphModel& graph,
  * @param consume_output Callable that accepts a NodeOutput rvalue on hit.
  * @return true when the attempt was a disk-cache hit; false otherwise.
  * @throws Exceptions from `consume_output` or diagnostic storage.
- * @note The template keeps assignment into node HP cache and scheduler temp
+ * @note The template keeps assignment into node HP cache and execution temp
  * output slots unified without exposing output ownership in GraphModel.
  */
 template <typename OutputConsumer>
@@ -336,6 +342,43 @@ bool finalize_disk_cache_load(
 }
 
 }  // namespace
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+namespace testing {
+namespace {
+
+/** @brief Borrowed cache hook pointer stored by the test-only seam. */
+using GraphCacheServiceTestHookPtr = const GraphCacheServiceTestHook*;
+
+/**
+ * @brief Process-local observer for deterministic cache-clear tests.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Tests serialize installation and clear the pointer before destroying
+ * the borrowed hook or context.
+ */
+std::atomic<GraphCacheServiceTestHookPtr> g_graph_cache_service_test_hook{
+    nullptr};  // NOLINT(whitespace/indent_namespace)
+
+}  // namespace
+
+/** @copydoc ps::testing::set_graph_cache_service_test_hook */
+void set_graph_cache_service_test_hook(
+    const GraphCacheServiceTestHook* hook) noexcept {
+  g_graph_cache_service_test_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc ps::testing::notify_graph_cache_service_test_hook */
+void notify_graph_cache_service_test_hook(
+    GraphCacheServiceTestEvent event, const std::filesystem::path& cache_root) {
+  const GraphCacheServiceTestHook* hook =
+      g_graph_cache_service_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->notify != nullptr) {
+    hook->notify(hook->context, event, cache_root);
+  }
+}
+
+}  // namespace testing
+#endif
 
 /** @copydoc GraphCacheService::GraphCacheService */
 GraphCacheService::GraphCacheService(
@@ -427,11 +470,17 @@ bool GraphCacheService::try_load_from_disk_cache_into(GraphModel& graph,
       [&](NodeOutput output) { out = std::move(output); });
 }
 
+/** @copydoc GraphCacheService::clear_drive_cache */
 GraphModel::DriveClearResult GraphCacheService::clear_drive_cache(
     GraphModel& graph) const {
   GraphModel::DriveClearResult result;
   if (!graph.cache_root.empty() && fs::exists(graph.cache_root)) {
     result.removed_entries = fs::remove_all(graph.cache_root);
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
+    testing::notify_graph_cache_service_test_hook(
+        testing::GraphCacheServiceTestEvent::DriveCacheRootRemoved,
+        graph.cache_root);
+#endif
     fs::create_directories(graph.cache_root);
   }
   return result;

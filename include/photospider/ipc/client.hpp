@@ -15,10 +15,10 @@
 
 /**
  * @file client.hpp
- * @brief Move-only typed client for Photospider local IPC protocol version 1.
+ * @brief Move-only typed client for Photospider local IPC protocol version 2.
  *
  * The class hides Unix connection ownership and private JSON envelopes behind
- * typed calls for the exact 55-method version 1 surface. Collection methods
+ * typed calls for the exact 60-method version 2 surface. Collection methods
  * aggregate stable daemon cursor pages before publishing their owned values;
  * no raw JSON or cursor-storage type enters the public API.
  */
@@ -151,7 +151,7 @@ class PHOTOSPIDER_API Client {
    * @return Typed service/version/method metadata or a categorized failure.
    * @throws std::bad_alloc if request or result allocation fails.
    * @note The response is correlated and validated against the exact sorted
-   *       55-method version 1 inventory before publication.
+   *       60-method version 2 inventory before publication.
    */
   IpcResult<DaemonVersion> version();
 
@@ -215,7 +215,7 @@ class PHOTOSPIDER_API Client {
    * @param include_metadata Whether cache/spatial node metadata is requested.
    * @return Copied flattened dependency tree or a categorized failure.
    * @throws std::bad_alloc if request or result allocation fails.
-   * @note Optional values and non-finite doubles use the version 1 null policy.
+   * @note Optional values and non-finite doubles use the version 2 null policy.
    */
   IpcResult<HostDependencyTreeSnapshot> inspect_dependency_tree(
       const IpcSessionId& session_id, std::optional<NodeId> node = std::nullopt,
@@ -444,7 +444,7 @@ class PHOTOSPIDER_API Client {
    * @param session_id Opaque daemon session identifier.
    * @return Latest milliseconds value or a categorized failure.
    * @throws std::bad_alloc if request or result allocation fails.
-   * @note JSON null is restored as quiet NaN under the version 1 policy.
+   * @note JSON null is restored as quiet NaN under the version 2 policy.
    */
   IpcResult<double> last_io_time(const IpcSessionId& session_id);
 
@@ -621,104 +621,137 @@ class PHOTOSPIDER_API Client {
   IpcResult<std::map<std::string, std::string>> ops_combined_sources();
 
   /**
-   * @brief Calls `scheduler.types` and aggregates every sorted stable page.
-   * @return Complete available scheduler type list or a categorized failure.
+   * @brief Calls `policy.types` and aggregates every stable page.
+   * @return Complete strictly sorted unique policy type list or failure.
    * @throws std::bad_alloc if request, page, or aggregate allocation fails.
-   * @note Global non-decreasing lexical order is validated across page
-   *       boundaries, and duplicate values are preserved.
+   * @note The Client validates canonical policy spelling and global ordering.
    */
-  IpcResult<std::vector<std::string>> scheduler_available_types();
+  IpcResult<std::vector<std::string>> policy_available_types();
 
   /**
-   * @brief Calls `scheduler.description` for one type.
-   * @param type_name Scheduler type name.
+   * @brief Calls `policy.description` for one canonical policy type.
+   * @param type_name Canonical policy type name.
    * @return Owned description or a categorized failure.
    * @throws std::bad_alloc if request or result allocation fails.
    * @note The response must echo the exact requested type name.
    */
-  IpcResult<std::string> scheduler_description(const std::string& type_name);
+  IpcResult<std::string> policy_description(const std::string& type_name);
 
   /**
-   * @brief Calls `scheduler.scan` exactly once.
-   * @param directories Scheduler plugin directories to scan.
-   * @return Exact loaded scheduler-type count or a categorized failure.
+   * @brief Calls `policy.scan` exactly once.
+   * @param directories Policy plugin directories in caller order.
+   * @return Exact published DSO count or a categorized failure.
    * @throws std::bad_alloc if request or result allocation fails.
    * @note This process-global mutation is never automatically retried.
    */
-  IpcResult<std::size_t> scheduler_scan(
+  IpcResult<std::size_t> policy_scan(
       const std::vector<std::string>& directories);
 
   /**
-   * @brief Calls `scheduler.load` exactly once.
-   * @param path Scheduler plugin library path.
+   * @brief Calls `policy.load` exactly once.
+   * @param path Policy plugin library path.
    * @return Success or the exact categorized failure.
    * @throws std::bad_alloc if request or status allocation fails.
    * @note This process-global mutation is never automatically retried.
    */
-  VoidResult scheduler_load(const std::string& path);
+  VoidResult policy_load(const std::string& path);
 
   /**
-   * @brief Calls `scheduler.loaded_plugins` and aggregates sorted pages.
-   * @return Complete loaded plugin-label list or a categorized failure.
+   * @brief Calls `policy.loaded_plugins` and aggregates stable pages.
+   * @return Globally nondecreasing copied labels with duplicates preserved.
    * @throws std::bad_alloc if request, page, or aggregate allocation fails.
-   * @note Global non-decreasing lexical order is validated across page
-   *       boundaries, and duplicate values are preserved.
+   * @note Labels are copied values and expose no loader or DSO ownership.
    */
-  IpcResult<std::vector<std::string>> scheduler_loaded_plugins();
+  IpcResult<std::vector<std::string>> policy_loaded_plugins();
 
   /**
-   * @brief Validates and calls `scheduler.configure_defaults` through at most
-   *        one RPC.
-   * @param config Scheduler type labels and requested worker count; the valid
-   *        worker range is `[0,8]`.
-   * @return Transport `not_connected` while disconnected, local Protocol
-   *         `invalid_params` for a connected Client whose worker count exceeds
-   *         eight, or success/the exact remote failure after one RPC.
+   * @brief Calls `policy.configure_defaults` exactly once after validation.
+   * @param config Canonical Interactive and Throughput policy types.
+   * @return Success, local invalid-params, or the exact remote failure.
    * @throws std::bad_alloc if request or status allocation fails.
-   * @note A disconnected Client returns `not_connected` before value
-   *       validation. A connected invalid request emits no wire frame and
-   *       leaves the connection usable. Existing sessions are not replaced,
-   *       a successful default update does not reserve process capacity, and a
-   *       valid mutation is not retried.
+   * @note A connected invalid request emits no frame; valid mutations are not
+   *       retried and change no execution route or worker count.
    */
-  VoidResult configure_scheduler_defaults(const HostSchedulerConfig& config);
+  VoidResult configure_policy_defaults(const HostPolicyConfig& config);
 
   /**
-   * @brief Calls `scheduler.info` for one session and compute intent.
+   * @brief Calls `policy.info` for one process policy class.
+   * @param policy_class Interactive or Throughput.
+   * @return Complete binding generation and sticky fault snapshot or failure.
+   * @throws std::bad_alloc if request or result allocation fails.
+   * @note The response must echo the requested class and obey fault null rules.
+   */
+  IpcResult<PolicyInfoSnapshot> policy_info(PolicyClass policy_class);
+
+  /**
+   * @brief Calls `policy.replace` exactly once.
+   * @param policy_class Process policy class to replace.
+   * @param type Canonical replacement policy type.
+   * @return Success or the exact categorized failure.
+   * @throws std::bad_alloc if request or status allocation fails.
+   * @note This process-global mutation is never automatically retried.
+   */
+  VoidResult replace_policy(PolicyClass policy_class, const std::string& type);
+
+  /**
+   * @brief Calls `execution.types` and aggregates every stable page.
+   * @return Exact strictly sorted unique execution route list or failure.
+   * @throws std::bad_alloc if request, page, or aggregate allocation fails.
+   * @note Every row must be one of the three protocol-v2 route literals.
+   */
+  IpcResult<std::vector<std::string>> execution_available_types();
+
+  /**
+   * @brief Calls `execution.description` for one exact route literal.
+   * @param type_name Exact execution route.
+   * @return Owned description or a categorized failure.
+   * @throws std::bad_alloc if request or result allocation fails.
+   * @note Invalid local route literals emit no wire request.
+   */
+  IpcResult<std::string> execution_description(const std::string& type_name);
+
+  /**
+   * @brief Calls `execution.configure_defaults` exactly once after validation.
+   * @param config Future HP/RT routes and worker request in `[0,8]`.
+   * @return Success, local invalid-params, or the exact remote failure.
+   * @throws std::bad_alloc if request or status allocation fails.
+   * @note Existing session bindings are unchanged and the RPC is not retried.
+   */
+  VoidResult configure_execution_defaults(const HostExecutionConfig& config);
+
+  /**
+   * @brief Calls `execution.info` for one session and compute intent.
    * @param session_id Opaque daemon session identifier.
-   * @param intent Scheduler intent to inspect.
-   * @return Complete owned scheduler information or a categorized failure.
+   * @param intent Compute intent whose physical route is inspected.
+   * @return Complete copied execution information or failure.
    * @throws std::bad_alloc if request or result allocation fails.
    * @note The response must echo both requested session and intent.
    */
-  IpcResult<SchedulerInfoSnapshot> scheduler_info(
+  IpcResult<ExecutionInfoSnapshot> execution_info(
       const IpcSessionId& session_id, ComputeIntent intent);
 
   /**
-   * @brief Calls `scheduler.replace` exactly once.
+   * @brief Calls `execution.replace` exactly once.
    * @param session_id Opaque daemon session identifier.
-   * @param intent Scheduler intent whose owner is replaced.
-   * @param type Scheduler type name.
-   * @return Success or the exact categorized failure, including Graph
-   *         `ComputeError` when candidate headroom cannot be reserved.
+   * @param intent Compute intent whose route is replaced.
+   * @param type Exact replacement execution route.
+   * @return Success or the exact categorized failure.
    * @throws std::bad_alloc if request or status allocation fails.
-   * @note This mutation is never automatically retried. The daemon Host keeps
-   *       the old scheduler installed when candidate planning, reservation, or
-   *       preparation fails.
+   * @note This per-session mutation is never automatically retried.
    */
-  VoidResult replace_scheduler(const IpcSessionId& session_id,
+  VoidResult replace_execution(const IpcSessionId& session_id,
                                ComputeIntent intent, const std::string& type);
 
   /**
-   * @brief Calls bounded non-destructive `scheduler.trace` exactly once.
+   * @brief Calls bounded non-destructive `execution.trace` exactly once.
    * @param session_id Opaque daemon session identifier.
    * @param after_sequence Exclusive observation sequence cursor.
    * @param limit Maximum trace events in the Host-defined valid range.
-   * @return Validated scheduler trace page or a categorized failure.
+   * @return Validated execution trace page or a categorized failure.
    * @throws std::bad_alloc if request or result allocation fails.
    * @note This is one status-like observation RPC and is never retried.
    */
-  IpcResult<SchedulerTracePage> scheduler_trace(const IpcSessionId& session_id,
+  IpcResult<ExecutionTracePage> execution_trace(const IpcSessionId& session_id,
                                                 std::uint64_t after_sequence,
                                                 std::size_t limit);
 

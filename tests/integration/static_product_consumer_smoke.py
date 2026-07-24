@@ -6,15 +6,17 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import platform
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
-from typing import Any
+from typing import Any, Callable
 
 from cmake_build_smoke_support import (
     producer_osx_architecture_arguments,
@@ -26,6 +28,45 @@ STATIC_PRODUCT_ARCHIVE_NAMES = {
     "libphotospider.lib",
     "photospider.lib",
 }
+INTERNAL_TEST_PRODUCT_STEM = "photospider_internal_test_product"
+INTERNAL_PRODUCT_TEST_DEFINITIONS = (
+    "PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING",
+    "PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING",
+    "PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING",
+    "PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING",
+    "PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING",
+)
+FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
+    "reserved_start_probe_state",
+    "record_reserved_start_attempt_for_testing",
+    "arm_reserved_start_rollback_probe_for_testing",
+    "reserved_start_rollback_probe_snapshot_for_testing",
+    "disarm_reserved_start_rollback_probe_for_testing",
+    "g_graph_cache_service_test_hook",
+    "set_graph_cache_service_test_hook",
+    "notify_graph_cache_service_test_hook",
+    "g_graph_state_executor_test_hook",
+    "set_graph_state_executor_test_hook",
+    "notify_graph_state_executor_test_hook",
+    "g_close_publish_test_hook",
+    "set_graph_state_executor_close_publish_test_hook",
+    "notify_graph_state_executor_close_publish_test_hook",
+    "publish_graph_state_executor_test_snapshot",
+    "g_kernel_close_test_hook",
+    "set_kernel_close_test_hook",
+    "notify_kernel_close_test_hook",
+    "g_kernel_compute_commit_test_hook",
+    "set_kernel_compute_commit_test_hook",
+    "notify_kernel_compute_commit_test_hook",
+)
+REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS = (
+    "ExecutionService17available_devices",
+    "GraphCacheService17clear_drive_cache",
+    "GraphStateExecutor15close_and_drain",
+    "Kernel11close_graph",
+    "Kernel30execute_staged_compute_request",
+    "Kernel8shutdown",
+)
 EXPORTED_TARGET = "Photospider::photospider"
 IPC_EXPORTED_TARGET = "Photospider::photospider_ipc_client"
 REQUIRED_IPC_PUBLIC_HEADERS = {
@@ -78,7 +119,7 @@ EXPECTED_IPC_DIRECT_INCLUDES = {
 FORBIDDEN_IPC_DECLARATION_PATTERNS = {
     "backend implementation type": (
         r"\b(?:Kernel|GraphModel|InteractionService|ComputeService|"
-        r"PluginManager|SchedulerPluginLoader)\b"
+        r"PluginManager|PolicyRegistry)\b"
     ),
     "nlohmann JSON type or header": r"nlohmann(?:::|/)",
     "raw Unix socket type": r"\b(?:sockaddr|sockaddr_un|sa_family_t)\b",
@@ -133,15 +174,20 @@ EXPECTED_CLIENT_METHODS = (
     "ops_sources",
     "ops_combined_keys",
     "ops_combined_sources",
-    "scheduler_available_types",
-    "scheduler_description",
-    "scheduler_scan",
-    "scheduler_load",
-    "scheduler_loaded_plugins",
-    "configure_scheduler_defaults",
-    "scheduler_info",
-    "replace_scheduler",
-    "scheduler_trace",
+    "policy_available_types",
+    "policy_description",
+    "policy_scan",
+    "policy_load",
+    "policy_loaded_plugins",
+    "configure_policy_defaults",
+    "policy_info",
+    "replace_policy",
+    "execution_available_types",
+    "execution_description",
+    "configure_execution_defaults",
+    "execution_info",
+    "replace_execution",
+    "execution_trace",
 )
 EXPECTED_HOST_METHODS = (
     "load_graph",
@@ -175,7 +221,7 @@ EXPECTED_HOST_METHODS = (
     "update_dirty_source",
     "end_dirty_source",
     "drain_compute_events",
-    "scheduler_trace",
+    "execution_trace",
     "clear_cache",
     "clear_drive_cache",
     "clear_memory_cache",
@@ -189,14 +235,19 @@ EXPECTED_HOST_METHODS = (
     "ops_sources",
     "ops_combined_keys",
     "ops_combined_sources",
-    "scheduler_available_types",
-    "scheduler_description",
-    "scheduler_scan",
-    "scheduler_load",
-    "scheduler_loaded_plugins",
-    "configure_scheduler_defaults",
-    "scheduler_info",
-    "replace_scheduler",
+    "policy_available_types",
+    "policy_description",
+    "policy_scan",
+    "policy_load",
+    "policy_loaded_plugins",
+    "configure_policy_defaults",
+    "policy_info",
+    "replace_policy",
+    "execution_available_types",
+    "execution_description",
+    "configure_execution_defaults",
+    "execution_info",
+    "replace_execution",
 )
 FORBIDDEN_IPC_TARGET_PARTS = (
     "Photospider::photospider",
@@ -229,6 +280,54 @@ OPENCV_COMPONENT_TARGET_VARIANTS = {
     ),
 }
 APPLE_PRODUCT_LINK_FLAGS = ("-framework Metal", "-framework Foundation")
+
+
+@dataclass(frozen=True)
+class SymbolToolCandidate:
+    """@brief Name one validated archive-symbol inspection candidate.
+
+    @param source Stable path-free label describing how the tool was found.
+    @param executable Exact executable path passed to ``subprocess``.
+    @throws None Construction only retains immutable strings.
+    @note Diagnostics expose ``source`` rather than ``executable`` so a failed
+      scan does not disclose a user or toolchain installation path.
+    """
+
+    source: str
+    executable: str
+
+
+@dataclass(frozen=True)
+class SymbolToolFailure:
+    """@brief Describe one path-free symbol-tool discovery failure.
+
+    @param source Stable source label from the closed candidate inventory.
+    @param reason Stable reason category containing no subprocess output/path.
+    @param status Optional nonzero child status for discovery failures.
+    @throws None Construction only retains immutable scalar values.
+    @note The record never stores executable text, stdout, stderr, or PATH.
+    """
+
+    source: str
+    reason: str
+    status: int | None = None
+
+
+@dataclass(frozen=True)
+class SymbolToolResolution:
+    """@brief Hold ordered unique symbol tools and discovery outcomes.
+
+    @param candidates Validated candidates in their required platform order.
+    @param failures Path-free discovery records for absent/unusable branches.
+    @param sequence Candidate and failure records in source-priority order.
+    @throws None Construction only retains immutable tuples.
+    @note Duplicate canonical executable paths occur at most once in
+      ``candidates`` and become path-free skipped records in ``sequence``.
+    """
+
+    candidates: tuple[SymbolToolCandidate, ...]
+    failures: tuple[SymbolToolFailure, ...]
+    sequence: tuple[SymbolToolCandidate | SymbolToolFailure, ...]
 
 
 def strict_remove_tree(path: Path) -> None:
@@ -279,30 +378,215 @@ def run_command(
     return proc.returncode
 
 
-def run_installed_scheduler_contract_probe(plugin: Path) -> int:
-    """@brief Invoke the fixture-only contract export from one built DSO.
+def run_captured_command(
+    command: list[str], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    """@brief Run one diagnostic command with captured text streams.
 
-    @param plugin Exact scheduler module selected from its CMake manifest.
+    @param command Executable and arguments passed directly without a shell.
+    @param cwd Working directory for the child process.
+    @return Completed process with replacement-decoded stdout and stderr.
+    @throws OSError If the executable cannot start.
+    @note This helper is reserved for short symbol-tool discovery/inspection;
+      callers convert failures to path-free diagnostics and never echo captured
+      stderr into the package verdict.
+    """
+
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+
+
+def is_executable_file(path: str) -> bool:
+    """@brief Validate one absolute regular executable path.
+
+    @param path Candidate returned by an external discovery command.
+    @return ``True`` only for an absolute regular file executable by this user.
+    @throws None Filesystem lookup errors produce ``False`` through the
+      ``Path.is_file`` and ``os.access`` contracts.
+    @note PATH candidates already pass ``shutil.which``; this stricter helper
+      validates untrusted text returned by ``xcrun --find``.
+    """
+
+    try:
+        candidate = Path(path)
+        return (
+            candidate.is_absolute()
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_product_archive_symbol_tools(
+    platform_system: str,
+    cwd: Path,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    captured_runner: Callable[
+        [list[str], Path], subprocess.CompletedProcess[str]
+    ] = run_captured_command,
+    executable_validator: Callable[[str], bool] = is_executable_file,
+) -> SymbolToolResolution:
+    """@brief Resolve ordered, unique archive-symbol inspection candidates.
+
+    Darwin first invokes ``xcrun --find llvm-nm`` and accepts its result only
+    when it is one absolute executable path. PATH ``llvm-nm`` and PATH ``nm``
+    follow in that order. Other platforms never discover or invoke ``xcrun``
+    and use only the two PATH candidates.
+
+    @param platform_system Host platform name such as ``Darwin`` or ``Linux``.
+    @param cwd Working directory for the optional ``xcrun`` discovery command.
+    @param which Injectable executable lookup matching ``shutil.which``.
+    @param captured_runner Injectable no-shell captured subprocess runner.
+    @param executable_validator Injectable validator for ``xcrun`` output.
+    @return Ordered candidates plus path-free discovery failures.
+    @throws None ``OSError`` from ``xcrun`` startup is converted to a failure;
+      injected callbacks are otherwise expected to honor their contracts.
+    @note Canonical paths are de-duplicated without changing the first source's
+      priority. No archive is read and no process-global environment changes.
+    """
+
+    sequence: list[SymbolToolCandidate | SymbolToolFailure] = []
+    if platform_system == "Darwin":
+        xcrun = which("xcrun")
+        if xcrun is None:
+            sequence.append(
+                SymbolToolFailure(
+                    source="xcrun llvm-nm",
+                    reason="xcrun is unavailable",
+                )
+            )
+        else:
+            try:
+                resolved = captured_runner(
+                    [xcrun, "--find", "llvm-nm"], cwd
+                )
+            except OSError:
+                sequence.append(
+                    SymbolToolFailure(
+                        source="xcrun llvm-nm",
+                        reason="discovery could not start",
+                    )
+                )
+            else:
+                resolved_path = resolved.stdout.strip()
+                if resolved.returncode != 0:
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery exited with nonzero status",
+                            status=resolved.returncode,
+                        )
+                    )
+                elif not resolved_path:
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned no path",
+                        )
+                    )
+                elif "\n" in resolved_path or "\r" in resolved_path:
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned multiple lines",
+                        )
+                    )
+                elif not Path(resolved_path).is_absolute():
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned a relative path",
+                        )
+                    )
+                elif not executable_validator(resolved_path):
+                    sequence.append(
+                        SymbolToolFailure(
+                            source="xcrun llvm-nm",
+                            reason="discovery returned an unusable path",
+                        )
+                    )
+                else:
+                    candidate = SymbolToolCandidate(
+                        source="xcrun llvm-nm",
+                        executable=resolved_path,
+                    )
+                    sequence.append(candidate)
+
+    for source, executable_name in (
+        ("PATH llvm-nm", "llvm-nm"),
+        ("PATH nm", "nm"),
+    ):
+        executable = which(executable_name)
+        if executable is None:
+            sequence.append(
+                SymbolToolFailure(
+                    source=source,
+                    reason="executable is unavailable",
+                )
+            )
+        else:
+            candidate = SymbolToolCandidate(
+                source=source, executable=executable
+            )
+            sequence.append(candidate)
+
+    unique: list[SymbolToolCandidate] = []
+    ordered: list[SymbolToolCandidate | SymbolToolFailure] = []
+    canonical_paths: set[str] = set()
+    for entry in sequence:
+        if isinstance(entry, SymbolToolFailure):
+            ordered.append(entry)
+            continue
+        canonical_path = os.path.normcase(os.path.realpath(entry.executable))
+        if canonical_path in canonical_paths:
+            ordered.append(
+                SymbolToolFailure(
+                    source=entry.source,
+                    reason="duplicate executable was skipped",
+                )
+            )
+            continue
+        canonical_paths.add(canonical_path)
+        unique.append(entry)
+        ordered.append(entry)
+    failures = tuple(
+        entry for entry in ordered if isinstance(entry, SymbolToolFailure)
+    )
+    return SymbolToolResolution(tuple(unique), failures, tuple(ordered))
+
+
+def run_installed_policy_contract_probe(plugin: Path) -> int:
+    """@brief Invoke the fixture-only ABI probe from one built policy DSO.
+
+    @param plugin Exact C11 or C++17 policy library selected from its manifest.
     @return Probe status, or 127 when loading or symbol resolution fails.
     @throws None Load and symbol failures are converted to status 127.
-    @note The DSO contains no backend dependency. The probe covers a batch with
-      one empty and one valid handle plus null-exception/reset semantics.
+    @note The DSO contains no backend dependency. Its private probe exercises
+      the same exact metadata/create/select/destroy table exported to the Host.
     """
 
     try:
         library = ctypes.CDLL(str(plugin))
-        probe = library.ps_installed_scheduler_contract_probe
+        probe = library.ps_installed_policy_contract_probe
         probe.argtypes = []
         probe.restype = ctypes.c_int
         status = int(probe())
     except (AttributeError, OSError) as error:
         print(
-            f"installed scheduler contract probe could not run: {error}",
+            f"installed policy contract probe could not run: {error}",
             file=sys.stderr,
             flush=True,
         )
         return 127
-    print(f"installed scheduler contract probe exited with {status}", flush=True)
+    print(f"installed policy contract probe exited with {status}", flush=True)
     return status
 
 
@@ -388,10 +672,42 @@ def ipc_consumer_source() -> str:
 
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace {
+
+/**
+ * @brief Detects a public ``cancel_compute`` compatibility member.
+ * @tparam T Installed Host or Client contract under inspection.
+ * @tparam Probe Substitution-only member-address expression.
+ * @throws Nothing.
+ * @note Issue #73 is private and must not add this public control shim.
+ */
+template <typename T, typename Probe = void>
+struct HasCancelCompute : std::false_type {};
+
+/** @copydoc HasCancelCompute */
+template <typename T>
+struct HasCancelCompute<T, std::void_t<decltype(&T::cancel_compute)>>
+    : std::true_type {};
+
+static_assert(!HasCancelCompute<ps::Host>::value,
+              "installed Host must expose no cancellation shim");
+static_assert(!HasCancelCompute<ps::ipc::Client>::value,
+              "installed Client must expose no cancellation shim");
+static_assert(static_cast<int>(ps::ipc::ComputeJobState::Queued) == 0 &&
+                  static_cast<int>(ps::ipc::ComputeJobState::Running) == 1 &&
+                  static_cast<int>(ps::ipc::ComputeJobState::Succeeded) == 2 &&
+                  static_cast<int>(ps::ipc::ComputeJobState::Failed) == 3,
+              "IPC v2 compute state inventory must remain unchanged");
+static_assert(static_cast<int>(ps::OperationErrorDomain::None) == 0 &&
+                  static_cast<int>(ps::OperationErrorDomain::Transport) == 1 &&
+                  static_cast<int>(ps::OperationErrorDomain::Protocol) == 2 &&
+                  static_cast<int>(ps::OperationErrorDomain::Graph) == 3 &&
+                  static_cast<int>(ps::OperationErrorDomain::Daemon) == 4,
+              "public status-domain inventory must remain unchanged");
 
 /**
  * @brief References every typed Client call and non-destructor Host virtual.
@@ -411,7 +727,8 @@ int reference_complete_surface(ps::ipc::Client& client, ps::Host& host) {
   const ps::ipc::ComputeSubmitRequest submit_request{};
   const ps::HostComputeRequest compute_request{};
   const ps::PixelRect roi{};
-  const ps::HostSchedulerConfig scheduler_config{};
+  const ps::HostPolicyConfig policy_config{};
+  const ps::HostExecutionConfig execution_config{};
   const std::vector<std::string> paths{};
   const std::string text;
   constexpr ps::NodeId node{0};
@@ -465,15 +782,20 @@ int reference_complete_surface(ps::ipc::Client& client, ps::Host& host) {
   (void)client.ops_sources();
   (void)client.ops_combined_keys();
   (void)client.ops_combined_sources();
-  (void)client.scheduler_available_types();
-  (void)client.scheduler_description(text);
-  (void)client.scheduler_scan(paths);
-  (void)client.scheduler_load(text);
-  (void)client.scheduler_loaded_plugins();
-  (void)client.configure_scheduler_defaults(scheduler_config);
-  (void)client.scheduler_info(ipc_session, intent);
-  (void)client.replace_scheduler(ipc_session, intent, text);
-  (void)client.scheduler_trace(ipc_session, 0, 1);
+  (void)client.policy_available_types();
+  (void)client.policy_description(text);
+  (void)client.policy_scan(paths);
+  (void)client.policy_load(text);
+  (void)client.policy_loaded_plugins();
+  (void)client.configure_policy_defaults(policy_config);
+  (void)client.policy_info(ps::PolicyClass::Interactive);
+  (void)client.replace_policy(ps::PolicyClass::Interactive, text);
+  (void)client.execution_available_types();
+  (void)client.execution_description(text);
+  (void)client.configure_execution_defaults(execution_config);
+  (void)client.execution_info(ipc_session, intent);
+  (void)client.replace_execution(ipc_session, intent, text);
+  (void)client.execution_trace(ipc_session, 0, 1);
 
   (void)host.load_graph(load_request);
   (void)host.close_graph(host_session);
@@ -506,7 +828,7 @@ int reference_complete_surface(ps::ipc::Client& client, ps::Host& host) {
   (void)host.update_dirty_source(host_session, node, dirty_domain, roi);
   (void)host.end_dirty_source(host_session, node, dirty_domain);
   (void)host.drain_compute_events(host_session, 1);
-  (void)host.scheduler_trace(host_session, 0, 1);
+  (void)host.execution_trace(host_session, 0, 1);
   (void)host.clear_cache(host_session);
   (void)host.clear_drive_cache(host_session);
   (void)host.clear_memory_cache(host_session);
@@ -520,14 +842,19 @@ int reference_complete_surface(ps::ipc::Client& client, ps::Host& host) {
   (void)host.ops_sources();
   (void)host.ops_combined_keys();
   (void)host.ops_combined_sources();
-  (void)host.scheduler_available_types();
-  (void)host.scheduler_description(text);
-  (void)host.scheduler_scan(paths);
-  (void)host.scheduler_load(text);
-  (void)host.scheduler_loaded_plugins();
-  (void)host.configure_scheduler_defaults(scheduler_config);
-  (void)host.scheduler_info(host_session, intent);
-  (void)host.replace_scheduler(host_session, intent, text);
+  (void)host.policy_available_types();
+  (void)host.policy_description(text);
+  (void)host.policy_scan(paths);
+  (void)host.policy_load(text);
+  (void)host.policy_loaded_plugins();
+  (void)host.configure_policy_defaults(policy_config);
+  (void)host.policy_info(ps::PolicyClass::Interactive);
+  (void)host.replace_policy(ps::PolicyClass::Interactive, text);
+  (void)host.execution_available_types();
+  (void)host.execution_description(text);
+  (void)host.configure_execution_defaults(execution_config);
+  (void)host.execution_info(host_session, intent);
+  (void)host.replace_execution(host_session, intent, text);
   return 0;
 }
 
@@ -557,6 +884,10 @@ int main(int argc, char** argv) {
   std::unique_ptr<ps::Host> host = ps::ipc::create_ipc_host("");
   if (!host) {
     return 2;
+  }
+  const ps::ipc::ComputeJobSnapshot default_job;
+  if (default_job.cancellable) {
+    return 3;
   }
   if (argc > 1) {
     return reference_complete_surface(client, *host);
@@ -599,14 +930,14 @@ def validate_complete_surface_inventory(source: str) -> dict[str, list[str]]:
     @return Extracted inventories after all exact count/set/uniqueness checks.
     @throws RuntimeError If any expected call is omitted, duplicated, or
       replaced, or if the normative expected inventories are themselves not
-      exactly 55 unique Client and 53 unique Host names.
+      exactly 60 unique Client and 58 unique Host names.
     @note This validates maintained product symbols rather than source-migration
       residue and remains part of the existing package-consumer behavior test.
     """
 
     expected = {
-        "client": (55, EXPECTED_CLIENT_METHODS),
-        "host": (53, EXPECTED_HOST_METHODS),
+        "client": (60, EXPECTED_CLIENT_METHODS),
+        "host": (58, EXPECTED_HOST_METHODS),
     }
     observed = complete_surface_inventory(source)
     failures: list[str] = []
@@ -645,11 +976,11 @@ def write_consumer_projects(
     @param ipc_source_dir Transient IPC-only consumer source directory.
     @return Embedded include directives and verified IPC call inventories.
     @throws OSError If directories or generated source files cannot be written.
-    @throws RuntimeError If the IPC harness does not reference the exact 55
-      Client and 53 Host operation names once each.
+    @throws RuntimeError If the IPC harness does not reference the exact 60
+      Client and 58 Host operation names once each.
     @note The explicit adapter link supplies only this consumer's OpenCV usage
       requirements; it must not weaken the product's ``LINK_ONLY`` dependency
-      contract or leak OpenCV into the operation/scheduler SDK consumers.
+      contract or leak OpenCV into the operation/policy SDK consumers.
       :func:`main` recreates the surrounding work directory on every run.
     """
 
@@ -693,7 +1024,7 @@ def write_consumer_projects(
                 "",
                 "int main(int argc, char** argv) {",
                 "  if (argc != 5) {",
-                '    std::cerr << "usage: consumer <scheduler-plugin> "',
+                '    std::cerr << "usage: consumer <policy-plugin> "',
                 '                 "<operation-plugin> <session-root> <yaml>\\n";',
                 "    return 64;",
                 "  }",
@@ -701,9 +1032,9 @@ def write_consumer_projects(
                 "  if (!host) {",
                 "    return 1;",
                 "  }",
-                "  const auto scheduler_load = host->scheduler_load(argv[1]);",
-                "  if (!scheduler_load.status.ok) {",
-                "    std::cerr << scheduler_load.status.message << '\\n';",
+                "  const auto policy_load = host->policy_load(argv[1]);",
+                "  if (!policy_load.status.ok) {",
+                "    std::cerr << policy_load.status.message << '\\n';",
                 "    return 2;",
                 "  }",
                 "  const std::filesystem::path operation_plugin(argv[2]);",
@@ -718,15 +1049,24 @@ def write_consumer_projects(
                 "    std::cerr << operation_load.status.message << '\\n';",
                 "    return 3;",
                 "  }",
-                "  ps::HostSchedulerConfig scheduler_config;",
-                '  scheduler_config.hp_type = "installed_sdk_smoke";',
-                '  scheduler_config.rt_type = "installed_sdk_smoke";',
-                "  scheduler_config.worker_count = 1;",
-                "  const auto configured =",
-                "      host->configure_scheduler_defaults(scheduler_config);",
-                "  if (!configured.status.ok) {",
-                "    std::cerr << configured.status.message << '\\n';",
+                "  ps::HostPolicyConfig policy_config;",
+                '  policy_config.interactive_type = "installed_policy_smoke";',
+                '  policy_config.throughput_type = "installed_policy_smoke";',
+                "  const auto policy_configured =",
+                "      host->configure_policy_defaults(policy_config);",
+                "  if (!policy_configured.status.ok) {",
+                "    std::cerr << policy_configured.status.message << '\\n';",
                 "    return 4;",
+                "  }",
+                "  ps::HostExecutionConfig execution_config;",
+                '  execution_config.hp_type = "cpu";',
+                '  execution_config.rt_type = "cpu";',
+                "  execution_config.worker_count = 1;",
+                "  const auto execution_configured =",
+                "      host->configure_execution_defaults(execution_config);",
+                "  if (!execution_configured.status.ok) {",
+                "    std::cerr << execution_configured.status.message << '\\n';",
+                "    return 5;",
                 "  }",
                 "  ps::GraphLoadRequest graph_request;",
                 '  graph_request.session = ps::GraphSessionId{"installed_extension"};',
@@ -737,14 +1077,21 @@ def write_consumer_projects(
                 "  const auto loaded = host->load_graph(graph_request);",
                 "  if (!loaded.status.ok) {",
                 "    std::cerr << loaded.status.message << '\\n';",
-                "    return 5;",
-                "  }",
-                "  const auto scheduler_info = host->scheduler_info(",
-                "      loaded.value, ps::ComputeIntent::GlobalHighPrecision);",
-                "  if (!scheduler_info.status.ok ||",
-                '      scheduler_info.value.scheduler_name != "installed_sdk_smoke") {',
-                "    std::cerr << scheduler_info.status.message << '\\n';",
                 "    return 6;",
+                "  }",
+                "  const auto policy_info =",
+                "      host->policy_info(ps::PolicyClass::Throughput);",
+                "  if (!policy_info.status.ok ||",
+                '      policy_info.value.policy_type != "installed_policy_smoke") {',
+                "    std::cerr << policy_info.status.message << '\\n';",
+                "    return 7;",
+                "  }",
+                "  const auto execution_info = host->execution_info(",
+                "      loaded.value, ps::ComputeIntent::GlobalHighPrecision);",
+                "  if (!execution_info.status.ok ||",
+                '      execution_info.value.execution_type != "cpu") {',
+                "    std::cerr << execution_info.status.message << '\\n';",
+                "    return 8;",
                 "  }",
                 "  ps::HostComputeRequest compute_request;",
                 "  compute_request.session = loaded.value;",
@@ -757,24 +1104,24 @@ def write_consumer_projects(
                 "  const auto computed = host->compute(compute_request);",
                 "  if (!computed.status.ok) {",
                 "    std::cerr << computed.status.message << '\\n';",
-                "    return 7;",
+                "    return 9;",
                 "  }",
                 "  const std::size_t step = ps::aligned_image_buffer_step(",
                 "      8, 4, ps::DataType::FLOAT32);",
                 "  auto image = ps::make_aligned_cpu_image_buffer(",
                 "      2, 2, 4, ps::DataType::FLOAT32);",
                 "  if (step != 128 || !image.data) {",
-                "    return 8;",
+                "    return 10;",
                 "  }",
                 "  const auto closed = host->close_graph(loaded.value);",
                 "  if (!closed.status.ok) {",
                 "    std::cerr << closed.status.message << '\\n';",
-                "    return 9;",
+                "    return 11;",
                 "  }",
                 "  const auto unloaded = host->plugins_unload_all();",
                 "  if (!unloaded.status.ok || unloaded.value < 1) {",
                 "    std::cerr << unloaded.status.message << '\\n';",
-                "    return 10;",
+                "    return 12;",
                 "  }",
                 "  return 0;",
                 "}",
@@ -838,339 +1185,430 @@ def write_consumer_projects(
     return include_lines, inventories
 
 
-def installed_scheduler_plugin_source() -> str:
-    """@brief Build a source-tree-independent scheduler DSO consumer.
+def installed_policy_plugin_source() -> str:
+    """@brief Build a source-tree-independent pure-C policy DSO consumer.
 
-    @return C++17 source implementing the complete installed scheduler ABI.
+    @return C11 source implementing and probing the complete policy ABI v1.
     @throws None The source is one immutable in-memory string.
-    @note The implementation is deliberately synchronous so the scheduler SDK
-      consumer requires neither ``Threads`` nor any backend package.
+    @note The policy SDK is one dependency-neutral header and exposes no Host
+      execution, worker, resource, Graph, Run, or lifecycle capability.
     """
 
     return dedent(
         r"""
-        #include <algorithm>
+        #include <stddef.h>
+        #include <stdint.h>
+
+        #include <photospider/policy/policy_plugin_api.h>
+
+        _Static_assert(PS_POLICY_PLUGIN_ABI_VERSION == 1U,
+                       "policy ABI generation changed");
+        _Static_assert(sizeof(ps_policy_candidate_v1) == 120U,
+                       "policy candidate layout changed");
+
+        /**
+         * @brief Builds a borrowed immutable metadata range.
+         * @param data Process-lifetime bytes.
+         * @param size Byte count excluding the terminator.
+         * @return ABI-v1 string view over the supplied storage.
+         */
+        static ps_policy_string_view_v1 installed_string_view(
+            const char *data, uint64_t size) {
+          ps_policy_string_view_v1 view;
+          view.data = data;
+          view.size = size;
+          return view;
+        }
+
+        /**
+         * @brief Returns the single installed smoke policy metadata row.
+         * @param type_index Zero-based row; only zero is valid.
+         * @param out_metadata Nonnull exact-size output record.
+         * @return OK or INVALID_ARGUMENT.
+         */
+        static ps_policy_status_v1 PS_POLICY_CALL installed_get_metadata(
+            uint32_t type_index, ps_policy_type_metadata_v1 *out_metadata) {
+          static const char kName[] = "installed_policy_smoke";
+          static const char kDescription[] =
+              "Installed pure-C policy SDK smoke fixture.";
+          static const char kVersion[] = "installed-smoke-v1";
+          if (type_index != 0U || out_metadata == NULL) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
+          }
+          *out_metadata = (ps_policy_type_metadata_v1){0};
+          out_metadata->struct_size = sizeof(*out_metadata);
+          out_metadata->struct_kind = PS_POLICY_STRUCT_TYPE_METADATA;
+          out_metadata->name =
+              installed_string_view(kName, sizeof(kName) - 1U);
+          out_metadata->description =
+              installed_string_view(kDescription, sizeof(kDescription) - 1U);
+          out_metadata->implementation_version =
+              installed_string_view(kVersion, sizeof(kVersion) - 1U);
+          out_metadata->supported_class_mask = PS_POLICY_CLASS_MASK_VALID;
+          return PS_POLICY_STATUS_OK;
+        }
+
+        /**
+         * @brief Creates one stateless class-specific policy context.
+         * @param type_index Zero-based row; only zero is valid.
+         * @param args Nonnull exact ABI-v1 creation arguments.
+         * @param out_context Nonnull context output initialized to null.
+         * @return OK for a valid class binding, otherwise INVALID_ARGUMENT.
+         */
+        static ps_policy_status_v1 PS_POLICY_CALL installed_create(
+            uint32_t type_index, const ps_policy_create_args_v1 *args,
+            void **out_context) {
+          if (type_index != 0U || args == NULL || out_context == NULL ||
+              args->struct_size != sizeof(*args) ||
+              args->struct_kind != PS_POLICY_STRUCT_CREATE_ARGS ||
+              args->binding_generation == 0U ||
+              (args->policy_class != PS_POLICY_CLASS_INTERACTIVE &&
+               args->policy_class != PS_POLICY_CLASS_THROUGHPUT)) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
+          }
+          *out_context = NULL;
+          return PS_POLICY_STATUS_OK;
+        }
+
+        /**
+         * @brief Selects the final candidate from one immutable snapshot.
+         * @param context Stateless context; ignored.
+         * @param snapshot Nonnull exact-size snapshot with candidates.
+         * @param out_decision Nonnull exact-size output record.
+         * @return OK for a valid snapshot, otherwise INVALID_ARGUMENT.
+         * @note No input pointer is retained beyond the callback.
+         */
+        static ps_policy_status_v1 PS_POLICY_CALL installed_select(
+            void *context, const ps_policy_selection_snapshot_v1 *snapshot,
+            ps_policy_decision_v1 *out_decision) {
+          (void)context;
+          if (snapshot == NULL || out_decision == NULL ||
+              snapshot->struct_size != sizeof(*snapshot) ||
+              snapshot->struct_kind != PS_POLICY_STRUCT_SELECTION_SNAPSHOT ||
+              snapshot->candidate_count == 0U ||
+              snapshot->candidate_stride != sizeof(ps_policy_candidate_v1) ||
+              snapshot->candidates == NULL ||
+              snapshot->binding_generation == 0U ||
+              snapshot->snapshot_generation == 0U) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
+          }
+          *out_decision = (ps_policy_decision_v1){0};
+          out_decision->struct_size = sizeof(*out_decision);
+          out_decision->struct_kind = PS_POLICY_STRUCT_DECISION;
+          out_decision->decision_kind = PS_POLICY_DECISION_SELECT;
+          out_decision->binding_generation = snapshot->binding_generation;
+          out_decision->snapshot_generation = snapshot->snapshot_generation;
+          out_decision->candidate_id =
+              snapshot->candidates[snapshot->candidate_count - 1U].candidate_id;
+          return PS_POLICY_STATUS_OK;
+        }
+
+        /**
+         * @brief Completes one successful stateless context lifetime.
+         * @param context Stateless context; ignored, including null.
+         * @return Always OK.
+         */
+        static ps_policy_status_v1 PS_POLICY_CALL installed_destroy(
+            void *context) {
+          (void)context;
+          return PS_POLICY_STATUS_OK;
+        }
+
+        /** @copydoc ps_policy_plugin_get_abi_version */
+        PS_POLICY_PLUGIN_EXPORT uint32_t PS_POLICY_CALL
+        ps_policy_plugin_get_abi_version(void) {
+          return PS_POLICY_PLUGIN_ABI_VERSION;
+        }
+
+        /** @copydoc ps_policy_plugin_get_api_v1 */
+        PS_POLICY_PLUGIN_EXPORT ps_policy_status_v1 PS_POLICY_CALL
+        ps_policy_plugin_get_api_v1(ps_policy_plugin_api_v1 *out_api) {
+          if (out_api == NULL) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
+          }
+          *out_api = (ps_policy_plugin_api_v1){0};
+          out_api->struct_size = sizeof(*out_api);
+          out_api->struct_kind = PS_POLICY_STRUCT_PLUGIN_API;
+          out_api->abi_version = PS_POLICY_PLUGIN_ABI_VERSION;
+          out_api->type_count = 1U;
+          out_api->get_metadata = installed_get_metadata;
+          out_api->create = installed_create;
+          out_api->select = installed_select;
+          out_api->destroy = installed_destroy;
+          return PS_POLICY_STATUS_OK;
+        }
+
+        /**
+         * @brief Exercises the installed API table without backend symbols.
+         * @return Zero on success or a stable nonzero probe stage.
+         * @note This fixture-only export is not part of the policy ABI.
+         */
+        PS_POLICY_PLUGIN_EXPORT int PS_POLICY_CALL
+        ps_installed_policy_contract_probe(void) {
+          ps_policy_plugin_api_v1 api = {0};
+          ps_policy_type_metadata_v1 metadata = {0};
+          ps_policy_create_args_v1 create_args = {0};
+          ps_policy_candidate_v1 candidates[2] = {{0}, {0}};
+          ps_policy_selection_snapshot_v1 snapshot = {0};
+          ps_policy_decision_v1 decision = {0};
+          void *context = NULL;
+
+          if (ps_policy_plugin_get_abi_version() != 1U ||
+              ps_policy_plugin_get_api_v1(&api) != PS_POLICY_STATUS_OK ||
+              api.struct_size != sizeof(api) || api.type_count != 1U) {
+            return 1;
+          }
+          if (api.get_metadata(0U, &metadata) != PS_POLICY_STATUS_OK ||
+              metadata.name.size != 22U ||
+              metadata.supported_class_mask != PS_POLICY_CLASS_MASK_VALID) {
+            return 2;
+          }
+          create_args.struct_size = sizeof(create_args);
+          create_args.struct_kind = PS_POLICY_STRUCT_CREATE_ARGS;
+          create_args.policy_class = PS_POLICY_CLASS_INTERACTIVE;
+          create_args.binding_generation = 7U;
+          if (api.create(0U, &create_args, &context) != PS_POLICY_STATUS_OK ||
+              context != NULL) {
+            return 3;
+          }
+          candidates[0].struct_size = sizeof(candidates[0]);
+          candidates[0].struct_kind = PS_POLICY_STRUCT_CANDIDATE;
+          candidates[0].candidate_id = 11U;
+          candidates[1].struct_size = sizeof(candidates[1]);
+          candidates[1].struct_kind = PS_POLICY_STRUCT_CANDIDATE;
+          candidates[1].candidate_id = 19U;
+          snapshot.struct_size = sizeof(snapshot);
+          snapshot.struct_kind = PS_POLICY_STRUCT_SELECTION_SNAPSHOT;
+          snapshot.policy_class = PS_POLICY_CLASS_INTERACTIVE;
+          snapshot.candidate_count = 2U;
+          snapshot.binding_generation = 7U;
+          snapshot.snapshot_generation = 13U;
+          snapshot.selection_sequence = 1U;
+          snapshot.candidate_stride = sizeof(ps_policy_candidate_v1);
+          snapshot.candidates = candidates;
+          if (api.select(context, &snapshot, &decision) != PS_POLICY_STATUS_OK ||
+              decision.decision_kind != PS_POLICY_DECISION_SELECT ||
+              decision.binding_generation != 7U ||
+              decision.snapshot_generation != 13U ||
+              decision.candidate_id != 19U) {
+            return 4;
+          }
+          return api.destroy(context) == PS_POLICY_STATUS_OK ? 0 : 5;
+        }
+        """
+    ).lstrip()
+
+
+def installed_cpp_policy_plugin_source() -> str:
+    """@brief Build a source-tree-independent C++17 policy DSO consumer.
+
+    @return C++17 source implementing and probing the complete policy ABI v1.
+    @throws None The source is one immutable in-memory string.
+    @note Every ABI callback is explicitly ``noexcept`` and the DSO links only
+      the dependency-neutral installed ``policy_sdk`` interface target.
+    """
+
+    return dedent(
+        r"""
         #include <cstddef>
         #include <cstdint>
-        #include <cstring>
-        #include <exception>
-        #include <limits>
-        #include <optional>
-        #include <stdexcept>
-        #include <string>
         #include <type_traits>
-        #include <utility>
-        #include <vector>
 
-        #include <photospider/scheduler/scheduler_plugin_api.hpp>
+        #include <photospider/policy/policy_plugin_api.h>
 
-        static_assert(std::has_virtual_destructor_v<ps::TaskExecutor>,
-                      "concrete executor destruction must remain polymorphic");
-        static_assert(!std::is_destructible_v<ps::TaskExecutor>,
-                      "borrowed TaskExecutor must not be base-deletable");
+        static_assert(PS_POLICY_PLUGIN_ABI_VERSION == 1U,
+                      "policy ABI generation changed");
+        static_assert(sizeof(ps_policy_candidate_v1) == 120U,
+                      "policy candidate layout changed");
+        static_assert(std::is_nothrow_invocable_r_v<
+                          ps_policy_status_v1, ps_policy_select_fn_v1, void*,
+                          const ps_policy_selection_snapshot_v1*,
+                          ps_policy_decision_v1*>,
+                      "C++ callback profile must remain noexcept");
 
         namespace {
 
         /**
-         * @brief Minimal synchronous scheduler compiled only from installed SDK.
-         * @throws std::invalid_argument for an invalid initial count.
-         * @throws std::overflow_error when completion accounting would overflow.
-         * @throws Submitted task and allocation exceptions unchanged.
-         * @note It borrows the host between attach/detach and retains no handles.
+         * @brief Builds one borrowed immutable metadata range.
+         * @param data Process-lifetime bytes.
+         * @param size Byte count excluding the terminator.
+         * @return ABI-v1 string view over the supplied storage.
+         * @throws Nothing.
          */
-        class InstalledScheduler final : public ps::IScheduler {
-         public:
-          /** @copydoc ps::IScheduler::attach */
-          void attach(ps::SchedulerHostContext& host) noexcept override {
-            host_ = &host;
-          }
-          /** @copydoc ps::IScheduler::detach */
-          void detach() noexcept override { host_ = nullptr; }
-          /** @copydoc ps::IScheduler::start */
-          void start() noexcept override { running_ = true; }
-          /** @copydoc ps::IScheduler::shutdown */
-          void shutdown() noexcept override { running_ = false; }
-          /** @copydoc ps::IScheduler::name */
-          std::string name() const override { return "installed_sdk_smoke"; }
-          /** @copydoc ps::IScheduler::get_stats */
-          std::string get_stats() const override { return "synchronous"; }
-          /** @copydoc ps::IScheduler::is_running */
-          bool is_running() const noexcept override { return running_; }
-
-          /** @copydoc ps::SchedulerTaskRuntime::submit_initial_task_handles */
-          void submit_initial_task_handles(
-              std::vector<ps::TaskHandle>&& handles, int total_task_count,
-              ps::SchedulerTaskPriority priority) override {
-            (void)priority;
-            const std::size_t valid_handle_count =
-                static_cast<std::size_t>(std::count_if(
-                    handles.begin(), handles.end(),
-                    [](const ps::TaskHandle& handle) {
-                      return static_cast<bool>(handle);
-                    }));
-            if (total_task_count < 0 ||
-                valid_handle_count >
-                    static_cast<std::size_t>(total_task_count)) {
-              throw std::invalid_argument("invalid installed scheduler batch");
-            }
-            tasks_to_complete_ =
-                valid_handle_count == 0U ? 0 : total_task_count;
-            error_ = nullptr;
-            for (const ps::TaskHandle handle : handles) {
-              if (handle) {
-                handle.run();
-              }
-            }
-          }
-
-          /**
-           * @copydoc ps::SchedulerTaskRuntime::submit_ready_task_handles_from_worker
-           */
-          void submit_ready_task_handles_from_worker(
-              std::vector<ps::TaskHandle>&& handles,
-              ps::SchedulerTaskPriority priority) override {
-            (void)priority;
-            for (const ps::TaskHandle handle : handles) {
-              handle.run();
-            }
-          }
-
-          /** @copydoc ps::SchedulerTaskRuntime::submit_ready_task_any_thread */
-          void submit_ready_task_any_thread(
-              Task&& task, ps::SchedulerTaskPriority priority,
-              std::optional<std::uint64_t> epoch) override {
-            (void)priority;
-            (void)epoch;
-            if (task) {
-              task();
-            }
-          }
-
-          /** @copydoc ps::SchedulerTaskRuntime::wait_for_completion */
-          void wait_for_completion() override {
-            if (error_) {
-              std::exception_ptr error = error_;
-              error_ = nullptr;
-              std::rethrow_exception(error);
-            }
-          }
-
-          /** @copydoc ps::SchedulerTaskRuntime::set_exception */
-          void set_exception(std::exception_ptr error) override {
-            if (error != nullptr && !error_) {
-              error_ = error;
-            }
-          }
-
-          /** @copydoc ps::SchedulerTaskRuntime::inc_tasks_to_complete */
-          void inc_tasks_to_complete(int delta) override {
-            if (delta <= 0) {
-              return;
-            }
-            if (tasks_to_complete_ > std::numeric_limits<int>::max() - delta) {
-              throw std::overflow_error("installed scheduler counter overflow");
-            }
-            tasks_to_complete_ += delta;
-          }
-
-          /** @copydoc ps::SchedulerTaskRuntime::dec_tasks_to_complete */
-          void dec_tasks_to_complete() override {
-            if (tasks_to_complete_ > 0) {
-              --tasks_to_complete_;
-            }
-          }
-
-          /** @copydoc ps::SchedulerTaskRuntime::log_event */
-          void log_event(ps::SchedulerTraceAction action,
-                         int node_id) noexcept override {
-            if (host_ != nullptr) {
-              host_->log_event(action, node_id, 0, 1U);
-            }
-          }
-
-         private:
-          /** @brief Borrowed installed host context, or null while detached. */
-          ps::SchedulerHostContext* host_ = nullptr;
-          /** @brief Synchronous lifecycle state. */
-          bool running_ = false;
-          /** @brief Logical completion count for compile/link coverage. */
-          int tasks_to_complete_ = 0;
-          /** @brief First exact synchronous callback exception. */
-          std::exception_ptr error_;
-        };
+        ps_policy_string_view_v1 string_view(const char* data,
+                                             std::uint64_t size) noexcept {
+          return ps_policy_string_view_v1{data, size};
+        }
 
         /**
-         * @brief Counts valid handle execution for the installed-DSO probe.
+         * @brief Returns the single installed C++17 policy metadata row.
+         * @param type_index Zero-based row; only zero is valid.
+         * @param out_metadata Nonnull exact-size output record.
+         * @return OK or INVALID_ARGUMENT.
          * @throws Nothing.
-         * @note The executor owns no scheduler or plugin state and is borrowed
-         *       only during one synchronous initial submission.
          */
-        class InstalledCountingExecutor final : public ps::TaskExecutor {
-         public:
-          /**
-           * @brief Records one valid task-handle callback.
-           * @param task_id Dense task id supplied by the probe.
-           * @return Nothing.
-           * @throws Nothing.
-           * @note The probe uses task zero; the value is otherwise diagnostic.
-           */
-          void run_task(int task_id) noexcept override {
-            (void)task_id;
-            ++execution_count_;
+        ps_policy_status_v1 PS_POLICY_CALL get_metadata(
+            std::uint32_t type_index,
+            ps_policy_type_metadata_v1* out_metadata) noexcept {
+          static constexpr char kName[] = "installed_policy_smoke";
+          static constexpr char kDescription[] =
+              "Installed C++17 policy SDK smoke fixture.";
+          static constexpr char kVersion[] = "installed-cpp17-v1";
+          if (type_index != 0U || out_metadata == nullptr) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
           }
+          *out_metadata = {};
+          out_metadata->struct_size = sizeof(*out_metadata);
+          out_metadata->struct_kind = PS_POLICY_STRUCT_TYPE_METADATA;
+          out_metadata->name = string_view(kName, sizeof(kName) - 1U);
+          out_metadata->description =
+              string_view(kDescription, sizeof(kDescription) - 1U);
+          out_metadata->implementation_version =
+              string_view(kVersion, sizeof(kVersion) - 1U);
+          out_metadata->supported_class_mask = PS_POLICY_CLASS_MASK_VALID;
+          return PS_POLICY_STATUS_OK;
+        }
 
-          /**
-           * @brief Reads the number of valid callbacks entered.
-           * @return Synchronous execution count.
-           * @throws Nothing.
-           * @note The probe reads only after initial submission returns.
-           */
-          int execution_count() const noexcept { return execution_count_; }
+        /**
+         * @brief Creates one stateless class-specific logical instance.
+         * @param type_index Zero-based row; only zero is valid.
+         * @param args Nonnull exact ABI-v1 creation arguments.
+         * @param out_context Nonnull context output initialized to null.
+         * @return OK for one valid binding, otherwise INVALID_ARGUMENT.
+         * @throws Nothing.
+         */
+        ps_policy_status_v1 PS_POLICY_CALL create(
+            std::uint32_t type_index, const ps_policy_create_args_v1* args,
+            void** out_context) noexcept {
+          if (type_index != 0U || args == nullptr || out_context == nullptr ||
+              args->struct_size != sizeof(*args) ||
+              args->struct_kind != PS_POLICY_STRUCT_CREATE_ARGS ||
+              args->binding_generation == 0U || args->reserved0 != 0U ||
+              args->reserved[0] != 0U || args->reserved[1] != 0U ||
+              (args->policy_class != PS_POLICY_CLASS_INTERACTIVE &&
+               args->policy_class != PS_POLICY_CLASS_THROUGHPUT)) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
+          }
+          *out_context = nullptr;
+          return PS_POLICY_STATUS_OK;
+        }
 
-         private:
-          /** @brief Number of valid task handles executed synchronously. */
-          int execution_count_ = 0;
-        };
+        /**
+         * @brief Selects the first candidate from one immutable snapshot.
+         * @param context Stateless context; ignored, including null.
+         * @param snapshot Nonnull exact-size snapshot with candidates.
+         * @param out_decision Nonnull exact-size output record.
+         * @return OK for a valid snapshot, otherwise INVALID_ARGUMENT.
+         * @throws Nothing.
+         */
+        ps_policy_status_v1 PS_POLICY_CALL select(
+            void* context, const ps_policy_selection_snapshot_v1* snapshot,
+            ps_policy_decision_v1* out_decision) noexcept {
+          (void)context;
+          if (snapshot == nullptr || out_decision == nullptr ||
+              snapshot->struct_size != sizeof(*snapshot) ||
+              snapshot->struct_kind != PS_POLICY_STRUCT_SELECTION_SNAPSHOT ||
+              snapshot->candidate_count == 0U ||
+              snapshot->candidate_stride != sizeof(ps_policy_candidate_v1) ||
+              snapshot->candidates == nullptr ||
+              snapshot->binding_generation == 0U ||
+              snapshot->snapshot_generation == 0U ||
+              snapshot->reserved0 != 0U || snapshot->reserved[0] != 0U) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
+          }
+          *out_decision = {};
+          out_decision->struct_size = sizeof(*out_decision);
+          out_decision->struct_kind = PS_POLICY_STRUCT_DECISION;
+          out_decision->decision_kind = PS_POLICY_DECISION_SELECT;
+          out_decision->binding_generation = snapshot->binding_generation;
+          out_decision->snapshot_generation = snapshot->snapshot_generation;
+          out_decision->candidate_id = snapshot->candidates[0].candidate_id;
+          return PS_POLICY_STATUS_OK;
+        }
 
-        static_assert(std::is_destructible_v<InstalledCountingExecutor>,
-                      "concrete executor must remain owner-destructible");
+        /**
+         * @brief Completes one successful stateless logical instance.
+         * @param context Stateless context; ignored, including null.
+         * @return Always OK.
+         * @throws Nothing.
+         */
+        ps_policy_status_v1 PS_POLICY_CALL destroy(void* context) noexcept {
+          (void)context;
+          return PS_POLICY_STATUS_OK;
+        }
 
         }  // namespace
 
-        /**
-         * @brief Exercises empty-handle and null-exception runtime contracts.
-         * @return Zero on success; one for invalid callback count, two when a
-         *         null publication clears the tagged exception, three when a
-         *         fresh batch fails to reset it, or four for another failure.
-         * @throws Nothing; every C++ exception is converted to status four.
-         * @note This fixture-only export is invoked by the package smoke after
-         *       loading the installed-header-only DSO. It is not scheduler ABI.
-         */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int
-        ps_installed_scheduler_contract_probe() noexcept {
-          try {
-            InstalledScheduler scheduler;
-            scheduler.start();
-            InstalledCountingExecutor executor;
-            std::vector<ps::TaskHandle> handles{
-                ps::TaskHandle{}, ps::TaskHandle{&executor, 0, 1}};
-            scheduler.submit_initial_task_handles(
-                std::move(handles), 1, ps::SchedulerTaskPriority::Normal);
-            if (executor.execution_count() != 1) {
-              return 1;
-            }
-            scheduler.dec_tasks_to_complete();
-            scheduler.set_exception(nullptr);
-            scheduler.wait_for_completion();
+        /** @copydoc ps_policy_plugin_get_abi_version */
+        PS_POLICY_PLUGIN_EXPORT std::uint32_t PS_POLICY_CALL
+        ps_policy_plugin_get_abi_version(void) noexcept {
+          return PS_POLICY_PLUGIN_ABI_VERSION;
+        }
 
-            scheduler.set_exception(std::make_exception_ptr(
-                std::runtime_error("installed scheduler tagged error")));
-            scheduler.set_exception(nullptr);
-            bool tagged_error_observed = false;
-            try {
-              scheduler.wait_for_completion();
-            } catch (const std::runtime_error& error) {
-              tagged_error_observed =
-                  std::strcmp(error.what(),
-                              "installed scheduler tagged error") == 0;
-            }
-            if (!tagged_error_observed) {
-              return 2;
-            }
-
-            scheduler.set_exception(std::make_exception_ptr(
-                std::runtime_error("installed scheduler stale error")));
-            scheduler.submit_initial_task_handles(
-                {}, 0, ps::SchedulerTaskPriority::Normal);
-            try {
-              scheduler.wait_for_completion();
-            } catch (...) {
-              return 3;
-            }
-            scheduler.shutdown();
-            return 0;
-          } catch (...) {
-            return 4;
+        /** @copydoc ps_policy_plugin_get_api_v1 */
+        PS_POLICY_PLUGIN_EXPORT ps_policy_status_v1 PS_POLICY_CALL
+        ps_policy_plugin_get_api_v1(
+            ps_policy_plugin_api_v1* out_api) noexcept {
+          if (out_api == nullptr) {
+            return PS_POLICY_STATUS_INVALID_ARGUMENT;
           }
+          *out_api = {};
+          out_api->struct_size = sizeof(*out_api);
+          out_api->struct_kind = PS_POLICY_STRUCT_PLUGIN_API;
+          out_api->abi_version = PS_POLICY_PLUGIN_ABI_VERSION;
+          out_api->type_count = 1U;
+          out_api->get_metadata = get_metadata;
+          out_api->create = create;
+          out_api->select = select;
+          out_api->destroy = destroy;
+          return PS_POLICY_STATUS_OK;
         }
 
         /**
-         * @brief Returns the exact installed scheduler ABI generation.
-         * @return ``PS_SCHEDULER_PLUGIN_ABI_VERSION``.
+         * @brief Exercises the installed C++17 ABI table without Host linkage.
+         * @return Zero only when create/select/destroy and echoes are exact.
          * @throws Nothing.
+         * @note This fixture-only export is not part of the policy ABI.
          */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT std::uint32_t
-        ps_scheduler_plugin_get_abi_version() noexcept {
-          return ps::PS_SCHEDULER_PLUGIN_ABI_VERSION;
-        }
-
-        /**
-         * @brief Reports the single scheduler type in this smoke DSO.
-         * @return One.
-         * @throws Nothing.
-         */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT std::uint32_t
-        ps_scheduler_plugin_get_count() noexcept { return 1U; }
-
-        /**
-         * @brief Returns the indexed smoke scheduler name.
-         * @param index Scheduler index.
-         * @return Stable name for index zero, otherwise null.
-         * @throws Nothing.
-         */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
-        ps_scheduler_plugin_get_name(std::uint32_t index) noexcept {
-          return index == 0U ? "installed_sdk_smoke" : nullptr;
-        }
-
-        /**
-         * @brief Returns the indexed smoke scheduler description.
-         * @param index Scheduler index.
-         * @return Stable description for index zero, otherwise null.
-         * @throws Nothing.
-         */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
-        ps_scheduler_plugin_get_description(std::uint32_t index) noexcept {
-          return index == 0U ? "installed SDK smoke scheduler" : nullptr;
-        }
-
-        /**
-         * @brief Creates the named smoke scheduler.
-         * @param type_name Requested scheduler name.
-         * @param num_workers Ignored synchronous worker hint.
-         * @return New scheduler, or null for another name.
-         * @throws std::bad_alloc if allocation fails.
-         */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT ps::IScheduler*
-        ps_scheduler_plugin_create(const char* type_name,
-                                   std::uint32_t num_workers) {
-          (void)num_workers;
-          if (type_name == nullptr ||
-              std::strcmp(type_name, "installed_sdk_smoke") != 0) {
-            return nullptr;
+        extern "C" PS_POLICY_PLUGIN_EXPORT int PS_POLICY_CALL
+        ps_installed_policy_contract_probe(void) noexcept {
+          ps_policy_plugin_api_v1 api{};
+          ps_policy_create_args_v1 create_args{};
+          ps_policy_candidate_v1 candidate{};
+          ps_policy_selection_snapshot_v1 snapshot{};
+          ps_policy_decision_v1 decision{};
+          void* context = nullptr;
+          if (ps_policy_plugin_get_api_v1(&api) != PS_POLICY_STATUS_OK ||
+              api.struct_size != sizeof(api) || api.type_count != 1U) {
+            return 1;
           }
-          return new InstalledScheduler();
-        }
-
-        /**
-         * @brief Destroys one scheduler created by this DSO.
-         * @param scheduler Owned scheduler pointer, or null.
-         * @return Nothing.
-         * @throws Nothing under the scheduler destructor contract.
-         */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT void
-        ps_scheduler_plugin_destroy(ps::IScheduler* scheduler) noexcept {
-          delete scheduler;
-        }
-
-        /**
-         * @brief Returns a human-readable smoke implementation version.
-         * @return Process-lifetime version literal.
-         * @throws Nothing.
-         */
-        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
-        ps_scheduler_plugin_get_version() noexcept {
-          return "installed-smoke-1";
+          create_args.struct_size = sizeof(create_args);
+          create_args.struct_kind = PS_POLICY_STRUCT_CREATE_ARGS;
+          create_args.policy_class = PS_POLICY_CLASS_INTERACTIVE;
+          create_args.binding_generation = 17U;
+          if (api.create(0U, &create_args, &context) != PS_POLICY_STATUS_OK) {
+            return 2;
+          }
+          candidate.struct_size = sizeof(candidate);
+          candidate.struct_kind = PS_POLICY_STRUCT_CANDIDATE;
+          candidate.candidate_id = 23U;
+          snapshot.struct_size = sizeof(snapshot);
+          snapshot.struct_kind = PS_POLICY_STRUCT_SELECTION_SNAPSHOT;
+          snapshot.policy_class = PS_POLICY_CLASS_INTERACTIVE;
+          snapshot.candidate_count = 1U;
+          snapshot.binding_generation = 17U;
+          snapshot.snapshot_generation = 19U;
+          snapshot.selection_sequence = 1U;
+          snapshot.candidate_stride = sizeof(candidate);
+          snapshot.candidates = &candidate;
+          if (api.select(context, &snapshot, &decision) !=
+                  PS_POLICY_STATUS_OK ||
+              decision.candidate_id != 23U ||
+              decision.binding_generation != 17U ||
+              decision.snapshot_generation != 19U) {
+            return 3;
+          }
+          return api.destroy(context) == PS_POLICY_STATUS_OK ? 0 : 4;
         }
         """
     ).lstrip()
@@ -1188,8 +1626,39 @@ def installed_operation_plugin_source() -> str:
     return dedent(
         r"""
         #include <stdexcept>
+        #include <string_view>
+        #include <type_traits>
 
         #include <photospider/plugin/plugin_api.hpp>
+
+        /**
+         * @brief Detects an added operation-registrar cancellation shim.
+         * @tparam T Installed registrar contract under inspection.
+         * @tparam Probe Substitution-only member-address expression.
+         * @throws Nothing.
+         * @note Operation ABI v2 receives callbacks only; it owns no Run.
+         */
+        template <typename T, typename Probe = void>
+        struct HasOperationCancel : std::false_type {};
+
+        /** @copydoc HasOperationCancel */
+        template <typename T>
+        struct HasOperationCancel<T, std::void_t<decltype(&T::cancel)>>
+            : std::true_type {};
+
+        static_assert(!HasOperationCancel<
+                          ps::plugin::OperationPluginRegistrar>::value,
+                      "operation ABI v2 must expose no cancellation shim");
+        static_assert(std::is_standard_layout_v<
+                          ps::plugin::OperationPluginRegistrar>,
+                      "operation ABI v2 registrar must remain standard layout");
+        static_assert(
+            sizeof(ps::plugin::OperationPluginRegistrar) == 9U * sizeof(void*),
+            "operation ABI v2 registrar pointer-table layout changed");
+        static_assert(
+            std::string_view(ps::plugin::kOperationPluginRegisterSymbolV2) ==
+                "register_photospider_ops_v2",
+            "operation plugin handshake must remain version two");
 
         /**
          * @brief Registers one installed-SDK operation using the image factory.
@@ -1219,14 +1688,14 @@ def installed_operation_plugin_source() -> str:
 
 
 def write_extension_consumer_projects(
-    scheduler_source_dir: Path,
+    policy_source_dir: Path,
     operation_source_dir: Path,
     opencv_source_dir: Path,
     real_opencv_config_dir: Path,
 ) -> None:
     """@brief Create three independent installed extension-SDK consumers.
 
-    @param scheduler_source_dir Scheduler-only DSO project directory.
+    @param policy_source_dir Pure-C/C++17 policy DSO project directory.
     @param operation_source_dir Operation SDK DSO/executable project directory.
     @param opencv_source_dir OpenCV-core-only adapter consumer directory.
     @param real_opencv_config_dir Producer-resolved OpenCV config directory.
@@ -1236,37 +1705,81 @@ def write_extension_consumer_projects(
     @note No generated target receives a repository source include directory.
       The operation fixture is a ``SHARED`` library so its platform suffix
       matches the production directory scanner (``.dylib`` on macOS); the
-      scheduler fixture remains a ``MODULE`` because it is loaded by exact path.
+      both policy fixtures are ``SHARED`` libraries accepted by the production
+      loader. The policy project must also reject a packed C++17 ABI profile.
     """
 
-    scheduler_source_dir.mkdir(parents=True, exist_ok=True)
+    policy_source_dir.mkdir(parents=True, exist_ok=True)
     operation_source_dir.mkdir(parents=True, exist_ok=True)
     opencv_source_dir.mkdir(parents=True, exist_ok=True)
 
-    (scheduler_source_dir / "CMakeLists.txt").write_text(
+    (policy_source_dir / "CMakeLists.txt").write_text(
         dedent(
             """
             cmake_minimum_required(VERSION 3.16)
-            project(installed_scheduler_sdk_consumer LANGUAGES CXX)
-            find_package(Photospider CONFIG REQUIRED COMPONENTS scheduler_sdk)
+            project(installed_policy_sdk_consumer LANGUAGES C CXX)
+            find_package(Photospider CONFIG REQUIRED COMPONENTS policy_sdk)
             if(DEFINED OpenCV_FOUND OR TARGET yaml-cpp::yaml-cpp OR
                TARGET Threads::Threads)
-              message(FATAL_ERROR "scheduler SDK discovered backend packages")
+              message(FATAL_ERROR "policy SDK discovered backend packages")
             endif()
-            add_library(installed_scheduler_plugin MODULE scheduler_plugin.cpp)
-            target_compile_definitions(installed_scheduler_plugin PRIVATE
-                PHOTOSPIDER_SCHEDULER_PLUGIN_BUILD)
-            target_link_libraries(installed_scheduler_plugin PRIVATE
-                Photospider::scheduler_sdk)
+            add_library(installed_policy_plugin SHARED policy_plugin.c)
+            set_target_properties(installed_policy_plugin PROPERTIES
+                C_STANDARD 11
+                C_STANDARD_REQUIRED YES)
+            target_link_libraries(installed_policy_plugin PRIVATE
+                Photospider::policy_sdk)
+            add_library(installed_cpp_policy_plugin SHARED policy_plugin.cpp)
+            set_target_properties(installed_cpp_policy_plugin PROPERTIES
+                CXX_STANDARD 17
+                CXX_STANDARD_REQUIRED YES
+                CXX_EXTENSIONS NO)
+            target_link_libraries(installed_cpp_policy_plugin PRIVATE
+                Photospider::policy_sdk)
+            get_target_property(POLICY_SDK_INCLUDE_DIRS
+                Photospider::policy_sdk INTERFACE_INCLUDE_DIRECTORIES)
+            set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+            try_compile(PACKED_POLICY_PROFILE_COMPILED
+                "${CMAKE_BINARY_DIR}/packed-policy-profile-build"
+                "${CMAKE_CURRENT_SOURCE_DIR}/packed_profile.cpp"
+                CMAKE_FLAGS
+                    "-DCMAKE_CXX_STANDARD:STRING=17"
+                    "-DCMAKE_CXX_STANDARD_REQUIRED:BOOL=ON"
+                    "-DCMAKE_CXX_EXTENSIONS:BOOL=OFF"
+                    "-DINCLUDE_DIRECTORIES:STRING=${POLICY_SDK_INCLUDE_DIRS}"
+                OUTPUT_VARIABLE PACKED_POLICY_PROFILE_OUTPUT)
+            unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+            if(PACKED_POLICY_PROFILE_COMPILED)
+              message(FATAL_ERROR
+                  "packed C++17 policy ABI profile unexpectedly compiled")
+            endif()
             file(GENERATE
-                OUTPUT "${CMAKE_BINARY_DIR}/installed_scheduler_plugin_target_$<CONFIG>.txt"
-                CONTENT "$<TARGET_FILE:installed_scheduler_plugin>\n")
+                OUTPUT "${CMAKE_BINARY_DIR}/installed_policy_plugin_target_$<CONFIG>.txt"
+                CONTENT "$<TARGET_FILE:installed_policy_plugin>\n")
+            file(GENERATE
+                OUTPUT "${CMAKE_BINARY_DIR}/installed_cpp_policy_plugin_target_$<CONFIG>.txt"
+                CONTENT "$<TARGET_FILE:installed_cpp_policy_plugin>\n")
             """
         ).lstrip(),
         encoding="utf-8",
     )
-    (scheduler_source_dir / "scheduler_plugin.cpp").write_text(
-        installed_scheduler_plugin_source(), encoding="utf-8"
+    (policy_source_dir / "policy_plugin.c").write_text(
+        installed_policy_plugin_source(), encoding="utf-8"
+    )
+    (policy_source_dir / "policy_plugin.cpp").write_text(
+        installed_cpp_policy_plugin_source(), encoding="utf-8"
+    )
+    (policy_source_dir / "packed_profile.cpp").write_text(
+        dedent(
+            """
+            #pragma pack(push, 1)
+            #include <photospider/policy/policy_plugin_api.h>
+            #pragma pack(pop)
+
+            int main() { return 0; }
+            """
+        ).lstrip(),
+        encoding="utf-8",
     )
 
     (operation_source_dir / "CMakeLists.txt").write_text(
@@ -1505,6 +2018,196 @@ def installed_static_product_archives(prefix: Path, install_libdir: str) -> list
         for path in archive_root.rglob("*")
         if path.is_file() and path.name.lower() in STATIC_PRODUCT_ARCHIVE_NAMES
     )
+
+
+def inspect_product_archive_symbols(
+    prefix: Path,
+    archives: list[str],
+    platform_system: str,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    captured_runner: Callable[
+        [list[str], Path], subprocess.CompletedProcess[str]
+    ] = run_captured_command,
+    executable_validator: Callable[[str], bool] = is_executable_file,
+) -> dict[str, Any]:
+    """@brief Inspect the installed product archive for private test seams.
+
+    @param prefix Temporary package installation prefix.
+    @param archives Product archive paths relative to ``prefix``.
+    @param platform_system Host platform controlling Darwin ``xcrun`` use.
+    @param which Injectable executable lookup for deterministic regression.
+    @param captured_runner Injectable captured subprocess runner used for both
+      discovery and archive scans.
+    @param executable_validator Injectable validator for ``xcrun`` output.
+    @return Path-free symbol-tool source/status, aggregate line/anchor/prohibited
+      counts, controlled symbol tokens, and structured candidate diagnostics. A
+      missing/non-unique archive or all unusable tools produces an unsuccessful
+      observation with the same closed schema.
+    @throws None Process startup failures are converted to candidate failures;
+      injected callbacks are otherwise expected to honor their contracts.
+    @note Darwin tries validated Xcode ``xcrun`` llvm-nm, PATH llvm-nm, then
+      PATH nm; other platforms never invoke xcrun. A candidate becomes
+      authoritative only after a zero exit, nonempty symbol table, and defined
+      anchors from all five seam objects. Raw lines remain only in this stack
+      frame: once authoritative, controlled fragment counts are retained and no
+      later tool may hide a forbidden symbol.
+    """
+
+    if len(archives) != 1:
+        return {
+            "tool_source": "",
+            "status": None,
+            "line_count": 0,
+            "prohibited_symbol_count": 0,
+            "prohibited_symbols": {},
+            "required_anchor_count": 0,
+            "required_anchor_total": len(
+                REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+            ),
+            "required_anchors": {
+                fragment: 0
+                for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+            },
+            "covers_product_seams": False,
+            "attempts": [],
+            "failure_reason": (
+                "expected exactly one installed product archive"
+            ),
+        }
+    resolution = resolve_product_archive_symbol_tools(
+        platform_system,
+        prefix,
+        which=which,
+        captured_runner=captured_runner,
+        executable_validator=executable_validator,
+    )
+    attempts: list[dict[str, Any]] = []
+    last_status: int | None = None
+    last_line_count = 0
+    last_prohibited_symbols: dict[str, int] = {}
+    last_required_anchors = {
+        fragment: 0 for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+    }
+    for entry in resolution.sequence:
+        if isinstance(entry, SymbolToolFailure):
+            attempt: dict[str, Any] = {
+                "tool_source": entry.source,
+                "reason": entry.reason,
+            }
+            if entry.status is not None:
+                attempt["status"] = entry.status
+            attempts.append(attempt)
+            continue
+        candidate = entry
+        try:
+            completed = captured_runner(
+                [candidate.executable, str(prefix / archives[0])], prefix
+            )
+        except OSError:
+            attempts.append(
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection could not start",
+                }
+            )
+            continue
+        symbol_lines = completed.stdout.splitlines()
+        prohibited_symbols = {
+            fragment: sum(fragment in line for line in symbol_lines)
+            for fragment in FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS
+        }
+        required_anchors = {
+            fragment: sum(
+                1
+                for line in symbol_lines
+                if fragment in line and re.search(r"\b[TW]\b", line)
+            )
+            for fragment in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+        }
+        last_status = completed.returncode
+        last_line_count = len(symbol_lines)
+        last_prohibited_symbols = {
+            fragment: count
+            for fragment, count in prohibited_symbols.items()
+            if count
+        }
+        last_required_anchors = required_anchors
+        missing_anchor_count = sum(
+            count == 0 for count in required_anchors.values()
+        )
+        if completed.returncode != 0:
+            attempts.append(
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection exited with nonzero status",
+                    "status": completed.returncode,
+                }
+            )
+            continue
+        if not symbol_lines:
+            attempts.append(
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection produced no symbol lines",
+                }
+            )
+            continue
+        if missing_anchor_count:
+            attempts.append(
+                {
+                    "tool_source": candidate.source,
+                    "reason": "inspection missed required anchors",
+                    "missing_anchor_count": missing_anchor_count,
+                    "required_anchor_total": len(required_anchors),
+                }
+            )
+            continue
+        attempts.append(
+            {
+                "tool_source": candidate.source,
+                "reason": "usable symbol table",
+            }
+        )
+        prohibited_symbol_count = sum(last_prohibited_symbols.values())
+        required_anchor_count = sum(
+            count > 0 for count in required_anchors.values()
+        )
+        return {
+            "tool_source": candidate.source,
+            "status": completed.returncode,
+            "line_count": len(symbol_lines),
+            "prohibited_symbol_count": prohibited_symbol_count,
+            "prohibited_symbols": last_prohibited_symbols,
+            "required_anchor_count": required_anchor_count,
+            "required_anchor_total": len(required_anchors),
+            "required_anchors": required_anchors,
+            "covers_product_seams": True,
+            "attempts": attempts,
+            "failure_reason": "",
+        }
+
+    prohibited_symbol_count = sum(last_prohibited_symbols.values())
+    required_anchor_count = sum(
+        count > 0 for count in last_required_anchors.values()
+    )
+    return {
+        "tool_source": "",
+        "status": last_status,
+        "line_count": last_line_count,
+        "prohibited_symbol_count": prohibited_symbol_count,
+        "prohibited_symbols": last_prohibited_symbols,
+        "required_anchor_count": required_anchor_count,
+        "required_anchor_total": len(
+            REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+        ),
+        "required_anchors": last_required_anchors,
+        "covers_product_seams": False,
+        "attempts": attempts,
+        "failure_reason": (
+            "no usable archive-symbol inspection candidate"
+        ),
+    }
 
 
 def relative_or_absolute(prefix: Path, path: Path) -> str:
@@ -1779,9 +2482,11 @@ def inspect_install_tree(
     @param package_cmake_dir Relative or absolute package CMake destination
       containing the config file and every Photospider target export set.
     @param platform_system Host platform used for dl/framework expectations.
-    @return Installed header/archive/config/export inventory and exact parsed
-      target properties aggregated across all matching export-set files.
-    @throws OSError If installed files cannot be traversed or read.
+    @return Installed header/archive/config/export inventory, production archive
+      symbol observations, and exact parsed target properties aggregated across
+      all matching export-set files.
+    @throws OSError If installed files cannot be traversed or read, or the
+      selected symbol-inspection process cannot start.
     @note ``INTERFACE_LINK_LIBRARIES`` is derived from the real installed
       ``Photospider*Targets*.cmake`` files. File concatenation preserves each
       generated export fragment, while property parsing accepts only the exact
@@ -1804,6 +2509,14 @@ def inspect_install_tree(
     ]
     source_root = repo.as_posix()
     archives = installed_static_product_archives(prefix, install_libdir)
+    product_symbol_scan = inspect_product_archive_symbols(
+        prefix, archives, platform_system
+    )
+    internal_test_product_artifacts = sorted(
+        relative_or_absolute(prefix, path)
+        for path in prefix.rglob("*")
+        if path.is_file() and INTERNAL_TEST_PRODUCT_STEM in path.name.lower()
+    )
     interface_link_raw = exported_target_property(
         target_text, EXPORTED_TARGET, "INTERFACE_LINK_LIBRARIES"
     )
@@ -1863,6 +2576,17 @@ def inspect_install_tree(
         "unexpected_headers": unexpected_headers,
         "static_product_archives": archives,
         "archive_exists": len(archives) == 1,
+        "production_archive_symbol_scan": product_symbol_scan,
+        "production_archive_omits_internal_test_symbols": (
+            product_symbol_scan["status"] == 0
+            and product_symbol_scan["line_count"] > 0
+            and product_symbol_scan["covers_product_seams"]
+            and product_symbol_scan["prohibited_symbol_count"] == 0
+        ),
+        "internal_test_product_artifacts": internal_test_product_artifacts,
+        "install_omits_internal_test_product_artifacts": (
+            internal_test_product_artifacts == []
+        ),
         "config_exists": config_path.is_file(),
         "targets_exists": targets_path.is_file(),
         "target_files": [relative_or_absolute(prefix, path) for path in target_paths],
@@ -1945,6 +2669,13 @@ def inspect_install_tree(
         "export_omits_source_root": source_root not in target_text
         and source_root not in config_text,
         "export_omits_src_include_root": "/src" not in target_text,
+        "export_omits_internal_test_product": (
+            INTERNAL_TEST_PRODUCT_STEM not in target_text
+            and all(
+                definition not in target_text
+                for definition in INTERNAL_PRODUCT_TEST_DEFINITIONS
+            )
+        ),
         "export_interface_link_libraries": {
             "raw": interface_link_raw,
             "entries": interface_link_entries,
@@ -1964,6 +2695,261 @@ def inspect_install_tree(
     }
 
 
+def archive_symbol_diagnostic_summary(
+    symbol_scan: dict[str, Any],
+) -> dict[str, Any]:
+    """@brief Project one symbol scan onto its printable closed schema.
+
+    @param symbol_scan In-memory archive observation used by package checks.
+    @return Newly owned path-free diagnostic containing only controlled source,
+      reason, symbol-token, status, and aggregate-count fields.
+    @throws None Missing or malformed fields are replaced by safe defaults.
+    @note The whitelist intentionally ignores unknown keys, executable/archive
+      paths, raw symbol lines, captured streams, and environment data.
+    """
+
+    allowed_sources = {"xcrun llvm-nm", "PATH llvm-nm", "PATH nm"}
+    allowed_reasons = {
+        "xcrun is unavailable",
+        "discovery could not start",
+        "discovery exited with nonzero status",
+        "discovery returned no path",
+        "discovery returned multiple lines",
+        "discovery returned a relative path",
+        "discovery returned an unusable path",
+        "executable is unavailable",
+        "duplicate executable was skipped",
+        "inspection could not start",
+        "inspection exited with nonzero status",
+        "inspection produced no symbol lines",
+        "inspection missed required anchors",
+        "usable symbol table",
+    }
+    allowed_failure_reasons = {
+        "",
+        "expected exactly one installed product archive",
+        "no usable archive-symbol inspection candidate",
+    }
+    prohibited_input = symbol_scan.get("prohibited_symbols", {})
+    if not isinstance(prohibited_input, dict):
+        prohibited_input = {}
+    prohibited_symbols: dict[str, int] = {}
+    for symbol in FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS:
+        count = prohibited_input.get(symbol, 0)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            prohibited_symbols[symbol] = count
+    anchor_input = symbol_scan.get("required_anchors", {})
+    if not isinstance(anchor_input, dict):
+        anchor_input = {}
+    required_anchors: dict[str, int] = {}
+    for symbol in REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS:
+        count = anchor_input.get(symbol, 0)
+        required_anchors[symbol] = (
+            count
+            if isinstance(count, int)
+            and not isinstance(count, bool)
+            and count > 0
+            else 0
+        )
+    attempts: list[dict[str, Any]] = []
+    raw_attempts = symbol_scan.get("attempts", [])
+    if not isinstance(raw_attempts, list):
+        raw_attempts = []
+    for raw_attempt in raw_attempts:
+        if not isinstance(raw_attempt, dict):
+            continue
+        source = raw_attempt.get("tool_source", "")
+        reason = raw_attempt.get("reason", "")
+        if (
+            not isinstance(source, str)
+            or source not in allowed_sources
+            or not isinstance(reason, str)
+            or reason not in allowed_reasons
+        ):
+            continue
+        attempt: dict[str, Any] = {
+            "tool_source": source,
+            "reason": reason,
+        }
+        status = raw_attempt.get("status")
+        if isinstance(status, int) and not isinstance(status, bool):
+            attempt["status"] = status
+        missing_anchor_count = raw_attempt.get("missing_anchor_count")
+        required_anchor_total = raw_attempt.get("required_anchor_total")
+        if (
+            isinstance(missing_anchor_count, int)
+            and not isinstance(missing_anchor_count, bool)
+            and missing_anchor_count >= 0
+            and isinstance(required_anchor_total, int)
+            and not isinstance(required_anchor_total, bool)
+            and required_anchor_total >= 0
+        ):
+            attempt["missing_anchor_count"] = missing_anchor_count
+            attempt["required_anchor_total"] = required_anchor_total
+        attempts.append(attempt)
+    tool_source = symbol_scan.get("tool_source", "")
+    if not isinstance(tool_source, str) or tool_source not in allowed_sources:
+        tool_source = ""
+    status = symbol_scan.get("status")
+    if not isinstance(status, int) or isinstance(status, bool):
+        status = None
+    line_count = symbol_scan.get("line_count", 0)
+    if (
+        not isinstance(line_count, int)
+        or isinstance(line_count, bool)
+        or line_count < 0
+    ):
+        line_count = 0
+    failure_reason = symbol_scan.get("failure_reason", "")
+    if (
+        not isinstance(failure_reason, str)
+        or failure_reason not in allowed_failure_reasons
+    ):
+        failure_reason = "no usable archive-symbol inspection candidate"
+    return {
+        "tool_source": tool_source,
+        "status": status,
+        "line_count": line_count,
+        "prohibited_symbol_count": sum(prohibited_symbols.values()),
+        "prohibited_symbols": prohibited_symbols,
+        "required_anchor_count": sum(
+            count > 0 for count in required_anchors.values()
+        ),
+        "required_anchor_total": len(
+            REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS
+        ),
+        "required_anchors": required_anchors,
+        "covers_product_seams": (
+            symbol_scan.get("covers_product_seams") is True
+        ),
+        "attempts": attempts,
+        "failure_reason": failure_reason,
+    }
+
+
+def behavior_diagnostic_summary(
+    observations: dict[str, Any], checks: dict[str, bool]
+) -> dict[str, Any]:
+    """@brief Build the only JSON projection allowed on package failure.
+
+    @param observations Complete in-memory package observations used for verdicts.
+    @param checks Stable named boolean behavior checks derived from observations.
+    @return Path-free diagnostic with failed check labels, whitelisted command
+      statuses, counts, and the sanitized archive-symbol observation.
+    @throws KeyError If the required symbol-scan observation is absent.
+    @note Full observations remain private because they contain transient build,
+      install, workspace, executable, manifest, and package paths.
+    """
+
+    command_names = (
+        "producer_configure",
+        "build_photospider",
+        "install",
+        "embedded_consumer_configure",
+        "embedded_consumer_build",
+        "ipc_consumer_configure",
+        "ipc_consumer_build",
+        "policy_sdk_configure",
+        "policy_sdk_build",
+        "policy_contract_probe",
+        "policy_cpp_contract_probe",
+        "operation_sdk_configure",
+        "operation_sdk_build",
+        "operation_opencv_configure",
+        "operation_opencv_build",
+        "optional_opencv_missing_configure",
+        "required_opencv_missing_configure",
+        "unknown_component_configure",
+        "consumer_run",
+        "ipc_consumer_run",
+        "operation_sdk_run",
+        "operation_opencv_run",
+    )
+    command_input = observations.get("commands", {})
+    if not isinstance(command_input, dict):
+        command_input = {}
+    command_statuses: dict[str, int | None | str] = {}
+    for name in command_names:
+        status = command_input.get(name)
+        command_statuses[name] = (
+            status
+            if (status is None or isinstance(status, int))
+            and not isinstance(status, bool)
+            else "invalid status"
+        )
+    failed_checks = [
+        name
+        if re.fullmatch(r"[A-Za-z0-9 _+().,'-]+", name)
+        else "unprintable behavior check"
+        for name, passed in checks.items()
+        if not passed
+    ]
+    symbol_scan = observations["install_tree"][
+        "production_archive_symbol_scan"
+    ]
+    return {
+        "failed_checks": failed_checks,
+        "command_statuses": command_statuses,
+        "archive_symbol_scan": archive_symbol_diagnostic_summary(symbol_scan),
+    }
+
+
+def emit_behavior_verdict(
+    observations: dict[str, Any], checks: dict[str, bool]
+) -> bool:
+    """@brief Emit the CTest-facing package verdict and safe diagnostics.
+
+    @param observations Complete in-memory package behavior observations.
+    @param checks Stable named boolean behavior checks derived from observations.
+    @return ``True`` only when every supplied check passes.
+    @throws KeyError If the symbol-scan observation required for output is absent.
+    @note Success and failure output share the sanitized symbol projection. On
+      failure, only :func:`behavior_diagnostic_summary` is serialized; complete
+      observations and captured tool data never reach stdout or stderr.
+    """
+
+    passed = all(checks.values())
+    symbol_scan = archive_symbol_diagnostic_summary(
+        observations["install_tree"]["production_archive_symbol_scan"]
+    )
+    print("static_product_consumer_smoke")
+    print(
+        "archive symbol scan: "
+        f"source={symbol_scan['tool_source'] or 'none'}, "
+        f"prohibited={symbol_scan['prohibited_symbol_count']}, "
+        f"anchors={symbol_scan['required_anchor_count']}/"
+        f"{symbol_scan['required_anchor_total']}"
+    )
+    for attempt in symbol_scan["attempts"]:
+        details = [
+            f"source={attempt['tool_source']}",
+            f"reason={attempt['reason']}",
+        ]
+        if "status" in attempt:
+            details.append(f"status={attempt['status']}")
+        if "missing_anchor_count" in attempt:
+            details.append(
+                "missing_anchors="
+                f"{attempt['missing_anchor_count']} of "
+                f"{attempt['required_anchor_total']}"
+            )
+        print("archive symbol attempt: " + ", ".join(details))
+    for name, ok in checks.items():
+        print(f"{'PASS' if ok else 'FAIL'} {name}")
+    if not passed:
+        print(
+            "package behavior diagnostic summary:\n"
+            + json.dumps(
+                behavior_diagnostic_summary(observations, checks),
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+    print(f"overall={'PASS' if passed else 'FAIL'}")
+    return passed
+
+
 def evaluate_behavior(observations: dict[str, Any]) -> bool:
     """@brief Evaluate installed-package behavior in memory.
 
@@ -1971,8 +2957,9 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
       installed export sets, and external consumers.
     @return ``True`` only when every durable package invariant passes.
     @throws KeyError If the caller provides an incomplete observation schema.
-    @note Results and failure observations are printed directly for CTest to
-      capture; this function creates no report or comparison files.
+    @note Results and a strict diagnostic projection are printed for CTest to
+      capture; complete observations remain in memory and no report file is
+      created. The projection excludes all transient paths and captured data.
     """
 
     install = observations["install_tree"]
@@ -1990,12 +2977,18 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "photospider target build succeeded": commands["build_photospider"] == 0,
         "install command succeeded": commands["install"] == 0,
         "installed static archive exists": install["archive_exists"],
+        "installed product archive omits internal test symbols": install[
+            "production_archive_omits_internal_test_symbols"
+        ],
+        "install omits internal test product artifacts": install[
+            "install_omits_internal_test_product_artifacts"
+        ],
         "package config and targets exist": install["config_exists"]
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
-        "installed public header inventory is exactly 23 files": len(install["headers"])
-        == 23,
+        "installed public header inventory is exactly 21 files": len(install["headers"])
+        == 21,
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],
@@ -2038,6 +3031,9 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
             "export_omits_source_root"
         ]
         and install["export_omits_src_include_root"],
+        "export omits internal test product and definitions": install[
+            "export_omits_internal_test_product"
+        ],
         "installed export contains exact target link interface": bool(
             install["export_interface_link_libraries"]["raw"]
         ),
@@ -2059,14 +3055,17 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "IPC-only component configure succeeds with backend discovery disabled": (
             commands["ipc_consumer_configure"] == 0
         ),
-        "scheduler SDK configures with all backend discovery disabled": (
-            commands["scheduler_sdk_configure"] == 0
+        "policy SDK configures with all backend discovery disabled": (
+            commands["policy_sdk_configure"] == 0
         ),
-        "scheduler SDK builds an installed-header-only DSO": (
-            commands["scheduler_sdk_build"] == 0
+        "policy SDK builds installed-header-only C11 and C++17 DSOs": (
+            commands["policy_sdk_build"] == 0
         ),
-        "installed scheduler DSO satisfies empty-handle and null contracts": (
-            commands["scheduler_contract_probe"] == 0
+        "installed policy DSO satisfies the exact ABI-v1 contract": (
+            commands["policy_contract_probe"] == 0
+        ),
+        "installed C++17 policy DSO satisfies the exact ABI-v1 contract": (
+            commands["policy_cpp_contract_probe"] == 0
         ),
         "operation SDK configures with all backend discovery disabled": (
             commands["operation_sdk_configure"] == 0
@@ -2136,9 +3135,12 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "CMake target manifest resolves operation SDK executable": observations[
             "consumer"
         ]["operation_sdk_executable_discovery"]["selected_from_manifest"],
-        "CMake target manifest resolves scheduler SDK plugin": observations["consumer"][
-            "scheduler_plugin_discovery"
+        "CMake target manifest resolves policy SDK plugin": observations["consumer"][
+            "policy_plugin_discovery"
         ]["selected_from_manifest"],
+        "CMake target manifest resolves C++17 policy SDK plugin": observations[
+            "consumer"
+        ]["cpp_policy_plugin_discovery"]["selected_from_manifest"],
         "CMake target manifest resolves operation SDK plugin": observations["consumer"][
             "operation_plugin_discovery"
         ]["selected_from_manifest"],
@@ -2159,22 +3161,7 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         ]
         == 0,
     }
-    passed = all(checks.values())
-    print("static_product_consumer_smoke")
-    for name, ok in checks.items():
-        print(f"{'PASS' if ok else 'FAIL'} {name}")
-    if install["unexpected_headers"]:
-        print("unexpected installed headers:", file=sys.stderr)
-        for header in install["unexpected_headers"]:
-            print(f"- {header}", file=sys.stderr)
-    if not passed:
-        print(
-            "package behavior observations:\n"
-            + json.dumps(observations, indent=2, sort_keys=True),
-            file=sys.stderr,
-        )
-    print(f"overall={'PASS' if passed else 'FAIL'}")
-    return passed
+    return emit_behavior_verdict(observations, checks)
 
 
 def main() -> int:
@@ -2231,8 +3218,8 @@ def main() -> int:
     embedded_consumer_build = work / "embedded-consumer-build"
     ipc_consumer_src = work / "ipc-consumer-src"
     ipc_consumer_build = work / "ipc-consumer-build"
-    scheduler_sdk_src = work / "scheduler-sdk-consumer-src"
-    scheduler_sdk_build = work / "scheduler-sdk-consumer-build"
+    policy_sdk_src = work / "policy-sdk-consumer-src"
+    policy_sdk_build = work / "policy-sdk-consumer-build"
     operation_sdk_src = work / "operation-sdk-consumer-src"
     operation_sdk_build = work / "operation-sdk-consumer-build"
     operation_opencv_src = work / "operation-opencv-consumer-src"
@@ -2280,7 +3267,7 @@ def main() -> int:
     if not opencv_config_dir_value or opencv_config_dir_value.endswith("-NOTFOUND"):
         raise RuntimeError("producer cache does not contain a usable OpenCV_DIR")
     write_extension_consumer_projects(
-        scheduler_sdk_src,
+        policy_sdk_src,
         operation_sdk_src,
         operation_opencv_src,
         Path(opencv_config_dir_value),
@@ -2333,12 +3320,12 @@ def main() -> int:
         "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
         "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
     ]
-    scheduler_sdk_configure_command = [
+    policy_sdk_configure_command = [
         args.cmake_executable,
         "-S",
-        str(scheduler_sdk_src),
+        str(policy_sdk_src),
         "-B",
-        str(scheduler_sdk_build),
+        str(policy_sdk_build),
         f"-DCMAKE_PREFIX_PATH={prefix}",
         "-DCMAKE_DISABLE_FIND_PACKAGE_Threads=TRUE",
         "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
@@ -2396,7 +3383,7 @@ def main() -> int:
         for command in (
             embedded_configure_command,
             ipc_configure_command,
-            scheduler_sdk_configure_command,
+            policy_sdk_configure_command,
             operation_sdk_configure_command,
             operation_opencv_configure_command,
             optional_opencv_missing_configure_command,
@@ -2418,7 +3405,7 @@ def main() -> int:
     for command in (
         embedded_configure_command,
         ipc_configure_command,
-        scheduler_sdk_configure_command,
+        policy_sdk_configure_command,
         operation_sdk_configure_command,
         operation_opencv_configure_command,
         optional_opencv_missing_configure_command,
@@ -2428,7 +3415,7 @@ def main() -> int:
         command.extend(osx_architecture_arguments)
     embedded_configure_code = run_command(embedded_configure_command, repo)
     ipc_configure_code = run_command(ipc_configure_command, repo)
-    scheduler_sdk_configure_code = run_command(scheduler_sdk_configure_command, repo)
+    policy_sdk_configure_code = run_command(policy_sdk_configure_command, repo)
     operation_sdk_configure_code = run_command(operation_sdk_configure_command, repo)
     operation_opencv_configure_code = run_command(
         operation_opencv_configure_command, repo
@@ -2453,10 +3440,10 @@ def main() -> int:
         "--build",
         str(ipc_consumer_build),
     ]
-    scheduler_sdk_build_command = [
+    policy_sdk_build_command = [
         args.cmake_executable,
         "--build",
-        str(scheduler_sdk_build),
+        str(policy_sdk_build),
     ]
     operation_sdk_build_command = [
         args.cmake_executable,
@@ -2471,12 +3458,12 @@ def main() -> int:
     if args.config:
         embedded_build_command.extend(["--config", args.config])
         ipc_build_command.extend(["--config", args.config])
-        scheduler_sdk_build_command.extend(["--config", args.config])
+        policy_sdk_build_command.extend(["--config", args.config])
         operation_sdk_build_command.extend(["--config", args.config])
         operation_opencv_build_command.extend(["--config", args.config])
     embedded_build_code = run_command(embedded_build_command, repo)
     ipc_build_code = run_command(ipc_build_command, repo)
-    scheduler_sdk_build_code = run_command(scheduler_sdk_build_command, repo)
+    policy_sdk_build_code = run_command(policy_sdk_build_command, repo)
     operation_sdk_build_code = run_command(operation_sdk_build_command, repo)
     operation_opencv_build_code = run_command(operation_opencv_build_command, repo)
 
@@ -2489,8 +3476,11 @@ def main() -> int:
     operation_sdk_executable_discovery = find_consumer_executable(
         operation_sdk_build, args.config, "installed_operation_factory"
     )
-    scheduler_plugin_discovery = find_consumer_executable(
-        scheduler_sdk_build, args.config, "installed_scheduler_plugin"
+    policy_plugin_discovery = find_consumer_executable(
+        policy_sdk_build, args.config, "installed_policy_plugin"
+    )
+    cpp_policy_plugin_discovery = find_consumer_executable(
+        policy_sdk_build, args.config, "installed_cpp_policy_plugin"
     )
     operation_plugin_discovery = find_consumer_executable(
         operation_sdk_build, args.config, "installed_operation_plugin"
@@ -2511,9 +3501,14 @@ def main() -> int:
         if executable_discovery["selected"]
         else None
     )
-    scheduler_plugin = (
-        Path(scheduler_plugin_discovery["selected"])
-        if scheduler_plugin_discovery["selected"]
+    policy_plugin = (
+        Path(policy_plugin_discovery["selected"])
+        if policy_plugin_discovery["selected"]
+        else None
+    )
+    cpp_policy_plugin = (
+        Path(cpp_policy_plugin_discovery["selected"])
+        if cpp_policy_plugin_discovery["selected"]
         else None
     )
     operation_plugin = (
@@ -2521,15 +3516,27 @@ def main() -> int:
         if operation_plugin_discovery["selected"]
         else None
     )
-    scheduler_contract_probe_code = 127
-    if scheduler_plugin is not None and scheduler_plugin.is_file():
-        scheduler_contract_probe_code = run_installed_scheduler_contract_probe(
-            scheduler_plugin
+    policy_contract_probe_code = 127
+    if policy_plugin is not None and policy_plugin.is_file():
+        policy_contract_probe_code = run_installed_policy_contract_probe(
+            policy_plugin
         )
     else:
         print(
-            "scheduler SDK plugin not found for contract probe; discovery="
-            + json.dumps(scheduler_plugin_discovery, sort_keys=True),
+            "policy SDK plugin not found for contract probe; discovery="
+            + json.dumps(policy_plugin_discovery, sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+    cpp_policy_contract_probe_code = 127
+    if cpp_policy_plugin is not None and cpp_policy_plugin.is_file():
+        cpp_policy_contract_probe_code = run_installed_policy_contract_probe(
+            cpp_policy_plugin
+        )
+    else:
+        print(
+            "C++17 policy SDK plugin not found for contract probe; discovery="
+            + json.dumps(cpp_policy_plugin_discovery, sort_keys=True),
             file=sys.stderr,
             flush=True,
         )
@@ -2550,15 +3557,15 @@ def main() -> int:
     if (
         executable is not None
         and executable.is_file()
-        and scheduler_plugin is not None
-        and scheduler_plugin.is_file()
+        and cpp_policy_plugin is not None
+        and cpp_policy_plugin.is_file()
         and operation_plugin is not None
         and operation_plugin.is_file()
     ):
         run_code = run_command(
             [
                 str(executable),
-                str(scheduler_plugin),
+                str(cpp_policy_plugin),
                 str(operation_plugin),
                 str(work / "installed-extension-sessions"),
                 str(extension_graph),
@@ -2571,7 +3578,8 @@ def main() -> int:
             + json.dumps(
                 {
                     "consumer": executable_discovery,
-                    "scheduler": scheduler_plugin_discovery,
+                    "policy": policy_plugin_discovery,
+                    "cpp_policy": cpp_policy_plugin_discovery,
                     "operation": operation_plugin_discovery,
                 },
                 sort_keys=True,
@@ -2650,9 +3658,10 @@ def main() -> int:
             "embedded_consumer_build": embedded_build_code,
             "ipc_consumer_configure": ipc_configure_code,
             "ipc_consumer_build": ipc_build_code,
-            "scheduler_sdk_configure": scheduler_sdk_configure_code,
-            "scheduler_sdk_build": scheduler_sdk_build_code,
-            "scheduler_contract_probe": scheduler_contract_probe_code,
+            "policy_sdk_configure": policy_sdk_configure_code,
+            "policy_sdk_build": policy_sdk_build_code,
+            "policy_contract_probe": policy_contract_probe_code,
+            "policy_cpp_contract_probe": cpp_policy_contract_probe_code,
             "operation_sdk_configure": operation_sdk_configure_code,
             "operation_sdk_build": operation_sdk_build_code,
             "operation_opencv_configure": operation_opencv_configure_code,
@@ -2686,7 +3695,8 @@ def main() -> int:
             "executable_discovery": executable_discovery,
             "ipc_executable_discovery": ipc_executable_discovery,
             "operation_sdk_executable_discovery": (operation_sdk_executable_discovery),
-            "scheduler_plugin_discovery": scheduler_plugin_discovery,
+            "policy_plugin_discovery": policy_plugin_discovery,
+            "cpp_policy_plugin_discovery": cpp_policy_plugin_discovery,
             "operation_plugin_discovery": operation_plugin_discovery,
             "operation_opencv_executable_discovery": (
                 operation_opencv_executable_discovery

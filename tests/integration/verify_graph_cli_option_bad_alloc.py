@@ -95,10 +95,12 @@ def main() -> int:
         "\n".join(
             [
                 "plugin_dirs: []",
-                "scheduler_dirs: []",
-                "scheduler_hp_type: serial_debug",
-                "scheduler_rt_type: serial_debug",
-                "scheduler_worker_count: 1",
+                "policy_dirs: []",
+                "policy_interactive_type: interactive",
+                "policy_throughput_type: throughput",
+                "execution_hp_type: serial_debug",
+                "execution_rt_type: serial_debug",
+                "execution_worker_count: 1",
                 "",
             ]
         ),
@@ -126,7 +128,7 @@ def main() -> int:
         "\n".join(
             [
                 "switch_after_load: false",
-                "scheduler_worker_count: invalid-integer",
+                "execution_worker_count: invalid-integer",
                 "",
             ]
         ),

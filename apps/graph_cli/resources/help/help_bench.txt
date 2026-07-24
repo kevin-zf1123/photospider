@@ -2,6 +2,11 @@ bench <benchmark_dir> <output_dir>
 
 Run a suite of benchmarks defined in <benchmark_dir>/benchmark_config.yaml.
 This command executes all sessions marked as 'enabled' in the config file.
+Each enabled session's execution.threads value is a Run concurrency cap:
+0 selects bounded hardware concurrency and 1..8 is exact. Mixed caps share the
+fixed process worker pool; they do not resize it per session. Disabled sessions
+are not thread-range checked or executed after the configuration file is
+parsed, while invalid enabled sessions are reported and skipped.
 
 - <benchmark_dir>: Directory containing benchmark_config.yaml.
 - <output_dir>:    Directory to save the results (summary.md, raw_data.csv).

@@ -1,11 +1,30 @@
 #include "compute/realtime_proxy_graph.hpp"
 
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace ps::compute {
+
+/** @copydoc RealtimeProxyGraph::clone_for_compute */
+std::unique_ptr<RealtimeProxyGraph> RealtimeProxyGraph::clone_for_compute()
+    const {  // NOLINT(whitespace/indent_namespace)
+  auto snapshot = std::make_unique<RealtimeProxyGraph>();
+  std::lock_guard<std::mutex> lock(mutex_);
+  snapshot->nodes_ = nodes_;
+  snapshot->topology_generation_ = topology_generation_;
+  return snapshot;
+}
+
+/** @copydoc RealtimeProxyGraph::publish_compute_snapshot */
+void RealtimeProxyGraph::publish_compute_snapshot(
+    RealtimeProxyGraph& prepared) noexcept {
+  std::scoped_lock lock(mutex_, prepared.mutex_);
+  nodes_.swap(prepared.nodes_);
+  std::swap(topology_generation_, prepared.topology_generation_);
+}
 
 void RealtimeProxyGraph::synchronize_with_graph(const GraphModel& graph) {
   std::lock_guard<std::mutex> lock(mutex_);

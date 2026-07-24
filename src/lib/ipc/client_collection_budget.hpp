@@ -41,7 +41,7 @@ struct CollectionPageMeasurement {
  *
  * @throws Nothing for construction and destruction. `admit()` may propagate
  *         `std::bad_alloc` while assigning a rejection diagnostic.
- * @note Production callers use the version 1 snapshot limits. Injectable
+ * @note Production callers use the version 2 snapshot limits. Injectable
  *       limits exist solely so unit tests can exercise `size_t` overflow
  *       without allocating an impossible response.
  */

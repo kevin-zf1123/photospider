@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -14,11 +15,13 @@ namespace ps {
  *
  * BenchmarkService 通过 Host frontend seam 加载临时 graph、执行 compute、
  * 读取 timing/inspection/IO telemetry，并把多次运行聚合为
- * BenchmarkResult。它不持有 backend compute、graph model 或 scheduler
+ * BenchmarkResult。它不持有 backend compute、graph model 或 execution
  * 对象，调用者负责保证传入 Host 在 BenchmarkService 生命周期内有效。
  *
  * @throws std::bad_alloc from non-destructor methods when configuration,
  * telemetry, result, or Host-side compute storage exhausts memory.
+ * @throws std::system_error from Run or RunAll when one-time execution
+ * preparation synchronization cannot execute as specified.
  */
 class BenchmarkService {
  public:
@@ -44,13 +47,16 @@ class BenchmarkService {
    *         or greater than eight.
    * @throws std::runtime_error when YAML loading, graph loading, or compute
    *         fails.
+   * @throws std::system_error when one-time execution preparation
+   *         synchronization cannot execute as specified.
    * @throws YAML::Exception when generated or user-provided graph YAML is
    *         malformed.
-   * @note Before graph load, the zero-through-eight request is resolved once.
-   *       Both future HP and RT defaults then receive the same nonzero CPU
-   *       work-stealing grant reported by the result; the Host never receives
-   *       the zero automatic-selection sentinel. Temporary graph sessions are
-   *       named `__benchmark_temp` and closed after each run.
+   * @note Before graph load, `execution.threads` is resolved once to a
+   *       positive Run `maximum_parallelism` cap and reported by the result.
+   *       The service prepares future HP/RT CPU routes at most once with an
+   *       automatic/idempotent process worker request; the session cap never
+   *       resizes the fixed pool. Temporary graph sessions are named
+   *       `__benchmark_temp` and closed after each run.
    */
   BenchmarkResult Run(const std::string& benchmark_dir,
                       const BenchmarkSessionConfig& config, int runs = 10);
@@ -62,11 +68,18 @@ class BenchmarkService {
    * @throws std::bad_alloc if configuration, Host execution, or result storage
    *         exhausts memory.
    * @throws std::runtime_error when configuration loading fails.
+   * @throws std::system_error when one-time execution preparation
+   *         synchronization cannot execute as specified.
    * @throws YAML::Exception when benchmark configuration values are malformed.
    * @throws std::filesystem::filesystem_error when pre-run artifact directory
    *         inspection fails.
-   * @note Individual session failures are reported to stderr and skipped so
-   *       later enabled sessions can still run.
+   * @note Disabled sessions are not thread-range preflighted or executed;
+   *       configuration loading still validates their YAML structure and
+   *       field types. Enabled thread requests are preflighted before one
+   *       process-execution preparation; invalid sessions and later
+   *       per-session failures are reported to stderr and skipped. A process
+   *       preparation failure remains exceptional because no session can run
+   *       safely.
    */
   std::vector<BenchmarkResult> RunAll(const std::string& benchmark_dir);
 
@@ -94,6 +107,46 @@ class BenchmarkService {
  private:
   /** @brief Borrowed Host used for benchmark graph operations. */
   ps::Host& svc_;
+
+  /**
+   * @brief Serializes the one successful Host execution-default preparation.
+   * @note `std::call_once` retries after an exception. The flag owns no Host
+   *       state and is destroyed only after all service calls have joined.
+   */
+  std::once_flag execution_preparation_once_;
+
+  /**
+   * @brief Prepares CPU execution defaults once for this service lifetime.
+   * @return Nothing.
+   * @throws std::bad_alloc if Host request or diagnostic storage allocation
+   *         fails.
+   * @throws std::runtime_error if Host rejects CPU route preparation.
+   * @throws std::system_error if `std::call_once` cannot execute the one-time
+   *         synchronization as specified.
+   * @note The Host receives `worker_count=0`, which initializes an unfixed
+   *       pool automatically or preserves an already fixed pool. No benchmark
+   *       session worker cap is forwarded through this process setting.
+   */
+  void prepare_execution();
+
+  /**
+   * @brief Executes one prevalidated benchmark with a Run QoS cap.
+   * @param benchmark_dir Directory containing benchmark inputs and temporary
+   *        session storage.
+   * @param config Enabled session configuration.
+   * @param runs Repetition count used for aggregation.
+   * @param maximum_parallelism Positive resolved Run callback cap.
+   * @return Aggregated benchmark result reporting `maximum_parallelism`.
+   * @throws std::bad_alloc if Host or local result storage exhausts memory.
+   * @throws std::runtime_error when graph input, loading, or compute fails.
+   * @throws YAML::Exception when graph YAML is malformed.
+   * @note The caller validates the cap and completes process preparation
+   *       first. Every repetition receives the same immutable Run cap.
+   */
+  BenchmarkResult run_with_parallelism(const std::string& benchmark_dir,
+                                       const BenchmarkSessionConfig& config,
+                                       int runs,
+                                       unsigned int maximum_parallelism);
 
   /**
    * @brief 分析多次运行的原始数据，计算统计指标。

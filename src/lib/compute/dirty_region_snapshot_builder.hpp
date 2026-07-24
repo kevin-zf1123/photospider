@@ -56,7 +56,7 @@ struct DirtyNodeWorkRecord {
  * @brief Tile enumeration request for one domain-local dirty ROI.
  *
  * @note The request is value-only and can be logged or inspected without
- * holding graph or scheduler state.
+ * holding graph or execution-runtime state.
  */
 struct DirtyTileEnumeration {
   /** @brief Node id associated with emitted tile keys. */
@@ -84,7 +84,7 @@ struct DirtyTileEnumeration {
  * planners and dirty control lanes keep ownership of graph generation and
  * storage, while this helper keeps derived snapshot writes consistent.
  *
- * @note The builder does not execute graph work, enqueue scheduler tasks, or
+ * @note The builder does not execute graph work, enqueue execution tasks, or
  * own compute request state. It only mutates the DirtyRegionSnapshot instance
  * supplied by the caller.
  */

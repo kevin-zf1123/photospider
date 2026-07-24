@@ -7,6 +7,7 @@
 #include <map>
 #include <new>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -14,7 +15,6 @@
 #include <vector>
 
 #include "benchmark/benchmark_yaml_generator.hpp"
-#include "scheduler/scheduler_worker_budget.hpp"
 
 namespace fs = std::filesystem;
 
@@ -108,52 +108,54 @@ static std::map<int, std::string> benchmark_op_names_by_node(
 }
 
 /**
- * @brief Validates and resolves one benchmark scheduler worker request.
+ * @brief Validates and resolves one benchmark Run parallelism request.
  *
  * @param configured_threads Benchmark `execution.threads` value.
- * @return Exact nonzero scheduler worker grant in the range one through eight.
+ * @return Exact nonzero Run callback cap in the range one through eight.
  * @throws std::invalid_argument if configured_threads is negative or greater
- *         than the public scheduler request maximum.
+ *         than the public execution request maximum.
  * @note Zero resolves exactly once at this benchmark boundary by the same
- *       bounded hardware-concurrency rule as product scheduler construction;
- *       callers publish the returned grant unchanged. Positive legal values
- *       remain exact.
+ *       bounded hardware-concurrency rule used by automatic process execution.
+ *       The resolved value is Run QoS and never resizes the fixed worker pool;
+ *       positive legal values remain exact.
  */
-static unsigned int resolve_benchmark_worker_count(int configured_threads) {
-  if (configured_threads < 0) {
+static unsigned int resolve_benchmark_parallelism(int configured_threads) {
+  if (configured_threads < 0 || static_cast<unsigned int>(configured_threads) >
+                                    kExecutionWorkerRequestMax) {
     throw std::invalid_argument(
         "benchmark execution.threads must be between zero and eight");
   }
-  return resolve_scheduler_worker_count(
-      static_cast<unsigned int>(configured_threads),
-      std::thread::hardware_concurrency());
+  if (configured_threads != 0) {
+    return static_cast<unsigned int>(configured_threads);
+  }
+  const unsigned int hardware = std::thread::hardware_concurrency();
+  return std::max(
+      1U, std::min(kExecutionWorkerRequestMax, hardware == 0U ? 1U : hardware));
 }
 
 /**
- * @brief Applies one resolved benchmark grant to future Host graph defaults.
+ * @brief Prepares future benchmark Graphs for the Host CPU execution route.
  *
- * @param host Host whose HP and RT CPU scheduler defaults are updated.
- * @param resolved_workers Exact nonzero grant already resolved by the
- *        benchmark boundary.
+ * @param host Host whose HP and RT CPU execution defaults are updated.
  * @return Nothing.
  * @throws std::bad_alloc if Host request or status storage exhausts memory.
- * @throws std::runtime_error if Host rejects the scheduler configuration.
- * @note The resolved grant is applied unchanged before benchmark graph load;
- *       this boundary never forwards the zero automatic-selection sentinel.
- *       Existing graph runtimes, if any, retain their scheduler configuration.
+ * @throws std::runtime_error if Host rejects the execution configuration.
+ * @note The zero worker request initializes an unfixed process pool
+ *       automatically and is idempotent for any already fixed pool. Benchmark
+ *       session caps travel through `HostComputeRequest`, never through this
+ *       process configuration. Existing graph runtimes retain their routes.
  */
-static void configure_benchmark_scheduler(Host& host,
-                                          unsigned int resolved_workers) {
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = "cpu_work_stealing";
-  scheduler_config.rt_type = "cpu_work_stealing";
-  scheduler_config.worker_count = resolved_workers;
+static void configure_benchmark_execution(Host& host) {
+  HostExecutionConfig execution_config;
+  execution_config.hp_type = "cpu";
+  execution_config.rt_type = "cpu";
+  execution_config.worker_count = 0U;
   const VoidResult configured =
-      host.configure_scheduler_defaults(scheduler_config);
+      host.configure_execution_defaults(execution_config);
   if (!configured.status.ok) {
     std::string reason = configured.status.message;
     if (reason.empty()) {
-      reason = "Host rejected benchmark scheduler defaults";
+      reason = "Host rejected benchmark execution defaults";
     }
     throw std::runtime_error(reason);
   }
@@ -167,6 +169,23 @@ static void configure_benchmark_scheduler(Host& host,
  * @note The Host must outlive this service. No backend object is retained.
  */
 BenchmarkService::BenchmarkService(ps::Host& svc) : svc_(svc) {}
+
+/**
+ * @brief Prepares CPU execution defaults once for this service lifetime.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc if Host request or diagnostic storage allocation
+ * fails.
+ * @throws std::runtime_error if Host rejects CPU route preparation.
+ * @throws std::system_error if `std::call_once` cannot execute the one-time
+ * synchronization as specified.
+ * @note The Host receives `worker_count=0`, and an exception leaves the once
+ * flag eligible for a later retry.
+ */
+void BenchmarkService::prepare_execution() {
+  std::call_once(execution_preparation_once_,
+                 [this] { configure_benchmark_execution(svc_); });
+}
 
 /**
  * @brief Runs and aggregates one benchmark configuration through Host.
@@ -185,20 +204,28 @@ BenchmarkService::BenchmarkService(ps::Host& svc) : svc_(svc) {}
  * @throws std::invalid_argument when `execution.threads` is outside zero
  * through eight.
  * @throws std::runtime_error when graph input, loading, or compute fails.
+ * @throws std::system_error when one-time execution preparation
+ * synchronization cannot execute as specified.
  * @throws YAML::Exception when generated or user-provided YAML is malformed.
- * @note The worker request is resolved once, then the same nonzero grant
- * configures future HP and RT CPU schedulers before graph load and is reported
- * in results. Temporary sessions are closed after successful runs. Host owns
- * graph state and preserves the documented resource-exhaustion exception
- * boundary.
+ * @note The thread request resolves once to a Run maximum-parallelism cap.
+ * Process CPU routes are prepared at most once with an automatic/idempotent
+ * worker request, then every repetition receives and reports the same cap.
+ * Temporary sessions are closed after successful runs. Host owns graph state
+ * and preserves the documented resource-exhaustion exception boundary.
  */
 BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
                                       const BenchmarkSessionConfig& config,
                                       int runs) {
-  const unsigned int resolved_workers =
-      resolve_benchmark_worker_count(config.execution.threads);
-  configure_benchmark_scheduler(svc_, resolved_workers);
+  const unsigned int maximum_parallelism =
+      resolve_benchmark_parallelism(config.execution.threads);
+  prepare_execution();
+  return run_with_parallelism(benchmark_dir, config, runs, maximum_parallelism);
+}
 
+/** @copydoc BenchmarkService::run_with_parallelism */
+BenchmarkResult BenchmarkService::run_with_parallelism(
+    const std::string& benchmark_dir, const BenchmarkSessionConfig& config,
+    int runs, unsigned int maximum_parallelism) {
   std::vector<BenchmarkResult> all_runs;
   all_runs.reserve(runs);
   const std::string fallback_op_name =
@@ -243,7 +270,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
 
     BenchmarkResult single_run_result;
     single_run_result.benchmark_name = config.name;
-    single_run_result.num_threads = static_cast<int>(resolved_workers);
+    single_run_result.num_threads = static_cast<int>(maximum_parallelism);
 
     auto start_total = std::chrono::high_resolution_clock::now();
 
@@ -255,6 +282,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
     request.cache.disable_disk_cache = true;
     request.cache.nosave = false;
     request.execution.parallel = config.execution.parallel;
+    request.execution.maximum_parallelism = maximum_parallelism;
     request.execution.quiet = true;
     request.telemetry.enable_timing = true;
     auto compute_status = svc_.compute(request).status;
@@ -303,7 +331,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
   final_result.width = config.auto_generate ? config.generator_config.width : 0;
   final_result.height =
       config.auto_generate ? config.generator_config.height : 0;
-  final_result.num_threads = static_cast<int>(resolved_workers);
+  final_result.num_threads = static_cast<int>(maximum_parallelism);
 
   analyze_results(final_result, all_runs);
 
@@ -318,7 +346,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
  *   2. 提取与 final_result.op_name 匹配的事件执行时间，排序后去掉前后 20%
  * 离群值，计算典型执行时间（typical_execution_time_ms）
  *   3. 计算所有运行的平均 IO 耗时（io_duration_ms）
- *   4. 占位计算调度器开销（scheduler_overhead_ms，目前暂为 0）
+ *   4. 占位计算执行路由开销（execution_overhead_ms，目前暂为 0）
  *   5. 填充 CPU、操作系统和编译器信息字段（cpu_info、os_info、compiler_info）
  *
  * @param[out] final_result 用于存放汇总后的基准测试结果
@@ -382,8 +410,8 @@ void BenchmarkService::analyze_results(
   }
   final_result.io_duration_ms = total_io_sum / all_runs.size();
 
-  // 4. 计算调度器开销 (占位符)
-  final_result.scheduler_overhead_ms = 0.0;
+  // 4. 计算执行路由开销 (占位符)
+  final_result.execution_overhead_ms = 0.0;
 
   // 5. 填充环境信息 (占位符)
   final_result.cpu_info = "Unknown CPU";
@@ -401,11 +429,16 @@ void BenchmarkService::analyze_results(
  * exhausts memory.
  * @throws std::runtime_error or YAML::Exception when configuration loading
  * fails before per-session execution begins.
+ * @throws std::system_error when one-time execution preparation
+ * synchronization cannot execute as specified.
  * @throws std::filesystem::filesystem_error when pre-run artifact directory
  * inspection fails.
- * @note Recoverable per-session standard exceptions are logged and skipped so
- * later sessions can run. Resource exhaustion is never reduced to a skipped
- * benchmark because callers must be able to apply process-level recovery.
+ * @note Disabled sessions are not thread-range preflighted or executed;
+ * configuration loading still validates their YAML structure and field types.
+ * Enabled thread values are preflighted before one process preparation;
+ * invalid sessions and recoverable per-session standard exceptions are logged
+ * and skipped so later sessions can run. Process preparation and resource
+ * exhaustion remain exceptional.
  */
 std::vector<BenchmarkResult> BenchmarkService::RunAll(
     const std::string& benchmark_dir) {
@@ -415,20 +448,44 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(
   cleanup_generated_files(benchmark_dir);
 
   auto configs = load_configs_internal(benchmark_dir);
+  std::vector<std::optional<unsigned int>> maximum_parallelism_by_session(
+      configs.size());
+  bool has_runnable_session = false;
+  for (std::size_t index = 0; index < configs.size(); ++index) {
+    const auto& config = configs[index];
+    if (!config.enabled) {
+      continue;
+    }
+    try {
+      maximum_parallelism_by_session[index] =
+          resolve_benchmark_parallelism(config.execution.threads);
+      has_runnable_session = true;
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error running benchmark '" << config.name
+                << "': " << error.what() << std::endl;
+    }
+  }
+
   std::vector<BenchmarkResult> results;
-  for (const auto& config : configs) {
-    if (config.enabled) {
-      // std::cout << "Running benchmark: " << config.name << "..." <<
-      // std::endl;
-      try {
-        // [修复] 将 benchmark_dir 和 runs 次数传递给 Run 函数
-        results.push_back(Run(benchmark_dir, config, config.execution.runs));
-      } catch (const std::bad_alloc&) {
-        throw;
-      } catch (const std::exception& e) {
-        std::cerr << "Error running benchmark '" << config.name
-                  << "': " << e.what() << std::endl;
-      }
+  if (!has_runnable_session) {
+    return results;
+  }
+
+  prepare_execution();
+  for (std::size_t index = 0; index < configs.size(); ++index) {
+    if (!maximum_parallelism_by_session[index]) {
+      continue;
+    }
+    const auto& config = configs[index];
+    try {
+      results.push_back(
+          run_with_parallelism(benchmark_dir, config, config.execution.runs,
+                               *maximum_parallelism_by_session[index]));
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const std::exception& error) {
+      std::cerr << "Error running benchmark '" << config.name
+                << "': " << error.what() << std::endl;
     }
   }
   return results;

@@ -25,7 +25,6 @@
 #include "ipc/codec.hpp"
 #include "ipc/frame.hpp"
 #include "ipc/unix_socket.hpp"
-#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps::ipc {
 namespace {
@@ -321,7 +320,7 @@ bool decode_session_echo(const internal::Json& result,
 }
 
 /**
- * @brief Decodes one nullable version 1 timing value.
+ * @brief Decodes one nullable version 2 timing value.
  * @param value Candidate JSON number or null.
  * @param output Receives a finite value or quiet NaN for null.
  * @return True on success; false without modifying output otherwise.
@@ -808,7 +807,7 @@ bool decode_timing_result(const internal::Json& value,
 }
 
 /**
- * @brief Returns the version 1 successor for one valid observation sequence.
+ * @brief Returns the version 2 successor for one valid observation sequence.
  * @param sequence Valid publication sequence below the exhausted sentinel.
  * @return Next sequence, or the exhausted sentinel after the final value.
  * @throws Nothing.
@@ -901,7 +900,7 @@ bool decode_compute_event_result(const internal::Json& value,
 }
 
 /**
- * @brief Decodes one bounded non-destructive scheduler-trace result.
+ * @brief Decodes one bounded non-destructive execution-trace result.
  * @param value Candidate result object.
  * @param expected_session Exact session requested by the Client.
  * @param after_sequence Exact exclusive sequence cursor sent by the Client.
@@ -911,26 +910,26 @@ bool decode_compute_event_result(const internal::Json& value,
  * @return True when event order, sentinel, gap, and page metadata validate.
  * @throws std::bad_alloc if page or diagnostic storage cannot allocate.
  */
-bool decode_scheduler_trace_result(const internal::Json& value,
+bool decode_execution_trace_result(const internal::Json& value,
                                    const IpcSessionId& expected_session,
                                    std::uint64_t after_sequence,
                                    std::size_t requested_limit,
-                                   SchedulerTracePage* page,
+                                   ExecutionTracePage* page,
                                    std::string* message) {
   if (page == nullptr || message == nullptr ||
-      requested_limit < kSchedulerTraceMinLimit ||
-      requested_limit > kSchedulerTraceMaxLimit ||
+      requested_limit < kExecutionTraceMinLimit ||
+      requested_limit > kExecutionTraceMaxLimit ||
       !decode_session_echo(value, expected_session, message) ||
       !value.contains("events") || !value.contains("next_sequence") ||
       !value.value("has_more", internal::Json()).is_boolean() ||
       !value.contains("dropped_count") ||
       !internal::valid_bounded_array(value["events"], requested_limit)) {
     if (message != nullptr && message->empty()) {
-      *message = "scheduler-trace result has an invalid shape or limit";
+      *message = "execution-trace result has an invalid shape or limit";
     }
     return false;
   }
-  SchedulerTracePage decoded;
+  ExecutionTracePage decoded;
   decoded.events.reserve(value["events"].size());
   std::uint64_t previous_sequence = after_sequence;
   for (const internal::Json& item : value["events"]) {
@@ -940,10 +939,10 @@ bool decode_scheduler_trace_result(const internal::Json& value,
         std::any_of(kFields.begin(), kFields.end(), [&item](const char* field) {
           return !item.contains(field);
         })) {
-      *message = "scheduler-trace row has an invalid shape";
+      *message = "execution-trace row has an invalid shape";
       return false;
     }
-    SchedulerTraceEventSnapshot event;
+    ExecutionTraceEventSnapshot event;
     if (!internal::decode_integer(item["sequence"], &event.sequence) ||
         event.sequence == 0 ||
         event.sequence == kObservationSequenceExhausted ||
@@ -955,7 +954,7 @@ bool decode_scheduler_trace_result(const internal::Json& value,
         event.worker_id < -1 ||
         !internal::decode_enum(item["action"], &event.action) ||
         !internal::decode_integer(item["timestamp_us"], &event.timestamp_us)) {
-      *message = "scheduler-trace row contains an invalid typed value";
+      *message = "execution-trace row contains an invalid typed value";
       return false;
     }
     previous_sequence = event.sequence;
@@ -965,7 +964,7 @@ bool decode_scheduler_trace_result(const internal::Json& value,
                                 &decoded.next_sequence) ||
       !internal::decode_integer(value["dropped_count"],
                                 &decoded.dropped_count)) {
-    *message = "scheduler-trace sequence metadata is invalid";
+    *message = "execution-trace sequence metadata is invalid";
     return false;
   }
   decoded.has_more = value["has_more"].get<bool>();
@@ -980,7 +979,7 @@ bool decode_scheduler_trace_result(const internal::Json& value,
        decoded.next_sequence != decoded.events.back().sequence) ||
       (!exhausted && decoded.events.empty() &&
        (decoded.next_sequence != after_sequence || decoded.has_more))) {
-    *message = "scheduler-trace page metadata is inconsistent";
+    *message = "execution-trace page metadata is inconsistent";
     return false;
   }
   *page = std::move(decoded);
@@ -1136,7 +1135,7 @@ internal::Json canonical_collection_rows(
  * @param task Validated public planning task.
  * @param encoded Receives the exact known-field object on success.
  * @param message Receives a protocol diagnostic for an impossible enum.
- * @return True when the task domain retains a version 1 wire label.
+ * @return True when the task domain retains a version 2 wire label.
  * @throws std::bad_alloc if JSON or diagnostics cannot allocate.
  */
 bool canonical_planning_task(const ComputePlanningTaskSnapshot& task,
@@ -1170,7 +1169,7 @@ bool canonical_planning_task(const ComputePlanningTaskSnapshot& task,
  * @param snapshot Validated public planning snapshot.
  * @param encoded Receives the exact known-field object on success.
  * @param message Receives a protocol diagnostic for an impossible enum.
- * @return True when all public enums retain version 1 labels.
+ * @return True when all public enums retain version 2 labels.
  * @throws std::invalid_argument for an impossible negative decoded node id.
  * @throws std::bad_alloc if JSON, samples, or diagnostics cannot allocate.
  */
@@ -2086,7 +2085,7 @@ class Client::Impl {
   /**
    * @brief Sends one request and validates its correlated response envelope.
    *
-   * @param method One of the exact 55 version 1 method names.
+   * @param method One of the exact 60 version 2 method names.
    * @param params Typed method parameters already encoded as an object.
    * @return Owned result object or categorized local/remote failure.
    * @throws std::bad_alloc if request/response storage cannot be allocated.
@@ -2114,7 +2113,7 @@ class Client::Impl {
       return {internal::failure_status(
                   OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
                   "invalid_params",
-                  "client method or params violate version 1 bounds"),
+                  "client method or params violate version 2 bounds"),
               {}};
     }
     const std::string id = "client-" + std::to_string(++request_sequence_);
@@ -2135,7 +2134,7 @@ class Client::Impl {
       return {internal::failure_status(
                   OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
                   "invalid_params",
-                  "serialized request exceeds the version 1 frame limit"),
+                  "serialized request exceeds the version 2 frame limit"),
               {}};
     }
     const internal::FrameWriteResult written =
@@ -2217,7 +2216,7 @@ class Client::Impl {
 
   /**
    * @brief Performs one typed status-only call whose result has no known field.
-   * @param method Exact version 1 method name.
+   * @param method Exact version 2 method name.
    * @param params Complete typed params object.
    * @return Success or the first transport/protocol/remote failure.
    * @throws std::bad_alloc if request, response, or diagnostics allocate.
@@ -2282,7 +2281,7 @@ class Client::Impl {
 
   /**
    * @brief Aggregates one globally non-decreasing stable string collection.
-   * @param method Exact plugin or scheduler wire method.
+   * @param method Exact plugin, policy, or execution wire method.
    * @param field Result array field.
    * @param maximum_bytes Field-specific per-string UTF-8 byte ceiling.
    * @return Complete non-decreasing owned string list or a failure.
@@ -2522,9 +2521,9 @@ IpcResult<DaemonVersion> Client::version() {
   if (result.protocol_version != kProtocolVersion ||
       result.service_name != "photospiderd" || result.service_version.empty() ||
       result.transport != "unix" ||
-      result.methods.size() != internal::kVersionOneMethodNames.size() ||
+      result.methods.size() != internal::kVersionTwoMethodNames.size() ||
       !std::equal(result.methods.begin(), result.methods.end(),
-                  internal::kVersionOneMethodNames.begin(),
+                  internal::kVersionTwoMethodNames.begin(),
                   [](const std::string& actual, std::string_view expected) {
                     return actual == expected;
                   })) {
@@ -3189,6 +3188,13 @@ IpcResult<ComputeJobSnapshot> Client::submit_compute(
   if (!impl_) {
     return failed_result<ComputeJobSnapshot>(not_connected_status());
   }
+  if (request.execution.maximum_parallelism &&
+      *request.execution.maximum_parallelism == 0U) {
+    return failed_result<ComputeJobSnapshot>(internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params",
+        "compute maximum_parallelism must be positive when present"));
+  }
   internal::Json params{
       {"session_id", request.session_id.value},
       {"node_id", request.node.value},
@@ -3203,18 +3209,22 @@ IpcResult<ComputeJobSnapshot> Client::submit_compute(
                                    {"quiet", request.execution.quiet}}},
       {"telemetry",
        internal::Json{{"enable_timing", request.telemetry.enable_timing}}}};
+  if (request.execution.maximum_parallelism) {
+    params["execution"]["maximum_parallelism"] =
+        *request.execution.maximum_parallelism;
+  }
   if (request.result_mode != ComputeResultMode::Status &&
       request.result_mode != ComputeResultMode::Image) {
     return failed_result<ComputeJobSnapshot>(internal::failure_status(
         OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
-        "invalid_params", "compute result mode has no version 1 label"));
+        "invalid_params", "compute result mode has no version 2 label"));
   }
   if (request.intent) {
     internal::Json intent;
     if (!internal::encode_enum(*request.intent, &intent)) {
       return failed_result<ComputeJobSnapshot>(internal::failure_status(
           OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
-          "invalid_params", "compute intent has no version 1 label"));
+          "invalid_params", "compute intent has no version 2 label"));
     }
     params["intent"] = std::move(intent);
   }
@@ -3437,7 +3447,7 @@ IpcResult<DirtyRegionInspectionSnapshot> Client::begin_dirty_source(
     return failed_result<DirtyRegionInspectionSnapshot>(
         internal::failure_status(OperationErrorDomain::Protocol,
                                  internal::kInvalidParamsCode, "invalid_params",
-                                 "dirty domain has no version 1 label"));
+                                 "dirty domain has no version 2 label"));
   }
   RawCallResult call = impl_->call(
       "dirty.begin",
@@ -3469,7 +3479,7 @@ IpcResult<DirtyRegionInspectionSnapshot> Client::update_dirty_source(
     return failed_result<DirtyRegionInspectionSnapshot>(
         internal::failure_status(OperationErrorDomain::Protocol,
                                  internal::kInvalidParamsCode, "invalid_params",
-                                 "dirty domain has no version 1 label"));
+                                 "dirty domain has no version 2 label"));
   }
   RawCallResult call = impl_->call(
       "dirty.update",
@@ -3500,7 +3510,7 @@ IpcResult<DirtyRegionInspectionSnapshot> Client::end_dirty_source(
     return failed_result<DirtyRegionInspectionSnapshot>(
         internal::failure_status(OperationErrorDomain::Protocol,
                                  internal::kInvalidParamsCode, "invalid_params",
-                                 "dirty domain has no version 1 label"));
+                                 "dirty domain has no version 2 label"));
   }
   RawCallResult call = impl_->call(
       "dirty.end", internal::Json{{"session_id", session_id.value},
@@ -3540,25 +3550,25 @@ IpcResult<ComputeEventBatch> Client::drain_compute_events(
   return {internal::ok_status(), std::move(result)};
 }
 
-/** @copydoc Client::scheduler_trace */
-IpcResult<SchedulerTracePage> Client::scheduler_trace(
+/** @copydoc Client::execution_trace */
+IpcResult<ExecutionTracePage> Client::execution_trace(
     const IpcSessionId& session_id, std::uint64_t after_sequence,
     std::size_t limit) {
   if (!impl_) {
-    return failed_result<SchedulerTracePage>(not_connected_status());
+    return failed_result<ExecutionTracePage>(not_connected_status());
   }
   RawCallResult call = impl_->call(
-      "scheduler.trace", internal::Json{{"session_id", session_id.value},
+      "execution.trace", internal::Json{{"session_id", session_id.value},
                                         {"after_sequence", after_sequence},
                                         {"limit", limit}});
   if (!call.status.ok) {
-    return failed_result<SchedulerTracePage>(std::move(call.status));
+    return failed_result<ExecutionTracePage>(std::move(call.status));
   }
-  SchedulerTracePage result;
+  ExecutionTracePage result;
   std::string message;
-  if (!decode_scheduler_trace_result(call.result, session_id, after_sequence,
+  if (!decode_execution_trace_result(call.result, session_id, after_sequence,
                                      limit, &result, &message)) {
-    return failed_result<SchedulerTracePage>(
+    return failed_result<ExecutionTracePage>(
         invalid_response(std::move(message)));
   }
   return {internal::ok_status(), std::move(result)};
@@ -3639,23 +3649,260 @@ VoidResult Client::seed_builtin_ops() {
   return impl_->void_call("plugins.seed_builtins", internal::Json::object());
 }
 
-/** @copydoc Client::scheduler_available_types */
-IpcResult<std::vector<std::string>> Client::scheduler_available_types() {
-  if (!impl_) {
+/** @copydoc Client::policy_available_types */
+IpcResult<std::vector<std::string>> Client::policy_available_types() {
+  if (!impl_ || !impl_->connected()) {
     return failed_result<std::vector<std::string>>(not_connected_status());
   }
-  return impl_->sorted_string_collection("scheduler.types", "types",
-                                         internal::kShortTextMaxBytes);
+  IpcResult<std::vector<std::string>> result = impl_->sorted_string_collection(
+      "policy.types", "types", internal::kPolicyTypeMaxBytes);
+  if (!result.status.ok) {
+    return result;
+  }
+  if (std::any_of(result.value.begin(), result.value.end(),
+                  [](const std::string& type) {
+                    return !internal::valid_policy_type(type);
+                  }) ||
+      std::adjacent_find(result.value.begin(), result.value.end()) !=
+          result.value.end()) {
+    return failed_result<std::vector<std::string>>(invalid_response(
+        "policy.types returned noncanonical or duplicate policy types"));
+  }
+  return result;
 }
 
-/** @copydoc Client::scheduler_description */
-IpcResult<std::string> Client::scheduler_description(
+/** @copydoc Client::policy_description */
+IpcResult<std::string> Client::policy_description(
     const std::string& type_name) {
-  if (!impl_) {
+  if (!impl_ || !impl_->connected()) {
     return failed_result<std::string>(not_connected_status());
   }
+  if (!internal::valid_policy_type(type_name)) {
+    return failed_result<std::string>(internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params", "policy type is not canonical"));
+  }
   RawCallResult call =
-      impl_->call("scheduler.description", internal::Json{{"type", type_name}});
+      impl_->call("policy.description", internal::Json{{"type", type_name}});
+  if (!call.status.ok) {
+    return failed_result<std::string>(std::move(call.status));
+  }
+  std::string returned_type;
+  std::string description;
+  if (!call.result.contains("type") || !call.result.contains("description") ||
+      !internal::decode_bounded_string(
+          call.result["type"], internal::kPolicyTypeMaxBytes, &returned_type) ||
+      !internal::valid_policy_type(returned_type) ||
+      returned_type != type_name ||
+      !internal::decode_bounded_string(call.result["description"],
+                                       internal::kPathTextMaxBytes,
+                                       &description)) {
+    return failed_result<std::string>(invalid_response(
+        "policy.description returned an invalid type or description"));
+  }
+  return {internal::ok_status(), std::move(description)};
+}
+
+/** @copydoc Client::policy_scan */
+IpcResult<std::size_t> Client::policy_scan(
+    const std::vector<std::string>& directories) {
+  if (!impl_ || !impl_->connected()) {
+    return failed_result<std::size_t>(not_connected_status());
+  }
+  if (directories.size() > internal::kPathArrayMaxEntries ||
+      std::any_of(directories.begin(), directories.end(),
+                  [](const std::string& directory) {
+                    return directory.empty() ||
+                           directory.size() > internal::kPathTextMaxBytes ||
+                           !internal::valid_utf8(directory) ||
+                           directory.find('\0') != std::string::npos;
+                  })) {
+    return failed_result<std::size_t>(internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params", "policy scan directories are invalid"));
+  }
+  RawCallResult call =
+      impl_->call("policy.scan", internal::Json{{"directories", directories}});
+  if (!call.status.ok) {
+    return failed_result<std::size_t>(std::move(call.status));
+  }
+  std::size_t loaded = 0;
+  if (!call.result.contains("loaded") ||
+      !internal::decode_integer(call.result["loaded"], &loaded)) {
+    return failed_result<std::size_t>(
+        invalid_response("policy.scan returned an invalid loaded count"));
+  }
+  return {internal::ok_status(), loaded};
+}
+
+/** @copydoc Client::policy_load */
+VoidResult Client::policy_load(const std::string& path) {
+  if (!impl_ || !impl_->connected()) {
+    return {not_connected_status()};
+  }
+  if (path.empty() || path.size() > internal::kPathTextMaxBytes ||
+      !internal::valid_utf8(path) || path.find('\0') != std::string::npos) {
+    return {internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params", "policy plugin path is invalid")};
+  }
+  return impl_->void_call("policy.load", internal::Json{{"path", path}});
+}
+
+/** @copydoc Client::policy_loaded_plugins */
+IpcResult<std::vector<std::string>> Client::policy_loaded_plugins() {
+  if (!impl_ || !impl_->connected()) {
+    return failed_result<std::vector<std::string>>(not_connected_status());
+  }
+  IpcResult<std::vector<std::string>> result = impl_->sorted_string_collection(
+      "policy.loaded_plugins", "plugins", internal::kPathTextMaxBytes);
+  if (!result.status.ok) {
+    return result;
+  }
+  if (std::any_of(result.value.begin(), result.value.end(),
+                  [](const std::string& path) {
+                    return path.find('\0') != std::string::npos;
+                  })) {
+    return failed_result<std::vector<std::string>>(
+        invalid_response("policy.loaded_plugins returned an invalid path"));
+  }
+  return result;
+}
+
+/** @copydoc Client::configure_policy_defaults */
+VoidResult Client::configure_policy_defaults(const HostPolicyConfig& config) {
+  if (!impl_ || !impl_->connected()) {
+    return {not_connected_status()};
+  }
+  if (!internal::valid_policy_type(config.interactive_type) ||
+      !internal::valid_policy_type(config.throughput_type)) {
+    return {internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params", "policy default types are not canonical")};
+  }
+  return impl_->void_call(
+      "policy.configure_defaults",
+      internal::Json{{"interactive_type", config.interactive_type},
+                     {"throughput_type", config.throughput_type}});
+}
+
+/** @copydoc Client::policy_info */
+IpcResult<PolicyInfoSnapshot> Client::policy_info(PolicyClass policy_class) {
+  if (!impl_ || !impl_->connected()) {
+    return failed_result<PolicyInfoSnapshot>(not_connected_status());
+  }
+  internal::Json encoded_class;
+  if (!internal::encode_enum(policy_class, &encoded_class)) {
+    return failed_result<PolicyInfoSnapshot>(internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params", "policy class has no protocol-v2 label"));
+  }
+  RawCallResult call = impl_->call(
+      "policy.info", internal::Json{{"policy_class", encoded_class}});
+  if (!call.status.ok) {
+    return failed_result<PolicyInfoSnapshot>(std::move(call.status));
+  }
+  PolicyInfoSnapshot result;
+  if (!call.result.is_object() || !call.result.contains("policy_class") ||
+      !internal::decode_enum(call.result["policy_class"],
+                             &result.policy_class) ||
+      result.policy_class != policy_class ||
+      !call.result.contains("policy_type") ||
+      !internal::decode_bounded_string(call.result["policy_type"],
+                                       internal::kPolicyTypeMaxBytes,
+                                       &result.policy_type) ||
+      !internal::valid_policy_type(result.policy_type) ||
+      !call.result.contains("binding_generation") ||
+      !internal::decode_integer(call.result["binding_generation"],
+                                &result.binding_generation) ||
+      result.binding_generation == 0 || !call.result.contains("fault")) {
+    return failed_result<PolicyInfoSnapshot>(
+        invalid_response("policy.info returned an invalid binding"));
+  }
+  const internal::Json& fault = call.result["fault"];
+  if (!fault.is_null()) {
+    PolicyFaultSnapshot decoded;
+    if (!fault.is_object() || !fault.contains("reason") ||
+        !internal::decode_enum(fault["reason"], &decoded.reason) ||
+        !fault.contains("callback_status") || !fault.contains("message") ||
+        !internal::decode_bounded_string(
+            fault["message"], internal::kPathTextMaxBytes, &decoded.message)) {
+      return failed_result<PolicyInfoSnapshot>(
+          invalid_response("policy.info returned an invalid fault"));
+    }
+    if (fault["callback_status"].is_null()) {
+      decoded.callback_status.reset();
+    } else {
+      std::uint32_t status = 0;
+      if (!internal::decode_integer(fault["callback_status"], &status)) {
+        return failed_result<PolicyInfoSnapshot>(invalid_response(
+            "policy.info returned an invalid callback status"));
+      }
+      decoded.callback_status = status;
+    }
+    if ((decoded.reason == PolicyFaultReason::CallbackStatus) !=
+        decoded.callback_status.has_value()) {
+      return failed_result<PolicyInfoSnapshot>(invalid_response(
+          "policy.info returned an inconsistent callback status"));
+    }
+    result.fault = std::move(decoded);
+  }
+  return {internal::ok_status(), std::move(result)};
+}
+
+/** @copydoc Client::replace_policy */
+VoidResult Client::replace_policy(PolicyClass policy_class,
+                                  const std::string& type) {
+  if (!impl_ || !impl_->connected()) {
+    return {not_connected_status()};
+  }
+  internal::Json encoded_class;
+  if (!internal::encode_enum(policy_class, &encoded_class) ||
+      !internal::valid_policy_type(type)) {
+    return {internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params", "policy replacement values are invalid")};
+  }
+  return impl_->void_call(
+      "policy.replace",
+      internal::Json{{"policy_class", encoded_class}, {"type", type}});
+}
+
+/** @copydoc Client::execution_available_types */
+IpcResult<std::vector<std::string>> Client::execution_available_types() {
+  if (!impl_ || !impl_->connected()) {
+    return failed_result<std::vector<std::string>>(not_connected_status());
+  }
+  IpcResult<std::vector<std::string>> result = impl_->sorted_string_collection(
+      "execution.types", "types", internal::kShortTextMaxBytes);
+  if (!result.status.ok) {
+    return result;
+  }
+  if (std::any_of(result.value.begin(), result.value.end(),
+                  [](const std::string& type) {
+                    return !internal::valid_execution_type(type);
+                  }) ||
+      std::adjacent_find(result.value.begin(), result.value.end()) !=
+          result.value.end()) {
+    return failed_result<std::vector<std::string>>(invalid_response(
+        "execution.types returned unknown or duplicate execution types"));
+  }
+  return result;
+}
+
+/** @copydoc Client::execution_description */
+IpcResult<std::string> Client::execution_description(
+    const std::string& type_name) {
+  if (!impl_ || !impl_->connected()) {
+    return failed_result<std::string>(not_connected_status());
+  }
+  if (!internal::valid_execution_type(type_name)) {
+    return failed_result<std::string>(internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params", "execution type is not a known route"));
+  }
+  RawCallResult call =
+      impl_->call("execution.description", internal::Json{{"type", type_name}});
   if (!call.status.ok) {
     return failed_result<std::string>(std::move(call.status));
   }
@@ -3664,127 +3911,96 @@ IpcResult<std::string> Client::scheduler_description(
   if (!call.result.contains("type") || !call.result.contains("description") ||
       !internal::decode_bounded_string(
           call.result["type"], internal::kShortTextMaxBytes, &returned_type) ||
-      returned_type.empty() || returned_type != type_name ||
+      returned_type != type_name ||
+      !internal::valid_execution_type(returned_type) ||
       !internal::decode_bounded_string(call.result["description"],
                                        internal::kPathTextMaxBytes,
                                        &description)) {
     return failed_result<std::string>(invalid_response(
-        "scheduler.description returned an invalid type or description"));
+        "execution.description returned an invalid type or description"));
   }
   return {internal::ok_status(), std::move(description)};
 }
 
-/** @copydoc Client::scheduler_scan */
-IpcResult<std::size_t> Client::scheduler_scan(
-    const std::vector<std::string>& directories) {
-  if (!impl_) {
-    return failed_result<std::size_t>(not_connected_status());
-  }
-  RawCallResult call = impl_->call(
-      "scheduler.scan", internal::Json{{"directories", directories}});
-  if (!call.status.ok) {
-    return failed_result<std::size_t>(std::move(call.status));
-  }
-  std::size_t loaded = 0;
-  if (!call.result.contains("loaded") ||
-      !internal::decode_integer(call.result["loaded"], &loaded)) {
-    return failed_result<std::size_t>(
-        invalid_response("scheduler.scan returned an invalid loaded count"));
-  }
-  return {internal::ok_status(), loaded};
-}
-
-/** @copydoc Client::scheduler_load */
-VoidResult Client::scheduler_load(const std::string& path) {
-  if (!impl_) {
-    return {not_connected_status()};
-  }
-  return impl_->void_call("scheduler.load", internal::Json{{"path", path}});
-}
-
-/** @copydoc Client::scheduler_loaded_plugins */
-IpcResult<std::vector<std::string>> Client::scheduler_loaded_plugins() {
-  if (!impl_) {
-    return failed_result<std::vector<std::string>>(not_connected_status());
-  }
-  return impl_->sorted_string_collection("scheduler.loaded_plugins", "plugins",
-                                         internal::kPathTextMaxBytes);
-}
-
-/** @copydoc Client::configure_scheduler_defaults */
-VoidResult Client::configure_scheduler_defaults(
-    const HostSchedulerConfig& config) {
+/** @copydoc Client::configure_execution_defaults */
+VoidResult Client::configure_execution_defaults(
+    const HostExecutionConfig& config) {
   if (!impl_ || !impl_->connected()) {
     return {not_connected_status()};
   }
-  if (config.worker_count > kSchedulerWorkerRequestMax) {
+  if (!internal::valid_execution_type(config.hp_type) ||
+      !internal::valid_execution_type(config.rt_type) ||
+      config.worker_count > kExecutionWorkerRequestMax) {
     return {internal::failure_status(
         OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
-        "invalid_params",
-        "scheduler worker count exceeds the version 1 maximum")};
+        "invalid_params", "execution defaults are invalid")};
   }
   return impl_->void_call(
-      "scheduler.configure_defaults",
+      "execution.configure_defaults",
       internal::Json{{"hp_type", config.hp_type},
                      {"rt_type", config.rt_type},
                      {"worker_count", config.worker_count}});
 }
 
-/** @copydoc Client::scheduler_info */
-IpcResult<SchedulerInfoSnapshot> Client::scheduler_info(
+/** @copydoc Client::execution_info */
+IpcResult<ExecutionInfoSnapshot> Client::execution_info(
     const IpcSessionId& session_id, ComputeIntent intent) {
-  if (!impl_) {
-    return failed_result<SchedulerInfoSnapshot>(not_connected_status());
+  if (!impl_ || !impl_->connected()) {
+    return failed_result<ExecutionInfoSnapshot>(not_connected_status());
   }
   internal::Json encoded_intent;
-  if (!internal::encode_enum(intent, &encoded_intent)) {
-    return failed_result<SchedulerInfoSnapshot>(internal::failure_status(
+  if (!internal::valid_opaque_id(session_id.value) ||
+      !internal::encode_enum(intent, &encoded_intent)) {
+    return failed_result<ExecutionInfoSnapshot>(internal::failure_status(
         OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
-        "invalid_params", "scheduler intent has no version 1 label"));
+        "invalid_params", "execution info request values are invalid"));
   }
   RawCallResult call = impl_->call(
-      "scheduler.info", internal::Json{{"session_id", session_id.value},
+      "execution.info", internal::Json{{"session_id", session_id.value},
                                        {"intent", encoded_intent}});
   if (!call.status.ok) {
-    return failed_result<SchedulerInfoSnapshot>(std::move(call.status));
+    return failed_result<ExecutionInfoSnapshot>(std::move(call.status));
   }
-  SchedulerInfoSnapshot result;
+  ExecutionInfoSnapshot result;
   std::string message;
   if (!decode_session_echo(call.result, session_id, &message) ||
       !call.result.contains("intent") ||
       !internal::decode_enum(call.result["intent"], &result.intent) ||
-      result.intent != intent || !call.result.contains("scheduler_name") ||
-      !internal::decode_bounded_string(call.result["scheduler_name"],
+      result.intent != intent || !call.result.contains("execution_type") ||
+      !internal::decode_bounded_string(call.result["execution_type"],
                                        internal::kShortTextMaxBytes,
-                                       &result.scheduler_name) ||
-      result.scheduler_name.empty() || !call.result.contains("stats") ||
+                                       &result.execution_type) ||
+      !internal::valid_execution_type(result.execution_type) ||
+      !call.result.contains("stats") ||
       !internal::decode_bounded_string(
           call.result["stats"], internal::kPathTextMaxBytes, &result.stats)) {
     if (message.empty()) {
-      message = "scheduler.info returned invalid or mismatched values";
+      message = "execution.info returned invalid or mismatched values";
     }
-    return failed_result<SchedulerInfoSnapshot>(
+    return failed_result<ExecutionInfoSnapshot>(
         invalid_response(std::move(message)));
   }
   return {internal::ok_status(), std::move(result)};
 }
 
-/** @copydoc Client::replace_scheduler */
-VoidResult Client::replace_scheduler(const IpcSessionId& session_id,
+/** @copydoc Client::replace_execution */
+VoidResult Client::replace_execution(const IpcSessionId& session_id,
                                      ComputeIntent intent,
                                      const std::string& type) {
-  if (!impl_) {
+  if (!impl_ || !impl_->connected()) {
     return {not_connected_status()};
   }
   internal::Json encoded_intent;
-  if (!internal::encode_enum(intent, &encoded_intent)) {
+  if (!internal::valid_opaque_id(session_id.value) ||
+      !internal::encode_enum(intent, &encoded_intent) ||
+      !internal::valid_execution_type(type)) {
     return {internal::failure_status(
         OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
-        "invalid_params", "scheduler intent has no version 1 label")};
+        "invalid_params", "execution replacement values are invalid")};
   }
-  return impl_->void_call("scheduler.replace",
+  return impl_->void_call("execution.replace",
                           internal::Json{{"session_id", session_id.value},
-                                         {"intent", std::move(encoded_intent)},
+                                         {"intent", encoded_intent},
                                          {"type", type}});
 }
 

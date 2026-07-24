@@ -82,27 +82,39 @@ void Kernel::save_graph_document(const std::string& name,
   });
 }
 
+/** @copydoc Kernel::clear_drive_cache */
 bool Kernel::clear_drive_cache(const std::string& name) {
   return with_graph_state(name,
                           [this](GraphModel& graph) {
+                            const GraphRevision prepared =
+                                graph.revision().next();
+                            graph.publish_prepared_revision(prepared);
                             cache_service_.clear_drive_cache(graph);
                             return true;
                           })
       .value_or(false);
 }
 
+/** @copydoc Kernel::clear_memory_cache */
 bool Kernel::clear_memory_cache(const std::string& name) {
   return with_graph_state(name,
                           [this](GraphModel& graph) {
+                            const GraphRevision prepared =
+                                graph.revision().next();
+                            graph.publish_prepared_revision(prepared);
                             cache_service_.clear_memory_cache(graph);
                             return true;
                           })
       .value_or(false);
 }
 
+/** @copydoc Kernel::clear_cache */
 bool Kernel::clear_cache(const std::string& name) {
   return with_graph_state(name,
                           [this](GraphModel& graph) {
+                            const GraphRevision prepared =
+                                graph.revision().next();
+                            graph.publish_prepared_revision(prepared);
                             cache_service_.clear_cache(graph);
                             return true;
                           })
@@ -120,26 +132,40 @@ bool Kernel::cache_all_nodes(const std::string& name,
       .value_or(false);
 }
 
+/** @copydoc Kernel::free_transient_memory */
 bool Kernel::free_transient_memory(const std::string& name) {
   return with_graph_state(name,
                           [this](GraphModel& graph) {
+                            const GraphRevision prepared =
+                                graph.revision().next();
+                            graph.publish_prepared_revision(prepared);
                             cache_service_.free_transient_memory(graph);
                             return true;
                           })
       .value_or(false);
 }
 
+/** @copydoc Kernel::clear_drive_cache_stats */
 std::optional<GraphModel::DriveClearResult> Kernel::clear_drive_cache_stats(
     const std::string& name) {
   return with_graph_state(name, [this](GraphModel& graph) {
-    return cache_service_.clear_drive_cache(graph);
+    const GraphRevision prepared = graph.revision().next();
+    graph.publish_prepared_revision(prepared);
+    GraphModel::DriveClearResult result =
+        cache_service_.clear_drive_cache(graph);
+    return result;
   });
 }
 
+/** @copydoc Kernel::clear_memory_cache_stats */
 std::optional<GraphModel::MemoryClearResult> Kernel::clear_memory_cache_stats(
     const std::string& name) {
   return with_graph_state(name, [this](GraphModel& graph) {
-    return cache_service_.clear_memory_cache(graph);
+    const GraphRevision prepared = graph.revision().next();
+    graph.publish_prepared_revision(prepared);
+    GraphModel::MemoryClearResult result =
+        cache_service_.clear_memory_cache(graph);
+    return result;
   });
 }
 
@@ -150,10 +176,15 @@ std::optional<GraphModel::CacheSaveResult> Kernel::cache_all_nodes_stats(
   });
 }
 
+/** @copydoc Kernel::free_transient_memory_stats */
 std::optional<GraphModel::MemoryClearResult>
 Kernel::free_transient_memory_stats(const std::string& name) {
   return with_graph_state(name, [this](GraphModel& graph) {
-    return cache_service_.free_transient_memory(graph);
+    const GraphRevision prepared = graph.revision().next();
+    graph.publish_prepared_revision(prepared);
+    GraphModel::MemoryClearResult result =
+        cache_service_.free_transient_memory(graph);
+    return result;
   });
 }
 

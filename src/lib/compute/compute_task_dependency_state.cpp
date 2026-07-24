@@ -1,7 +1,10 @@
 #include "compute/compute_task_dependency_state.hpp"
 
+#include <cstdint>
 #include <unordered_set>
 #include <vector>
+
+#include "compute/resource_demand_estimator.hpp"
 
 namespace ps::compute {
 
@@ -29,6 +32,30 @@ TaskDependencyState::TaskDependencyState(
   std::unordered_set<int> active(active_task_ids.begin(),
                                  active_task_ids.end());
   build_dependency_state(task_graph, &active, &dependency_task_ids);
+}
+
+/** @copydoc TaskDependencyState::dynamic_retained_memory_bytes */
+std::uint64_t TaskDependencyState::dynamic_retained_memory_bytes() const {
+  RetainedMemoryEstimator estimate("TaskDependencyState");
+  estimate.add_objects<void*>(
+      static_cast<std::uint64_t>(id_to_idx_.bucket_count()));
+  estimate.add_objects<decltype(id_to_idx_)::value_type>(
+      static_cast<std::uint64_t>(id_to_idx_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(id_to_idx_.size()));
+  estimate.add_objects<void*>(static_cast<std::uint64_t>(id_to_idx_.size()));
+  estimate.add_objects<std::atomic<int>>(
+      static_cast<std::uint64_t>(dependency_counters_.capacity()));
+  estimate.add_objects<std::vector<int>>(
+      static_cast<std::uint64_t>(dependents_map_.capacity()));
+  for (const std::vector<int>& dependents : dependents_map_) {
+    estimate.add_objects<int>(
+        static_cast<std::uint64_t>(dependents.capacity()));
+  }
+  const std::uint64_t active_bit_capacity =
+      static_cast<std::uint64_t>(active_tasks_.capacity());
+  estimate.add_bytes(active_bit_capacity / 8U +
+                     (active_bit_capacity % 8U == 0U ? 0U : 1U));
+  return estimate.bytes();
 }
 
 bool TaskDependencyState::ready_for_initial_submit(int task_id) const {

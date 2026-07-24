@@ -67,7 +67,7 @@ struct UpstreamRoiProjection {
  * dependency LUT results, and projects ROIs forward or backward through image
  * input edges.
  *
- * @note The service does not own graph topology, dirty snapshots, scheduler
+ * @note The service does not own graph topology, dirty snapshots, execution
  * queues, or compute task state. Callers provide graph state and request-local
  * size caches when needed.
  */

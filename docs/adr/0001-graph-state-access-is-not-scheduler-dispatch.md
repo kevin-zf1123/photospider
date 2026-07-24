@@ -50,5 +50,6 @@ without turning graph-state operations into scheduler work.
 
 ## Relationship to Other Decisions
 
-ADR 0003 changes physical execution-resource ownership but preserves this
-decision. No decision supersedes ADR 0001.
+ADR 0003 changes physical execution-resource ownership, and ADR 0007 fixes the
+detailed target Run, ready-submission, completion, and lifetime boundaries.
+Both preserve this decision. No decision supersedes ADR 0001.

@@ -2,10 +2,12 @@ config
 
 Open the interactive configuration editor.
 
-Editable scheduler fields:
-  scheduler_hp_type       Default HP scheduler for graphs loaded after config is applied
-  scheduler_rt_type       Default RT scheduler for graphs loaded after config is applied
-  scheduler_worker_count  CPU/plugin grant: 0=auto capped at 8; 1..8 exact
+Editable policy and execution fields:
+  policy_interactive_type  Process Interactive policy binding
+  policy_throughput_type   Process Throughput policy binding
+  execution_hp_type        Default HP private execution route
+  execution_rt_type        Default RT private execution route
+  execution_worker_count   Process workers: 0=auto capped at 8; 1..8 exact
 
 Values outside 0..8 are rejected without changing the active defaults.
-The fixed process-wide scheduler capacity is 32 slots and is not configurable.
+Removed scheduler_* keys are rejected and have no compatibility translation.

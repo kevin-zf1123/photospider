@@ -19,24 +19,106 @@
 
 namespace fs = ps::fs;
 
+namespace {
+
 /**
- * @brief Validates one CLI scheduler worker-count value.
+ * @brief Reports whether one CLI policy type has canonical ABI spelling.
+ * @param value Candidate policy type bytes.
+ * @return True for 1..128 ASCII bytes matching `[a-z][a-z0-9_.-]*`.
+ * @throws Nothing.
+ * @note This preflight prevents partial cross-domain default application; the
+ * Host remains authoritative for registry visibility and class support.
+ */
+bool canonical_policy_type(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 128U || value.front() < 'a' ||
+      value.front() > 'z') {
+    return false;
+  }
+  for (std::size_t index = 1U; index < value.size(); ++index) {
+    const char byte = value[index];
+    if (!((byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9') ||
+          byte == '_' || byte == '.' || byte == '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Reports whether one CLI execution route is part of the fixed set.
+ * @param value Candidate route name.
+ * @return True only for `cpu`, `gpu_pipeline`, or `serial_debug`.
+ * @throws Nothing.
+ */
+bool known_execution_type(std::string_view value) noexcept {
+  return value == "cpu" || value == "gpu_pipeline" || value == "serial_debug";
+}
+
+/**
+ * @brief Converts one failed Host default operation into a CLI exception.
+ * @param operation Human-readable operation label.
+ * @param status Host-owned copied operation status.
+ * @return Nothing when status is successful.
+ * @throws std::runtime_error when status reports failure.
+ * @throws std::bad_alloc when diagnostic construction exhausts memory.
+ */
+void require_host_success(std::string_view operation,
+                          const ps::OperationStatus& status) {
+  if (status.ok) {
+    return;
+  }
+  std::string diagnostic = "Host rejected ";
+  diagnostic.append(operation);
+  if (!status.name.empty()) {
+    diagnostic += " (" + status.name + ")";
+  }
+  if (!status.message.empty()) {
+    diagnostic += ": " + status.message;
+  }
+  throw std::runtime_error(diagnostic);
+}
+
+/**
+ * @brief Rejects removed scheduler configuration keys before field parsing.
+ * @param root Complete parsed YAML mapping.
+ * @return Nothing when no removed key is present.
+ * @throws std::invalid_argument when a key begins with `scheduler_`.
+ * @throws YAML::Exception when a mapping key is not convertible to text.
+ * @throws std::bad_alloc when copied key or diagnostic storage exhausts memory.
+ * @note No compatibility translation is provided for the breaking generation.
+ */
+void reject_removed_scheduler_keys(const YAML::Node& root) {
+  if (!root.IsMap()) {
+    throw std::invalid_argument("CLI configuration root must be a mapping");
+  }
+  for (const auto& field : root) {
+    const std::string key = field.first.as<std::string>();
+    if (key.rfind("scheduler_", 0U) == 0U) {
+      throw std::invalid_argument("unknown removed configuration key: " + key);
+    }
+  }
+}
+
+}  // namespace
+
+/**
+ * @brief Validates one CLI execution worker-count value.
  *
  * @param worker_count Parsed or programmatically supplied CLI value.
  * @return Nothing.
  * @throws std::invalid_argument If the count is outside `[0, 8]`.
  * @note Zero remains automatic-resolution intent and no state is mutated.
  */
-void validate_cli_scheduler_worker_count(int worker_count) {
+void validate_cli_execution_worker_count(int worker_count) {
   if (worker_count < 0 || static_cast<unsigned int>(worker_count) >
-                              ps::kSchedulerWorkerRequestMax) {
+                              ps::kExecutionWorkerRequestMax) {
     throw std::invalid_argument(
-        "scheduler_worker_count must be an integer in range [0, 8]");
+        "execution_worker_count must be an integer in range [0, 8]");
   }
 }
 
 /**
- * @brief Strictly parses one CLI editor scheduler worker-count value.
+ * @brief Strictly parses one CLI editor execution worker-count value.
  *
  * @param text Complete editor text to parse.
  * @return Parsed count in `[0, 8]`.
@@ -46,10 +128,10 @@ void validate_cli_scheduler_worker_count(int worker_count) {
  * @note Leading/trailing whitespace and trailing characters are rejected so
  * the editor cannot silently coerce a partially valid token.
  */
-int parse_cli_scheduler_worker_count(std::string_view text) {
+int parse_cli_execution_worker_count(std::string_view text) {
   if (text.empty()) {
     throw std::invalid_argument(
-        "scheduler_worker_count must be an integer in range [0, 8]");
+        "execution_worker_count must be an integer in range [0, 8]");
   }
   int worker_count = 0;
   const char* const first = text.data();
@@ -57,47 +139,53 @@ int parse_cli_scheduler_worker_count(std::string_view text) {
   const auto parsed = std::from_chars(first, last, worker_count);
   if (parsed.ec != std::errc{} || parsed.ptr != last) {
     throw std::invalid_argument(
-        "scheduler_worker_count must be an integer in range [0, 8]");
+        "execution_worker_count must be an integer in range [0, 8]");
   }
-  validate_cli_scheduler_worker_count(worker_count);
+  validate_cli_execution_worker_count(worker_count);
   return worker_count;
 }
 
 /**
- * @brief Applies one validated CLI scheduler-default snapshot to a Host.
+ * @brief Applies validated CLI policy and execution defaults to one Host.
  *
- * @param host Borrowed Host receiving future-Graph scheduler defaults.
+ * @param host Borrowed Host receiving process policy and future-session route
+ * defaults.
  * @param config Complete CLI snapshot to translate.
  * @return Nothing.
  * @throws std::invalid_argument If the count is outside `[0, 8]`.
  * @throws std::runtime_error If the Host rejects the complete candidate.
- * @throws std::bad_alloc If scheduler configuration or diagnostics cannot
+ * @throws std::bad_alloc If policy/route configuration or diagnostics cannot
  * allocate.
  * @note Validation happens before the exactly-once Host call. Host failure is
  * exceptional here so both startup and interactive CLI boundaries observe it.
  */
-void apply_cli_scheduler_defaults(ps::Host& host, const CliConfig& config) {
-  validate_cli_scheduler_worker_count(config.scheduler_worker_count);
-
-  ps::HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = config.scheduler_hp_type;
-  scheduler_config.rt_type = config.scheduler_rt_type;
-  scheduler_config.worker_count =
-      static_cast<unsigned int>(config.scheduler_worker_count);
-  const ps::VoidResult result =
-      host.configure_scheduler_defaults(scheduler_config);
-  if (result.status.ok) {
-    return;
+void apply_cli_policy_execution_defaults(ps::Host& host,
+                                         const CliConfig& config) {
+  validate_cli_execution_worker_count(config.execution_worker_count);
+  if (!canonical_policy_type(config.policy_interactive_type) ||
+      !canonical_policy_type(config.policy_throughput_type)) {
+    throw std::invalid_argument("policy defaults require canonical type names");
+  }
+  if (!known_execution_type(config.execution_hp_type) ||
+      !known_execution_type(config.execution_rt_type)) {
+    throw std::invalid_argument(
+        "execution defaults require cpu, gpu_pipeline, or serial_debug");
   }
 
-  std::string diagnostic = "Host rejected scheduler defaults";
-  if (!result.status.name.empty()) {
-    diagnostic += " (" + result.status.name + ")";
-  }
-  if (!result.status.message.empty()) {
-    diagnostic += ": " + result.status.message;
-  }
-  throw std::runtime_error(diagnostic);
+  ps::HostPolicyConfig policy_config;
+  policy_config.interactive_type = config.policy_interactive_type;
+  policy_config.throughput_type = config.policy_throughput_type;
+  require_host_success("policy defaults",
+                       host.configure_policy_defaults(policy_config).status);
+
+  ps::HostExecutionConfig execution_config;
+  execution_config.hp_type = config.execution_hp_type;
+  execution_config.rt_type = config.execution_rt_type;
+  execution_config.worker_count =
+      static_cast<unsigned int>(config.execution_worker_count);
+  require_host_success(
+      "execution defaults",
+      host.configure_execution_defaults(execution_config).status);
 }
 
 /**
@@ -117,7 +205,7 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
     root["cache_root_dir"] = config.cache_root_dir;
     root["cache_precision"] = config.cache_precision;
     root["plugin_dirs"] = config.plugin_dirs;
-    root["scheduler_dirs"] = config.scheduler_dirs;
+    root["policy_dirs"] = config.policy_dirs;
     root["history_size"] = config.history_size;
     root["default_print_mode"] = config.default_print_mode;
     root["default_traversal_arg"] = config.default_traversal_arg;
@@ -132,9 +220,11 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
     root["default_compute_args"] = config.default_compute_args;
     root["switch_after_load"] = config.switch_after_load;
     root["session_warning"] = config.session_warning;
-    root["scheduler_hp_type"] = config.scheduler_hp_type;
-    root["scheduler_rt_type"] = config.scheduler_rt_type;
-    root["scheduler_worker_count"] = config.scheduler_worker_count;
+    root["policy_interactive_type"] = config.policy_interactive_type;
+    root["policy_throughput_type"] = config.policy_throughput_type;
+    root["execution_hp_type"] = config.execution_hp_type;
+    root["execution_rt_type"] = config.execution_rt_type;
+    root["execution_worker_count"] = config.execution_worker_count;
 
     std::ofstream fout(path);
     if (!fout) {
@@ -170,6 +260,7 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
     try {
       candidate.loaded_config_path = fs::absolute(config_path).string();
       YAML::Node root = YAML::LoadFile(config_path);
+      reject_removed_scheduler_keys(root);
       if (root["cache_root_dir"])
         candidate.cache_root_dir = root["cache_root_dir"].as<std::string>();
       if (root["cache_precision"])
@@ -185,10 +276,9 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         candidate.plugin_dirs.push_back(root["plugin_dir"].as<std::string>());
       }
 
-      // Scheduler directories
-      if (root["scheduler_dirs"] && root["scheduler_dirs"].IsSequence()) {
-        candidate.scheduler_dirs =
-            root["scheduler_dirs"].as<std::vector<std::string>>();
+      if (root["policy_dirs"] && root["policy_dirs"].IsSequence()) {
+        candidate.policy_dirs =
+            root["policy_dirs"].as<std::vector<std::string>>();
       }
 
       if (root["default_print_mode"])
@@ -242,18 +332,29 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
       if (root["session_warning"])
         candidate.session_warning = root["session_warning"].as<bool>();
 
-      // Scheduler selection from config accepts built-ins and scanned plugin
-      // scheduler names.
-      if (root["scheduler_hp_type"])
-        candidate.scheduler_hp_type =
-            root["scheduler_hp_type"].as<std::string>();
-      if (root["scheduler_rt_type"])
-        candidate.scheduler_rt_type =
-            root["scheduler_rt_type"].as<std::string>();
-      if (root["scheduler_worker_count"])
-        candidate.scheduler_worker_count =
-            root["scheduler_worker_count"].as<int>();
-      validate_cli_scheduler_worker_count(candidate.scheduler_worker_count);
+      if (root["policy_interactive_type"])
+        candidate.policy_interactive_type =
+            root["policy_interactive_type"].as<std::string>();
+      if (root["policy_throughput_type"])
+        candidate.policy_throughput_type =
+            root["policy_throughput_type"].as<std::string>();
+      if (root["execution_hp_type"])
+        candidate.execution_hp_type =
+            root["execution_hp_type"].as<std::string>();
+      if (root["execution_rt_type"])
+        candidate.execution_rt_type =
+            root["execution_rt_type"].as<std::string>();
+      if (root["execution_worker_count"])
+        candidate.execution_worker_count =
+            root["execution_worker_count"].as<int>();
+      validate_cli_execution_worker_count(candidate.execution_worker_count);
+      if (!canonical_policy_type(candidate.policy_interactive_type) ||
+          !canonical_policy_type(candidate.policy_throughput_type) ||
+          !known_execution_type(candidate.execution_hp_type) ||
+          !known_execution_type(candidate.execution_rt_type)) {
+        throw std::invalid_argument(
+            "configuration contains an invalid policy or execution type");
+      }
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const std::exception& e) {

@@ -2,11 +2,12 @@
 
 /**
  * @file compute_intent.hpp
- * @brief Stable compute intent values for frontend and scheduler requests.
+ * @brief Stable compute intent values for frontend and execution requests.
  *
  * Compute intent is a small value contract shared by host APIs, IPC messages,
- * scheduler selection, and legacy kernel entry points. The enum does not own
- * runtime state and does not expose planner, graph, or scheduler
+ * policy-class mapping, execution-route selection, and kernel entry points.
+ * The enum does not own runtime state and does not expose planner, Graph,
+ * policy context, or executor
  * implementation types.
  */
 
@@ -21,7 +22,7 @@ namespace ps {
  *
  * @throws Nothing.
  * @note Values are stable wire/API labels. Adding a value requires updating
- *       host, IPC, scheduler, and compatibility translation code together.
+ *       Host, IPC, policy, and execution translation code together.
  */
 enum class ComputeIntent {
   /** @brief Full-resolution high-precision compute path. */

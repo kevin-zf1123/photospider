@@ -1,4 +1,4 @@
-// Photospider kernel: GraphRuntime per-graph resources and scheduler registry
+// Photospider kernel: GraphRuntime per-graph state and execution routes
 #pragma once
 
 #include <atomic>
@@ -6,16 +6,22 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "compute/compute_request_coordinator.hpp"
+#include "execution/execution_task_runtime.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"
-#include "photospider/scheduler/scheduler.hpp"
+#include "photospider/core/graph_error.hpp"
 #include "runtime/graph_event_service.hpp"
 
 #ifdef __OBJC__
@@ -32,32 +38,68 @@ namespace ps {
 class GraphRuntime;
 namespace compute {
 class RealtimeProxyGraph;
+class GraphLifetimeAnchor;
 }  // namespace compute
 
 /**
- * @brief Owns one graph model, serialized graph-state lane, schedulers, and
- *        bounded observation rings.
+ * @brief Owns one graph model, graph-state and compute-request lanes, execution
+ *        bindings, and bounded observation rings.
  *
  * The runtime constructs all graph-scoped resources from `Info`, routes
- * lifecycle-sensitive graph operations through `GraphStateExecutor`, and owns
- * scheduler instances for each compute intent. Compute events and scheduler
- * traces are copied into independent bounded public/internal pages without
- * exposing scheduler or cache ownership.
+ * lifecycle-sensitive graph operations through `GraphStateExecutor`, and
+ * publishes one resource-neutral execution binding for each compute intent.
+ * Every binding names a Host-lifetime physical route owned by the process
+ * execution service. Compute events and execution traces are copied into
+ * independent bounded public/internal pages without exposing worker, queue,
+ * route-adapter, or cache ownership.
  *
  * @throws std::invalid_argument when an injected observation capacity or
  *         initial sequence is invalid.
- * @throws std::bad_alloc when graph, scheduler, proxy, or fixed-ring ownership
- *         cannot be allocated.
+ * @throws std::bad_alloc when graph, proxy, route-binding, or fixed-ring
+ *         ownership cannot be allocated.
  * @throws std::filesystem::filesystem_error when runtime/cache directory
  *         preparation fails.
- * @note Graph-state operations are serialized by `graph_state_`; event and
- *       trace rings have independent mutexes. Scheduler replacement and
- *       inspection must use the graph-state lane whenever active compute may
- *       retain scheduler state. The runtime owns every model, scheduler,
- *       cache-facing resource, and observation slot until destruction.
+ * @note Visible Graph capture, mutation, predicate, and publication are
+ *       serialized by `graph_state_`; same-Graph compute and route-binding
+ *       inspection/replacement are serialized by `compute_requests_`. Event
+ *       and trace rings have independent mutexes. The runtime owns its model,
+ *       route values, cache-facing resources, and observation slots until
+ *       destruction, but never owns physical execution resources.
  */
-class GraphRuntime : public SchedulerHostContext {
+class GraphRuntime : public ExecutionHostContext {
  public:
+  /**
+   * @brief Copied private route binding for one compute intent.
+   *
+   * @throws Nothing for scalar operations; string copies may throw
+   * `std::bad_alloc`.
+   * @note The value contains no executor, worker, queue, reservation, native
+   * device, or lifecycle authority.
+   */
+  struct ExecutionRouteBinding final {
+    /** @brief Exact private route id. */
+    std::string execution_type = "cpu";
+
+    /** @brief Nonzero generation advanced by every successful replacement. */
+    std::uint64_t generation = 1U;
+  };
+
+  /**
+   * @brief Owned best-effort diagnostic for one exact Graph runtime.
+   *
+   * @throws Nothing for default construction; copying or assigning the owned
+   * message may throw `std::bad_alloc`.
+   * @note The value belongs to this runtime's diagnostic slot. It is never
+   * indexed by a reusable graph name or retained in a process-global table.
+   */
+  struct LastError final {
+    /** @brief Exact graph-domain category captured at the failure boundary. */
+    GraphErrc code = GraphErrc::Unknown;
+
+    /** @brief Owned diagnostic text captured by the same failed operation. */
+    std::string message;
+  };
+
   /**
    * @brief Internal construction inputs for one graph-owned runtime.
    *
@@ -85,6 +127,12 @@ class GraphRuntime : public SchedulerHostContext {
     /** @brief Effective cache root, or empty to derive it from `root`. */
     std::filesystem::path cache_root;
 
+    /** @brief Initial full high-precision route id. */
+    std::string hp_execution_type = "cpu";
+
+    /** @brief Initial real-time dirty-update route id. */
+    std::string rt_execution_type = "cpu";
+
     /** @brief Fixed compute-event capacity for this runtime. */
     std::size_t compute_event_capacity = kComputeEventRingCapacity;
 
@@ -94,26 +142,29 @@ class GraphRuntime : public SchedulerHostContext {
     /** @brief Initial compute-event shared drop count test seam. */
     uint64_t compute_event_initial_dropped_count = 0;
 
-    /** @brief Fixed scheduler-trace capacity for this runtime. */
-    std::size_t scheduler_trace_capacity = kSchedulerTraceRingCapacity;
+    /** @brief Fixed execution-trace capacity for this runtime. */
+    std::size_t execution_trace_capacity = kExecutionTraceRingCapacity;
 
-    /** @brief First scheduler-trace sequence, or the exhausted sentinel. */
-    uint64_t scheduler_trace_initial_sequence = 1;
+    /** @brief First execution-trace sequence, or the exhausted sentinel. */
+    uint64_t execution_trace_initial_sequence = 1;
 
-    /** @brief Initial unsequenced scheduler drop count test seam. */
-    uint64_t scheduler_trace_initial_dropped_count = 0;
+    /** @brief Initial unsequenced execution-trace drop count test seam. */
+    uint64_t execution_trace_initial_dropped_count = 0;
+
+    /** @brief First graph-wide supersession generation test seam. */
+    uint64_t supersession_first_generation = 1;
   };
 
   /**
-   * @brief Internal allocation-free scheduler trace publication value.
+   * @brief Internal allocation-free execution-trace publication value.
    *
    * @throws Nothing for construction, copy, move, and scalar access.
    * @note `GraphRuntime` owns retained instances in its fixed ring and guards
    *       them with `log_mutex_`. Returned pages own independent copies whose
    *       lifetime and access no longer require the runtime lock.
    */
-  struct SchedulerEvent {
-    /** @brief Scheduler action recorded by a compute path. */
+  struct ExecutionEvent {
+    /** @brief Execution action recorded by a compute path. */
     enum Action {
       /** @brief Initial ready-task assignment. */
       ASSIGN_INITIAL,
@@ -136,14 +187,14 @@ class GraphRuntime : public SchedulerHostContext {
       /** @brief Stale dirty generation skipped before execution. */
       SKIP_STALE_GENERATION,
 
-      /** @brief Captured scheduler task exception rethrown to the caller. */
+      /** @brief Captured task exception rethrown to the caller. */
       RETHROW_EXCEPTION,
     };
 
     /** @brief Per-runtime trace publication sequence. */
     uint64_t sequence;
 
-    /** @brief Scheduler task epoch. */
+    /** @brief Execution batch epoch. */
     uint64_t epoch;
 
     /** @brief Backend node id. */
@@ -152,7 +203,7 @@ class GraphRuntime : public SchedulerHostContext {
     /** @brief Worker id, or -1 when unavailable. */
     int worker_id;
 
-    /** @brief Recorded scheduler action. */
+    /** @brief Recorded execution action. */
     Action action;
 
     /** @brief Backend high-resolution observation time. */
@@ -160,7 +211,7 @@ class GraphRuntime : public SchedulerHostContext {
   };
 
   /**
-   * @brief Internal bounded non-destructive scheduler-trace page.
+   * @brief Internal bounded non-destructive execution-trace page.
    *
    * @throws std::bad_alloc when event-vector construction, copy, or mutation
    *         allocates.
@@ -169,9 +220,9 @@ class GraphRuntime : public SchedulerHostContext {
    *       no lock after return, and remains valid independently of later ring
    *       publication, eviction, clearing, or runtime destruction.
    */
-  struct SchedulerEventPage {
+  struct ExecutionEventPage {
     /** @brief Retained internal events whose sequence exceeds the cursor. */
-    std::vector<SchedulerEvent> events;
+    std::vector<ExecutionEvent> events;
 
     /** @brief Last event cursor, input cursor, or exhausted sentinel. */
     uint64_t next_sequence = 0;
@@ -192,69 +243,53 @@ class GraphRuntime : public SchedulerHostContext {
    *         cannot be created.
    * @throws std::filesystem::filesystem_error if session/cache directories
    *         cannot be created.
-   * @note Compute-event and scheduler-trace slots are fully allocated before
+   * @note Compute-event and execution-trace slots are fully allocated before
    *       publication begins. Construction consumes `info` before concurrent
    *       access begins; the runtime then retains exclusive ownership of its
    *       copied configuration and rings for its complete graph lifetime.
    */
   explicit GraphRuntime(const Info& info);
   /**
-   * @brief Releases every scheduler and graph-owned runtime resource.
+   * @brief Releases every graph-owned runtime resource.
    * @throws Nothing.
-   * @note The graph-state lane first stops admission, drains all admitted work,
-   *       and joins its worker. Scheduler shutdown and detach are then
-   * attempted in order under the registry lock before later GPU/trace/model
-   * member teardown. Scheduler lifecycle exceptions are suppressed; an executor
-   *       join invariant failure terminates rather than tearing down borrowed
-   *       state beneath a live graph-state task.
+   * @note The compute-request lane first stops admission, drains accepted work,
+   *       and joins its worker while graph-state remains available for final
+   *       commit. Graph-state is then drained and joined before route values,
+   *       GPU state, traces, and the model are released. Physical workers and
+   *       route adapters remain owned by the Host-lifetime ExecutionService.
+   *       An executor join invariant failure terminates rather than tearing
+   *       down state beneath a live task.
    */
   ~GraphRuntime() noexcept override;
 
-  /** @brief Prevents copying graph, scheduler, and observation ownership. */
+  /** @brief Prevents copying Graph, route, and observation ownership. */
   GraphRuntime(const GraphRuntime&) = delete;
 
   /** @brief Prevents copy assignment of graph-scoped runtime ownership. */
   GraphRuntime& operator=(const GraphRuntime&) = delete;
 
   /**
-   * @brief Starts every attached scheduler as one runtime lifecycle
-   * transaction.
-   *
-   * The runtime stages rollback tracking before invoking scheduler lifecycle
-   * code. It publishes `running()==true` only after every previously stopped
-   * scheduler starts successfully. On failure, schedulers started by this call
-   * are shut down in reverse order and the original exception is rethrown.
-   *
+   * @brief Publishes this Graph runtime as running.
    * @return Nothing.
-   * @throws std::bad_alloc if rollback tracking or a scheduler start exhausts
-   * memory.
-   * @throws std::system_error if a scheduler cannot create worker resources.
-   * @throws Any exception propagated by a plugin scheduler's explicit start.
-   * @note Rollback cleanup suppresses secondary shutdown failures to preserve
-   * the original start exception. Scheduler objects and GraphModel remain owned
-   * by this runtime; no graph cache or compute state is committed here.
+   * @throws Nothing.
+   * @note Physical workers are owned by the Host-lifetime ExecutionService;
+   * this call publishes only Graph-local lifecycle state after construction.
    */
   void start();
 
   /**
-   * @brief Stops all running schedulers owned by this graph runtime.
+   * @brief Publishes this Graph runtime as stopped.
    * @return Nothing.
-   * @throws The first exception propagated by a scheduler running-state query
-   * or explicit shutdown.
-   * @note The runtime publishes its stopped state under `schedulers_mutex_`,
-   * then queries each scheduler and attempts shutdown whenever it reports
-   * running or its state cannot be determined. A query failure therefore does
-   * not skip that scheduler's cleanup, later schedulers are still swept, and
-   * the first lifecycle error is rethrown only after the sweep. Graph/cache
-   * ownership remains unchanged and repeated calls are lifecycle-idempotent
-   * for built-ins.
+   * @throws Nothing.
+   * @note The call is idempotent and does not stop Host-lifetime physical
+   * workers. Kernel drains request and Graph-state lanes before calling it.
    */
   void stop();
   /**
-   * @brief Reports whether the complete scheduler set is running.
-   * @return True only after the outer start transaction commits.
+   * @brief Reports whether this Graph runtime is running.
+   * @return True after `start()` and before `stop()`.
    * @throws Nothing.
-   * @note The acquire load never exposes a partially started scheduler set.
+   * @note The acquire load pairs with lifecycle release stores.
    */
   bool running() const noexcept {
     return running_.load(std::memory_order_acquire);
@@ -282,6 +317,54 @@ class GraphRuntime : public SchedulerHostContext {
   const Info& info() const noexcept { return info_; }
 
   /**
+   * @brief Returns the complete preallocated Graph lifetime anchor.
+   * @return Shared exact-identity anchor retained through close completion.
+   * @throws Nothing.
+   * @note The anchor contains no GraphModel or lane pointer. Kernel registers
+   * it only after runtime construction and both lanes are complete.
+   */
+  std::shared_ptr<compute::GraphLifetimeAnchor> lifetime_anchor()
+      const noexcept {
+    return lifetime_anchor_;
+  }
+
+  /**
+   * @brief Removes this runtime's best-effort diagnostic snapshot.
+   *
+   * @return Nothing.
+   * @throws std::system_error if diagnostic locking fails.
+   * @note Calling-thread result translation may clear this slot after graph
+   * close removed the runtime name. Such a delayed clear remains confined to
+   * the retained old runtime and cannot target a same-name replacement.
+   */
+  void clear_last_error();
+
+  /**
+   * @brief Replaces this runtime's best-effort diagnostic snapshot.
+   *
+   * @param error Fully constructed diagnostic moved into the runtime slot.
+   * @return Nothing.
+   * @throws std::system_error if diagnostic locking fails.
+   * @note Moving the fully constructed value performs no map insertion.
+   * Calling-thread result translation may store after name removal, but the
+   * slot remains owned by the exact retained runtime and is destroyed with its
+   * final shared owner.
+   */
+  void store_last_error(LastError error);
+
+  /**
+   * @brief Copies this runtime's best-effort diagnostic snapshot.
+   *
+   * @return Owned diagnostic, or nullopt when no failure is recorded.
+   * @throws std::bad_alloc if copying the diagnostic text fails.
+   * @throws std::system_error if diagnostic locking fails.
+   * @note The copy completes under `last_error_mutex_`; no borrowed string or
+   * optional reference escapes. Public name lookup retains the current runtime
+   * before invoking this method, so old and replacement slots never alias.
+   */
+  std::optional<LastError> last_error() const;
+
+  /**
    * @brief Returns the runtime-owned mutable graph model.
    * @return Borrowed graph model reference.
    * @throws Nothing.
@@ -295,6 +378,125 @@ class GraphRuntime : public SchedulerHostContext {
    * @throws Nothing.
    */
   GraphStateExecutor& graph_state() noexcept { return graph_state_; }
+
+  /**
+   * @brief Admits one same-Graph compute or route-lifetime request.
+   *
+   * @tparam Fn No-argument callable retained by the private bounded serial
+   * request lane.
+   * @param fn Request callback captured by value.
+   * @return Future carrying the callable's exact result or exception.
+   * @throws std::bad_alloc if task/future capture allocation fails.
+   * @throws std::logic_error on request-lane worker reentry.
+   * @throws std::runtime_error after compute-request admission stops.
+   * @throws std::system_error for queue synchronization failures.
+   * @note The wrapper deliberately hides the GraphModel reference required by
+   *       its reused executor mechanism. The callback must enter graph_state()
+   *       separately for capture, mutation, predicate, or publication. Future
+   *       destruction neither cancels nor waits for accepted work.
+   */
+  template <typename Fn>
+  auto submit_compute_request(Fn&& fn)
+      -> std::future<std::invoke_result_t<Fn>> {
+    using Ret = std::invoke_result_t<Fn>;
+    return compute_requests_.submit(
+        [f = std::forward<Fn>(fn)](GraphModel&) mutable -> Ret {
+          if constexpr (std::is_void_v<Ret>) {
+            std::invoke(f);
+          } else {
+            return std::invoke(f);
+          }
+        });
+  }
+
+  /**
+   * @brief Prepares one canonical compute candidate and reserves key capacity.
+   * @param key Target/request-intent supersession lineage.
+   * @return Move-only identity and provisional ticket adoption.
+   * @throws The allocation, admission, and synchronization errors documented
+   * by compute::ComputeRequestCoordinator::prepare.
+   * @note This is private Kernel infrastructure, not public Host ABI.
+   */
+  compute::ComputeRequestCoordinator::PreparedCandidate prepare_compute_request(
+      const compute::SupersessionKey& key) {
+    return compute_request_coordinator_.prepare(key);
+  }
+
+  /**
+   * @brief Publishes one latest-wins compute candidate to the logical runner.
+   * @param prepared Prepared identity and provisional ownership.
+   * @param cancellation Request-wide cancellation fan-out source.
+   * @param execute Existing synchronous Kernel compute path.
+   * @param settle_superseded Exact-once completion for an unmaterialized loser.
+   * @param settle_failure Fallback completion for an escaping callback.
+   * @return Nothing after graph-state publication work is admitted.
+   * @throws The validation, allocation, admission, and synchronization errors
+   * documented by compute::ComputeRequestCoordinator::publish.
+   * @note The admitted graph-state item linearizes later in FIFO order.
+   * Execution uses only the existing compute-request lane worker; this method
+   * creates no thread or asynchronous loop.
+   */
+  void publish_compute_request(
+      compute::ComputeRequestCoordinator::PreparedCandidate prepared,
+      std::shared_ptr<compute::ComputeRequestCancellationSource> cancellation,
+      compute::ComputeRequestCoordinator::ExecuteCallback execute,
+      compute::ComputeRequestCoordinator::SupersededCallback settle_superseded,
+      compute::ComputeRequestCoordinator::FailureCallback settle_failure) {
+    compute_request_coordinator_.publish(
+        std::move(prepared), std::move(cancellation), std::move(execute),
+        std::move(settle_superseded), std::move(settle_failure));
+  }
+
+  /**
+   * @brief Tests exact request currency inside product commit arbitration.
+   * @param identity Run-captured canonical key/generation.
+   * @return True only for the latest graph-state-published generation.
+   * @throws std::system_error for synchronization failure.
+   */
+  bool is_current_supersession(
+      const compute::SupersessionIdentity& identity) const {
+    return compute_request_coordinator_.is_current(identity);
+  }
+
+  /**
+   * @brief Returns bounded coordinator/ticket ownership for private tests.
+   * @return Scalar snapshot with no retained runtime ownership.
+   * @throws std::system_error if coordinator or lane locking fails.
+   * @note This observation is not installed Host ABI and may become stale
+   * immediately after return.
+   */
+  compute::ComputeRequestCoordinator::Snapshot compute_request_snapshot()
+      const {
+    return compute_request_coordinator_.snapshot();
+  }
+
+  /**
+   * @brief Stops new private compute-request admission without draining work.
+   * @return Nothing.
+   * @throws The lifecycle errors documented by
+   * GraphStateExecutor::stop_admission.
+   * @note Host close calls this before waiting accepted async work so a
+   * producer blocked on the bounded request queue is rejected and can retire
+   * its pre-registration.
+   */
+  void stop_compute_request_admission() {
+    compute_request_coordinator_.stop_admission();
+    compute_requests_.stop_admission();
+  }
+
+  /**
+   * @brief Stops and drains every accepted private compute request.
+   * @return Nothing after the request worker is joined.
+   * @throws The lifecycle errors documented by
+   *         GraphStateExecutor::close_and_drain.
+   * @note Graph-state admission must remain available until this returns
+   * because accepted requests may still submit their final predicate
+   * transaction.
+   */
+  void close_compute_requests() {
+    compute_request_coordinator_.stop_admission();
+    compute_requests_.close_and_drain();
+  }
 
   /**
    * @brief Returns the graph-owned compute-event service.
@@ -315,32 +517,32 @@ class GraphRuntime : public SchedulerHostContext {
   compute::RealtimeProxyGraph& realtime_proxy_graph();
 
   /**
-   * @brief Publishes a scheduler trace with the current thread-local context.
-   * @param action Scheduler action to record.
+   * @brief Publishes an execution trace with the current thread-local context.
+   * @param action Execution action to record.
    * @param node_id Backend node id.
    * @return Nothing.
    * @throws Nothing.
    * @note Publication is sequenced and admitted to the fixed ring under the
    *       trace lock.
    */
-  void log_event(SchedulerEvent::Action action, int node_id);
+  void log_event(ExecutionEvent::Action action, int node_id);
 
   /**
-   * @brief Publishes a scheduler trace with explicit worker and epoch values.
-   * @param action Scheduler action to record.
+   * @brief Publishes an execution trace with explicit worker and epoch values.
+   * @param action Execution action to record.
    * @param node_id Backend node id.
    * @param worker_id Worker id, or -1 when unavailable.
-   * @param epoch Scheduler task epoch.
+   * @param epoch Execution task epoch.
    * @return Nothing.
    * @throws Nothing.
    * @note Full-ring eviction and terminal exhaustion increment drop accounting
    *       with saturating arithmetic.
    */
-  void log_event(SchedulerEvent::Action action, int node_id, int worker_id,
+  void log_event(ExecutionEvent::Action action, int node_id, int worker_id,
                  uint64_t epoch);
 
   /**
-   * @brief Copies one bounded scheduler-trace page without removing entries.
+   * @brief Copies one bounded execution-trace page without removing entries.
    * @param after_sequence Exclusive cursor; zero starts at the oldest retained
    *        entry and the exhausted sentinel requests a terminal empty page.
    * @param limit Maximum entries to copy.
@@ -351,20 +553,20 @@ class GraphRuntime : public SchedulerHostContext {
    * @note Copying, `has_more`, cursor advancement, and gap calculation observe
    *       one locked ring state.
    */
-  SchedulerEventPage scheduler_trace_page(uint64_t after_sequence,
+  ExecutionEventPage execution_trace_page(uint64_t after_sequence,
                                           std::size_t limit) const;
 
   /**
-   * @brief Removes all retained scheduler traces for deterministic tests.
+   * @brief Removes all retained execution traces for deterministic tests.
    * @return Nothing.
    * @throws Nothing.
    * @note Sequence state is preserved, so later bounded reads report cleared
    *       history as a cursor gap. Production frontends have no clear method.
    */
-  void clear_scheduler_log();
+  void clear_execution_trace();
 
   /**
-   * @brief Reports a physical device capability to attached schedulers.
+   * @brief Reports a physical device capability to private execution routes.
    * @param device Stable public device label.
    * @return True for CPU and for an initialized Metal device on Apple hosts.
    * @throws Nothing.
@@ -373,8 +575,8 @@ class GraphRuntime : public SchedulerHostContext {
   bool is_device_available(Device device) const noexcept override;
 
   /**
-   * @brief Publishes scheduler worker identity into host thread-local state.
-   * @param worker_id Scheduler worker id, or -1 when unavailable.
+   * @brief Publishes execution worker identity into thread-local state.
+   * @param worker_id Execution worker id, or -1 when unavailable.
    * @param epoch Active task epoch.
    * @return Nothing.
    * @throws Nothing.
@@ -382,63 +584,65 @@ class GraphRuntime : public SchedulerHostContext {
   void set_task_context(int worker_id, uint64_t epoch) noexcept override;
 
   /**
-   * @brief Clears scheduler worker identity from host thread-local state.
+   * @brief Clears execution worker identity from thread-local state.
    * @return Nothing.
    * @throws Nothing.
    */
   void clear_task_context() noexcept override;
 
   /**
-   * @brief Maps and publishes one public scheduler trace action.
-   * @param action Stable public scheduler action.
+   * @brief Maps and publishes one private execution trace action.
+   * @param action Stable execution action.
    * @param node_id Backend node id, or -1 when unavailable.
-   * @param worker_id Scheduler worker id, or -1 when unavailable.
+   * @param worker_id Execution worker id, or -1 when unavailable.
    * @param epoch Active task epoch.
    * @return Nothing.
    * @throws Nothing; observation failures are dropped so task exceptions keep
    *         their original identity.
-   * @note This is the only public-to-private scheduler action mapping.
+   * @note This is the only adapter-to-runtime execution-action mapping.
    */
-  void log_event(SchedulerTraceAction action, int node_id, int worker_id,
+  void log_event(ExecutionTraceAction action, int node_id, int worker_id,
                  uint64_t epoch) noexcept override;
 
   /**
-   * @brief Returns scheduler worker identity for the calling thread.
-   * @return Active compute worker id, scheduler-context id, or -1.
+   * @brief Returns execution worker identity for the calling thread.
+   * @return Active compute or execution-context worker id, or -1.
    * @throws Nothing.
    */
   static int this_worker_id() noexcept;
 
   /**
-   * @brief Returns scheduler task epoch for the calling thread.
-   * @return Active scheduler epoch, or zero outside a scheduler callback.
+   * @brief Returns execution task epoch for the calling thread.
+   * @return Active execution epoch, or zero outside an execution callback.
    * @throws Nothing.
    */
   static uint64_t this_task_epoch() noexcept;
 
   /**
-   * @brief Sets host-observed scheduler identity on the calling thread.
-   * @param worker_id Scheduler worker id, or -1.
-   * @param epoch Scheduler task epoch.
+   * @brief Sets Host-observed execution identity on the calling thread.
+   * @param worker_id Execution worker id, or -1.
+   * @param epoch Execution task epoch.
    * @return Nothing.
    * @throws Nothing.
-   * @note Scheduler callbacks balance this helper through the public host
-   *       context; direct internal use must call `clear_scheduler_log_context`.
+   * @note Private execution callbacks balance this helper through
+   *       `ExecutionHostContext`; direct internal use must call
+   *       `clear_execution_trace_context`.
    */
-  static void set_scheduler_log_context(int worker_id, uint64_t epoch) noexcept;
+  static void set_execution_trace_context(int worker_id,
+                                          uint64_t epoch) noexcept;
 
   /**
-   * @brief Clears host-observed scheduler identity on the calling thread.
+   * @brief Clears Host-observed execution identity on the calling thread.
    * @return Nothing.
    * @throws Nothing.
    */
-  static void clear_scheduler_log_context() noexcept;
+  static void clear_execution_trace_context() noexcept;
 
   /**
    * @brief Returns the private native Metal device for internal compute code.
    * @return Borrowed Objective-C device, or null when unavailable.
    * @throws Nothing.
-   * @note This native handle is never exposed through `SchedulerHostContext`.
+   * @note This native handle is never exposed through `ExecutionHostContext`.
    */
   id get_metal_device() noexcept;
 
@@ -446,134 +650,131 @@ class GraphRuntime : public SchedulerHostContext {
    * @brief Returns the private native Metal command queue.
    * @return Borrowed Objective-C command queue, or null when unavailable.
    * @throws Nothing.
-   * @note This native handle is never exposed through the scheduler SDK.
+   * @note This native handle never crosses the private execution boundary.
    */
   id get_metal_command_queue() noexcept;
 
   /**
-   * @brief Transactionally installs a scheduler for one compute intent.
-   *
-   * The method reserves the map slot, prepares the candidate with attach and,
-   * when the runtime is running, start, then publishes ownership with a
-   * non-allocating unique_ptr swap. An existing owner remains published and
-   * alive until candidate preparation succeeds.
-   *
-   * @param intent Compute intent whose scheduler owner is installed.
-   * @param scheduler Candidate owner; null removes an existing scheduler.
-   * @return Nothing.
-   * @throws std::bad_alloc If reserving a previously absent map slot fails.
-   * @throws Any candidate attach/start exception unchanged after best-effort
-   * shutdown and detach of that candidate.
-   * @note Candidate failure leaves the prior map value and runtime running
-   * state unchanged. This method shares the replacement transaction. After
-   * successful publication, displaced-owner shutdown/detach failures are
-   * suppressed as post-commit diagnostics; the old owner is still destroyed
-   * and the committed replacement returns normally.
+   * @brief Copies one intent's private route binding.
+   * @param intent Global high precision or real-time update.
+   * @return Host-owned route id and nonzero generation.
+   * @throws std::invalid_argument for an unsupported intent.
+   * @throws std::logic_error when no binding is published.
+   * @throws std::bad_alloc while copying the route id.
+   * @note Callers serialize active-request capture through the existing
+   * compute-request lane when ordering against replacement is required.
    */
-  void set_scheduler(ComputeIntent intent,
-                     std::unique_ptr<IScheduler> scheduler);
+  ExecutionRouteBinding execution_route(ComputeIntent intent) const;
 
   /**
-   * @brief Looks up the scheduler for one compute intent.
-   * @param intent Compute intent route.
-   * @return Borrowed scheduler pointer, or null when no owner is installed.
-   * @throws std::system_error only if locking a valid mutex fails.
-   * @note The pointer is stable only while scheduler replacement/destruction is
-   *       excluded, normally by the graph-state execution lane.
+   * @brief Replaces one intent's route id as a nonallocating publication.
+   * @param intent Global high precision or real-time update.
+   * @param execution_type Exact `cpu`, `gpu_pipeline`, or `serial_debug` id.
+   * @return Nothing after advancing the nonzero generation, including when
+   * the type equals the previous value.
+   * @throws std::invalid_argument for an invalid intent or route.
+   * @throws GraphError when the generation is exhausted.
+   * @throws std::bad_alloc while staging the new route id.
+   * @note Validation and string allocation complete before the route mutex;
+   * failure preserves the previous id/generation and creates no physical
+   * owner, worker, queue, or reservation.
    */
-  IScheduler* get_scheduler(ComputeIntent intent);
+  void replace_execution_route(ComputeIntent intent,
+                               const std::string& execution_type);
 
   /**
-   * @brief Looks up a read-only scheduler for one compute intent.
-   * @param intent Compute intent route.
-   * @return Borrowed const scheduler pointer, or null when absent.
-   * @throws std::system_error only if locking a valid mutex fails.
-   * @note The pointer has the same external serialization requirement as the
-   *       mutable overload.
+   * @brief Tests whether one supported intent has a published route.
+   * @param intent Candidate compute intent.
+   * @return True only for an existing HP/RT route binding.
+   * @throws Nothing.
    */
-  const IScheduler* get_scheduler(ComputeIntent intent) const;
-
-  /**
-   * @brief Transactionally replaces the scheduler for one compute intent.
-   *
-   * Candidate attach/start completes before publication. If preparation fails,
-   * candidate shutdown and detach are attempted independently and the exact
-   * preparation exception is rethrown. On success, ownership is published by a
-   * non-allocating swap; the displaced owner is then shut down, detached, and
-   * destroyed in that order.
-   *
-   * @param intent Compute intent whose scheduler owner is replaced.
-   * @param scheduler Candidate owner; null removes an existing scheduler.
-   * @return Nothing.
-   * @throws std::bad_alloc If reserving a previously absent map slot fails.
-   * @throws Any candidate attach/start exception unchanged after rollback.
-   * @note A displaced-owner cleanup error is suppressed after both lifecycle
-   * stages are attempted, because publication has already committed and cannot
-   * truthfully be reported as failed. The displaced owner is still destroyed,
-   * and the runtime running flag is never changed by this transaction.
-   */
-  void replace_scheduler(ComputeIntent intent,
-                         std::unique_ptr<IScheduler> scheduler);
-
-  /**
-   * @brief Tests whether one compute intent has a non-null scheduler owner.
-   * @param intent Compute intent route.
-   * @return True when a scheduler is installed.
-   * @throws std::system_error only if locking a valid mutex fails.
-   */
-  bool has_scheduler(ComputeIntent intent) const;
+  bool has_execution_route(ComputeIntent intent) const noexcept;
 
  private:
   /** @brief Immutable copied construction and filesystem configuration. */
   Info info_;
   /** @brief Runtime-owned graph model and cache-facing state. */
   GraphModel model_;
+  /**
+   * @brief Exact-identity lifetime root declared before lanes so reverse
+   * destruction retires it after both lane owners.
+   */
+  std::shared_ptr<compute::GraphLifetimeAnchor> lifetime_anchor_;
+  /**
+   * @brief Serializes access to this runtime's diagnostic slot.
+   *
+   * @note This mutex is independent of graph-state, compute-request,
+   * graph-registry, lifecycle, and execution-service locks. No such lock is
+   * acquired while it is held.
+   */
+  mutable std::mutex last_error_mutex_;
+  /**
+   * @brief Best-effort diagnostic bound to this exact runtime lifetime.
+   *
+   * @note The slot is declared before both lane owners so reverse member
+   * destruction keeps it alive through lane teardown. A retained old caller
+   * may update it after close, and the slot disappears when the last shared
+   * runtime owner releases.
+   */
+  std::optional<LastError> last_error_;
   /** @brief Serial executor governing mutable graph model access. */
   GraphStateExecutor graph_state_;
+  /**
+   * @brief Bounded serial lane for compute/execution lifetime requests.
+   * @note Its wrapper never exposes the bound model; member order drains this
+   * lane before graph_state_ during ordinary reverse destruction.
+   */
+  GraphStateExecutor compute_requests_;
+  /**
+   * @brief Per-Graph latest-wins publication domain and logical ticket pump.
+   * @note Reverse destruction releases this state before either executor lane.
+   */
+  compute::ComputeRequestCoordinator compute_request_coordinator_;
   /** @brief Fixed-capacity graph compute-event service. */
   GraphEventService event_service_;
   /** @brief Runtime-owned low-resolution real-time proxy graph. */
   std::unique_ptr<compute::RealtimeProxyGraph> realtime_proxy_graph_;
 
-  /** @brief Compute-intent routes to exclusively owned scheduler instances. */
-  std::map<ComputeIntent, std::unique_ptr<IScheduler>> schedulers_;
-  /** @brief Serializes scheduler registry and lifecycle transactions. */
-  mutable std::mutex schedulers_mutex_;
+  /** @brief Intent routes to resource-neutral private execution ids. */
+  std::map<ComputeIntent, ExecutionRouteBinding> execution_routes_;
 
-  /** @brief True only after the complete scheduler start transaction commits.
+  /** @brief Serializes copied route observation and publication. */
+  mutable std::mutex execution_routes_mutex_;
+
+  /** @brief True only after the runtime start transaction commits.
    */
   std::atomic<bool> running_{false};
 
   /** @brief Internal compute worker id for the calling thread. */
   static thread_local int tls_worker_id_;
-  /** @brief Host-observed scheduler worker id for the calling thread. */
-  static thread_local int tls_scheduler_log_worker_id_;
-  /** @brief Host-observed scheduler epoch for the calling thread. */
-  static thread_local uint64_t tls_scheduler_log_epoch_;
+  /** @brief Host-observed execution worker id for the calling thread. */
+  static thread_local int tls_execution_context_worker_id_;
+  /** @brief Host-observed execution epoch for the calling thread. */
+  static thread_local uint64_t tls_execution_context_epoch_;
 
-  /** @brief Private platform device/queue ownership hidden from scheduler SDK.
+  /** @brief Private platform device/queue ownership hidden from policy plugins.
    */
   struct GpuContext;
   /** @brief Runtime-owned native GPU state, or null on unsupported hosts. */
   std::unique_ptr<GpuContext> gpu_context_;
 
-  /** @brief Serializes scheduler-trace publication and page observation. */
+  /** @brief Serializes execution-trace publication and page observation. */
   mutable std::mutex log_mutex_;
 
-  /** @brief Fixed, constructor-allocated optional scheduler trace slots. */
-  std::vector<std::optional<SchedulerEvent>> scheduler_trace_slots_;
+  /** @brief Fixed, constructor-allocated optional execution trace slots. */
+  std::vector<std::optional<ExecutionEvent>> execution_trace_slots_;
 
-  /** @brief Index of the oldest retained scheduler trace. */
-  std::size_t scheduler_trace_head_ = 0;
+  /** @brief Index of the oldest retained execution trace. */
+  std::size_t execution_trace_head_ = 0;
 
-  /** @brief Number of occupied scheduler trace slots. */
-  std::size_t scheduler_trace_size_ = 0;
+  /** @brief Number of occupied execution trace slots. */
+  std::size_t execution_trace_size_ = 0;
 
   /** @brief Next assignable trace sequence or exhausted sentinel. */
-  uint64_t scheduler_trace_next_sequence_ = 1;
+  uint64_t execution_trace_next_sequence_ = 1;
 
   /** @brief Saturating unsequenced exhausted-attempt test/accounting count. */
-  uint64_t scheduler_trace_unsequenced_drops_ = 0;
+  uint64_t execution_trace_unsequenced_drops_ = 0;
 };
 
 }  // namespace ps

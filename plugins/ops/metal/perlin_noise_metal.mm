@@ -142,7 +142,7 @@ double parameter_double(const plugin::NodeView& node, std::string_view key,
  * @note Objective-C references retain their objects for the lifetime of this
  * state. Construction happens once through GetMetalState and calls are
  * serialized separately by g_metal_perlin_mutex. That provider-private mutex
- * protects shared Metal backend state only; it is not an OpenCV or scheduler
+ * protects shared Metal backend state only; it is not an OpenCV or execution
  * exclusivity policy.
  */
 struct MetalState {
@@ -261,7 +261,7 @@ void perlin_noise_metal_eager_init() {
  * holds it from entry into the serialized boundary through CPU readback; the
  * independent g_metal_state_flag remains responsible for state initialization.
  * This DSO-private boundary does not serialize CPU OpenCV providers or declare
- * scheduler-wide exclusivity.
+ * execution-domain-wide exclusivity.
  */
 static std::mutex g_metal_perlin_mutex;
 

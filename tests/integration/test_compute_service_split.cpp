@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "benchmark/benchmark_types.hpp"
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_metrics_recorder.hpp"
@@ -27,6 +28,7 @@
 #include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/downsample_executor.hpp"
+#include "compute/execution_service.hpp"
 #include "compute/intent_update_coordinator.hpp"
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
@@ -46,10 +48,9 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
-#include "scheduler/cpu_work_stealing_scheduler.hpp"
-#include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
+#include "support/scoped_execution_graph_lifecycle.hpp"
 
 namespace ps {
 namespace {
@@ -57,7 +58,7 @@ namespace {
 /**
  * @brief Counts real tile invocations for the disk-cache guard regression.
  *
- * @note The counter is reset by the focused test before scheduler submission.
+ * @note The counter is reset by the focused test before execution submission.
  * Any positive value means at least one tile executed after a whole-node disk
  * cache hit should have satisfied the node.
  */
@@ -135,11 +136,40 @@ std::atomic_int g_host_preparation_hp_target_calls{0};
 std::atomic_int g_host_preparation_rt_target_calls{0};
 
 /**
+ * @brief Optional service observed from inside a connected provider callback.
+ * @note The scoped owning test installs the pointer only around one synchronous
+ * request, so the service outlives every acquire-load.
+ */
+std::atomic<compute::ExecutionService*> g_preflight_lifecycle_service{nullptr};
+
+/** @brief Snapshot sequence preceding the observed dirty request. */
+std::atomic<std::uint64_t> g_preflight_lifecycle_min_sequence{0U};
+
+/** @brief Number of provider-side lifecycle observations. */
+std::atomic_int g_preflight_lifecycle_observations{0};
+
+/** @brief Whether exact current-request installation preceded provider entry.
+ */
+std::atomic_bool g_preflight_observed_installed_bundle{false};
+
+/** @brief Whether reserved-start physical authority preceded provider entry. */
+std::atomic_bool g_preflight_observed_reserved_start{false};
+
+/**
+ * @brief Optional request source cancelled by the host-preparation provider.
+ * @note Atomic shared ownership lets the execution callback safely retain the
+ * source while its synchronous owning test clears the process-global hook.
+ */
+std::shared_ptr<compute::ComputeRequestCancellationSource>
+    // NOLINTNEXTLINE(whitespace/indent_namespace)
+    g_host_preparation_cancellation_source;
+
+/**
  * @brief Original operation failure text used by the LastError integration
  * contract.
  *
  * @note The sentinel is intentionally stable so the test can distinguish the
- * operator's message from scheduler and Kernel context added around it.
+ * operator's message from execution and Kernel context added around it.
  */
 constexpr auto kOpFailureMessage = "split runtime parallel operation failure";
 
@@ -191,106 +221,88 @@ class ScopedTestDirectory {
 };
 
 /**
- * @brief Test scheduler whose installed instance always fails lifecycle start.
+ * @brief Installs one request source for deterministic preflight cancellation.
  *
- * @throws std::runtime_error from start(); every dispatch method rejects use
- * because no successful start can make the scheduler runnable.
- * @note The fixture isolates ComputeService preflight ordering. Attach/detach
- * remain valid so GraphRuntime can own and clean up the candidate normally.
+ * The host-preparation source provider loads this shared owner immediately
+ * before returning its staged output. Destruction clears the hook only after
+ * the synchronous ComputeService call has settled.
+ *
+ * @throws Nothing from construction or destruction.
+ * @note Tests must not overlap installations. The fixture owns no Run and
+ * exposes no cancellation authority outside this translation unit.
  */
-class StartFailingScheduler final : public IScheduler {
+class ScopedHostPreparationCancellationSource final {
  public:
-  /** @brief Releases the detached test scheduler without throwing. */
-  ~StartFailingScheduler() noexcept override = default;
-
   /**
-   * @brief Borrows the runtime host context.
-   * @param host Context retained until detach().
+   * @brief Publishes the request source observed by the provider callback.
+   * @param source Non-null request-owned cancellation coordinator.
    * @throws Nothing.
    */
-  void attach(SchedulerHostContext& host) noexcept override { host_ = &host; }
-
-  /** @brief Clears the borrowed host context without throwing. */
-  void detach() noexcept override { host_ = nullptr; }
-
-  /**
-   * @brief Fails every lifecycle start attempt deterministically.
-   * @throws std::runtime_error unconditionally.
-   */
-  void start() override {
-    throw std::runtime_error("intent scheduler start failure");
-  }
-
-  /** @brief Performs idempotent failed-start cleanup without throwing. */
-  void shutdown() noexcept override {}
-
-  /** @brief Returns the stable fixture name. */
-  std::string name() const override { return "start_failing"; }
-
-  /** @brief Returns the stable fixture lifecycle diagnostic. */
-  std::string get_stats() const override { return "running=false"; }
-
-  /** @brief Reports that start never succeeded. */
-  bool is_running() const noexcept override { return false; }
-
-  /** @brief Reports the otherwise valid CPU capability set. */
-  std::vector<Device> available_devices() const override {
-    return {Device::CPU};
-  }
-
-  /** @brief Rejects initial work because lifecycle start failed. */
-  void submit_initial_task_handles(std::vector<TaskHandle>&&, int,
-                                   SchedulerTaskPriority) override {
-    throw std::logic_error("start-failing scheduler cannot submit work");
-  }
-
-  /** @brief Rejects worker-ready handles because lifecycle start failed. */
-  void submit_ready_task_handles_from_worker(std::vector<TaskHandle>&&,
-                                             SchedulerTaskPriority) override {
-    throw std::logic_error("start-failing scheduler cannot submit work");
-  }
-
-  /** @brief Rejects any-thread work because lifecycle start failed. */
-  void submit_ready_task_any_thread(Task&&, SchedulerTaskPriority,
-                                    std::optional<std::uint64_t>) override {
-    throw std::logic_error("start-failing scheduler cannot submit work");
-  }
-
-  /** @brief Rejects completion waits because no batch can exist. */
-  void wait_for_completion() override {
-    throw std::logic_error("start-failing scheduler has no active batch");
-  }
-
-  /** @brief Rejects exception publication because no batch can exist. */
-  void set_exception(std::exception_ptr) override {
-    throw std::logic_error("start-failing scheduler has no active batch");
-  }
-
-  /** @brief Rejects task-count growth because no batch can exist. */
-  void inc_tasks_to_complete(int) override {
-    throw std::logic_error("start-failing scheduler has no active batch");
-  }
-
-  /** @brief Rejects task completion because no batch can exist. */
-  void dec_tasks_to_complete() override {
-    throw std::logic_error("start-failing scheduler has no active batch");
+  explicit ScopedHostPreparationCancellationSource(
+      std::shared_ptr<compute::ComputeRequestCancellationSource> source) {
+    std::atomic_store_explicit(&g_host_preparation_cancellation_source,
+                               std::move(source), std::memory_order_release);
   }
 
   /**
-   * @brief Ignores tracing because no callback can enter.
-   * @param action Unused trace action.
-   * @param node_id Unused node id.
+   * @brief Clears the provider-visible request source.
    * @throws Nothing.
    */
-  void log_event(SchedulerTraceAction action, int node_id) noexcept override {
-    (void)action;
-    (void)node_id;
+  ~ScopedHostPreparationCancellationSource() noexcept {
+    std::atomic_store_explicit(
+        &g_host_preparation_cancellation_source,
+        std::shared_ptr<compute::ComputeRequestCancellationSource>{},
+        std::memory_order_release);
   }
 
- private:
-  /** @brief Borrowed host context retained only to exercise lifecycle cleanup.
+  /** @brief Prevents overlapping ownership of the process-global hook. */
+  ScopedHostPreparationCancellationSource(
+      const ScopedHostPreparationCancellationSource&) = delete;
+
+  /** @brief Prevents reassignment of the process-global hook owner. */
+  ScopedHostPreparationCancellationSource& operator=(
+      const ScopedHostPreparationCancellationSource&) = delete;
+};
+
+/**
+ * @brief Installs provider-side lifecycle observation for one request.
+ *
+ * @throws std::bad_alloc or synchronization exceptions from the baseline
+ * lifecycle snapshot.
+ * @note Construction captures the prior sequence before publishing the service
+ * pointer. Destruction clears the pointer after synchronous settlement.
+ */
+class ScopedPreflightLifecycleObservation final {
+ public:
+  /**
+   * @brief Arms one exact service for provider-side observation.
+   * @param service Service owning the request lifecycle and physical root.
+   * @throws std::bad_alloc or synchronization exceptions from snapshot copy.
    */
-  SchedulerHostContext* host_ = nullptr;
+  explicit ScopedPreflightLifecycleObservation(
+      compute::ExecutionService& service) {
+    const compute::ExecutionLifecyclePage before =
+        service.lifecycle_snapshot(0U, 1U);
+    g_preflight_lifecycle_min_sequence.store(before.snapshot_cut,
+                                             std::memory_order_release);
+    g_preflight_lifecycle_observations.store(0, std::memory_order_relaxed);
+    g_preflight_observed_installed_bundle.store(false,
+                                                std::memory_order_relaxed);
+    g_preflight_observed_reserved_start.store(false, std::memory_order_relaxed);
+    g_preflight_lifecycle_service.store(&service, std::memory_order_release);
+  }
+
+  /** @brief Clears provider-visible service ownership. */
+  ~ScopedPreflightLifecycleObservation() noexcept {
+    g_preflight_lifecycle_service.store(nullptr, std::memory_order_release);
+  }
+
+  /** @brief Prevents overlapping observer installations. */
+  ScopedPreflightLifecycleObservation(
+      const ScopedPreflightLifecycleObservation&) = delete;
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedPreflightLifecycleObservation& operator=(
+      const ScopedPreflightLifecycleObservation&) = delete;
 };
 
 Node make_node(int id, std::string type, std::string subtype) {
@@ -322,8 +334,11 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
  * @throws std::bad_alloc when parameter/output storage fails.
  * @throws std::invalid_argument when image-buffer allocation rejects shape.
  * @throws std::runtime_error or cv::Exception when CPU pixels cannot be filled.
+ * @throws Exceptions from request cancellation cleanup callbacks unchanged.
  * @note The mismatched String remains a valid ParameterValue; the exact public
- * Int64 accessor is the intended failure.
+ * Int64 accessor is the intended failure. When the test-only request source is
+ * installed, cancellation is requested after output production and directly
+ * before provider return.
  */
 NodeOutput execute_host_preparation_source(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -333,6 +348,34 @@ NodeOutput execute_host_preparation_source(
         "host-preparation source received an image input: " + node.name);
   }
   g_host_preparation_source_calls.fetch_add(1, std::memory_order_relaxed);
+  if (compute::ExecutionService* observed_service =
+          g_preflight_lifecycle_service.load(std::memory_order_acquire)) {
+    const compute::ExecutionLifecyclePage lifecycle =
+        observed_service->lifecycle_snapshot(0U, 4096U);
+    const std::uint64_t minimum_sequence =
+        g_preflight_lifecycle_min_sequence.load(std::memory_order_acquire);
+    const bool current_bundle_admitted = std::any_of(
+        lifecycle.records.begin(), lifecycle.records.end(),
+        [minimum_sequence](const compute::ExecutionLifecycleEvent& event) {
+          return event.sequence > minimum_sequence &&
+                 event.kind ==
+                     compute::ExecutionLifecycleEventKind::BundleAdmitted;
+        });
+    const bool installed =
+        current_bundle_admitted &&
+        lifecycle.counters.pending_candidate_count == 0U &&
+        (lifecycle.counters.admitted_standalone_run_count != 0U ||
+         lifecycle.counters.admitted_run_group_count != 0U);
+    const bool reserved_start =
+        lifecycle.counters.entered_callback_count != 0U &&
+        lifecycle.counters.live_root_reservation_count != 0U &&
+        observed_service->resource_snapshot().reserved != ResourceVector{};
+    g_preflight_observed_installed_bundle.store(installed,
+                                                std::memory_order_release);
+    g_preflight_observed_reserved_start.store(reserved_start,
+                                              std::memory_order_release);
+    g_preflight_lifecycle_observations.fetch_add(1, std::memory_order_release);
+  }
   NodeOutput output = make_image_output(
       as_int_flexible(node.parameters, "width", 64),
       as_int_flexible(node.parameters, "height", 16), 1, 4.0f);
@@ -340,6 +383,12 @@ NodeOutput execute_host_preparation_source(
     output.data["injected"] = "not-an-integer";
   } else {
     output.data["injected"] = 1;
+  }
+  const std::shared_ptr<compute::ComputeRequestCancellationSource>
+      cancellation_source = std::atomic_load_explicit(
+          &g_host_preparation_cancellation_source, std::memory_order_acquire);
+  if (cancellation_source) {
+    (void)cancellation_source->request_cancellation();
   }
   return output;
 }
@@ -1896,7 +1945,10 @@ TEST(TaskGraphPlanningSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request execution_request;
   execution_request.node_id = 2;
   execution_request.intent = ComputeIntent::GlobalHighPrecision;
@@ -2009,6 +2061,152 @@ TEST(TaskGraphPlanningSplit,
   verify_domain(ComputeIntent::RealTimeUpdate);
 }
 
+/**
+ * @brief Proves HP and realtime child Runs validate before target planning.
+ *
+ * @note A zero QoS weight is a Run descriptor error. The missing HP target
+ * would instead produce NotFound if planning ran first. RealTimeUpdate creates
+ * its separate HP/RT children before intent planning, so the same invalid QoS
+ * is rejected without manufacturing a mixed-domain Run.
+ */
+TEST(ComputeRunProductPath, HpAndRealtimeChildrenValidateBeforePlanning) {
+  GraphModel graph("cache/compute-run-product-path");
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+
+  ComputeService::Request hp_request;
+  hp_request.node_id = 404;
+  hp_request.graph_identity = "product-path-hp";
+  hp_request.qos.weight = 0;
+  EXPECT_THROW((void)service.compute(graph, hp_request), std::invalid_argument);
+
+  ComputeService::Request realtime_request = hp_request;
+  realtime_request.intent = ComputeIntent::RealTimeUpdate;
+  EXPECT_THROW((void)service.compute(graph, realtime_request),
+               std::invalid_argument);
+
+  const compute::ExecutionLifecyclePage lifecycle =
+      execution_service.lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(lifecycle.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_run_group_count, 0U);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::CandidateBegan;
+                }),
+            2);
+  EXPECT_EQ(
+      std::count_if(
+          lifecycle.records.begin(), lifecycle.records.end(),
+          [](const compute::ExecutionLifecycleEvent& event) {
+            return event.kind ==
+                   compute::ExecutionLifecycleEventKind::CandidateRolledBack;
+          }),
+      2);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::BundleAdmitted;
+                }),
+            0);
+}
+
+/**
+ * @brief Proves failed full-HP preparation publishes no diagnostics or sink
+ * reset.
+ *
+ * @return Nothing; GoogleTest assertions report candidate, inspection, or
+ * caller-owned benchmark mutations.
+ * @throws Runtime, graph, planning, or test setup failures unchanged.
+ * @note Both inline and route-backed paths build a valid task graph for an
+ * operation key that has no executable callback. Resolution therefore fails
+ * after planning but before lifecycle installation. The existing benchmark
+ * record and all plan histories must remain unchanged.
+ */
+TEST(ComputeRunProductPath,
+     FullHpPreparationFailureLeavesInspectionAndBenchmarkUnpublished) {
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-full-hp-preparation-rollback");
+  GraphRuntime::Info info;
+  info.name = "full-hp-preparation-rollback";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  Node unresolved = make_node(1, "unregistered", "candidate_preparation");
+  unresolved.parameters["width"] = 8;
+  unresolved.parameters["height"] = 8;
+  graph.add_node(unresolved);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+  std::vector<BenchmarkEvent> benchmark_events(1U);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  request.telemetry.benchmark_events = &benchmark_events;
+
+  const auto expect_unpublished_failure = [&](bool parallel) {
+    SCOPED_TRACE(parallel ? "parallel" : "inline");
+    EXPECT_THROW(parallel ? static_cast<void>(service.compute_parallel(
+                                graph, runtime, request))
+                          : static_cast<void>(service.compute(graph, request)),
+                 GraphError);
+    EXPECT_EQ(benchmark_events.size(), 1U);
+    EXPECT_FALSE(graph.last_compute_plan.has_value());
+    EXPECT_FALSE(graph.last_compute_plan_summary.has_value());
+    EXPECT_TRUE(graph.recent_compute_plan_summaries.empty());
+  };
+  expect_unpublished_failure(false);
+  expect_unpublished_failure(true);
+
+  const compute::ExecutionLifecyclePage lifecycle =
+      execution_service.lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(lifecycle.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::CandidateBegan;
+                }),
+            2);
+  EXPECT_EQ(
+      std::count_if(
+          lifecycle.records.begin(), lifecycle.records.end(),
+          [](const compute::ExecutionLifecycleEvent& event) {
+            return event.kind ==
+                   compute::ExecutionLifecycleEventKind::CandidateRolledBack;
+          }),
+      2);
+  EXPECT_EQ(std::count_if(
+                lifecycle.records.begin(), lifecycle.records.end(),
+                [](const compute::ExecutionLifecycleEvent& event) {
+                  return event.kind ==
+                         compute::ExecutionLifecycleEventKind::BundleAdmitted;
+                }),
+            0);
+  runtime.stop();
+}
+
 TEST(ComputeServiceSplit,
      DirtyConnectedKernelStabilizesThreeToTwentyOneToThree) {
   register_split_ops();
@@ -2021,7 +2219,10 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request full;
   full.node_id = 2;
@@ -2070,7 +2271,10 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2131,7 +2335,10 @@ TEST(ComputeServiceSplit,
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    ComputeService service(traversal, cache, events);
+    compute::ExecutionService execution_service;
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                           graph);
     ComputeService::Request request;
     request.node_id = 2;
     request.cache.precision = "float32";
@@ -2183,7 +2390,10 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2211,7 +2421,10 @@ TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2252,10 +2465,10 @@ TEST(ComputeServiceSplit,
     info.root = "cache/" + info.name;
     info.cache_root = info.root / "cache";
     GraphRuntime runtime(info);
-    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                          std::make_unique<SerialDebugScheduler>());
-    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                          std::make_unique<SerialDebugScheduler>());
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                    "serial_debug");
+    runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                    "serial_debug");
     runtime.start();
     GraphModel& graph = runtime.model();
     populate_host_preparation_failure_graph(graph);
@@ -2263,7 +2476,10 @@ TEST(ComputeServiceSplit,
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    ComputeService service(traversal, cache, events);
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                           graph);
     ComputeService::Request request;
     request.node_id = 2;
     request.cache.precision = "float32";
@@ -2424,92 +2640,219 @@ TEST(ComputeServiceSplit,
   }
 }
 
-TEST(ComputeServiceSplit,
-     MissingParallelHpSchedulerDoesNotReserveGenerationOrEnterPreflight) {
+/**
+ * @brief Proves connected provider entry follows install and reserved start.
+ *
+ * @return Nothing; GoogleTest reports lifecycle, ledger, or provider-order
+ * failures.
+ * @throws Setup, graph, service, allocation, or callback exceptions unchanged.
+ * @note The provider copies the real lifecycle/ledger snapshots from inside
+ * its callback. The observed BundleAdmitted sequence must be newer than the
+ * baseline request, the candidate must already be consumed, and both entered
+ * callback plus live root counters must be nonzero.
+ */
+TEST(ComputeServiceLifecycle,
+     ConnectedPreflightProviderEntersAfterInstallAndReservedStart) {
   register_split_ops();
-  g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-connected-preflight-installed-start");
   GraphRuntime::Info info;
-  info.name = "split-missing-hp-preflight-scheduler";
-  info.root = "cache/split-missing-hp-preflight-scheduler";
-  info.cache_root = "cache/split-missing-hp-preflight-scheduler/cache";
+  info.name = "connected-preflight-installed-start";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                        std::make_unique<SerialDebugScheduler>());
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
   runtime.start();
   GraphModel& graph = runtime.model();
-  populate_dynamic_blur_graph(graph);
-  const uint64_t generation_before = graph.dirty_generation_counter;
+  populate_host_preparation_failure_graph(graph);
   GraphTraversalService traversal;
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+
   ComputeService::Request request;
   request.node_id = 2;
-  request.intent = ComputeIntent::RealTimeUpdate;
-  request.dirty_roi = (PixelRect{1, 1, 2, 2});
+  request.cache.precision = "float32";
   request.cache.disable_disk_cache = true;
-  EXPECT_THROW(service.compute_parallel(graph, runtime, request), GraphError);
-  EXPECT_EQ(graph.dirty_generation_counter, generation_before);
-  EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 0);
+  (void)service.compute_parallel(graph, runtime, request);
+
+  g_host_preparation_emit_malformed_value.store(false,
+                                                std::memory_order_release);
+  g_host_preparation_source_calls.store(0, std::memory_order_relaxed);
+  g_host_preparation_plugin_calls.store(0, std::memory_order_relaxed);
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.dirty_roi = PixelRect{8, 0, 4, 4};
+  {
+    ScopedPreflightLifecycleObservation observation(execution_service);
+    EXPECT_NO_THROW((void)service.compute_parallel(graph, runtime, request));
+  }
+
+  EXPECT_EQ(g_host_preparation_source_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_host_preparation_plugin_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_preflight_lifecycle_observations.load(std::memory_order_acquire),
+            1);
+  EXPECT_TRUE(
+      g_preflight_observed_installed_bundle.load(std::memory_order_acquire));
+  EXPECT_TRUE(
+      g_preflight_observed_reserved_start.load(std::memory_order_acquire));
+  const compute::ExecutionLifecyclePage settled =
+      execution_service.lifecycle_snapshot(0U, 4096U);
+  EXPECT_EQ(settled.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(settled.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(settled.counters.live_root_reservation_count, 0U);
+  EXPECT_EQ(execution_service.resource_snapshot().reserved, ResourceVector{});
   runtime.stop();
 }
 
-TEST(ComputeServiceSplit,
-     SchedulerStartFailureDoesNotReserveGenerationOrEnterPreflight) {
+/**
+ * @brief Proves connected-preflight cancellation suppresses dirty phase two.
+ *
+ * @return Nothing; GoogleTest assertions report dependent entry, publication,
+ * or terminal-translation failures for HP and paired HP/RT requests.
+ * @throws Setup, execution, graph, allocation, or image-adaptation exceptions
+ * when the fixture itself cannot execute.
+ * @note The serial-debug execution route runs source preflight. Its provider
+ * requests cancellation immediately before return, so the parameter callback,
+ * HP/RT target tiles, inspection publication, Graph caches, and RT proxy must
+ * remain unchanged after bounded synchronous settlement.
+ */
+TEST(ComputeServiceCancellation,
+     ConnectedPreflightCancellationSuppressesDirtyAndSiblingPublication) {
   register_split_ops();
-  for (const ComputeIntent failing_intent :
+  for (const ComputeIntent intent :
        {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
-    SCOPED_TRACE(failing_intent == ComputeIntent::GlobalHighPrecision ? "HP"
-                                                                      : "RT");
-    g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+    const bool is_rt = intent == ComputeIntent::RealTimeUpdate;
+    SCOPED_TRACE(is_rt ? "RT" : "HP");
+    const std::string suffix = is_rt ? "rt" : "hp";
+    const ScopedTestDirectory root(
+        std::filesystem::temp_directory_path() /
+        ("photospider-connected-preflight-cancellation-" + suffix));
     GraphRuntime::Info info;
-    info.name = failing_intent == ComputeIntent::GlobalHighPrecision
-                    ? "split-failing-hp-preflight-scheduler"
-                    : "split-failing-rt-preflight-scheduler";
-    info.root = "cache/" + info.name;
-    info.cache_root = info.root / "cache";
+    info.name = "connected-preflight-cancellation-" + suffix;
+    info.root = root.path();
+    info.cache_root = root.path() / "cache";
     GraphRuntime runtime(info);
-    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                          failing_intent == ComputeIntent::GlobalHighPrecision
-                              ? std::unique_ptr<IScheduler>(
-                                    std::make_unique<StartFailingScheduler>())
-                              : std::unique_ptr<IScheduler>(
-                                    std::make_unique<SerialDebugScheduler>()));
-    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                          failing_intent == ComputeIntent::RealTimeUpdate
-                              ? std::unique_ptr<IScheduler>(
-                                    std::make_unique<StartFailingScheduler>())
-                              : std::unique_ptr<IScheduler>(
-                                    std::make_unique<SerialDebugScheduler>()));
+    runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                    "serial_debug");
+    runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                    "serial_debug");
+    runtime.start();
     GraphModel& graph = runtime.model();
-    populate_dynamic_blur_graph(graph);
-    const std::uint64_t generation_before = graph.dirty_generation_counter;
+    populate_host_preparation_failure_graph(graph);
     GraphTraversalService traversal;
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                             testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
-    ComputeService service(traversal, cache, events);
+    compute::ExecutionService execution_service(1U);
+    ComputeService service(traversal, cache, events, execution_service);
+    testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                           graph);
     ComputeService::Request request;
     request.node_id = 2;
-    request.intent = ComputeIntent::RealTimeUpdate;
-    request.dirty_roi = (PixelRect{1, 1, 2, 2});
+    request.cache.precision = "float32";
     request.cache.disable_disk_cache = true;
+    (void)service.compute_parallel(graph, runtime, request);
 
-    EXPECT_THROW((void)service.compute_parallel(graph, runtime, request),
-                 std::runtime_error);
-    EXPECT_EQ(graph.dirty_generation_counter, generation_before);
-    EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 0);
-    EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
-    EXPECT_FALSE(graph.node(2).cached_output_high_precision.has_value());
-    EXPECT_FALSE(graph.node(3).cached_output_high_precision.has_value());
-    EXPECT_EQ(runtime.realtime_proxy_graph().find_output(2), nullptr);
+    ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
+    const cv::Mat source_pixels_before =
+        toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
+            .clone();
+    const cv::Mat target_pixels_before =
+        toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
+            .clone();
+    const int source_version_before = graph.node(1).hp_version;
+    const int target_version_before = graph.node(2).hp_version;
+    const int parameter_version_before = graph.node(3).hp_version;
+    const std::optional<PixelRect> source_roi_before = graph.node(1).hp_roi;
+    const std::optional<PixelRect> target_roi_before = graph.node(2).hp_roi;
+    const std::optional<PixelRect> parameter_roi_before = graph.node(3).hp_roi;
+    const std::size_t dirty_snapshots_before =
+        graph.recent_dirty_region_snapshots.size();
+    const std::size_t compute_plans_before = graph.recent_compute_plans.size();
+    const std::size_t plan_summaries_before =
+        graph.recent_compute_plan_summaries.size();
+    const std::uint64_t request_generation_before =
+        graph.dirty_generation_counter;
+    ASSERT_EQ(runtime.realtime_proxy_graph().find_state(2), nullptr);
+
+    g_host_preparation_emit_malformed_value.store(false,
+                                                  std::memory_order_release);
+    g_host_preparation_source_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_plugin_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_hp_target_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_rt_target_calls.store(0, std::memory_order_relaxed);
+    auto cancellation_source =
+        std::make_shared<compute::ComputeRequestCancellationSource>();
+    request.intent = intent;
+    request.dirty_roi = PixelRect{8, 0, 4, 4};
+    request.cancellation_source = cancellation_source;
+    bool saw_cancellation = false;
+    {
+      ScopedHostPreparationCancellationSource cancellation_hook(
+          cancellation_source);
+      try {
+        (void)service.compute_parallel(graph, runtime, request);
+      } catch (const GraphError& error) {
+        saw_cancellation = true;
+        EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+        EXPECT_NE(std::string(error.what())
+                      .find("ComputeRun cancelled: explicit request."),
+                  std::string::npos)
+            << error.what();
+      }
+    }
+
+    EXPECT_TRUE(saw_cancellation);
+    EXPECT_EQ(cancellation_source->accepted_reason(),
+              compute::ComputeRunCancellationReason::ExplicitRequest);
+    EXPECT_EQ(g_host_preparation_source_calls.load(std::memory_order_relaxed),
+              1);
+    EXPECT_EQ(g_host_preparation_plugin_calls.load(std::memory_order_relaxed),
+              0)
+        << "the dependent parameter callback must not enter";
+    EXPECT_EQ(
+        g_host_preparation_hp_target_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(
+        g_host_preparation_rt_target_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(graph.dirty_generation_counter, request_generation_before + 1);
+    EXPECT_EQ(graph.recent_dirty_region_snapshots.size(),
+              dirty_snapshots_before);
+    EXPECT_EQ(graph.recent_compute_plans.size(), compute_plans_before);
+    EXPECT_EQ(graph.recent_compute_plan_summaries.size(),
+              plan_summaries_before);
+    EXPECT_EQ(graph.node(1).hp_version, source_version_before);
+    EXPECT_EQ(graph.node(2).hp_version, target_version_before);
+    EXPECT_EQ(graph.node(3).hp_version, parameter_version_before);
+    EXPECT_EQ(graph.node(1).hp_roi, source_roi_before);
+    EXPECT_EQ(graph.node(2).hp_roi, target_roi_before);
+    EXPECT_EQ(graph.node(3).hp_roi, parameter_roi_before);
+    EXPECT_DOUBLE_EQ(
+        cv::norm(
+            source_pixels_before,
+            toCvMat(graph.node(1).cached_output_high_precision->image_buffer),
+            cv::NORM_INF),
+        0.0);
+    EXPECT_DOUBLE_EQ(
+        cv::norm(
+            target_pixels_before,
+            toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
+            cv::NORM_INF),
+        0.0);
+    EXPECT_EQ(runtime.realtime_proxy_graph().find_state(2), nullptr);
     runtime.stop();
   }
 }
 
 TEST(ComputeServiceSplit,
-     SchedulerBackedRtRequestStabilizesDataOnlyProducerExactlyOnce) {
+     ExecutionBackedRtRequestStabilizesDataOnlyProducerExactlyOnce) {
   register_split_ops();
   g_dynamic_parameter_fail.store(false, std::memory_order_release);
   g_dynamic_blur_ksize.store(3, std::memory_order_release);
@@ -2518,10 +2861,10 @@ TEST(ComputeServiceSplit,
   info.root = "cache/split-parallel-data-only-preflight";
   info.cache_root = "cache/split-parallel-data-only-preflight/cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<SerialDebugScheduler>());
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                        std::make_unique<SerialDebugScheduler>());
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
+  runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                  "serial_debug");
   runtime.start();
   GraphModel& graph = runtime.model();
   populate_dynamic_blur_graph(graph);
@@ -2529,7 +2872,10 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2545,7 +2891,7 @@ TEST(ComputeServiceSplit,
   });
   ASSERT_EQ(compute_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready)
-      << "initial TaskHandle preflight batch must not lose work at epoch zero";
+      << "initial execution preflight batch must not lose work";
   ASSERT_NE(compute_future.get(), nullptr);
   EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 1);
   ASSERT_GE(graph.recent_dirty_region_snapshots.size(), 2u);
@@ -2555,7 +2901,7 @@ TEST(ComputeServiceSplit,
 }
 
 TEST(ComputeServiceSplit,
-     SchedulerPreflightFailureRetryStartsFreshBatchWithoutHanging) {
+     ExecutionPreflightFailureRetryStartsFreshBatchWithoutHanging) {
   register_split_ops();
   g_dynamic_parameter_fail.store(false, std::memory_order_release);
   g_dynamic_blur_ksize.store(3, std::memory_order_release);
@@ -2565,10 +2911,10 @@ TEST(ComputeServiceSplit,
   info.root = "cache/split-preflight-failure-retry";
   info.cache_root = "cache/split-preflight-failure-retry/cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<SerialDebugScheduler>());
-  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                        std::make_unique<SerialDebugScheduler>());
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
+  runtime.replace_execution_route(ComputeIntent::RealTimeUpdate,
+                                  "serial_debug");
   runtime.start();
   GraphModel& graph = runtime.model();
   populate_dynamic_blur_graph(graph);
@@ -2576,7 +2922,10 @@ TEST(ComputeServiceSplit,
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService service(traversal, cache, events);
+  compute::ExecutionService execution_service(1U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 2;
   request.cache.precision = "float32";
@@ -2592,7 +2941,7 @@ TEST(ComputeServiceSplit,
     return &service.compute_parallel(graph, runtime, request);
   });
   ASSERT_EQ(failed.wait_for(std::chrono::seconds(2)), std::future_status::ready)
-      << "a failed preflight TaskHandle batch must settle its wait";
+      << "a failed execution preflight batch must settle its wait";
   EXPECT_THROW((void)failed.get(), GraphError);
   EXPECT_EQ(graph.node(2).hp_version, target_version_before);
 
@@ -2603,7 +2952,7 @@ TEST(ComputeServiceSplit,
   });
   ASSERT_EQ(retried.wait_for(std::chrono::seconds(2)),
             std::future_status::ready)
-      << "retry must open a fresh scheduler epoch after prior failure";
+      << "retry must open a fresh execution batch after prior failure";
   NodeOutput* output = retried.get();
   ASSERT_NE(output, nullptr);
   EXPECT_GT(output->image_buffer.width, 0);
@@ -2722,8 +3071,8 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   info.root = "cache/split-force-recache-task-graph-cache";
   info.cache_root = "cache/split-force-recache-task-graph-cache/cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<SerialDebugScheduler>());
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                  "serial_debug");
   runtime.start();
 
   GraphModel& graph = runtime.model();
@@ -2740,7 +3089,10 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service(1U);
+  ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request request;
   request.node_id = 1;
@@ -2855,8 +3207,7 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   info.root = root;
   info.cache_root = root / "cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                        std::make_unique<CpuWorkStealingScheduler>(8));
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
   runtime.start();
 
   GraphModel& graph = runtime.model();
@@ -2879,7 +3230,10 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   graph.mutate_node_runtime_state(
       1, [](auto& state) { state.cached_output_high_precision.reset(); });
 
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service(1U);
+  ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
   ComputeService::Request request;
   request.node_id = 1;
   request.cache.precision = "int8";
@@ -3088,8 +3442,8 @@ TEST(IntentUpdateCoordinatorSplit,
 
   NodeOutput& coordinated =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, nullptr, nullptr,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::RealTimeUpdate, false, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3114,8 +3468,8 @@ TEST(IntentUpdateCoordinatorSplit,
   stages.clear();
   NodeOutput& coordinated_global_dirty =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::GlobalHighPrecision, nullptr, nullptr,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::GlobalHighPrecision, false, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated_global_dirty, &rt_output);
   EXPECT_TRUE(ran_global_dirty);
   EXPECT_NE(std::find(stages.begin(), stages.end(),
@@ -3131,8 +3485,8 @@ TEST(IntentUpdateCoordinatorSplit,
   stages.clear();
   NodeOutput& coordinated_without_runtime =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, nullptr, nullptr,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::RealTimeUpdate, false, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated_without_runtime, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3148,10 +3502,6 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_LT(std::distance(stages.begin(), inline_rt_stage),
             std::distance(stages.begin(), inline_hp_stage));
 
-  SerialDebugScheduler hp_runtime;
-  SerialDebugScheduler rt_runtime;
-  hp_runtime.start();
-  rt_runtime.start();
   ran_hp.store(false);
   ran_rt.store(false);
   active_callbacks.store(0);
@@ -3191,8 +3541,8 @@ TEST(IntentUpdateCoordinatorSplit,
   };
   NodeOutput& coordinated_with_runtimes =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, &hp_runtime, &rt_runtime,
-          (PixelRect{0, 0, 4, 4}), callbacks);
+          ComputeIntent::RealTimeUpdate, true, (PixelRect{0, 0, 4, 4}),
+          callbacks);
   EXPECT_EQ(&coordinated_with_runtimes, &rt_output);
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
@@ -3211,8 +3561,6 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_TRUE(hp_callback_entered);
   EXPECT_FALSE(concurrent_callbacks_timed_out);
   EXPECT_GE(max_active_callbacks.load(), 2);
-  hp_runtime.shutdown();
-  rt_runtime.shutdown();
 }
 
 TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
@@ -3251,7 +3599,15 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   EXPECT_EQ(*committed_state->dirty_source_generation, 42u);
 }
 
-TEST(RealtimeProxyGraph, PreservesWithinGenerationAndResetsOnGraphReplacement) {
+/**
+ * @brief Verifies isolated proxy cloning, no-throw publication, and reset.
+ * @return Nothing.
+ * @throws Test fixture allocation and Graph mutation exceptions unchanged.
+ * @note Publication swaps the complete prepared proxy state while leaving the
+ * displaced visible state in the request-owned snapshot.
+ */
+TEST(RealtimeProxyGraph,
+     ClonesPublishesAndResetsAcrossGraphTopologyGenerations) {
   GraphModel graph("cache/rt-proxy-generation-reset");
   Node node = make_node(1, "split_plan", "tile");
   graph.add_node(node);
@@ -3272,6 +3628,23 @@ TEST(RealtimeProxyGraph, PreservesWithinGenerationAndResetsOnGraphReplacement) {
   EXPECT_EQ(preserved_state->version, 7);
   ASSERT_TRUE(preserved_state->dirty_source_generation.has_value());
   EXPECT_EQ(*preserved_state->dirty_source_generation, 42u);
+
+  std::unique_ptr<compute::RealtimeProxyGraph> snapshot =
+      proxy_graph.clone_for_compute();
+  const auto* cloned_state = snapshot->find_state(1);
+  ASSERT_NE(cloned_state, nullptr);
+  compute::RealtimeProxyGraph::NodeState prepared_state = *cloned_state;
+  prepared_state.version = 11;
+  prepared_state.dirty_source_generation = 77;
+  snapshot->commit_node_state(1, std::move(prepared_state));
+  ASSERT_NE(proxy_graph.find_state(1), nullptr);
+  EXPECT_EQ(proxy_graph.find_state(1)->version, 7);
+  static_assert(noexcept(proxy_graph.publish_compute_snapshot(*snapshot)));
+  proxy_graph.publish_compute_snapshot(*snapshot);
+  ASSERT_NE(proxy_graph.find_state(1), nullptr);
+  EXPECT_EQ(proxy_graph.find_state(1)->version, 11);
+  ASSERT_NE(snapshot->find_state(1), nullptr);
+  EXPECT_EQ(snapshot->find_state(1)->version, 7);
 
   GraphModel::NodeMap replacement_nodes;
   Node replacement = make_node(1, "split_plan", "domain_tile");
@@ -3359,7 +3732,10 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request request;
   request.node_id = 2;
@@ -3422,7 +3798,10 @@ TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request full_request;
   full_request.node_id = 2;
@@ -3482,7 +3861,10 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
-  ComputeService compute(traversal, cache, events);
+  compute::ExecutionService execution_service;
+  ComputeService compute(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
 
   ComputeService::Request full_request;
   full_request.node_id = 2;
@@ -3530,13 +3912,18 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-hp-parity");
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
-  Kernel::SchedulerConfig scheduler_config;
-  scheduler_config.worker_count = 2;
-  kernel.set_scheduler_config(scheduler_config);
+  Kernel::ExecutionConfig execution_config;
+  execution_config.worker_count = 2;
+  kernel.set_execution_config(execution_config);
   InteractionService interaction(kernel);
   constexpr char kGraphName[] = "split_hp_parity";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
                   .has_value());
+  const auto service_route =
+      testing::KernelTestAccess::runtime(kernel, kGraphName)
+          .execution_route(ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(service_route.execution_type, "cpu");
+  EXPECT_GT(service_route.generation, 0U);
 
   GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
   Node source = make_node(1, "split_plan", "source");
@@ -3561,7 +3948,7 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   const uint64_t sequential_hp_version = graph.node(2).hp_version;
   EXPECT_GT(sequential_hp_version, 0u);
 
-  testing::KernelTestAccess::clear_scheduler_trace(kernel, kGraphName);
+  testing::KernelTestAccess::clear_execution_trace(kernel, kGraphName);
   request.execution.parallel = true;
   auto parallel = interaction.cmd_compute_and_get_image(request);
   ASSERT_TRUE(parallel.has_value());
@@ -3573,12 +3960,12 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   EXPECT_GT(parallel_summary.task_count, 0u);
   EXPECT_GT(parallel_summary.tile_task_count, 0u);
   EXPECT_LE(parallel_summary.tile_task_count, parallel_summary.task_count);
-  const auto scheduler_events =
-      testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
-  EXPECT_TRUE(std::any_of(scheduler_events.events.begin(),
-                          scheduler_events.events.end(), [](const auto& event) {
+  const auto execution_events =
+      testing::KernelTestAccess::execution_trace(kernel, kGraphName);
+  EXPECT_TRUE(std::any_of(execution_events.events.begin(),
+                          execution_events.events.end(), [](const auto& event) {
                             return event.action ==
-                                   GraphRuntime::SchedulerEvent::EXECUTE_TILE;
+                                   GraphRuntime::ExecutionEvent::EXECUTE_TILE;
                           }));
   EXPECT_GT(graph.node(2).hp_version, sequential_hp_version);
   const cv::Mat sequential_matrix = toCvMat(*sequential);
@@ -3591,14 +3978,14 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
 }
 
 TEST(KernelComputeRuntimeSplit,
-     AsyncHpThenInlineRtDirtyExposesFullEventChainAndState) {
+     AsyncHpThenParallelRtDirtyUsesSharedServiceAndExposesState) {
   register_split_ops();
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-async-inline-dirty");
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
-  Kernel::SchedulerConfig scheduler_config;
-  scheduler_config.worker_count = 2;
-  kernel.set_scheduler_config(scheduler_config);
+  Kernel::ExecutionConfig execution_config;
+  execution_config.worker_count = 2;
+  kernel.set_execution_config(execution_config);
   InteractionService interaction(kernel);
   constexpr char kGraphName[] = "split_async_inline_dirty";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
@@ -3638,7 +4025,7 @@ TEST(KernelComputeRuntimeSplit,
 
   Kernel::ComputeRequest rt_request = hp_request;
   rt_request.cache.force_recache = false;
-  rt_request.execution.parallel = false;
+  rt_request.execution.parallel = true;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
   rt_request.dirty_roi = (PixelRect{8, 8, 16, 16});
   auto rt_image = interaction.cmd_compute_and_get_image(rt_request);
@@ -3651,28 +4038,23 @@ TEST(KernelComputeRuntimeSplit,
   ASSERT_TRUE(rt_events.has_value());
   EXPECT_TRUE(contains_event_sources(
       rt_events->events,
-      {"intent_coordinator_decision_inline", "intent_coordinator_inline_rt",
-       "rt_update", "intent_coordinator_inline_hp", "hp_update"}));
+      {"intent_coordinator_decision_concurrent",
+       "intent_coordinator_concurrent_rt_start",
+       "intent_coordinator_concurrent_hp_start", "rt_update", "hp_update"}));
   std::vector<std::string> event_sources;
   event_sources.reserve(rt_events->events.size());
   std::transform(rt_events->events.begin(), rt_events->events.end(),
                  std::back_inserter(event_sources),
                  [](const auto& event) { return event.source; });
-  const auto inline_rt = std::find(event_sources.begin(), event_sources.end(),
-                                   "intent_coordinator_inline_rt");
-  const auto rt_update =
-      std::find(event_sources.begin(), event_sources.end(), "rt_update");
-  const auto inline_hp = std::find(event_sources.begin(), event_sources.end(),
-                                   "intent_coordinator_inline_hp");
-  const auto hp_update =
-      std::find(event_sources.begin(), event_sources.end(), "hp_update");
-  ASSERT_NE(inline_rt, event_sources.end());
-  ASSERT_NE(rt_update, event_sources.end());
-  ASSERT_NE(inline_hp, event_sources.end());
-  ASSERT_NE(hp_update, event_sources.end());
-  EXPECT_LT(inline_rt, rt_update);
-  EXPECT_LT(rt_update, inline_hp);
-  EXPECT_LT(inline_hp, hp_update);
+  const auto concurrent_rt_start =
+      std::find(event_sources.begin(), event_sources.end(),
+                "intent_coordinator_concurrent_rt_start");
+  const auto concurrent_hp_start =
+      std::find(event_sources.begin(), event_sources.end(),
+                "intent_coordinator_concurrent_hp_start");
+  ASSERT_NE(concurrent_rt_start, event_sources.end());
+  ASSERT_NE(concurrent_hp_start, event_sources.end());
+  EXPECT_LT(concurrent_rt_start, concurrent_hp_start);
 
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
   EXPECT_GT(graph.node(2).hp_version, 0);
@@ -3696,9 +4078,9 @@ TEST(KernelComputeRuntimeSplit,
   ScopedTestDirectory root(std::filesystem::temp_directory_path() /
                            "photospider-split-parallel-error");
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
-  Kernel::SchedulerConfig scheduler_config;
-  scheduler_config.worker_count = 2;
-  kernel.set_scheduler_config(scheduler_config);
+  Kernel::ExecutionConfig execution_config;
+  execution_config.worker_count = 2;
+  kernel.set_execution_config(execution_config);
   InteractionService interaction(kernel);
   constexpr char kGraphName[] = "split_parallel_error";
   ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
@@ -3726,12 +4108,12 @@ TEST(KernelComputeRuntimeSplit,
   const auto error = interaction.cmd_last_error(kGraphName);
   ASSERT_TRUE(error.has_value());
   EXPECT_NE(error->message.find(kOpFailureMessage), std::string::npos);
-  const auto scheduler_events =
-      testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
+  const auto execution_events =
+      testing::KernelTestAccess::execution_trace(kernel, kGraphName);
   EXPECT_TRUE(std::any_of(
-      scheduler_events.events.begin(), scheduler_events.events.end(),
+      execution_events.events.begin(), execution_events.events.end(),
       [](const auto& event) {
-        return event.action == GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION;
+        return event.action == GraphRuntime::ExecutionEvent::RETHROW_EXCEPTION;
       }));
 }
 

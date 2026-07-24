@@ -2,6 +2,7 @@
  * @file kernel_dirty_roi_facade.cpp
  * @brief Implements Kernel ROI projection and dirty-source lifecycle facades.
  */
+#include <memory>
 #include <string>
 
 #include "runtime/kernel.hpp"
@@ -85,9 +86,15 @@ Kernel::begin_dirty_source_control(const std::string& name, int node_id,
   return with_graph_state_last_error(
       name, "Dirty source begin failed: ",
       [this, node_id, domain, source_roi](GraphModel& graph) {
+        const GraphRevision prepared = graph.revision().next();
+        std::unique_ptr<GraphModel> staged = graph.clone_for_compute();
         compute::DirtyControlLane lane(traversal_service_,
                                        roi_propagation_service_);
-        return lane.begin_dirty_source(graph, node_id, domain, source_roi);
+        compute::DirtyControlLaneResult result =
+            lane.begin_dirty_source(*staged, node_id, domain, source_roi);
+        graph.publish_compute_snapshot(*staged);
+        graph.publish_prepared_revision(prepared);
+        return result;
       });
 }
 
@@ -110,9 +117,15 @@ Kernel::update_dirty_source_control(const std::string& name, int node_id,
   return with_graph_state_last_error(
       name, "Dirty source update failed: ",
       [this, node_id, domain, source_roi](GraphModel& graph) {
+        const GraphRevision prepared = graph.revision().next();
+        std::unique_ptr<GraphModel> staged = graph.clone_for_compute();
         compute::DirtyControlLane lane(traversal_service_,
                                        roi_propagation_service_);
-        return lane.update_dirty_source(graph, node_id, domain, source_roi);
+        compute::DirtyControlLaneResult result =
+            lane.update_dirty_source(*staged, node_id, domain, source_roi);
+        graph.publish_compute_snapshot(*staged);
+        graph.publish_prepared_revision(prepared);
+        return result;
       });
 }
 
@@ -132,9 +145,15 @@ std::optional<compute::DirtyControlLaneResult> Kernel::end_dirty_source_control(
   return with_graph_state_last_error(
       name,
       "Dirty source end failed: ", [this, node_id, domain](GraphModel& graph) {
+        const GraphRevision prepared = graph.revision().next();
+        std::unique_ptr<GraphModel> staged = graph.clone_for_compute();
         compute::DirtyControlLane lane(traversal_service_,
                                        roi_propagation_service_);
-        return lane.end_dirty_source(graph, node_id, domain);
+        compute::DirtyControlLaneResult result =
+            lane.end_dirty_source(*staged, node_id, domain);
+        graph.publish_compute_snapshot(*staged);
+        graph.publish_prepared_revision(prepared);
+        return result;
       });
 }
 

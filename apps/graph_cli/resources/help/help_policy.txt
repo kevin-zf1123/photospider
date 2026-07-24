@@ -1,0 +1,28 @@
+policy - Inspect process policy bindings and load policy plugins
+
+SYNOPSIS
+  policy list
+  policy get [interactive|throughput|all]
+  policy set <interactive|throughput> <type>
+  policy set all <interactive-type> <throughput-type>
+  policy scan [directory]
+  policy load <path>
+  policy plugins
+  policy help
+
+DESCRIPTION
+  Policy plugins rank only Host-admissible ready work. They do not own workers,
+  queues, Graph state, resource grants, or execution routes. Built-in policy
+  types are interactive and throughput.
+
+  A successful set advances the binding generation even when the type name is
+  unchanged. `set all` replaces both classes atomically. `scan` uses policy_dirs
+  when no directory is supplied.
+
+CONFIGURATION
+  policy_dirs:
+    - build/policies
+  policy_interactive_type: interactive
+  policy_throughput_type: throughput
+
+  Policy type names use [a-z][a-z0-9_.-]* and contain at most 128 bytes.

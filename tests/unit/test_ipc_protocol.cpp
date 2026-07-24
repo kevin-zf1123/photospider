@@ -43,13 +43,7 @@
 #include "ipc/unix_socket.hpp"
 #include "photospider/host/host.hpp"
 #include "photospider/ipc/client.hpp"
-#include "photospider/scheduler/scheduler.hpp"
-#include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
 #include "support/ipc_host_spy.hpp"
-
-#ifndef PS_TEST_SCHEDULER_PLUGIN_PATH
-#error "PS_TEST_SCHEDULER_PLUGIN_PATH must name the active-build scheduler DSO"
-#endif
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
 #define PS_TEST_OP_PLUGIN_DIR "build/test_plugins/lifecycle"
@@ -57,14 +51,6 @@
 
 namespace ps::ipc::internal {
 namespace {
-
-/** @brief Environment key selecting scheduler fixture lifecycle failures. */
-constexpr const char* kSchedulerFailureEnvironment =  // NOLINT
-    "PS_DESTROY_COUNT_SCHEDULER_FAILURE";             // NOLINT
-
-/** @brief Scheduler type exported by the deterministic close-failure fixture.
- */
-constexpr const char* kDestroyCountSchedulerType = "destroy_count_test";
 
 /** @brief Maximum diagnostic label bytes retained in a socket test directory.
  */
@@ -202,168 +188,6 @@ class ScopedRequestRouterRuntime final {
   RequestRouter& router_;
   /** @brief Owned exact-mode lifecycle descriptor. */
   UniqueFd lock_fd_;
-};
-
-/**
- * @brief Temporarily sets one scheduler-fixture environment value.
- *
- * @throws std::bad_alloc if the key or previous value cannot be copied.
- * @throws std::runtime_error if the platform environment update fails.
- * @note Tests using this helper are process-serial because environment values
- *       are global. Destruction restores the exact prior value best-effort.
- */
-class ScopedEnvironmentValue final {
- public:
-  /**
-   * @brief Saves the current value and installs one fixture selection.
-   * @param name Environment key copied for this guard's lifetime.
-   * @param value New value visible to the scheduler plugin.
-   * @throws std::bad_alloc if owned strings cannot be allocated.
-   * @throws std::runtime_error if the environment cannot be updated.
-   */
-  ScopedEnvironmentValue(const char* name, const std::string& value)
-      : name_(name) {
-    if (const char* previous = std::getenv(name)) {
-      previous_ = std::string(previous);
-    }
-    set(value);
-  }
-
-  /**
-   * @brief Restores the saved environment state without hiding test failures.
-   * @throws Nothing; platform restoration failures are suppressed.
-   */
-  ~ScopedEnvironmentValue() noexcept {
-    try {
-      if (previous_) {
-        set(*previous_);
-      } else {
-        clear();
-      }
-    } catch (...) {
-    }
-  }
-
-  /**
-   * @brief Prevents duplicate restoration ownership.
-   * @param other Guard that remains the sole restoration owner.
-   * @throws Nothing because construction is unavailable.
-   */
-  ScopedEnvironmentValue(const ScopedEnvironmentValue& other) = delete;
-
-  /**
-   * @brief Prevents replacing one active environment guard.
-   * @param other Guard whose environment key remains unchanged.
-   * @return No value because assignment is unavailable.
-   * @throws Nothing because assignment is unavailable.
-   */
-  ScopedEnvironmentValue& operator=(const ScopedEnvironmentValue& other) =
-      delete;
-
- private:
-  /**
-   * @brief Installs a new value for the owned key.
-   * @param value Value to publish process-wide.
-   * @return Nothing.
-   * @throws std::runtime_error if the platform call fails.
-   */
-  void set(const std::string& value) {
-#if defined(_WIN32)
-    if (_putenv_s(name_.c_str(), value.c_str()) != 0) {
-      throw std::runtime_error("_putenv_s failed");
-    }
-#else
-    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
-      throw std::runtime_error("setenv failed");
-    }
-#endif
-  }
-
-  /**
-   * @brief Removes the owned environment key.
-   * @return Nothing.
-   * @throws std::runtime_error if the platform call fails.
-   */
-  void clear() {
-#if defined(_WIN32)
-    if (_putenv_s(name_.c_str(), "") != 0) {
-      throw std::runtime_error("_putenv_s clear failed");
-    }
-#else
-    if (unsetenv(name_.c_str()) != 0) {
-      throw std::runtime_error("unsetenv failed");
-    }
-#endif
-  }
-
-  /** @brief Environment key retained through restoration. */
-  std::string name_;
-  /** @brief Previous value, or nullopt when the key was absent. */
-  std::optional<std::string> previous_;
-};
-
-/**
- * @brief Returns the deterministic scheduler lifecycle fixture library path.
- *
- * @return Platform-specific path below the CMake test scheduler directory.
- * @throws std::bad_alloc if path or filename construction cannot allocate.
- */
-std::filesystem::path destroy_count_scheduler_plugin_path() {
-  return std::filesystem::path(PS_TEST_SCHEDULER_PLUGIN_PATH);
-}
-
-/**
- * @brief Clears process-global scheduler plugins on every router-test exit.
- *
- * @throws Nothing.
- * @note Declare before the Host owner so reverse destruction destroys all graph
- *       runtimes before the loader releases its final plugin mapping.
- */
-class ScopedSchedulerPluginCleanup final {
- public:
-  /**
-   * @brief Clears stale scheduler plugin state before a fixture test begins.
-   * @throws Nothing; cleanup failures are suppressed for assertion safety.
-   */
-  ScopedSchedulerPluginCleanup() noexcept { clear(); }
-
-  /**
-   * @brief Clears scheduler state after later-declared Host destruction.
-   * @throws Nothing; cleanup failures are contained.
-   */
-  ~ScopedSchedulerPluginCleanup() noexcept { clear(); }
-
- private:
-  /**
-   * @brief Clears plugin mappings and diagnostics behind a no-throw fence.
-   * @return Nothing.
-   * @throws Nothing; scheduler cleanup exceptions are contained.
-   */
-  static void clear() noexcept {
-    try {
-      SchedulerPluginLoader::instance().clear_plugins();
-      SchedulerPluginLoader::instance().clear_errors();
-    } catch (...) {
-    }
-  }
-
- public:
-  /**
-   * @brief Prevents duplicate process-global cleanup ownership.
-   * @param other Guard that retains cleanup responsibility.
-   * @throws Nothing because construction is unavailable.
-   */
-  ScopedSchedulerPluginCleanup(const ScopedSchedulerPluginCleanup& other) =
-      delete;
-
-  /**
-   * @brief Prevents replacing process-global cleanup ownership.
-   * @param other Guard whose cleanup responsibility remains unchanged.
-   * @return No value because assignment is unavailable.
-   * @throws Nothing because assignment is unavailable.
-   */
-  ScopedSchedulerPluginCleanup& operator=(
-      const ScopedSchedulerPluginCleanup& other) = delete;
 };
 
 /**
@@ -1080,19 +904,21 @@ Json valid_host_routed_params(std::string_view method,
  */
 Json valid_compute_submit_params(const std::string& session_id,
                                  std::string result_mode = "status") {
-  return Json{{"session_id", session_id},
-              {"node_id", 37},
-              {"cache", Json{{"precision", "float16"},
-                             {"force_recache", true},
-                             {"disable_disk_cache", true},
-                             {"nosave", true},
-                             {"future_cache_field", "ignored"}}},
-              {"execution", Json{{"parallel", true}, {"quiet", true}}},
-              {"telemetry", Json{{"enable_timing", true}}},
-              {"intent", "real_time_update"},
-              {"dirty_roi", expected_rect(PixelRect{-4, 5, 6, 7})},
-              {"result_mode", std::move(result_mode)},
-              {"future_submit_field", true}};
+  return Json{
+      {"session_id", session_id},
+      {"node_id", 37},
+      {"cache", Json{{"precision", "float16"},
+                     {"force_recache", true},
+                     {"disable_disk_cache", true},
+                     {"nosave", true},
+                     {"future_cache_field", "ignored"}}},
+      {"execution",
+       Json{{"parallel", true}, {"quiet", true}, {"maximum_parallelism", 4}}},
+      {"telemetry", Json{{"enable_timing", true}}},
+      {"intent", "real_time_update"},
+      {"dirty_roi", expected_rect(PixelRect{-4, 5, 6, 7})},
+      {"result_mode", std::move(result_mode)},
+      {"future_submit_field", true}};
 }
 
 /**
@@ -1342,35 +1168,33 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
-       SchedulerGlobalControlRoutesExactHostValuesWithoutSessionIdentity) {
-  host_.set_scheduler_description("deterministic scheduler");
-  Json response = route("scheduler.description",
-                        Json{{"type", "serial_debug"},
-                             {"session_id", "ignored-global-forward-field"},
-                             {"future", true}});
+       PolicyAndExecutionGlobalRoutesPreserveExactHostValues) {
+  host_.set_policy_description("deterministic policy");
+  Json response = route("policy.description",
+                        Json{{"type", "fixture_policy"}, {"future", true}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"],
-            (Json{{"type", "serial_debug"},
-                  {"description", "deterministic scheduler"}}));
+            (Json{{"type", "fixture_policy"},
+                  {"description", "deterministic policy"}}));
   ASSERT_EQ(host_.invocations().size(), 1U);
-  EXPECT_EQ(host_.invocations()[0].method, "scheduler.description");
-  EXPECT_EQ(host_.invocations()[0].text, "serial_debug");
+  EXPECT_EQ(host_.invocations()[0].method, "policy.description");
+  EXPECT_EQ(host_.invocations()[0].text, "fixture_policy");
   EXPECT_TRUE(host_.invocations()[0].session.value.empty());
 
   host_.reset_invocations();
-  host_.set_scheduler_scan_count(7);
-  response = route(
-      "scheduler.scan",
-      Json{{"directories", Json::array({"relative/schedulers", "/tmp/*"})},
-           {"future", "ignored"}});
+  host_.set_policy_scan_count(7);
+  response =
+      route("policy.scan",
+            Json{{"directories", Json::array({"relative/policies", "/tmp/*"})},
+                 {"future", "ignored"}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"], (Json{{"loaded", 7}}));
   ASSERT_EQ(host_.invocations().size(), 1U);
   EXPECT_EQ(host_.invocations()[0].texts,
-            (std::vector<std::string>{"relative/schedulers", "/tmp/*"}));
+            (std::vector<std::string>{"relative/policies", "/tmp/*"}));
 
   host_.reset_invocations();
-  response = route("scheduler.load",
+  response = route("policy.load",
                    Json{{"path", "relative/plugin.dylib"}, {"future", 1}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"], Json::object());
@@ -1378,20 +1202,36 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(host_.invocations()[0].text, "relative/plugin.dylib");
 
   host_.reset_invocations();
-  response = route("scheduler.configure_defaults",
-                   Json{{"hp_type", "cpu_work_stealing"},
-                        {"rt_type", "serial_debug"},
-                        {"worker_count", 3U},
+  response = route("policy.configure_defaults",
+                   Json{{"interactive_type", "interactive"},
+                        {"throughput_type", "throughput"},
                         {"future", Json::object()}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"], Json::object());
   ASSERT_EQ(host_.invocations().size(), 1U);
-  EXPECT_EQ(host_.invocations()[0].text, "cpu_work_stealing\nserial_debug");
+  EXPECT_EQ(host_.invocations()[0].text, "interactive\nthroughput");
+
+  host_.reset_invocations();
+  host_.set_execution_description("private CPU route");
+  response = route("execution.description", Json{{"type", "cpu"}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"],
+            (Json{{"type", "cpu"}, {"description", "private CPU route"}}));
+  EXPECT_EQ(host_.call_count("execution.description"), 1U);
+
+  host_.reset_invocations();
+  response =
+      route("execution.configure_defaults", Json{{"hp_type", "cpu"},
+                                                 {"rt_type", "serial_debug"},
+                                                 {"worker_count", 3U}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].text, "cpu\nserial_debug");
   EXPECT_EQ(host_.invocations()[0].worker_count, 3U);
 }
 
 /**
- * @brief Proves scheduler worker limits are enforced before Host mutation.
+ * @brief Proves execution worker limits are enforced before Host mutation.
  * @return Nothing.
  * @throws std::bad_alloc If request, response, or spy storage cannot allocate.
  * @throws GoogleTest assertion failures when exact routing or rejection
@@ -1401,106 +1241,142 @@ TEST_F(HostRoutedGraphStateProtocolTest,
  * the test observes both pre-Host validation and unchanged prior state.
  */
 TEST_F(HostRoutedGraphStateProtocolTest,
-       SchedulerDefaultsBoundWorkerCountBeforeHostAccess) {
-  for (const unsigned int worker_count : {0U, kSchedulerWorkerRequestMax}) {
+       ExecutionDefaultsBoundWorkerCountBeforeHostAccess) {
+  for (const unsigned int worker_count : {0U, kExecutionWorkerRequestMax}) {
     host_.reset_invocations();
-    const Json accepted = route("scheduler.configure_defaults",
-                                Json{{"hp_type", "cpu_work_stealing"},
+    const Json accepted = route("execution.configure_defaults",
+                                Json{{"hp_type", "cpu"},
                                      {"rt_type", "serial_debug"},
                                      {"worker_count", worker_count}});
     ASSERT_TRUE(accepted.contains("result")) << accepted.dump();
     EXPECT_EQ(accepted["result"], Json::object());
-    ASSERT_EQ(host_.call_count("scheduler.configure_defaults"), 1U);
+    ASSERT_EQ(host_.call_count("execution.configure_defaults"), 1U);
     ASSERT_EQ(host_.invocations().size(), 1U);
     EXPECT_EQ(host_.invocations().front().worker_count, worker_count);
   }
 
   const Json rejected =
-      route("scheduler.configure_defaults",
-            Json{{"hp_type", "cpu_work_stealing"},
+      route("execution.configure_defaults",
+            Json{{"hp_type", "cpu"},
                  {"rt_type", "serial_debug"},
-                 {"worker_count", kSchedulerWorkerRequestMax + 1U}});
+                 {"worker_count", kExecutionWorkerRequestMax + 1U}});
   ASSERT_TRUE(rejected.contains("error")) << rejected.dump();
   EXPECT_EQ(rejected["error"]["domain"], "protocol");
   EXPECT_EQ(rejected["error"]["code"], kInvalidParamsCode);
   EXPECT_EQ(rejected["error"]["name"], "invalid_params");
-  ASSERT_EQ(host_.call_count("scheduler.configure_defaults"), 1U);
+  ASSERT_EQ(host_.call_count("execution.configure_defaults"), 1U);
   ASSERT_EQ(host_.invocations().size(), 1U);
   EXPECT_EQ(host_.invocations().front().worker_count,
-            kSchedulerWorkerRequestMax);
+            kExecutionWorkerRequestMax);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
-       SchedulerSessionRoutesPreserveOpaqueAdmissionAndCopiedValues) {
-  SchedulerInfoSnapshot info;
-  info.intent = ComputeIntent::RealTimeUpdate;
-  info.scheduler_name = "destroy_count_test";
-  info.stats = "workers=3;running=true";
-  host_.set_scheduler_info(info);
+       PolicyAndExecutionInfoRoutesPreserveScopeAndCopiedValues) {
+  PolicyInfoSnapshot policy_info;
+  policy_info.policy_class = PolicyClass::Throughput;
+  policy_info.policy_type = "fixture_policy";
+  policy_info.binding_generation = 9;
+  policy_info.fault = PolicyFaultSnapshot{PolicyFaultReason::CallbackStatus,
+                                          std::uint32_t{4}, "fixture fault"};
+  host_.set_policy_info(policy_info);
 
-  Json response = route("scheduler.info", Json{{"session_id", session_id_},
-                                               {"intent", "real_time_update"},
-                                               {"future", true}});
+  Json response =
+      route("policy.info", Json{{"policy_class", "throughput"},
+                                {"session_id", "ignored-global-field"},
+                                {"future", true}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"],
+            (Json{{"policy_class", "throughput"},
+                  {"policy_type", "fixture_policy"},
+                  {"binding_generation", 9},
+                  {"fault", Json{{"reason", "callback_status"},
+                                 {"callback_status", 4},
+                                 {"message", "fixture fault"}}}}));
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].method, "policy.info");
+  EXPECT_EQ(host_.invocations()[0].policy_class, PolicyClass::Throughput);
+  EXPECT_TRUE(host_.invocations()[0].session.value.empty());
+
+  host_.reset_invocations();
+  response = route("policy.replace", Json{{"policy_class", "interactive"},
+                                          {"type", "fixture_policy"},
+                                          {"future", Json::array()}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], Json::object());
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].method, "policy.replace");
+  EXPECT_EQ(host_.invocations()[0].policy_class, PolicyClass::Interactive);
+  EXPECT_EQ(host_.invocations()[0].text, "fixture_policy");
+
+  host_.reset_invocations();
+  ExecutionInfoSnapshot execution_info;
+  execution_info.intent = ComputeIntent::RealTimeUpdate;
+  execution_info.execution_type = "gpu_pipeline";
+  execution_info.stats = "workers=3;running=true";
+  host_.set_execution_info(execution_info);
+  response = route("execution.info", Json{{"session_id", session_id_},
+                                          {"intent", "real_time_update"},
+                                          {"future", true}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"], (Json{{"session_id", session_id_},
                                       {"intent", "real_time_update"},
-                                      {"scheduler_name", "destroy_count_test"},
+                                      {"execution_type", "gpu_pipeline"},
                                       {"stats", "workers=3;running=true"}}));
   ASSERT_EQ(host_.invocations().size(), 1U);
-  EXPECT_EQ(host_.invocations()[0].method, "scheduler.info");
+  EXPECT_EQ(host_.invocations()[0].method, "execution.info");
   EXPECT_EQ(host_.invocations()[0].session.value, "ipc-host-spy-session");
   EXPECT_EQ(host_.invocations()[0].intent, ComputeIntent::RealTimeUpdate);
 
   host_.reset_invocations();
   response =
-      route("scheduler.replace", Json{{"session_id", session_id_},
+      route("execution.replace", Json{{"session_id", session_id_},
                                       {"intent", "global_high_precision"},
-                                      {"type", "serial_debug"},
-                                      {"future", Json::array()}});
+                                      {"type", "serial_debug"}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
-  EXPECT_EQ(response["result"], Json::object());
   ASSERT_EQ(host_.invocations().size(), 1U);
-  EXPECT_EQ(host_.invocations()[0].method, "scheduler.replace");
+  EXPECT_EQ(host_.invocations()[0].method, "execution.replace");
   EXPECT_EQ(host_.invocations()[0].session.value, "ipc-host-spy-session");
   EXPECT_EQ(host_.invocations()[0].intent, ComputeIntent::GlobalHighPrecision);
   EXPECT_EQ(host_.invocations()[0].text, "serial_debug");
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
-       SchedulerRoutesRejectMalformedKnownValuesBeforeHostAccess) {
+       PolicyAndExecutionRoutesRejectMalformedValuesBeforeHostAccess) {
   std::vector<std::pair<std::string, Json>> malformed = {
-      {"scheduler.description", Json::object()},
-      {"scheduler.description", Json{{"type", ""}}},
-      {"scheduler.description",
-       Json{{"type", std::string(kShortTextMaxBytes + 1, 't')}}},
-      {"scheduler.scan", Json{{"directories", "not-an-array"}}},
-      {"scheduler.scan", Json{{"directories", Json::array({""})}}},
-      {"scheduler.load", Json{{"path", std::string("bad\0path", 8)}}},
-      {"scheduler.configure_defaults", Json{{"hp_type", "cpu_work_stealing"},
+      {"policy.description", Json::object()},
+      {"policy.description", Json{{"type", "Uppercase"}}},
+      {"policy.description",
+       Json{{"type", std::string(kPolicyTypeMaxBytes + 1, 't')}}},
+      {"policy.scan", Json{{"directories", "not-an-array"}}},
+      {"policy.scan", Json{{"directories", Json::array({""})}}},
+      {"policy.load", Json{{"path", std::string("bad\0path", 8)}}},
+      {"policy.configure_defaults",
+       Json{{"interactive_type", "interactive"}, {"throughput_type", "Bad"}}},
+      {"policy.info", Json{{"policy_class", "future_class"}}},
+      {"policy.replace", Json{{"policy_class", "interactive"}, {"type", ""}}},
+      {"execution.description", Json{{"type", "future_route"}}},
+      {"execution.configure_defaults", Json{{"hp_type", "cpu"},
                                             {"rt_type", "serial_debug"},
                                             {"worker_count", -1}}},
-      {"scheduler.configure_defaults",
-       Json{{"hp_type", "cpu_work_stealing"},
-            {"rt_type", "serial_debug"},
-            {"worker_count", static_cast<std::uint64_t>(
-                                 std::numeric_limits<unsigned int>::max()) +
-                                 1U}}},
-      {"scheduler.info",
+      {"execution.configure_defaults", Json{{"hp_type", "future_route"},
+                                            {"rt_type", "serial_debug"},
+                                            {"worker_count", 1}}},
+      {"execution.info",
        Json{{"session_id", session_id_}, {"intent", "future_intent"}}},
-      {"scheduler.replace", Json{{"session_id", session_id_},
+      {"execution.replace", Json{{"session_id", session_id_},
                                  {"intent", "real_time_update"},
-                                 {"type", ""}}},
+                                 {"type", "future_route"}}},
   };
   Json too_many_directories = Json::array();
   for (std::size_t index = 0; index < kPathArrayMaxEntries + 1; ++index) {
-    too_many_directories.push_back("scheduler-dir");
+    too_many_directories.push_back("policy-dir");
   }
   malformed.push_back(
-      {"scheduler.scan", Json{{"directories", too_many_directories}}});
+      {"policy.scan", Json{{"directories", too_many_directories}}});
 
   for (std::size_t index = 0; index < malformed.size(); ++index) {
     const Json response = route(malformed[index].first, malformed[index].second,
-                                "malformed-scheduler-" + std::to_string(index));
+                                "malformed-policy-" + std::to_string(index));
     ASSERT_TRUE(response.contains("error")) << response.dump();
     EXPECT_EQ(response["error"]["domain"], "protocol");
     EXPECT_EQ(response["error"]["name"], "invalid_params");
@@ -1512,14 +1388,14 @@ TEST_F(HostRoutedGraphStateProtocolTest,
     unknown_session.front() = 'b';
   }
   const Json invalid_before_session =
-      route("scheduler.replace", Json{{"session_id", unknown_session},
+      route("execution.replace", Json{{"session_id", unknown_session},
                                       {"intent", "future_intent"},
                                       {"type", "serial_debug"}});
   EXPECT_EQ(invalid_before_session["error"]["domain"], "protocol");
   EXPECT_TRUE(host_.invocations().empty());
 
   const Json unknown = route(
-      "scheduler.info",
+      "execution.info",
       Json{{"session_id", unknown_session}, {"intent", "real_time_update"}});
   EXPECT_EQ(unknown["error"]["domain"], "graph");
   EXPECT_EQ(unknown["error"]["name"], "not_found");
@@ -1527,44 +1403,55 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
-       SchedulerRoutesPreserveHostFailuresAndRejectMalformedCopiedValues) {
-  host_.set_status("scheduler.load", host_routed_graph_failure());
-  Json response =
-      route("scheduler.load", Json{{"path", "failed-plugin.dylib"}});
+       PolicyAndExecutionRoutesRejectMalformedCopiedHostValues) {
+  host_.set_status("policy.load", host_routed_graph_failure());
+  Json response = route("policy.load", Json{{"path", "failed-plugin.dylib"}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "graph");
   EXPECT_EQ(response["error"]["name"], "io");
-  EXPECT_EQ(host_.call_count("scheduler.load"), 1U);
+  EXPECT_EQ(host_.call_count("policy.load"), 1U);
 
   host_.reset_invocations();
-  host_.set_status("scheduler.load", OperationStatus{});
-  host_.set_scheduler_description(std::string(kPathTextMaxBytes + 1, 'd'));
-  response = route("scheduler.description", Json{{"type", "serial_debug"}});
+  host_.set_status("policy.load", OperationStatus{});
+  host_.set_policy_description(std::string(kPathTextMaxBytes + 1, 'd'));
+  response = route("policy.description", Json{{"type", "fixture_policy"}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "protocol");
   EXPECT_EQ(response["error"]["name"], "response_too_large");
-  EXPECT_EQ(host_.call_count("scheduler.description"), 1U);
+  EXPECT_EQ(host_.call_count("policy.description"), 1U);
 
   host_.reset_invocations();
-  host_.set_scheduler_description(std::string("invalid\xc3\x28", 9));
-  response = route("scheduler.description", Json{{"type", "serial_debug"}});
+  host_.set_policy_description(std::string("invalid\xc3\x28", 9));
+  response = route("policy.description", Json{{"type", "fixture_policy"}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.description"), 1U);
+  EXPECT_EQ(host_.call_count("policy.description"), 1U);
 
   host_.reset_invocations();
-  SchedulerInfoSnapshot mismatched;
+  PolicyInfoSnapshot invalid_policy;
+  invalid_policy.policy_class = PolicyClass::Interactive;
+  invalid_policy.policy_type = "Bad";
+  invalid_policy.binding_generation = 1;
+  host_.set_policy_info(invalid_policy);
+  response = route("policy.info", Json{{"policy_class", "interactive"}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("policy.info"), 1U);
+
+  host_.reset_invocations();
+  ExecutionInfoSnapshot mismatched;
   mismatched.intent = ComputeIntent::GlobalHighPrecision;
-  mismatched.scheduler_name = "serial_debug";
+  mismatched.execution_type = "serial_debug";
   mismatched.stats = "idle";
-  host_.set_scheduler_info(mismatched);
-  response = route("scheduler.info", Json{{"session_id", session_id_},
+  host_.set_execution_info(mismatched);
+  response = route("execution.info", Json{{"session_id", session_id_},
                                           {"intent", "real_time_update"}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.info"), 1U);
+  EXPECT_EQ(host_.call_count("execution.info"), 1U);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -1755,6 +1642,8 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_TRUE(request.cache.nosave);
   EXPECT_TRUE(request.execution.parallel);
   EXPECT_TRUE(request.execution.quiet);
+  ASSERT_TRUE(request.execution.maximum_parallelism.has_value());
+  EXPECT_EQ(*request.execution.maximum_parallelism, 4U);
   EXPECT_TRUE(request.telemetry.enable_timing);
   ASSERT_TRUE(request.intent.has_value());
   EXPECT_EQ(*request.intent, ComputeIntent::RealTimeUpdate);
@@ -1823,6 +1712,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
     EXPECT_FALSE(request.cache.nosave);
     EXPECT_FALSE(request.execution.parallel);
     EXPECT_FALSE(request.execution.quiet);
+    EXPECT_FALSE(request.execution.maximum_parallelism.has_value());
     EXPECT_FALSE(request.telemetry.enable_timing);
     EXPECT_FALSE(request.intent.has_value());
     EXPECT_FALSE(request.dirty_roi.has_value());
@@ -1871,6 +1761,19 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   Json execution_flag = valid;
   execution_flag["execution"]["parallel"] = "true";
   malformed.emplace_back("execution flag", std::move(execution_flag));
+  Json zero_parallelism = valid;
+  zero_parallelism["execution"]["maximum_parallelism"] = 0;
+  malformed.emplace_back("zero maximum parallelism",
+                         std::move(zero_parallelism));
+  Json wide_parallelism = valid;
+  wide_parallelism["execution"]["maximum_parallelism"] =
+      std::uint64_t{4294967296ULL};
+  malformed.emplace_back("wide maximum parallelism",
+                         std::move(wide_parallelism));
+  Json fractional_parallelism = valid;
+  fractional_parallelism["execution"]["maximum_parallelism"] = 1.5;
+  malformed.emplace_back("fractional maximum parallelism",
+                         std::move(fractional_parallelism));
   Json telemetry_flag = valid;
   telemetry_flag["telemetry"]["enable_timing"] = nullptr;
   malformed.emplace_back("telemetry flag", std::move(telemetry_flag));
@@ -1898,6 +1801,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(host_.call_count("compute.submit"), 0U);
 
   Json nullable = valid_compute_submit_params(unknown_session);
+  nullable["execution"]["maximum_parallelism"] = nullptr;
   nullable["intent"] = nullptr;
   nullable["dirty_roi"] = nullptr;
   const Json admitted = route("compute.submit", std::move(nullable));
@@ -2670,91 +2574,99 @@ TEST_F(StableInspectionPagingProtocolTest,
 }
 
 TEST_F(StableInspectionPagingProtocolTest,
-       SchedulerListsSortFreezeAndBindPagesWithoutSecondHostCall) {
-  host_.set_scheduler_types({"zeta", "alpha", "middle"});
+       PolicyListsSortFreezeAndBindPagesWithoutSecondHostCall) {
+  host_.set_policy_types({"zeta", "alpha", "middle"});
   Json first =
-      route("scheduler.types", Json{{"limit", 2}, {"session_id", "ignored"}});
+      route("policy.types", Json{{"limit", 2}, {"session_id", "ignored"}});
   ASSERT_TRUE(first.contains("result")) << first.dump();
   EXPECT_EQ(first["result"]["types"], Json::array({"alpha", "middle"}));
   ASSERT_TRUE(first["result"]["cursor"].is_string());
   EXPECT_TRUE(first["result"]["has_more"].get<bool>());
   EXPECT_EQ(first["result"]["offset"], 0);
-  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+  EXPECT_EQ(host_.call_count("policy.types"), 1U);
 
-  host_.set_scheduler_types({"changed-after-publication"});
+  host_.set_policy_types({"changed-after-publication"});
   Json response = route(
-      "scheduler.loaded_plugins",
+      "policy.loaded_plugins",
       Json{{"cursor", first["result"]["cursor"]}, {"offset", 2}, {"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["name"], "cursor_not_found");
-  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 0U);
+  EXPECT_EQ(host_.call_count("policy.loaded_plugins"), 0U);
 
   response = route(
-      "scheduler.types",
+      "policy.types",
       Json{{"cursor", first["result"]["cursor"]}, {"offset", 1}, {"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["name"], "cursor_not_found");
-  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+  EXPECT_EQ(host_.call_count("policy.types"), 1U);
 
-  response =
-      route("scheduler.types", Json{{"cursor", first["result"]["cursor"]},
-                                    {"offset", 2},
-                                    {"limit", 2},
-                                    {"future", true}});
+  response = route("policy.types", Json{{"cursor", first["result"]["cursor"]},
+                                        {"offset", 2},
+                                        {"limit", 2},
+                                        {"future", true}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"]["types"], Json::array({"zeta"}));
   EXPECT_FALSE(response["result"]["has_more"].get<bool>());
   EXPECT_TRUE(response["result"]["cursor"].is_null());
   EXPECT_EQ(response["result"]["offset"], 2);
-  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+  EXPECT_EQ(host_.call_count("policy.types"), 1U);
 
-  host_.set_scheduler_loaded_plugins(
+  host_.set_policy_loaded_plugins(
       {"/plugins/zeta.dylib", "/plugins/alpha.dylib"});
-  response = route("scheduler.loaded_plugins", Json{{"limit", 8}});
+  response = route("policy.loaded_plugins", Json{{"limit", 8}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"]["plugins"],
             Json::array({"/plugins/alpha.dylib", "/plugins/zeta.dylib"}));
   EXPECT_TRUE(response["result"]["cursor"].is_null());
   EXPECT_FALSE(response["result"]["has_more"].get<bool>());
-  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
+  EXPECT_EQ(host_.call_count("policy.loaded_plugins"), 1U);
+
+  host_.reset_invocations();
+  host_.set_execution_types({"serial_debug", "cpu", "gpu_pipeline"});
+  response = route("execution.types", Json{{"limit", 3}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["types"],
+            Json::array({"cpu", "gpu_pipeline", "serial_debug"}));
+  EXPECT_FALSE(response["result"]["has_more"].get<bool>());
+  EXPECT_EQ(host_.call_count("execution.types"), 1U);
 }
 
 TEST_F(StableInspectionPagingProtocolTest,
-       SchedulerListsReserveBeforeHostAndEnforceQuotaExpiryAndSize) {
-  host_.set_scheduler_types({"alpha", "beta"});
-  const Json held = route("scheduler.types", Json{{"limit", 1}});
+       PolicyListsReserveBeforeHostAndEnforceQuotaExpiryAndSize) {
+  host_.set_policy_types({"alpha", "beta"});
+  const Json held = route("policy.types", Json{{"limit", 1}});
   ASSERT_TRUE(held.contains("result")) << held.dump();
   ASSERT_TRUE(held["result"]["cursor"].is_string());
 
-  host_.set_scheduler_loaded_plugins({"/plugins/one.dylib"});
-  Json response = route("scheduler.loaded_plugins", Json{{"limit", 1}});
+  host_.set_policy_loaded_plugins({"/plugins/one.dylib"});
+  Json response = route("policy.loaded_plugins", Json{{"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "capacity_exceeded");
-  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 0U);
+  EXPECT_EQ(host_.call_count("policy.loaded_plugins"), 0U);
 
   clock_.advance(std::chrono::seconds(2));
   response = route(
-      "scheduler.types",
+      "policy.types",
       Json{{"cursor", held["result"]["cursor"]}, {"offset", 1}, {"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["name"], "cursor_not_found");
-  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+  EXPECT_EQ(host_.call_count("policy.types"), 1U);
 
   std::vector<std::string> oversized(
       small_protocol_snapshot_limits().snapshot_entries + 1,
       "/plugins/repeated.dylib");
-  host_.set_scheduler_loaded_plugins(std::move(oversized));
+  host_.set_policy_loaded_plugins(std::move(oversized));
   host_.reset_invocations();
-  response = route("scheduler.loaded_plugins", Json{{"limit", 4}});
+  response = route("policy.loaded_plugins", Json{{"limit", 4}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "protocol");
   EXPECT_EQ(response["error"]["name"], "response_too_large");
-  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
+  EXPECT_EQ(host_.call_count("policy.loaded_plugins"), 1U);
 }
 
 TEST_F(StableInspectionPagingProtocolTest,
-       SchedulerListsRejectMalformedControlsAndReturnedLabelsWithoutRetry) {
+       PolicyListsRejectMalformedControlsAndReturnedLabelsWithoutRetry) {
   const std::vector<Json> malformed = {
       Json{{"limit", 0}},
       Json{{"limit", kGeneralPageMaxEntries + 1}},
@@ -2762,42 +2674,58 @@ TEST_F(StableInspectionPagingProtocolTest,
       Json{{"cursor", "malformed"}, {"offset", 0}, {"limit", 1}},
   };
   for (const Json& params : malformed) {
-    const Json response = route("scheduler.types", params);
+    const Json response = route("policy.types", params);
     ASSERT_TRUE(response.contains("error")) << response.dump();
     EXPECT_EQ(response["error"]["name"], "invalid_params");
   }
-  EXPECT_EQ(host_.call_count("scheduler.types"), 0U);
+  EXPECT_EQ(host_.call_count("policy.types"), 0U);
 
-  host_.set_scheduler_types({""});
-  Json response = route("scheduler.types", Json{{"limit", 1}});
+  host_.set_policy_types({""});
+  Json response = route("policy.types", Json{{"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+  EXPECT_EQ(host_.call_count("policy.types"), 1U);
 
   host_.reset_invocations();
-  host_.set_scheduler_types({std::string(kShortTextMaxBytes + 1, 't')});
-  response = route("scheduler.types", Json{{"limit", 1}});
-  ASSERT_TRUE(response.contains("error")) << response.dump();
-  EXPECT_EQ(response["error"]["domain"], "protocol");
-  EXPECT_EQ(response["error"]["name"], "response_too_large");
-  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
-
-  host_.reset_invocations();
-  host_.set_scheduler_loaded_plugins({std::string("invalid\xc3\x28", 9)});
-  response = route("scheduler.loaded_plugins", Json{{"limit", 1}});
+  host_.set_policy_types({std::string(kPolicyTypeMaxBytes + 1, 't')});
+  response = route("policy.types", Json{{"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
+  EXPECT_EQ(host_.call_count("policy.types"), 1U);
 
   host_.reset_invocations();
-  host_.set_scheduler_loaded_plugins({std::string(kPathTextMaxBytes + 1, 'p')});
-  response = route("scheduler.loaded_plugins", Json{{"limit", 1}});
+  host_.set_policy_types({"duplicate", "duplicate"});
+  response = route("policy.types", Json{{"limit", 2}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("policy.types"), 1U);
+
+  host_.reset_invocations();
+  host_.set_execution_types({"cpu", "unknown"});
+  response = route("execution.types", Json{{"limit", 2}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("execution.types"), 1U);
+
+  host_.reset_invocations();
+  host_.set_policy_loaded_plugins({std::string("invalid\xc3\x28", 9)});
+  response = route("policy.loaded_plugins", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("policy.loaded_plugins"), 1U);
+
+  host_.reset_invocations();
+  host_.set_policy_loaded_plugins({std::string(kPathTextMaxBytes + 1, 'p')});
+  response = route("policy.loaded_plugins", Json{{"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "protocol");
   EXPECT_EQ(response["error"]["name"], "response_too_large");
-  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
+  EXPECT_EQ(host_.call_count("policy.loaded_plugins"), 1U);
 }
 
 TEST(ProtocolOperationPlugins,
@@ -4316,21 +4244,21 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(invocation.session.value, "ipc-host-spy-session");
   EXPECT_EQ(invocation.first_node.value, 2);
 
-  SchedulerTracePage trace_page;
+  ExecutionTracePage trace_page;
   trace_page.events = {
-      SchedulerTraceEventSnapshot{
+      ExecutionTraceEventSnapshot{
           kObservationSequenceExhausted - 2, 31, NodeId{-1}, -1,
-          HostSchedulerTraceAction::RethrowException, 9001},
-      SchedulerTraceEventSnapshot{kObservationSequenceExhausted - 1, 32,
+          HostExecutionTraceAction::RethrowException, 9001},
+      ExecutionTraceEventSnapshot{kObservationSequenceExhausted - 1, 32,
                                   NodeId{9}, 4,
-                                  HostSchedulerTraceAction::ExecuteTile, 9002}};
+                                  HostExecutionTraceAction::ExecuteTile, 9002}};
   trace_page.next_sequence = kObservationSequenceExhausted;
   trace_page.has_more = false;
   trace_page.dropped_count = kObservationSequenceExhausted;
-  host_.set_scheduler_trace_page(trace_page);
+  host_.set_execution_trace_page(trace_page);
   host_.reset_invocations();
 
-  response = route("scheduler.trace",
+  response = route("execution.trace",
                    Json{{"session_id", session_id_},
                         {"after_sequence", kObservationSequenceExhausted - 3},
                         {"limit", 2},
@@ -4351,7 +4279,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(result["next_sequence"], kObservationSequenceExhausted);
   EXPECT_FALSE(result["has_more"].get<bool>());
   EXPECT_EQ(result["dropped_count"], kObservationSequenceExhausted);
-  ASSERT_EQ(host_.call_count("scheduler.trace"), 1u);
+  ASSERT_EQ(host_.call_count("execution.trace"), 1u);
   invocation = host_.invocations().front();
   EXPECT_EQ(invocation.first_node.value, 2);
   EXPECT_EQ(invocation.text, std::to_string(kObservationSequenceExhausted - 3));
@@ -4385,48 +4313,48 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_FALSE(second["result"]["has_more"].get<bool>());
   EXPECT_EQ(second["result"]["dropped_count"], 0);
 
-  SchedulerTracePage first_trace;
-  first_trace.events = {SchedulerTraceEventSnapshot{
-      10, 1, NodeId{3}, 0, HostSchedulerTraceAction::Execute, 100}};
+  ExecutionTracePage first_trace;
+  first_trace.events = {ExecutionTraceEventSnapshot{
+      10, 1, NodeId{3}, 0, HostExecutionTraceAction::Execute, 100}};
   first_trace.next_sequence = 10;
   first_trace.has_more = true;
   first_trace.dropped_count = 9;
-  host_.set_scheduler_trace_page(first_trace);
+  host_.set_execution_trace_page(first_trace);
   Json trace = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 0}, {"limit", 1}});
   ASSERT_TRUE(trace.contains("result")) << trace.dump();
   const Json repeated = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 0}, {"limit", 1}});
   ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
   EXPECT_EQ(repeated["result"], trace["result"]);
 
-  SchedulerTracePage second_trace;
-  second_trace.events = {SchedulerTraceEventSnapshot{
-      11, 2, NodeId{4}, 1, HostSchedulerTraceAction::ExecuteTile, 101}};
+  ExecutionTracePage second_trace;
+  second_trace.events = {ExecutionTraceEventSnapshot{
+      11, 2, NodeId{4}, 1, HostExecutionTraceAction::ExecuteTile, 101}};
   second_trace.next_sequence = 11;
   second_trace.dropped_count = 0;
-  host_.set_scheduler_trace_page(second_trace);
+  host_.set_execution_trace_page(second_trace);
   const Json final = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 10}, {"limit", 1}});
   ASSERT_TRUE(final.contains("result")) << final.dump();
   EXPECT_EQ(final["result"]["events"][0]["sequence"], 11);
   EXPECT_FALSE(final["result"]["has_more"].get<bool>());
 
-  SchedulerTracePage empty_trace;
+  ExecutionTracePage empty_trace;
   empty_trace.next_sequence = 11;
-  host_.set_scheduler_trace_page(empty_trace);
+  host_.set_execution_trace_page(empty_trace);
   const Json empty = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 11}, {"limit", 1}});
   ASSERT_TRUE(empty.contains("result")) << empty.dump();
   EXPECT_TRUE(empty["result"]["events"].empty());
   EXPECT_EQ(empty["result"]["next_sequence"], 11);
   EXPECT_FALSE(empty["result"]["has_more"].get<bool>());
   EXPECT_EQ(host_.call_count("events.drain"), 2u);
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 4u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 4u);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -4470,30 +4398,30 @@ TEST_F(HostRoutedGraphStateProtocolTest,
     if (!cursor.is_null()) {
       params["after_sequence"] = cursor;
     }
-    response = route("scheduler.trace", std::move(params));
+    response = route("execution.trace", std::move(params));
     ASSERT_TRUE(response.contains("error")) << response.dump();
     EXPECT_EQ(response["error"]["name"], "invalid_params");
   }
   for (const Json& limit : std::vector<Json>{
-           Json(0), Json(kSchedulerTraceMaxLimit + 1), Json(-1), Json(1.5)}) {
-    response = route("scheduler.trace", Json{{"session_id", session_id_},
+           Json(0), Json(kExecutionTraceMaxLimit + 1), Json(-1), Json(1.5)}) {
+    response = route("execution.trace", Json{{"session_id", session_id_},
                                              {"after_sequence", 0},
                                              {"limit", limit}});
     ASSERT_TRUE(response.contains("error")) << response.dump();
     EXPECT_EQ(response["error"]["name"], "invalid_params");
   }
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 0u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 0u);
 
-  SchedulerTracePage terminal;
+  ExecutionTracePage terminal;
   terminal.next_sequence = kObservationSequenceExhausted;
-  host_.set_scheduler_trace_page(terminal);
-  response = route("scheduler.trace",
+  host_.set_execution_trace_page(terminal);
+  response = route("execution.trace",
                    Json{{"session_id", session_id_},
                         {"after_sequence", kObservationSequenceExhausted},
-                        {"limit", kSchedulerTraceMaxLimit}});
+                        {"limit", kExecutionTraceMaxLimit}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"]["next_sequence"], kObservationSequenceExhausted);
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 1u);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -4514,14 +4442,14 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(response["error"]["name"], "io");
   EXPECT_EQ(host_.call_count("events.drain"), 1u);
 
-  host_.set_status("scheduler.trace", host_routed_graph_failure());
+  host_.set_status("execution.trace", host_routed_graph_failure());
   response = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 0}, {"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "graph");
   EXPECT_EQ(response["error"]["name"], "io");
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 1u);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -4550,53 +4478,53 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(response["error"]["name"], "response_too_large");
   EXPECT_EQ(host_.call_count("events.drain"), 1u);
 
-  SchedulerTracePage malformed_trace;
-  malformed_trace.events = {SchedulerTraceEventSnapshot{
-      4, 1, NodeId{1}, 0, static_cast<HostSchedulerTraceAction>(999), 1}};
+  ExecutionTracePage malformed_trace;
+  malformed_trace.events = {ExecutionTraceEventSnapshot{
+      4, 1, NodeId{1}, 0, static_cast<HostExecutionTraceAction>(999), 1}};
   malformed_trace.next_sequence = 4;
-  host_.set_scheduler_trace_page(malformed_trace);
+  host_.set_execution_trace_page(malformed_trace);
   host_.reset_invocations();
   response = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 1u);
 
-  malformed_trace.events.front().action = HostSchedulerTraceAction::Execute;
+  malformed_trace.events.front().action = HostExecutionTraceAction::Execute;
   malformed_trace.events.front().node = NodeId{-2};
-  host_.set_scheduler_trace_page(malformed_trace);
+  host_.set_execution_trace_page(malformed_trace);
   host_.reset_invocations();
   response = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 1u);
 
   malformed_trace.events.front().node = NodeId{1};
   malformed_trace.events.front().worker_id = -2;
-  host_.set_scheduler_trace_page(malformed_trace);
+  host_.set_execution_trace_page(malformed_trace);
   host_.reset_invocations();
   response = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
   ASSERT_TRUE(response.contains("error")) << response.dump();
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 1u);
 
   malformed_trace.events.front().worker_id = 0;
   malformed_trace.next_sequence = kObservationSequenceExhausted;
-  host_.set_scheduler_trace_page(malformed_trace);
+  host_.set_execution_trace_page(malformed_trace);
   host_.reset_invocations();
   response = route(
-      "scheduler.trace",
+      "execution.trace",
       Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
   EXPECT_EQ(response["error"]["domain"], "daemon");
   EXPECT_EQ(response["error"]["name"], "internal_error");
-  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+  EXPECT_EQ(host_.call_count("execution.trace"), 1u);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -5144,6 +5072,70 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 /**
+ * @brief Proves concurrent clients and shutdown join one daemon close result.
+ *
+ * @throws Nothing when controlled Host entry and router shutdown settle before
+ * the test deadline.
+ * @note The first routed caller crosses the Host boundary. Signal-style
+ * shutdown stops ordinary admission, joins that exact generation, and neither
+ * a discarded response nor a late close can replay `Host::close_graph`.
+ */
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ConcurrentCloseAndShutdownIssueOneHostCallWithoutReplay) {
+  std::mutex gate_mutex;
+  std::condition_variable gate_changed;
+  bool close_entered = false;
+  bool release_close = false;
+  host_.set_call_hook([&](std::string_view method) {
+    if (method != "graph.close") {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    close_entered = true;
+    gate_changed.notify_all();
+    gate_changed.wait(lock, [&] { return release_close; });
+  });
+
+  auto close_future = std::async(std::launch::async, [&] {
+    return route("graph.close", Json{{"session_id", session_id_}},
+                 "discarded-close-response");
+  });
+  ScopedProtocolGateRelease release_guard(gate_mutex, gate_changed,
+                                          release_close);
+  {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    ASSERT_TRUE(gate_changed.wait_for(lock, std::chrono::seconds(2),
+                                      [&] { return close_entered; }));
+  }
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+
+  router_.begin_shutdown();
+  auto shutdown_future =
+      std::async(std::launch::async, [&] { router_.finish_shutdown(); });
+  EXPECT_EQ(shutdown_future.wait_for(std::chrono::milliseconds(25)),
+            std::future_status::timeout);
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+
+  release_guard.release();
+  const Json discarded_response = close_future.get();
+  ASSERT_TRUE(discarded_response.contains("result"))
+      << discarded_response.dump();
+  EXPECT_TRUE(discarded_response["result"]["closed"].get<bool>());
+  ASSERT_EQ(shutdown_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  shutdown_future.get();
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+
+  const Json late =
+      route("graph.close", Json{{"session_id", session_id_}}, "late-close");
+  ASSERT_TRUE(late.contains("error")) << late.dump();
+  EXPECT_EQ(late["error"]["domain"], "graph");
+  EXPECT_EQ(late["error"]["name"], "not_found");
+  EXPECT_EQ(host_.call_count("graph.close"), 1U);
+  host_.set_call_hook({});
+}
+
+/**
  * @brief Verifies one complete internal enum label table transactionally.
  *
  * @tparam Enum Public enum type handled by the overloaded codec.
@@ -5409,12 +5401,12 @@ TEST(ProtocolEnvelope, RejectsDuplicatesAndMalformedRequests) {
   EXPECT_EQ(malformed["error"]["name"], "parse_error");
 
   Json duplicated = parse_response(router.route(
-      R"({"protocol_version":1,"id":"a","id":"b","method":"daemon.ping","params":{}})"));
+      R"({"protocol_version":2,"id":"a","id":"b","method":"daemon.ping","params":{}})"));
   EXPECT_TRUE(duplicated["id"].is_null());
   EXPECT_EQ(duplicated["error"]["name"], "invalid_request");
 
   Json nested_duplicate = parse_response(router.route(
-      R"({"protocol_version":1,"id":"nested","method":"daemon.ping","params":{"value":1,"value":2}})"));
+      R"({"protocol_version":2,"id":"nested","method":"daemon.ping","params":{"value":1,"value":2}})"));
   EXPECT_EQ(nested_duplicate["id"], "nested");
   EXPECT_EQ(nested_duplicate["error"]["name"], "invalid_request");
 }
@@ -5424,20 +5416,20 @@ TEST(ProtocolEnvelope, NegotiatesVersionAndRejectsUnknownMethodAndSession) {
   ASSERT_NE(host, nullptr);
   RequestRouter router(*host, "0.1.0");
   Json unsupported = parse_response(router.route(
-      R"({"protocol_version":2,"id":"v","method":"daemon.ping","params":{}})"));
+      R"({"protocol_version":1,"id":"v","method":"daemon.ping","params":{}})"));
   EXPECT_EQ(unsupported["id"], "v");
   EXPECT_EQ(unsupported["error"]["name"], "unsupported_protocol");
-  EXPECT_EQ(unsupported["error"]["supported_versions"], Json::array({1}));
+  EXPECT_EQ(unsupported["error"]["supported_versions"], Json::array({2}));
 
   Json compute_without_params = parse_response(router.route(
-      R"({"protocol_version":1,"id":"m","method":"compute.submit","params":{}})"));
+      R"({"protocol_version":2,"id":"m","method":"compute.submit","params":{}})"));
   EXPECT_EQ(compute_without_params["error"]["name"], "invalid_params");
   Json unknown = parse_response(router.route(
-      R"({"protocol_version":1,"id":"u","method":"compute.cancel","params":{}})"));
+      R"({"protocol_version":2,"id":"u","method":"compute.cancel","params":{}})"));
   EXPECT_EQ(unknown["error"]["name"], "method_not_found");
 
   Json missing = parse_response(router.route(
-      R"({"protocol_version":1,"id":"s","method":"inspect.graph","params":{"session_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})"));
+      R"({"protocol_version":2,"id":"s","method":"inspect.graph","params":{"session_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})"));
   EXPECT_EQ(missing["error"]["domain"], "graph");
   EXPECT_EQ(missing["error"]["code"], 2);
   EXPECT_EQ(missing["error"]["name"], "not_found");
@@ -5453,8 +5445,8 @@ TEST(ProtocolEnvelope, NegotiatesVersionAndRejectsUnknownMethodAndSession) {
  *       prevents any unadvertised route family from becoming reachable.
  */
 TEST(ProtocolContract,
-     AdvertisesAndRoutesExactlyTheNormativeVersionOneMethods) {
-  static constexpr std::array<std::string_view, 55> kExpectedMethods = {
+     AdvertisesAndRoutesExactlyTheNormativeVersionTwoMethods) {
+  static constexpr std::array<std::string_view, 60> kExpectedMethods = {
       "cache.cache_all_nodes",
       "cache.clear_all",
       "cache.clear_drive",
@@ -5474,6 +5466,12 @@ TEST(ProtocolContract,
       "dirty.end",
       "dirty.update",
       "events.drain",
+      "execution.configure_defaults",
+      "execution.description",
+      "execution.info",
+      "execution.replace",
+      "execution.trace",
+      "execution.types",
       "graph.clear",
       "graph.close",
       "graph.list",
@@ -5501,6 +5499,24 @@ TEST(ProtocolContract,
       "plugins.ops_sources",
       "plugins.seed_builtins",
       "plugins.unload_all",
+      "policy.configure_defaults",
+      "policy.description",
+      "policy.info",
+      "policy.load",
+      "policy.loaded_plugins",
+      "policy.replace",
+      "policy.scan",
+      "policy.types"};
+  static constexpr std::array<std::string_view, 18> kUnadvertisedMethods = {
+      "compute.async",
+      "compute.cancel",
+      "compute.image",
+      "daemon.shutdown",
+      "events.subscribe",
+      "graph.open",
+      "host.call",
+      "inspect.nodes",
+      "plugins.load",
       "scheduler.configure_defaults",
       "scheduler.description",
       "scheduler.info",
@@ -5510,17 +5526,12 @@ TEST(ProtocolContract,
       "scheduler.scan",
       "scheduler.trace",
       "scheduler.types"};
-  static constexpr std::array<std::string_view, 11> kUnadvertisedMethods = {
-      "compute.async",      "compute.cancel",      "compute.image",
-      "daemon.shutdown",    "events.subscribe",    "graph.open",
-      "host.call",          "inspect.nodes",       "plugins.load",
-      "scheduler.defaults", "scheduler.trace_page"};
 
   ::ps::testing::IpcHostSpy host;
   RequestRouter router(host, "contract-test");
   /**
    * @brief Routes one empty-params method through a complete envelope.
-   * @param method Candidate version 1 method or unadvertised control name.
+   * @param method Candidate version 2 method or unadvertised control name.
    * @return Parsed correlated router response owned by the test.
    * @throws std::bad_alloc or std::runtime_error when construction or parsing
    *         fails.
@@ -5568,7 +5579,7 @@ TEST(ProtocolContract,
   }
 }
 
-TEST(ProtocolEnvelope, TreatsEveryNonV1IntegerAsUnsupported) {
+TEST(ProtocolEnvelope, TreatsEveryNonV2IntegerAsUnsupported) {
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
   RequestRouter router(*host, "0.1.0");
@@ -5584,7 +5595,7 @@ TEST(ProtocolEnvelope, TreatsEveryNonV1IntegerAsUnsupported) {
         {"params", Json::object()}}.dump()));
     EXPECT_EQ(response["error"]["domain"], "protocol");
     EXPECT_EQ(response["error"]["name"], "unsupported_protocol");
-    EXPECT_EQ(response["error"]["supported_versions"], Json::array({1}));
+    EXPECT_EQ(response["error"]["supported_versions"], Json::array({2}));
   }
 }
 
@@ -5651,7 +5662,7 @@ TEST(IntegerCodec, RejectsEveryNonIntegerCategoryTransactionally) {
   EXPECT_EQ(unsigned_output, std::numeric_limits<std::uint32_t>::max());
 }
 
-TEST(OpaqueIdCodec, ValidatesOneExactSharedVersionOneShape) {
+TEST(OpaqueIdCodec, ValidatesOneExactSharedVersionTwoShape) {
   const std::vector<std::pair<std::string, bool>> cases = {
       {"0123456789abcdef0123456789abcdef", true},
       {std::string(32, '0'), true},
@@ -5783,7 +5794,7 @@ TEST(StringCodec, EnforcesUtf8ByteBoundsAndTransactionalArrays) {
 TEST(PageCodec, ValidatesLimitsAndOverflowWithoutPublishingPartialValues) {
   const std::array<std::pair<std::size_t, std::size_t>, 2> ranges = {{
       {kComputeEventDrainMinLimit, kComputeEventDrainMaxLimit},
-      {kSchedulerTraceMinLimit, kSchedulerTraceMaxLimit},
+      {kExecutionTraceMinLimit, kExecutionTraceMaxLimit},
   }};
   for (const auto& range : ranges) {
     std::size_t output = 17;
@@ -5927,7 +5938,7 @@ TEST(PixelRectCodec, PreservesEveryIntBoundaryAndIgnoresUnknownFields) {
   }
 }
 
-TEST(EnumCodec, RoundTripsEveryDefinedVersionOneLabel) {
+TEST(EnumCodec, RoundTripsEveryDefinedVersionTwoLabel) {
   expect_enum_codec(std::array<std::pair<ComputeIntent, const char*>, 2>{{
       {ComputeIntent::GlobalHighPrecision, "global_high_precision"},
       {ComputeIntent::RealTimeUpdate, "real_time_update"},
@@ -5955,19 +5966,19 @@ TEST(EnumCodec, RoundTripsEveryDefinedVersionOneLabel) {
           {HostDependencyTreeScope::EndingNodes, "ending_nodes"},
           {HostDependencyTreeScope::StartNode, "start_node"},
       }});
-  expect_enum_codec(std::array<std::pair<HostSchedulerTraceAction, const char*>,
+  expect_enum_codec(std::array<std::pair<HostExecutionTraceAction, const char*>,
                                9>{{
-      {HostSchedulerTraceAction::AssignInitial, "assign_initial"},
-      {HostSchedulerTraceAction::Execute, "execute"},
-      {HostSchedulerTraceAction::ExecuteTile, "execute_tile"},
-      {HostSchedulerTraceAction::ExecuteDirtySource, "execute_dirty_source"},
-      {HostSchedulerTraceAction::ExecuteDirtyDownstreamNode,
+      {HostExecutionTraceAction::AssignInitial, "assign_initial"},
+      {HostExecutionTraceAction::Execute, "execute"},
+      {HostExecutionTraceAction::ExecuteTile, "execute_tile"},
+      {HostExecutionTraceAction::ExecuteDirtySource, "execute_dirty_source"},
+      {HostExecutionTraceAction::ExecuteDirtyDownstreamNode,
        "execute_dirty_downstream_node"},
-      {HostSchedulerTraceAction::ExecuteDirtyDownstreamTile,
+      {HostExecutionTraceAction::ExecuteDirtyDownstreamTile,
        "execute_dirty_downstream_tile"},
-      {HostSchedulerTraceAction::SkipStaleGeneration, "skip_stale_generation"},
-      {HostSchedulerTraceAction::RethrowException, "rethrow_exception"},
-      {HostSchedulerTraceAction::Unknown, "unknown"},
+      {HostExecutionTraceAction::SkipStaleGeneration, "skip_stale_generation"},
+      {HostExecutionTraceAction::RethrowException, "rethrow_exception"},
+      {HostExecutionTraceAction::Unknown, "unknown"},
   }});
   expect_enum_codec(std::array<std::pair<DataType, const char*>, 6>{{
       {DataType::UINT8, "uint8"},
@@ -5992,7 +6003,7 @@ TEST(ProtocolEnvelope, EnforcesRequestAndMethodUtf8ByteBounds) {
 
   const std::string exact_id(kRequestTextMaxBytes, 'i');
   const Json exact_id_response = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", exact_id},
       {"method", "unknown"},
       {"params", Json::object()}}.dump()));
@@ -6000,7 +6011,7 @@ TEST(ProtocolEnvelope, EnforcesRequestAndMethodUtf8ByteBounds) {
   EXPECT_EQ(exact_id_response["error"]["name"], "method_not_found");
 
   const Json long_id_response = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", std::string(kRequestTextMaxBytes + 1, 'i')},
       {"method", "unknown"},
       {"params", Json::object()}}.dump()));
@@ -6008,13 +6019,13 @@ TEST(ProtocolEnvelope, EnforcesRequestAndMethodUtf8ByteBounds) {
   EXPECT_EQ(long_id_response["error"]["name"], "invalid_request");
 
   const Json exact_method_response = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "method-exact"},
       {"method", std::string(kRequestTextMaxBytes, 'm')},
       {"params", Json::object()}}.dump()));
   EXPECT_EQ(exact_method_response["error"]["name"], "method_not_found");
   const Json long_method_response = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "method-long"},
       {"method", std::string(kRequestTextMaxBytes + 1, 'm')},
       {"params", Json::object()}}.dump()));
@@ -6032,7 +6043,7 @@ TEST(ProtocolParams, IgnoresUnknownFieldsButStillValidatesKnownFields) {
        {std::string("daemon.ping"), std::string("daemon.version"),
         std::string("graph.list")}) {
     const Json response = parse_response(router.route(Json{
-        {"protocol_version", 1},
+        {"protocol_version", kProtocolVersion},
         {"id", method},
         {"method", method},
         {"future_envelope", Json{{"nested", true}}},
@@ -6041,7 +6052,7 @@ TEST(ProtocolParams, IgnoresUnknownFieldsButStillValidatesKnownFields) {
     EXPECT_TRUE(response.contains("result")) << response.dump();
   }
   const Json malformed_known = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "known"},
       {"method", "inspect.node"},
       {"params", Json{{"session_id", std::string(32, 'a')},
@@ -6057,7 +6068,7 @@ TEST(ProtocolParams, EnforcesSessionAndFilesystemPathByteBounds) {
   RequestRouter router(*host, "0.1.0");
 
   const Json exact_session = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "session-exact"},
       {"method", "graph.load"},
       {"params", Json{{"session_name", std::string(kShortTextMaxBytes, 's')},
@@ -6067,7 +6078,7 @@ TEST(ProtocolParams, EnforcesSessionAndFilesystemPathByteBounds) {
       << exact_session.dump();
 
   const Json long_session = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "session-long"},
       {"method", "graph.load"},
       {"params",
@@ -6077,7 +6088,7 @@ TEST(ProtocolParams, EnforcesSessionAndFilesystemPathByteBounds) {
 
   const std::string exact_path = "/" + std::string(kPathTextMaxBytes - 1, 'p');
   const Json accepted_path = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "path-exact"},
       {"method", "graph.load"},
       {"params", Json{{"session_name", "path_exact"},
@@ -6087,7 +6098,7 @@ TEST(ProtocolParams, EnforcesSessionAndFilesystemPathByteBounds) {
       << accepted_path.dump();
 
   const Json long_path = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "path-long"},
       {"method", "graph.load"},
       {"params", Json{{"session_name", "path_long"},
@@ -6095,7 +6106,7 @@ TEST(ProtocolParams, EnforcesSessionAndFilesystemPathByteBounds) {
   EXPECT_EQ(long_path["error"]["name"], "invalid_params");
 
   const Json nul_session = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "session-nul"},
       {"method", "graph.load"},
       {"params", Json{{"session_name", std::string("safe\0tail", 9)},
@@ -6113,31 +6124,31 @@ TEST(ProtocolParams, RejectsInvalidValuesWithoutHostMutation) {
   const std::string valid_session_id(32, 'a');
   const std::filesystem::path untouched_root = temp.path() / "untouched";
   const std::vector<Json> requests = {
-      Json{{"protocol_version", 1},
+      Json{{"protocol_version", kProtocolVersion},
            {"id", "unsafe-name"},
            {"method", "graph.load"},
            {"params", Json{{"session_name", "../unsafe"},
                            {"root_dir", untouched_root.string()}}}},
-      Json{{"protocol_version", 1},
+      Json{{"protocol_version", kProtocolVersion},
            {"id", "relative-root"},
            {"method", "graph.load"},
            {"params",
             Json{{"session_name", "safe"}, {"root_dir", "relative/root"}}}},
-      Json{{"protocol_version", 1},
+      Json{{"protocol_version", kProtocolVersion},
            {"id", "negative-node"},
            {"method", "inspect.node"},
            {"params", Json{{"session_id", valid_session_id}, {"node_id", -1}}}},
-      Json{{"protocol_version", 1},
+      Json{{"protocol_version", kProtocolVersion},
            {"id", "wrong-node-type"},
            {"method", "inspect.node"},
            {"params",
             Json{{"session_id", valid_session_id}, {"node_id", "one"}}}},
-      Json{{"protocol_version", 1},
+      Json{{"protocol_version", kProtocolVersion},
            {"id", "overflow-node"},
            {"method", "inspect.node"},
            {"params", Json{{"session_id", valid_session_id},
                            {"node_id", std::uint64_t{4294967296ULL}}}}},
-      Json{{"protocol_version", 1},
+      Json{{"protocol_version", kProtocolVersion},
            {"id", "overflow-tree-node"},
            {"method", "inspect.dependency_tree"},
            {"params", Json{{"session_id", valid_session_id},
@@ -6177,7 +6188,7 @@ TEST(ProtocolGraphLoad, FailedHostLoadReleasesNameForRetry) {
                     {"root_dir", (temp.path() / "sessions").string()},
                     {"yaml_path", yaml_path.string()}};
   const Json first = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "first"},
       {"method", "graph.load"},
       {"params", params}}.dump()));
@@ -6199,7 +6210,7 @@ TEST(ProtocolGraphLoad, FailedHostLoadReleasesNameForRetry) {
               "    height: 4\n";
   }
   const Json second = parse_response(router.route(Json{
-      {"protocol_version", 1},
+      {"protocol_version", kProtocolVersion},
       {"id", "second"},
       {"method", "graph.load"},
       {"params", params}}.dump()));
@@ -6207,101 +6218,6 @@ TEST(ProtocolGraphLoad, FailedHostLoadReleasesNameForRetry) {
   EXPECT_EQ(second["result"]["session_name"], "retry_session");
   router.begin_shutdown();
   router.finish_shutdown();
-}
-
-/**
- * @brief Verifies non-NotFound close failure retains graph and opaque mapping.
- *
- * @throws Nothing when real Host, router, and scheduler fixture behavior holds;
- *         GoogleTest records any mismatch.
- * @note The fixture throws GraphError::Io from scheduler shutdown. The close
- *       boundary must preserve that exact category while the same opaque id is
- *       listed and remains usable until a later successful close removes the
- *       mapping.
- */
-TEST(ProtocolGraphClose, ShutdownFailureRetainsMappingAndAllowsRetry) {
-  ScopedTempDirectory temp("photospider-ipc-close-failure");
-  ScopedSchedulerPluginCleanup scheduler_cleanup;
-  std::unique_ptr<Host> host = create_embedded_host();
-  ASSERT_NE(host, nullptr);
-
-  const std::filesystem::path plugin_path =
-      destroy_count_scheduler_plugin_path();
-  ASSERT_TRUE(std::filesystem::exists(plugin_path))
-      << "scheduler close-failure fixture was not built: " << plugin_path;
-  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
-  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
-
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = kDestroyCountSchedulerType;
-  scheduler_config.rt_type = "serial_debug";
-  const VoidResult configured =
-      host->configure_scheduler_defaults(scheduler_config);
-  ASSERT_TRUE(configured.status.ok) << configured.status.message;
-
-  RequestRouter router(*host, "0.1.0");
-  ScopedRequestRouterRuntime runtime(router, temp);
-  const Json load_response = parse_response(router.route(
-      Json{{"protocol_version", 1},
-           {"id", "load"},
-           {"method", "graph.load"},
-           {"params", Json{{"session_name", "close_failure_retry"},
-                           {"root_dir", (temp.path() / "sessions").string()}}}}
-          .dump()));
-  ASSERT_TRUE(load_response.contains("result")) << load_response.dump();
-  const std::string session_id =
-      load_response["result"]["session_id"].get<std::string>();
-
-  {
-    ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
-                                   "shutdown_graph_io");
-    const Json failed_close = parse_response(router.route(Json{
-        {"protocol_version", 1},
-        {"id", "close-failed"},
-        {"method", "graph.close"},
-        {"params", Json{{"session_id", session_id}}}}.dump()));
-    ASSERT_TRUE(failed_close.contains("error")) << failed_close.dump();
-    EXPECT_EQ(failed_close["error"]["domain"], "graph");
-    EXPECT_EQ(failed_close["error"]["code"],
-              static_cast<std::int32_t>(GraphErrc::Io));
-    EXPECT_EQ(failed_close["error"]["name"], "io");
-    EXPECT_NE(failed_close["error"]["message"].get<std::string>().find(
-                  "fixture shutdown graph-io failure"),
-              std::string::npos);
-  }
-
-  const Result<GraphInspectionView> inspected_after_failure =
-      host->inspect_graph(GraphSessionId{"close_failure_retry"});
-  ASSERT_TRUE(inspected_after_failure.status.ok)
-      << inspected_after_failure.status.message;
-
-  const Json listed = parse_response(router.route(Json{
-      {"protocol_version", 1},
-      {"id", "list-after-failure"},
-      {"method", "graph.list"},
-      {"params", Json::object()}}.dump()));
-  ASSERT_TRUE(listed.contains("result")) << listed.dump();
-  ASSERT_EQ(listed["result"]["sessions"].size(), 1u);
-  EXPECT_EQ(listed["result"]["sessions"][0]["session_id"], session_id);
-  EXPECT_EQ(listed["result"]["sessions"][0]["session_name"],
-            "close_failure_retry");
-
-  const Json retry_close = parse_response(router.route(Json{
-      {"protocol_version", 1},
-      {"id", "close-retry"},
-      {"method", "graph.close"},
-      {"params", Json{{"session_id", session_id}}}}.dump()));
-  ASSERT_TRUE(retry_close.contains("result")) << retry_close.dump();
-  EXPECT_TRUE(retry_close["result"]["closed"].get<bool>());
-
-  const Json missing_retry = parse_response(router.route(Json{
-      {"protocol_version", 1},
-      {"id", "close-missing"},
-      {"method", "graph.close"},
-      {"params", Json{{"session_id", session_id}}}}.dump()));
-  ASSERT_TRUE(missing_retry.contains("error")) << missing_retry.dump();
-  EXPECT_EQ(missing_retry["error"]["domain"], "graph");
-  EXPECT_EQ(missing_retry["error"]["name"], "not_found");
 }
 
 TEST(ProtocolErrors, PreservesEveryGraphErrcCodeAndName) {
@@ -7351,8 +7267,8 @@ TEST(ClientLifecycle, InterruptBeforeConnectPreventsDescriptorPublication) {
 
 TEST(ClientLifecycle, RejectsUncorrelatedResponseAndClosesIdempotently) {
   for (const auto& response :
-       std::vector<std::pair<std::string, std::int32_t>>{{"wrong-id", 1},
-                                                         {"client-1", 2}}) {
+       std::vector<std::pair<std::string, std::int32_t>>{{"wrong-id", 2},
+                                                         {"client-1", 1}}) {
     ScopedTempDirectory temp("photospider-ipc-client-unit");
     const std::string socket_path = (temp.path() / "server.sock").string();
     UniqueFd listener = create_test_listener(socket_path);
@@ -7379,7 +7295,7 @@ TEST(ClientLifecycle, RejectsUncorrelatedResponseAndClosesIdempotently) {
 TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
   const std::vector<std::string> responses = {
       R"({"protocol_version":4294967297,"id":"client-1","result":{"pong":true,"server_instance_id":"0123456789abcdef0123456789abcdef"}})",
-      R"({"protocol_version":1,"id":"client-1","error":{"domain":"protocol","code":18446744073709551615,"name":"future","message":"diagnostic"}})"};
+      R"({"protocol_version":2,"id":"client-1","error":{"domain":"protocol","code":18446744073709551615,"name":"future","message":"diagnostic"}})"};
   for (const std::string& response : responses) {
     ScopedTempDirectory temp("ps-ipc-overflow-envelope");
     const std::string socket_path = (temp.path() / "server.sock").string();
@@ -7400,7 +7316,7 @@ TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
 }
 
 /**
- * @brief Rejects an excessive typed scheduler worker request before wire IO.
+ * @brief Rejects an excessive typed execution worker request before wire IO.
  *
  * The same Client is first queried while disconnected, then connected to a
  * scripted peer that expects only one exact-limit request. The excessive
@@ -7415,13 +7331,13 @@ TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
  *       carrying eight therefore proves the connected rejection sent no frame
  *       without relying on timing or diagnostic message text.
  */
-TEST(ClientSchedulerDefaults,
+TEST(ClientExecutionDefaults,
      RejectsConnectedAboveLimitBeforeWireAndRetainsConnection) {
-  ScopedTempDirectory temp("ps-ipc-sched-limit");
+  ScopedTempDirectory temp("ps-ipc-exec-limit");
   const std::string socket_path = (temp.path() / "server.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
   const std::vector<ScriptedClientReply> replies = {
-      {"scheduler.configure_defaults", Json::object()}};
+      {"execution.configure_defaults", Json::object()}};
   std::vector<Json> requests;
   bool served = false;
   std::thread peer([&] {
@@ -7429,23 +7345,23 @@ TEST(ClientSchedulerDefaults,
   });
 
   Client client;
-  HostSchedulerConfig excessive;
-  excessive.hp_type = "cpu_work_stealing";
+  HostExecutionConfig excessive;
+  excessive.hp_type = "cpu";
   excessive.rt_type = "serial_debug";
-  excessive.worker_count = kSchedulerWorkerRequestMax + 1U;
+  excessive.worker_count = kExecutionWorkerRequestMax + 1U;
   const VoidResult disconnected =
-      client.configure_scheduler_defaults(excessive);
+      client.configure_execution_defaults(excessive);
   ASSERT_TRUE(client.connect(socket_path).ok);
-  const VoidResult rejected = client.configure_scheduler_defaults(excessive);
+  const VoidResult rejected = client.configure_execution_defaults(excessive);
 
-  HostSchedulerConfig accepted = excessive;
-  accepted.worker_count = kSchedulerWorkerRequestMax;
+  HostExecutionConfig accepted = excessive;
+  accepted.worker_count = kExecutionWorkerRequestMax;
   const VoidResult accepted_result =
-      client.configure_scheduler_defaults(accepted);
+      client.configure_execution_defaults(accepted);
   const bool connected_after_accepted = client.connected();
   client.disconnect();
   const VoidResult disconnected_again =
-      client.configure_scheduler_defaults(excessive);
+      client.configure_execution_defaults(excessive);
   peer.join();
 
   ASSERT_FALSE(disconnected.status.ok);
@@ -7460,7 +7376,7 @@ TEST(ClientSchedulerDefaults,
   EXPECT_TRUE(served);
   ASSERT_EQ(requests.size(), 1U);
   EXPECT_EQ(requests.front()["params"]["worker_count"],
-            kSchedulerWorkerRequestMax);
+            kExecutionWorkerRequestMax);
   EXPECT_TRUE(connected_after_accepted);
   ASSERT_FALSE(disconnected_again.status.ok);
   EXPECT_EQ(disconnected_again.status.domain, OperationErrorDomain::Transport);
@@ -7470,9 +7386,65 @@ TEST(ClientSchedulerDefaults,
 }
 
 /**
- * @brief Dispatches the exact typed version 1 Client surface once per method.
+ * @brief Rejects a zero typed Run cap before wire I/O.
  *
- * A scripted local peer expects all 55 normative methods in canonical order
+ * A connected Client first receives a present zero maximum parallelism and
+ * then a valid positive value. The peer has a reply slot only for the valid
+ * submit, proving that local public-value validation sends no rejected frame
+ * and leaves the connection usable.
+ *
+ * @return Nothing; GoogleTest records status, request-count, or value errors.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         script, request, or peer-thread setup cannot complete.
+ * @note The accepted call receives a scripted daemon failure because this test
+ *       isolates request validation and encoding from result decoding.
+ */
+TEST(ClientComputeRequest,
+     RejectsZeroMaximumParallelismBeforeWireAndRetainsConnection) {
+  ScopedTempDirectory temp("ps-ipc-compute-run-cap");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const Json scripted_error{{"domain", "daemon"},
+                            {"code", kJobNotFoundCode},
+                            {"name", "job_not_found"},
+                            {"message", "scripted typed-call failure"}};
+  const std::vector<ScriptedClientReply> replies = {
+      {"compute.submit", scripted_error, true}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  ComputeSubmitRequest request;
+  request.session_id = IpcSessionId{std::string(32, 'a')};
+  request.node = NodeId{7};
+  request.execution.maximum_parallelism = 0U;
+  const IpcResult<ComputeJobSnapshot> rejected = client.submit_compute(request);
+
+  request.execution.maximum_parallelism = 2U;
+  const IpcResult<ComputeJobSnapshot> accepted = client.submit_compute(request);
+  client.disconnect();
+  peer.join();
+
+  EXPECT_FALSE(rejected.status.ok);
+  EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(rejected.status.code, kInvalidParamsCode);
+  EXPECT_EQ(rejected.status.name, "invalid_params");
+  EXPECT_FALSE(accepted.status.ok);
+  EXPECT_EQ(accepted.status.domain, OperationErrorDomain::Daemon);
+  EXPECT_TRUE(served);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests.front()["method"], "compute.submit");
+  EXPECT_EQ(requests.front()["params"]["execution"]["maximum_parallelism"], 2);
+}
+
+/**
+ * @brief Dispatches the exact typed version 2 Client surface once per method.
+ *
+ * A scripted local peer expects all 60 normative methods in canonical order
  * and returns one recoverable daemon error for each call. The test invokes
  * every public typed Client operation with representative values, then checks
  * request envelopes and selected nested parameters at the wire boundary.
@@ -7484,7 +7456,7 @@ TEST(ClientSchedulerDefaults,
  *       test isolates symbol coverage, exact method mapping, and no-retry
  *       dispatch from the method-specific codec tests.
  */
-TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
+TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionTwoMethodsOnce) {
   ScopedTempDirectory temp("ps-ipc-surface");
   const std::string socket_path = (temp.path() / "server.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
@@ -7493,8 +7465,8 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
                             {"name", "job_not_found"},
                             {"message", "scripted typed-call failure"}};
   std::vector<ScriptedClientReply> replies;
-  replies.reserve(kVersionOneMethodNames.size());
-  for (std::string_view method : kVersionOneMethodNames) {
+  replies.reserve(kVersionTwoMethodNames.size());
+  for (std::string_view method : kVersionTwoMethodNames) {
     replies.push_back(
         ScriptedClientReply{std::string(method), scripted_error, true});
   }
@@ -7511,14 +7483,18 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
   const DeliveryLeaseId delivery_id{std::string(32, 'c')};
   const PixelRect roi{-1, 2, 3, 4};
   const std::vector<std::string> directories{"/tmp/plugins"};
-  HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = "cpu_work_stealing";
-  scheduler_config.rt_type = "serial_debug";
-  scheduler_config.worker_count = 3;
+  HostPolicyConfig policy_config;
+  policy_config.interactive_type = "interactive";
+  policy_config.throughput_type = "throughput";
+  HostExecutionConfig execution_config;
+  execution_config.hp_type = "cpu";
+  execution_config.rt_type = "serial_debug";
+  execution_config.worker_count = 3;
   ComputeSubmitRequest compute_request;
   compute_request.session_id = session_id;
   compute_request.node = NodeId{7};
   compute_request.cache.precision = "float32";
+  compute_request.execution.maximum_parallelism = 3U;
   compute_request.intent = ComputeIntent::GlobalHighPrecision;
   compute_request.dirty_roi = roi;
   GraphLoadRequest graph_request;
@@ -7547,6 +7523,13 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
   (void)client.update_dirty_source(session_id, NodeId{7},
                                    DirtyDomain::HighPrecision, roi);
   (void)client.drain_compute_events(session_id, 1);
+  (void)client.configure_execution_defaults(execution_config);
+  (void)client.execution_description("cpu");
+  (void)client.execution_info(session_id, ComputeIntent::GlobalHighPrecision);
+  (void)client.replace_execution(session_id, ComputeIntent::GlobalHighPrecision,
+                                 "serial_debug");
+  (void)client.execution_trace(session_id, 0, 1);
+  (void)client.execution_available_types();
   (void)client.clear_graph(session_id);
   (void)client.close_graph(session_id);
   (void)client.list_graphs();
@@ -7574,22 +7557,20 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
   (void)client.ops_sources();
   (void)client.seed_builtin_ops();
   (void)client.plugins_unload_all();
-  (void)client.configure_scheduler_defaults(scheduler_config);
-  (void)client.scheduler_description("serial_debug");
-  (void)client.scheduler_info(session_id, ComputeIntent::GlobalHighPrecision);
-  (void)client.scheduler_load("/tmp/scheduler.so");
-  (void)client.scheduler_loaded_plugins();
-  (void)client.replace_scheduler(session_id, ComputeIntent::GlobalHighPrecision,
-                                 "serial_debug");
-  (void)client.scheduler_scan(directories);
-  (void)client.scheduler_trace(session_id, 0, 1);
-  (void)client.scheduler_available_types();
+  (void)client.configure_policy_defaults(policy_config);
+  (void)client.policy_description("fixture_policy");
+  (void)client.policy_info(PolicyClass::Interactive);
+  (void)client.policy_load("/tmp/policy.so");
+  (void)client.policy_loaded_plugins();
+  (void)client.replace_policy(PolicyClass::Interactive, "fixture_policy");
+  (void)client.policy_scan(directories);
+  (void)client.policy_available_types();
   peer.join();
 
   ASSERT_TRUE(served);
-  ASSERT_EQ(requests.size(), kVersionOneMethodNames.size());
+  ASSERT_EQ(requests.size(), kVersionTwoMethodNames.size());
   for (std::size_t index = 0; index < requests.size(); ++index) {
-    EXPECT_EQ(requests[index]["method"], kVersionOneMethodNames[index]);
+    EXPECT_EQ(requests[index]["method"], kVersionTwoMethodNames[index]);
     EXPECT_EQ(requests[index]["protocol_version"], kProtocolVersion);
     EXPECT_TRUE(requests[index]["params"].is_object());
   }
@@ -7602,8 +7583,9 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
   EXPECT_EQ(submit_params["result_mode"], "status");
   EXPECT_TRUE(submit_params["cache"].is_object());
   EXPECT_TRUE(submit_params["execution"].is_object());
+  EXPECT_EQ(submit_params["execution"]["maximum_parallelism"], 3);
   EXPECT_TRUE(submit_params["telemetry"].is_object());
-  EXPECT_EQ(requests[24]["params"]["yaml_text"], "id: 7");
+  EXPECT_EQ(requests[30]["params"]["yaml_text"], "id: 7");
   EXPECT_TRUE(client.connected());
 }
 
@@ -7812,9 +7794,10 @@ TEST(ClientCollectionAggregation, RejectsUnstableCursorWithoutPartialValue) {
 /**
  * @brief Preserves duplicate sorted strings within one stable result page.
  *
- * The scripted peer returns one non-decreasing scheduler-type page containing
- * two equal adjacent values. The direct Client must decode and aggregate that
- * page once, preserve every original row, and stop at its final-page marker.
+ * The scripted peer returns one non-decreasing policy-plugin label page
+ * containing two equal adjacent values. The direct Client must decode and
+ * aggregate that page once, preserve every original row, and stop at its
+ * final-page marker.
  *
  * @return Nothing; GoogleTest assertions report value or request mismatch.
  * @throws std::bad_alloc, std::runtime_error, or std::system_error if
@@ -7828,8 +7811,8 @@ TEST(ClientCollectionAggregation,
   const std::string socket_path = (temp.path() / "server.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
   const std::vector<ScriptedClientReply> replies = {
-      {"scheduler.types",
-       Json{{"types", Json::array({"alpha", "alpha", "beta"})},
+      {"policy.loaded_plugins",
+       Json{{"plugins", Json::array({"alpha", "alpha", "beta"})},
             {"offset", 0},
             {"has_more", false},
             {"cursor", nullptr}}}};
@@ -7841,7 +7824,7 @@ TEST(ClientCollectionAggregation,
   Client client;
   ASSERT_TRUE(client.connect(socket_path).ok);
   const IpcResult<std::vector<std::string>> result =
-      client.scheduler_available_types();
+      client.policy_loaded_plugins();
   peer.join();
 
   ASSERT_TRUE(served);
@@ -7857,10 +7840,10 @@ TEST(ClientCollectionAggregation,
 /**
  * @brief Preserves one duplicate spanning adjacent stable string pages.
  *
- * The scripted peer freezes a two-page scheduler-type collection whose final
- * first-page value equals the next page's first value. The Client must retain
- * both rows in order, advance by the actual first-page length, and perform
- * exactly the two scripted RPC attempts.
+ * The scripted peer freezes a two-page policy-plugin label collection whose
+ * final first-page value equals the next page's first value. The Client must
+ * retain both rows in order, advance by the actual first-page length, and
+ * perform exactly the two scripted RPC attempts.
  *
  * @return Nothing; GoogleTest assertions report value or request mismatch.
  * @throws std::bad_alloc, std::runtime_error, or std::system_error if
@@ -7875,14 +7858,16 @@ TEST(ClientCollectionAggregation,
   UniqueFd listener = create_test_listener(socket_path);
   const std::string cursor(32, 'e');
   const std::vector<ScriptedClientReply> replies = {
-      {"scheduler.types", Json{{"types", Json::array({"alpha", "beta"})},
-                               {"offset", 0},
-                               {"has_more", true},
-                               {"cursor", cursor}}},
-      {"scheduler.types", Json{{"types", Json::array({"beta", "gamma"})},
-                               {"offset", 2},
-                               {"has_more", false},
-                               {"cursor", nullptr}}}};
+      {"policy.loaded_plugins",
+       Json{{"plugins", Json::array({"alpha", "beta"})},
+            {"offset", 0},
+            {"has_more", true},
+            {"cursor", cursor}}},
+      {"policy.loaded_plugins",
+       Json{{"plugins", Json::array({"beta", "gamma"})},
+            {"offset", 2},
+            {"has_more", false},
+            {"cursor", nullptr}}}};
   std::vector<Json> requests;
   bool served = false;
   std::thread peer([&] {
@@ -7891,7 +7876,7 @@ TEST(ClientCollectionAggregation,
   Client client;
   ASSERT_TRUE(client.connect(socket_path).ok);
   const IpcResult<std::vector<std::string>> result =
-      client.scheduler_available_types();
+      client.policy_loaded_plugins();
   peer.join();
 
   ASSERT_TRUE(served);
@@ -7924,8 +7909,8 @@ TEST(ClientCollectionAggregation,
   const std::string socket_path = (temp.path() / "server.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
   const std::vector<ScriptedClientReply> replies = {
-      {"scheduler.types",
-       Json{{"types", Json::array({"alpha", "gamma", "beta"})},
+      {"policy.loaded_plugins",
+       Json{{"plugins", Json::array({"alpha", "gamma", "beta"})},
             {"offset", 0},
             {"has_more", false},
             {"cursor", nullptr}}}};
@@ -7937,7 +7922,7 @@ TEST(ClientCollectionAggregation,
   Client client;
   ASSERT_TRUE(client.connect(socket_path).ok);
   const IpcResult<std::vector<std::string>> result =
-      client.scheduler_available_types();
+      client.policy_loaded_plugins();
   peer.join();
 
   ASSERT_TRUE(served);
@@ -8447,7 +8432,7 @@ TEST(ClientResultValidation, RejectsOverflowedVersionWithoutDesynchronizing) {
 
 TEST(ClientResultValidation, RejectsEveryInexactMethodInventory) {
   Json exact_methods = Json::array();
-  for (std::string_view method : kVersionOneMethodNames) {
+  for (std::string_view method : kVersionTwoMethodNames) {
     exact_methods.push_back(std::string(method));
   }
   std::vector<Json> malformed_methods;
@@ -8696,7 +8681,7 @@ TEST(ClientResultValidation, ClassifiesDuplicateResponseAsInvalidRequest) {
   Client client;
   ASSERT_TRUE(client.connect(socket_path).ok);
   const std::string response =
-      R"({"protocol_version":1,"id":"client-1","result":{"pong":true,"pong":true,"server_instance_id":"0123456789abcdef0123456789abcdef"}})";
+      R"({"protocol_version":2,"id":"client-1","result":{"pong":true,"pong":true,"server_instance_id":"0123456789abcdef0123456789abcdef"}})";
   bool served = false;
   std::thread peer(
       [&] { served = serve_raw_response(listener.get(), response); });

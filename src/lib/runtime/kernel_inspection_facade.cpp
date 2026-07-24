@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/run_lifecycle_registry.hpp"
 #include "graph/in_memory_graph_document_adapter.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/kernel.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
@@ -54,7 +55,11 @@ std::optional<GraphInspectionSnapshot> Kernel::inspect_graph(
 /** @copydoc Kernel::last_error */
 std::optional<Kernel::LastError> Kernel::last_error(
     const std::string& name) const {
-  return copy_last_error(name);
+  const auto runtime = acquire_runtime(name);
+  if (!runtime) {
+    return std::nullopt;
+  }
+  return runtime->last_error();
 }
 
 std::optional<std::vector<int>> Kernel::ending_nodes(const std::string& name) {
@@ -200,21 +205,21 @@ void Kernel::set_node_document(const std::string& name, int node_id,
 /** @copydoc Kernel::drain_compute_events */
 std::optional<ComputeEventBatch> Kernel::drain_compute_events(
     const std::string& name, std::size_t limit) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
+  auto runtime = acquire_runtime(name);
+  if (!runtime) {
     return std::nullopt;
   }
-  return it->second->drain_compute_events_now(limit);
+  return runtime->drain_compute_events_now(limit);
 }
 
-/** @copydoc Kernel::scheduler_trace */
-std::optional<GraphRuntime::SchedulerEventPage> Kernel::scheduler_trace(
+/** @copydoc Kernel::execution_trace */
+std::optional<GraphRuntime::ExecutionEventPage> Kernel::execution_trace(
     const std::string& name, uint64_t after_sequence, std::size_t limit) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
+  auto runtime = acquire_runtime(name);
+  if (!runtime) {
     return std::nullopt;
   }
-  return it->second->scheduler_trace_page(after_sequence, limit);
+  return runtime->execution_trace_page(after_sequence, limit);
 }
 
 std::optional<std::string> Kernel::dirty_region_snapshot_debug(

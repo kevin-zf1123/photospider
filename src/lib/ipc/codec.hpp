@@ -18,7 +18,7 @@
 namespace ps::ipc::internal {
 
 /**
- * @brief Version 1 JSON value used only inside IPC implementation targets.
+ * @brief Version 2 JSON value used only inside IPC implementation targets.
  *
  * @throws std::bad_alloc when value construction or mutation allocates.
  * @note This private alias is not installed or exposed by the typed public IPC
@@ -27,7 +27,7 @@ namespace ps::ipc::internal {
 using Json = nlohmann::json;
 
 /**
- * @brief Exact hexadecimal character count of every version 1 opaque id.
+ * @brief Exact hexadecimal character count of every version 2 opaque id.
  *
  * @throws Nothing; this is an immutable compile-time value.
  * @note The bound applies uniformly to server, session, compute, output,
@@ -47,10 +47,17 @@ inline constexpr std::size_t kRequestTextMaxBytes = 128;
  * @brief Maximum UTF-8 byte length of a short public label.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note Version 1 uses this for session names, scheduler/precision labels,
+ * @note Version 2 uses this for session names, policy/precision labels,
  *       operation/plugin keys, stable enum/error names, and event text.
  */
 inline constexpr std::size_t kShortTextMaxBytes = 1024;
+
+/**
+ * @brief Maximum UTF-8 byte length of one canonical policy type.
+ * @throws Nothing; this is immutable protocol-v2 metadata.
+ * @note The spelling rule is enforced separately by `valid_policy_type()`.
+ */
+inline constexpr std::size_t kPolicyTypeMaxBytes = 128;
 
 /**
  * @brief Maximum UTF-8 byte length of a filesystem path.
@@ -84,20 +91,20 @@ inline constexpr std::size_t kLargeTextMaxBytes = 8U * 1024U * 1024U;
  *
  * @throws Nothing; this is an immutable compile-time value.
  * @note Every element must also satisfy its field-specific path/text bound
- *       before a plugin, scheduler, graph, or filesystem mutation begins.
+ *       before a plugin, policy, execution, graph, or filesystem mutation.
  */
 inline constexpr std::size_t kPathArrayMaxEntries = 256;
 
 /**
- * @brief Exact sorted method inventory advertised by protocol version 1.
+ * @brief Exact sorted method inventory advertised by protocol version 2.
  *
  * @throws Nothing; this is immutable compile-time metadata.
  * @note `daemon.version`, request admission, and the installed typed Client's
- *       version validation share this authoritative 55-method table. Route
+ *       version validation share this authoritative 60-method table. Route
  *       family matchers remain independent so contract tests can detect an
  *       advertised method that has no implementation.
  */
-inline constexpr std::array<std::string_view, 55> kVersionOneMethodNames = {
+inline constexpr std::array<std::string_view, 60> kVersionTwoMethodNames = {
     "cache.cache_all_nodes",
     "cache.clear_all",
     "cache.clear_drive",
@@ -117,6 +124,12 @@ inline constexpr std::array<std::string_view, 55> kVersionOneMethodNames = {
     "dirty.end",
     "dirty.update",
     "events.drain",
+    "execution.configure_defaults",
+    "execution.description",
+    "execution.info",
+    "execution.replace",
+    "execution.trace",
+    "execution.types",
     "graph.clear",
     "graph.close",
     "graph.list",
@@ -144,15 +157,14 @@ inline constexpr std::array<std::string_view, 55> kVersionOneMethodNames = {
     "plugins.ops_sources",
     "plugins.seed_builtins",
     "plugins.unload_all",
-    "scheduler.configure_defaults",
-    "scheduler.description",
-    "scheduler.info",
-    "scheduler.load",
-    "scheduler.loaded_plugins",
-    "scheduler.replace",
-    "scheduler.scan",
-    "scheduler.trace",
-    "scheduler.types"};  // NOLINT(whitespace/indent_namespace)
+    "policy.configure_defaults",
+    "policy.description",
+    "policy.info",
+    "policy.load",
+    "policy.loaded_plugins",
+    "policy.replace",
+    "policy.scan",
+    "policy.types"};  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Checks the immutable method table for strict lexical ordering.
@@ -163,17 +175,17 @@ inline constexpr std::array<std::string_view, 55> kVersionOneMethodNames = {
  * @note The strict comparison rejects both accidental reordering and adjacent
  *       duplicates before any daemon or client target is built.
  */
-inline constexpr bool version_one_methods_are_strictly_sorted() noexcept {
-  for (std::size_t index = 1; index < kVersionOneMethodNames.size(); ++index) {
-    if (!(kVersionOneMethodNames[index - 1] < kVersionOneMethodNames[index])) {
+inline constexpr bool version_two_methods_are_strictly_sorted() noexcept {
+  for (std::size_t index = 1; index < kVersionTwoMethodNames.size(); ++index) {
+    if (!(kVersionTwoMethodNames[index - 1] < kVersionTwoMethodNames[index])) {
       return false;
     }
   }
   return true;
 }
 
-static_assert(version_one_methods_are_strictly_sorted(),
-              "version 1 method names must be sorted and unique");
+static_assert(version_two_methods_are_strictly_sorted(),
+              "version 2 method names must be sorted and unique");
 
 /**
  * @brief Decodes one JSON integer without signedness loss or narrowing.
@@ -240,34 +252,34 @@ bool decode_integer(const Json& value, Integer* output) noexcept {
 }
 
 /**
- * @brief JSON-RPC-compatible parse failure code used by version 1.
+ * @brief JSON-RPC-compatible parse failure code used by version 2.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kParseErrorCode = -32700;
 
 /**
- * @brief Malformed request or response envelope code used by version 1.
+ * @brief Malformed request or response envelope code used by version 2.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kInvalidRequestCode = -32600;
 
 /**
- * @brief Unknown method code used by version 1.
+ * @brief Unknown method code used by version 2.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kMethodNotFoundCode = -32601;
 
 /**
- * @brief Invalid typed parameter code used by version 1.
+ * @brief Invalid typed parameter code used by version 2.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kInvalidParamsCode = -32602;
 
@@ -275,23 +287,23 @@ inline constexpr std::int32_t kInvalidParamsCode = -32602;
  * @brief Unexpected daemon request-processing failure code.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kInternalErrorCode = -32603;
 
 /**
- * @brief Unsupported protocol negotiation code used by version 1.
+ * @brief Unsupported protocol negotiation code used by version 2.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kUnsupportedProtocolCode = -32001;
 
 /**
- * @brief Bounded-response overflow code used by version 1.
+ * @brief Bounded-response overflow code used by version 2.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kResponseTooLargeCode = -32002;
 
@@ -299,7 +311,7 @@ inline constexpr std::int32_t kResponseTooLargeCode = -32002;
  * @brief Unknown, expired, released, or evicted compute-job code.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kJobNotFoundCode = -32010;
 
@@ -307,7 +319,7 @@ inline constexpr std::int32_t kJobNotFoundCode = -32010;
  * @brief Nonterminal compute-job result or release code.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kJobNotReadyCode = -32011;
 
@@ -315,7 +327,7 @@ inline constexpr std::int32_t kJobNotReadyCode = -32011;
  * @brief Bounded daemon-registry admission failure code.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kCapacityExceededCode = -32012;
 
@@ -323,7 +335,7 @@ inline constexpr std::int32_t kCapacityExceededCode = -32012;
  * @brief Missing or identity-mismatched output artifact code.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kArtifactNotFoundCode = -32013;
 
@@ -331,7 +343,7 @@ inline constexpr std::int32_t kArtifactNotFoundCode = -32013;
  * @brief Output-store count or byte quota failure code.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kArtifactLimitExceededCode = -32014;
 
@@ -339,7 +351,7 @@ inline constexpr std::int32_t kArtifactLimitExceededCode = -32014;
  * @brief Unknown, expired, or identity-mismatched snapshot cursor code.
  *
  * @throws Nothing; this is an immutable compile-time value.
- * @note The numeric wire value is stable for protocol version 1.
+ * @note The numeric wire value is stable for protocol version 2.
  */
 inline constexpr std::int32_t kCursorNotFoundCode = -32015;
 
@@ -356,7 +368,27 @@ inline constexpr std::int32_t kCursorNotFoundCode = -32015;
 bool valid_utf8(std::string_view value) noexcept;
 
 /**
- * @brief Validates the exact version 1 opaque identifier representation.
+ * @brief Validates one canonical protocol-v2 policy type.
+ * @param value Candidate decoded UTF-8 bytes.
+ * @return True only for 1..128 ASCII bytes matching
+ *         `[a-z][a-z0-9_.-]*`.
+ * @throws Nothing.
+ * @note This is the shared request, Host-return, and direct-Client validator.
+ */
+bool valid_policy_type(std::string_view value) noexcept;
+
+/**
+ * @brief Validates one exact protocol-v2 execution route literal.
+ * @param value Candidate decoded string.
+ * @return True only for `cpu`, `gpu_pipeline`, or `serial_debug`.
+ * @throws Nothing.
+ * @note The wire vocabulary is closed even though Host stores routes in
+ *       `std::string`.
+ */
+bool valid_execution_type(std::string_view value) noexcept;
+
+/**
+ * @brief Validates the exact version 2 opaque identifier representation.
  *
  * @param value Candidate identifier bytes.
  * @return True only for 32 lowercase hexadecimal ASCII characters.
@@ -367,7 +399,7 @@ bool valid_utf8(std::string_view value) noexcept;
 bool valid_opaque_id(std::string_view value) noexcept;
 
 /**
- * @brief Decodes one exact version 1 opaque identifier transactionally.
+ * @brief Decodes one exact version 2 opaque identifier transactionally.
  *
  * @param value Candidate JSON string.
  * @param output Receives the 32-character lowercase hexadecimal id only after
@@ -380,7 +412,7 @@ bool valid_opaque_id(std::string_view value) noexcept;
 bool decode_opaque_id(const Json& value, std::string* output);
 
 /**
- * @brief Validates one version 1 graph session display name.
+ * @brief Validates one version 2 graph session display name.
  *
  * @param value Candidate decoded UTF-8 bytes.
  * @return True only for a nonempty, at-most-1,024-byte UTF-8 path component
@@ -564,7 +596,7 @@ Json encode_node_ids(const std::vector<NodeId>& nodes);
  * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
  *         allocated.
  * @throws std::length_error if either report array or a returned string exceeds
- *         its version 1 bound.
+ *         its version 2 bound.
  * @throws std::invalid_argument if counts, GraphErrc values, or returned UTF-8
  *         values violate the public report contract.
  * @note Error messages are bounded diagnostics and are therefore repaired and
@@ -594,7 +626,7 @@ Json encode_plugin_key(std::string_view key);
  * @return Object with exact `key` and `source` strings.
  * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
  *         allocated.
- * @throws std::length_error if the key or source exceeds its version 1 bound.
+ * @throws std::length_error if the key or source exceeds its version 2 bound.
  * @throws std::invalid_argument if the key is empty or either string is
  *         invalid UTF-8.
  * @note Source strings use the 8 MiB copied-source bound. They are never
@@ -603,19 +635,20 @@ Json encode_plugin_key(std::string_view key);
 Json encode_plugin_source_row(std::string_view key, std::string_view source);
 
 /**
- * @brief Encodes one scheduler type name for discovery paging.
- * @param type Complete copied public scheduler type.
+ * @brief Encodes one policy type name for discovery paging.
+ * @param type Complete copied public policy type.
  * @return JSON string containing the exact type name.
  * @throws std::bad_alloc if JSON string storage cannot allocate.
- * @throws std::length_error if the type exceeds 1,024 UTF-8 bytes.
- * @throws std::invalid_argument if the type is empty or invalid UTF-8.
+ * @throws std::length_error if the type exceeds 128 UTF-8 bytes.
+ * @throws std::invalid_argument if the type is empty, noncanonical, or invalid
+ *         UTF-8.
  * @note The router sorts and freezes the complete type list before invoking
- *       this row encoder; no factory or scheduler ownership enters the value.
+ *       this row encoder; no context or execution ownership enters the value.
  */
-Json encode_scheduler_type(std::string_view type);
+Json encode_policy_type(std::string_view type);
 
 /**
- * @brief Encodes one loaded scheduler-plugin diagnostic label.
+ * @brief Encodes one loaded policy-plugin diagnostic label.
  * @param label Complete copied Host label.
  * @return JSON string containing the exact label.
  * @throws std::bad_alloc if JSON string storage cannot allocate.
@@ -624,10 +657,10 @@ Json encode_scheduler_type(std::string_view type);
  * @note Labels are copied diagnostics only; they are never interpreted as a
  *       loader handle, registry key, or mutable ownership token.
  */
-Json encode_scheduler_plugin_label(std::string_view label);
+Json encode_policy_plugin_label(std::string_view label);
 
 /**
- * @brief Encodes one scheduler type description result.
+ * @brief Encodes one policy type description result.
  * @param type Exact validated request type passed to Host.
  * @param description Complete copied Host description.
  * @return Object containing `type` and `description`.
@@ -636,25 +669,57 @@ Json encode_scheduler_plugin_label(std::string_view label);
  * @throws std::invalid_argument if either value is invalid UTF-8 or the type
  *         is empty.
  * @note An empty description is a valid copied display value and does not
- *       imply that the scheduler type is absent.
+ *       imply that the policy type is absent.
  */
-Json encode_scheduler_description(std::string_view type,
+Json encode_policy_description(std::string_view type,
+                               std::string_view description);
+
+/**
+ * @brief Encodes one copied process policy-binding information snapshot.
+ * @param snapshot Complete public Host policy value.
+ * @return Object containing class, type, generation, and optional first fault.
+ * @throws std::bad_alloc if validation or JSON storage cannot allocate.
+ * @throws std::length_error if policy type or fault text exceeds its bound.
+ * @throws std::invalid_argument if a class, type, generation, status relation,
+ *         or returned text is malformed.
+ * @note The value contains no policy context, callback, registry handle, or
+ *       dynamic-library lease.
+ */
+Json encode_policy_info(const PolicyInfoSnapshot& snapshot);
+
+/**
+ * @brief Encodes one exact execution-route type for discovery paging.
+ * @param type Complete copied Host route name.
+ * @return JSON string containing the exact closed-vocabulary route.
+ * @throws std::invalid_argument if the Host returns an unknown route.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ * @note The helper exposes no executor, worker, or queue ownership.
+ */
+Json encode_execution_type(std::string_view type);
+
+/**
+ * @brief Encodes one execution-route description result.
+ * @param type Exact already validated request route.
+ * @param description Complete copied Host description.
+ * @return Object containing exact `type` and bounded `description`.
+ * @throws std::length_error if description exceeds 4,096 UTF-8 bytes.
+ * @throws std::invalid_argument for malformed returned text or route.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ */
+Json encode_execution_description(std::string_view type,
                                   std::string_view description);
 
 /**
- * @brief Encodes one copied per-session scheduler information snapshot.
+ * @brief Encodes one copied per-session execution information snapshot.
  * @param session_id Opaque daemon session visible to the caller.
- * @param snapshot Complete public Host scheduler value.
- * @return Object containing session, intent, scheduler name, and statistics.
- * @throws std::bad_alloc if validation or JSON storage cannot allocate.
- * @throws std::length_error if scheduler name or statistics exceeds its bound.
- * @throws std::invalid_argument if the opaque id, intent, or returned text is
- *         malformed.
- * @note The value contains no scheduler pointer, runtime, factory, loader, or
- *       dynamic-library ownership. Statistics remain display-only text.
+ * @param snapshot Complete copied Host execution value.
+ * @return Object containing session, intent, execution type, and statistics.
+ * @throws std::length_error if statistics exceed 4,096 UTF-8 bytes.
+ * @throws std::invalid_argument for malformed ids, enums, route, or text.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
  */
-Json encode_scheduler_info(const IpcSessionId& session_id,
-                           const SchedulerInfoSnapshot& snapshot);
+Json encode_execution_info(const IpcSessionId& session_id,
+                           const ExecutionInfoSnapshot& snapshot);
 
 /**
  * @brief Encodes one bounded node-YAML result.
@@ -686,7 +751,7 @@ Json encode_node_yaml(const IpcSessionId& session_id, NodeId node,
  *         `total_ms`.
  * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
  *         allocated.
- * @throws std::length_error if rows/strings exceed their version 1 bounds or
+ * @throws std::length_error if rows/strings exceed their version 2 bounds or
  *         an overflow-safe serialized-size lower bound proves that the actual
  *         success frame cannot fit in 16 MiB.
  * @throws std::invalid_argument if the request id, opaque id, a node id, or
@@ -709,7 +774,7 @@ Json encode_timing(std::string_view request_id, const IpcSessionId& session_id,
  * @return Object containing session id, ordered events, and locked metadata.
  * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
  *         allocated.
- * @throws std::length_error if event count or text exceeds its version 1
+ * @throws std::length_error if event count or text exceeds its version 2
  *         bound.
  * @throws std::invalid_argument if ids, sequences, UTF-8, page metadata, or
  *         requested-limit invariants are malformed.
@@ -721,7 +786,7 @@ Json encode_compute_event_batch(const IpcSessionId& session_id,
                                 std::size_t requested_limit);
 
 /**
- * @brief Encodes one bounded non-destructive scheduler-trace page.
+ * @brief Encodes one bounded non-destructive execution-trace page.
  *
  * @param session_id Opaque daemon session id visible to the caller.
  * @param after_sequence Exact exclusive wire cursor passed to Host.
@@ -730,16 +795,16 @@ Json encode_compute_event_batch(const IpcSessionId& session_id,
  * @return Object containing session id, ordered traces, and locked metadata.
  * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
  *         allocated.
- * @throws std::length_error if the event count exceeds the version 1 bound.
+ * @throws std::length_error if the event count exceeds the version 2 bound.
  * @throws std::invalid_argument if ids, sequences, enums, page metadata, or
  *         requested-limit invariants are malformed.
  * @note The encoder accepts nonnegative node/worker ids and preserves `-1` as
  *       the no-specific-node/worker sentinel. Values below -1 are rejected,
  *       and Host trace state is never mutated.
  */
-Json encode_scheduler_trace_page(const IpcSessionId& session_id,
+Json encode_execution_trace_page(const IpcSessionId& session_id,
                                  uint64_t after_sequence,
-                                 const SchedulerTracePage& page,
+                                 const ExecutionTracePage& page,
                                  std::size_t requested_limit);
 
 /**
@@ -793,6 +858,42 @@ bool encode_enum(ComputeIntent value, Json* output);
  * @throws Nothing.
  */
 bool decode_enum(const Json& value, ComputeIntent* output) noexcept;
+
+/**
+ * @brief Encodes one policy class as its protocol-v2 label.
+ * @param value Public policy class.
+ * @param output Receives the label only for a recognized value.
+ * @return True on success; false without modifying output otherwise.
+ * @throws std::bad_alloc if JSON allocation fails.
+ */
+bool encode_enum(PolicyClass value, Json* output);
+
+/**
+ * @brief Decodes one exact protocol-v2 policy-class label.
+ * @param value Candidate JSON string.
+ * @param output Receives the recognized class transactionally.
+ * @return True on success; false otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, PolicyClass* output) noexcept;
+
+/**
+ * @brief Encodes one sticky policy-fault reason label.
+ * @param value Public fault reason.
+ * @param output Receives the label only for a recognized value.
+ * @return True on success; false otherwise.
+ * @throws std::bad_alloc if JSON allocation fails.
+ */
+bool encode_enum(PolicyFaultReason value, Json* output);
+
+/**
+ * @brief Decodes one exact sticky policy-fault reason label.
+ * @param value Candidate JSON string.
+ * @param output Receives the recognized reason transactionally.
+ * @return True on success; false otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, PolicyFaultReason* output) noexcept;
 
 /**
  * @brief Encodes one dirty compute domain as its stable lowercase label.
@@ -885,22 +986,22 @@ bool encode_enum(HostDependencyTreeScope value, Json* output);
 bool decode_enum(const Json& value, HostDependencyTreeScope* output) noexcept;
 
 /**
- * @brief Encodes one scheduler trace action as its stable lowercase label.
+ * @brief Encodes one execution trace action as its stable lowercase label.
  * @param value Public enum value.
  * @param output Receives the label only for a recognized enum value.
  * @return True on success; false without modifying `output` otherwise.
  * @throws std::bad_alloc if JSON string storage cannot be allocated.
  */
-bool encode_enum(HostSchedulerTraceAction value, Json* output);
+bool encode_enum(HostExecutionTraceAction value, Json* output);
 
 /**
- * @brief Decodes one stable scheduler-trace-action label.
+ * @brief Decodes one stable execution-trace-action label.
  * @param value Candidate JSON string.
  * @param output Receives the enum only after exact label validation.
  * @return True on success; false without modifying `output` otherwise.
  * @throws Nothing.
  */
-bool decode_enum(const Json& value, HostSchedulerTraceAction* output) noexcept;
+bool decode_enum(const Json& value, HostExecutionTraceAction* output) noexcept;
 
 /**
  * @brief Encodes one image channel data type as its stable lowercase label.
@@ -1016,7 +1117,7 @@ OperationStatus failure_status(OperationErrorDomain domain, std::int32_t code,
 OperationStatus graph_status(const OperationStatus& status);
 
 /**
- * @brief Encodes a failure status into the exact version 1 error schema.
+ * @brief Encodes a failure status into the exact version 2 error schema.
  *
  * @param status Failed status to encode.
  * @return Object containing domain, code, name, and message.
@@ -1032,7 +1133,7 @@ OperationStatus graph_status(const OperationStatus& status);
 Json encode_error(const OperationStatus& status);
 
 /**
- * @brief Decodes and validates the exact required version 1 error fields.
+ * @brief Decodes and validates the exact required version 2 error fields.
  *
  * @param value Candidate error object.
  * @param status Receives the owned decoded status.
@@ -1056,7 +1157,7 @@ bool decode_error(const Json& value, OperationStatus* status,
  * @throws std::bad_alloc if JSON or bounded diagnostic storage cannot allocate.
  * @throws std::length_error if an unknown future name exceeds its wire bound.
  * @throws std::invalid_argument if a failed status cannot be represented by
- *         the version 1 remote error schema.
+ *         the version 2 remote error schema.
  * @note Success is canonicalized to none/zero/empty fields. Recognized failure
  *       codes are encoded with their stable name; unknown future pairs are
  *       preserved without interpreting diagnostic text. The 1,024-byte name
@@ -1082,7 +1183,7 @@ bool decode_operation_status(const Json& value, OperationStatus* status,
                              std::string* message);
 
 /**
- * @brief Serializes one bounded version 1 success response.
+ * @brief Serializes one bounded version 2 success response.
  *
  * @param id Correlated nonempty request id.
  * @param result Successful method result object.
@@ -1101,7 +1202,7 @@ std::string encode_success_response(const std::string& id, Json result);
  * @return Snake-case JSON object with explicit nullable metadata.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
  * @throws std::length_error if a returned string or collection exceeds its
- *         version 1 bound.
+ *         version 2 bound.
  * @throws std::invalid_argument if a string is invalid UTF-8 or the snapshot
  *         contains a negative node id.
  * @note Non-finite floating-point fields are encoded as JSON null.
@@ -1114,7 +1215,7 @@ Json encode_node(const NodeInspectionView& node);
  * @param value Candidate snake-case node object.
  * @param node Receives the fully owned public value.
  * @param message Receives a validation diagnostic on failure.
- * @return True only when all required fields have valid version 1 shapes.
+ * @return True only when all required fields have valid version 2 shapes.
  * @throws std::bad_alloc if copied values cannot be allocated.
  * @note JSON null in a floating-point field is restored as quiet NaN.
  */
@@ -1141,7 +1242,7 @@ Json encode_graph(const IpcSessionId& session_id,
  * @param value Candidate graph result object.
  * @param graph Receives a snapshot whose session value is the opaque id.
  * @param message Receives a validation diagnostic on failure.
- * @return True when the result follows the version 1 schema.
+ * @return True when the result follows the version 2 schema.
  * @throws std::bad_alloc if copied values cannot be allocated.
  */
 bool decode_graph(const Json& value, GraphInspectionView* graph,
@@ -1155,7 +1256,7 @@ bool decode_graph(const Json& value, GraphInspectionView* graph,
  * @return Snake-case flattened dependency-tree result object.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
  * @throws std::length_error if a returned string or collection exceeds its
- *         current version 1 wire bound.
+ *         current version 2 wire bound.
  * @throws std::invalid_argument if an id, depth, UTF-8 string, or public enum
  *         is invalid.
  */
@@ -1168,7 +1269,7 @@ Json encode_dependency_tree(const IpcSessionId& session_id,
  * @param value Candidate dependency-tree result object.
  * @param tree Receives the fully owned public tree.
  * @param message Receives a validation diagnostic on failure.
- * @return True when every scope, edge, node, and optional follows version 1.
+ * @return True when every scope, edge, node, and optional follows version 2.
  * @throws std::bad_alloc if copied values cannot be allocated.
  */
 bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,

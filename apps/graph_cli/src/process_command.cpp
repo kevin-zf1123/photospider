@@ -87,8 +87,10 @@ bool process_command(const std::string& line, ps::Host& svc,
       return handle_bench(iss, svc, current_graph, modified, config);
     } else if (cmd == "benchmark") {
       return handle_benchmark(iss, svc, current_graph, modified, config);
-    } else if (cmd == "scheduler") {
-      return handle_scheduler(iss, svc, current_graph, modified, config);
+    } else if (cmd == "policy") {
+      return handle_policy(iss, svc, current_graph, modified, config);
+    } else if (cmd == "execution") {
+      return handle_execution(iss, svc, current_graph, modified, config);
     } else {
       std::cout << "Unknown command: " << cmd
                 << ". Type 'help' for a list of commands.\n";

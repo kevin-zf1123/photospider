@@ -6,13 +6,18 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <limits>
+#include <map>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "compute/realtime_proxy_graph.hpp"
+#include "compute/run_lifecycle_registry.hpp"
+#include "photospider/core/graph_error.hpp"
 
 #ifdef __APPLE__
 #import <Metal/Metal.h>
@@ -78,51 +83,57 @@ uint64_t sequence_gap(uint64_t after_sequence,
 }
 
 /**
- * @brief Runs explicit scheduler shutdown and detach as a best-effort sweep.
- *
- * Shutdown is attempted before detach. Each stage has an independent exception
- * fence so a hostile shutdown cannot prevent detach.
- *
- * @param scheduler Scheduler whose lifecycle ownership is being rolled back or
- * released; null is accepted as an already-clean owner.
- * @return The exact first lifecycle exception, or an empty pointer on success.
- * @throws Nothing; lifecycle failures are returned to the caller.
- * @note The helper neither destroys nor publishes the scheduler owner.
+ * @brief Tests the fixed private execution-route vocabulary.
+ * @param type Candidate route id.
+ * @return True only for a current Host-owned route.
+ * @throws Nothing.
  */
-std::exception_ptr cleanup_scheduler_lifecycle(IScheduler* scheduler) noexcept {
-  if (!scheduler) {
-    return nullptr;
-  }
+bool valid_execution_type(const std::string& type) noexcept {
+  return type == "cpu" || type == "gpu_pipeline" || type == "serial_debug";
+}
 
-  std::exception_ptr first_error;
-  try {
-    scheduler->shutdown();
-  } catch (...) {
-    first_error = std::current_exception();
-  }
-  try {
-    scheduler->detach();
-  } catch (...) {
-    if (!first_error) {
-      first_error = std::current_exception();
-    }
-  }
-  return first_error;
+/**
+ * @brief Tests whether an intent owns one physical execution route.
+ * @param intent Candidate compute intent.
+ * @return True for GlobalHighPrecision or RealTimeUpdate.
+ * @throws Nothing.
+ */
+bool valid_execution_intent(ComputeIntent intent) noexcept {
+  return intent == ComputeIntent::GlobalHighPrecision ||
+         intent == ComputeIntent::RealTimeUpdate;
+}
+
+/**
+ * @brief Builds the complete initial execution-route binding map.
+ * @param info Borrowed construction values for the HP and RT route ids.
+ * @return Owned bindings for both supported compute intents at generation one.
+ * @throws std::bad_alloc If route-string copies or map nodes cannot allocate.
+ * @note Route vocabulary validation remains in `GraphRuntime` construction so
+ * the complete owner is staged before the runtime becomes observable.
+ */
+std::map<ComputeIntent, GraphRuntime::ExecutionRouteBinding>
+make_initial_execution_routes(const GraphRuntime::Info& info) {
+  return {
+      {ComputeIntent::GlobalHighPrecision,
+       GraphRuntime::ExecutionRouteBinding{info.hp_execution_type, 1U}},
+      {ComputeIntent::RealTimeUpdate,
+       GraphRuntime::ExecutionRouteBinding{info.rt_execution_type, 1U}},
+  };
 }
 
 }  // namespace
 
 /** @copydoc GraphRuntime::tls_worker_id_ */
 thread_local int GraphRuntime::tls_worker_id_ = -1;
-/** @copydoc GraphRuntime::tls_scheduler_log_worker_id_ */
-thread_local int GraphRuntime::tls_scheduler_log_worker_id_ = -1;
-/** @copydoc GraphRuntime::tls_scheduler_log_epoch_ */
-thread_local uint64_t GraphRuntime::tls_scheduler_log_epoch_ = 0;
+/** @copydoc GraphRuntime::tls_execution_context_worker_id_ */
+thread_local int GraphRuntime::tls_execution_context_worker_id_ = -1;
+/** @copydoc GraphRuntime::tls_execution_context_epoch_ */
+thread_local uint64_t GraphRuntime::tls_execution_context_epoch_ = 0;
 
 /**
  * @brief Owns private platform GPU objects for one graph runtime.
  * @note The type is complete only in this implementation and never crosses the
- *       scheduler SDK host-context boundary.
+ *       private execution host-context boundary.
  */
 struct GraphRuntime::GpuContext {
 #ifdef __APPLE__
@@ -137,25 +148,36 @@ struct GraphRuntime::GpuContext {
 GraphRuntime::GraphRuntime(const Info& info)
     : info_(info),
       model_(info.cache_root.empty() ? info.root / "cache" : info.cache_root),
+      lifetime_anchor_(
+          std::make_shared<compute::GraphLifetimeAnchor>(model_.instance_id())),
       graph_state_(model_),
+      compute_requests_(model_, GraphStateExecutor::kDefaultQueueCapacity,
+                        GraphStateExecutor::CapacityMode::TotalAdmission),
+      compute_request_coordinator_(graph_state_, compute_requests_,
+                                   info.supersession_first_generation),
       event_service_(info.compute_event_capacity,
                      info.compute_event_initial_sequence,
                      info.compute_event_initial_dropped_count),
       realtime_proxy_graph_(std::make_unique<compute::RealtimeProxyGraph>()),
-      scheduler_trace_slots_(info.scheduler_trace_capacity),
-      scheduler_trace_next_sequence_(info.scheduler_trace_initial_sequence),
-      scheduler_trace_unsequenced_drops_(
-          info.scheduler_trace_initial_dropped_count) {
-  if (info.scheduler_trace_capacity == 0) {
-    throw std::invalid_argument(
-        "scheduler-trace ring capacity must be nonzero");
+      execution_routes_(make_initial_execution_routes(info)),
+      execution_trace_slots_(info.execution_trace_capacity),
+      execution_trace_next_sequence_(info.execution_trace_initial_sequence),
+      execution_trace_unsequenced_drops_(
+          info.execution_trace_initial_dropped_count) {
+  if (!valid_execution_type(info.hp_execution_type) ||
+      !valid_execution_type(info.rt_execution_type)) {
+    throw std::invalid_argument("GraphRuntime received an invalid route id");
   }
-  if (info.scheduler_trace_initial_sequence == 0) {
+  if (info.execution_trace_capacity == 0) {
     throw std::invalid_argument(
-        "scheduler-trace initial sequence must be nonzero");
+        "execution-trace ring capacity must be nonzero");
   }
-  static_assert(std::is_nothrow_move_constructible_v<SchedulerEvent>);
-  static_assert(std::is_nothrow_move_assignable_v<SchedulerEvent>);
+  if (info.execution_trace_initial_sequence == 0) {
+    throw std::invalid_argument(
+        "execution-trace initial sequence must be nonzero");
+  }
+  static_assert(std::is_nothrow_move_constructible_v<ExecutionEvent>);
+  static_assert(std::is_nothrow_move_assignable_v<ExecutionEvent>);
 
   std::filesystem::create_directories(info_.root);
   if (!model_.cache_root.empty()) {
@@ -178,17 +200,32 @@ GraphRuntime::GraphRuntime(const Info& info)
 /** @copydoc GraphRuntime::~GraphRuntime */
 GraphRuntime::~GraphRuntime() noexcept {
   try {
+    compute_request_coordinator_.stop_admission();
+    compute_requests_.close_and_drain();
     graph_state_.close_and_drain();
   } catch (...) {
     std::terminate();
   }
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
   running_.store(false, std::memory_order_release);
-  for (auto& [intent, scheduler] : schedulers_) {
-    (void)intent;
-    (void)cleanup_scheduler_lifecycle(scheduler.get());
-  }
-  schedulers_.clear();
+  lifetime_anchor_->mark_retired();
+}
+
+/** @copydoc GraphRuntime::clear_last_error */
+void GraphRuntime::clear_last_error() {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_.reset();
+}
+
+/** @copydoc GraphRuntime::store_last_error */
+void GraphRuntime::store_last_error(LastError error) {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_ = std::move(error);
+}
+
+/** @copydoc GraphRuntime::last_error */
+std::optional<GraphRuntime::LastError> GraphRuntime::last_error() const {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  return last_error_;
 }
 
 /** @copydoc GraphRuntime::this_worker_id */
@@ -196,7 +233,7 @@ int GraphRuntime::this_worker_id() noexcept {
   if (tls_worker_id_ >= 0) {
     return tls_worker_id_;
   }
-  return tls_scheduler_log_worker_id_;
+  return tls_execution_context_worker_id_;
 }
 
 /** @copydoc GraphRuntime::get_metal_device */
@@ -224,91 +261,30 @@ compute::RealtimeProxyGraph& GraphRuntime::realtime_proxy_graph() {
 
 /** @copydoc GraphRuntime::start */
 void GraphRuntime::start() {
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
-  if (running_.load(std::memory_order_acquire)) {
-    return;
-  }
-
-  std::vector<IScheduler*> started_schedulers;
-  started_schedulers.reserve(schedulers_.size());
-  try {
-    for (auto& [intent, scheduler] : schedulers_) {
-      (void)intent;
-      if (scheduler && !scheduler->is_running()) {
-        started_schedulers.push_back(scheduler.get());
-        scheduler->start();
-      }
-    }
-  } catch (...) {
-    const std::exception_ptr start_error = std::current_exception();
-    for (auto it = started_schedulers.rbegin(); it != started_schedulers.rend();
-         ++it) {
-      try {
-        if (*it) {
-          (*it)->shutdown();
-        }
-      } catch (...) {
-      }
-    }
-    running_.store(false, std::memory_order_release);
-    std::rethrow_exception(start_error);
-  }
   running_.store(true, std::memory_order_release);
 }
 
 /** @copydoc GraphRuntime::stop */
 void GraphRuntime::stop() {
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
   running_.store(false, std::memory_order_release);
-  std::exception_ptr first_stop_error;
-  for (auto& [intent, scheduler] : schedulers_) {
-    (void)intent;
-    if (!scheduler) {
-      continue;
-    }
-
-    bool shutdown_required = true;
-    try {
-      shutdown_required = scheduler->is_running();
-    } catch (...) {
-      if (!first_stop_error) {
-        first_stop_error = std::current_exception();
-      }
-    }
-
-    if (!shutdown_required) {
-      continue;
-    }
-
-    try {
-      scheduler->shutdown();
-    } catch (...) {
-      if (!first_stop_error) {
-        first_stop_error = std::current_exception();
-      }
-    }
-  }
-  if (first_stop_error) {
-    std::rethrow_exception(first_stop_error);
-  }
 }
 
 /** @copydoc GraphRuntime::this_task_epoch */
 uint64_t GraphRuntime::this_task_epoch() noexcept {
-  return tls_scheduler_log_epoch_;
+  return tls_execution_context_epoch_;
 }
 
-/** @copydoc GraphRuntime::set_scheduler_log_context */
-void GraphRuntime::set_scheduler_log_context(int worker_id,
-                                             uint64_t epoch) noexcept {
-  tls_scheduler_log_worker_id_ = worker_id;
-  tls_scheduler_log_epoch_ = epoch;
+/** @copydoc GraphRuntime::set_execution_trace_context */
+void GraphRuntime::set_execution_trace_context(int worker_id,
+                                               uint64_t epoch) noexcept {
+  tls_execution_context_worker_id_ = worker_id;
+  tls_execution_context_epoch_ = epoch;
 }
 
-/** @copydoc GraphRuntime::clear_scheduler_log_context */
-void GraphRuntime::clear_scheduler_log_context() noexcept {
-  tls_scheduler_log_worker_id_ = -1;
-  tls_scheduler_log_epoch_ = 0;
+/** @copydoc GraphRuntime::clear_execution_trace_context */
+void GraphRuntime::clear_execution_trace_context() noexcept {
+  tls_execution_context_worker_id_ = -1;
+  tls_execution_context_epoch_ = 0;
 }
 
 /** @copydoc GraphRuntime::is_device_available */
@@ -331,125 +307,125 @@ bool GraphRuntime::is_device_available(Device device) const noexcept {
 
 /** @copydoc GraphRuntime::set_task_context */
 void GraphRuntime::set_task_context(int worker_id, uint64_t epoch) noexcept {
-  set_scheduler_log_context(worker_id, epoch);
+  set_execution_trace_context(worker_id, epoch);
 }
 
 /** @copydoc GraphRuntime::clear_task_context */
 void GraphRuntime::clear_task_context() noexcept {
-  clear_scheduler_log_context();
+  clear_execution_trace_context();
 }
 
-/** @copydoc GraphRuntime::log_event(SchedulerTraceAction,int,int,uint64_t) */
-void GraphRuntime::log_event(SchedulerTraceAction action, int node_id,
+/** @copydoc GraphRuntime::log_event(ExecutionTraceAction,int,int,uint64_t) */
+void GraphRuntime::log_event(ExecutionTraceAction action, int node_id,
                              int worker_id, uint64_t epoch) noexcept {
-  SchedulerEvent::Action runtime_action = SchedulerEvent::EXECUTE;
+  ExecutionEvent::Action runtime_action = ExecutionEvent::EXECUTE;
   switch (action) {
-    case SchedulerTraceAction::AssignInitial:
-      runtime_action = SchedulerEvent::ASSIGN_INITIAL;
+    case ExecutionTraceAction::AssignInitial:
+      runtime_action = ExecutionEvent::ASSIGN_INITIAL;
       break;
-    case SchedulerTraceAction::Execute:
-      runtime_action = SchedulerEvent::EXECUTE;
+    case ExecutionTraceAction::Execute:
+      runtime_action = ExecutionEvent::EXECUTE;
       break;
-    case SchedulerTraceAction::ExecuteTile:
-      runtime_action = SchedulerEvent::EXECUTE_TILE;
+    case ExecutionTraceAction::ExecuteTile:
+      runtime_action = ExecutionEvent::EXECUTE_TILE;
       break;
-    case SchedulerTraceAction::ExecuteDirtySource:
-      runtime_action = SchedulerEvent::EXECUTE_DIRTY_SOURCE;
+    case ExecutionTraceAction::ExecuteDirtySource:
+      runtime_action = ExecutionEvent::EXECUTE_DIRTY_SOURCE;
       break;
-    case SchedulerTraceAction::ExecuteDirtyDownstreamNode:
-      runtime_action = SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE;
+    case ExecutionTraceAction::ExecuteDirtyDownstreamNode:
+      runtime_action = ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE;
       break;
-    case SchedulerTraceAction::ExecuteDirtyDownstreamTile:
-      runtime_action = SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE;
+    case ExecutionTraceAction::ExecuteDirtyDownstreamTile:
+      runtime_action = ExecutionEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE;
       break;
-    case SchedulerTraceAction::SkipStaleGeneration:
-      runtime_action = SchedulerEvent::SKIP_STALE_GENERATION;
+    case ExecutionTraceAction::SkipStaleGeneration:
+      runtime_action = ExecutionEvent::SKIP_STALE_GENERATION;
       break;
-    case SchedulerTraceAction::RethrowException:
-      runtime_action = SchedulerEvent::RETHROW_EXCEPTION;
+    case ExecutionTraceAction::RethrowException:
+      runtime_action = ExecutionEvent::RETHROW_EXCEPTION;
       break;
   }
   try {
     log_event(runtime_action, node_id, worker_id, epoch);
   } catch (...) {
-    // Scheduler observations are best effort and cannot replace task failures.
+    // Execution observations are best effort and cannot replace task failures.
   }
 }
 
-/** @copydoc GraphRuntime::log_event(SchedulerEvent::Action,int) */
-void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
+/** @copydoc GraphRuntime::log_event(ExecutionEvent::Action,int) */
+void GraphRuntime::log_event(ExecutionEvent::Action action, int node_id) {
   uint64_t epoch = this_task_epoch();
   int worker_id = this_worker_id();
   if (worker_id < 0) {
-    worker_id = tls_scheduler_log_worker_id_;
+    worker_id = tls_execution_context_worker_id_;
   }
   log_event(action, node_id, worker_id, epoch);
 }
 
-/** @copydoc GraphRuntime::log_event(SchedulerEvent::Action,int,int,uint64_t)
+/** @copydoc GraphRuntime::log_event(ExecutionEvent::Action,int,int,uint64_t)
  */
-void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id,
+void GraphRuntime::log_event(ExecutionEvent::Action action, int node_id,
                              int worker_id, uint64_t epoch) {
   std::lock_guard<std::mutex> lock(log_mutex_);
-  if (scheduler_trace_next_sequence_ == kObservationSequenceExhausted) {
-    saturating_increment(scheduler_trace_unsequenced_drops_);
+  if (execution_trace_next_sequence_ == kObservationSequenceExhausted) {
+    saturating_increment(execution_trace_unsequenced_drops_);
     return;
   }
 
-  const uint64_t sequence = scheduler_trace_next_sequence_;
-  SchedulerEvent event{sequence, epoch,
+  const uint64_t sequence = execution_trace_next_sequence_;
+  ExecutionEvent event{sequence, epoch,
                        node_id,  worker_id,
                        action,   std::chrono::high_resolution_clock::now()};
-  scheduler_trace_next_sequence_ = sequence_successor(sequence);
+  execution_trace_next_sequence_ = sequence_successor(sequence);
 
-  if (scheduler_trace_size_ == scheduler_trace_slots_.size()) {
-    scheduler_trace_slots_[scheduler_trace_head_] = std::move(event);
-    scheduler_trace_head_ =
-        (scheduler_trace_head_ + 1) % scheduler_trace_slots_.size();
+  if (execution_trace_size_ == execution_trace_slots_.size()) {
+    execution_trace_slots_[execution_trace_head_] = std::move(event);
+    execution_trace_head_ =
+        (execution_trace_head_ + 1) % execution_trace_slots_.size();
     return;
   }
 
   const std::size_t insertion =
-      (scheduler_trace_head_ + scheduler_trace_size_) %
-      scheduler_trace_slots_.size();
-  scheduler_trace_slots_[insertion].emplace(std::move(event));
-  ++scheduler_trace_size_;
+      (execution_trace_head_ + execution_trace_size_) %
+      execution_trace_slots_.size();
+  execution_trace_slots_[insertion].emplace(std::move(event));
+  ++execution_trace_size_;
 }
 
-/** @copydoc GraphRuntime::scheduler_trace_page */
-GraphRuntime::SchedulerEventPage GraphRuntime::scheduler_trace_page(
+/** @copydoc GraphRuntime::execution_trace_page */
+GraphRuntime::ExecutionEventPage GraphRuntime::execution_trace_page(
     uint64_t after_sequence,
     std::size_t limit) const {  // NOLINT(whitespace/indent_namespace)
-  if (limit < kSchedulerTraceMinLimit || limit > kSchedulerTraceMaxLimit) {
-    throw std::invalid_argument("scheduler-trace limit is out of range");
+  if (limit < kExecutionTraceMinLimit || limit > kExecutionTraceMaxLimit) {
+    throw std::invalid_argument("execution-trace limit is out of range");
   }
 
   std::lock_guard<std::mutex> lock(log_mutex_);
-  SchedulerEventPage page;
+  ExecutionEventPage page;
   if (after_sequence == kObservationSequenceExhausted) {
-    if (scheduler_trace_next_sequence_ != kObservationSequenceExhausted) {
+    if (execution_trace_next_sequence_ != kObservationSequenceExhausted) {
       throw std::invalid_argument(
-          "scheduler-trace exhausted cursor precedes exhaustion");
+          "execution-trace exhausted cursor precedes exhaustion");
     }
     page.next_sequence = kObservationSequenceExhausted;
     return page;
   }
 
   const uint64_t last_published =
-      scheduler_trace_next_sequence_ == kObservationSequenceExhausted
+      execution_trace_next_sequence_ == kObservationSequenceExhausted
           ? kObservationSequenceExhausted - 1
-          : scheduler_trace_next_sequence_ - 1;
+          : execution_trace_next_sequence_ - 1;
   if (after_sequence > last_published) {
-    throw std::invalid_argument("scheduler-trace cursor is in the future");
+    throw std::invalid_argument("execution-trace cursor is in the future");
   }
 
-  page.events.reserve(std::min(limit, scheduler_trace_size_));
+  page.events.reserve(std::min(limit, execution_trace_size_));
   std::size_t matching_count = 0;
-  uint64_t first_later_sequence = scheduler_trace_next_sequence_;
-  for (std::size_t offset = 0; offset < scheduler_trace_size_; ++offset) {
+  uint64_t first_later_sequence = execution_trace_next_sequence_;
+  for (std::size_t offset = 0; offset < execution_trace_size_; ++offset) {
     const std::size_t index =
-        (scheduler_trace_head_ + offset) % scheduler_trace_slots_.size();
-    const SchedulerEvent& event = *scheduler_trace_slots_[index];
+        (execution_trace_head_ + offset) % execution_trace_slots_.size();
+    const ExecutionEvent& event = *execution_trace_slots_[index];
     if (event.sequence <= after_sequence) {
       continue;
     }
@@ -465,16 +441,16 @@ GraphRuntime::SchedulerEventPage GraphRuntime::scheduler_trace_page(
   page.has_more = matching_count > page.events.size();
   page.dropped_count =
       saturating_add(sequence_gap(after_sequence, first_later_sequence),
-                     scheduler_trace_unsequenced_drops_);
+                     execution_trace_unsequenced_drops_);
 
   if (!page.events.empty()) {
     const uint64_t last_returned = page.events.back().sequence;
     const bool terminal_page =
-        scheduler_trace_next_sequence_ == kObservationSequenceExhausted &&
+        execution_trace_next_sequence_ == kObservationSequenceExhausted &&
         !page.has_more && last_returned == kObservationSequenceExhausted - 1;
     page.next_sequence =
         terminal_page ? kObservationSequenceExhausted : last_returned;
-  } else if (scheduler_trace_next_sequence_ == kObservationSequenceExhausted) {
+  } else if (execution_trace_next_sequence_ == kObservationSequenceExhausted) {
     page.next_sequence = kObservationSequenceExhausted;
     page.has_more = false;
   } else {
@@ -483,76 +459,62 @@ GraphRuntime::SchedulerEventPage GraphRuntime::scheduler_trace_page(
   return page;
 }
 
-/** @copydoc GraphRuntime::clear_scheduler_log */
-void GraphRuntime::clear_scheduler_log() {
+/** @copydoc GraphRuntime::clear_execution_trace */
+void GraphRuntime::clear_execution_trace() {
   std::lock_guard<std::mutex> lock(log_mutex_);
-  for (auto& slot : scheduler_trace_slots_) {
+  for (auto& slot : execution_trace_slots_) {
     slot.reset();
   }
-  scheduler_trace_head_ = 0;
-  scheduler_trace_size_ = 0;
+  execution_trace_head_ = 0;
+  execution_trace_size_ = 0;
 }
 
-/** @copydoc GraphRuntime::set_scheduler */
-void GraphRuntime::set_scheduler(ComputeIntent intent,
-                                 std::unique_ptr<IScheduler> scheduler) {
-  replace_scheduler(intent, std::move(scheduler));
-}
-
-/** @copydoc GraphRuntime::get_scheduler(ComputeIntent) */
-IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) {
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
-  auto it = schedulers_.find(intent);
-  return (it != schedulers_.end()) ? it->second.get() : nullptr;
-}
-
-/** @copydoc GraphRuntime::get_scheduler(ComputeIntent) const */
-const IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) const {
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
-  auto it = schedulers_.find(intent);
-  return (it != schedulers_.end()) ? it->second.get() : nullptr;
-}
-
-/** @copydoc GraphRuntime::replace_scheduler */
-void GraphRuntime::replace_scheduler(ComputeIntent intent,
-                                     std::unique_ptr<IScheduler> scheduler) {
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
-
-  // Reserve any new map node before candidate lifecycle calls. Once this
-  // succeeds, publication into the existing unique_ptr slot cannot allocate.
-  auto [slot, inserted] = schedulers_.try_emplace(intent, nullptr);
-  try {
-    if (scheduler) {
-      scheduler->attach(*this);
-      if (running_.load(std::memory_order_acquire)) {
-        scheduler->start();
-      }
-    }
-  } catch (...) {
-    const std::exception_ptr candidate_error = std::current_exception();
-    (void)cleanup_scheduler_lifecycle(scheduler.get());
-    if (inserted) {
-      schedulers_.erase(slot);
-    }
-    std::rethrow_exception(candidate_error);
+/** @copydoc GraphRuntime::execution_route */
+GraphRuntime::ExecutionRouteBinding GraphRuntime::execution_route(
+    ComputeIntent intent) const {
+  if (!valid_execution_intent(intent)) {
+    throw std::invalid_argument("Unsupported execution-route intent.");
   }
-
-  // Candidate preparation is complete. Swap publishes it without allocation
-  // or ownership destruction; scheduler now owns the previous map value.
-  slot->second.swap(scheduler);
-
-  // Publication cannot be rolled back truthfully. Cleanup remains a complete
-  // best-effort sweep, but a displaced-owner lifecycle error is post-commit
-  // diagnostic state rather than a replacement failure.
-  (void)cleanup_scheduler_lifecycle(scheduler.get());
-  scheduler.reset();
+  std::lock_guard<std::mutex> lock(execution_routes_mutex_);
+  const auto found = execution_routes_.find(intent);
+  if (found == execution_routes_.end()) {
+    throw std::logic_error("GraphRuntime has no execution-route binding.");
+  }
+  return found->second;
 }
 
-/** @copydoc GraphRuntime::has_scheduler */
-bool GraphRuntime::has_scheduler(ComputeIntent intent) const {
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
-  auto it = schedulers_.find(intent);
-  return it != schedulers_.end() && it->second != nullptr;
+/** @copydoc GraphRuntime::replace_execution_route */
+void GraphRuntime::replace_execution_route(ComputeIntent intent,
+                                           const std::string& execution_type) {
+  if (!valid_execution_intent(intent) ||
+      !valid_execution_type(execution_type)) {
+    throw std::invalid_argument("Invalid execution route replacement.");
+  }
+  std::string staged_type(execution_type);
+  std::lock_guard<std::mutex> lock(execution_routes_mutex_);
+  const auto found = execution_routes_.find(intent);
+  if (found == execution_routes_.end()) {
+    throw std::logic_error("GraphRuntime has no execution-route binding.");
+  }
+  if (found->second.generation == std::numeric_limits<std::uint64_t>::max()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Execution route generation exhausted.");
+  }
+  found->second.execution_type.swap(staged_type);
+  ++found->second.generation;
+}
+
+/** @copydoc GraphRuntime::has_execution_route */
+bool GraphRuntime::has_execution_route(ComputeIntent intent) const noexcept {
+  if (!valid_execution_intent(intent)) {
+    return false;
+  }
+  try {
+    std::lock_guard<std::mutex> lock(execution_routes_mutex_);
+    return execution_routes_.find(intent) != execution_routes_.end();
+  } catch (...) {
+    return false;
+  }
 }
 
 }  // namespace ps

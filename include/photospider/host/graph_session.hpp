@@ -9,8 +9,8 @@
  * @brief Public graph-session request values for Host implementations.
  *
  * These values describe graph lifecycle requests without exposing backend
- * runtime, model, filesystem service objects, or scheduler state. They are
- * copied into an embedded or IPC host adapter before any backend mutation
+ * runtime, model, filesystem service objects, policy contexts, or execution
+ * state. They are copied into an embedded or IPC Host adapter before mutation
  * occurs.
  */
 

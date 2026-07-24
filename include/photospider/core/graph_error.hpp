@@ -12,8 +12,8 @@
  *
  * The declarations in this header are the public error vocabulary for
  * Photospider graph, compute, IO, and plugin boundaries. They intentionally do
- * not include graph model, runtime, scheduler, or service implementation
- * headers.
+ * not include Graph model, runtime, policy, execution, or service
+ * implementation headers.
  */
 
 namespace ps {
@@ -63,7 +63,7 @@ enum class GraphErrc : std::uint32_t {
  * @brief Exception carrying a stable graph error code.
  *
  * GraphError is used at internal service boundaries and may cross a controlled
- * scheduler call when it is an already host-owned task failure. A
+ * private execution callback when it is an already Host-owned task failure. A
  * DSO-origin `GraphError` never escapes an unloadable plugin object: the host
  * copies its code and message into a new host-owned `GraphError` while the
  * plugin library lease is still live. The object owns its diagnostic message

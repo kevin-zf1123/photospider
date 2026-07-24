@@ -16,12 +16,13 @@ namespace ps {
 CliAutocompleter::CliAutocompleter(ps::Host& svc) : svc_(svc) {
   // This list should be kept in sync with commands in `process_command`
   commands_ = {
-      "bench",       "benchmark", "clear",       "cls",  // 如果您想补全别名，也在这里添加
-      "clear-cache", "cc",        "clear-graph", "close",    "compute",
-      "config",      "exit",      "quit",        "q",        "free",
-      "graphs",      "help",      "inspect",     "load",     "node",
-      "ops",         "output",    "print",       "read",     "save",
-      "scheduler",   "source",    "switch",      "traversal"};
+      "bench",       "benchmark", "clear",
+      "cls",  // 如果您想补全别名，也在这里添加
+      "clear-cache", "cc",        "clear-graph", "close",     "compute",
+      "config",      "exit",      "quit",        "q",         "free",
+      "graphs",      "help",      "inspect",     "load",      "node",
+      "ops",         "output",    "policy",      "print",     "read",
+      "save",        "source",    "switch",      "traversal", "execution"};
   std::sort(commands_.begin(), commands_.end());
 }
 
@@ -116,12 +117,10 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
       CompleteGraphName(prefix, result.options);
     } else if (cmd == "ops") {
       CompleteOpsMode(prefix, result.options);
-    } else if (cmd == "scheduler") {
-      // scheduler <list|get|set|scan|load|plugins> [intent] [type]
+    } else if (cmd == "policy") {
       bool completing_first_arg =
           (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
       if (completing_first_arg) {
-        // Subcommands
         std::vector<std::string> subcmds = {"list", "get",     "set", "scan",
                                             "load", "plugins", "help"};
         for (const auto& s : subcmds) {
@@ -134,14 +133,14 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
           bool completing_intent = (tokens.size() == 2) ||
                                    (tokens.size() == 3 && line.back() != ' ');
           if (completing_intent) {
-            // Intent options
-            std::vector<std::string> intents = {"hp", "rt", "all"};
-            for (const auto& i : intents) {
-              if (i.rfind(prefix, 0) == 0)
-                result.options.push_back(i);
+            for (const std::string policy_class :
+                 {"interactive", "throughput", "all"}) {
+              if (policy_class.rfind(prefix, 0) == 0) {
+                result.options.push_back(policy_class);
+              }
             }
           } else if (subcmd == "set") {
-            auto types = svc_.scheduler_available_types();
+            auto types = svc_.policy_available_types();
             if (types.status.ok) {
               for (const auto& t : types.value) {
                 if (t.rfind(prefix, 0) == 0)
@@ -152,6 +151,39 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
         } else if (subcmd == "scan" || subcmd == "load") {
           // Path completion for scan/load
           CompletePath(prefix, result.options);
+        }
+      }
+    } else if (cmd == "execution") {
+      const bool completing_first_arg =
+          (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
+      if (completing_first_arg) {
+        for (const std::string subcommand : {"list", "get", "set", "help"}) {
+          if (subcommand.rfind(prefix, 0) == 0) {
+            result.options.push_back(subcommand);
+          }
+        }
+      } else if (tokens.size() >= 2) {
+        const std::string& subcommand = tokens[1];
+        if (subcommand == "get" || subcommand == "set") {
+          const bool completing_intent =
+              (tokens.size() == 2) ||
+              (tokens.size() == 3 && line.back() != ' ');
+          if (completing_intent) {
+            for (const std::string intent : {"hp", "rt", "all"}) {
+              if (intent.rfind(prefix, 0) == 0) {
+                result.options.push_back(intent);
+              }
+            }
+          } else if (subcommand == "set") {
+            const auto types = svc_.execution_available_types();
+            if (types.status.ok) {
+              for (const std::string& type : types.value) {
+                if (type.rfind(prefix, 0) == 0) {
+                  result.options.push_back(type);
+                }
+              }
+            }
+          }
         }
       }
     }

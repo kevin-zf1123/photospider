@@ -108,7 +108,7 @@ cmake --build build --target photospider_ipc_client photospiderd -j
 `photospiderd` is a same-user local Unix-domain sidecar, not a system service,
 remote endpoint, or TCP server. The CLI does not connect to it.
 
-See the [IPC protocol](docs/codebase-structure/IPC-Protocol-v1.md) for its typed
+See the [IPC protocol](docs/codebase-structure/IPC-Protocol-v2.md) for its typed
 client, socket policy, lifecycle, and limits.
 
 ### Install and integrate
@@ -132,7 +132,7 @@ only the dependencies recorded as enabled by the producer.
 | Typed local IPC | `ipc_client` | `Photospider::photospider_ipc_client` |
 | Operation plugin | `operation_sdk` | `Photospider::operation_sdk` |
 | OpenCV operation adapter | `operation_opencv` | `Photospider::operation_opencv` |
-| Scheduler plugin | `scheduler_sdk` | `Photospider::scheduler_sdk` |
+| Policy plugin | `policy_sdk` | `Photospider::policy_sdk` |
 
 For example, an embedded consumer can use:
 
@@ -141,7 +141,7 @@ find_package(Photospider CONFIG REQUIRED COMPONENTS embedded)
 target_link_libraries(app PRIVATE Photospider::photospider)
 ```
 
-Operation and scheduler extension authors should use only their narrow SDK
+Operation and policy extension authors should use only their narrow SDK
 component. The [plugin ABI guide](docs/kernel-architecture/Plugin-ABI.md)
 defines the public contracts and required entry points.
 
@@ -152,8 +152,8 @@ defines the public contracts and required entry points.
 | CLI, REPL, configuration, and built-in operations | [User manual](manual.md) |
 | Architecture reading order | [Kernel architecture index](docs/kernel-architecture/README.md) |
 | Current modules and ownership | [Architecture overview](docs/kernel-architecture/Overview.md) |
-| Local daemon and typed IPC | [IPC protocol](docs/codebase-structure/IPC-Protocol-v1.md) |
-| Operation and scheduler extensions | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |
+| Local daemon and typed IPC | [IPC protocol](docs/codebase-structure/IPC-Protocol-v2.md) |
+| Operation and policy extensions | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |
 | Build and validation guidance | [Testing and validation](docs/development/Testing-and-Validation.md) |
 
 English documentation is authoritative. Matching files under the relevant

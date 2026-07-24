@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "compute/compute_commit_policy.hpp"
+#include "compute/compute_run.hpp"
+#include "compute/compute_supersession.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -17,10 +20,13 @@ class GraphTraversalService;
 class GraphCacheService;
 class GraphEventService;
 struct BenchmarkEvent;
+struct PreparedIntentUpdateState;
 namespace compute {
 class DirtyNodeSynchronization;
 class DirtySiblingCommitGate;
+class ExecutionService;
 class RealtimeProxyGraph;
+class RunLifecycleAdmissionCandidate;
 class StabilizedDirtyParameters;
 }  // namespace compute
 
@@ -97,9 +103,11 @@ class ComputeService {
    * legacy HP-only path, while a populated intent delegates to
    * IntentUpdateCoordinator with dirty_roi forwarded unchanged.
    *
-   * @note The request does not own GraphModel, GraphRuntime, schedulers, or
-   * cache entries. All graph mutation happens inside the compute call selected
-   * by compute() or compute_parallel().
+   * @note The request does not own GraphModel, GraphRuntime, workers, routes,
+   * or cache entries. Every created Run snapshots graph_identity and qos before
+   * planning: one Run for a standalone HP request and one immutable copy in
+   * each HP/RT child of a realtime request. All graph mutation happens inside
+   * the compute call selected by compute() or compute_parallel().
    */
   struct Request {
     /** @brief Target graph node id requested by the caller. */
@@ -116,25 +124,85 @@ class ComputeService {
 
     /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
     std::optional<PixelRect> dirty_roi;
+
+    /**
+     * @brief Stable graph/session identity captured in every created Run.
+     *
+     * @note Kernel supplies its session label. Direct private service callers
+     * may leave this empty without manufacturing address-based identity.
+     */
+    std::string graph_identity;
+
+    /**
+     * @brief Explicit QoS value captured independently from compute intent.
+     *
+     * @note Current Kernel callers use Throughput, weight one, no deadline, and
+     * an optional sequential parallelism cap. Built-in CPU ExecutionService
+     * routes apply the explicit class, deadline, and weight without inferring
+     * from intent or quality; inline work retains its existing execution
+     * behavior.
+     */
+    compute::ComputeRunQos qos;
+
+    /**
+     * @brief Optional private product policy for visible staged publication.
+     * @note Kernel supplies one policy tied to its exact request-owned Graph
+     * snapshot. Direct ComputeService callers may leave it empty.
+     */
+    std::shared_ptr<compute::ComputeCommitPolicy> commit_policy;
+
+    /**
+     * @brief Optional request-owned RT proxy snapshot used instead of runtime
+     * or service-local visible proxy storage.
+     * @note Kernel owns this object through complete compute and commit. A
+     * non-null pointer is valid only together with that request lifetime.
+     */
+    compute::RealtimeProxyGraph* staged_realtime_proxy = nullptr;
+
+    /**
+     * @brief Optional private current-request cancellation authority.
+     * @note Direct backend callers may retain this source and request explicit
+     * cancellation. ComputeService creates a request-local source when absent.
+     * The wrapper acquires lifecycle leases before attachment so an already
+     * requested cancellation remains observable. The field is not installed
+     * and does not expand Host, CLI, or IPC v1.
+     */
+    std::shared_ptr<compute::ComputeRequestCancellationSource>
+        cancellation_source;
+
+    /**
+     * @brief Optional product-assigned canonical key/generation lineage.
+     * @note Kernel supplies this before staging/materialization. Direct private
+     * service callers may omit it and receive a local generation-one identity
+     * that grants no product supersession authority.
+     */
+    std::optional<compute::SupersessionIdentity> supersession;
   };
 
   /**
    * @brief Runtime policy for one ComputeService execution path.
    *
-   * ExecutionStrategy captures whether the caller has selected a
-   * scheduler-backed path and, when so, which runtime owns the scheduler task
-   * pools. It keeps execution policy separate from the semantic request so the
-   * same Request can be used by both compute() and compute_parallel().
+   * ExecutionStrategy captures whether the caller selected an execution-bound
+   * path and, when so, which runtime supplies Graph lifecycle, binding lookup,
+   * and worker-facing observation. It keeps execution policy separate from
+   * the semantic request so the same Request can be used by both compute() and
+   * compute_parallel().
    *
    * @note A null runtime is valid only when use_parallel_executor is false.
    * Parallel HP or RT scheduling validates the runtime before dispatching work.
    */
   struct ExecutionStrategy {
-    /** @brief Runtime that owns scheduler task pools, or null for inline work.
+    /**
+     * @brief Runtime providing bindings and observation, or null for inline
+     * work.
+     *
+     * @note The runtime owns only copied route bindings and execution
+     * observations. Every queued route dispatches through the injected process
+     * ExecutionService.
      */
     GraphRuntime* runtime = nullptr;
 
-    /** @brief Whether full non-dirty work should use scheduler dispatch. */
+    /** @brief Whether full non-dirty work should use queued route dispatch. */
     bool use_parallel_executor = false;
   };
 
@@ -145,12 +213,16 @@ class ComputeService {
    * planning.
    * @param cache Cache service used for disk cache reads and writes.
    * @param events Event service used for compute status and timing events.
+   * @param execution_service Explicit process CPU execution owner.
    * @throws Nothing directly; referenced services must already be valid.
    * @note ComputeService does not own the supplied services and must not
-   * outlive them.
+   * outlive them. All queued CPU, GPU-pipeline, and serial-debug paths share
+   * the injected execution service; only explicit inline work executes without
+   * it.
    */
   ComputeService(GraphTraversalService& traversal, GraphCacheService& cache,
-                 GraphEventService& events);
+                 GraphEventService& events,
+                 compute::ExecutionService& execution_service);
 
   /**
    * @brief Destroys inline RT proxy graph storage owned by the service.
@@ -172,39 +244,100 @@ class ComputeService {
    * graph node state; RT dirty outputs are owned by the service inline proxy
    * graph.
    * @throws GraphError for validation, planning, cache, dispatch, or missing
-   * output failures; may propagate operation-specific exceptions.
+   * output failures, including private cancellation translated to
+   * `GraphErrc::ComputeError`; may propagate operation-specific exceptions.
    * @throws std::bad_alloc unchanged when any Host-reachable compute stage
    * exhausts memory.
    * @note A request without intent uses the legacy GlobalHighPrecision
    * recursive path. Intent-aware requests are coordinated inline without a
-   * scheduler runtime.
+   * queued execution runtime. Cancellation that wins before the Run commit
+   * contender prevents product-visible staged publication; an already entered
+   * monolithic provider remains non-preemptible until it returns.
    */
   NodeOutput& compute(GraphModel& graph, const Request& request);
 
   /**
-   * @brief Executes a scheduler-backed compute request against one graph.
+   * @brief Executes inline work through an already indexed Graph candidate.
+   * @param graph Exact staged or direct Graph.
+   * @param request Complete service request.
+   * @param admission_candidate Candidate begun before revision capture.
+   * @return Mutable selected-domain output.
+   * @throws The ordinary compute and lifecycle installation errors unchanged.
+   * @note Kernel uses this overload so snapshot/revision capture, planning,
+   * reservation, Run construction, and staging all occur after the first
+   * lifecycle check. The candidate is consumed or rolled back exactly once.
+   */
+  NodeOutput& compute(
+      GraphModel& graph, const Request& request,
+      compute::RunLifecycleAdmissionCandidate admission_candidate);
+
+  /**
+   * @brief Executes an execution-bound compute request against one graph.
    *
    * @param graph Graph whose node caches, timing, and inspection state are
    * read and mutated.
-   * @param runtime Runtime that owns intent-specific scheduler task pools.
+   * @param runtime Runtime providing Graph lifecycle, intent bindings, and
+   * worker-facing observation. Every supported binding uses the injected
+   * ExecutionService for physical execution.
    * @param request Target, cache, telemetry, intent, and dirty ROI options.
    * @return Mutable output selected by the request. HP outputs are owned by
    * graph node state; RT dirty outputs are owned by the runtime proxy graph.
-   * @throws GraphError for scheduler lookup, validation, planning, dispatch, or
-   * missing output failures; may propagate operation-specific exceptions.
+   * @throws GraphError for route lookup, validation, planning, dispatch, or
+   * missing output failures, including private cancellation translated to
+   * `GraphErrc::ComputeError`; may propagate operation-specific exceptions.
    * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
    * cache, telemetry, or result storage exhausts memory.
-   * @note Dirty RT updates pass HP and RT scheduler task runtimes to
-   * IntentUpdateCoordinator when both runtimes are available. The staged dirty
-   * commit path starts RT before HP, waits for RT proxy commit before HP graph
-   * commit, and returns the RT proxy output. Kernel callers must enter this
-   * method from GraphStateExecutor so scheduler-backed work remains serialized
-   * with graph-state operations.
+   * @note Dirty RT updates create separate HP and RT child Runs. Built-in CPU
+   * routes submit both children to the fixed process ExecutionService. The
+   * staged dirty commit path starts RT before HP, waits for RT proxy commit
+   * before HP graph commit, and returns the RT proxy output. Kernel callers
+   * must enter this method from GraphStateExecutor so execution-bound work
+   * remains serialized with graph-state operations. Cancellation purges only
+   * the matching built-in CPU Run's queued work and drains running callbacks;
+   * the Kernel product policy prevents visible publication when cancellation
+   * wins before commit arbitration.
    */
   NodeOutput& compute_parallel(GraphModel& graph, GraphRuntime& runtime,
                                const Request& request);
 
+  /**
+   * @brief Executes route-backed work through an already indexed candidate.
+   * @param graph Exact staged Graph.
+   * @param runtime Runtime retaining routes, lanes, and lifetime anchor.
+   * @param request Complete service request.
+   * @param admission_candidate Candidate begun before revision capture.
+   * @return Mutable selected-domain output.
+   * @throws The ordinary parallel and lifecycle errors unchanged.
+   * @note Bundle installation remains all-or-nothing after off-fence staging.
+   */
+  NodeOutput& compute_parallel(
+      GraphModel& graph, GraphRuntime& runtime, const Request& request,
+      compute::RunLifecycleAdmissionCandidate admission_candidate);
+
  private:
+  /**
+   * @brief Complete off-registry plan for one sequential HP request.
+   *
+   * @throws std::bad_alloc when plan, operation, or recursion storage grows.
+   * @note Operation lookup and all request-sized recursion-map allocation
+   * finish before lifecycle installation. The state remains caller-owned until
+   * synchronous execution settles.
+   */
+  struct PreparedSequentialCompute {
+    /** @brief Cache-pruned plan retained for diagnostics and execution shape.
+     */
+    compute::ComputePlan compute_plan;
+
+    /** @brief Planned node order after cache pruning. */
+    std::vector<int> execution_order;
+
+    /** @brief Pre-resolved HP operation for every executable planned node. */
+    std::unordered_map<int, OpRegistry::OpVariant> resolved_operations;
+
+    /** @brief Pre-reserved recursion/cycle state reused during execution. */
+    std::unordered_map<int, bool> visiting;
+  };
+
   /**
    * @brief Shared recursive sequential compute context.
    *
@@ -231,6 +364,12 @@ class ComputeService {
 
     /** @brief Optional caller-owned benchmark sink for this request. */
     std::vector<BenchmarkEvent>* benchmark_events = nullptr;
+
+    /** @brief Off-registry operation lookup keyed by planned node id. */
+    const std::unordered_map<int, OpRegistry::OpVariant>& resolved_operations;
+
+    /** @brief Retained read-only Run lease observed at recursive boundaries. */
+    const compute::ComputeRunLease& run_lease;
   };
 
   /**
@@ -244,66 +383,19 @@ class ComputeService {
    * @throws std::bad_alloc unchanged when dependency, operation, cache,
    * telemetry, or result storage exhausts memory.
    * @throws GraphError for cycles, missing dependencies or operations, cache
-   * failures, and operation failures represented by the backend.
+   * failures, operation failures represented by the backend, and accepted
+   * cancellation translated from the retained Run.
    * @note The context and its references must outlive the recursive call tree.
    * Effective parameters and execution-facing node state remain on a
    * request-local Node snapshot. The method commits only the resolved
    * graph-owned input-size hint, HP cache/version, disk-cache effects, and
-   * telemetry on the calling thread.
+   * telemetry on the calling thread. Cooperative observations surround
+   * recursive dependency resolution, disk cache, provider/tile execution,
+   * cache publication, and return; a monolithic provider already entered is
+   * non-preemptible.
    */
   NodeOutput& compute_internal(GraphModel& graph, int node_id,
                                const RecursiveComputeContext& context);
-
-  /**
-   * @brief Delegates one HP dirty update to HighPrecisionDirtyExecutor.
-   *
-   * @param graph Graph whose HP state and cache are updated.
-   * @param proxy_graph RT proxy graph receiving optional HP downsample output.
-   * @param strategy Inline or scheduler-backed execution policy.
-   * @param request Validated dirty request and telemetry/cache options.
-   * @param sibling_commit_gate Optional RT sibling gate protecting HP commit.
-   * @return Mutable target HP output owned by graph.
-   * @throws std::bad_alloc unchanged when planning, task, cache, or output
-   * storage exhausts memory.
-   * @throws GraphError for dirty planning, dispatch, operation, or target
-   * validation failures; std::bad_optional_access for an unvalidated request.
-   * @note The executor owns phase locking and scheduler lifetime. The optional
-   * gate is shared only for the active RealTimeUpdate request.
-   */
-  NodeOutput& compute_high_precision_update(
-      GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
-      const ExecutionStrategy& strategy, const Request& request,
-      std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate =
-          nullptr,
-      std::shared_ptr<const compute::StabilizedDirtyParameters>
-          stabilized_parameters = nullptr);
-
-  /**
-   * @brief Delegates one RT dirty update to RealTimeDirtyExecutor.
-   *
-   * @param graph Graph supplying topology, parameters, and HP fallback data.
-   * @param proxy_graph RT proxy graph receiving the committed result.
-   * @param strategy Inline or scheduler-backed execution policy.
-   * @param request Validated dirty request and telemetry/cache options.
-   * @param stabilized_parameters Optional immutable parameter preflight output.
-   * @param node_synchronization Optional per-node critical sections shared with
-   * the concurrent HP sibling of the same RealTimeUpdate transaction.
-   * @return Mutable target RT output owned by proxy_graph.
-   * @throws std::bad_alloc unchanged when planning, task, proxy, or output
-   * storage exhausts memory.
-   * @throws GraphError for dirty planning, dispatch, operation, or target
-   * validation failures; std::bad_optional_access for an unvalidated request.
-   * @note RT output never becomes formal reusable GraphModel cache state. The
-   * optional synchronization owner is retained only for this synchronous call
-   * and is not stored in the Graph or runtime.
-   */
-  NodeOutput& compute_real_time_update(
-      GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
-      const ExecutionStrategy& strategy, const Request& request,
-      std::shared_ptr<const compute::StabilizedDirtyParameters>
-          stabilized_parameters = nullptr,
-      std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization =
-          nullptr);
 
   /**
    * @brief Resolves the RT proxy graph for one compute request.
@@ -311,13 +403,16 @@ class ComputeService {
    * @param graph GraphModel used as the inline-store key when no runtime is
    * available.
    * @param strategy Execution strategy that may supply GraphRuntime ownership.
-   * @return Runtime-owned proxy graph, or a service-owned inline proxy graph.
+   * @param request Request that may carry a Kernel-owned staged proxy override.
+   * @return Request-owned staged proxy, runtime-owned proxy graph, or a
+   * service-owned inline proxy graph, in that priority order.
    * @throws std::bad_alloc if inline proxy storage must be created.
    * @note The returned proxy is synchronized by dirty executors before
    * planning. Runtime-backed calls never use the inline store.
    */
   compute::RealtimeProxyGraph& realtime_proxy_graph_for(
-      GraphModel& graph, const ExecutionStrategy& strategy);
+      GraphModel& graph, const ExecutionStrategy& strategy,
+      const Request& request);
 
   /**
    * @brief Clears request-scoped timing records under the graph timing mutex.
@@ -331,56 +426,90 @@ class ComputeService {
   void clear_timing_results(GraphModel& graph);
 
   /**
+   * @brief Plans and resolves one sequential HP request before installation.
+   *
+   * @param graph Request-local Graph snapshot used for planning.
+   * @param request Target, cache, and telemetry controls.
+   * @param run_lease Candidate lease used for cancellation observation.
+   * @return Complete plan, operations, and reserved recursion state.
+   * @throws GraphError for missing targets, invalid topology/plans, or missing
+   * operations.
+   * @throws std::bad_alloc unchanged from planning and staging.
+   * @note The method executes no operation, advances no Run phase, publishes
+   * no result, and requires no lifecycle admission.
+   */
+  PreparedSequentialCompute prepare_sequential_compute(
+      GraphModel& graph, const Request& request,
+      const compute::ComputeRunLease& run_lease);
+
+  /**
    * @brief Executes legacy sequential HP compute after plan inspection.
    *
    * @param graph Graph whose planned HP cone is computed.
-   * @param request Target, cache, and telemetry options without scheduler
-   * ownership.
+   * @param request Target, cache, and telemetry options without queued route
+   * execution.
+   * @param prepared Complete plan and operation staging built off-registry.
+   * @param run Request-owned HP descriptor and terminal/storage owner.
+   * @param run_lease Retained lifecycle lease observed by recursive nodes and
+   * tiled-provider boundaries.
    * @return Mutable target HP output owned by graph.
    * @throws std::bad_alloc unchanged when planning, recursion, cache,
    * telemetry, or result storage exhausts memory.
    * @throws GraphError for target, topology, planning, operation, or cache
    * failures.
    * @note The method builds request-local recursion state and releases it after
-   * completion; graph-state serialization is owned by the Kernel caller.
+   * completion. Product Kernel callers supply a request-owned Graph snapshot;
+   * the outer Run wrapper advances to CommitPending before visible commit.
+   * Cancellation observations suppress later recursive/provider work and the
+   * outer commit; monolithic work already executing is non-preemptible.
    */
-  NodeOutput& compute_sequential_impl(GraphModel& graph,
-                                      const Request& request);
+  NodeOutput& compute_sequential_impl(
+      GraphModel& graph, const Request& request,
+      PreparedSequentialCompute prepared, compute::ComputeRun& run,
+      const compute::ComputeRunLease& run_lease);
 
   /**
-   * @brief Executes an intent-aware request without a GraphRuntime.
-   *
-   * @param graph Graph whose HP state or service-owned RT proxy is updated.
-   * @param request Intent and dirty request to coordinate inline.
-   * @return Mutable HP or RT output selected by the intent.
-   * @throws std::bad_alloc unchanged when coordination, dirty execution, cache,
-   * or output storage exhausts memory.
-   * @throws GraphError for intent validation, operation, planning, or output
-   * failures.
-   * @note Inline RT proxy storage remains owned by ComputeService until service
-   * destruction and is protected by inline_rt_proxy_graphs_mutex_.
+   * @brief Prepares a dirty intent request before lifecycle installation.
+   * @param graph Request-local Graph snapshot.
+   * @param strategy Inline or route-backed physical policy.
+   * @param request Validated GlobalHighPrecision-dirty or RealTimeUpdate
+   * request.
+   * @param hp_run Candidate HP Run.
+   * @param rt_run Candidate RT Run for realtime, otherwise null.
+   * @param hp_run_lease Candidate HP lease.
+   * @param rt_run_lease Candidate RT lease for realtime, otherwise null.
+   * @param sibling_commit_gate Realtime RT-first gate, otherwise null.
+   * @return Complete unpublished intent state owning provider-free connected
+   * preflight staging; output-dependent dirty domains are prepared later.
+   * @throws GraphError or standard exceptions from validation, topology,
+   * operation lookup, resource reservation, and preflight staging.
+   * @note Candidate preparation freezes connected-preflight providers,
+   * devices, callables, and service reservations without entering provider
+   * code. No physical callback, Run phase, lifecycle record, Graph output, or
+   * proxy output is published.
    */
-  NodeOutput& compute_with_intent_impl(GraphModel& graph,
-                                       const Request& request);
+  std::unique_ptr<PreparedIntentUpdateState> prepare_intent_update(
+      GraphModel& graph, const ExecutionStrategy& strategy,
+      const Request& request, compute::ComputeRun* hp_run,
+      compute::ComputeRun* rt_run, const compute::ComputeRunLease* hp_run_lease,
+      const compute::ComputeRunLease* rt_run_lease,
+      std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate);
 
   /**
-   * @brief Binds intent coordinator callbacks to concrete compute executors.
-   *
-   * @param graph Graph supplying HP state and topology.
-   * @param strategy Inline or scheduler-backed execution policy.
-   * @param request Intent-aware request including any dirty ROI.
-   * @return Mutable output selected by IntentUpdateCoordinator.
-   * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
-   * output storage exhausts memory.
-   * @throws GraphError for invalid intent, missing runtime, planning,
-   * operation, scheduler, or output failures.
-   * @note Callback captures, the optional sibling gate, and concurrent per-node
-   * synchronization are request-local; scheduler and proxy graph ownership
-   * remain with strategy/runtime/service.
+   * @brief Executes one installed prepared dirty intent request.
+   * @param prepared Complete unpublished state from prepare_intent_update().
+   * @return Mutable selected-domain output.
+   * @throws GraphError or standard exceptions from installed preflight,
+   * output-dependent dirty planning/staging, coordination, execution, commit
+   * policy, telemetry, or validation.
+   * @note The caller must atomically install the matching standalone/group
+   * bundle before entry. Connected providers enter only from a pre-reserved
+   * start after that installation; their immutable outputs then drive HP/RT
+   * dirty-domain preparation inside the installed Run. The preparation is
+   * consumed exactly once.
    */
-  NodeOutput& compute_intent_update_impl(GraphModel& graph,
-                                         const ExecutionStrategy& strategy,
-                                         const Request& request);
+  NodeOutput& execute_prepared_intent_update(
+      std::unique_ptr<PreparedIntentUpdateState> prepared);
 
   /** @brief Borrowed traversal service used by planning and dirty execution. */
   GraphTraversalService& traversal_;
@@ -388,6 +517,14 @@ class ComputeService {
   GraphCacheService& cache_;
   /** @brief Borrowed graph event sink used for request telemetry. */
   GraphEventService& events_;
+  /**
+   * @brief Borrowed explicitly injected process CPU execution owner.
+   *
+   * @note Built-in CPU full HP, dirty HP, dirty preflight, and RT work share
+   * this fixed process service. It outlives every request-local
+   * ComputeService.
+   */
+  compute::ExecutionService& execution_service_;
   /** @brief Protects service-owned inline RT proxy graph map access. */
   std::mutex inline_rt_proxy_graphs_mutex_;
   /**

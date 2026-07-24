@@ -39,4 +39,5 @@ Compute commit policy 与 `ComputeIntent` 保持分离。Staged、interruptible 
 
 ## 与其他决策的关系
 
-ADR 0003 会改变物理执行资源所有权，但保留本决策。当前没有决策取代 ADR 0001。
+ADR 0003 会改变物理执行资源所有权，ADR 0007 则冻结目标 Run、ready submission、
+completion 与生命周期的详细边界；两者都保留本决策。当前没有决策取代 ADR 0001。

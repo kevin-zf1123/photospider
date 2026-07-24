@@ -69,7 +69,7 @@ struct OutputTile {
 };
 
 /**
- * @brief Scheduler-visible unit of tiled node work.
+ * @brief Execution-visible unit of tiled node work.
  *
  * TileTask binds one node, one writable output tile, and all read-only input
  * tiles required by the selected operator. The task owns no image memory; all

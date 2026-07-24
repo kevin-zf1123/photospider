@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -43,15 +44,28 @@ struct HostComputeCacheOptions {
  * @brief Execution controls for one Host compute request.
  *
  * @throws Nothing.
- * @note `parallel` selects the scheduler-backed path where supported, while
+ * @note `parallel` selects the private execution path where supported, while
  *       `quiet` suppresses graph output for this request only.
+ *       `maximum_parallelism` optionally caps this request's Run callbacks
+ *       without resizing the process worker pool. The optional follows the
+ *       two pre-existing booleans so two-argument aggregate initialization
+ *       preserves its historical `parallel, quiet` source semantics.
  */
 struct HostComputeExecutionOptions {
-  /** @brief Whether scheduler-backed execution should be requested. */
+  /** @brief Whether parallel private execution should be requested. */
   bool parallel = false;
 
   /** @brief Whether graph output should be quiet during this request. */
   bool quiet = false;
+
+  /**
+   * @brief Optional positive maximum number of callbacks in flight for one
+   *        Run.
+   * @note Absence leaves the Run uncapped below the fixed process lanes. Zero
+   *       is invalid; the value controls Run QoS only and never reconfigures
+   *       process workers.
+   */
+  std::optional<std::uint32_t> maximum_parallelism;
 };
 
 /**
@@ -84,7 +98,7 @@ struct HostComputeRequest {
   /** @brief Cache precision and persistence controls. */
   HostComputeCacheOptions cache;
 
-  /** @brief Scheduler and quiet-mode controls. */
+  /** @brief Private execution and quiet-mode controls. */
   HostComputeExecutionOptions execution;
 
   /** @brief Timing and telemetry controls. */

@@ -50,7 +50,7 @@ std::string format_graph_inspection(const GraphInspectionView& graph);
  * @return Human-readable dirty-region report.
  * @throws std::bad_alloc if string construction allocates and fails.
  * @note The formatter consumes only public Host values and does not depend on
- *       kernel dirty-region or scheduler implementation types. It sorts the
+ *       kernel dirty-region or execution implementation types. It sorts the
  *       copied per-node ROI keys for stable output and retains no snapshot
  *       storage.
  */

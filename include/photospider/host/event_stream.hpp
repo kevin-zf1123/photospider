@@ -10,11 +10,11 @@
 
 /**
  * @file event_stream.hpp
- * @brief Public Host event, timing, and scheduler trace snapshots.
+ * @brief Public Host event, timing, and execution trace snapshots.
  *
- * These snapshot values are copied from backend event buffers and scheduler
- * traces. They do not expose backend event services, scheduler event objects,
- * scheduler instances, task runtimes, or mutable scheduler queues.
+ * These snapshot values are copied from backend event buffers and the private
+ * execution domain. They expose no backend event service, physical executor,
+ * task runtime, ready store, worker, resource grant, or mutable queue.
  */
 
 namespace ps {
@@ -31,19 +31,19 @@ inline constexpr std::size_t kComputeEventRingCapacity = 8192;
 /** @brief Maximum canonical UTF-8 byte length of an event name or source. */
 inline constexpr std::size_t kComputeEventTextMaxBytes = 1024;
 
-/** @brief Minimum accepted scheduler-trace page size. */
-inline constexpr std::size_t kSchedulerTraceMinLimit = 1;
+/** @brief Minimum accepted execution-trace page size. */
+inline constexpr std::size_t kExecutionTraceMinLimit = 1;
 
-/** @brief Maximum accepted scheduler-trace page size. */
-inline constexpr std::size_t kSchedulerTraceMaxLimit = 4096;
+/** @brief Maximum accepted execution-trace page size. */
+inline constexpr std::size_t kExecutionTraceMaxLimit = 4096;
 
-/** @brief Production capacity of each graph's scheduler-trace ring. */
-inline constexpr std::size_t kSchedulerTraceRingCapacity = 65536;
+/** @brief Production capacity of each graph's execution-trace ring. */
+inline constexpr std::size_t kExecutionTraceRingCapacity = 65536;
 
 /**
  * @brief Sentinel indicating that an observation sequence is exhausted.
  *
- * @note Valid compute-event and scheduler-trace publication sequences are one
+ * @note Valid compute-event and execution-trace publication sequences are one
  *       through `kObservationSequenceExhausted - 1`; the sentinel is never
  *       assigned to an event.
  */
@@ -104,7 +104,7 @@ struct ComputeEventBatch {
  *
  * @throws Nothing for value operations except string allocation on mutation.
  * @note The row is observational telemetry from the most recent timed compute
- *       request and is not scheduler synchronization state.
+ *       request and is not execution synchronization state.
  */
 struct NodeTimingSnapshot {
   /** @brief Node represented by the timing row. */
@@ -136,13 +136,13 @@ struct TimingSnapshot {
 };
 
 /**
- * @brief Public label for one scheduler trace action.
+ * @brief Public label for one private execution trace action.
  *
  * @throws Nothing.
- * @note Values are copied from backend trace actions and deliberately do not
- *       expose scheduler queue internals or task handles.
+ * @note Values are copied from the private execution domain and deliberately
+ * expose no ready-store entry, resource grant, worker owner, or callback.
  */
-enum class HostSchedulerTraceAction {
+enum class HostExecutionTraceAction {
   /** @brief Initial node or task assignment. */
   AssignInitial,
 
@@ -161,10 +161,10 @@ enum class HostSchedulerTraceAction {
   /** @brief Dirty downstream tile execution. */
   ExecuteDirtyDownstreamTile,
 
-  /** @brief Stale dirty generation skipped by the scheduler path. */
+  /** @brief Stale dirty generation skipped by the execution path. */
   SkipStaleGeneration,
 
-  /** @brief Scheduler path rethrew a captured exception. */
+  /** @brief Execution path rethrew a captured exception. */
   RethrowException,
 
   /** @brief Backend action was not recognized by this Host version. */
@@ -172,22 +172,22 @@ enum class HostSchedulerTraceAction {
 };
 
 /**
- * @brief Copied scheduler trace event for frontend inspection.
+ * @brief Copied execution trace event for frontend inspection.
  *
  * @throws Nothing for value operations.
  * @note `timestamp_us` is the backend clock timestamp serialized as
  *       microseconds since that clock's epoch. It is useful for ordering within
  *       one run, not for wall-clock display.
  */
-struct SchedulerTraceEventSnapshot {
+struct ExecutionTraceEventSnapshot {
   /** @brief Per-session publication sequence; never the exhausted sentinel. */
   uint64_t sequence = 0;
 
-  /** @brief Scheduler epoch associated with the event. */
+  /** @brief Private execution epoch associated with the event. */
   uint64_t epoch = 0;
 
   /**
-   * @brief Node involved in the scheduler event.
+   * @brief Node involved in the execution event.
    *
    * @note A nonnegative value identifies a specific node. `NodeId{-1}` means
    *       that no specific node applies to this event; values below -1 are
@@ -196,7 +196,7 @@ struct SchedulerTraceEventSnapshot {
   NodeId node;
 
   /**
-   * @brief Worker involved in the scheduler event.
+   * @brief Worker involved in the execution event.
    *
    * @note A nonnegative value identifies a specific worker. `-1` means that no
    *       specific worker applies to this event; values below -1 are invalid.
@@ -204,14 +204,14 @@ struct SchedulerTraceEventSnapshot {
   int worker_id = -1;
 
   /** @brief Public trace action label. */
-  HostSchedulerTraceAction action = HostSchedulerTraceAction::Unknown;
+  HostExecutionTraceAction action = HostExecutionTraceAction::Unknown;
 
   /** @brief Backend high-resolution clock timestamp in microseconds. */
   uint64_t timestamp_us = 0;
 };
 
 /**
- * @brief Bounded non-destructive scheduler-trace sequence page.
+ * @brief Bounded non-destructive execution-trace sequence page.
  *
  * @throws Nothing for scalar access; vector allocation can throw
  *         `std::bad_alloc`.
@@ -220,9 +220,9 @@ struct SchedulerTraceEventSnapshot {
  *       exact retained-history and exhausted-publication gap after that
  *       cursor, using saturating arithmetic.
  */
-struct SchedulerTracePage {
+struct ExecutionTracePage {
   /** @brief Retained trace events selected at one locked observation point. */
-  std::vector<SchedulerTraceEventSnapshot> events;
+  std::vector<ExecutionTraceEventSnapshot> events;
 
   /**
    * @brief Last returned sequence, the input cursor for a pre-exhaustion empty
@@ -238,20 +238,20 @@ struct SchedulerTracePage {
 };
 
 /**
- * @brief Copied scheduler implementation information.
+ * @brief Copied private execution-route information.
  *
  * @throws Nothing for value operations except string allocation on mutation.
  * @note The stats string remains backend-defined text for the first Host slice;
  *       callers must not parse it for control flow.
  */
-struct SchedulerInfoSnapshot {
-  /** @brief Compute intent served by the scheduler. */
+struct ExecutionInfoSnapshot {
+  /** @brief Compute intent served by the private route. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
 
-  /** @brief Human-readable scheduler implementation name. */
-  std::string scheduler_name;
+  /** @brief Exact route name: `cpu`, `gpu_pipeline`, or `serial_debug`. */
+  std::string execution_type;
 
-  /** @brief Backend-defined scheduler statistics text. */
+  /** @brief Backend-defined copied execution statistics text. */
   std::string stats;
 };
 

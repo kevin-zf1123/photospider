@@ -1486,7 +1486,7 @@ static NodeOutput op_resize(const Node& node,
  * @throws GraphError for missing input or invalid crop dimensions.
  * @throws cv::Exception if OpenCV view, copy, or buffer conversion fails.
  * @note The callback uses only local `cv::Mat` headers and independent output
- *       storage, so scheduler workers may invoke it concurrently. Spatial ROI
+ *       storage, so execution workers may invoke it concurrently. Spatial ROI
  *       endpoints are derived with checked kernel geometry before publication.
  */
 static NodeOutput op_crop(const Node& node,
@@ -1618,7 +1618,7 @@ static NodeOutput op_extract_channel(
  * @throws GraphError if the required input tile is missing.
  * @throws cv::Exception if OpenCV arithmetic or adapter conversion fails.
  * @note Local `cv::Mat` headers share only task-owned payloads. Multiple
- *       scheduler workers may execute this callback concurrently.
+ *       execution workers may execute this callback concurrently.
  */
 static void op_curve_transform_tiled(
     const Node& node, const OutputTile& output_tile,
@@ -1652,7 +1652,7 @@ static void op_curve_transform_tiled(
  * @throws std::runtime_error if planned halo geometry cannot cover output.
  * @throws cv::Exception if OpenCV blur, copy, or adapter conversion fails.
  * @note Every invocation owns its temporary matrix and output region, so the
- *       callback is reentrant across scheduler workers.
+ *       callback is reentrant across execution workers.
  */
 static void op_gaussian_blur_tiled(const Node& node,
                                    const OutputTile& output_tile,
@@ -1747,7 +1747,7 @@ static NodeOutput op_gaussian_blur_monolithic(
  * @note Invalid individual channel-map entries are skipped, while memory
  *       exhaustion remains exceptional for the public Host compute boundary.
  *       All mutable matrices are callback-local or task-owned, so independent
- *       scheduler invocations are reentrant.
+ *       execution invocations are reentrant.
  */
 static void op_add_weighted_tiled(const Node& node,
                                   const OutputTile& output_tile,
@@ -1872,7 +1872,7 @@ static void op_add_weighted_tiled(const Node& node,
  * @throws GraphError for missing or mismatched inputs.
  * @throws cv::Exception if OpenCV channel arithmetic or merging fails.
  * @note Temporary channels and the output region are task-owned, permitting
- *       concurrent scheduler invocation without outer serialization.
+ *       concurrent execution invocation without outer serialization.
  */
 static void op_abs_diff_tiled(const Node& node, const OutputTile& output_tile,
                               const std::vector<InputTile>& input_tiles) {
@@ -2221,7 +2221,7 @@ static NodeOutput op_abs_diff_monolithic(
  * @throws GraphError for missing inputs or unsupported normalization.
  * @throws cv::Exception if OpenCV normalization or multiplication fails.
  * @note Callback-local matrices provide reentrant execution across independent
- *       scheduler work.
+ *       execution work.
  */
 static NodeOutput op_multiply_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {

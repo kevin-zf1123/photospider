@@ -148,7 +148,7 @@ struct SpatialSnapshot {
 /**
  * @brief Owned diagnostic metadata returned by an operation.
  * @throws std::bad_alloc when device-label storage allocates.
- * @note Diagnostics are informational and do not own scheduler state.
+ * @note Diagnostics are informational and do not own execution state.
  */
 struct DebugMetadata {
   /** @brief Worker id reported by execution, or -1 when unknown. */

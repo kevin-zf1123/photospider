@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
+#include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -146,6 +149,20 @@ void validate_node_map(const NodeMap& nodes) {
   }
 }
 
+/**
+ * @brief Computes the next topology generation without unsigned wrapping.
+ * @param generation Current topology-only cache generation.
+ * @return Exact successor generation.
+ * @throws std::overflow_error when generation is UINT64_MAX.
+ * @note This counter remains separate from authoritative GraphRevision.
+ */
+uint64_t next_topology_generation(uint64_t generation) {
+  if (generation == std::numeric_limits<uint64_t>::max()) {
+    throw std::overflow_error("Graph topology generation is exhausted.");
+  }
+  return generation + 1;
+}
+
 }  // namespace
 
 void GraphTopologyIndex::clear() {
@@ -157,11 +174,164 @@ bool GraphTopologyIndex::empty() const {
   return incoming_by_node.empty() && outgoing_by_node.empty();
 }
 
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::lock */
+void GraphModel::DiskCacheDiagnosticStore::lock() const noexcept {
+  while (mutex_.test_and_set(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::unlock */
+void GraphModel::DiskCacheDiagnosticStore::unlock() const noexcept {
+  mutex_.clear(std::memory_order_release);
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::record */
+void GraphModel::DiskCacheDiagnosticStore::record(DiskCacheLoadResult result) {
+  std::optional<DiskCacheLoadResult> prepared(std::move(result));
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(prepared)>,
+      "Disk-cache diagnostic replacement must remain no-throw after locking");
+  const ScopedLock lock(*this);
+  value_.swap(prepared);
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::snapshot */
+std::optional<GraphModel::DiskCacheLoadResult>
+GraphModel::DiskCacheDiagnosticStore::snapshot() const {
+  const ScopedLock lock(*this);
+  return value_;
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::clear */
+void GraphModel::DiskCacheDiagnosticStore::clear() noexcept {
+  const ScopedLock lock(*this);
+  value_.reset();
+}
+
+/** @copydoc GraphModel::DiskCacheDiagnosticStore::exchange_with */
+void GraphModel::DiskCacheDiagnosticStore::exchange_with(
+    DiskCacheDiagnosticStore& other) noexcept {
+  if (this == &other) {
+    return;
+  }
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(value_)>,
+      "Disk-cache diagnostic publication must remain no-throw after locking");
+  DiskCacheDiagnosticStore* first = this;
+  DiskCacheDiagnosticStore* second = &other;
+  if (std::less<DiskCacheDiagnosticStore*>{}(second, first)) {
+    std::swap(first, second);
+  }
+  const ScopedLock first_lock(*first);
+  const ScopedLock second_lock(*second);
+  value_.swap(other.value_);
+}
+
+/** @copydoc GraphModel::GraphModel(fs::path) */
 GraphModel::GraphModel(fs::path cache_root_dir)
-    : cache_root(std::move(cache_root_dir)) {
+    : cache_root(std::move(cache_root_dir)),
+      instance_id_(GraphInstanceId::mint()),
+      revision_(GraphRevision::initial()) {
   if (!cache_root.empty()) {
     fs::create_directories(cache_root);
   }
+}
+
+/** @copydoc
+ * GraphModel::GraphModel(ComputeSnapshotTag,fs::path,GraphInstanceId,GraphRevision)
+ */
+GraphModel::GraphModel(ComputeSnapshotTag tag, fs::path cache_root_dir,
+                       GraphInstanceId instance_id, GraphRevision revision)
+    : cache_root(std::move(cache_root_dir)),
+      instance_id_(instance_id),
+      revision_(revision),
+      compute_snapshot_(true) {
+  (void)tag;
+}
+
+/** @copydoc GraphModel::clone_for_compute */
+std::unique_ptr<GraphModel> GraphModel::clone_for_compute() const {
+  auto snapshot = std::unique_ptr<GraphModel>(new GraphModel(
+      ComputeSnapshotTag{}, cache_root, instance_id_, revision_));
+  snapshot->timing_results = timing_results;
+  snapshot->last_dirty_region_snapshot_debug = last_dirty_region_snapshot_debug;
+  snapshot->last_dirty_region_snapshot = last_dirty_region_snapshot;
+  snapshot->recent_dirty_region_snapshots = recent_dirty_region_snapshots;
+  snapshot->dirty_generation_counter = dirty_generation_counter;
+  snapshot->dirty_source_hp_commit_generation =
+      dirty_source_hp_commit_generation;
+  snapshot->last_compute_plan = last_compute_plan;
+  snapshot->recent_compute_plans = recent_compute_plans;
+  snapshot->last_compute_plan_summary = last_compute_plan_summary;
+  snapshot->recent_compute_plan_summaries = recent_compute_plan_summaries;
+  snapshot->nodes_ = nodes_;
+  snapshot->topology_ = topology_;
+  std::optional<DiskCacheLoadResult> diagnostic =
+      disk_cache_diagnostics_.snapshot();
+  if (diagnostic.has_value()) {
+    snapshot->disk_cache_diagnostics_.record(std::move(*diagnostic));
+  }
+  snapshot->topology_generation_ = topology_generation_;
+  snapshot->full_task_graph_cache_ = full_task_graph_cache_;
+  snapshot->quiet_ = quiet_;
+  snapshot->skip_save_cache_.store(skip_save_cache(),
+                                   std::memory_order_relaxed);
+  snapshot->total_io_time_ms.store(
+      total_io_time_ms.load(std::memory_order_relaxed),
+      std::memory_order_relaxed);
+  return snapshot;
+}
+
+/** @copydoc GraphModel::publish_compute_snapshot */
+void GraphModel::publish_compute_snapshot(GraphModel& prepared) noexcept {
+  static_assert(std::is_nothrow_swappable_v<decltype(timing_results)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(last_dirty_region_snapshot_debug)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(last_dirty_region_snapshot)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(recent_dirty_region_snapshots)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(dirty_generation_counter)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(dirty_source_hp_commit_generation)>);
+  static_assert(std::is_nothrow_swappable_v<decltype(last_compute_plan)>);
+  static_assert(std::is_nothrow_swappable_v<decltype(recent_compute_plans)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(last_compute_plan_summary)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(recent_compute_plan_summaries)>);
+  static_assert(std::is_nothrow_swappable_v<decltype(nodes_)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(topology_.incoming_by_node)>);
+  static_assert(
+      std::is_nothrow_swappable_v<decltype(topology_.outgoing_by_node)>);
+  static_assert(std::is_nothrow_swappable_v<decltype(full_task_graph_cache_)>);
+  using std::swap;
+  swap(timing_results, prepared.timing_results);
+  swap(last_dirty_region_snapshot_debug,
+       prepared.last_dirty_region_snapshot_debug);
+  swap(last_dirty_region_snapshot, prepared.last_dirty_region_snapshot);
+  swap(recent_dirty_region_snapshots, prepared.recent_dirty_region_snapshots);
+  swap(dirty_generation_counter, prepared.dirty_generation_counter);
+  dirty_source_hp_commit_generation.swap(
+      prepared.dirty_source_hp_commit_generation);
+  swap(last_compute_plan, prepared.last_compute_plan);
+  recent_compute_plans.swap(prepared.recent_compute_plans);
+  swap(last_compute_plan_summary, prepared.last_compute_plan_summary);
+  recent_compute_plan_summaries.swap(prepared.recent_compute_plan_summaries);
+  nodes_.swap(prepared.nodes_);
+  topology_.incoming_by_node.swap(prepared.topology_.incoming_by_node);
+  topology_.outgoing_by_node.swap(prepared.topology_.outgoing_by_node);
+  disk_cache_diagnostics_.exchange_with(prepared.disk_cache_diagnostics_);
+  full_task_graph_cache_.swap(prepared.full_task_graph_cache_);
+
+  const double live_io = total_io_time_ms.load(std::memory_order_relaxed);
+  total_io_time_ms.store(
+      prepared.total_io_time_ms.load(std::memory_order_relaxed),
+      std::memory_order_relaxed);
+  prepared.total_io_time_ms.store(live_io, std::memory_order_relaxed);
 }
 
 void GraphModel::set_quiet(bool q) {
@@ -172,23 +342,24 @@ bool GraphModel::is_quiet() const {
   return quiet_;
 }
 
+/** @copydoc GraphModel::record_disk_cache_load_result */
 void GraphModel::record_disk_cache_load_result(DiskCacheLoadResult result) {
-  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
-  last_disk_cache_load_result_ = std::move(result);
+  disk_cache_diagnostics_.record(std::move(result));
 }
 
+/** @copydoc GraphModel::last_disk_cache_load_result_snapshot */
 std::optional<GraphModel::DiskCacheLoadResult>
 GraphModel::last_disk_cache_load_result_snapshot() const {
-  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
-  return last_disk_cache_load_result_;
+  return disk_cache_diagnostics_.snapshot();
 }
 
-void GraphModel::clear_disk_cache_load_result() {
-  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
-  last_disk_cache_load_result_.reset();
+/** @copydoc GraphModel::clear_disk_cache_load_result */
+void GraphModel::clear_disk_cache_load_result() noexcept {
+  disk_cache_diagnostics_.clear();
 }
 
-void GraphModel::reset_runtime_state() {
+/** @copydoc GraphModel::reset_runtime_state */
+void GraphModel::reset_runtime_state() noexcept {
   timing_results.node_timings.clear();
   timing_results.total_ms = 0.0;
   last_dirty_region_snapshot_debug.reset();
@@ -201,19 +372,25 @@ void GraphModel::reset_runtime_state() {
   last_compute_plan_summary.reset();
   recent_compute_plan_summaries.clear();
   full_task_graph_cache_.clear();
-  clear_disk_cache_load_result();
+  disk_cache_diagnostics_.clear();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);
   skip_save_cache_.store(false, std::memory_order_relaxed);
 }
 
+/** @copydoc GraphModel::clear */
 void GraphModel::clear() {
+  const GraphRevision next_revision = revision_.next();
+  const uint64_t next_generation =
+      next_topology_generation(topology_generation_);
   nodes_.clear();
   topology_.clear();
   reset_runtime_state();
-  ++topology_generation_;
+  topology_generation_ = next_generation;
+  revision_ = next_revision;
   quiet_ = true;
 }
 
+/** @copydoc GraphModel::add_node */
 void GraphModel::add_node(const Node& node) {
   if (has_node(node.id)) {
     throw GraphError(
@@ -242,10 +419,12 @@ void GraphModel::add_node(const Node& node) {
   NodeMap candidate = nodes_;
   candidate[node.id] = node;
   validate_node_map(candidate);
-  nodes_ = std::move(candidate);
-  rebuild_topology_index();
+  GraphTopologyIndex topology = build_topology_index(candidate);
+  publish_structural_replacement(std::move(candidate), std::move(topology),
+                                 false);
 }
 
+/** @copydoc GraphModel::replace_node */
 void GraphModel::replace_node(const Node& node) {
   if (!has_node(node.id)) {
     throw GraphError(GraphErrc::NotFound,
@@ -254,10 +433,12 @@ void GraphModel::replace_node(const Node& node) {
   NodeMap candidate = nodes_;
   candidate[node.id] = node;
   validate_node_map(candidate);
-  nodes_ = std::move(candidate);
-  rebuild_topology_index();
+  GraphTopologyIndex topology = build_topology_index(candidate);
+  publish_structural_replacement(std::move(candidate), std::move(topology),
+                                 false);
 }
 
+/** @copydoc GraphModel::remove_node */
 void GraphModel::remove_node(int id) {
   if (!has_node(id)) {
     throw GraphError(GraphErrc::NotFound,
@@ -278,10 +459,12 @@ void GraphModel::remove_node(int id) {
     }
   }
   validate_node_map(candidate);
-  nodes_ = std::move(candidate);
-  rebuild_topology_index();
+  GraphTopologyIndex topology = build_topology_index(candidate);
+  publish_structural_replacement(std::move(candidate), std::move(topology),
+                                 false);
 }
 
+/** @copydoc GraphModel::rewire_image_input */
 void GraphModel::rewire_image_input(int node_id, size_t input_index,
                                     int from_node_id,
                                     std::string from_output_name) {
@@ -296,10 +479,12 @@ void GraphModel::rewire_image_input(int node_id, size_t input_index,
   target.image_inputs[input_index].from_output_name =
       std::move(from_output_name);
   validate_node_map(candidate);
-  nodes_ = std::move(candidate);
-  rebuild_topology_index();
+  GraphTopologyIndex topology = build_topology_index(candidate);
+  publish_structural_replacement(std::move(candidate), std::move(topology),
+                                 false);
 }
 
+/** @copydoc GraphModel::rewire_parameter_input */
 void GraphModel::rewire_parameter_input(int node_id, size_t input_index,
                                         int from_node_id,
                                         std::string from_output_name,
@@ -317,18 +502,35 @@ void GraphModel::rewire_parameter_input(int node_id, size_t input_index,
   target.parameter_inputs[input_index].to_parameter_name =
       std::move(to_parameter_name);
   validate_node_map(candidate);
-  nodes_ = std::move(candidate);
-  rebuild_topology_index();
+  GraphTopologyIndex topology = build_topology_index(candidate);
+  publish_structural_replacement(std::move(candidate), std::move(topology),
+                                 false);
 }
 
 /** @copydoc GraphModel::replace_nodes */
 void GraphModel::replace_nodes(NodeMap nodes) {
   validate_node_map(nodes);
   GraphTopologyIndex topology = build_topology_index(nodes);
-  nodes_ = std::move(nodes);
-  topology_ = std::move(topology);
-  reset_runtime_state();
-  ++topology_generation_;
+  publish_structural_replacement(std::move(nodes), std::move(topology), true);
+}
+
+/** @copydoc GraphModel::publish_structural_replacement */
+void GraphModel::publish_structural_replacement(NodeMap nodes,
+                                                GraphTopologyIndex topology,
+                                                bool reset_runtime) {
+  const GraphRevision next_revision = revision_.next();
+  const uint64_t next_generation =
+      next_topology_generation(topology_generation_);
+  nodes_.swap(nodes);
+  topology_.incoming_by_node.swap(topology.incoming_by_node);
+  topology_.outgoing_by_node.swap(topology.outgoing_by_node);
+  if (reset_runtime) {
+    reset_runtime_state();
+  } else {
+    full_task_graph_cache_.clear();
+  }
+  topology_generation_ = next_generation;
+  revision_ = next_revision;
 }
 
 bool GraphModel::has_node(int id) const {
@@ -407,10 +609,17 @@ void GraphModel::validate_topology() const {
   validate_node_map(nodes_);
 }
 
+/** @copydoc GraphModel::rebuild_topology_index */
 void GraphModel::rebuild_topology_index() {
   validate_node_map(nodes_);
-  topology_ = build_topology_index(nodes_);
-  ++topology_generation_;
+  GraphTopologyIndex topology = build_topology_index(nodes_);
+  const GraphRevision next_revision = revision_.next();
+  const uint64_t next_generation =
+      next_topology_generation(topology_generation_);
+  topology_.incoming_by_node.swap(topology.incoming_by_node);
+  topology_.outgoing_by_node.swap(topology.outgoing_by_node);
+  topology_generation_ = next_generation;
+  revision_ = next_revision;
   full_task_graph_cache_.clear();
 }
 

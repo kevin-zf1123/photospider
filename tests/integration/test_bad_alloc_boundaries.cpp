@@ -549,10 +549,12 @@ void write_graph_cli_runner_fixtures(const std::filesystem::path& root) {
   std::ofstream config(root / "config.yaml");
   config.exceptions(std::ios::failbit | std::ios::badbit);
   config << "plugin_dirs: []\n"
-         << "scheduler_dirs: []\n"
-         << "scheduler_hp_type: serial_debug\n"
-         << "scheduler_rt_type: serial_debug\n"
-         << "scheduler_worker_count: 1\n"
+         << "policy_dirs: []\n"
+         << "policy_interactive_type: interactive\n"
+         << "policy_throughput_type: throughput\n"
+         << "execution_hp_type: serial_debug\n"
+         << "execution_rt_type: serial_debug\n"
+         << "execution_worker_count: 1\n"
          << "cache_root_dir: cache\n";
   config.close();
 
@@ -812,12 +814,12 @@ GraphSessionId load_dirty_boundary_graph(Host& host,
 }
 
 /**
- * @brief Creates a scheduler-backed Host request for the single test node.
+ * @brief Creates a private-execution Host request for the single test node.
  *
  * @param session Loaded Host graph session.
  * @return Parallel, no-disk-cache request targeting node 1.
  * @throws std::bad_alloc if precision storage exhausts memory.
- * @note execution.parallel=true forces the ComputeTaskDispatcher scheduler
+ * @note execution.parallel=true forces the ComputeTaskDispatcher execution
  * worker path under test.
  */
 HostComputeRequest make_parallel_host_request(const GraphSessionId& session) {
@@ -832,25 +834,25 @@ HostComputeRequest make_parallel_host_request(const GraphSessionId& session) {
 }
 
 /**
- * @brief Asserts that scheduler execution recorded an exception rethrow.
+ * @brief Asserts that private execution recorded an exception rethrow.
  *
- * @param host Host whose copied scheduler trace is inspected.
+ * @param host Host whose copied execution trace is inspected.
  * @param session Session that ran the failing parallel compute.
  * @return Nothing.
  * @throws std::bad_alloc unchanged if Host trace copying exhausts memory.
  * @note Requiring a node-1 RethrowException event proves the registered failure
- * reached scheduler task execution rather than only an outer Host wrapper.
+ * reached execution-task processing rather than only an outer Host wrapper.
  */
-void expect_scheduler_worker_rethrow_trace(Host& host,
+void expect_execution_worker_rethrow_trace(Host& host,
                                            const GraphSessionId& session) {
-  const Result<SchedulerTracePage> trace =
-      host.scheduler_trace(session, 0, kSchedulerTraceMaxLimit);
+  const Result<ExecutionTracePage> trace =
+      host.execution_trace(session, 0, kExecutionTraceMaxLimit);
   ASSERT_TRUE(trace.status.ok) << trace.status.message;
   EXPECT_TRUE(std::any_of(
       trace.value.events.begin(), trace.value.events.end(),
-      [](const SchedulerTraceEventSnapshot& event) {
+      [](const ExecutionTraceEventSnapshot& event) {
         return event.node.value == 1 &&
-               event.action == HostSchedulerTraceAction::RethrowException;
+               event.action == HostExecutionTraceAction::RethrowException;
       }));
 }
 
@@ -860,7 +862,7 @@ void expect_scheduler_worker_rethrow_trace(Host& host,
  * @param session Loaded Host graph session.
  * @param intent GlobalHighPrecision for HP dirty or RealTimeUpdate for RT
  * dirty.
- * @return Forced, scheduler-backed dirty request for node 2 and a 16x16 ROI.
+ * @return Forced, private-execution dirty request for node 2 and a 16x16 ROI.
  * @throws std::bad_alloc if precision or optional request storage exhausts
  * memory.
  * @note The request traverses the public Host adapter and internal intent
@@ -1097,14 +1099,14 @@ TEST(MetalBadAllocBoundary, RealPerlinEntryContextsStandardFailure) {
 #endif
 
 /**
- * @brief Proves scheduler-worker exhaustion crosses Host sync unchanged.
+ * @brief Proves execution-worker exhaustion crosses Host sync unchanged.
  *
  * @throws Nothing when the expected exception type reaches the test.
  * @note execution.parallel=true reaches ComputeTaskDispatcher; the registered
- * operation throws from the scheduler worker rather than the calling thread.
+ * operation throws from the execution worker rather than the calling thread.
  */
 TEST(ComputeTaskDispatcherBadAllocBoundary,
-     ParallelHostComputePreservesSchedulerWorkerResourceExhaustion) {
+     ParallelHostComputePreservesExecutionWorkerResourceExhaustion) {
   register_bad_alloc_boundary_operations();
   ScopedTestDirectory directory;
   std::unique_ptr<Host> host = create_embedded_host();
@@ -1115,18 +1117,18 @@ TEST(ComputeTaskDispatcherBadAllocBoundary,
   const HostComputeRequest request = make_parallel_host_request(session);
 
   EXPECT_THROW((void)host->compute(request), std::bad_alloc);
-  expect_scheduler_worker_rethrow_trace(*host, session);
+  expect_execution_worker_rethrow_trace(*host, session);
 }
 
 /**
- * @brief Proves scheduler-worker exhaustion crosses Host future unchanged.
+ * @brief Proves execution-worker exhaustion crosses Host future unchanged.
  *
  * @throws Nothing when the returned future rethrows std::bad_alloc.
  * @note The Host schedules a parallel ComputeTaskDispatcher run and the
- * operation fails on its scheduler worker before the adapter future is read.
+ * operation fails on its execution worker before the adapter future is read.
  */
 TEST(ComputeTaskDispatcherBadAllocBoundary,
-     ParallelHostFuturePreservesSchedulerWorkerResourceExhaustion) {
+     ParallelHostFuturePreservesExecutionWorkerResourceExhaustion) {
   register_bad_alloc_boundary_operations();
   ScopedTestDirectory directory;
   std::unique_ptr<Host> host = create_embedded_host();
@@ -1140,7 +1142,7 @@ TEST(ComputeTaskDispatcherBadAllocBoundary,
   ASSERT_TRUE(scheduled.value.valid());
 
   EXPECT_THROW((void)scheduled.value.get(), std::bad_alloc);
-  expect_scheduler_worker_rethrow_trace(*host, session);
+  expect_execution_worker_rethrow_trace(*host, session);
 }
 
 /**
@@ -1236,9 +1238,15 @@ TEST(DirtyExecutorBadAllocBoundary,
   const GraphSessionId session = load_dirty_boundary_graph(
       *host, directory.root(), "rt_dirty_host", "rt_dirty_resource_exhausted");
 
-  EXPECT_THROW((void)host->compute(make_dirty_host_request(
-                   session, ComputeIntent::RealTimeUpdate)),
-               std::bad_alloc);
+  try {
+    const VoidResult result = host->compute(
+        make_dirty_host_request(session, ComputeIntent::RealTimeUpdate));
+    FAIL() << "std::bad_alloc was converted to Host status: code="
+           << static_cast<int>(result.status.code)
+           << " message=" << result.status.message;
+  } catch (const std::bad_alloc&) {
+    SUCCEED();
+  }
 }
 
 /**

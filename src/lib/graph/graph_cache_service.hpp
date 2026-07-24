@@ -16,7 +16,7 @@ namespace ps {
  *
  * The service owns no graph state. It reads and mutates cache-related fields on
  * GraphModel and Node, saves formal HP outputs to configured cache files, loads
- * disk cache entries back into HP outputs or temporary scheduler slots, and
+ * disk cache entries back into HP outputs or temporary execution slots, and
  * synchronizes stale disk files with current HP cache authority.
  *
  * @note Disk-cache load wrappers keep their historical bool return contract:
@@ -62,7 +62,13 @@ class GraphCacheService {
    * @param graph Graph whose disk cache root should be cleared.
    * @return Number of filesystem entries removed.
    * @throws std::filesystem::filesystem_error on filesystem failures.
-   * @note Empty cache roots are treated as a no-op.
+   * @throws std::bad_alloc when filesystem path or diagnostic storage exhausts
+   *         memory.
+   * @note Empty cache roots are treated as a no-op. Removal and recreation are
+   *       not an atomic filesystem transaction: removal may succeed before
+   *       recreation fails. The serialized facade therefore publishes its
+   *       prepared successor revision before calling this method and never
+   *       rolls that invalidation back.
    */
   GraphModel::DriveClearResult clear_drive_cache(GraphModel& graph) const;
 
@@ -166,7 +172,7 @@ class GraphCacheService {
    * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
    * failures are recorded through GraphModel's locked disk-cache diagnostic API
    * and reported as false.
-   * @note Used by scheduler worker paths that stage outputs outside the
+   * @note Used by execution worker paths that stage outputs outside the
    * formal HP cache before committing.
    */
   bool try_load_from_disk_cache_into(GraphModel& graph, const Node& node,

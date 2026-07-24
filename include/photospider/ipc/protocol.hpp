@@ -13,7 +13,7 @@
 
 /**
  * @file protocol.hpp
- * @brief Typed public values for Photospider local IPC protocol version 1.
+ * @brief Typed public values for Photospider local IPC protocol version 2.
  *
  * The declarations own their data and deliberately exclude JSON parser types,
  * Unix descriptors, socket structures, and backend implementation objects.
@@ -27,10 +27,10 @@ namespace ps::ipc {
  * @throws Nothing.
  * @note The constant is compile-time metadata, not a negotiated mutable state.
  */
-inline constexpr std::int32_t kProtocolVersion = 1;
+inline constexpr std::int32_t kProtocolVersion = 2;
 
 /**
- * @brief Largest accepted version 1 JSON payload in bytes.
+ * @brief Largest accepted version 2 JSON payload in bytes.
  *
  * @throws Nothing.
  * @note The four-byte frame header is not included in this payload bound.
@@ -58,7 +58,7 @@ struct IpcResult {
  * @brief Opaque daemon-global identifier for one active graph session.
  *
  * @throws std::bad_alloc when copied or mutated storage cannot be allocated.
- * @note Version 1 values are 32 lowercase hexadecimal characters generated
+ * @note Version 2 values are 32 lowercase hexadecimal characters generated
  *       from operating-system entropy. Clients must not parse or derive them.
  */
 struct IpcSessionId {
@@ -84,7 +84,7 @@ struct DaemonPing {
  * @brief Typed version and capability metadata for one daemon instance.
  *
  * @throws std::bad_alloc when copied strings or methods cannot be allocated.
- * @note `methods` is the exact sorted 55-method version 1 inventory and
+ * @note `methods` is the exact sorted 60-method version 2 inventory and
  *       advertises only routes admitted by the connected daemon.
  */
 struct DaemonVersion {
@@ -100,10 +100,10 @@ struct DaemonVersion {
   /** @brief Opaque identity of the serving daemon process instance. */
   std::string server_instance_id;
 
-  /** @brief Local transport name; version 1 reports `unix`. */
+  /** @brief Local transport name; version 2 reports `unix`. */
   std::string transport;
 
-  /** @brief Exact sorted 55-method wire inventory supported by the daemon. */
+  /** @brief Exact sorted 60-method wire inventory supported by the daemon. */
   std::vector<std::string> methods;
 };
 
@@ -126,7 +126,7 @@ struct GraphSessionSummary {
  * @brief Opaque daemon-global identifier for one accepted compute job.
  *
  * @throws std::bad_alloc when copied or mutated storage cannot be allocated.
- * @note Version 1 values are 32 lowercase hexadecimal characters. They remain
+ * @note Version 2 values are 32 lowercase hexadecimal characters. They remain
  *       valid across direct-client disconnects until release, eviction, or
  *       terminal-record expiry and must never be interpreted as paths.
  */
@@ -181,7 +181,7 @@ enum class ComputeResultMode {
  *
  * @throws Nothing.
  * @note Values may advance only from Queued to Running and then to Succeeded
- *       or Failed. Version 1 publishes no cancelling/cancelled state.
+ *       or Failed. Version 2 publishes no cancelling/cancelled state.
  */
 enum class ComputeJobState {
   /** @brief Accepted work waiting for the daemon's joined worker. */
@@ -220,7 +220,11 @@ struct ComputeSubmitRequest {
   /** @brief Cache precision and persistence controls. */
   HostComputeCacheOptions cache;
 
-  /** @brief Scheduler and quiet-mode controls. */
+  /**
+   * @brief Parallel-route, optional positive Run-cap, and quiet-mode controls.
+   * @note The direct Client omits an absent `maximum_parallelism`, preserves a
+   *       positive value exactly, and rejects zero before wire I/O.
+   */
   HostComputeExecutionOptions execution;
 
   /** @brief Timing and telemetry controls. */
@@ -265,7 +269,7 @@ struct OutputArtifactMetadata {
   /** @brief Validated channel scalar type. */
   DataType data_type = DataType::FLOAT32;
 
-  /** @brief Materialized memory domain; version 1 requires CPU. */
+  /** @brief Materialized memory domain; version 2 requires CPU. */
   Device device = Device::CPU;
 
   /** @brief Exact tight row width in bytes. */
@@ -317,7 +321,7 @@ struct ComputeJobSnapshot {
   /** @brief Current forward-only job lifecycle state. */
   ComputeJobState state = ComputeJobState::Queued;
 
-  /** @brief Cancellation capability; version 1 requires false. */
+  /** @brief Cancellation capability; version 2 requires false. */
   bool cancellable = false;
 
   /** @brief Exact immutable terminal status, absent while nonterminal. */

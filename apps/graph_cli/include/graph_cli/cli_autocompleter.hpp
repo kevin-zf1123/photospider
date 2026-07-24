@@ -36,7 +36,8 @@ struct CompletionResult {
  *
  * Completion first tokenizes the text before the cursor, selects a provider
  * for the active command and argument, and then applies the longest common
- * prefix. Dynamic graph, node, and scheduler candidates are queried only
+ * prefix. Dynamic graph, node, policy, and execution candidates are queried
+ * only
  * through the borrowed public Host boundary.
  *
  * @throws std::bad_alloc if command inventory, token, candidate, path, or
@@ -53,7 +54,8 @@ class CliAutocompleter {
    * The constructor copies and sorts the fixed command inventory. Dynamic
    * candidates are fetched lazily during `Complete`.
    *
-   * @param svc Borrowed Host used for graph, node, and scheduler candidates.
+   * @param svc Borrowed Host used for graph, node, policy, and route
+   * candidates.
    * @throws std::bad_alloc if command inventory construction exhausts memory.
    * @note `svc` must outlive this object and is never owned or synchronized by
    *       the completer.

@@ -41,7 +41,7 @@ namespace ps::ipc {
 namespace {
 
 /**
- * @brief Builds the exact adapter-stop status required by protocol version 1.
+ * @brief Builds the exact adapter-stop status required by protocol version 2.
  * @return Transport code 5/name `client_stopped`.
  * @throws std::bad_alloc if diagnostic storage cannot be allocated.
  * @note This is a local lifecycle classification and never appears on wire.
@@ -493,6 +493,29 @@ ComputeSubmitRequest compute_submission(const HostComputeRequest& request,
   submit.dirty_roi = request.dirty_roi;
   submit.result_mode = mode;
   return submit;
+}
+
+/**
+ * @brief Validates public Run execution controls before IPC transport.
+ *
+ * @param execution Public Host execution options.
+ * @return Success when the optional Run cap is absent or positive; otherwise
+ *         Graph `InvalidParameter`.
+ * @throws std::bad_alloc if the invalid-value diagnostic cannot be allocated.
+ * @note IPC Host applies the public Host error domain before opening a Client
+ *       connection. The typed Client independently rejects zero as protocol
+ *       `invalid_params` for direct Client callers.
+ */
+OperationStatus validate_host_compute_execution(
+    const HostComputeExecutionOptions& execution) {
+  if (!execution.maximum_parallelism || *execution.maximum_parallelism != 0U) {
+    return {};
+  }
+  return internal::failure_status(
+      OperationErrorDomain::Graph,
+      static_cast<std::int32_t>(GraphErrc::InvalidParameter),
+      graph_error_stable_name(GraphErrc::InvalidParameter),
+      "compute maximum_parallelism must be positive when present");
 }
 
 /**
@@ -998,7 +1021,8 @@ void run_async_status_worker(
  * overrides are implemented below through one joined polling lifecycle.
  *
  * @throws std::bad_alloc when immutable or runtime state allocation fails.
- * @note The adapter owns no daemon graph, plugin, scheduler, or job state.
+ * @note The adapter owns no daemon graph, plugin, execution worker, or job
+ * state.
  */
 class IpcHost final : public Host {
  public:
@@ -1325,12 +1349,12 @@ class IpcHost final : public Host {
     });
   }
 
-  /** @copydoc Host::scheduler_trace */
-  Result<SchedulerTracePage> scheduler_trace(const GraphSessionId& session,
+  /** @copydoc Host::execution_trace */
+  Result<ExecutionTracePage> execution_trace(const GraphSessionId& session,
                                              std::uint64_t after_sequence,
                                              std::size_t limit) override {
-    return mapped<SchedulerTracePage>([&](Client& client) {
-      return client.scheduler_trace(ipc_session(session), after_sequence,
+    return mapped<ExecutionTracePage>([&](Client& client) {
+      return client.execution_trace(ipc_session(session), after_sequence,
                                     limit);
     });
   }
@@ -1428,60 +1452,95 @@ class IpcHost final : public Host {
         [](Client& client) { return client.ops_combined_sources(); });
   }
 
-  /** @copydoc Host::scheduler_available_types */
-  Result<std::vector<std::string>> scheduler_available_types() const override {
+  /** @copydoc Host::policy_available_types */
+  Result<std::vector<std::string>> policy_available_types() const override {
     return mapped<std::vector<std::string>>(
-        [](Client& client) { return client.scheduler_available_types(); });
+        [](Client& client) { return client.policy_available_types(); });
   }
 
-  /** @copydoc Host::scheduler_description */
-  Result<std::string> scheduler_description(
+  /** @copydoc Host::policy_description */
+  Result<std::string> policy_description(
       const std::string& type) const override {
     return mapped<std::string>(
-        [&](Client& client) { return client.scheduler_description(type); });
+        [&](Client& client) { return client.policy_description(type); });
   }
 
-  /** @copydoc Host::scheduler_scan */
-  Result<std::size_t> scheduler_scan(
+  /** @copydoc Host::policy_scan */
+  Result<std::size_t> policy_scan(
       const std::vector<std::string>& dirs) override {
     return mapped<std::size_t>(
-        [&](Client& client) { return client.scheduler_scan(dirs); });
+        [&](Client& client) { return client.policy_scan(dirs); });
   }
 
-  /** @copydoc Host::scheduler_load */
-  VoidResult scheduler_load(const std::string& path) override {
-    return call_void(
-        [&](Client& client) { return client.scheduler_load(path); });
+  /** @copydoc Host::policy_load */
+  VoidResult policy_load(const std::string& path) override {
+    return call_void([&](Client& client) { return client.policy_load(path); });
   }
 
-  /** @copydoc Host::scheduler_loaded_plugins */
-  Result<std::vector<std::string>> scheduler_loaded_plugins() const override {
+  /** @copydoc Host::policy_loaded_plugins */
+  Result<std::vector<std::string>> policy_loaded_plugins() const override {
     return mapped<std::vector<std::string>>(
-        [](Client& client) { return client.scheduler_loaded_plugins(); });
+        [](Client& client) { return client.policy_loaded_plugins(); });
   }
 
-  /** @copydoc Host::configure_scheduler_defaults */
-  VoidResult configure_scheduler_defaults(
-      const HostSchedulerConfig& config) override {
+  /** @copydoc Host::configure_policy_defaults */
+  VoidResult configure_policy_defaults(
+      const HostPolicyConfig& config) override {
     return call_void([&](Client& client) {
-      return client.configure_scheduler_defaults(config);
+      return client.configure_policy_defaults(config);
     });
   }
 
-  /** @copydoc Host::scheduler_info */
-  Result<SchedulerInfoSnapshot> scheduler_info(
+  /** @copydoc Host::policy_info */
+  Result<PolicyInfoSnapshot> policy_info(
+      PolicyClass policy_class) const override {
+    return mapped<PolicyInfoSnapshot>(
+        [&](Client& client) { return client.policy_info(policy_class); });
+  }
+
+  /** @copydoc Host::replace_policy */
+  VoidResult replace_policy(PolicyClass policy_class,
+                            const std::string& type) override {
+    return call_void([&](Client& client) {
+      return client.replace_policy(policy_class, type);
+    });
+  }
+
+  /** @copydoc Host::execution_available_types */
+  Result<std::vector<std::string>> execution_available_types() const override {
+    return mapped<std::vector<std::string>>(
+        [](Client& client) { return client.execution_available_types(); });
+  }
+
+  /** @copydoc Host::execution_description */
+  Result<std::string> execution_description(
+      const std::string& type) const override {
+    return mapped<std::string>(
+        [&](Client& client) { return client.execution_description(type); });
+  }
+
+  /** @copydoc Host::configure_execution_defaults */
+  VoidResult configure_execution_defaults(
+      const HostExecutionConfig& config) override {
+    return call_void([&](Client& client) {
+      return client.configure_execution_defaults(config);
+    });
+  }
+
+  /** @copydoc Host::execution_info */
+  Result<ExecutionInfoSnapshot> execution_info(
       const GraphSessionId& session, ComputeIntent intent) const override {
-    return mapped<SchedulerInfoSnapshot>([&](Client& client) {
-      return client.scheduler_info(ipc_session(session), intent);
+    return mapped<ExecutionInfoSnapshot>([&](Client& client) {
+      return client.execution_info(ipc_session(session), intent);
     });
   }
 
-  /** @copydoc Host::replace_scheduler */
-  VoidResult replace_scheduler(const GraphSessionId& session,
+  /** @copydoc Host::replace_execution */
+  VoidResult replace_execution(const GraphSessionId& session,
                                ComputeIntent intent,
                                const std::string& type) override {
     return call_void([&](Client& client) {
-      return client.replace_scheduler(ipc_session(session), intent, type);
+      return client.replace_execution(ipc_session(session), intent, type);
     });
   }
 
@@ -1556,6 +1615,11 @@ class IpcHost final : public Host {
 
 /** @copydoc IpcHost::compute */
 VoidResult IpcHost::compute(const HostComputeRequest& request) {
+  OperationStatus validation =
+      validate_host_compute_execution(request.execution);
+  if (!validation.ok) {
+    return {std::move(validation)};
+  }
   const ComputeSubmitRequest submit_request =
       compute_submission(request, ComputeResultMode::Status);
   IpcResult<ComputeJobSnapshot> submitted = call_value<ComputeJobSnapshot>(
@@ -1590,6 +1654,11 @@ VoidResult IpcHost::compute(const HostComputeRequest& request) {
 /** @copydoc IpcHost::compute_async */
 Result<std::future<OperationStatus>> IpcHost::compute_async(
     HostComputeRequest request) {
+  OperationStatus validation =
+      validate_host_compute_execution(request.execution);
+  if (!validation.ok) {
+    return {std::move(validation), {}};
+  }
   reap_finished_workers();
   auto completion = std::make_shared<AsyncCompletion>();
   std::future<OperationStatus> future = completion->take_future();
@@ -1636,6 +1705,11 @@ Result<std::future<OperationStatus>> IpcHost::compute_async(
 /** @copydoc IpcHost::compute_and_get_image */
 Result<ImageBuffer> IpcHost::compute_and_get_image(
     const HostComputeRequest& request) {
+  OperationStatus validation =
+      validate_host_compute_execution(request.execution);
+  if (!validation.ok) {
+    return {std::move(validation), {}};
+  }
   const ComputeSubmitRequest submit_request =
       compute_submission(request, ComputeResultMode::Image);
   IpcResult<ComputeJobSnapshot> submitted = call_value<ComputeJobSnapshot>(

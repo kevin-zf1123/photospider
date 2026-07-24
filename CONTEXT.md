@@ -11,7 +11,7 @@ That glossary defines the vocabulary of the current implementation, including:
 
 - `ps::Host`, `Kernel`, `GraphRuntime`, and `GraphModel` ownership;
 - graph-state operations and `GraphStateExecutor`;
-- `ComputeIntent`, `ComputePlan`, `DirtyRegionSnapshot`, and
+- `ComputeIntent`, `ComputeRun`, `ComputePlan`, `DirtyRegionSnapshot`, and
   `ComputeTaskDispatcher`;
 - `ReadyTaskSubmission`, `IScheduler`, cache, `ImageBuffer`, providers, and
   adapters.
@@ -24,11 +24,72 @@ are authoritative; reader-oriented Chinese copies live under
 
 ## Current and Target Concepts
 
-Do not describe accepted future objects as if they already exist. In
-particular, `ComputeRun`, process-owned `ExecutionService`, `ResourceLedger`,
-the general `Value` model, heterogeneous executors, server control plane, and
-isolated plugin workers are defined only in
-`docs/roadmap/Kernel-Evolution.md` until their implementation lands.
+Issue #67 established one private, request-owned `ComputeRun` for each
+non-realtime HP request. Issue #69 extended current behavior so realtime
+requests create independent HP `Full` and RT `Interactive` child Runs; issue
+#74 now composes those children in one private request-owned `RunGroup` without
+creating a mixed-domain Run. Built-in CPU submissions from those Runs and from
+multiple Graphs share one fixed Host-composed `ExecutionService`. Each Run
+retains its descriptor, monotonic phase, exact terminal outcome, plan or dirty
+staging, stable `ComputeRunLease` values, and
+`(RunId, RunLocalTaskId)` completion identity.
+
+Issue #70 makes the same service the current owner of one Host-authoritative
+`ResourceLedger`, complete checked Run admission, and the entry/byte-bounded
+ready store used by initial and dependency-released work. Issue #71 makes the
+private Interactive/Throughput policy seam current: the store performs fixed
+three-to-one class arbitration first, then applies dispatch-count aging,
+deadline, and class-local Graph/Run fair-score ordering only within the selected
+class. Its protected headroom account charges only active built-in Throughput
+roots and follows exact ledger root lifetime; Interactive and transitional
+legacy roots do not debit that class quota. Issue #72 makes strong non-reused
+Graph instance identity, checked nonzero authoritative `GraphRevision`,
+request-owned product snapshots, exact-revision staged publication, and the
+separate compute-request lane current. Issue #73 adds private request
+cancellation, exact Run settlement, and the one-shot commit contender. Issue
+#74 adds per-live-Graph latest-wins supersession: missing intent canonicalizes
+to HP, every candidate receives a graph-wide checked generation, same-key
+pending work coalesces behind one reserved ticket, and exact generation joins
+instance/revision validation before visible commit. RT publishes before opening
+its `RunGroup` sibling gate, and later stale HP or failed newer work cannot roll
+back an already valid RT proxy. Issue #75 makes the policy-only scheduler ABI,
+closed private execution routes, route-aware device freezing, and reserved
+start current. Issue #76 makes the process-owned
+`ExecutionService::RunLifecycleRegistry`, graph-close/process-shutdown fence,
+exact lifecycle/resource settlement, and bounded lifecycle telemetry current.
+Connected-parameter preflight now freezes provider/device/callable and complete
+service reservations before admission. One umbrella reservation charges shared
+Run/result/anticipated-staging ownership once across the connected closure,
+while node roots charge only unique callback and service-envelope demand.
+Providers enter only after atomic bundle installation and reserved start, and
+output-dependent dirty planning stays inside the installed Run. Before graph
+close linearizes, an owner failure is handed to every already joined caller by
+one non-reused close generation; a fresh retry cannot begin until those
+joiners consume it. Kernel's mutex-protected graph-name registry retains shared
+runtime roots: lookup and nonwaiting close-generation selection are atomic, a
+failed-generation retry waits outside the registry lock and revalidates the
+exact runtime identity, long lifecycle/lane work runs outside the registry
+lock, and final name removal plus success publication are one transaction.
+Shutdown first validates the caller without mutation; rejection leaves the
+runtime-publication gate open and the service `Accepting` at generation zero.
+It then closes only that gate under the graph-registry lock and performs the
+service transition and cancellation fanout without the lock, so a racing load
+is either published and drained or never registered while listing remains
+available. Gate closure is the irreversible fail-stop boundary. Each exact
+`GraphRuntime` owns its mutex-protected optional `LastError` slot; there is no
+process-global Kernel diagnostic table. Delayed translation retained from an
+old runtime can mutate only that old slot, which disappears with the final
+shared runtime owner, and cannot affect a same-name replacement. Worker
+settlement retires its local queue, callable, lease, and grant owners before
+publishing quiescence;
+persistent finalization authority and irreversible close/shutdown cancellation
+fail stop rather than silently lose cleanup obligations. The general `Value`
+model, heterogeneous executors, server control plane, and isolated plugin
+workers remain later target work.
+The detailed Run/process-execution ownership decision is
+`docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
+the combined accepted direction remains
+`docs/roadmap/Kernel-Evolution.md`.
 
 Long-lived decisions are recorded in `docs/adr/`. Task state, dependencies,
 and acceptance evidence belong in GitHub Projects and Issues rather than this
@@ -42,5 +103,14 @@ context document.
 - `DirtyRegionSnapshot` is not `ComputeTaskGraph`.
 - HP cache is not RT proxy state.
 - `ImageBuffer` is not a general Tensor, Deep Image, or vector-scene model.
-- The current worker-owning `IScheduler` is not the target process execution
-  domain.
+- A legacy worker-owning `IScheduler` is neither the current Host-composed CPU
+  `ExecutionService` nor the target policy-only scheduler generation.
+- A scheduler epoch is neither a `RunId` nor a completion identity. Current
+  built-in CPU full, dirty, and preflight completion is scoped by one stable
+  Run lease and `(RunId, RunLocalTaskId)`; only legacy dirty scheduler routes
+  retain their synchronous borrowed-handle path.
+- A request-owned `RunGroup` coordinates results and cancellation for
+  independent HP/RT Runs; it is not a mixed-domain Run or a cross-domain task
+  graph.
+- A graph-lifetime lease protects a target Graph lifetime; it does not make
+  `GraphRuntime` the owner of admitted Runs or their process registry.

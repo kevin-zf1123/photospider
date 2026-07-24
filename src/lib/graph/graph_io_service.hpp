@@ -37,7 +37,7 @@ class GraphIOService {
    * @param reader Shared owner used for complete and single-node reads.
    * @param writer Shared owner used for complete and single-node writes.
    * @throws std::invalid_argument if either owner is empty.
-   * @note Construction performs no graph, parser, filesystem, scheduler, or
+   * @note Construction performs no graph, parser, filesystem, execution, or
    *       session operation.
    */
   GraphIOService(std::shared_ptr<const GraphDocumentReader> reader,

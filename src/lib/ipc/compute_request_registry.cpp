@@ -76,7 +76,8 @@ bool terminal_state(ComputeRequestState state) noexcept {
  *
  * @throws std::bad_alloc when owned request/status storage cannot be allocated.
  * @note `terminal_slot` starts in `reserved_terminal_order_` and is spliced
- *       without allocation into publication order at the terminal commit.
+ *       without allocation into publication order only after any displaced
+ *       terminal record has completed cleanup.
  */
 struct ComputeRequestRegistry::Record {
   /** @brief Opaque compute identity. */
@@ -515,14 +516,31 @@ void ComputeRequestRegistry::worker_loop() noexcept {
     } catch (...) {
     }
 
+    std::unique_ptr<Record> evicted;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (terminal_order_.size() >= limits_.terminal) {
+        const auto oldest = records_.find(terminal_order_.front());
+        if (oldest != records_.end()) {
+          evicted = detach_terminal_locked(oldest);
+        } else {
+          terminal_order_.pop_front();
+        }
+      }
+    }
+    evicted.reset();
+
+    if (!normal_outcome) {
+      output.reset();
+    }
     TimePoint terminal_time{};
     try {
       terminal_time = clock_();
     } catch (...) {
       normal_outcome = false;
+      output.reset();
     }
 
-    std::unique_ptr<Record> evicted;
     SessionRegistry::JobAdmission completed_admission;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -536,21 +554,12 @@ void ComputeRequestRegistry::worker_loop() noexcept {
                           ? ComputeRequestState::Succeeded
                           : ComputeRequestState::Failed;
       record->terminal_since = terminal_time;
-      if (terminal_order_.size() >= limits_.terminal) {
-        const auto oldest = records_.find(terminal_order_.front());
-        if (oldest != records_.end()) {
-          evicted = detach_terminal_locked(oldest);
-        } else {
-          terminal_order_.pop_front();
-        }
-      }
       terminal_order_.splice(terminal_order_.end(), reserved_terminal_order_,
                              record->terminal_slot);
       --active_count_;
       completed_admission = std::move(record->admission);
     }
     completed_admission = {};
-    evicted.reset();
   }
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <future>
 #include <map>
 #include <memory>
@@ -14,7 +16,6 @@
 #include "photospider/host/compute_request.hpp"
 #include "photospider/host/event_stream.hpp"
 #include "photospider/host/graph_session.hpp"
-#include "photospider/scheduler/scheduler.hpp"
 
 /**
  * @file host.hpp
@@ -24,7 +25,7 @@
  * Host is the stable local frontend boundary. Implementations translate these
  * request and snapshot values into an embedded backend stack or the installed
  * typed IPC transport without exposing backend runtime, model, execution,
- * compute, scheduler-queue, image-library, or parser object ownership through
+ * compute, execution-queue, image-library, or parser object ownership through
  * installable headers.
  */
 
@@ -199,25 +200,126 @@ struct HostPluginLoadReport {
 };
 
 /**
- * @brief Scheduler defaults applied to graph sessions loaded after update.
+ * @brief Maximum accepted worker request for the private execution service.
+ * @note Zero selects bounded automatic resolution; positive values are exact.
+ *
+ * This value constrains public configuration only. It grants no worker,
+ * thread, queue, reservation, or resource authority.
+ */
+inline constexpr unsigned int kExecutionWorkerRequestMax = 8U;
+
+/**
+ * @brief Policy service class configured independently from compute intent.
+ *
+ * @throws Nothing for value construction and comparison.
+ * @note The class chooses one ranking binding only. It does not choose a
+ * physical executor or grant a resource quantity.
+ */
+enum class PolicyClass {
+  /** @brief Latency-sensitive service with bounded burst preference. */
+  Interactive,
+
+  /** @brief Weighted background service confined to general capacity. */
+  Throughput,
+};
+
+/**
+ * @brief Stable first-fault category for one policy binding generation.
+ *
+ * @throws Nothing for value construction and comparison.
+ * @note A fault is copied observation state. It contains no plugin context,
+ * DSO lease, callback, exception object, or mutable binding capability.
+ */
+enum class PolicyFaultReason {
+  /** @brief Plugin explicitly returned an ABI-v1 abstention. */
+  Abstained,
+  /** @brief Plugin returned a non-OK callback status. */
+  CallbackStatus,
+  /** @brief A catchable foreign callback exception crossed the boundary. */
+  CallbackException,
+  /** @brief Decision bytes violated an ABI record invariant. */
+  MalformedDecision,
+  /** @brief Decision did not echo the original binding/snapshot generation. */
+  GenerationMismatch,
+  /** @brief Decision named no candidate in the immutable original snapshot. */
+  CandidateOutsideSnapshot,
+};
+
+/**
+ * @brief Future policy defaults applied atomically to the execution domain.
  *
  * @throws Nothing for value operations except string allocation on mutation.
- * @note This mirrors the embedded backend's scheduler default configuration
- *       without exposing scheduler factories or runtime ownership.
+ * @note The Host borrows this value only for the call. Names are canonical
+ * 1..128-byte policy types; successful configuration advances both bindings
+ * even when either name equals the previous value.
  */
-struct HostSchedulerConfig {
-  /** @brief Scheduler type used for global high-precision compute. */
-  std::string hp_type = "cpu_work_stealing";
+struct HostPolicyConfig {
+  /** @brief Type bound to the Interactive class. */
+  std::string interactive_type = "interactive";
 
-  /** @brief Scheduler type used for real-time dirty-region updates. */
-  std::string rt_type = "cpu_work_stealing";
+  /** @brief Type bound to the Throughput class. */
+  std::string throughput_type = "throughput";
+};
+
+/**
+ * @brief Immutable first fault copied from one exact binding generation.
+ *
+ * @throws Nothing for value operations except string allocation on mutation.
+ * @note `callback_status` is present if and only if `reason` is
+ * `CallbackStatus`. `message` is valid UTF-8 of at most 4,096 bytes.
+ */
+struct PolicyFaultSnapshot {
+  /** @brief Stable fault category. */
+  PolicyFaultReason reason = PolicyFaultReason::MalformedDecision;
+
+  /** @brief Raw callback status only for `CallbackStatus`. */
+  std::optional<std::uint32_t> callback_status;
+
+  /** @brief Copied bounded diagnostic text. */
+  std::string message;
+};
+
+/**
+ * @brief Point-in-time copied state for one process policy binding.
+ *
+ * @throws Nothing for value operations except owned string/optional mutation.
+ * @note A successful snapshot has a canonical nonempty type and a nonzero
+ * generation. A fault bypasses only that producing generation and remains
+ * immutable until a successful replacement publishes a new generation.
+ */
+struct PolicyInfoSnapshot {
+  /** @brief Binding class represented by this snapshot. */
+  PolicyClass policy_class = PolicyClass::Interactive;
+
+  /** @brief Canonical policy type bound to the class. */
+  std::string policy_type;
+
+  /** @brief Nonzero generation that cannot be reused by this service. */
+  std::uint64_t binding_generation = 0;
+
+  /** @brief First sticky plugin fault, or no fault. */
+  std::optional<PolicyFaultSnapshot> fault;
+};
+
+/**
+ * @brief Future private execution defaults applied as one transaction.
+ *
+ * @throws Nothing for value operations except string allocation on mutation.
+ * @note The Host borrows this value only for the call. Route names accept
+ * exactly `cpu`, `gpu_pipeline`, or `serial_debug`; the worker request is
+ * `[0,8]`. The value carries no executor or worker ownership.
+ */
+struct HostExecutionConfig {
+  /** @brief Route used for future high-precision session bindings. */
+  std::string hp_type = "cpu";
+
+  /** @brief Route used for future real-time dirty-region bindings. */
+  std::string rt_type = "cpu";
 
   /**
-   * @brief CPU/plugin worker request; zero means bounded automatic selection.
-   * @note Zero resolves once before construction to a value in `[1,8]`;
-   *       positive values are exact and must not exceed
-   *       `kSchedulerWorkerRequestMax`. This field does not configure the
-   *       fixed process-wide scheduler capacity.
+   * @brief Private worker request; zero means bounded automatic selection.
+   * @note A positive request is exact and cannot resize an already fixed
+   * process pool to a different value.
    */
   unsigned int worker_count = 0;
 };
@@ -255,28 +357,28 @@ class PHOTOSPIDER_API Host {
    *
    * @param request Session name, root, YAML, config, and cache-root values.
    * @return Loaded session id on success; `GraphErrc::InvalidParameter` for a
-   *         duplicate session or scheduler-request validation;
-   *         `GraphErrc::ComputeError` when the complete HP+RT scheduler pair
-   *         cannot fit the process worker budget; `GraphErrc::Io` for an
-   *         explicit missing/unreadable/uncopyable source or session-path
-   *         failure; `GraphErrc::InvalidYaml` for syntax, root-shape,
-   *         duplicate-id, or node-schema rejection;
+   *         duplicate session or invalid execution defaults;
+   *         `GraphErrc::Io` for an explicit
+   *         missing/unreadable/uncopyable source or session-path failure;
+   *         `GraphErrc::InvalidYaml` for syntax, root-shape, duplicate-id, or
+   *         node-schema rejection;
    *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
    *         rejection; or `GraphErrc::Unknown` for an unexpected internal
    *         failure.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The returned session is a value label, never a runtime pointer. The
-   *       embedded implementation plans both scheduler intents and reserves
-   *       their aggregate capacity before constructing either candidate. A
-   *       conforming implementation must not leave a scheduler candidate,
-   *       worker reservation, or newly published session when load returns
-   *       failure or an exception propagates. Empty `yaml_path` loads existing
-   *       session-local content or intentionally creates an empty graph;
-   *       nonempty `yaml_path` is explicit and never falls back. Nonempty
-   *       relative request paths use the caller process working directory; an
-   *       IPC implementation resolves them in its client process before
-   *       sending the typed request.
+   *       embedded implementation captures both private execution-route ids
+   *       before document ingestion. The first Graph load may fix and start
+   *       the Host-lifetime `ExecutionService` pool even if document loading
+   *       later fails; the pool is uncharged process infrastructure and owns no
+   *       per-Graph reservation. Runtime construction, filesystem preparation,
+   *       document validation, and session publication otherwise roll back
+   *       transactionally. Empty `yaml_path` loads existing session-local
+   *       content or intentionally creates an empty graph; nonempty `yaml_path`
+   *       is explicit and never falls back. Nonempty relative request paths use
+   *       the caller process working directory; an IPC implementation resolves
+   *       them in its client process before sending the typed request.
    */
   virtual Result<GraphSessionId> load_graph(
       const GraphLoadRequest& request) = 0;
@@ -285,19 +387,21 @@ class PHOTOSPIDER_API Host {
    * @brief Closes a loaded graph session.
    *
    * @param session Session to close.
-   * @return Success, `GraphErrc::NotFound` only when the session is absent, or
-   *         another failure code when shutdown fails while the session remains
-   *         loaded.
+   * @return Success shared by every caller joining the live close generation,
+   *         or `GraphErrc::NotFound` when the session is absent, stale, or
+   *         already removed.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The embedded implementation first publishes its closing marker and
-   *       drains synchronous calls admitted before that marker. It then stops
-   *       graph-state lane admission so full-FIFO producers are awakened and
-   *       rejected before close waits pre-registered async schedulers and every
-   *       backend-accepted caller-visible status future. Only then does it join
-   *       the drained lane and begin scheduler shutdown or backend-resource
-   *       release. A failed scheduler shutdown recreates one lane worker and
-   *       reopens admission for the retained session so callers may retry it.
+   * @note The embedded implementation preallocates one close record before
+   *       Graph publication. The first caller publishes its edge marker and
+   *       drains synchronous calls admitted before that marker; concurrent
+   *       callers join the same immutable result. Kernel then linearizes the
+   *       exact lifecycle row to Closing, cancels Graph-indexed work, stops
+   *       compute-request admission, settles and unregisters Runs, removes the
+   *       row, drains compute-request then graph-state, stops the runtime, and
+   *       releases route ids. At most one Kernel close call progresses, and the
+   *       generation is never reopened; process execution workers remain owned
+   *       by the Host-lifetime service.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 
@@ -388,6 +492,8 @@ class PHOTOSPIDER_API Host {
    * @param request Host compute request.
    * @return Success, NotFound when the graph session is missing or closed, or
    *         a compute failure status for existing sessions.
+   *         `GraphErrc::InvalidParameter` is returned before session access
+   *         when a present `maximum_parallelism` is zero.
    * @throws std::bad_alloc if request processing, compute execution, backend-
    *         to-status translation, or copied result construction exhausts
    *         memory.
@@ -404,7 +510,9 @@ class PHOTOSPIDER_API Host {
    *
    * @param request Host compute request captured by value.
    * @return Future resolving to the final operation status, or a failure status
-   *         when scheduling cannot start.
+   *         when scheduling cannot start. A present zero
+   *         `maximum_parallelism` returns `GraphErrc::InvalidParameter` before
+   *         async admission.
    * @throws std::bad_alloc if request processing, async submission, backend-
    *         to-status translation, or copied result construction exhausts
    *         memory.
@@ -432,7 +540,8 @@ class PHOTOSPIDER_API Host {
    * @return ImageBuffer descriptor on success, an ok empty descriptor when the
    *         compute succeeds without image output, `GraphErrc::NotFound` when
    *         the graph session is missing or closed, or a compute failure status
-   *         for existing sessions.
+   *         for existing sessions. A present zero `maximum_parallelism`
+   *         returns `GraphErrc::InvalidParameter` before session access.
    * @throws std::bad_alloc if request processing, compute/image execution,
    *         backend-to-status translation, or copied result construction
    *         exhausts memory.
@@ -676,7 +785,7 @@ class PHOTOSPIDER_API Host {
    * @return Copied dirty-region snapshot, or a failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Snapshot values exclude scheduler queues and task counters.
+   * @note Snapshot values exclude execution queues and task counters.
    */
   virtual Result<DirtyRegionInspectionSnapshot> dirty_region_snapshot(
       const GraphSessionId& session) = 0;
@@ -690,7 +799,7 @@ class PHOTOSPIDER_API Host {
    *         translation, or copied result construction exhausts memory.
    * @note Loaded sessions that have not computed yet return an empty optional
    *       with success status. Snapshot values exclude task closures,
-   *       scheduler queues, backend object references, and mutable graph state.
+   *       execution queues, backend object references, and mutable graph state.
    */
   virtual Result<std::optional<ComputePlanningInspectionSnapshot>>
   compute_planning_snapshot(const GraphSessionId& session) = 0;
@@ -774,22 +883,22 @@ class PHOTOSPIDER_API Host {
       const GraphSessionId& session, std::size_t limit) = 0;
 
   /**
-   * @brief Returns copied scheduler trace events for a session.
+   * @brief Returns copied private execution trace events for a session.
    *
    * @param session Session to inspect.
    * @param after_sequence Exclusive sequence cursor; zero starts at the oldest
-   *        retained trace and `kObservationSequenceExhausted` observes a
+   * retained trace and `kObservationSequenceExhausted` observes a
    *        terminal empty page.
    * @param limit Maximum events to copy; must be in
-   *        `kSchedulerTraceMinLimit..kSchedulerTraceMaxLimit`.
-   * @return Bounded non-destructive scheduler trace page, or a failure status.
+   * `kExecutionTraceMinLimit..kExecutionTraceMaxLimit`.
+   * @return Bounded non-destructive execution trace page, or a failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note Trace reads never remove events. Invalid limits, future cursors, or
    *       an exhausted sentinel used before actual exhaustion return
    *       `GraphErrc::InvalidParameter` without copying a page.
    */
-  virtual Result<SchedulerTracePage> scheduler_trace(
+  virtual Result<ExecutionTracePage> execution_trace(
       const GraphSessionId& session, uint64_t after_sequence,
       std::size_t limit) = 0;
 
@@ -954,117 +1063,163 @@ class PHOTOSPIDER_API Host {
       const = 0;
 
   /**
-   * @brief Lists scheduler types available to the Host.
-   *
-   * @return Copied scheduler type names.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note Includes built-in scheduler types and any loaded scheduler plugins.
+   * @brief Lists canonical policy types visible to the process owner.
+   * @return Copied lexically sorted unique type names.
+   * @throws std::bad_alloc when owner observation or result copying exhausts
+   * memory.
+   * @note The result contains the immutable built-ins and atomically published
+   * DSO types. It carries no registry or DSO lease.
    */
-  virtual Result<std::vector<std::string>> scheduler_available_types()
-      const = 0;
+  virtual Result<std::vector<std::string>> policy_available_types() const = 0;
 
   /**
-   * @brief Returns a scheduler type description.
-   *
-   * @param type_name Scheduler type name.
-   * @return Description text, or `GraphErrc::NotFound` when the scheduler type
-   *         is not available to the Host.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note Descriptions are for display and must not drive behavior; callers can
-   *       use the status code to distinguish typos from real descriptions.
+   * @brief Returns copied display text for one canonical policy type.
+   * @param type_name Canonical 1..128-byte policy type.
+   * @return Description, or `GraphErrc::NotFound` when unavailable.
+   * @throws std::bad_alloc when validation, lookup, or copying exhausts memory.
+   * @note The returned string owns its storage and remains valid after unload.
    */
-  virtual Result<std::string> scheduler_description(
+  virtual Result<std::string> policy_description(
       const std::string& type_name) const = 0;
 
   /**
-   * @brief Scans directories for scheduler plugins.
-   *
-   * @param dirs Directories to scan.
-   * @return Number of scheduler types loaded.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note Loaded scheduler plugin handles remain owned by the backend loader.
+   * @brief Scans caller-ordered directories for compatible policy DSOs.
+   * @param dirs Directory strings processed in caller order.
+   * @return Number of complete DSOs published by this scan.
+   * @throws std::bad_alloc when path, transaction, metadata, or result storage
+   * exhausts memory.
+   * @note Each DSO is an all-or-nothing registry transaction. An earlier
+   * successful DSO remains visible if a later candidate fails. Recoverable
+   * path/open, ABI/metadata/conflict, and callback failures use
+   * `OperationStatus`; the Host never loads partially compatible rows.
    */
-  virtual Result<size_t> scheduler_scan(
+  virtual Result<std::size_t> policy_scan(
       const std::vector<std::string>& dirs) = 0;
 
   /**
-   * @brief Loads one scheduler plugin.
-   *
-   * @param path Plugin library path.
-   * @return Success or failure status.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note Loading registers scheduler factory entries for later graph use.
+   * @brief Loads one policy DSO as one registry transaction.
+   * @param path Nonempty candidate library path.
+   * @return Success or a precise recoverable status.
+   * @throws std::bad_alloc when path, transaction, or copied metadata storage
+   * exhausts memory.
+   * @note The loader opens eagerly and locally, resolves/calls only the version
+   * export before exact ABI equality, validates every row, then publishes all
+   * rows or none. There is no scheduler ABI or compatibility adapter.
    */
-  virtual VoidResult scheduler_load(const std::string& path) = 0;
+  virtual VoidResult policy_load(const std::string& path) = 0;
 
   /**
-   * @brief Lists loaded scheduler plugin labels.
-   *
-   * @return Copied plugin labels.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note Labels are diagnostic strings, not plugin handles.
+   * @brief Lists copied labels for currently visible policy DSOs.
+   * @return Globally nondecreasing path labels with Host duplicates preserved.
+   * @throws std::bad_alloc when observation or copying exhausts memory.
+   * @note Labels are values, not handles; active bindings retain independent
+   * leases after registry visibility changes.
    */
-  virtual Result<std::vector<std::string>> scheduler_loaded_plugins() const = 0;
+  virtual Result<std::vector<std::string>> policy_loaded_plugins() const = 0;
 
   /**
-   * @brief Applies scheduler defaults used when loading future sessions.
-   *
-   * @param config Scheduler type names and worker count.
-   * @return Success, or `GraphErrc::InvalidParameter` when the positive worker
-   *         request exceeds `kSchedulerWorkerRequestMax`.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note Existing loaded graph sessions keep their current scheduler objects;
-   *       callers can use replace_scheduler() to update them explicitly. A
-   *       rejected candidate leaves the previous future-session defaults
-   *       unchanged. Success validates defaults only and does not reserve
-   *       process capacity for a future graph load.
+   * @brief Atomically replaces both process policy-class bindings.
+   * @param config Canonical Interactive and Throughput type names borrowed only
+   * for this call.
+   * @return Success or `InvalidParameter`/`ComputeError` without partial
+   * publication.
+   * @throws std::bad_alloc when candidate preparation or copied diagnostics
+   * exhausts memory.
+   * @note Contexts and DSO leases are prepared outside binding/store/ledger/
+   * Graph/Run locks. One nonallocating commit advances both nonzero generations
+   * even for equal names; failure preserves both old bindings.
    */
-  virtual VoidResult configure_scheduler_defaults(
-      const HostSchedulerConfig& config) = 0;
+  virtual VoidResult configure_policy_defaults(
+      const HostPolicyConfig& config) = 0;
 
   /**
-   * @brief Returns scheduler information for a graph intent.
-   *
+   * @brief Copies one process policy binding and its immutable first fault.
+   * @param policy_class Interactive or Throughput.
+   * @return Successful copied binding info, including any sticky generation
+   * fault; invalid enum values return `GraphErrc::InvalidParameter`.
+   * @throws std::bad_alloc when copied type or diagnostic storage exhausts
+   * memory.
+   * @note Read-only inspection is permitted during a plugin callback and never
+   * returns a context, lease, callback, or mutable generation owner.
+   */
+  virtual Result<PolicyInfoSnapshot> policy_info(
+      PolicyClass policy_class) const = 0;
+
+  /**
+   * @brief Replaces exactly one process policy-class binding.
+   * @param policy_class Interactive or Throughput.
+   * @param type Canonical type supporting the requested class.
+   * @return Success or precise recoverable status; failure leaves the old
+   * binding and generation unchanged.
+   * @throws std::bad_alloc when candidate preparation or copied diagnostics
+   * exhausts memory.
+   * @note Successful same-name replacement still advances the nonzero
+   * generation, clears the old generation's fault, drains its invocations,
+   * and destroys its context exactly once while its DSO remains mapped.
+   */
+  virtual VoidResult replace_policy(PolicyClass policy_class,
+                                    const std::string& type) = 0;
+
+  /**
+   * @brief Lists the complete private physical execution route vocabulary.
+   * @return Exactly `cpu`, `gpu_pipeline`, and `serial_debug` in lexical order.
+   * @throws std::bad_alloc when result storage exhausts memory.
+   * @note Routes are fixed Host implementation values, not loadable plugins.
+   */
+  virtual Result<std::vector<std::string>> execution_available_types()
+      const = 0;
+
+  /**
+   * @brief Returns copied display text for one private execution route.
+   * @param type_name Exact route name.
+   * @return Description or `GraphErrc::NotFound` when unavailable.
+   * @throws std::bad_alloc when result storage exhausts memory.
+   */
+  virtual Result<std::string> execution_description(
+      const std::string& type_name) const = 0;
+
+  /**
+   * @brief Atomically configures future-session routes and fixed worker count.
+   * @param config Exact HP/RT route names and `[0,8]` worker request borrowed
+   * only for this call.
+   * @return Success or `GraphErrc::InvalidParameter`; failure preserves all
+   * defaults.
+   * @throws std::bad_alloc when transactional copied state exhausts memory.
+   * @note A zero/equal request preserves an already fixed process pool; a
+   * different positive request is rejected. Existing session routes do not
+   * change.
+   */
+  virtual VoidResult configure_execution_defaults(
+      const HostExecutionConfig& config) = 0;
+
+  /**
+   * @brief Copies the private execution route for one session intent.
    * @param session Session to inspect.
-   * @param intent Compute intent served by the scheduler.
-   * @return Copied scheduler info, or a failure status.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note The Host returns value text instead of exposing scheduler objects.
-   *       Embedded inspection shares graph-state serialization with compute,
-   *       replacement, and close so no borrowed scheduler outlives its owner.
+   * @param intent GlobalHighPrecision or RealTimeUpdate.
+   * @return Copied route info; missing/closing sessions return `NotFound` and
+   * invalid intent values return `InvalidParameter`.
+   * @throws std::bad_alloc when request or copied result storage exhausts
+   * memory.
+   * @note Inspection is serialized with compute, route replacement, and close,
+   * but returns no physical owner or queue capability.
    */
-  virtual Result<SchedulerInfoSnapshot> scheduler_info(
+  virtual Result<ExecutionInfoSnapshot> execution_info(
       const GraphSessionId& session, ComputeIntent intent) const = 0;
 
   /**
-   * @brief Replaces the scheduler for a graph intent.
-   *
+   * @brief Replaces one session intent's private execution route.
    * @param session Session to update.
-   * @param intent Compute intent whose scheduler should be replaced.
-   * @param type Scheduler type name.
-   * @return Success, `GraphErrc::NotFound` for missing/closed sessions, or
-   *         `GraphErrc::InvalidParameter` for unavailable/null scheduler types
-   *         or handled candidate failures, or `GraphErrc::ComputeError` when
-   *         process capacity cannot reserve candidate headroom.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
-   * @note Replacement shares graph-state serialization with compute,
-   *       scheduler inspection, and close. Session lifecycle failures are
-   *       reported before scheduler type validation. Planning and reservation
-   *       retain the old scheduler in its pre-call state until candidate
-   *       preparation and publication succeed, so exhaustion never destroys an
-   *       owner still usable by later compute. Candidate/plugin GraphError
-   *       retains the established handled InvalidParameter mapping; only the
-   *       new budget category is preserved exactly.
+   * @param intent Intent whose route is replaced.
+   * @param type Exact route name.
+   * @return Success, `NotFound`, `InvalidParameter`, or `ComputeError` while
+   * preserving the old route on failure.
+   * @throws std::bad_alloc when validation or candidate preparation exhausts
+   * memory.
+   * @note Validation precedes one ownerless nonzero-generation publication
+   * serialized with active same-session requests. A same-name replacement is
+   * still a new generation; no scheduler owner or plugin is constructed.
    */
-  virtual VoidResult replace_scheduler(const GraphSessionId& session,
+  virtual VoidResult replace_execution(const GraphSessionId& session,
                                        ComputeIntent intent,
                                        const std::string& type) = 0;
 };

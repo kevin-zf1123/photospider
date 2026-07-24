@@ -7,7 +7,7 @@
 namespace ps::ipc::internal {
 
 /**
- * @brief Outcome category for reading one complete version 1 frame.
+ * @brief Outcome category for reading one complete version 2 frame.
  *
  * @throws Nothing.
  * @note Clean EOF is distinct from an EOF that truncates a trusted header or
@@ -23,7 +23,7 @@ enum class FrameReadState {
   /** @brief The peer closed inside a header or payload. */
   Truncated,
 
-  /** @brief The advertised payload length was outside the version 1 bounds. */
+  /** @brief The advertised payload length was outside the version 2 bounds. */
   InvalidLength,
 
   /** @brief A socket read failed or a private stage deadline expired. */

@@ -51,7 +51,7 @@ struct BenchmarkOptions final {
  *         populated by the benchmark runner.
  */
 struct BenchmarkRow final {
-  /** @brief Exact scheduler worker grant used for every sample. */
+  /** @brief Exact execution worker grant used for every sample. */
   int workers = 1;
 
   /** @brief Per-sample public Host compute wall durations in milliseconds. */
@@ -301,7 +301,7 @@ void print_usage(std::ostream& stream) {
 /**
  * @brief Builds one real Host curve workload for an exact worker grant.
  * @param options Validated workload dimensions and chain length.
- * @param worker_count Exact scheduler request from one through eight.
+ * @param worker_count Exact execution request from one through eight.
  * @return Enabled parallel single-run BenchmarkService configuration.
  * @throws std::bad_alloc if string storage allocation fails.
  */

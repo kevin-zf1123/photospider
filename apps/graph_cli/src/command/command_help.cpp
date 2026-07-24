@@ -99,8 +99,11 @@ static bool dispatch_print(const std::string& name, const CliConfig& config) {
   } else if (cmd == "exit") {
     print_help_exit(config);
     return true;
-  } else if (cmd == "scheduler") {
-    print_help_scheduler(config);
+  } else if (cmd == "policy") {
+    print_help_policy(config);
+    return true;
+  } else if (cmd == "execution") {
+    print_help_execution(config);
     return true;
   }
   return false;

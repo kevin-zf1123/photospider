@@ -8,27 +8,41 @@ adapters are current behavior.
 
 ## Ownership
 
-`Kernel` owns a map from graph names to `GraphRuntime` instances. Each runtime
-owns one `GraphModel`, one `GraphStateExecutor`, event and scheduler state, and
-platform runtime resources.
+`Kernel` owns a mutex-protected map from graph names to shared `GraphRuntime`
+lifetime roots. Each runtime owns one `GraphModel`, one graph-state executor,
+one private compute-request executor, one latest-wins request coordinator,
+copied HP/RT execution-route bindings, event/execution-trace state, and
+platform runtime resources. Map lookup copies one shared runtime owner inside a
+short critical section; graph-state, compute, IO, inspection, and lane work run
+after releasing the map lock. A concurrent close may therefore remove the name
+without destroying a runtime already retained by an admitted internal call.
 
 ```text
 Kernel
-  graph name -> GraphRuntime
+  graph-registry mutex
+    -> graph name -> shared GraphRuntime root
                   -> GraphStateExecutor
+                  -> compute-request lane
+                  -> ComputeRequestCoordinator
                   -> GraphModel
 ```
 
 The public `ps::Host` returns copied `GraphSessionId` values. A session id is a
-label, not a graph or runtime handle. Graph-state mutation and visible compute
-enter the same per-graph exclusive access boundary.
+label, not a graph or runtime handle. Each live `GraphModel` additionally owns a
+private strong non-reused `GraphInstanceId` and checked nonzero
+`GraphRevision`. Visible capture, mutation, commit validation, and publication
+enter the graph-state lane. Long-running operation execution uses a
+request-owned snapshot outside it. The coordinator publishes checked
+supersession generations and coalesces one pending owner per exact key; the
+existing compute-request lane worker remains the only logical active runner
+while that lane also serializes execution-route inspection/replacement.
 
 ## New Session Load
 
-`Kernel::load_graph()` constructs a runtime outside the published graph map,
-starts its configured schedulers, validates the complete graph document, and
-only then inserts the runtime. Source selection distinguishes omission from an
-explicit request:
+`Kernel::load_graph()` configures the Host-lifetime fixed worker count when
+needed, constructs a runtime with copied route bindings outside the published
+graph map, validates the complete graph document, and only then inserts the
+runtime. Source selection distinguishes omission from an explicit request:
 
 - an empty `yaml_path` uses `<root>/<session>/content.yaml` when that file
   exists and otherwise intentionally creates an empty session;
@@ -37,15 +51,15 @@ explicit request:
   explicit-source failure is `GraphErrc::Io` and never falls back to older
   session content.
 
-Before constructing that runtime, Kernel plans both configured intent
-schedulers. Worker requests are valid from zero through eight; zero resolves to
+Worker requests are valid from zero through eight; zero resolves to
 `min(max(1, hardware_concurrency()), 8)` and explicit positive values remain
-exact. Kernel then atomically reserves the combined HP+RT charge from the
-process-wide 32-slot `SchedulerWorkerBudget`. Built-in `serial_debug` charges
-zero, built-in CPU and ABI v2 plugin schedulers charge the resolved grant, and
-built-in GPU/heterogeneous schedulers also charge their configured potential
-GPU worker. If planning or combined admission fails, neither scheduler is
-constructed and no session is published.
+exact. The first configuration or load that selects the fixed service freezes
+that process count; later zero/equal requests preserve it and a conflicting
+positive request is rejected. Each runtime copies one closed-vocabulary
+`cpu`, `serial_debug`, or `gpu_pipeline` route id for HP and RT with generation
+one. Graph load constructs no physical executor, policy context, scheduler,
+plugin, or ledger reservation. Each Run is admitted later with its complete
+resource vector through the common ready/policy/reserved-start boundary.
 
 Graph document loading is a prepare-then-publish transaction:
 
@@ -63,16 +77,19 @@ Graph document loading is a prepare-then-publish transaction:
 4. The adapter calls `GraphModel::replace_nodes()` exactly once. That call
    validates dependencies and cycles, builds replacement adjacency, installs
    nodes and topology together, resets graph runtime metadata, and advances
-   topology generation.
-5. `Kernel` inserts the runtime into its map only after the load completes.
+   topology generation plus authoritative `GraphRevision`.
+5. `Kernel` takes the graph-registry mutex, rechecks shutdown and duplicate-name
+   state, registers the lifetime anchor, and inserts the preallocated map node
+   as one final publication transaction.
 
 A path, parser, definition conversion, topology, unexpected, or resource failure
 therefore publishes neither a partial graph nor a new session.
 `std::bad_alloc` propagates unchanged; other failures use the stable matrix
 below. Directory creation and file-copy side effects that happened before
-parsing are not rolled back, but they are not graph-map publication. Scheduler
-capacity is stricter: any failure before publication destroys every candidate
-scheduler and returns both atomically admitted reservations exactly once.
+parsing are not rolled back, but they are not graph-map publication. A failure
+before publication destroys the unpublished runtime and its copied route
+bindings; it has no Graph-owned execution reservation to return. A fixed worker
+pool already configured for the Host remains available for later sessions.
 
 The classification and transaction rationale is fixed by
 [ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md).
@@ -92,41 +109,50 @@ classification as initial load.
 `GraphIOService` builds a detached definition and the in-memory adapter stages
 and validates a temporary replacement exactly as they do for initial loading.
 Until the adapter's single `replace_nodes()` call succeeds, the visible node
-map, topology, topology generation, cache, timing, dirty/planning state,
-runtime state, and session identity remain unchanged. This guarantee covers
-handled failures and propagated `std::bad_alloc`.
+map, topology, topology generation, authoritative revision, cache, timing,
+dirty/planning state, runtime state, and Graph/session identity remain
+unchanged. This guarantee covers handled failures and propagated
+`std::bad_alloc`.
 
-Successful reload replaces the whole graph, resets model runtime state, and
-advances topology generation even when node ids are reused. Runtime-owned
-mirrors such as `RealtimeProxyGraph` observe that generation boundary and
-discard stale per-node state.
+Successful reload replaces the whole graph, resets model runtime state, retains
+the live Graph instance identity, and advances both topology generation and
+authoritative revision even when node ids are reused. Runtime-owned mirrors
+such as `RealtimeProxyGraph` observe the topology-generation boundary and
+discard stale per-node state; staged compute also fails exact revision
+validation rather than publishing into the replacement. Disk-cache diagnostic
+reset crosses the same private no-throw store used by worker record and reader
+snapshot. It occurs only in successful replacement publication; a failed reload
+retains the prior complete diagnostic together with the rest of runtime state.
 
-## Scheduler Replacement
+## Execution Route Replacement
 
-Scheduler replacement is serialized with compute, inspection, and close by the
-per-graph `GraphStateExecutor`. Kernel first validates and plans one candidate,
-then reserves its complete charge while the old scheduler and reservation stay
-live. It constructs, attaches, and starts the candidate before publishing the
-new owner; only after publication does destruction of the displaced owner
-return its slots. Replacement therefore requires transient process headroom
-and never borrows the old reservation speculatively.
+Execution-route inspection and replacement are serialized with same-Graph
+compute by the private per-Graph compute-request lane. Embedded Host inspection
+first preserves missing/closing-session classification as `NotFound`, then
+rejects an invalid `ComputeIntent` as `InvalidParameter` before the Kernel's
+optional route lookup. A valid intent whose copied route is absent remains
+`NotFound`; successful inspection returns only a copied route/statistics
+snapshot.
 
-If capacity is unavailable, replacement returns `GraphErrc::ComputeError`
-before candidate construction. If candidate construction, attach, or start
-fails, only the candidate reservation is returned and the old scheduler
-continues to serve compute. Unknown types and invalid worker requests remain
-`InvalidParameter`. A successful replacement transfers one move-only
-reservation into `ReservationOwnedScheduler`, whose destruction orders
-concrete scheduler teardown before slot release. After publication, shutdown
-and detach failures from the displaced owner are suppressed as post-commit
-diagnostics: the committed replacement remains successful, while destruction
-still returns the displaced reservation exactly once.
+For replacement, Kernel first rejects anything outside the closed `cpu`,
+`serial_debug`, and `gpu_pipeline` vocabulary. Inside the lane,
+`GraphRuntime` copies the candidate id before locking route state, verifies the
+intent and checked generation, then publishes the copied id and next nonzero
+generation together. Same-name replacement also advances the generation.
+
+No replacement constructs a worker, device owner, policy context, plugin, or
+resource reservation, so it needs no transient process headroom. Unknown
+routes, invalid intents, generation exhaustion, or handled lane-lifecycle
+failure preserve the previous binding and return `InvalidParameter`; a missing
+or closing session remains `NotFound`. `std::bad_alloc` from candidate copying
+propagates through the documented Host boundary without partial publication.
 
 ## Existing Session Save
 
 `Host::save_graph()` admits the session against concurrent close, requires the
-session map entry, and serializes the visible node snapshot through the same
-`GraphStateExecutor` used by graph mutation and compute. `GraphIOService` first
+session map entry, and serializes the visible node snapshot through the
+`GraphStateExecutor` used by graph mutation and compute capture/commit.
+`GraphIOService` first
 captures a detached definition in ascending node-id order through the
 in-memory adapter and excludes all runtime state, then passes it to the
 injected writer. The configured YAML adapter emits the complete representation
@@ -139,9 +165,10 @@ exception channel rather than becoming an `Io` status.
 
 Save is an owner-state read transaction. Success, a returned failure, and
 propagated resource exhaustion leave the graph topology, topology generation,
-cache/timing/dirty/planning/runtime state, and session identity unchanged. A
-caller may retry the same admitted session after any reported failure; the IPC
-client sends each mutation once and does not retry it automatically.
+authoritative revision, cache/timing/dirty/planning/runtime state, Graph
+instance identity, and session identity unchanged. A caller may retry the same
+admitted session after any reported failure; the IPC client sends each
+mutation once and does not retry it automatically.
 
 The destination has a deliberately narrower guarantee. Save writes directly
 to the supplied path and does not use a temporary file plus atomic replacement.
@@ -165,16 +192,31 @@ missing or closing session, or a missing requested node, is
 an existing target are `GraphErrc::InvalidYaml`.
 
 Replacement copies the current node map, validates the complete candidate
-topology, and only then swaps it into visible state. Parse,
-missing-dependency, or cycle validation failure leaves the previous node map
-and topology unchanged. The current implementation does not claim an
-all-exception strong guarantee: allocation failure while rebuilding the
-already-validated topology may occur after the candidate node map has been
-moved into the model.
+topology, prepares successor topology/revision generations, and only then uses
+no-throw container swaps plus scalar stores to publish visible state. Parse,
+missing-dependency, cycle, allocation, or generation-overflow failure therefore
+leaves the previous node map, topology, generations, revision, and runtime state
+unchanged. Publication begins only after all throwing structural preparation
+has completed.
 
 `add_node()`, `remove_node()`, and input-rewire methods follow the same
 candidate-map pattern. A successful structural edit rebuilds the adjacency
-index, advances topology generation, and clears the cached full task graph.
+index, advances topology generation and authoritative revision, and clears the
+cached full task graph. A rejected candidate advances neither value.
+
+Explicit disk, memory, combined, and transient-memory cache clears use a
+different failure boundary because filesystem deletion and multi-node clearing
+can succeed partially before a later operation throws. The graph-state work
+item first computes the checked successor revision. Overflow therefore leaves
+the Graph, caches, and files unchanged. After that pure preparation succeeds,
+it publishes the successor revision without throwing and only then enters the
+cache side effects. A later clear failure is returned through the existing
+facade contract, but the revision is never rolled back: every Run captured
+before the clear intent remains stale even when the cache root was removed but
+could not be recreated, or only part of memory cache was released. This is
+revision-safe invalidation, distinct from issue #73 cooperative cancellation.
+A cache clear does not request cancellation; stale and cancelled Runs converge
+only at the rule that neither may publish request-owned staged output.
 
 ## ROI Projection
 
@@ -191,9 +233,14 @@ construct library geometry only locally at an actual matrix operation; that
 representation does not enter the graph-state work item or its retained state.
 
 Existing-session propagation exceptions continue to update Kernel's
-best-effort `LastError` mirror, but the current Host result comes directly from
-the same required operation. It is never reconstructed by reading shared
-diagnostic state after the operation.
+best-effort `LastError` observation, but the current Host result comes directly
+from the same required operation. It is never reconstructed by reading shared
+diagnostic state after the operation. Each exact `GraphRuntime` exclusively
+owns one mutex-protected optional diagnostic slot; Kernel has no process-global
+identity-to-error table. Public name lookup first retains the current runtime
+and then copies only that runtime's slot. Delayed store or clear translation
+retained from an old runtime can mutate only the old slot, which is destroyed
+with the final shared runtime owner, and cannot affect a same-name replacement.
 
 ## Injected Persistence Lifetime
 
@@ -208,13 +255,15 @@ configured fallback.
 These dependencies are not graph state: reload, clear, and close do not replace
 them. `Kernel::~Kernel()` explicitly clears the owned runtime map before
 ordinary member teardown reaches cache, traversal, diagnostic, IO, or ROI
-collaborators. Each `GraphRuntime` therefore stops graph-state admission,
-drains admitted work, and joins its worker while those borrowed Kernel
-services and all injected owners are still alive; only later service
-destruction releases them. The owning Host must stop external Kernel-call
-admission before Kernel destruction, because the private graph map is not a
-concurrent-destruction API. Codec/document `GraphError` values retain their
-documented categories, and `std::bad_alloc` propagates unchanged.
+collaborators. Each `GraphRuntime` therefore stops and drains compute-request
+work while graph-state is available, then drains graph-state before releasing
+Graph-local route values and platform state, all while those borrowed Kernel
+services and injected owners remain alive; only later service destruction
+releases them. The owning Host must stop
+external Kernel-call admission before Kernel destruction, because the private
+graph map is not a concurrent-destruction API. Codec/document `GraphError`
+values retain their documented categories, and `std::bad_alloc` propagates
+unchanged.
 
 ## Clear
 
@@ -226,61 +275,120 @@ documented categories, and `std::bad_alloc` propagates unchanged.
 - compute-plan history and full-task-graph cache;
 - disk-cache diagnostics and skip-save state.
 
-Clear advances topology generation and leaves the model in quiet mode. It does
-not close or destroy the owning `GraphRuntime`; the session remains loaded. It
-also does not delete disk-cache files, clear runtime-owned event/trace rings,
-directly clear `RealtimeProxyGraph`, or clear Kernel-owned `LastError`.
-`RealtimeProxyGraph` invalidates itself when its next synchronization observes
-the advanced topology generation.
+Clear advances topology generation and authoritative revision, then leaves the
+model in quiet mode. It does not close or destroy the owning `GraphRuntime`; the
+session remains loaded. It also does not delete disk-cache files, clear
+runtime-owned event/trace rings, directly clear `RealtimeProxyGraph`, or clear
+the runtime-owned `LastError` diagnostic slot. `RealtimeProxyGraph` invalidates
+itself when its next synchronization observes the advanced topology
+generation; an older staged compute is rejected by revision validation.
+Diagnostic record, snapshot, reset, clone, and staged exchange all use one
+encapsulated no-throw mutex contract, so clear can overlap worker diagnostic
+traffic without unsynchronized optional/path/string access.
 
 ## Close and Lifetime
 
-Embedded Host close first marks the session closing. New compute, scheduler,
-reload, required save, node-YAML replacement, ROI projection, timing
-inspection, and all-cache clearing admissions fail. The Host waits for
-synchronous calls admitted before that marker through caller-visible
-result/status translation
-while the lane is still accepting, so calls that use graph state can finish
-their graph-state submission. Kernel then stops admission on the same
-`GraphStateExecutor` used by those calls.
-Producers blocked on the full 64-entry FIFO are awakened and rejected without
-requiring queue space; only after this stop does the Host wait for async
-submission placeholders and caller-visible status publication. Already admitted
-callbacks drain in FIFO order, and Kernel joins the sole worker. Scheduler stop
-begins only after that joined boundary; the map entry is removed only after stop
-succeeds.
+One completely constructed `GraphRuntime` owns a stable
+`GraphLifetimeAnchor` and a preallocated monotonic close coordinator. Kernel
+registers the non-reused `GraphInstanceId` and anchor only after load is ready
+to publish. A lifecycle candidate retains an anchor lease from its first
+admission check through atomic standalone/realtime-bundle installation or
+rollback, so close cannot miss planning that began before its marker.
 
-Concurrent close callers serialize through the Host lifecycle gate. Within the
-executor, every closer records the close generation it joined and waits until
-that generation is durably published as joined. A runtime stop failure retains
-the runtime, diagnostic state, and live scheduler reservations. Because the
-prior lane worker has already joined, Kernel creates one replacement worker
-before returning the stop failure; Host then clears the closing marker and
-reopens admission. That restart may occur before delayed waiters for the prior
-generation wake, but those waiters still return and no second worker is created.
-A later close drains and joins the replacement lane before retrying scheduler
-stop. On successful close, concrete schedulers shut down and are destroyed
-before their slots return. Destroying an embedded Host without explicit close
-follows the same synchronous ownership chain. The adapter first waits its joined
-async status workers and stops external admission; `Kernel::~Kernel()` then
-clears the runtime map while Kernel services remain alive. Every `GraphRuntime`
-drains and joins its lane before scheduler teardown, and all graph reservations
-return before Host destruction completes. Direct internal Kernel owners have the
-same duty to stop concurrent callers before destruction. `NotFound` is reserved
-for a session that is actually absent.
+Direct Kernel close resolves the name, retains the exact shared runtime root,
+and performs a nonwaiting owner/joiner selection while holding the
+graph-registry mutex. Lookup and selection are therefore one transaction: a
+caller cannot observe the old name and accidentally join a replacement
+runtime, and the owner keeps the retired runtime alive after map removal. If a
+failed generation still owes its result to an old joiner, selection returns an
+explicit retry token instead of waiting. The caller releases the graph-registry
+mutex, waits for that token, then revalidates both the retained shared runtime
+and `GraphInstanceId` before selecting again. Every later runtime operation
+uses the same short lookup-and-retain rule; no graph-registry lock is held
+while retry waiting, lifecycle settlement, or either Graph-owned lane runs.
+
+Embedded Host close first selects or joins that one close generation and marks
+the public session closing. New compute, execution, reload, required save,
+node-YAML replacement, ROI projection, timing inspection, and all-cache
+clearing admissions fail. Under the `RunLifecycleRegistry` fence, the owner
+changes the exact Graph row `Open -> Closing`, rejects pending candidates,
+denies visible commit, and requests `GraphClose` cancellation for every
+installed Run. It releases the fence before waiting; a candidate either
+installed before the marker or rolls back, and no late Run can enter the row.
+Every live concurrent close caller joins the same generation result.
+
+Owner selection alone is not the lifecycle linearization point. If that owner
+fails before `Open -> Closing`, the coordinator publishes the exact
+`std::exception_ptr` to every caller that already joined that generation. No
+fresh owner may start while an old joiner can still observe that failure; the
+last joiner consumes it before the coordinator returns to `Idle`, and the next
+caller receives a fresh, non-reused generation. This generation-qualified
+failure handoff prevents ABA and joiner hangs, while a destructor may retry the
+ordinary close path. Once `Open -> Closing` linearizes, recoverable unwind is
+forbidden and the existing fail-stop cleanup boundary applies.
+
+Accepted synchronous calls finish result/status translation, accepted daemon
+jobs keep status/result/release ownership, and already admitted Runs retain
+only the ready, execution, completion, and graph-finalization paths needed to
+settle. Finalization waits for terminal publication, physical callback
+quiescence, commit/discard completion, exact root reservation and child-grant
+release, Graph lifetime lease release, and registry unregistration. A
+non-preemptible provider that never returns can therefore keep close blocked;
+the implementation does not fabricate recovery.
+
+After the Graph index and candidate count are empty, close performs the exact
+irreversible tail:
+
+1. remove the empty lifecycle-registry row;
+2. stop coordinator and compute-request admission, wake capacity-blocked
+   producers, retire parked tickets, drain accepted callbacks, and join the
+   request worker while graph-state finalization remains available;
+3. stop, drain, and join the graph-state lane;
+4. mark the runtime retired and release route ownership;
+5. retake the graph-registry mutex, verify that the name still denotes the
+   retained runtime, erase that map entry, and publish close-generation success
+   before releasing the mutex. Remaining shared runtime owners may then retire
+   without any dangling map-derived pointer.
+
+There is no post-marker reopen or worker reconstruction. A valid direct Host
+close succeeds; an absent Graph with no joinable generation returns
+`NotFound`. Graph close never stops process-owned workers, routes, policy
+bindings, or unrelated Graph Runs.
+
+Destroying an embedded Host without explicit close first stops external Host
+admission and invokes the same Graph close path for each live session. After
+all Graphs settle, the composition root invokes idempotent process execution
+shutdown exactly once. That shutdown changes the service to `Stopping` and all
+remaining rows to `Closing`, drains every installed Run, then stops ready and
+route admission, joins physical executors, retires policy invocations and
+current/displaced bindings, and publishes `ServiceStopped` only with all
+lifecycle/resource counters zero. Kernel first rejects a same-service worker or
+policy-callback caller without mutation; that recoverable preflight leaves the
+publication gate open, telemetry `Accepting`, and shutdown generation zero. A
+short graph-registry transaction then closes the monotonic late-publication
+gate and releases the mutex before the service transition and cancellation
+fanout. The lifecycle fence orders a
+load that already passed construction against `ServiceStopping`: it either
+publishes first and is drained, or loses the closed gate and never registers a
+lifecycle row. Graph listing and unrelated name lookup remain available while
+fanout blocks. Gate closure is the irreversible boundary: because publication
+cannot safely reopen, any unexpected observer or service-transition failure
+after it closes is fail-stop. Direct internal Kernel owners
+have the same duty to stop concurrent callers before destruction. The joined
+boundaries are also the lifetime fence for each live or staged `GraphModel`
+diagnostic store; the store owns no thread or detached lifetime.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
 lease, socket, and shutdown rules are defined in
-`../codebase-structure/IPC-Protocol-v1.md`; they are not graph-kernel ownership.
+`../codebase-structure/IPC-Protocol-v2.md`; they are not graph-kernel ownership.
 
 ## Current Error Surface
 
 | Operation | Current public behavior |
 | --- | --- |
 | initial load, duplicate session | `GraphErrc::InvalidParameter`; existing session remains unchanged |
-| scheduler defaults or direct planning, worker request above eight | `GraphErrc::InvalidParameter`; no scheduler is constructed and future defaults remain unchanged |
-| initial load, combined HP+RT process capacity unavailable | no session or scheduler publication; exact `GraphErrc::ComputeError` |
+| execution defaults, unknown route or worker request above eight/conflicting with the fixed pool | `GraphErrc::InvalidParameter`; future defaults remain unchanged |
 | initial load, empty path | loads session-local `content.yaml` when present; otherwise intentionally publishes an empty session |
 | initial load, explicit missing/unreadable/uncopyable source or session-path failure | `GraphErrc::Io`; no session publication or fallback; already-created filesystem scratch side effects are not rolled back |
 | initial load, YAML syntax/representation, non-sequence root, duplicate id, parameter representation/overflow, or node-schema failure | `GraphErrc::InvalidYaml`; no session publication |
@@ -301,8 +409,10 @@ lease, socket, and shutdown rules are defined in
 | node replacement, existing target with malformed input, missing dependency, or cycle | `GraphErrc::InvalidYaml`; previous graph state remains visible |
 | forward/backward ROI projection, missing/closing session or missing endpoint | `GraphErrc::NotFound` |
 | forward/backward ROI projection, existing endpoints with no valid projection | `GraphErrc::InvalidParameter` |
-| scheduler replacement, unknown type or invalid request | `GraphErrc::InvalidParameter`; old scheduler remains published |
-| scheduler replacement, transient process capacity unavailable | `GraphErrc::ComputeError`; no candidate is constructed and old compute behavior remains available |
+| execution inspection, missing/closing session or absent route | `GraphErrc::NotFound` |
+| execution inspection, existing session with invalid intent | `GraphErrc::InvalidParameter` |
+| execution replacement, unknown route, invalid intent, generation exhaustion, or handled lane failure | `GraphErrc::InvalidParameter`; old route binding remains published |
+| execution replacement, missing or closing session | `GraphErrc::NotFound` |
 | clear or close, missing session | `GraphErrc::NotFound` |
 
 `OperationStatus` exposes an error domain, signed code, stable name, and
@@ -323,8 +433,21 @@ taxonomy.
   separate testable stages without changing the public path contract.
 - The graph-owner transaction and destination-file side effects are separate:
   save preserves graph state but does not promise atomic destination replace.
-- `GraphStateExecutor` serializes visible graph ownership, while scheduler
-  reservations remain attached to concrete scheduler lifetime and rollback.
+- `GraphStateExecutor` serializes visible graph capture, mutation, exact commit
+  validation, and publication. The private compute-request lane serializes
+  same-Graph compute and execution-route access while long-running operation
+  execution uses request-owned snapshots outside graph-state.
+- The graph registry lock serializes only runtime-root lookup/publication,
+  nonwaiting close-generation selection, final erase/success publication, and
+  shutdown publication rejection. Failed-generation retry waiting and process
+  lifecycle transition/cancellation fanout run after releasing it. Its nested
+  order is graph registry before nonwaiting close-coordinator access or
+  lifecycle registration; no lifecycle/lane wait holds it and no inverse
+  nested acquisition is permitted. Repository-only focused tests may
+  recompile this seam with a lifecycle observer; the installed production
+  archive contains neither that observer state nor its branches.
+- Graph route bindings are copied, resource-neutral values; physical execution
+  and policy contexts remain Host/process owned.
 
 These boundaries make publication, mutation, and resource ownership testable
 without using shared diagnostic state as a transaction log.
@@ -340,6 +463,19 @@ YAML-neutral. Issue #63 completes the dependency-disabled product profile:
 empty and in-memory sessions remain available without yaml-cpp discovery,
 while an explicit graph-document or cache-metadata representation operation
 uses an unavailable adapter and returns `GraphErrc::Io`.
+
+The accepted
+[ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)
+now governs the implemented strong Graph identity/revision, staged compute,
+exact revision/generation commit predicate, cooperative Run cancellation,
+latest-wins supersession, request-owned realtime `RunGroup`, and separate
+compute-request/graph-state lanes. The `ExecutionService`-owned
+`RunLifecycleRegistry`, atomic Run-admission/Graph-close fence,
+lifecycle-driven close/shutdown cancellation, exact settlement, and
+source-private telemetry from issue #76 are current behavior. Issue #75's
+pure-C policy ABI, Host-authored frontier, reserved-start admission, and
+private execution-route replacement remain current. Public cancellation and
+lifecycle telemetry are intentionally not exposed through Host, CLI, or IPC.
 
 ## Implementation and Validation Entry Points
 
@@ -363,9 +499,17 @@ uses an unavailable adapter and returns `GraphErrc::Io`.
 - `src/lib/core/parameter_value_text.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_io_service.cpp`
+- `src/lib/graph/graph_revision.hpp`
 - `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`
+- `src/lib/compute/compute_commit_policy.hpp`
+- `src/lib/compute/compute_service.*`
+- `src/lib/compute/run_lifecycle_registry.*`
+- `src/lib/compute/execution_lifecycle_telemetry.*`
+- `src/lib/compute/realtime_proxy_graph.*`
+- `src/lib/runtime/graph_runtime.*`
 - `src/lib/host/embedded_host.cpp`
+- `src/lib/runtime/kernel_compute.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
@@ -373,4 +517,7 @@ uses an unavailable adapter and returns `GraphErrc::Io`.
 - `tests/unit/test_graph_document_adapter.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
+- `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/unit/test_compute_run.cpp`
