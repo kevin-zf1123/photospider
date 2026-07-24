@@ -8,14 +8,19 @@ adapters are current behavior.
 
 ## Ownership
 
-`Kernel` owns a map from graph names to `GraphRuntime` instances. Each runtime
-owns one `GraphModel`, one graph-state executor, one private compute-request
-executor, one latest-wins request coordinator, copied HP/RT execution-route
-bindings, event/execution-trace state, and platform runtime resources.
+`Kernel` owns a mutex-protected map from graph names to shared `GraphRuntime`
+lifetime roots. Each runtime owns one `GraphModel`, one graph-state executor,
+one private compute-request executor, one latest-wins request coordinator,
+copied HP/RT execution-route bindings, event/execution-trace state, and
+platform runtime resources. Map lookup copies one shared runtime owner inside a
+short critical section; graph-state, compute, IO, inspection, and lane work run
+after releasing the map lock. A concurrent close may therefore remove the name
+without destroying a runtime already retained by an admitted internal call.
 
 ```text
 Kernel
-  graph name -> GraphRuntime
+  graph-registry mutex
+    -> graph name -> shared GraphRuntime root
                   -> GraphStateExecutor
                   -> compute-request lane
                   -> ComputeRequestCoordinator
@@ -73,7 +78,9 @@ Graph document loading is a prepare-then-publish transaction:
    validates dependencies and cycles, builds replacement adjacency, installs
    nodes and topology together, resets graph runtime metadata, and advances
    topology generation plus authoritative `GraphRevision`.
-5. `Kernel` inserts the runtime into its map only after the load completes.
+5. `Kernel` takes the graph-registry mutex, rechecks shutdown and duplicate-name
+   state, registers the lifetime anchor, and inserts the preallocated map node
+   as one final publication transaction.
 
 A path, parser, definition conversion, topology, unexpected, or resource failure
 therefore publishes neither a partial graph nor a new session.
@@ -283,6 +290,14 @@ to publish. A lifecycle candidate retains an anchor lease from its first
 admission check through atomic standalone/realtime-bundle installation or
 rollback, so close cannot miss planning that began before its marker.
 
+Direct Kernel close resolves the name, retains the exact shared runtime root,
+and selects owner or joiner while holding the graph-registry mutex. Lookup and
+generation selection are therefore one transaction: a caller cannot observe
+the old name and accidentally join a replacement runtime, and the owner keeps
+the retired runtime alive after map removal. Every later runtime operation
+uses the same short lookup-and-retain rule; no graph-registry lock is held
+while lifecycle settlement or either Graph-owned lane runs.
+
 Embedded Host close first selects or joins that one close generation and marks
 the public session closing. New compute, execution, reload, required save,
 node-YAML replacement, ROI projection, timing inspection, and all-cache
@@ -320,8 +335,11 @@ irreversible tail:
    producers, retire parked tickets, drain accepted callbacks, and join the
    request worker while graph-state finalization remains available;
 3. stop, drain, and join the graph-state lane;
-4. mark the runtime retired, remove route ids/map ownership, and destroy Graph
-   state.
+4. mark the runtime retired and release route ownership;
+5. retake the graph-registry mutex, verify that the name still denotes the
+   retained runtime, erase that map entry, and publish close-generation success
+   before releasing the mutex. Remaining shared runtime owners may then retire
+   without any dangling map-derived pointer.
 
 There is no post-marker reopen or worker reconstruction. A valid direct Host
 close succeeds; an absent Graph with no joinable generation returns
@@ -335,10 +353,14 @@ shutdown exactly once. That shutdown changes the service to `Stopping` and all
 remaining rows to `Closing`, drains every installed Run, then stops ready and
 route admission, joins physical executors, retires policy invocations and
 current/displaced bindings, and publishes `ServiceStopped` only with all
-lifecycle/resource counters zero. Direct internal Kernel owners have the same
-duty to stop concurrent callers before destruction. The joined boundaries are
-also the lifetime fence for each live or staged `GraphModel` diagnostic store;
-the store owns no thread or detached lifetime.
+lifecycle/resource counters zero. Kernel holds the graph-registry mutex across
+the initial service-shutdown transition and its monotonic
+late-publication-rejection flag, so load either publishes before shutdown and
+is drained, or observes rejection and never registers a lifecycle row. Direct
+internal Kernel owners have the same duty to stop concurrent callers before
+destruction. The joined boundaries are also the lifetime fence for each live
+or staged `GraphModel` diagnostic store; the store owns no thread or detached
+lifetime.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
@@ -399,6 +421,11 @@ taxonomy.
   validation, and publication. The private compute-request lane serializes
   same-Graph compute and execution-route access while long-running operation
   execution uses request-owned snapshots outside graph-state.
+- The graph registry lock serializes only runtime-root lookup/publication,
+  close-generation selection, final erase/success publication, and shutdown
+  publication rejection. Its nested order is graph registry before close
+  coordinator or lifecycle registration; no lifecycle/lane wait holds it and
+  no inverse nested acquisition is permitted.
 - Graph route bindings are copied, resource-neutral values; physical execution
   and policy contexts remain Host/process owned.
 

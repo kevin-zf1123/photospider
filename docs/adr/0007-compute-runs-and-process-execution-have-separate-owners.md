@@ -548,6 +548,13 @@ joiner consumes it. The next caller then owns a fresh, non-reused generation,
 so no joiner hangs and no retry can observe an ABA-completed generation.
 Destruction retries this ordinary pre-linearization failure.
 
+Kernel's graph-name registry is a separate ownership index, not the admitted-Run
+registry. A short graph-registry critical section retains the exact shared
+`GraphRuntime` root and selects its close-generation owner/joiner together.
+Lifecycle settlement and lane drainage then run without that lock. The only
+nested order is graph registry before close coordinator or lifecycle
+registration; no inverse nested acquisition is allowed.
+
 1. under the lifecycle-registry fence changes the graph row to `Closing`, stops
    new/pending Run admission and ordinary external graph-state admission for
    that Graph, and preserves lifecycle admission only for already-admitted Run
@@ -564,8 +571,11 @@ Destruction retries this ordinary pre-linearization failure.
 6. removes the empty registry row, stops and drains the private per-Graph
    compute-request lane while graph-state finalization remains available, then
    stops and drains the graph-state lane and destroys graph state without
-   stopping any process-owned execution route; and
-7. leaves `ExecutionService` and unrelated Graph Runs running.
+   stopping any process-owned execution route;
+7. under the graph-registry lock verifies the same retained runtime, erases its
+   name, and publishes close-generation success before any later lookup can
+   observe absence; and
+8. leaves `ExecutionService` and unrelated Graph Runs running.
 
 After `Open -> Closing` linearizes, cancellation cannot escape as a recoverable
 error: cleanup callback failures are contained after complete fan-out, while a
@@ -581,7 +591,12 @@ process-owned routes, and there is no post-marker reopen.
 
 Current process execution-domain shutdown (#76):
 
-1. under the same registry fence changes the service to `Stopping`, changes
+Kernel holds the graph-registry lock while beginning the service shutdown and
+publishing monotonic rejection of late GraphRuntime registration. A concurrent
+load therefore either publishes first and is included in drainage, or never
+registers a lifecycle row.
+
+1. under the same lifecycle-registry fence changes the service to `Stopping`, changes
    every graph row to `Closing`, and stops global admission of new Runs and
    ordinary external graph-state work;
 2. waits for all pending candidates to register-before-shutdown or roll back,

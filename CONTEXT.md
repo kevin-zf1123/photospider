@@ -65,12 +65,16 @@ Providers enter only after atomic bundle installation and reserved start, and
 output-dependent dirty planning stays inside the installed Run. Before graph
 close linearizes, an owner failure is handed to every already joined caller by
 one non-reused close generation; a fresh retry cannot begin until those
-joiners consume it. Worker settlement retires its local queue, callable, lease,
-and grant owners before publishing quiescence; persistent finalization
-authority and irreversible close/shutdown cancellation fail stop rather than
-silently lose cleanup obligations. The general `Value` model, heterogeneous
-executors, server control plane, and isolated plugin workers remain later
-target work.
+joiners consume it. Kernel's mutex-protected graph-name registry retains shared
+runtime roots: lookup and close-generation selection are atomic, long
+lifecycle/lane work runs outside the registry lock, and final name removal plus
+success publication are one transaction. Shutdown atomically rejects late
+runtime publication, so a racing load is either published and drained or never
+registered. Worker settlement retires its local queue, callable, lease, and
+grant owners before publishing quiescence; persistent finalization authority
+and irreversible close/shutdown cancellation fail stop rather than silently
+lose cleanup obligations. The general `Value` model, heterogeneous executors,
+server control plane, and isolated plugin workers remain later target work.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains

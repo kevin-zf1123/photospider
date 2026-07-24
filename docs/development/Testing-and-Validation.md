@@ -65,18 +65,20 @@ All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
 `BUILD_TESTING` controls availability of internal test products, not how the
-installed `photospider` archive compiles the Issue #72/#75 observation seams. The
-product source inventory is divided into common objects, compiled once, and
-production objects for `execution_service.cpp`, `graph_cache_service.cpp`,
-`graph_state_executor.cpp`, and `kernel_compute.cpp`. The real archive always
-uses the production form of those four translation units, with no
+installed `photospider` archive compiles the Issue #72/#75/#76 observation
+seams. The product source inventory is divided into common objects, compiled
+once, and production objects for `execution_service.cpp`,
+`graph_cache_service.cpp`, `graph_state_executor.cpp`, `kernel.cpp`, and
+`kernel_compute.cpp`. The real archive always uses the production form of those
+five translation units, with no
 `PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, or
-`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` declarations, globals, branches,
-or symbols. Focused tests link a non-installed
+`PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING` or
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` close/compute declarations,
+globals, branches, or symbols. Focused tests link a non-installed
 `photospider_internal_test_product` that reuses the same common objects and
-recompiles only those four translation units with the deterministic seams.
+recompiles only those five translation units with the deterministic seams.
 No target links both complete archives, and the test product is absent from
 install and export sets. The Issue #75 probe declarations are source-tree-
 private free functions, so the macro does not change the production
@@ -89,7 +91,7 @@ real product is installed, Darwin first invokes and validates
 non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
 that order. Canonically identical executable paths run once. A candidate is
 usable only when it starts, exits successfully, emits symbols, and exposes
-defined anchors from all four production seam objects. Otherwise the smoke
+defined anchors from all five production seam objects. Otherwise the smoke
 records a path-free failure reason and tries the next candidate; no candidate
 or all unusable candidates fail closed. The first usable full symbol table is
 authoritative and rejects every hook function/helper/global fragment. The
@@ -725,7 +727,12 @@ The existing product-boundary targets carry integration ownership:
 - `test_compute_run`, `test_compute_service_split`, and
   `test_kernel_contracts` cover full, dirty, preflight, no-op, realtime child,
   admission-race, visible-commit, exact finalization, and unrelated-Graph
-  behavior.
+  behavior. `test_kernel_contracts` also fixes the exact close owner/joiner
+  generation, throwing-observer claim consumption, and atomic final
+  name-removal/success-publication boundaries.
+- `test_kernel_lifecycle_concurrency` links the real production archive, with
+  the close observer macro rejected at compile time, and repeatedly races
+  same-name publication, listing, direct close, and shutdown admission.
 - `test_resource_ledger` and `test_policy_execution` cover exact root/child
   release, ready/callback/policy/binding counters, route drainage, same-service
   worker/policy-callback shutdown rejection, cross-service shutdown, repeated
@@ -744,7 +751,8 @@ Run the focused lifecycle boundary with:
 ```bash
 cmake --build build --target test_run_lifecycle_registry \
   test_execution_lifecycle_telemetry test_compute_run \
-  test_compute_service_split test_kernel_contracts test_resource_ledger \
+  test_compute_service_split test_kernel_contracts \
+  test_kernel_lifecycle_concurrency test_resource_ledger \
   test_policy_execution test_host_adapter test_compute_request_registry \
   test_ipc_protocol test_ipc_host test_ipc_daemon -j
 ./build/tests/test_run_lifecycle_registry
@@ -752,6 +760,7 @@ cmake --build build --target test_run_lifecycle_registry \
 ./build/tests/test_compute_run
 ./build/tests/test_compute_service_split
 ./build/tests/test_kernel_contracts
+./build/tests/test_kernel_lifecycle_concurrency
 ./build/tests/test_resource_ledger
 ./build/tests/test_policy_execution
 ./build/tests/test_host_adapter
