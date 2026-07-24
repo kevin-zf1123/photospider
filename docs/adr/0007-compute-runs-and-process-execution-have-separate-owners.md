@@ -345,11 +345,17 @@ Run admission and graph close use the following two-stage protocol:
 
 Connected-parameter preflight divides its work across that point. Before
 installation it freezes the topology closure, operation/device/callable, DSO
-lease, and complete service roots without entering provider code. After
-installation, each prepared phase performs reserved start before provider
-entry, and provider output drives the output-dependent dirty plans inside the
-installed Run. These later failures therefore use terminal finalization rather
-than candidate rollback.
+lease, and complete service roots without entering provider code. One umbrella
+root charges shared Run control, the prepared result, and anticipated missing
+staging entries exactly once across the connected closure, together with its
+own private carrier and ledger reservation-state envelope; each node root
+charges only its unique callback, ready-store, and service-envelope ownership.
+The umbrella is prepared after all node roots and final cancellation-slot
+capacity are known. After installation, each prepared phase performs reserved
+start before provider entry, and provider output drives the output-dependent
+dirty plans inside the installed Run. Preparation rollback, installation
+failure, and provider failure release every root exactly once; these later
+failures use terminal finalization rather than candidate rollback.
 
 Graph close changes the graph row from `Open` to `Closing` under the same fence.
 If registration linearizes first, close finds the Run in its graph index. If
@@ -534,6 +540,14 @@ process-shutdown denial sources now fan through both children.
 
 Current Graph close (#76):
 
+Before the lifecycle transition, close-owner selection is
+generation-qualified. If the selected owner fails before `Open -> Closing`,
+the coordinator publishes the exact exception to all callers that already
+joined that generation and does not admit a fresh owner until the last old
+joiner consumes it. The next caller then owns a fresh, non-reused generation,
+so no joiner hangs and no retry can observe an ABA-completed generation.
+Destruction retries this ordinary pre-linearization failure.
+
 1. under the lifecycle-registry fence changes the graph row to `Closing`, stops
    new/pending Run admission and ordinary external graph-state admission for
    that Graph, and preserves lifecycle admission only for already-admitted Run
@@ -579,7 +593,9 @@ Current process execution-domain shutdown (#76):
    exactly once;
 5. stops remaining ready/execution admission after registry emptiness and Run
    quiescence;
-6. joins all physical executors; and
+6. transfers every physical executor thread into an armed local join guard,
+   which joins and accounts for all remaining workers even if later shutdown
+   bookkeeping unwinds; and
 7. destroys `ExecutionService`.
 
 Worker and operation exceptions are fenced at the execution boundary and routed

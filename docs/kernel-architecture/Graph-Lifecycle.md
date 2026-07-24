@@ -291,7 +291,17 @@ changes the exact Graph row `Open -> Closing`, rejects pending candidates,
 denies visible commit, and requests `GraphClose` cancellation for every
 installed Run. It releases the fence before waiting; a candidate either
 installed before the marker or rolls back, and no late Run can enter the row.
-Every live concurrent close caller joins the same successful generation.
+Every live concurrent close caller joins the same generation result.
+
+Owner selection alone is not the lifecycle linearization point. If that owner
+fails before `Open -> Closing`, the coordinator publishes the exact
+`std::exception_ptr` to every caller that already joined that generation. No
+fresh owner may start while an old joiner can still observe that failure; the
+last joiner consumes it before the coordinator returns to `Idle`, and the next
+caller receives a fresh, non-reused generation. This generation-qualified
+failure handoff prevents ABA and joiner hangs, while a destructor may retry the
+ordinary close path. Once `Open -> Closing` linearizes, recoverable unwind is
+forbidden and the existing fail-stop cleanup boundary applies.
 
 Accepted synchronous calls finish result/status translation, accepted daemon
 jobs keep status/result/release ownership, and already admitted Runs retain

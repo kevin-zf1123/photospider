@@ -228,7 +228,15 @@ timing inspection 与 all-cache clearing admission 都会失败。在 `RunLifecy
 owner 会把精确 Graph row 从 `Open` 改为 `Closing`、拒绝 pending candidate、拒绝 visible commit，
 并对每个已安装 Run 请求 `GraphClose` cancellation。等待前会释放 fence；candidate 要么在 marker
 前完成安装，要么回滚，任何迟到 Run 都不能进入该 row。所有 live 并发 close caller 会加入同一个
-成功 generation。
+generation result。
+
+仅选择 owner 并不是 lifecycle 线性化点。如果该 owner 在 `Open -> Closing` 之前失败，
+coordinator 会把精确的 `std::exception_ptr` 发布给所有已经加入该 generation 的 caller。
+只要旧 joiner 仍可能观察该 failure，就不允许 fresh owner 启动；最后一个 joiner 消费 failure
+后 coordinator 才返回 `Idle`，下一个 caller 会获得新的、不复用的 generation。这个按
+generation 限定的 failure handoff 会防止 ABA 与 joiner hang，同时允许析构函数重试普通 close
+路径。`Open -> Closing` 一旦线性化，就禁止 recoverable unwind，并沿用既有的 fail-stop cleanup
+边界。
 
 已接受的同步调用会完成 result/status translation；已接受的 daemon job 继续拥有
 status/result/release；已 admission Run 只保留 settle 所需的 ready、execution、completion 与

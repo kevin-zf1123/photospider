@@ -113,7 +113,7 @@ reserved-start transaction.
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, and callback owner for one full HP request | Execution-route workers, Run terminal state, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, lifecycle admission registry, or visible commit |
+| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one private lifecycle-admission registry, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, or visible commit |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
@@ -150,6 +150,18 @@ metadata. HP downstream demand reads the current Run-owned write buffer through
 the live `ComputeRunLease`, then its phase-local estimator adds only still
 missing entries, so source-created entries remain charged without being
 counted twice.
+
+Connected-preflight preparation separates shared and per-node ownership. One
+umbrella reservation charges the shared Run control, prepared result, and
+anticipated missing staging entries exactly once across the whole connected
+closure, plus its own private carrier and ledger reservation-state envelope.
+Each node reservation charges only that node's unique callback, ready-entry,
+ready-byte, and service-envelope ownership. The umbrella is prepared only
+after every node root and the final cancellation-slot capacity are known. An
+exact combined limit therefore admits the closure, while a one-byte
+retained-memory shortfall rejects it before provider entry; rollback,
+installation failure, or provider failure releases every node root and the
+umbrella exactly once.
 
 Dirty HP and RT demand also charges the complete request-owned
 `DirtyNodeSynchronization`: the shared allocation, unordered-map buckets,
@@ -492,6 +504,9 @@ surfaces expose no cancellation entry; IPC jobs continue to report
   DSO lease, and every complete service root without provider entry. Providers
   enter only after the complete lifecycle bundle installs and reserved start
   commits; their output then drives dirty planning inside the installed Run.
+  One umbrella root charges shared Run/result/anticipated-staging ownership
+  once, while node roots contain only unique callback and service-envelope
+  demand.
 - A worker destroys its local queue/submission/callable/lease owners outside
   locks while `in_flight` still blocks settlement, then decrements
   `in_flight` and notifies quiescence. Bundle finalization retains one

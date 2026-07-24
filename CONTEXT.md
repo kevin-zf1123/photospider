@@ -58,14 +58,19 @@ start current. Issue #76 makes the process-owned
 `ExecutionService::RunLifecycleRegistry`, graph-close/process-shutdown fence,
 exact lifecycle/resource settlement, and bounded lifecycle telemetry current.
 Connected-parameter preflight now freezes provider/device/callable and complete
-service reservations before admission, enters providers only after atomic
-bundle installation and reserved start, and performs output-dependent dirty
-planning inside the installed Run. Worker settlement retires its local queue,
-callable, lease, and grant owners before publishing quiescence; persistent
-finalization authority and irreversible close/shutdown cancellation fail stop
-rather than silently lose cleanup obligations. The general `Value` model,
-heterogeneous executors, server control plane, and isolated plugin workers
-remain later target work.
+service reservations before admission. One umbrella reservation charges shared
+Run/result/anticipated-staging ownership once across the connected closure,
+while node roots charge only unique callback and service-envelope demand.
+Providers enter only after atomic bundle installation and reserved start, and
+output-dependent dirty planning stays inside the installed Run. Before graph
+close linearizes, an owner failure is handed to every already joined caller by
+one non-reused close generation; a fresh retry cannot begin until those
+joiners consume it. Worker settlement retires its local queue, callable, lease,
+and grant owners before publishing quiescence; persistent finalization
+authority and irreversible close/shutdown cancellation fail stop rather than
+silently lose cleanup obligations. The general `Value` model, heterogeneous
+executors, server control plane, and isolated plugin workers remain later
+target work.
 The detailed Run/process-execution ownership decision is
 `docs/adr/0007-compute-runs-and-process-execution-have-separate-owners.md`;
 the combined accepted direction remains
