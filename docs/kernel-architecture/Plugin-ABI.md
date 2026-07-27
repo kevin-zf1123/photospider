@@ -102,8 +102,11 @@ registry symbols. An ordinary plugin requests the `operation_sdk` package
 component and links only `Photospider::operation_sdk`. That interface target
 carries the installed headers and transitively links
 `Photospider::operation_runtime`, whose static archive implements public
-image-buffer factories without linking back to the SDK or requiring an
-external package.
+image-buffer factories plus the immutable CPU DenseTensor Value and checked
+view symbols, without linking back to the SDK or requiring an external
+package. Those data/memory headers are available for dependency-neutral
+plugin-internal work, but operation v2 callback records still receive and
+return the current ImageBuffer/OperationOutput values.
 
 OpenCV is an explicit opt-in. A plugin that uses
 `photospider/plugin/opencv_adapter.hpp` additionally requests and links
@@ -129,8 +132,9 @@ This split supports the static-host direction:
   `PluginManager`, shared by every embedded Host.
 - Dynamic operation plugins receive registration callbacks from the host, so
   registry mutation stays in that process-owned instance.
-- `Photospider::operation_runtime` contains value-factory implementation only;
-  it contains no registry, loader, Graph, policy, execution, or compute state.
+- `Photospider::operation_runtime` contains ImageBuffer and immutable CPU
+  DenseTensor value/view implementation only; it contains no registry, loader,
+  Graph, policy, execution, or compute state.
 - Plugin callback objects and plugin-instantiated return-value internals may
   still point into plugin code, so the process owner and copied value leases
   retain libraries until all such state has been destroyed.
@@ -533,7 +537,7 @@ profiles:
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
-### Accepted future relationship (not current behavior)
+### Implemented V-2 SDK subset and future provider ABI
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts a separately versioned pure-C provider ABI v3 for Schema, Facet,
@@ -543,7 +547,11 @@ exceptions, RTTI, virtual classes, allocator ownership, or `Value` PImpl
 across the DSO boundary. Immutable process-owned provider generations will use
 leases and `Active -> Retiring -> Unloaded` replacement.
 
-That target does not alter the two current boundaries in the table. Operation
+V-2 implements the dependency-neutral C++ CPU DenseTensor `Value`,
+`StridedLayout`, `DenseTensorView`, and `ImageView` subset in
+`operation_runtime`, and one built-in operation uses it behind a private
+ImageBuffer copy bridge. It does not place Value or its PImpl in a v2 callback
+record and does not change the two current boundaries in the table. Operation
 ABI v2 remains the current operation contract until every repository-owned
 operation and installed consumer has migrated. The completion boundary then
 deletes v2, its entry point, SDK, fixtures, and package surface without a

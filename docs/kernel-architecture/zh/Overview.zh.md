@@ -42,8 +42,8 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction、event、固定 worker service、reserved-start 与私有 route 实现；它单向依赖 policy 和 execution internal。 |
 | `photospider_host_internal` | 仅用于构建的 Kernel/Interaction facade 与 embedded Host composition root。它根据 producer capability 选择真实 YAML persistence adapter 或显式 unavailable adapter。 |
 | `photospider_kernel` | 可构建的聚合 target，编译实际选中的 core、graph、operation-plugin、policy、execution、compute、Host 以及可选 provider/adapter 模块；它不是安装 artifact，也不是占位 library。 |
-| `photospider_operation_runtime` | 可安装的 public image-buffer factory 静态实现；不依赖 OpenCV、yaml-cpp、Threads、graph、registry 或 embedded product。 |
-| `photospider_operation_sdk` | operation v2 header 的可安装 interface target；传递链接 `operation_runtime`。 |
+| `photospider_operation_runtime` | 可安装的 public image-buffer factory 与 immutable CPU DenseTensor Value/ImageView 子集静态实现；不依赖 OpenCV、yaml-cpp、Threads、graph、registry 或 embedded product。 |
+| `photospider_operation_sdk` | operation v2 与 dependency-neutral data/memory header 的可安装 interface target；传递链接 `operation_runtime`。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter，只使用 OpenCV `core` component；仅在 `PHOTOSPIDER_ENABLE_OPENCV=ON` 时存在。 |
 | `photospider_policy_sdk` | 携带自包含纯 C policy ABI header 与 C11/C++17 requirement 的可安装、无依赖 interface target。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由已启用的 CLI 和 embedded Host 前端链接。它导出 `Photospider::photospider`，在 OpenCV 与 YAML 均禁用时仍可构建；operation plugin 通过 `ps::plugin::OperationPluginRegistrar` 和 `register_photospider_ops_v2` 注册，而不是为了 registry 状态链接该产品。 |
@@ -413,6 +413,15 @@ snapshot 注册；public callback 不会获得可变 `Node`、`GraphModel`、`Op
 `ImageBuffer` 是公共内核契约，不是内部实现细节。算子、执行器、插件、适配器和缓存代码可以依赖其文档化字段和不变量。
 
 内核拥有的 CPU 缓冲区必须提供 64 字节对齐的行起点。`step` 是字节单位的行步长，可以大于紧凑行大小以保持对齐。ARM Mac 高性能路径可能需要或受益于 128 字节对齐，但 128 字节对齐是优化目标，而不是可移植最低要求。
+
+V-2 还安装 immutable CPU DenseTensor `Value`、`DenseTensorView` 与 explicit-axis
+`ImageView` contract。内建 `image_process:invert_dense` operation 会经过正常 core
+seeding、`OpRegistry` resolution 与 `NodeExecutor` monolithic invocation 抵达这些 type。
+其 private callback bridge 会把当前 ImageBuffer input 深拷贝为 Value，把
+descriptor-only inference 与 stride-aware execution 分开，校验返回的完整
+descriptor/facet/layout，再把 active result byte 复制回新的 validated ImageBuffer。
+Graph/cache/Host state 与 operation plugin ABI v2 会继续停留在当前 ImageBuffer 边界，直到其
+后续 migration slice。
 
 ### 脏区传播
 

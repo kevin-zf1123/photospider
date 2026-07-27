@@ -148,10 +148,13 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     core/image_buffer.hpp
     core/inspection_types.hpp
     core/result_types.hpp
+    data/image_view.hpp
+    data/value.hpp
     host/compute_request.hpp
     host/event_stream.hpp
     host/graph_session.hpp
     host/host.hpp
+    memory/strided_layout.hpp
     plugin/node_view.hpp
     plugin/op_contract.hpp
     plugin/plugin_api.hpp
@@ -169,7 +172,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 17)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 20)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -234,7 +237,8 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
 # Public image-buffer factory implementation. This target deliberately has no
 # OpenCV, yaml-cpp, Threads, graph, registry, or embedded product dependency.
 add_library(photospider_operation_runtime STATIC
-    src/lib/core/image_buffer.cpp)
+    src/lib/core/image_buffer.cpp
+    src/lib/core/value.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
 set_target_properties(photospider_operation_runtime PROPERTIES
@@ -432,6 +436,7 @@ endif()
 # Module: private graph model, registry behavior, dependency-neutral cache
 # coordination, and format-neutral graph services.
 set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
+    src/lib/core/cpu_dense_image_operation.cpp
     src/lib/core/ops.cpp
     src/lib/graph/in_memory_graph_document_adapter.cpp
     src/lib/graph/graph_model.cpp
@@ -1361,6 +1366,12 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         target_compile_definitions(test_kernel_contracts PRIVATE
             PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     endif()
+
+    add_ps_test(test_cpu_dense_tensor_image_operation
+        tests/integration/test_cpu_dense_tensor_image_operation.cpp)
+    gtest_discover_tests(test_cpu_dense_tensor_image_operation
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
 
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)

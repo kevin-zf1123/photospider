@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/cpu_dense_image_operation.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -218,6 +219,23 @@ NodeOutput op_divide(const Node& node,
   return output;
 }
 
+/**
+ * @brief Runs the built-in Value-backed dense unsigned-8 image inversion.
+ *
+ * @param node Immutable operation node.
+ * @param inputs Exactly one current-boundary CPU image input.
+ * @return Validated current-boundary image whose active bytes are inverted.
+ * @throws GraphError for input, inference, execution, or output failures.
+ * @throws std::bad_alloc unchanged for resource exhaustion.
+ * @note The static operation definition is immutable and reentrant; the runner
+ *       performs all current ImageBuffer edge adaptation.
+ */
+NodeOutput op_invert_dense(const Node& node,
+                           const std::vector<const NodeOutput*>& inputs) {
+  static const CpuDenseImageOperation operation = make_dense_invert_operation();
+  return execute_cpu_dense_image_operation(node, inputs, operation);
+}
+
 }  // namespace
 
 /** @copydoc ps::ops::builtin_input_halo_radius */
@@ -251,13 +269,18 @@ void register_core_operations() {
                                      MonolithicOpFunc(op_get_dimensions));
   registry.register_op_hp_monolithic("math", "divide",
                                      MonolithicOpFunc(op_divide));
+  registry.register_op_hp_monolithic("image_process", "invert_dense",
+                                     MonolithicOpFunc(op_invert_dense));
 
   const DirtyRoiPropFunc dirty(identity_dirty_roi);
   const ForwardRoiPropFunc forward(identity_forward_roi);
   registry.register_dirty_propagator("analyzer", "get_dimensions", dirty);
   registry.register_dirty_propagator("math", "divide", dirty);
+  registry.register_dirty_propagator("image_process", "invert_dense", dirty);
   registry.register_forward_propagator("analyzer", "get_dimensions", forward);
   registry.register_forward_propagator("math", "divide", forward);
+  registry.register_forward_propagator("image_process", "invert_dense",
+                                       forward);
 }
 
 }  // namespace ps::ops

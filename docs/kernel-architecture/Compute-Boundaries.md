@@ -128,6 +128,17 @@ not form an installable API. The only installed extension contract in this
 area is the pure-C policy ABI declared by
 `include/photospider/policy/policy_plugin_api.h`.
 
+V-2 keeps `NodeExecutor` and the monolithic registry slot unchanged while one
+private core runner adds a stricter operation-local boundary. It snapshots
+current CPU ImageBuffer inputs into immutable Values, deep-copies the
+request-effective ParameterMap into a configuration that omits Node
+output/cache/topology state, invokes pure inference with only that configuration
+and logical DenseTensor/Image descriptors, invokes execute with the same
+configuration, checked ImageViews, and inferred descriptor, and validates the
+complete Value result before publishing a new NodeOutput. This is not general
+planner inference, resource metadata, cache identity, or a new plugin callback
+slot; those remain owned by later Project 4 slices.
+
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
 retained storage is charged once. Uniform per-task retained and scratch demand
@@ -265,6 +276,9 @@ pure-C policy ABI v1 and receives no execution resource.
   boundaries carry kernel-owned `PixelRect`/`PixelSize`, never OpenCV geometry.
 - Tiled input normalization occurs once per node invocation where possible,
   rather than once per tile callback.
+- The V-2 dense invert inference callback cannot inspect payload bytes, and its
+  execute result must match the inferred DenseTensor descriptor and Image
+  Facet before current-boundary publication.
 
 These rules make planning deterministic and keep policy/physical execution
 independent of graph semantics. Planning cost therefore follows full expansion before

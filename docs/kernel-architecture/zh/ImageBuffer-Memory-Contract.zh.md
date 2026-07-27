@@ -110,6 +110,31 @@ CPU scalar value、排除 padding，并记录 range/non-finite diagnostic。Acti
 时，继续保留此前正/负无穷的 empty-range sentinel。Opaque non-CPU resource 继续保留 provider
 提供的 diagnostic，因为只有对应 device adapter 可以映射它们。
 
+## V-2 Value-backed CPU Operation Bridge
+
+dependency-neutral operation runtime 现在也实现 installed `Value`、`DenseTensorView` 与
+`ImageView` 的 CPU 子集。已发布 Value 拥有精确的 immutable byte envelope；concrete shape 与
+element fact 和 optional explicit Image Facet、positive signed byte stride 保持分离。
+Checked view 保留完整 Value，且不暴露 writable pointer。
+
+内建 `image_process:invert_dense` operation 在生产路径证明这项 surface：
+
+1. 当前 monolithic callback 校验一个非空 CPU `ImageBuffer`；
+2. private adapter 分配精确 Value envelope，保留 `[height, width, channels]` 与 `step`，
+   复制 active row 而不共享 mutable ImageBuffer owner，并独立初始化 inter-row padding；
+3. pure inference 只接收 deep-owned effective parameter snapshot 与 logical
+   DenseTensor/Image descriptor，不接收 Node output/cache state；
+4. execute 接收 checked ImageView，遵循显式 x/y/channel stride，并返回独立拥有的 padded
+   unsigned-8 Value；
+5. runner 将完整 result descriptor 与 Image Facet 和 inference 比较，要求可由当前 adapter
+   处理的 interleaved layout，只把 active byte 复制到新的 ImageBuffer，并在发布前完成校验。
+
+Malformed caller input 映射为 `GraphErrc::InvalidParameter`；unsupported 或 mismatched
+operation result 映射为 `GraphErrc::ComputeError`；`std::bad_alloc` 原样传播。这项 bridge
+只在 source tree 内部使用。Graph/cache/Host、operation ABI v2 与其他 operation 继续使用
+ImageBuffer；#80 会在 BufferHandle ownership 与 cache allocation identity 明确后替换这条
+copy edge。
+
 ## GPU 缓冲区契约
 
 对于 GPU 缓冲区：
@@ -166,10 +191,10 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
-### 已接受的未来关系（不是当前行为）
+### 已实现的 V-2 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
-接受以下未来替换：
+接受以下完整替换：
 
 ```text
 ImageBuffer -> Value + ImageFacet + ImageView
@@ -179,9 +204,12 @@ PixelRect   -> RegionSet atom ImageRect
 ```
 
 目标把逻辑 `DataDescriptor` 与物理 `StorageBinding` 分离，并且只通过已检查的
-`BufferHandle` range 与 lease 访问内存。Issue #78 不实现任何这些目标类型。在后续实现切片
-同时更新 code、ABI、test 与本当前事实文档前，上文的 structure、stride、allocation、device
-与 view 契约仍是权威。
+`BufferHandle` range 与 lease 访问内存。V-2 只实现上述有界 operation bridge 使用的 CPU
+DenseTensor descriptor、ImageFacet、positive signed StridedLayout、immutable direct byte
+owner 与 checked ImageView。它不实现 BufferHandle/range/lease、allocation identity、cache
+ownership、quantization、Region、device identity、readiness、transfer 或 provider ABI v3。
+因此，在各自后续切片同步更新 code、ABI、test 与本当前事实文档前，当前 ImageBuffer 的
+structure、allocation、device、DSO 与外围 graph/cache 契约仍是权威。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。

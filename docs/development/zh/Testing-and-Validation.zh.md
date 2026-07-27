@@ -115,6 +115,8 @@ optional component 会保持 not-found，而不会使 package 无效。
 生成的源码会探测精确 policy ABI constant 与 layout。外部 embedded consumer 随后会加载该已安装
 policy DSO 与一个已安装 operation DSO，配置 policy/execution default，验证其 public snapshot，
 并通过两种 extension 完成 compute。任何生成的 consumer 都不会获得 source-tree include 目录。
+operation-SDK-only factory 还会通过 ImageView 构造并读取 installed immutable CPU DenseTensor
+Value，证明新 header 与 implementation symbol 在不发现 OpenCV、yaml-cpp 或 Threads 时仍完整。
 
 长期 `IpcDisabledInstallSmoke` 会用
 `PHOTOSPIDER_BUILD_IPC=OFF` 与 `BUILD_TESTING=OFF` 配置另一个 clean producer；它验证不会
@@ -130,9 +132,9 @@ aggregate 与 `photospider` product。它会验证派生的 provider/plugin/CLI 
 显式组合的精确诊断。Clean install 后，它会拒绝 OpenCV header、target、export reference 与
 yaml-cpp link 泄漏；optional `operation_opencv` 保持 unavailable，required component 则失败。
 外部 consumer 会在两个 discovery 均禁用时配置，链接并运行
-`Photospider::photospider`，分配中立 image，加载并关闭 empty Host session，并观察显式 YAML
-operation 返回 `GraphErrc::Io`。CI 只有在校验 producer cache identity、configuration 与完整
-capability profile 后才可复用该 producer。
+`Photospider::photospider`，分配中立 image，构造并读取同一 Value/ImageView surface，加载并
+关闭 empty Host session，并观察显式 YAML operation 返回 `GraphErrc::Io`。CI 只有在校验
+producer cache identity、configuration 与完整 capability profile 后才可复用该 producer。
 
 当所选 CMake generator 提供多个 configuration 时，smoke 会为 producer 与 consumer 使用同一个
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从
@@ -653,6 +655,30 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
+## CPU DenseTensor 与 ImageView Operation 验证
+
+`test_cpu_dense_tensor_image_operation` 是已实现 V-2 边界的 provider-independent integration
+binary。它的五个长期用例验证 malformed facet/stride/exact-envelope rejection、immutable
+Value copy sharing 与 ImageView-retained lifetime、pure exact invert inference、经过
+`register_core_operations -> OpRegistry::resolve_for_intent ->
+NodeExecutor::execute` 的 padded multi-channel execution，以及 execute 返回 descriptor 与
+inference 不一致的合法 Value 时以 `GraphErrc::ComputeError` 拒绝。Active output byte 必须
+等于 `255 - input`；input/output row padding 不被当作 image element。
+
+聚焦验证命令为：
+
+```bash
+cmake --build build --target test_cpu_dense_tensor_image_operation \
+  public_header_self_containment -j 2
+ctest --test-dir build --output-on-failure \
+  -R '^CpuDenseTensorImageOperation\.'
+```
+
+`DependencyDisabledInstallSmoke` 会在 OpenCV/YAML disabled 画像证明 public runtime 与
+installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only installed
+consumer。下述 provider-disabled nested build 也会编译并运行全部五个用例，因此真实 core
+operation 不依赖 optional OpenCV operation provider。
+
 ## 可选 OpenCV Operation Provider 验证
 
 `test_optional_opencv_operation_provider` 是针对两种 provider 配置构建并注册到 CTest 的
@@ -674,18 +700,21 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 `BUILD_TESTING=ON` 与 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`
 配置一个临时嵌套 build，同时保留 OpenCV、YAML、graph CLI 与 operation-plugin 的默认启用值。
 因此 provider-aware broad suite gate 为关闭。Driver 会校验精确 CMake cache 画像，构建上述
-provider-independent focused binary 与 stdlib-only fixture，并额外构建专用 disk-cache
-diagnostic concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须精确包含
-`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores` 与三个
-`DiskCacheDiagnosticConcurrency.*` case；每个 concurrency case 必须仅保留
-`kernel-concurrency` label 与 20 秒 timeout。不得残留任何依赖 provider 的 broad test。
-Driver 随后通过 CTest 运行 optional-provider case 与全部三个 concurrency case。禁用
-profile 要求依赖中立
-analyzer/math operation 仍被 seed、OpenCV-backed operation key 不存在，并要求 replacement
-provider 能发布、执行且完整退役其 resize key。该临时 build 是长期 product configuration
-检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前阶段禁用的是 operation provider，
-不是彼此独立的 OpenCV codec、normalization、adapter 或 embedded-product 依赖。
+provider-independent focused binary 与 stdlib-only fixture，并额外构建 CPU
+DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary 与
+kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须
+精确包含 12 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部五个
+`CpuDenseTensorImageOperation.*` case、三个 `DiskCacheDiagnosticConcurrency.*` case 与
+两个 `KernelLifecycleConcurrency.*` case。Disk-cache case 必须只保留
+`kernel-concurrency` label 与 20 秒 timeout；lifecycle case 保留同一 label 与 60 秒
+timeout；dense-image case 保留 30 秒 timeout。不得残留任何依赖 provider 的 broad test。
+Driver 随后通过 CTest 运行全部 focused case。禁用 profile 要求 dependency-neutral
+analyzer/math/dense-invert operation 仍被 seed、OpenCV-backed operation key 不存在，并要求
+replacement provider 能发布、执行且完整退役其 resize key。该临时 build 是长期 product
+configuration 检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前阶段禁用的是
+operation provider，不是彼此独立的 OpenCV codec、normalization、adapter 或
+embedded-product 依赖。
 
 OpenCV-provider 与注入式 codec 两个嵌套 build driver 都从
 `cmake_build_smoke_support.py` 导入同一份破坏性 work-tree helper。移除临时目录前，该 helper

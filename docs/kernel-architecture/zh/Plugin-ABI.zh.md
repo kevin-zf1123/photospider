@@ -79,8 +79,10 @@ representation 与显式 `1..9` 数值。
 操作插件不会为了访问 registry 符号而链接宽泛的静态 `photospider` 产品。仓库内 operation plugin 通过
 `OperationPluginRegistrar` 注册。普通插件请求 `operation_sdk` package component，并且只链接
 `Photospider::operation_sdk`。该 interface target 提供安装头，并传递链接
-`Photospider::operation_runtime`；后者的静态归档实现公共 image-buffer factory，不反向链接 SDK，
-也不要求外部 package。
+`Photospider::operation_runtime`；后者的静态归档实现公共 image-buffer factory、immutable
+CPU DenseTensor Value 与 checked view symbol，不反向链接 SDK，也不要求外部 package。这些
+data/memory header 可用于 dependency-neutral plugin-internal 工作，但 operation v2 callback
+record 仍接收并返回当前 ImageBuffer/OperationOutput value。
 
 OpenCV 是显式 opt-in。使用 `photospider/plugin/opencv_adapter.hpp` 的插件额外请求并链接
 `Photospider::operation_opencv`。该 target 拥有 adapter 实现，只发现 OpenCV `core`，不会带入
@@ -97,8 +99,8 @@ descriptor 及其完整 extent 执行明确的 backend-preserving passthrough；
 
 - 静态 Photospider 进程拥有一个 `OpRegistry` 和一个 operation `PluginManager`，由所有 embedded Host 共享。
 - 动态 operation plugin 从 host 接收注册 callback，因此 registry mutation 始终发生在该进程拥有的实例中。
-- `Photospider::operation_runtime` 只包含 value-factory 实现，不包含 registry、loader、Graph、policy、
-  execution 或 compute state。
+- `Photospider::operation_runtime` 只包含 ImageBuffer 与 immutable CPU DenseTensor
+  value/view 实现，不包含 registry、loader、Graph、policy、execution 或 compute state。
 - 插件 callback object 和插件实例化的返回值内部状态仍可能指向插件代码，因此进程 owner 和复制值中的 lease
   必须保留插件库，直到这些状态全部销毁。
 
@@ -404,7 +406,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
-### 已接受的未来关系（不是当前行为）
+### 已实现的 V-2 SDK 子集与未来 provider ABI
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受单独版本化的 pure-C provider ABI v3，用于 Schema、Facet、Layout、access、
@@ -413,10 +415,13 @@ conversion、inference、query、region、digest 与 execution provider suite。
 或 `Value` PImpl 放到 DSO 边界上。不可变、进程拥有的 provider generation 会通过 lease 与
 `Active -> Retiring -> Unloaded` 完成 replacement。
 
-该目标不会改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成
-migration 前，operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry
-point、SDK、fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding
-header 或 v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
+V-2 在 `operation_runtime` 中实现 dependency-neutral C++ CPU DenseTensor `Value`、
+`StridedLayout`、`DenseTensorView` 与 `ImageView` 子集，并让一条内建 operation 在 private
+ImageBuffer copy bridge 后使用该子集。它不会把 Value 或其 PImpl 放进 v2 callback record，也
+不会改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成 migration
+前，operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、
+SDK、fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header
+或 v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
 
 操作插件的 C linkage 入口名称只是身份/代次 gate，并不是稳定 C data ABI。
 二进制兼容性仍依赖匹配的 SDK、编译器、标准库、C++ ABI、分配器/runtime、

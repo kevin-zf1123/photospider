@@ -225,13 +225,35 @@ def validate_provider_disabled_inventory(
             "ShutdownAndGraphPublicationShareOneProductionAdmissionBoundary"
         ),
     }
+    dense_image_tests = {
+        (
+            "CpuDenseTensorImageOperation."
+            "ValueRejectsMalformedFacetStrideAndEnvelope"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ValueCopiesShareBytesAndViewsRetainLifetime"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DenseInvertInferencePreservesExactLogicalDescriptor"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductRegistryAndExecutorInvertPaddedMultiChannelInput"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
+        ),
+    }
     expected = {
         "DependencyDisabledInstallSmoke",
         (
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
-    } | disk_cache_tests | lifecycle_tests
+    } | disk_cache_tests | lifecycle_tests | dense_image_tests
     names = set(inventory)
     if names != expected:
         raise RuntimeError(
@@ -380,6 +402,7 @@ def main() -> int:
         str(work),
         "--target",
         "test_optional_opencv_operation_provider",
+        "test_cpu_dense_tensor_image_operation",
         "test_disk_cache_diagnostic_concurrency",
         "test_kernel_lifecycle_concurrency",
         "-j",
@@ -409,6 +432,7 @@ def main() -> int:
             "-R",
             (
                 "^(DiskCacheDiagnosticConcurrency\\..*|"
+                "CpuDenseTensorImageOperation\\..*|"
                 "KernelLifecycleConcurrency\\..*|"
                 "OptionalOpenCvOperationProvider\\."
                 "ReplacementExecutesAndRestores)$"

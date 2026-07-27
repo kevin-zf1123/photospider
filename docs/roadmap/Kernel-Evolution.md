@@ -603,12 +603,16 @@ leakage, and runs an external Host consumer.
 
 Current baseline: `ImageBuffer`, `DataType`, `Device`, `PixelRect`,
 `ParameterMap`, operation ABI v2, and the existing cache/execution ownership
-remain the implemented contracts. Their exact behavior is documented in
+remain implemented contracts. V-2 additionally implements a bounded
+dependency-neutral CPU DenseTensor `Value`/`ImageView` subset and one built-in
+operation behind the current ImageBuffer edge. Their exact behavior is
+documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
 [Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
-[Kernel Cache Model](../kernel-architecture/Cache-Model.md). The following is
-an accepted target, not a description of current runtime objects.
+[Kernel Cache Model](../kernel-architecture/Cache-Model.md). The complete model
+below is the accepted target; only the explicit V-2 subset called out here is a
+current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -642,6 +646,26 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField`; an OpenEXR Deep logical value is
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
+
+The implemented V-2 subset is deliberately narrower:
+
+- `DenseTensorDescriptor` contains positive concrete shape, independent
+  unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
+  byte-addressed storage encoding;
+- `ImageFacet` explicitly maps distinct x/y and optional channel axes;
+- final copyable `Value` shares an immutable PImpl with one exact owned CPU
+  byte envelope and positive signed `StridedLayout`;
+- retaining checked `DenseTensorView`/`ImageView` expose read-only addresses;
+  and
+- `image_process:invert_dense` separates exact descriptor-only inference from
+  stride-aware unsigned-8 execution and validates its result before converting
+  back to the current NodeOutput.
+
+V-2 has no BufferHandle, allocation identity, offset, lease, cache integration,
+Region, DataSpec, device registry, fence, transfer, quantization, packed
+element, provider ABI v3, or general graph Value storage. Its private
+ImageBuffer-to-Value copy edge is removed rather than retained when #80
+connects BufferHandle and cache ownership.
 
 `ElementSemantics`, `StorageEncoding`, and `QuantizationSchema` are independent.
 Describable, executable, and convertible support are also independent, and

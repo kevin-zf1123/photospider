@@ -279,22 +279,34 @@ propagation.
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
 
-### Accepted future relationship (not current behavior)
+### Implemented V-2 data surface and remaining migration
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
-accepts a future generic-value replacement, but it does not change any field
-above. During the later no-shim migration, named computed outputs become named
-immutable `Value` objects, graph port constraints become `DataSpec`, and
-`ParameterMap` remains configuration-only. `PixelRect` is eventually replaced
-at migrated public and internal Region boundaries by the `ImageRect` atom of
-`RegionSet`.
+accepts the complete generic-value replacement. V-2 now implements one bounded
+CPU DenseTensor subset of that target:
 
-Until those implementation slices land with durable tests, `NodeOutput`
-continues to contain `ImageBuffer` plus named `ParameterMap` data,
-`ParameterMap` continues to carry current connected computed results, and
-current graph/dirty/planning geometry continues to use `PixelRect`. This
-document does not expose target `Value`, `DataSpec`, or `RegionSet` objects as
-implemented runtime state.
+- installed `DenseTensorDescriptor` keeps concrete shape,
+  `ElementSemantics`, and `StorageEncoding` separate;
+- installed `ImageFacet` explicitly assigns distinct x/y and optional channel
+  axes;
+- final copyable `Value` shares one immutable PImpl containing the descriptor,
+  optional facet, positive signed `StridedLayout`, and exact owned CPU byte
+  envelope;
+- `DenseTensorView` and `ImageView` retain the complete Value and expose only
+  bounds-checked read-only addresses; and
+- `image_process:invert_dense` performs descriptor-only inference and
+  stride-aware unsigned-8 execution on those views.
+
+This implemented surface does not change the graph fields above. The built-in
+dense operation uses a private deep-copy bridge at its current product edge;
+`NodeOutput` still contains `ImageBuffer` plus named `ParameterMap` data,
+connected computed results still use `ParameterMap`, and graph/dirty/planning
+geometry still uses `PixelRect`. BufferHandle allocation identity, cache
+integration, `DataSpec`, `RegionSet`, device routing, readiness, transfer, and
+provider ABI v3 remain later no-shim migration slices. During those slices,
+named computed outputs become named immutable Values, `ParameterMap` becomes
+configuration-only, and migrated Region boundaries replace `PixelRect` with
+the `ImageRect` atom of `RegionSet`.
 
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. Issue #62 completes the

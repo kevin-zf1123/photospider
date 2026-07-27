@@ -50,6 +50,30 @@ OPTIONAL_PROVIDER_CTEST_NAME = (
 #: @brief Stable build-smoke entry required by every provider-disabled profile.
 #: @note Its own build-smoke label is not inherited by diagnostic cases.
 DEPENDENCY_DISABLED_CTEST_NAME = "DependencyDisabledInstallSmoke"
+#: @brief Stable Value-backed dense-image cases required without the provider.
+#: @note The names independently mirror the dedicated integration target.
+CPU_DENSE_IMAGE_CTEST_NAMES = (
+    (
+        "CpuDenseTensorImageOperation."
+        "ValueRejectsMalformedFacetStrideAndEnvelope"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ValueCopiesShareBytesAndViewsRetainLifetime"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DenseInvertInferencePreservesExactLogicalDescriptor"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ProductRegistryAndExecutorInvertPaddedMultiChannelInput"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
+    ),
+)
 
 
 def ctest_json_test(
@@ -91,6 +115,7 @@ def provider_disabled_ctest_payload() -> str:
         OPTIONAL_PROVIDER_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
         *KERNEL_LIFECYCLE_CTEST_NAMES,
+        *CPU_DENSE_IMAGE_CTEST_NAMES,
     }
     return json.dumps(
         {
@@ -793,7 +818,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves seven names and concurrency
+        @return None after parsing preserves twelve names and concurrency
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
         @note Exact labels exclude the build-smoke label from disk test cases.
@@ -804,6 +829,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             OPTIONAL_PROVIDER_CTEST_NAME,
             *DISK_CACHE_CTEST_NAMES,
             *KERNEL_LIFECYCLE_CTEST_NAMES,
+            *CPU_DENSE_IMAGE_CTEST_NAMES,
         }
 
         inventory = subject.parse_ctest_inventory(

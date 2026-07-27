@@ -135,6 +135,38 @@ previous positive/negative infinity empty-range sentinels. Opaque non-CPU
 resources retain provider-supplied diagnostics because only their device
 adapter may map them.
 
+## V-2 Value-Backed CPU Operation Bridge
+
+The dependency-neutral operation runtime also implements the installed
+`Value`, `DenseTensorView`, and `ImageView` CPU subset. A published Value owns
+an exact immutable byte envelope; concrete shape and element facts remain
+separate from an optional explicit Image Facet and positive signed byte
+strides. Checked views retain the complete Value and expose no writable
+pointer.
+
+The built-in `image_process:invert_dense` operation proves this surface on the
+production path:
+
+1. the current monolithic callback validates one nonempty CPU `ImageBuffer`;
+2. a private adapter allocates an exact Value envelope, preserves
+   `[height, width, channels]` and `step`, copies active rows without sharing
+   the mutable ImageBuffer owner, and initializes inter-row padding
+   independently;
+3. pure inference receives only a deep-owned effective parameter snapshot and
+   logical DenseTensor/Image descriptors, with no Node output/cache state;
+4. execute receives checked ImageViews, follows explicit x/y/channel strides,
+   and returns a separately owned padded unsigned-8 Value; and
+5. the runner compares the complete result descriptor and Image Facet with
+   inference, requires an interleaved current-adapter layout, copies only
+   active bytes to a new ImageBuffer, and validates it before publication.
+
+Malformed caller input is `GraphErrc::InvalidParameter`; an unsupported or
+mismatched operation result is `GraphErrc::ComputeError`; `std::bad_alloc`
+propagates unchanged. This bridge is source-tree private. Graph/cache/Host,
+operation ABI v2, and other operations continue to use ImageBuffer, and #80
+replaces this copy edge when BufferHandle ownership and cache allocation
+identity become explicit.
+
 ## GPU Buffer Contract
 
 For GPU buffers:
@@ -201,10 +233,10 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
-### Accepted future relationship (not current behavior)
+### Implemented V-2 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
-accepts the future replacement:
+accepts the complete replacement:
 
 ```text
 ImageBuffer -> Value + ImageFacet + ImageView
@@ -215,10 +247,14 @@ PixelRect   -> RegionSet atom ImageRect
 
 The target separates logical `DataDescriptor` from physical
 `StorageBinding`, and accesses memory only through checked `BufferHandle`
-ranges and leases. None of those target types is implemented by Issue #78.
-Until a later implementation slice updates code, ABI, tests, and this
-current-fact document together, the structure, stride, allocation, device, and
-view contracts above remain authoritative.
+ranges and leases. V-2 implements only the CPU DenseTensor descriptor,
+ImageFacet, positive signed StridedLayout, immutable direct byte owner, and
+checked ImageView used by the bounded operation bridge above. It does not
+implement BufferHandle/ranges/leases, allocation identity, cache ownership,
+quantization, Region, device identity, readiness, transfer, or provider ABI
+v3. The current ImageBuffer structure, allocation, device, DSO, and outer
+graph/cache contracts therefore remain authoritative until their owning later
+slices update code, ABI, tests, and this current-fact document together.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.

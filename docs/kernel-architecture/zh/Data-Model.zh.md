@@ -224,18 +224,28 @@ RT proxy commit 之后。
   `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
-### 已接受的未来关系（不是当前行为）
+### 已实现的 V-2 data surface 与剩余 migration
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
-接受未来的通用 Value 替换，但不会改变上文任何字段。在后续 no-shim migration 中，命名
-computed output 会变成命名的不可变 `Value` object，graph port constraint 会变成
-`DataSpec`，`ParameterMap` 只保留 configuration 用途。`PixelRect` 最终会在已迁移的公共与
-内部 Region 边界被 `RegionSet` 的 `ImageRect` atom 替换。
+接受完整的通用 Value 替换。V-2 现已实现该目标中一个有界的 CPU DenseTensor 子集：
 
-在这些实现切片与长期 test 落地前，`NodeOutput` 继续包含 `ImageBuffer` 和命名
-`ParameterMap` data，`ParameterMap` 继续携带当前 connected computed result，当前
-graph/dirty/planning geometry 继续使用 `PixelRect`。本文不会把目标 `Value`、`DataSpec` 或
-`RegionSet` object 写成已经实现的 runtime state。
+- installed `DenseTensorDescriptor` 把 concrete shape、`ElementSemantics` 与
+  `StorageEncoding` 分开；
+- installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
+- final、copyable `Value` 共享一个 immutable PImpl，其中包含 descriptor、optional facet、
+  positive signed `StridedLayout` 与精确拥有的 CPU byte envelope；
+- `DenseTensorView` 与 `ImageView` 保留完整 Value，只暴露经过 bounds check 的只读 address；
+- `image_process:invert_dense` 对这些 view 执行 descriptor-only inference 与
+  stride-aware unsigned-8 execution。
+
+这项已实现 surface 不改变上文 graph 字段。内建 dense operation 在当前 product edge 使用
+private deep-copy bridge；`NodeOutput` 仍包含 `ImageBuffer` 与命名 `ParameterMap` data，
+connected computed result 仍使用 `ParameterMap`，graph/dirty/planning geometry 仍使用
+`PixelRect`。BufferHandle allocation identity、cache integration、`DataSpec`、`RegionSet`、
+device routing、readiness、transfer 与 provider ABI v3 仍属于后续 no-shim migration slice。
+在这些切片中，命名 computed output 会变成命名的不可变 Value，`ParameterMap` 只保留
+configuration 用途，已迁移的 Region 边界会用 `RegionSet` 的 `ImageRect` atom 替换
+`PixelRect`。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的

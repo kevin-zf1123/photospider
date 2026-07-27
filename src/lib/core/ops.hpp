@@ -27,9 +27,10 @@ int builtin_input_halo_radius(const std::string& type,
 /**
  * @brief Publishes dependency-neutral built-in operations.
  *
- * The core registration set currently contains named-data analyzers and scalar
- * math callbacks plus their propagation contracts. Optional image algorithm
- * providers are composed separately by the process plugin owner.
+ * The core registration set contains named-data analyzers, scalar math
+ * callbacks, and the dependency-neutral Value-backed dense image inversion,
+ * plus their propagation contracts. Optional image algorithm providers are
+ * composed separately by the process plugin owner.
  *
  * @return Nothing.
  * @throws std::bad_alloc if registry key or callback storage allocation fails.

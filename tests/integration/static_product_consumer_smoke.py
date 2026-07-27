@@ -1818,17 +1818,53 @@ def write_extension_consumer_projects(
     (operation_source_dir / "main.cpp").write_text(
         dedent(
             """
+            #include <cstddef>
+            #include <utility>
+            #include <vector>
+
             #include <photospider/core/image_buffer.hpp>
+            #include <photospider/data/image_view.hpp>
+            #include <photospider/data/value.hpp>
 
             /**
-             * @brief Calls the SDK-transitive image factory from an executable.
-             * @return Zero only when allocated storage and dimensions are valid.
-             * @throws Nothing; allocation failure terminates the smoke process.
+             * @brief Calls SDK-transitive image and immutable Value symbols.
+             * @return Zero only when current and Value-backed image dimensions
+             *         and read-only bytes are valid.
+             * @throws std::bad_alloc or validation exceptions terminate the smoke
+             *         process because the executable intentionally has no recovery
+             *         path.
+             * @note The consumer requests only operation_sdk, so successful
+             *       construction also proves all implementation symbols link
+             *       without backend package discovery.
              */
             int main() {
               const auto image = ps::make_aligned_cpu_image_buffer(
                   3, 2, 1, ps::DataType::UINT8);
-              return image.data && image.width == 3 && image.height == 2 ? 0 : 1;
+              ps::DenseTensorDescriptor descriptor{
+                  {2U, 3U, 1U},
+                  ps::ElementSemantics::UnsignedInteger,
+                  ps::StorageEncoding{8U}};
+              ps::ImageFacet facet;
+              facet.x_axis = 1U;
+              facet.y_axis = 0U;
+              facet.channel_axis = 2U;
+              ps::StridedLayout layout{{3, 1, 1}};
+              std::vector<std::byte> storage{
+                  std::byte{1}, std::byte{2}, std::byte{3},
+                  std::byte{4}, std::byte{5}, std::byte{6}};
+              const ps::Value value = ps::Value::from_cpu_dense_tensor(
+                  std::move(descriptor), facet, std::move(layout),
+                  std::move(storage));
+              const ps::ImageView view(value);
+              const bool valid_value =
+                  view.width() == 3U && view.height() == 2U &&
+                  view.channels() == 1U &&
+                  std::to_integer<unsigned int>(
+                      *view.channel_data(2U, 1U, 0U)) == 6U;
+              return image.data && image.width == 3 && image.height == 2 &&
+                             valid_value
+                         ? 0
+                         : 1;
             }
             """
         ).lstrip(),
@@ -2987,8 +3023,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
-        "installed public header inventory is exactly 21 files": len(install["headers"])
-        == 21,
+        "installed public header inventory is exactly 24 files": len(install["headers"])
+        == 24,
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],

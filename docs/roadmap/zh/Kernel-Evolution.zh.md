@@ -478,12 +478,14 @@ Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML c
 ## 通用数据与 Region
 
 当前 baseline：`ImageBuffer`、`DataType`、`Device`、`PixelRect`、`ParameterMap`、
-operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的契约。精确行为记录在
+operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的契约。V-2 还实现了一个
+有界、dependency-neutral 的 CPU DenseTensor `Value`/`ImageView` 子集，以及一条位于当前
+ImageBuffer edge 后的内建 operation。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
-[内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。以下内容是已接受目标，
-不是当前 runtime object 的描述。
+[内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。下述完整模型是已接受目标；
+只有这里明确指出的 V-2 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -513,6 +515,22 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 每个 site 的 variable sample 使用 `VariableSampleField`；OpenEXR Deep 逻辑 value 是
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
+
+已实现的 V-2 子集刻意保持更窄的范围：
+
+- `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
+  或 floating element semantics，以及 8/16/32/64-bit byte-addressed storage encoding；
+- `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis；
+- final、copyable `Value` 共享 immutable PImpl，其中包含一个精确拥有的 CPU byte envelope
+  与 positive signed `StridedLayout`；
+- retaining checked `DenseTensorView`/`ImageView` 暴露只读 address；
+- `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
+  unsigned-8 execution 分开，并在转换回当前 NodeOutput 前校验 result。
+
+V-2 不含 BufferHandle、allocation identity、offset、lease、cache integration、Region、
+DataSpec、device registry、fence、transfer、quantization、packed element、provider ABI v3
+或 general graph Value storage。#80 贯通 BufferHandle 与 cache ownership 时，会删除而不是
+保留这条 private ImageBuffer-to-Value copy edge。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意

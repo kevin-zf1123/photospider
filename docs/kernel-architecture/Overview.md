@@ -49,8 +49,8 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, event, fixed worker service, reserved-start, and private route implementation; it depends one-way on policy and execution internals. |
 | `photospider_host_internal` | Build-only Kernel/Interaction facades and embedded Host composition root. It selects real YAML persistence adapters or explicit unavailable adapters according to the producer capability. |
 | `photospider_kernel` | Buildable aggregate target that compiles the real selected core, graph, operation-plugin, policy, execution, compute, Host, and optional provider/adapter modules; it is not an install artifact or a placeholder library. |
-| `photospider_operation_runtime` | Installable static implementation of public image-buffer factories with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
-| `photospider_operation_sdk` | Installable interface target for operation v2 headers; it transitively links `operation_runtime`. |
+| `photospider_operation_runtime` | Installable static implementation of public image-buffer factories and the immutable CPU DenseTensor Value/ImageView subset, with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
+| `photospider_operation_sdk` | Installable interface target for operation v2 and dependency-neutral data/memory headers; it transitively links `operation_runtime`. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_policy_sdk` | Installable dependency-neutral interface target carrying the self-contained pure-C policy ABI header plus C11/C++17 requirements. |
 | `photospider` | Static installable backend product, archived as `libphotospider`, linked by enabled CLI and embedded Host frontends. It exports `Photospider::photospider` and remains buildable with OpenCV and YAML disabled; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
@@ -509,6 +509,17 @@ is the row stride in bytes and may be larger than the packed row size to
 preserve alignment. ARM Mac high-performance paths may need or benefit from
 128-byte alignment, but 128-byte alignment is an optimization target rather than
 the portable minimum.
+
+V-2 additionally installs immutable CPU DenseTensor `Value`,
+`DenseTensorView`, and explicit-axis `ImageView` contracts. The built-in
+`image_process:invert_dense` operation reaches those types through normal core
+seeding, `OpRegistry` resolution, and `NodeExecutor` monolithic invocation.
+Its private callback bridge deep-copies current ImageBuffer inputs to Values,
+separates descriptor-only inference from stride-aware execution, validates the
+complete returned descriptor/facet/layout, and copies active result bytes back
+to a new validated ImageBuffer. Graph/cache/Host state and operation plugin ABI
+v2 remain on the current ImageBuffer boundary until their later migration
+slices.
 
 ### Dirty Region Propagation
 
