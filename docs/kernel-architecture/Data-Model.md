@@ -279,6 +279,23 @@ propagation.
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
 
+### Accepted future relationship (not current behavior)
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+accepts a future generic-value replacement, but it does not change any field
+above. During the later no-shim migration, named computed outputs become named
+immutable `Value` objects, graph port constraints become `DataSpec`, and
+`ParameterMap` remains configuration-only. `PixelRect` is eventually replaced
+at migrated public and internal Region boundaries by the `ImageRect` atom of
+`RegionSet`.
+
+Until those implementation slices land with durable tests, `NodeOutput`
+continues to contain `ImageBuffer` plus named `ParameterMap` data,
+`ParameterMap` continues to carry current connected computed results, and
+current graph/dirty/planning geometry continues to use `PixelRect`. This
+document does not expose target `Value`, `DataSpec`, or `RegionSet` objects as
+implemented runtime state.
+
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. Issue #62 completes the
 runtime/cache YAML value boundary without making the configured product

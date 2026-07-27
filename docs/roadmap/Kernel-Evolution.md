@@ -307,25 +307,31 @@ Run destruction is non-throwing and occurs only after one terminal outcome,
 quiescence, release of every lease, and exact release of every reservation and
 grant. Dropping a caller observer does not implicitly cancel admitted work.
 
-### Target `GraphRuntime`
+### Current `GraphRuntime` through Issue #76
 
-The current issue #75 `GraphRuntime` owns `GraphModel`, graph-scoped runtime
-state, separate graph-state and compute-request lanes, monotonic
+The current `GraphRuntime` through Issue #76 owns `GraphModel`, graph-scoped
+runtime state, separate graph-state and compute-request lanes, monotonic
 `GraphRevision`, revision capture, serialized commit validation/publication,
-graph events, stable graph-instance identity, and platform/session metadata.
-The graph-lifetime anchor remains target behavior.
+graph events, stable graph-instance identity, platform/session metadata, and
+one `GraphLifetimeAnchor` for that exact Graph identity. The anchor supplies
+the close coordinator and lease root used by lifecycle admission.
 
 It owns no Run, admitted-Run index, CPU/device/I/O/plugin worker, process ready
 store, process admission, `ResourceLedger`, `PolicyRegistry`, policy binding,
-or physical execution route. It stores only copied HP and RT route ids and
-their nonzero generations. A Run may hold a graph-lifetime lease without
-reversing that ownership.
+or physical execution route. The process-owned `ExecutionService` owns the
+private `RunLifecycleRegistry`; that registry owns the admitted-Run index and
+the admission/Graph-close/process-shutdown lifetime fence. `GraphRuntime`
+stores only copied HP and RT route ids and their nonzero generations. A Run may
+hold a registry-validated Graph lifetime lease without reversing either
+ownership.
 
 The graph-state lane is held for immutable revision capture and validated
 visible commit, not for long-running planning/execution. The private
 compute-request lane currently serializes same-Graph requests without owning
-an executor or policy lifetime; the target registry/lifetime fence remains
-future behavior.
+an executor or policy lifetime. The Issue #76 registry/lifetime fence is
+current behavior; future work here is limited to public cancellation/control
+surfaces and separately approved later execution-domain capabilities, not the
+Graph anchor or lifecycle registry.
 
 ## Process Execution Domain
 
@@ -595,31 +601,121 @@ leakage, and runs an external Host consumer.
 
 ## General Data and Regions
 
-`ImageBuffer` remains the current image payload while the general model is
-introduced alongside it. The target hierarchy is intentionally incremental:
+Current baseline: `ImageBuffer`, `DataType`, `Device`, `PixelRect`,
+`ParameterMap`, operation ABI v2, and the existing cache/execution ownership
+remain the implemented contracts. Their exact behavior is documented in
+[Kernel Data Model](../kernel-architecture/Data-Model.md),
+[ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
+[Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
+[Kernel Cache Model](../kernel-architecture/Cache-Model.md). The following is
+an accepted target, not a description of current runtime objects.
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+is authoritative for the complete target contract. Its central separation is:
 
 ```text
 Value
-├── DenseTensor
-│   └── ImageView
-├── SparseTensor
-├── DeepImage
-├── PathSet / VectorScene
-└── Structured values
+├── DataDescriptor
+│   ├── exactly one versioned RepresentationSchema
+│   └── zero or more orthogonal versioned Facets
+└── one or more authoritative StorageBindings
+    ├── StorageLayout
+    ├── BufferHandle[]
+    ├── ReadyFence
+    └── AccessProvider lease
 ```
 
-The first supported vertical slice is `DenseTensor + ImageView`, based on:
+`DataDescriptor` is logical. Allocation, stride, packing, device, byte range,
+mapping, and readiness are physical binding facts. `Value` is immutable after
+one exclusive `ValueBuilder::seal`; checked views retain the complete Value.
+The stable core is extensible through permanent Schema/Facet/Layout identities,
+canonical versioned payloads, pure nonblocking queries, explicit operations,
+and immutable process-owned provider generations with leases.
 
-- `DataDescriptor`: kind, rank, shape, byte strides, element format, planes,
-  channel schema, color/alpha semantics, and quantization;
-- `BufferHandle`: memory domain, device identity, byte range, allocation
-  identity, mutability, release behavior, and synchronization fence;
-- `Region`: `ImageRect`, `TensorSlice`, object/time ranges, or whole value.
+The first representation is homogeneous rank-N DenseTensor. An ordinary image
+is `DenseTensor + ImageFacet`; channel, color, alpha, and time meaning is
+explicit and never inferred from names. Per-site variable samples use
+`VariableSampleField`; an OpenEXR Deep logical value is
+`VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
+self-contained and does not contain runtime child Values.
 
-FP64, 8/16-channel images, padded rows, and N-dimensional latent values must be
-validated without silent float32 conversion or channel-role guessing. Packed
-FP4 additionally requires bits, packing, quantization block, and offset-aware
-region semantics; it cannot be modeled as one byte per scalar.
+`ElementSemantics`, `StorageEncoding`, and `QuantizationSchema` are independent.
+Describable, executable, and convertible support are also independent, and
+conversion is always explicit. This allows FP64, arbitrary channels, padded or
+signed strides, N-dimensional latent values, and packed FP4 to be represented
+without silent float32 conversion, one-byte-per-element assumptions, or
+channel-role guessing.
+
+`BufferHandle` is a checked immutable byte range. Reads and writes require
+leases; sealed Values are never writable. Strided, Blocked, and
+ProviderDefined Layouts retain bounded buffer envelopes. `DeviceBackend`,
+`DeviceId`, and `MemoryDomain` are separate, and access is an explicit
+`Direct | Map | Import | Transfer | Unsupported` plan. Readiness and consumer
+visibility are separate obligations.
+
+`RegionSet` is bounded DNF over explicit logical domain keys. The MVP supports
+Whole, Empty, ImageRect, TensorSlice, and one nonempty clause. Region algebra
+returns Exact, labelled ConservativeSuperset, Unknown, Unsupported, or
+TooComplex rather than silently widening. `DataSpec` describes descriptor sets
+and uses subset, disjointness, conditional runtime guards, or
+`CannotEvaluate`; it never authorizes implicit conversion or device access.
+
+Runtime revision, descriptor/content/Layout digests, and artifact identity are
+different identities. Persistence is divided into graph documents, canonical
+descriptor envelopes, artifact/cache manifests plus chunks, and
+never-persisted runtime bindings. Unknown valid extension bytes are preserved
+without interpretation when a provider is absent.
+
+The public migration is complete rather than permanently dual:
+
+```text
+ImageBuffer     -> Value + ImageFacet + ImageView
+PixelRect       -> RegionSet atom ImageRect
+Device          -> DeviceBackend + DeviceId + MemoryDomain
+OperationOutput -> named Value outputs
+ParameterMap    -> configuration only
+```
+
+Operation providers migrate from provisional C++ ABI v2 to separately
+versioned pure-C provider ABI v3 only after exact records and owned consumers
+exist. The completion boundary deletes v2 without a permanent wrapper, alias,
+forwarding header, dual loader, or v2-to-v3 shim. Policy ABI v1 remains
+independent.
+
+### Project 4 implementation dependency contract
+
+The table fixes architectural ordering, not live completion status. Each linked
+Issue remains a separately verifiable implementation slice and its Issue and
+Project fields remain the status authority.
+
+| Slice | Delivery boundary | Blocking slices |
+| --- | --- | --- |
+| [#78 / V-1](https://github.com/kevin-zf1123/photospider/issues/78) | Ratify the generic data, memory, and Region ADR; documentation only | #63, #65 |
+| [#79 / V-2](https://github.com/kevin-zf1123/photospider/issues/79) | Run one operation with CPU DenseTensor plus ImageView | #78 |
+| [#80 / V-3](https://github.com/kevin-zf1123/photospider/issues/80) | Connect BufferHandle ownership, allocation identity, and cache | #79 |
+| [#81 / V-4](https://github.com/kevin-zf1123/photospider/issues/81) | Run ImageRect and TensorSlice through unified Region | #79, #72 |
+| [#82 / V-5](https://github.com/kevin-zf1123/photospider/issues/82) | Drive CPU implementation and resource routing from operation metadata | #80, #70 |
+| [#83 / V-6](https://github.com/kevin-zf1123/photospider/issues/83) | Prove fences, asynchronous completion, and explicit transfer with a fake device | #80, #81, #82, #70 |
+| [#84 / V-7](https://github.com/kevin-zf1123/photospider/issues/84) | Run one Metal operation through DeviceExecutorRegistry | #83 |
+| [#85 / V-8](https://github.com/kevin-zf1123/photospider/issues/85) | Implement explicit CPU/GPU transfer, residency, and stale completion | #84, #74 |
+| [#86 / V-9](https://github.com/kevin-zf1123/photospider/issues/86) | Account device memory and scratch in ResourceLedger | #84, #70 |
+| [#87 / V-10](https://github.com/kevin-zf1123/photospider/issues/87) | Decide compute IO durability and completion semantics | #65 |
+| [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | Run cache and codec paths through bounded ComputeIoExecutor | #87, #70 |
+| [#89 / V-12](https://github.com/kevin-zf1123/photospider/issues/89) | Verify the multi-channel, FP64, latent, and stride matrix | #81, #85 |
+| [#90 / V-13](https://github.com/kevin-zf1123/photospider/issues/90) | Run one packed FP4/quantized DenseTensor slice | #89 |
+
+V-14 is a separate later dependency-free synthetic
+`VariableSampleField` issue/change. “Dependency-free” means the proof does not
+use OpenEXR or another optional codec; it must exercise registration, unknown
+byte preservation, multi-buffer Layout and binding, Region/DataSpec/query,
+canonical digest, generation replacement, lease, and unload behavior directly.
+
+V-15 is a separate later optional OpenEXR provider/codec issue/change. Its first
+format is single-part deep-scanline read/write, following the core and V-14
+proof rather than replacing it. Deep tiled, multipart, and mixed shallow/deep
+parts remain later work. Disabling the option must remove OpenEXR headers,
+links, types, symbols, package requirements, and transitive dependencies from
+the kernel, public ABI, and dependency-disabled product.
 
 ## Heterogeneous Executors
 

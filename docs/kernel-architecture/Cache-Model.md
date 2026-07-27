@@ -162,6 +162,22 @@ neither and returns `GraphErrc::Io` for explicit representation IO.
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
 describe the final adapter and document boundary.
 
+### Accepted future relationship (not current behavior)
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+separates future persistence into graph documents, canonical descriptor
+envelopes, artifact/cache manifests plus chunks, and never-persisted runtime
+state. `DescriptorDigest`, `ContentDigest`, `StorageLayoutDigest`,
+`ArtifactId`, and `ValueRevisionId` answer different identity questions;
+device/allocation identity, fences, leases, access plans, and residency
+replicas never enter persistent logical content identity.
+
+This target does not change the current cache format or authority described
+above. HP output remains the only formal reusable cache, RT proxy output
+remains transient, and the current injected artifact/metadata codecs remain
+the implementation boundary until later slices migrate cache manifests and
+payloads. No future residency replica becomes a second cache authority.
+
 ## Implementation and Validation Entry Points
 
 - `src/lib/core/image_artifact_codec.hpp`

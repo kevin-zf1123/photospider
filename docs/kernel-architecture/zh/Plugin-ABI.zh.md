@@ -404,6 +404,20 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
+### 已接受的未来关系（不是当前行为）
+
+[ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+接受单独版本化的 pure-C provider ABI v3，用于 Schema、Facet、Layout、access、
+conversion、inference、query、region、digest 与 execution provider suite。它的 C++ SDK
+会提供 RAII wrapper，但不会把 STL、exception、RTTI、virtual class、allocator ownership
+或 `Value` PImpl 放到 DSO 边界上。不可变、进程拥有的 provider generation 会通过 lease 与
+`Active -> Retiring -> Unloaded` 完成 replacement。
+
+该目标不会改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成
+migration 前，operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry
+point、SDK、fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding
+header 或 v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
+
 操作插件的 C linkage 入口名称只是身份/代次 gate，并不是稳定 C data ABI。
 二进制兼容性仍依赖匹配的 SDK、编译器、标准库、C++ ABI、分配器/runtime、
 异常模型和 RTTI 配置。

@@ -1,0 +1,566 @@
+# ADR 0008: Generic Values, Memory Bindings, and Regions Are Explicit Versioned Contracts
+
+## Status
+
+Accepted as the target contract for Project 4 generic data and heterogeneous
+execution. This ADR is an architecture decision, not an implementation claim.
+The current source tree still uses `ImageBuffer`, `DataType`, `Device`,
+`PixelRect`, `ParameterMap`, operation plugin ABI v2, and the cache and
+execution ownership documented in `docs/kernel-architecture/`.
+
+Issue #78 ratifies this contract and updates documentation only. Issues
+#79 through #90 remain implementation slices. A synthetic
+`VariableSampleField` proof and an optional OpenEXR Deep provider remain
+separate later changes; neither is implemented by this decision.
+
+## Context
+
+The current `ImageBuffer` contract is a useful two-dimensional image payload,
+but it cannot be extended into the general graph value model by appending
+fields. Logical meaning, physical storage, device access, readiness, cache
+identity, and region reasoning have different owners and version lifetimes.
+Conflating them would make a storage move change logical identity, let one
+device enum imply access, make padding part of content identity, and force
+future data families into one closed enumeration.
+
+The target must support homogeneous rank-N tensors, arbitrary-channel images,
+sub-byte and quantized encodings, provider-defined layouts, multiple memory
+domains, asynchronous producer completion, bounded logical regions, structured
+values, and variable per-site samples. It must preserve unknown valid
+extensions, remain dependency-neutral, and allow provider generations to
+retire safely while in-flight values, leases, queries, and callbacks still
+exist.
+
+The decision must also preserve existing ownership decisions:
+
+- [ADR 0003](0003-process-owned-execution-resources.md) and
+  [ADR 0007](0007-compute-runs-and-process-execution-have-separate-owners.md)
+  keep physical execution resources, admission, ready work, and provider
+  lifecycle in the injected process execution domain.
+- [ADR 0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
+  keeps current facts, accepted decisions, evolution targets, and live delivery
+  status distinct.
+- [ADR 0002](0002-external-libraries-are-kernel-adapters.md) keeps optional
+  libraries behind dependency-neutral provider and adapter boundaries.
+
+## Decision
+
+### Logical descriptors and physical bindings are separate
+
+Every concrete `Value` has one immutable `DataDescriptor`. The descriptor
+contains only logical semantics:
+
+- exactly one versioned `RepresentationSchema` identity and canonical payload;
+- zero or more versioned Facet identities and canonical payloads; and
+- concrete logical dimensions, element semantics, channel, time, domain, and
+  other schema-defined facts required to interpret the logical object.
+
+It contains no allocation, plane, stride, byte offset, packing, device,
+mapping, fence, or native handle. Physical facts use the separate composition:
+
+```text
+StorageBinding =
+  StorageLayout
+  + BufferHandle[]
+  + ReadyFence
+  + AccessProvider lease
+```
+
+A `Value` may own multiple authoritative bindings only when its producer
+declares them equivalent for the same logical revision. Residency or low
+access cost alone does not make a binding authoritative. The core validates
+bounded envelopes and cross-references; the matching providers validate
+schema-, Facet-, Layout-, and access-specific invariants.
+
+### Value semantics, construction, and lifetime
+
+`Value` is a final, copyable, immutable RAII handle implemented through PImpl.
+Copying shares immutable control, allocation owners, and provider-generation
+leases; it does not copy payload bytes. Consumers cannot subclass `Value` or
+replace its descriptor, bindings, readiness, revision, or leases.
+
+`ValueBuilder` is move-only and owns the only write authority for storage under
+construction. It may abandon construction or seal exactly once. A successful
+seal:
+
+1. proves that the descriptor is fully concrete;
+2. validates the descriptor, Layout, handles, fence, access, and provider
+   envelope;
+3. ends all `WriteLease` values and prohibits later writes;
+4. creates a fresh process-local `ValueRevisionId`; and
+5. publishes an immutable `Value`.
+
+The payload may still be pending behind `ReadyFence`; the descriptor may not
+be pending. `ImageView` and `DenseTensorView` are checked final facades that
+retain the complete `Value`. Their construction either validates the required
+Schema and Facets or returns a typed failure. They never borrow a naked
+descriptor or allocation.
+
+`StructuredValueSchema` v1 is self-contained. Its descriptor may recursively
+describe fields, but one v1 `Value` does not contain runtime child `Value`
+objects. Independent results use named output ports or an identity-free
+`ValueBundle`. A shareable `CompositeValue` DAG, cross-value identity, cycles,
+and graph persistence require a separate decision.
+
+### Representation Schema, Facets, and extension identity
+
+There is no closed `ValueKind` enumeration and no generic bag of optional
+properties. A `RepresentationSchema` defines logical representation, such as
+DenseTensor, VariableSampleField, or StructuredValue. Orthogonal versioned
+Facets add image, Deep sample, color, alpha, or time meaning.
+
+Every Schema and Facet definition has:
+
+- a permanent 128-bit `SchemaId` or `FacetId`;
+- a diagnostic name that is never authoritative identity;
+- an independent structural version `{major, minor}`;
+- a canonical bounded byte representation; and
+- applicable validation, query, region, digest, migration, conversion,
+  inference, and execution hooks.
+
+Providers publish explicit supported version sets or ranges and explicit
+migrations. Equal major numbers across unrelated identities do not imply
+compatibility. When a bounded envelope is valid but its provider is absent,
+the system may preserve the unknown bytes exactly. It may not interpret,
+normalize, recompute, convert, region-evaluate, canonically content-hash, or
+execute that extension.
+
+The stable core knows only envelope framing, permanent identities, structural
+versions, generic memory bounds, canonical payload framing, common
+query/result types, and registry protocols. It does not know all future
+Schemas, Facets, Layouts, devices, conversions, or kernels.
+
+### Dense tensors, images, variable samples, and structured values
+
+DenseTensor represents a rank-N rectangular set of homogeneous logical
+elements. It implies no NCHW/NHWC order, image axes, channels, color, alpha, or
+media time. A runtime descriptor has concrete rank and extents; symbolic or
+unknown runtime dimensions cannot be sealed. `DataSpec`, rather than
+`DataDescriptor`, may carry symbolic dimensions and constraints.
+
+An ordinary arbitrary-channel image is:
+
+```text
+DenseTensor + ImageFacet
+```
+
+`ImageFacet` maps signed half-open x/y coordinates and an optional channel axis
+to the underlying representation. It does not select planar or interleaved
+storage. Signed `ImageBounds` can represent nonzero or negative data-window
+origins.
+
+`ChannelSchema` supports arbitrary channel counts, stable `ChannelId` values,
+and explicit `ChannelGroupId` groups. Names are diagnostic and never imply
+color, alpha, depth, or another role. `ColorFacet` and `AlphaFacet` bind
+semantics to explicit groups or channels. They never infer roles from names
+such as `R`, `G`, `B`, or `A`; conversion produces a new `Value`.
+
+`TimeFacet` has a `TimeDomainId`, `TimeBase`, signed integer ticks, and
+half-open `TimeRange`. A nominal rate is rational when exact or explicitly
+marked approximate. Variable-frame-rate timestamps remain authoritative.
+
+More channels do not make an image Deep. A variable number of samples at each
+logical site uses `VariableSampleField`. An OpenEXR Deep logical value is:
+
+```text
+VariableSampleField + ImageFacet + DeepSampleFacet
+```
+
+Heterogeneous or independently sampled channels use a multi-plane structured
+representation or a versioned extension instead of violating DenseTensor
+homogeneity.
+
+### Element meaning, encoding, and quantization
+
+The target replaces `DataType` as a universal data contract with three
+independent concepts:
+
+- `ElementSemantics`: logical domain and interpretation;
+- `StorageEncoding`: bit width, lanes, packing, byte/bit order, and physical
+  encoding rules; and
+- `QuantizationSchema`: scale, zero point, block/group axes, calibration, and
+  schema-defined quantization parameters.
+
+Support is classified independently as describable, executable, and
+convertible. Describable means the descriptor and storage envelope are valid;
+executable means a selected kernel supports the requested capability;
+convertible means an explicit registered conversion exists. No path silently
+changes meaning, encoding, quantization, channel roles, color, alpha, or time.
+An explicit conversion creates a new `ValueRevisionId`.
+
+### Buffer handles, layouts, leases, and write safety
+
+An allocation control block owns native allocation identity, provider/device
+state, release behavior, and lifetime. `BufferHandle` is an immutable copyable
+view of a checked byte range in that allocation. It contains neither a general
+raw pointer nor a copyable mutable flag.
+
+One binding may use multiple handles, and handles may refer to disjoint or
+overlapping ranges only when Layout and access rules permit it. Core validation
+uses checked arithmetic to prove that every declared envelope is within its
+handle.
+
+Payload access requires:
+
+- `ReadLease`, retaining allocation, provider generation, mapping/import state,
+  visibility obligations, and immutable access; or
+- `WriteLease`, additionally proving exclusive builder authority and a valid
+  non-overlapping writable Layout.
+
+A sealed `Value` cannot issue `WriteLease`. Direct CPU pointers, mapped
+pointers, imported resources, and transfer destinations exist only within the
+corresponding lease and access-provider contract.
+
+The first core Layout families are:
+
+- `Strided`: byte offset, shape-compatible plane mapping, and signed byte
+  strides;
+- `Blocked`: explicit block/tile geometry and packing; and
+- `ProviderDefined`: versioned opaque payload plus a mandatory generic bounded
+  buffer envelope.
+
+Strided reads may use positive, negative, or zero strides. Negative and zero
+strides are read-only in v1. Writable access must prove in-bounds,
+non-overlapping addresses for the requested write region; failure to prove
+that property rejects the lease. A provider-defined Layout never bypasses core
+bounds: it names each handle and byte envelope it may touch.
+
+### Device identity, access, residency, readiness, and visibility
+
+The target separates:
+
+- `DeviceBackend`, a stable backend family such as CPU, CUDA, Metal, or Vulkan;
+- `DeviceId`, a process-local identity for one concrete device; and
+- `MemoryDomain`, a versioned allocation domain such as host, pinned host,
+  device-local, shared, or imported memory.
+
+None of these implies accessibility. An `AccessProvider` returns an explicit
+`AccessPlan`:
+
+```text
+Direct | Map | Import | Transfer | Unsupported
+```
+
+The plan identifies source binding, target capability, required readiness,
+visibility work, leases, resource demand, and the resulting binding or access
+scope. Device, Layout, memory-domain, residency, and access constraints belong
+to `KernelCapability`, not `DataSpec`.
+
+A `Value` owns authoritative bindings. The process-owned `ResidencyManager`
+may own extra replicas keyed by `ValueRevisionId`; those replicas are neither
+serialized into `Value` nor treated as authority. A stale replica cannot
+satisfy a newer revision.
+
+`ReadyFence` is an immutable copyable observer. `FenceCompleter` is the
+move-only producer capability. Exactly one terminal transition is allowed:
+
+```text
+Pending -> Ready
+        -> Failed
+        -> ProducerCancelled
+```
+
+Dropping an unresolved completer publishes `ProducerCancelled`. `poll` is
+nonblocking. Waits are scheduled asynchronously through the owning execution
+or device mechanism; CPU workers do not block on device fences. Cancelling a
+waiter does not mutate the shared fence or cancel the producer.
+
+`Ready` reports producer completion only. It does not establish host mapping,
+cache coherency, queue-family ownership, or consumer visibility; those duties
+belong to `AccessPlan`. Fences, pending waits, access scopes, and native owners
+retain the defining provider-generation lease.
+
+A `ComputeRun` retains request-local immutable Values and their authoritative
+bindings. Settlement accounts for every output's terminal fence state,
+provider-generation lease, access obligation, and ResourceLedger release. A
+failed fence may settle the Run with a typed failure and release request
+accounting while callbacks, waits, or access leases keep the retiring provider
+and native owners alive. Closing the Run releases its Value handles but neither
+destroys an in-flight owner nor prevents an eligible process-owned residency
+replica from remaining under its exact `ValueRevisionId`. This rule does not
+move Run, dispatcher, ledger, commit, or shutdown authority away from the
+owners defined by ADR 0007.
+
+### Bounded logical regions
+
+`RegionSet` is a bounded, extensible disjunction of conjunctions over explicit
+`RegionDomainKey` values:
+
+- atoms in one clause combine by AND;
+- clauses combine by OR; and
+- every atom names its logical coordinate domain.
+
+`Whole` is one empty clause. `Empty` is zero clauses. Intervals are half-open.
+The MVP supports Whole, Empty, `ImageRect`, `TensorSlice`, and at most one
+nonempty clause. Additional atom types and multiple clauses are versioned
+extensions.
+
+Union, intersection, difference, projection, and transformation consume an
+explicit complexity budget and return one of:
+
+```text
+Exact(RegionSet)
+ConservativeSuperset(RegionSet, reason)
+Unknown
+Unsupported
+TooComplex
+```
+
+The latter three are outcomes, not fake regions. Hull or Whole fallback is
+legal only as a labelled `ConservativeSuperset`; each caller decides whether
+the approximation is safe for planning, invalidation, or execution.
+
+### DataSpec, capabilities, properties, and output inference
+
+`DataSpec` describes a set of acceptable concrete descriptors. It may contain
+symbolic dimensions, ranges, Schema/Facet version constraints,
+element/quantization predicates, and provider-evaluable conditions.
+
+For producer set `P` and consumer set `C`:
+
+- `P` is statically compatible when `P` is a subset of `C`;
+- it is incompatible when their intersection is empty;
+- nonempty partial overlap requires an explicit runtime guard; and
+- missing provider logic yields `CannotEvaluate`.
+
+Compatibility never inserts a conversion. Graph planning selects an explicit
+conversion operation when needed.
+
+A pure nonblocking property query returns exactly one
+`PropertyQueryResult<T>` state:
+
+```text
+Available(T)
+NotApplicable
+Unknown
+Deferred
+MissingProvider
+UnsupportedSchemaVersion
+InvalidDescriptor
+```
+
+Queries perform no IO, payload access, mapping, transfer, allocation-sized
+compute, or device work. Work required to resolve `Deferred` is an explicit
+operation or scheduled prepare step.
+
+Output description has three stages:
+
+1. static inference maps input `DataSpec` plus configuration to output
+   `DataSpec` without reading payloads;
+2. pure concrete inference maps concrete descriptors plus configuration to
+   `Exact(DataDescriptor)` or `Deferred`; and
+3. scheduled prepare/execute performs content-, IO-, or device-dependent work.
+
+An operation may start scheduled work with a deferred descriptor, but cannot
+seal the output until the descriptor is concrete. A sealed output may be
+payload-pending behind its fence. Named operation outputs are named `Value`
+objects; after migration `ParameterMap` remains configuration-only.
+
+### Error model and provider ABI
+
+Queries use the typed observation states above. Failing operations use
+`Result<T>` or `Status` with stable categories and owned diagnostics. Pure-C
+provider callbacks and asynchronous device/IO completions never propagate C++
+exceptions. Provider boundaries translate resource exhaustion to
+`resource_exhausted` and unknown exceptions to a host-owned internal error
+while retaining the provider lease.
+
+Schema, Facet, Layout, access, conversion, inference, query, region, digest,
+and execution provider suites use a separately versioned pure-C provider ABI
+v3. Records use fixed-width scalars, explicit sizes/kinds/versions, bounded
+byte/string views, opaque handles, host-owned output storage, status returns,
+and zero-required reserved fields. They expose no STL type, exception, RTTI
+object, virtual class, allocator owner, `Value` PImpl, native owner reference,
+or mutable Host registry.
+
+The C++ SDK provides RAII wrappers around those suites without changing their
+wire layout or authority. Exact record layout, limits, calling convention, and
+callback inventories must be frozen and independently reproduced before
+implementation.
+
+The injected process execution domain owns separate Schema, Facet, Layout, and
+provider registries. They are not global or function-static singletons. For one
+exact identity and structural version, at most one definition provider is
+active; multiple execution kernels may support that logical definition on
+different capabilities.
+
+Published definitions and kernel bindings are immutable generation owners.
+Callers retain generation leases through validation, query, inference, access
+planning, invocation, result conversion, and provider-created owner lifetime.
+Replacement prepares a complete candidate, publishes atomically, and moves the
+old generation through:
+
+```text
+Active -> Retiring -> Unloaded
+```
+
+Retiring rejects new leases but remains mapped until all existing leases and
+provider-created owners retire. Failed preparation or publication preserves
+the prior generation.
+
+Policy plugin C ABI v1 is independently versioned and is not renamed to v3.
+The process execution domain, ResourceLedger, ready store, and policy authority
+defined by ADR 0007 remain unchanged.
+
+### Runtime identity, digests, persistence, and cache authority
+
+Every successful seal creates a fresh process-local `ValueRevisionId`, even if
+descriptor and content equal an earlier value. Persistent and comparable
+identities remain distinct:
+
+- `DescriptorDigest`: canonical logical descriptor envelope;
+- `ContentDigest`: schema-defined canonical logical content stream;
+- `StorageLayoutDigest`: canonical physical Layout description without native
+  allocation identity; and
+- `ArtifactId`: identity of one persisted manifest or artifact version.
+
+Each digest carries an algorithm tag. `ContentDigest` may be `Deferred`. It
+excludes device identity, allocation identity, fences, padding, physical
+stride, and replica state. Schema providers define canonical traversal so
+equivalent logical values hash equally across permitted physical layouts.
+
+Persistence has four layers:
+
+1. graph documents contain operation configuration, named ports, and
+   `DataSpec` constraints;
+2. descriptor envelopes contain Schema/Facet identities, structural versions,
+   canonical payloads, and unknown extension bytes;
+3. artifact/cache manifests contain descriptor/content/layout digests,
+   `ArtifactLayout`, content-addressed chunk references, codec/provider
+   metadata, and `ArtifactId`; and
+4. runtime state contains bindings, handles, native/allocation/device identity,
+   fences, leases, access plans, and residency replicas, and is never
+   persisted.
+
+Schema, Facet, Layout, provider ABI, graph document, artifact manifest, codec,
+and digest algorithm versions are independent axes. Unknown valid extension
+payloads are preserved byte-for-byte through descriptor and artifact
+read/write cycles; they are not normalized without their provider.
+
+The current formal HP cache and RT transient state ownership remain in force
+until implementation slices migrate them. The target does not allow a second
+cache authority or promote a residency replica into logical or persistent
+authority.
+
+### Complete public migration without permanent shims
+
+The target installed surface is organized under:
+
+```text
+include/photospider/core/
+include/photospider/data/
+include/photospider/memory/
+include/photospider/plugin/
+```
+
+The final replacement is:
+
+```text
+ImageBuffer     -> Value + ImageFacet + ImageView
+PixelRect       -> RegionSet atom ImageRect
+Device          -> DeviceBackend + DeviceId + MemoryDomain
+OperationOutput -> named Value outputs
+ParameterMap    -> configuration only, never a data payload
+```
+
+Repository-owned operations and providers migrate first. Owned adapters,
+cache, graph documents, Host values, CLI/IPC translation, tests, installed
+consumers, and documentation then migrate in dependency order. Only after all
+owned operation plugins and consumers have a v3 replacement is operation ABI
+v2, its entry point, SDK, fixtures, and package surface deleted.
+
+The final state has no permanent compatibility wrapper, alias class, duplicate
+old/new API, forwarding header, dual loader, v2-to-v3 shim, or dual
+descriptor/cache/ABI authority. Temporary edge adaptation may exist only
+inside an explicitly bounded implementation slice and must be deleted by that
+slice's completion boundary.
+
+### Verification boundaries
+
+Issue #78 changes architecture and documentation only.
+
+The first implementation chain remains issues #79 through #90. Each issue is a
+separately testable vertical slice and must consume this contract without
+silently narrowing it.
+
+A later dependency-free synthetic `VariableSampleField` slice, tracked as
+V-14, must prove registration, unknown byte preservation, descriptor and
+Layout validation, multi-buffer binding, Region/DataSpec/query behavior,
+canonical digests, generation leases, hot replacement, and unload without
+OpenEXR.
+
+A separate optional OpenEXR slice, tracked as V-15, initially supports only
+single-part deep-scanline read/write. It maps to
+`VariableSampleField + ImageFacet + DeepSampleFacet` and keeps OpenEXR types,
+headers, links, symbols, codec/IO, and package requirements provider-only.
+Deep tiled, multipart, and mixed shallow/deep parts remain later work. With the
+option disabled, OpenEXR is absent from the kernel, public ABI,
+dependency-disabled product, and transitive install dependencies.
+
+## Consequences
+
+- Logical identity survives storage movement, repacking, transfer, and
+  additional residency.
+- Unknown valid extensions can be retained without pretending they are
+  executable or queryable.
+- Memory safety, exclusive writes, readiness, visibility, and provider lifetime
+  become explicit contracts instead of conventions around raw pointers.
+- Region and compatibility uncertainty remain typed outcomes; callers cannot
+  silently substitute Whole, a hull, or a conversion.
+- The pure-C provider ABI and generation leases permit controlled replacement
+  without exposing C++ layout or exception ownership across DSOs.
+- The design adds explicit schemas, Facets, registries, leases, and result
+  states. This complexity is accepted because the omitted distinctions are
+  correctness and lifetime boundaries, not optional metadata.
+- Current runtime behavior does not change until later implementation slices
+  update code, durable tests, current-fact documentation, and installed
+  contracts together.
+
+## Rejected Alternatives
+
+### Expand ImageBuffer and DataType indefinitely
+
+Rejected because rank, variable samples, sub-byte packing, quantization,
+logical meaning, storage, and device access have independent invariants and
+version axes.
+
+### Use one ValueKind enum with optional fields
+
+Rejected because extension identity would depend on core releases, invalid
+field combinations would proliferate, and unknown payloads could not be
+preserved faithfully.
+
+### Treat Device or residency as accessibility
+
+Rejected because backend family, concrete device, allocation domain,
+visibility, and actual consumer access are different facts.
+
+### Store one bounding PixelRect and widen silently
+
+Rejected because it loses tensor and sparse logical domains and conceals
+approximation from callers.
+
+### Reuse operation ABI v2 with new C++ Value objects
+
+Rejected because a C-linkage entry symbol does not stabilize C++ layout,
+allocators, exceptions, RTTI, standard-library ownership, or toolchain ABI.
+
+### Make OpenEXR the first extensibility proof
+
+Rejected because a codec dependency could conceal core registry, persistence,
+and memory-envelope flaws and would violate the dependency-neutral foundation.
+
+## Relationship to Current Facts and Evolution Target
+
+The following maintained documents remain authoritative for current behavior:
+
+- [Kernel Data Model](../kernel-architecture/Data-Model.md);
+- [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md);
+- [Plugin ABI](../kernel-architecture/Plugin-ABI.md); and
+- [Kernel Cache Model](../kernel-architecture/Cache-Model.md).
+
+The [general data and regions roadmap](../roadmap/Kernel-Evolution.md#general-data-and-regions)
+is authoritative for the accepted target and implementation dependency order.
+Live issue and Project state remain authoritative for delivery status. Neither
+this ADR nor the roadmap promotes an unimplemented target object into current
+runtime documentation.

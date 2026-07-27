@@ -608,6 +608,11 @@ composition object。
   与生命周期细节上由本 ADR 取代。
 - [ADR 0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
   要求当前事实、本 accepted target 决策、roadmap 方向与 Issue/Project 状态保持分离。
+- [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+  定义目标通用 `Value`、内存、Region 与 provider-generation 契约。它保留本 ADR 的进程执行域
+  所有权：通用数据 registry 与 provider generation 是注入的进程级资源，而 `Value`、binding、
+  fence、access 与 residency object 不拥有 Run admission、ready release、worker、policy、
+  ledger grant、commit authority、Graph close 或 process shutdown。
 - [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md) 记录持久目标与交付依赖顺序。
 - 当前行为（包括 issue #69 的固定多 Graph HP/RT CPU pool、issue #70 的 admission/ledger 边界、
   issue #71 的 policy-aware ready store、issue #72 的强类型 Graph revision 与 staged

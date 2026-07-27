@@ -759,6 +759,13 @@ static composition object.
 - [ADR 0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
   requires current facts, this accepted target decision, roadmap direction, and
   Issue/Project status to remain distinct.
+- [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+  defines the target generic `Value`, memory, Region, and provider-generation
+  contracts. It preserves this ADR's process execution-domain ownership:
+  generic-data registries and provider generations are injected process-owned
+  resources, while `Value`, binding, fence, access, and residency objects do
+  not own Run admission, ready release, workers, policy, ledger grants, commit
+  authority, Graph close, or process shutdown.
 - [Kernel Evolution](../roadmap/Kernel-Evolution.md#run-and-process-execution-domain-contract)
   records the durable target and delivery dependency order.
 - Current behavior, including issue #69's fixed multi-Graph HP/RT CPU pool,

@@ -116,6 +116,20 @@ representation IO 时返回 `GraphErrc::Io`。
 和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述最终 adapter 与
 document boundary。
 
+### 已接受的未来关系（不是当前行为）
+
+[ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+把未来 persistence 分成 graph document、canonical descriptor envelope、artifact/cache
+manifest 与 chunk，以及绝不持久化的 runtime state。`DescriptorDigest`、`ContentDigest`、
+`StorageLayoutDigest`、`ArtifactId` 与 `ValueRevisionId` 回答不同 identity 问题；
+device/allocation identity、fence、lease、access plan 与 residency replica 永远不会进入持久
+logical content identity。
+
+该目标不会改变上文描述的当前 cache format 或 authority。HP output 仍是唯一正式可复用 cache，
+RT proxy output 继续保持 transient，当前注入的 artifact/metadata codec 继续作为实现边界，
+直到后续切片迁移 cache manifest 与 payload。未来 residency replica 也不会成为第二个 cache
+authority。
+
 ## 实现与验证入口
 
 - `src/lib/core/image_artifact_codec.hpp`

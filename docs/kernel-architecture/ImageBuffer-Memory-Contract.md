@@ -201,6 +201,25 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
+### Accepted future relationship (not current behavior)
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+accepts the future replacement:
+
+```text
+ImageBuffer -> Value + ImageFacet + ImageView
+DataType    -> ElementSemantics + StorageEncoding + QuantizationSchema
+Device      -> DeviceBackend + DeviceId + MemoryDomain
+PixelRect   -> RegionSet atom ImageRect
+```
+
+The target separates logical `DataDescriptor` from physical
+`StorageBinding`, and accesses memory only through checked `BufferHandle`
+ranges and leases. None of those target types is implemented by Issue #78.
+Until a later implementation slice updates code, ABI, tests, and this
+current-fact document together, the structure, stride, allocation, device, and
+view contracts above remain authoritative.
+
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
 

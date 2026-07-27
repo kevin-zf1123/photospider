@@ -189,3 +189,20 @@ boundary while superseding the implicit details. It is authoritative for Run
 identity and leases, monotonic terminal state, completion routing, target
 `GraphRuntime` non-ownership, ledger token authority, commit races, graph/process
 shutdown scope, and the issue #66–#76 dependency contract.
+
+## Relationship to ADR 0008
+
+[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+extends, rather than reverses, this decision. The injected process execution
+domain owns the target Schema, Facet, Layout, access, conversion, query,
+inference, digest, and execution-provider registries; immutable published
+generations and their leases follow the same prepare, publish, retire, and
+unload discipline as other process-owned execution resources. A `Value`,
+`StorageBinding`, `ReadyFence`, or residency replica does not own workers,
+admission, ready queues, policy authority, or ResourceLedger tokens.
+
+ADR 0008 is authoritative for generic-value and provider-generation contracts.
+ADR 0007 remains authoritative for Run identity, execution admission,
+ready-work release, resource grants, cancellation, commit arbitration, Graph
+close, and process shutdown. Implementing generic values must not restore
+Graph-owned physical executors or create a second execution-resource authority.

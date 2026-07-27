@@ -98,7 +98,7 @@ API，也不会增加第二套 device-capacity ledger；后续 resource executor
 
 ## 与当前文档的关系
 
-ADR 0001 完全有效。Issue #69 至 #75 已取代
+ADR 0001 完全有效。Issue #69 至 #76 已取代
 `docs/kernel-architecture/Policy-and-Execution-Architecture.md` 历史版本中描述的 per-Graph 物理
 所有权与拥有 worker 的 scheduler model：HP、RT、preflight 与 dirty ready work 都会经过注入的
 固定 service。`GraphRuntime` 只拥有复制的 route id/generation；serial-debug、shared-CPU 与
@@ -142,3 +142,17 @@ authority。
 保留本决策的进程级执行方向与 ADR 0001 边界，同时取代原先隐含的细节。Run 身份与 lease、
 单调终态、completion routing、目标 `GraphRuntime` 的非所有权、账本 token 权威、提交竞争、
 Graph/进程 shutdown 范围，以及 issue #66–#76 的依赖契约，均以 ADR 0007 为权威。
+
+## 与 ADR 0008 的关系
+
+[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+扩展而不是推翻本决策。注入的进程执行域拥有目标 Schema、Facet、Layout、access、
+conversion、query、inference、digest 与 execution-provider registry；不可变的已发布
+generation 及其 lease 遵守其他进程级执行资源所采用的 prepare、publish、retire 与 unload
+规则。`Value`、`StorageBinding`、`ReadyFence` 或 residency replica 都不拥有 worker、
+admission、ready queue、policy authority 或 ResourceLedger token。
+
+ADR 0008 是通用 Value 与 provider-generation 契约的权威来源。ADR 0007 继续作为 Run
+identity、execution admission、ready-work release、resource grant、cancellation、commit
+arbitration、Graph close 与 process shutdown 的权威来源。实现通用 Value 时不得恢复 Graph
+拥有的物理 executor，也不得创建第二个 execution-resource authority。

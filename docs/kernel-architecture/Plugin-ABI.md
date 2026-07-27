@@ -533,6 +533,23 @@ profiles:
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
+### Accepted future relationship (not current behavior)
+
+[ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+accepts a separately versioned pure-C provider ABI v3 for Schema, Facet,
+Layout, access, conversion, inference, query, region, digest, and execution
+provider suites. Its C++ SDK will provide RAII wrappers without placing STL,
+exceptions, RTTI, virtual classes, allocator ownership, or `Value` PImpl
+across the DSO boundary. Immutable process-owned provider generations will use
+leases and `Active -> Retiring -> Unloaded` replacement.
+
+That target does not alter the two current boundaries in the table. Operation
+ABI v2 remains the current operation contract until every repository-owned
+operation and installed consumer has migrated. The completion boundary then
+deletes v2, its entry point, SDK, fixtures, and package surface without a
+permanent dual loader, wrapper, alias, forwarding header, or v2-to-v3 shim.
+Policy ABI v1 remains independently versioned and is not renamed to v3.
+
 The operation C-linkage entry name is an identity/generation gate, not a stable
 C data ABI. Binary compatibility still depends on the matching SDK, compiler,
 standard library, C++ ABI, allocator/runtime, exception model, and RTTI

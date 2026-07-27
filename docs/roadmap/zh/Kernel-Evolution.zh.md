@@ -250,21 +250,26 @@ dependency 或 exception 串扰。
 Run destruction 不抛异常，且只会在发布一个 terminal outcome、达到 quiescence、释放全部 lease，
 以及精确释放全部 reservation/grant 后发生。Caller observer 被丢弃不会隐式取消已经 admission 的 work。
 
-### 目标 `GraphRuntime`
+### 截至 Issue #76 的当前 `GraphRuntime`
 
-当前 Issue #75 `GraphRuntime` 拥有 `GraphModel`、graph-scoped runtime state、彼此分离的
+截至 Issue #76，当前 `GraphRuntime` 拥有 `GraphModel`、graph-scoped runtime state、彼此分离的
 graph-state 与 compute-request lane、monotonic `GraphRevision`、revision capture、串行化 commit
-validation/publication、graph event、稳定 graph-instance identity，以及 platform/session metadata。
-Graph-lifetime anchor 仍是目标行为。
+validation/publication、graph event、稳定 graph-instance identity、platform/session metadata，
+以及一个绑定该精确 Graph identity 的 `GraphLifetimeAnchor`。该 anchor 提供 lifecycle admission
+使用的 close coordinator 与 lease root。
 
 它不拥有 Run、admitted-Run index、CPU/device/I/O/plugin worker、process ready store、
 process admission、`ResourceLedger`、`PolicyRegistry`、policy binding 或物理 execution route。
-它只存储复制的 HP 与 RT route id 及其 nonzero generation。Run 可以持有 graph-lifetime lease，
-但不会反转这项所有权。
+Process-owned `ExecutionService` 拥有私有 `RunLifecycleRegistry`；该 registry 拥有
+admitted-Run index 与 admission/Graph-close/process-shutdown lifetime fence。
+`GraphRuntime` 只存储复制的 HP 与 RT route id 及其 nonzero generation。Run 可以持有
+registry-validated Graph lifetime lease，但不会反转任一所有权。
 
 graph-state lane 只在捕获 immutable revision 和执行经过验证的 visible commit 时持有，不覆盖
 长时间 planning/execution。私有 compute-request lane 当前会串行化同一 Graph 的 request，但不
-拥有 executor 或 policy lifetime；目标 registry/lifetime fence 仍是未来行为。
+拥有 executor 或 policy lifetime。Issue #76 registry/lifetime fence 已是当前行为；这里未来工作
+仅限 public cancellation/control surface 与另行批准的后续 execution-domain capability，而不是
+Graph anchor 或 lifecycle registry。
 
 ## 进程执行域
 
@@ -472,29 +477,108 @@ Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML c
 
 ## 通用数据与 Region
 
-引入通用模型期间，`ImageBuffer` 继续作为当前 image payload。目标层次会增量建立：
+当前 baseline：`ImageBuffer`、`DataType`、`Device`、`PixelRect`、`ParameterMap`、
+operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的契约。精确行为记录在
+[内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
+[ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
+[插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
+[内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。以下内容是已接受目标，
+不是当前 runtime object 的描述。
+
+[ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+是完整目标契约的权威来源。其核心分离关系是：
 
 ```text
 Value
-├── DenseTensor
-│   └── ImageView
-├── SparseTensor
-├── DeepImage
-├── PathSet / VectorScene
-└── Structured values
+├── DataDescriptor
+│   ├── exactly one versioned RepresentationSchema
+│   └── zero or more orthogonal versioned Facets
+└── one or more authoritative StorageBindings
+    ├── StorageLayout
+    ├── BufferHandle[]
+    ├── ReadyFence
+    └── AccessProvider lease
 ```
 
-第一条受支持纵向切片是 `DenseTensor + ImageView`，基础包括：
+`DataDescriptor` 是逻辑对象。Allocation、stride、packing、device、byte range、mapping 与
+readiness 是物理 binding fact。`Value` 在唯一的 exclusive `ValueBuilder::seal` 后不可变；
+checked view 会保留完整 Value。稳定 core 通过永久 Schema/Facet/Layout identity、canonical
+versioned payload、纯 nonblocking query、显式 operation 与带 lease 的不可变进程级 provider
+generation 实现扩展。
 
-- `DataDescriptor`：kind、rank、shape、byte stride、element format、plane、channel schema、
-  color/alpha 语义和 quantization；
-- `BufferHandle`：memory domain、device identity、byte range、allocation identity、mutability、
-  release behavior 和 synchronization fence；
-- `Region`：`ImageRect`、`TensorSlice`、object/time range 或 whole value。
+首个 representation 是同构 rank-N DenseTensor。普通图像是
+`DenseTensor + ImageFacet`；channel、color、alpha 与 time 含义都是显式的，绝不从名称推断。
+每个 site 的 variable sample 使用 `VariableSampleField`；OpenEXR Deep 逻辑 value 是
+`VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
+不含 runtime child Value。
 
-FP64、8/16 通道图像、padded row 和 N 维 latent 必须通过验证，不允许静默转为 float32 或猜测
-通道角色。Packed FP4 还需要 bits、packing、quantization block 和 offset-aware region 语义，
-不能建模成每 scalar 一个 byte。
+`ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
+executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
+channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
+而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
+
+`BufferHandle` 是已检查的不可变 byte range。读写需要 lease；已 seal Value 永远不可写。
+Strided、Blocked 与 ProviderDefined Layout 都保留有界 buffer envelope。
+`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，access 是显式
+`Direct | Map | Import | Transfer | Unsupported` plan。Readiness 与 consumer visibility
+是不同义务。
+
+`RegionSet` 是基于显式逻辑 domain key 的有界析取范式。MVP 支持 Whole、Empty、
+ImageRect、TensorSlice 与一个 nonempty clause。Region algebra 返回 Exact、带标签的
+ConservativeSuperset、Unknown、Unsupported 或 TooComplex，而不是静默放大。
+`DataSpec` 描述 descriptor set，并使用 subset、disjointness、conditional runtime guard 或
+`CannotEvaluate`；它绝不授权隐式 conversion 或 device access。
+
+Runtime revision、descriptor/content/Layout digest 与 artifact identity 是不同 identity。
+Persistence 分成 graph document、canonical descriptor envelope、artifact/cache manifest 与
+chunk，以及绝不持久化的 runtime binding。Provider 缺失时，未知但有效的 extension byte 会被
+保留而不被解释。
+
+Public migration 会完整收口，而不是永久保留双重边界：
+
+```text
+ImageBuffer     -> Value + ImageFacet + ImageView
+PixelRect       -> RegionSet atom ImageRect
+Device          -> DeviceBackend + DeviceId + MemoryDomain
+OperationOutput -> named Value outputs
+ParameterMap    -> configuration only
+```
+
+只有精确 record 与自有 consumer 已经存在后，operation provider 才从临时 C++ ABI v2 迁移到
+单独版本化的 pure-C provider ABI v3。完成边界会删除 v2，不保留永久 wrapper、alias、
+forwarding header、dual loader 或 v2-to-v3 shim。Policy ABI v1 保持独立。
+
+### Project 4 实现依赖契约
+
+下表冻结架构顺序，而不是 live completion status。每个链接 Issue 仍是可独立验证的实现切片，
+其 Issue 与 Project field 仍是状态权威。
+
+| 切片 | 交付边界 | 阻塞切片 |
+| --- | --- | --- |
+| [#78 / V-1](https://github.com/kevin-zf1123/photospider/issues/78) | 批准通用数据、内存与 Region ADR；只修改文档 | #63、#65 |
+| [#79 / V-2](https://github.com/kevin-zf1123/photospider/issues/79) | 以 CPU DenseTensor 与 ImageView 跑通一条 operation | #78 |
+| [#80 / V-3](https://github.com/kevin-zf1123/photospider/issues/80) | 贯通 BufferHandle ownership、allocation identity 与 cache | #79 |
+| [#81 / V-4](https://github.com/kevin-zf1123/photospider/issues/81) | 让 ImageRect 与 TensorSlice 经过统一 Region | #79、#72 |
+| [#82 / V-5](https://github.com/kevin-zf1123/photospider/issues/82) | 用 operation metadata 驱动 CPU implementation 与 resource routing | #80、#70 |
+| [#83 / V-6](https://github.com/kevin-zf1123/photospider/issues/83) | 以 fake device 证明 fence、asynchronous completion 与显式 transfer | #80、#81、#82、#70 |
+| [#84 / V-7](https://github.com/kevin-zf1123/photospider/issues/84) | 通过 DeviceExecutorRegistry 跑通一条 Metal operation | #83 |
+| [#85 / V-8](https://github.com/kevin-zf1123/photospider/issues/85) | 实现显式 CPU/GPU transfer、residency 与 stale completion | #84、#74 |
+| [#86 / V-9](https://github.com/kevin-zf1123/photospider/issues/86) | 在 ResourceLedger 中核算 device memory 与 scratch | #84、#70 |
+| [#87 / V-10](https://github.com/kevin-zf1123/photospider/issues/87) | 裁定 compute IO durability 与 completion semantics | #65 |
+| [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | 让 cache 与 codec path 经过 bounded ComputeIoExecutor | #87、#70 |
+| [#89 / V-12](https://github.com/kevin-zf1123/photospider/issues/89) | 验证 multi-channel、FP64、latent 与 stride matrix | #81、#85 |
+| [#90 / V-13](https://github.com/kevin-zf1123/photospider/issues/90) | 跑通一个 packed FP4/quantized DenseTensor slice | #89 |
+
+V-14 是单独的后续依赖中立合成 `VariableSampleField` issue/change。“依赖中立”表示该证明不使用
+OpenEXR 或其他可选 codec；它必须直接验证 registration、unknown byte preservation、
+multi-buffer Layout 与 binding、Region/DataSpec/query、canonical digest、generation
+replacement、lease 与 unload 行为。
+
+V-15 是单独的后续可选 OpenEXR provider/codec issue/change。首个 format 是 single-part
+deep-scanline read/write；它跟随 core 与 V-14 proof，而不是替代 V-14。Deep tiled、multipart
+与混合 shallow/deep part 仍是后续工作。关闭 option 时，kernel、public ABI 与
+dependency-disabled product 中不得出现 OpenEXR header、link、type、symbol、package
+requirement 或 transitive dependency。
 
 ## 异构 Executor
 

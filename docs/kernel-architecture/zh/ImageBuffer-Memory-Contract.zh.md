@@ -166,6 +166,23 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
+### 已接受的未来关系（不是当前行为）
+
+[ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+接受以下未来替换：
+
+```text
+ImageBuffer -> Value + ImageFacet + ImageView
+DataType    -> ElementSemantics + StorageEncoding + QuantizationSchema
+Device      -> DeviceBackend + DeviceId + MemoryDomain
+PixelRect   -> RegionSet atom ImageRect
+```
+
+目标把逻辑 `DataDescriptor` 与物理 `StorageBinding` 分离，并且只通过已检查的
+`BufferHandle` range 与 lease 访问内存。Issue #78 不实现任何这些目标类型。在后续实现切片
+同时更新 code、ABI、test 与本当前事实文档前，上文的 structure、stride、allocation、device
+与 view 契约仍是权威。
+
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
 

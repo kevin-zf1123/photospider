@@ -224,6 +224,19 @@ RT proxy commit 之后。
   `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
+### 已接受的未来关系（不是当前行为）
+
+[ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+接受未来的通用 Value 替换，但不会改变上文任何字段。在后续 no-shim migration 中，命名
+computed output 会变成命名的不可变 `Value` object，graph port constraint 会变成
+`DataSpec`，`ParameterMap` 只保留 configuration 用途。`PixelRect` 最终会在已迁移的公共与
+内部 Region 边界被 `RegionSet` 的 `ImageRect` atom 替换。
+
+在这些实现切片与长期 test 落地前，`NodeOutput` 继续包含 `ImageBuffer` 和命名
+`ParameterMap` data，`ParameterMap` 继续携带当前 connected computed result，当前
+graph/dirty/planning geometry 继续使用 `PixelRect`。本文不会把目标 `Value`、`DataSpec` 或
+`RegionSet` object 写成已经实现的 runtime state。
+
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
 前提下完成 runtime/cache YAML value 边界。剩余 configured-product 与 provider-library
