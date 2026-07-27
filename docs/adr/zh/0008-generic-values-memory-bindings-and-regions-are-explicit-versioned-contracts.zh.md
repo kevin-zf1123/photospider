@@ -78,9 +78,11 @@ seal 一次。成功 seal 会：
 
 Seal 是一次原子写权限转换。如果 `ReadyFence` 已经 terminal，全部 producer 写权限都必须在
 seal 前停止访问存储并退役。如果 fence 仍为 Pending，seal 会把唯一排他写权限转交给私有的
-producer-scoped write capability。只有已登记的异步 producer、fence 或 native owner 可以保留
-该 move-only capability。它绑定精确的 `ValueRevisionId`、provider-generation lease，以及
-预先验证的 `StorageBinding`/Layout/`BufferHandle` envelope。它只能在该 envelope 内完成此前
+producer-scoped write capability。只有已登记的异步 producer，或代表该 producer 执行的
+native owner，可以保留这一 move-only capability；其生命周期与 producer 的 terminal
+fence transition 耦合。该 capability 绑定精确的 `ValueRevisionId`、
+provider-generation lease，以及预先验证的
+`StorageBinding`/Layout/`BufferHandle` envelope。它只能在该 envelope 内完成此前
 已经承诺的 payload 写入；不得改变 descriptor、binding 集合、Layout、allocation/native owner
 或 revision。它绝不公开、不可复制，consumer 也无法取得。
 
@@ -186,8 +188,8 @@ handle 内。
 - `WriteLease`：还要证明 exclusive builder authority 与有效、无重叠的 writable Layout。
 
 Pending producer-scoped write capability 是 seal 时对普通 lease access 的唯一例外。它携带
-相同的 checked、non-overlapping envelope 证明，但只属于已登记的
-producer/fence/native owner，不能通过 sealed `Value` 请求。
+相同的 checked、non-overlapping envelope 证明，但只属于已登记的 producer 或代表该
+producer 执行的 native owner，不能通过 sealed `Value` 请求。
 
 已 seal 的 `Value` 不能发出 `WriteLease`，并且 consumer writable access 始终被拒绝。Direct
 CPU pointer、mapped pointer、imported resource 与 transfer destination 只存在于对应 lease

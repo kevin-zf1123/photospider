@@ -653,9 +653,10 @@ channel-role guessing.
 `BufferHandle` is a checked immutable byte range. Consumer reads and ordinary
 builder writes require leases; sealed Values never issue `WriteLease`, and
 consumer writes are always rejected. A sealed payload whose fence remains
-Pending may be completed only by the registered producer/fence/native owner
-through its noncopyable producer-scoped capability, within the prevalidated
-binding/Layout/handle envelope. The producer retires that capability
+Pending may be completed only by the registered producer, or a native owner
+acting as that producer, through its noncopyable producer-scoped capability,
+within the prevalidated binding/Layout/handle envelope. The producer retires
+that capability
 happens-before publishing Ready, Failed, or ProducerCancelled. Pending, Failed,
 and ProducerCancelled expose no consumer-readable payload; Ready still requires
 `AccessPlan` visibility before `ReadLease`. Strided, Blocked, and

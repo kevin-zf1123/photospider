@@ -521,8 +521,9 @@ channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 �
 
 `BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通 builder write 需要 lease；
 已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。Fence 仍为 Pending 的
-sealed payload 只能由已登记的 producer/fence/native owner 通过其不可复制的 producer-scoped
-capability，在预先验证的 binding/Layout/handle envelope 内完成。Producer capability 退役
+sealed payload 只能由已登记的 producer，或代表该 producer 执行的 native owner，通过其
+不可复制的 producer-scoped capability，在预先验证的 binding/Layout/handle envelope 内
+完成。Producer capability 退役
 happen-before Ready、Failed 或 ProducerCancelled 发布。Pending、Failed 与
 ProducerCancelled 不暴露 consumer-readable payload；Ready 之后仍须由 `AccessPlan` 完成
 visibility，才能取得 `ReadLease`。Strided、Blocked 与 ProviderDefined Layout 都保留有界

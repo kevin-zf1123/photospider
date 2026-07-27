@@ -96,9 +96,10 @@ Seal is one atomic write-authority transition. If the `ReadyFence` is already
 terminal, every producer write authority must have stopped accessing storage
 and retired before seal. If the fence is Pending, seal transfers the one
 exclusive write authority to a private producer-scoped write capability. Only
-the registered asynchronous producer, fence, or native owner may retain that
-move-only capability. It is bound to the exact `ValueRevisionId`,
-provider-generation lease, and prevalidated
+the registered asynchronous producer, or a native owner acting as that
+producer, may retain that move-only capability. Its lifetime is coupled to the
+producer's terminal fence transition. It is bound to the exact
+`ValueRevisionId`, provider-generation lease, and prevalidated
 `StorageBinding`/Layout/`BufferHandle` envelope. It may finish only the
 previously committed payload writes inside that envelope; it cannot change the
 descriptor, binding set, Layout, allocation/native owner, or revision. It is
@@ -225,8 +226,8 @@ Public builder and consumer payload access requires:
 
 A Pending producer-scoped write capability is the only seal-time exception to
 ordinary lease access. It carries the same checked, non-overlapping envelope
-proof but is private to the registered producer/fence/native owner and cannot
-be requested through a sealed `Value`.
+proof but is private to the registered producer or a native owner acting as
+that producer and cannot be requested through a sealed `Value`.
 
 A sealed `Value` cannot issue `WriteLease`, and consumer writable access is
 always rejected. Direct CPU pointers, mapped pointers, imported resources, and
