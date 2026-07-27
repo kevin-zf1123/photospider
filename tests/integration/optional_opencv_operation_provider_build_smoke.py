@@ -236,6 +236,14 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "ValueDeepCopiesLvaluePayloadShapeAndStrides"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ValueDoesNotAdoptMovedInputAllocations"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "DenseInvertInferencePreservesExactLogicalDescriptor"
         ),
         (

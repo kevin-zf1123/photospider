@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <variant>
@@ -165,6 +166,72 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(std::to_integer<std::uint8_t>(*image.channel_data(2U, 1U, 1U)),
             12U);
   EXPECT_THROW(image.channel_data(3U, 0U, 0U), std::out_of_range);
+}
+
+TEST(CpuDenseTensorImageOperation,
+     ValueDeepCopiesLvaluePayloadShapeAndStrides) {
+  DenseTensorDescriptor descriptor{{2U, 3U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  StridedLayout layout{{4, 1}};
+  std::vector<std::byte> storage{std::byte{1U}, std::byte{2U}, std::byte{3U},
+                                 std::byte{0U}, std::byte{4U}, std::byte{5U},
+                                 std::byte{6U}};
+
+  const Value value =
+      Value::from_cpu_dense_tensor(descriptor, std::nullopt, layout, storage);
+  ASSERT_NE(value.dense_tensor_descriptor().shape.data(),
+            descriptor.shape.data());
+  ASSERT_NE(value.strided_layout().byte_strides.data(),
+            layout.byte_strides.data());
+  ASSERT_NE(value.data(), storage.data());
+
+  descriptor.shape[0] = 9U;
+  layout.byte_strides[0] = 9;
+  storage[0] = std::byte{9U};
+
+  EXPECT_EQ(value.dense_tensor_descriptor().shape,
+            (std::vector<std::size_t>{2U, 3U}));
+  EXPECT_EQ(value.strided_layout().byte_strides,
+            (std::vector<std::ptrdiff_t>{4, 1}));
+  EXPECT_EQ(std::to_integer<std::uint8_t>(value.data()[0]), 1U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(value.data()[6]), 6U);
+}
+
+TEST(CpuDenseTensorImageOperation, ValueDoesNotAdoptMovedInputAllocations) {
+  DenseTensorDescriptor descriptor{{2U, 3U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  StridedLayout layout{{4, 1}};
+  std::vector<std::byte> storage{std::byte{1U}, std::byte{2U}, std::byte{3U},
+                                 std::byte{0U}, std::byte{4U}, std::byte{5U},
+                                 std::byte{6U}};
+  // Capture integer address evidence before move. The old allocations may be
+  // released when the call returns and are never read or dereferenced below.
+  const std::uintptr_t shape_allocation =
+      reinterpret_cast<std::uintptr_t>(descriptor.shape.data());
+  const std::uintptr_t stride_allocation =
+      reinterpret_cast<std::uintptr_t>(layout.byte_strides.data());
+  const std::uintptr_t storage_allocation =
+      reinterpret_cast<std::uintptr_t>(storage.data());
+
+  const Value value =
+      Value::from_cpu_dense_tensor(std::move(descriptor), std::nullopt,
+                                   std::move(layout), std::move(storage));
+
+  EXPECT_NE(reinterpret_cast<std::uintptr_t>(
+                value.dense_tensor_descriptor().shape.data()),
+            shape_allocation);
+  EXPECT_NE(reinterpret_cast<std::uintptr_t>(
+                value.strided_layout().byte_strides.data()),
+            stride_allocation);
+  EXPECT_NE(reinterpret_cast<std::uintptr_t>(value.data()), storage_allocation);
+  EXPECT_EQ(value.dense_tensor_descriptor().shape,
+            (std::vector<std::size_t>{2U, 3U}));
+  EXPECT_EQ(value.strided_layout().byte_strides,
+            (std::vector<std::ptrdiff_t>{4, 1}));
+  EXPECT_EQ(std::to_integer<std::uint8_t>(value.data()[0]), 1U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(value.data()[6]), 6U);
 }
 
 TEST(CpuDenseTensorImageOperation,

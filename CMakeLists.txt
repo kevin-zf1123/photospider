@@ -1307,6 +1307,30 @@ set(PHOTOSPIDER_BUILD_SMOKE_LABEL "build-smoke")
 if(BUILD_TESTING)
     enable_testing()
     find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    include(GoogleTest)
+    find_package(GTest REQUIRED)
+    set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
+    file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+
+    # This production-chain integration target is dependency-neutral and must
+    # remain buildable when both optional image/document capabilities are off.
+    add_executable(test_cpu_dense_tensor_image_operation
+        tests/integration/test_cpu_dense_tensor_image_operation.cpp)
+    set_target_properties(test_cpu_dense_tensor_image_operation PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+    target_include_directories(test_cpu_dense_tensor_image_operation PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/tests")
+    target_link_libraries(test_cpu_dense_tensor_image_operation PRIVATE
+        photospider
+        GTest::gtest
+        GTest::gtest_main)
+    gtest_discover_tests(test_cpu_dense_tensor_image_operation
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+
     add_test(NAME DependencyDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/dependency_disabled_install_smoke.py"
@@ -1323,11 +1347,6 @@ if(BUILD_TESTING)
 endif()
 
 if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
-    set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
-    file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
-
-    include(GoogleTest)
-    find_package(GTest REQUIRED)
     macro(add_ps_test TEST_NAME SOURCE_FILE)
         set(PHOTOSPIDER_TEST_PRODUCT_TARGET photospider)
         if(NOT "${ARGV2}" STREQUAL "")
@@ -1366,12 +1385,6 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         target_compile_definitions(test_kernel_contracts PRIVATE
             PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     endif()
-
-    add_ps_test(test_cpu_dense_tensor_image_operation
-        tests/integration/test_cpu_dense_tensor_image_operation.cpp)
-    gtest_discover_tests(test_cpu_dense_tensor_image_operation
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-        PROPERTIES TIMEOUT 30)
 
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)

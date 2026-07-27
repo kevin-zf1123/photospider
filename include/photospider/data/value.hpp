@@ -157,17 +157,23 @@ class Value final {
    * optional distinct in-rank image axes, one positive stride per axis,
    * checked envelope arithmetic, and exact storage size before publication.
    *
-   * @param descriptor Concrete logical tensor descriptor.
+   * @param descriptor Concrete logical tensor descriptor copied into isolated
+   *        immutable state after validation.
    * @param image_facet Optional explicit image-axis mapping.
-   * @param layout Physical signed byte strides.
-   * @param storage Exclusively owned bytes consumed by the returned Value.
-   * @return Valid immutable Value sharing no mutable input storage.
+   * @param layout Physical signed byte strides copied into isolated immutable
+   *        state after validation.
+   * @param storage Exclusively owned input bytes consumed as the source for an
+   *        isolated immutable allocation.
+   * @return Valid immutable Value whose shape, strides, and payload allocations
+   *         are distinct from every caller-owned input allocation.
    * @throws std::invalid_argument for malformed descriptors, facets, layouts,
    *         or a storage-size mismatch.
    * @throws std::overflow_error when the required address envelope cannot be
    *         represented by std::size_t.
    * @throws std::bad_alloc when immutable state allocation fails.
-   * @note Validation finishes before the immutable PImpl is published.
+   * @note Validation finishes before the immutable PImpl is published. The
+   *       published state deep-copies shape, strides, and payload so pointers
+   *       retained before an lvalue or rvalue call never alias the Value.
    */
   static Value from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
                                      std::optional<ImageFacet> image_facet,

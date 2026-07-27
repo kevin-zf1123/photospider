@@ -1,4 +1,5 @@
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -119,10 +120,10 @@ bool is_image_axis(const ImageFacet& facet, std::size_t axis) noexcept {
 /**
  * @brief Immutable implementation for one validated CPU DenseTensor Value.
  *
- * @throws std::bad_alloc when vector members are moved from allocators with
- *         incompatible state; current standard allocators move without
- *         allocation.
- * @note Instances are published only through shared_ptr<const Impl>.
+ * @throws std::bad_alloc when deep-copying shape, strides, or storage fails.
+ * @note Instances are published only through shared_ptr<const Impl>. Every
+ *       vector allocation is distinct from the validated constructor input,
+ *       preventing caller-retained writable pointers from aliasing a Value.
  */
 struct Value::Impl final {
   /** @brief Validated concrete logical descriptor. */
@@ -138,22 +139,26 @@ struct Value::Impl final {
   std::vector<std::byte> storage;
 
   /**
-   * @brief Moves already validated Value state into immutable ownership.
+   * @brief Deep-copies already validated state into isolated immutable storage.
    *
-   * @param descriptor_in Logical descriptor.
-   * @param image_facet_in Optional image facet.
-   * @param layout_in Physical byte layout.
-   * @param storage_in Exact owned byte envelope.
-   * @throws std::bad_alloc only for allocator-incompatible vector moves.
-   * @note The caller completes validation before construction.
+   * @param descriptor_in Logical descriptor whose shape allocation is not
+   *        retained.
+   * @param image_facet_in Optional image facet copied by value.
+   * @param layout_in Physical byte layout whose stride allocation is not
+   *        retained.
+   * @param storage_in Exact byte envelope whose allocation is not retained.
+   * @throws std::bad_alloc when any vector deep copy fails.
+   * @note The caller completes validation before construction and retains every
+   *       input allocation until all copies finish. A construction exception
+   *       publishes no partial Value.
    */
-  Impl(DenseTensorDescriptor descriptor_in,
-       std::optional<ImageFacet> image_facet_in, StridedLayout layout_in,
-       std::vector<std::byte> storage_in)
-      : descriptor(std::move(descriptor_in)),
-        image_facet(std::move(image_facet_in)),
-        layout(std::move(layout_in)),
-        storage(std::move(storage_in)) {}
+  Impl(const DenseTensorDescriptor& descriptor_in,
+       const std::optional<ImageFacet>& image_facet_in,
+       const StridedLayout& layout_in, const std::vector<std::byte>& storage_in)
+      : descriptor(descriptor_in),
+        image_facet(image_facet_in),
+        layout(layout_in),
+        storage(storage_in) {}
 };
 
 /** @copydoc ps::dense_tensor_element_bytes */
@@ -204,9 +209,8 @@ Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
         "DenseTensor storage size must equal its exact byte envelope.");
   }
 
-  return Value(std::make_shared<const Impl>(
-      std::move(descriptor), std::move(image_facet), std::move(layout),
-      std::move(storage)));
+  return Value(
+      std::make_shared<const Impl>(descriptor, image_facet, layout, storage));
 }
 
 /** @copydoc ps::Value::valid */

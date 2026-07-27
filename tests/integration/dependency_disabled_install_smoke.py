@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the installed OpenCV/YAML-disabled Host product."""
+"""Exercise the OpenCV/YAML-disabled dense runtime and installed Host product."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
             f"source={cached_source}, build={cached_build}"
         )
     expected_values = {
-        "BUILD_TESTING": "OFF",
+        "BUILD_TESTING": "ON",
         "PHOTOSPIDER_BUILD_IPC": "OFF",
         "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
         "PHOTOSPIDER_ENABLE_YAML": "OFF",
@@ -170,6 +170,47 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
         raise RuntimeError(
             f"reusable producer build type is not requested {config}"
         )
+
+
+def configured_dense_test_executable(build: Path, config: str) -> Path:
+    """@brief Resolve the built dependency-neutral dense integration binary.
+
+    @param build Configured dependency-disabled producer build directory.
+    @param config Requested single- or multi-config build configuration.
+    @return Expected executable path for the cached generator mode.
+    @throws OSError If the producer cache cannot be read.
+    @throws RuntimeError If configuration metadata is missing or contradicts
+      the requested configuration.
+    @note The caller executes the returned path directly, so a missing or
+      non-runnable target fails through the ordinary process-start boundary.
+    """
+
+    cache = cmake_cache_values(build)
+    configuration_types = cache.get("CMAKE_CONFIGURATION_TYPES", "")
+    if configuration_types:
+        available = [
+            candidate.strip()
+            for candidate in configuration_types.split(";")
+            if candidate.strip()
+        ]
+        if config not in available:
+            raise RuntimeError(
+                "dependency-disabled test configuration mismatch: "
+                f"requested {config}, available {available}"
+            )
+        output_directory = build / "tests" / config
+    else:
+        build_type = cache.get("CMAKE_BUILD_TYPE")
+        if build_type != config:
+            raise RuntimeError(
+                "dependency-disabled test build type mismatch: "
+                f"requested {config}, got {build_type}"
+            )
+        output_directory = build / "tests"
+    executable_suffix = ".exe" if sys.platform == "win32" else ""
+    return output_directory / (
+        "test_cpu_dense_tensor_image_operation" + executable_suffix
+    )
 
 
 def write_component_probe(source: Path, *, required: bool) -> None:
@@ -319,21 +360,23 @@ def write_consumer(source: Path) -> None:
 
 
 def main() -> int:
-    """@brief Build, install, and consume the dependency-disabled profile.
+    """@brief Execute, install, and consume the dependency-disabled profile.
 
     @return Zero only when the kernel aggregate and Host product build without
-      OpenCV/YAML discovery, installation omits their public/export surfaces,
-      optional/required component semantics are correct, and the real consumer
-      exercises neutral image and Host behavior.
+      OpenCV/YAML discovery, the core dense operation executes through its
+      production registry/executor chain, installation omits optional
+      public/export surfaces, component semantics are correct, and the real
+      consumer exercises neutral image and Host behavior.
     @throws OSError For filesystem or process-start failures.
     @throws subprocess.CalledProcessError For required command failures.
     @throws ValueError If transient paths overlap protected paths.
     @throws RuntimeError If any build, export, component, or runtime invariant
       contradicts the dependency-disabled profile.
-    @note A validated ``--producer-build`` may be reused without configuration
-      or compilation. Installation and consumer artifacts always remain under
-      ``work`` and are removed before return. On Darwin, every child configure
-      inherits the selected producer's meaningful
+    @note A validated, already-built ``--producer-build`` may be reused without
+      configuration or compilation. Its dependency-neutral dense integration
+      binary is still executed. Installation and consumer artifacts always
+      remain under ``work`` and are removed before return. On Darwin, every
+      child configure inherits the selected producer's meaningful
       ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
       receive no macOS-specific option.
     """
@@ -385,7 +428,7 @@ def main() -> int:
                     str(repo),
                     "-B",
                     str(build),
-                    "-DBUILD_TESTING=OFF",
+                    "-DBUILD_TESTING=ON",
                     "-DPHOTOSPIDER_BUILD_IPC=OFF",
                     "-DPHOTOSPIDER_ENABLE_OPENCV=OFF",
                     "-DPHOTOSPIDER_ENABLE_YAML=OFF",
@@ -403,6 +446,7 @@ def main() -> int:
                     "--target",
                     "photospider_kernel",
                     "photospider",
+                    "test_cpu_dense_tensor_image_operation",
                     "--config",
                     args.config,
                     "--parallel",
@@ -410,6 +454,11 @@ def main() -> int:
                 ],
                 repo,
             )
+
+        dense_test_executable = configured_dense_test_executable(
+            build, args.config
+        )
+        run([str(dense_test_executable)], repo)
 
         child_architecture_arguments = (
             producer_osx_architecture_arguments(build)

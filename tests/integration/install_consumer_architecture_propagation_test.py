@@ -1563,6 +1563,7 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
             cache = base_producer_cache(repo, producer)
             cache.update(
                 {
+                    "BUILD_TESTING": "ON",
                     "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
                     "PHOTOSPIDER_ENABLE_YAML": "OFF",
                     "PHOTOSPIDER_BUILD_GRAPH_CLI": "OFF",
