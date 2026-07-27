@@ -79,22 +79,38 @@ Copying shares immutable control, allocation owners, and provider-generation
 leases; it does not copy payload bytes. Consumers cannot subclass `Value` or
 replace its descriptor, bindings, readiness, revision, or leases.
 
-`ValueBuilder` is move-only and owns the only write authority for storage under
-construction. It may abandon construction or seal exactly once. A successful
-seal:
+`ValueBuilder` is move-only and owns the only ordinary write authority for
+storage under construction. It may abandon construction or seal exactly once.
+A successful seal:
 
 1. proves that the descriptor is fully concrete;
 2. validates the descriptor, Layout, handles, fence, access, and provider
    envelope;
-3. ends all `WriteLease` values and prohibits later writes;
-4. creates a fresh process-local `ValueRevisionId`; and
-5. publishes an immutable `Value`.
+3. creates a fresh process-local `ValueRevisionId`;
+4. atomically revokes every builder- or caller-held `WriteLease` and every
+   public or consumer path that could acquire write authority; and
+5. publishes an immutable `Value` after completing the producer-authority
+   transition below.
+
+Seal is one atomic write-authority transition. If the `ReadyFence` is already
+terminal, every producer write authority must have stopped accessing storage
+and retired before seal. If the fence is Pending, seal transfers the one
+exclusive write authority to a private producer-scoped write capability. Only
+the registered asynchronous producer, fence, or native owner may retain that
+move-only capability. It is bound to the exact `ValueRevisionId`,
+provider-generation lease, and prevalidated
+`StorageBinding`/Layout/`BufferHandle` envelope. It may finish only the
+previously committed payload writes inside that envelope; it cannot change the
+descriptor, binding set, Layout, allocation/native owner, or revision. It is
+never public, copyable, or obtainable by a consumer.
 
 The payload may still be pending behind `ReadyFence`; the descriptor may not
-be pending. `ImageView` and `DenseTensorView` are checked final facades that
-retain the complete `Value`. Their construction either validates the required
-Schema and Facets or returns a typed failure. They never borrow a naked
-descriptor or allocation.
+be pending. Pending means only that the registered producer is completing the
+already committed payload through its restricted capability; it does not make
+the sealed `Value` generally writable. `ImageView` and `DenseTensorView` are
+checked final facades that retain the complete `Value`. Their construction
+either validates the required Schema and Facets or returns a typed failure.
+They never borrow a naked descriptor or allocation.
 
 `StructuredValueSchema` v1 is self-contained. Its descriptor may recursively
 describe fields, but one v1 `Value` does not contain runtime child `Value`
@@ -200,16 +216,22 @@ overlapping ranges only when Layout and access rules permit it. Core validation
 uses checked arithmetic to prove that every declared envelope is within its
 handle.
 
-Payload access requires:
+Public builder and consumer payload access requires:
 
 - `ReadLease`, retaining allocation, provider generation, mapping/import state,
   visibility obligations, and immutable access; or
 - `WriteLease`, additionally proving exclusive builder authority and a valid
   non-overlapping writable Layout.
 
-A sealed `Value` cannot issue `WriteLease`. Direct CPU pointers, mapped
-pointers, imported resources, and transfer destinations exist only within the
-corresponding lease and access-provider contract.
+A Pending producer-scoped write capability is the only seal-time exception to
+ordinary lease access. It carries the same checked, non-overlapping envelope
+proof but is private to the registered producer/fence/native owner and cannot
+be requested through a sealed `Value`.
+
+A sealed `Value` cannot issue `WriteLease`, and consumer writable access is
+always rejected. Direct CPU pointers, mapped pointers, imported resources, and
+transfer destinations exist only within the corresponding lease or private
+producer capability and access-provider contract.
 
 The first core Layout families are:
 
@@ -252,7 +274,8 @@ serialized into `Value` nor treated as authority. A stale replica cannot
 satisfy a newer revision.
 
 `ReadyFence` is an immutable copyable observer. `FenceCompleter` is the
-move-only producer capability. Exactly one terminal transition is allowed:
+move-only terminal-publication capability; it does not by itself grant payload
+write access. Exactly one terminal transition is allowed:
 
 ```text
 Pending -> Ready
@@ -265,10 +288,20 @@ nonblocking. Waits are scheduled asynchronously through the owning execution
 or device mechanism; CPU workers do not block on device fences. Cancelling a
 waiter does not mutate the shared fence or cancel the producer.
 
+Before publishing Ready, Failed, or ProducerCancelled, the producer must stop
+all payload access and release or revoke its producer-scoped write capability.
+All producer writes and that capability's retirement happen-before observers
+can see the terminal transition. Publishing a terminal state while the
+capability can still access storage is invalid.
+
 `Ready` reports producer completion only. It does not establish host mapping,
 cache coherency, queue-family ownership, or consumer visibility; those duties
-belong to `AccessPlan`. Fences, pending waits, access scopes, and native owners
-retain the defining provider-generation lease.
+belong to `AccessPlan`. Pending, Failed, and ProducerCancelled permit immutable
+metadata and diagnostics but cannot yield a consumer `ReadLease` or
+payload-visible access. After Ready, consumer reads still require the selected
+`AccessPlan` to discharge its visibility obligations before issuing the
+`ReadLease`. Fences, pending waits, access scopes, private producer
+capabilities, and native owners retain the defining provider-generation lease.
 
 A `ComputeRun` retains request-local immutable Values and their authoritative
 bindings. Settlement accounts for every output's terminal fence state,

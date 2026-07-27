@@ -66,19 +66,29 @@ envelope 与交叉引用；匹配的 provider 验证 Schema、Facet、Layout 和
 allocation owner 与 provider-generation lease，不会复制 payload byte。Consumer 不能继承
 `Value`，也不能替换其 descriptor、binding、readiness、revision 或 lease。
 
-`ValueBuilder` 只能 move，并且拥有正在构造的存储的唯一写权限。它可以放弃构造，或精确 seal
-一次。成功 seal 会：
+`ValueBuilder` 只能 move，并且拥有正在构造的存储的唯一普通写权限。它可以放弃构造，或精确
+seal 一次。成功 seal 会：
 
 1. 证明 descriptor 已完全具体化；
 2. 验证 descriptor、Layout、handle、fence、access 与 provider envelope；
-3. 结束全部 `WriteLease` 并禁止后续写入；
-4. 创建新的进程本地 `ValueRevisionId`；以及
-5. 发布不可变 `Value`。
+3. 创建新的进程本地 `ValueRevisionId`；
+4. 原子撤销 builder 或 caller 持有的每个 `WriteLease`，以及能够取得写权限的每条公共或
+   consumer 路径；以及
+5. 在完成下述 producer 权限转换后发布不可变 `Value`。
 
-Payload 仍可在 `ReadyFence` 后处于 pending；descriptor 不得 pending。`ImageView` 与
-`DenseTensorView` 是经过检查的 final facade，并保留完整 `Value`。构造时要么验证必需的
-Schema 与 Facet，要么返回 typed failure。它们绝不借用可能失去 owner 的裸 descriptor 或
-allocation。
+Seal 是一次原子写权限转换。如果 `ReadyFence` 已经 terminal，全部 producer 写权限都必须在
+seal 前停止访问存储并退役。如果 fence 仍为 Pending，seal 会把唯一排他写权限转交给私有的
+producer-scoped write capability。只有已登记的异步 producer、fence 或 native owner 可以保留
+该 move-only capability。它绑定精确的 `ValueRevisionId`、provider-generation lease，以及
+预先验证的 `StorageBinding`/Layout/`BufferHandle` envelope。它只能在该 envelope 内完成此前
+已经承诺的 payload 写入；不得改变 descriptor、binding 集合、Layout、allocation/native owner
+或 revision。它绝不公开、不可复制，consumer 也无法取得。
+
+Payload 仍可在 `ReadyFence` 后处于 pending；descriptor 不得 pending。Pending 只表示已登记
+producer 正通过其受限 capability 完成已承诺的 payload，不会使 sealed `Value` 变成一般可写。
+`ImageView` 与 `DenseTensorView` 是经过检查的 final facade，并保留完整 `Value`。构造时要么
+验证必需的 Schema 与 Facet，要么返回 typed failure。它们绝不借用可能失去 owner 的裸
+descriptor 或 allocation。
 
 `StructuredValueSchema` v1 是自包含的。它的 descriptor 可以递归描述字段，但一个 v1
 `Value` 不包含 runtime child `Value` object。独立结果使用命名 output port 或不带 identity 的
@@ -169,14 +179,19 @@ behavior 与 lifetime。`BufferHandle` 是 allocation 中已检查 byte range �
 或重叠的 range。Core validation 使用 checked arithmetic 证明每个声明的 envelope 都位于其
 handle 内。
 
-Payload access 要求：
+公共 builder 与 consumer 的 payload access 要求：
 
 - `ReadLease`：保留 allocation、provider generation、mapping/import state、visibility
   obligation 与不可变访问；或
 - `WriteLease`：还要证明 exclusive builder authority 与有效、无重叠的 writable Layout。
 
-已 seal 的 `Value` 不能发出 `WriteLease`。Direct CPU pointer、mapped pointer、imported
-resource 与 transfer destination 只存在于对应 lease 和 access-provider contract 内。
+Pending producer-scoped write capability 是 seal 时对普通 lease access 的唯一例外。它携带
+相同的 checked、non-overlapping envelope 证明，但只属于已登记的
+producer/fence/native owner，不能通过 sealed `Value` 请求。
+
+已 seal 的 `Value` 不能发出 `WriteLease`，并且 consumer writable access 始终被拒绝。Direct
+CPU pointer、mapped pointer、imported resource 与 transfer destination 只存在于对应 lease
+或私有 producer capability 和 access-provider contract 内。
 
 首批 core Layout family 是：
 
@@ -212,8 +227,8 @@ access constraint 属于 `KernelCapability`，不属于 `DataSpec`。
 `ValueRevisionId` 索引的额外 replica；这些 replica 既不会序列化进 `Value`，也不会被视为
 权威。Stale replica 不能满足更新的 revision。
 
-`ReadyFence` 是不可变、可复制的 observer；`FenceCompleter` 是只能 move 的 producer
-capability。精确允许一次 terminal transition：
+`ReadyFence` 是不可变、可复制的 observer；`FenceCompleter` 是只能 move 的 terminal
+publication capability，本身不授予 payload write access。精确允许一次 terminal transition：
 
 ```text
 Pending -> Ready
@@ -225,9 +240,17 @@ Pending -> Ready
 execution 或 device mechanism 异步调度；CPU worker 不会阻塞等待 device fence。取消某个
 waiter 不会修改共享 fence，也不会取消 producer。
 
+在发布 Ready、Failed 或 ProducerCancelled 前，producer 必须停止全部 payload access，并释放
+或撤销 producer-scoped write capability。全部 producer 写入与该 capability 的退役
+happen-before observer 可以看到 terminal transition。在 capability 仍可访问存储时发布
+terminal state 属于无效行为。
+
 `Ready` 只报告 producer completion。它不建立 host mapping、cache coherency、queue-family
-ownership 或 consumer visibility；这些职责属于 `AccessPlan`。Fence、pending wait、
-access scope 与 native owner 都保留定义它们的 provider-generation lease。
+ownership 或 consumer visibility；这些职责属于 `AccessPlan`。Pending、Failed 与
+ProducerCancelled 允许访问不可变 metadata 与 diagnostic，但不能产生 consumer `ReadLease` 或
+payload-visible access。Ready 之后，consumer read 仍必须由选定 `AccessPlan` 完成其 visibility
+obligation，之后才能签发 `ReadLease`。Fence、pending wait、access scope、私有 producer
+capability 与 native owner 都保留定义它们的 provider-generation lease。
 
 `ComputeRun` 会保留 request-local 不可变 Value 及其 authoritative binding。Settlement 会核算
 每个 output 的 terminal fence state、provider-generation lease、access obligation 与

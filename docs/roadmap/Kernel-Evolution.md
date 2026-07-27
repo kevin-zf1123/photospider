@@ -626,11 +626,15 @@ Value
 ```
 
 `DataDescriptor` is logical. Allocation, stride, packing, device, byte range,
-mapping, and readiness are physical binding facts. `Value` is immutable after
-one exclusive `ValueBuilder::seal`; checked views retain the complete Value.
-The stable core is extensible through permanent Schema/Facet/Layout identities,
-canonical versioned payloads, pure nonblocking queries, explicit operations,
-and immutable process-owned provider generations with leases.
+mapping, and readiness are physical binding facts. `Value` is logically and
+structurally immutable after one exclusive `ValueBuilder::seal`; checked views
+retain the complete Value. Seal revokes every ordinary builder/caller
+`WriteLease` and every consumer write path. A Pending producer may retain only
+the unique private write capability transferred atomically at seal for its
+prevalidated binding envelope. The stable core is extensible through permanent
+Schema/Facet/Layout identities, canonical versioned payloads, pure nonblocking
+queries, explicit operations, and immutable process-owned provider generations
+with leases.
 
 The first representation is homogeneous rank-N DenseTensor. An ordinary image
 is `DenseTensor + ImageFacet`; channel, color, alpha, and time meaning is
@@ -646,12 +650,18 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-`BufferHandle` is a checked immutable byte range. Reads and writes require
-leases; sealed Values are never writable. Strided, Blocked, and
+`BufferHandle` is a checked immutable byte range. Consumer reads and ordinary
+builder writes require leases; sealed Values never issue `WriteLease`, and
+consumer writes are always rejected. A sealed payload whose fence remains
+Pending may be completed only by the registered producer/fence/native owner
+through its noncopyable producer-scoped capability, within the prevalidated
+binding/Layout/handle envelope. The producer retires that capability
+happens-before publishing Ready, Failed, or ProducerCancelled. Pending, Failed,
+and ProducerCancelled expose no consumer-readable payload; Ready still requires
+`AccessPlan` visibility before `ReadLease`. Strided, Blocked, and
 ProviderDefined Layouts retain bounded buffer envelopes. `DeviceBackend`,
 `DeviceId`, and `MemoryDomain` are separate, and access is an explicit
-`Direct | Map | Import | Transfer | Unsupported` plan. Readiness and consumer
-visibility are separate obligations.
+`Direct | Map | Import | Transfer | Unsupported` plan.
 
 `RegionSet` is bounded DNF over explicit logical domain keys. The MVP supports
 Whole, Empty, ImageRect, TensorSlice, and one nonempty clause. Region algebra

@@ -501,10 +501,12 @@ Value
 ```
 
 `DataDescriptor` 是逻辑对象。Allocation、stride、packing、device、byte range、mapping 与
-readiness 是物理 binding fact。`Value` 在唯一的 exclusive `ValueBuilder::seal` 后不可变；
-checked view 会保留完整 Value。稳定 core 通过永久 Schema/Facet/Layout identity、canonical
-versioned payload、纯 nonblocking query、显式 operation 与带 lease 的不可变进程级 provider
-generation 实现扩展。
+readiness 是物理 binding fact。`Value` 在唯一的 exclusive `ValueBuilder::seal` 后保持逻辑和
+结构不可变；checked view 会保留完整 Value。Seal 会撤销每个普通 builder/caller
+`WriteLease` 和每条 consumer 写路径。Pending producer 只能保留 seal 时原子转交的唯一私有写
+capability，并且只能用于其预先验证的 binding envelope。稳定 core 通过永久
+Schema/Facet/Layout identity、canonical versioned payload、纯 nonblocking query、显式
+operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 
 首个 representation 是同构 rank-N DenseTensor。普通图像是
 `DenseTensor + ImageFacet`；channel、color、alpha 与 time 含义都是显式的，绝不从名称推断。
@@ -517,11 +519,15 @@ executable 与 convertible 支持也彼此独立，而且 conversion 始终显�
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-`BufferHandle` 是已检查的不可变 byte range。读写需要 lease；已 seal Value 永远不可写。
-Strided、Blocked 与 ProviderDefined Layout 都保留有界 buffer envelope。
-`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，access 是显式
-`Direct | Map | Import | Transfer | Unsupported` plan。Readiness 与 consumer visibility
-是不同义务。
+`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通 builder write 需要 lease；
+已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。Fence 仍为 Pending 的
+sealed payload 只能由已登记的 producer/fence/native owner 通过其不可复制的 producer-scoped
+capability，在预先验证的 binding/Layout/handle envelope 内完成。Producer capability 退役
+happen-before Ready、Failed 或 ProducerCancelled 发布。Pending、Failed 与
+ProducerCancelled 不暴露 consumer-readable payload；Ready 之后仍须由 `AccessPlan` 完成
+visibility，才能取得 `ReadLease`。Strided、Blocked 与 ProviderDefined Layout 都保留有界
+buffer envelope。`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，access 是显式
+`Direct | Map | Import | Transfer | Unsupported` plan。
 
 `RegionSet` 是基于显式逻辑 domain key 的有界析取范式。MVP 支持 Whole、Empty、
 ImageRect、TensorSlice 与一个 nonempty clause。Region algebra 返回 Exact、带标签的
