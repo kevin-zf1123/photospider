@@ -149,6 +149,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     core/inspection_types.hpp
     core/result_types.hpp
     data/image_view.hpp
+    data/region.hpp
     data/value.hpp
     host/compute_request.hpp
     host/event_stream.hpp
@@ -173,7 +174,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 21)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 22)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -242,6 +243,7 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
 # embedded product dependency.
 add_library(photospider_operation_runtime SHARED
     src/lib/core/image_buffer.cpp
+    src/lib/core/region.cpp
     src/lib/core/value.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
@@ -445,6 +447,7 @@ endif()
 set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/core/cpu_dense_image_operation.cpp
     src/lib/core/ops.cpp
+    src/lib/core/region_image_adapter.cpp
     src/lib/core/value_image_adapter.cpp
     src/lib/graph/in_memory_graph_document_adapter.cpp
     src/lib/graph/graph_model.cpp
@@ -1655,6 +1658,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_propagation tests/integration/test_propagation.cpp)
     add_ps_test(test_propagation_contracts
         tests/unit/test_propagation_contracts.cpp)
+    add_ps_test(test_region_contracts
+        tests/unit/test_region_contracts.cpp)
     add_ps_test(test_graph_topology_boundaries
         tests/unit/test_graph_topology_boundaries.cpp)
     add_ps_test(test_graph_document_adapter
@@ -2043,6 +2048,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
     gtest_discover_tests(test_propagation_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_region_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_graph_document_adapter
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}

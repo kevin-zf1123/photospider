@@ -196,11 +196,13 @@ The cache-related node fields are:
 | Field | Status | Meaning |
 | --- | --- | --- |
 | `cached_output_high_precision` | Formal cache | HP cache for full-quality reusable output. |
+| `hp_version` | Formal cache metadata | Monotonic revision of the reusable HP output. |
+| `hp_region` | Formal cache metadata | Normalized logical Region known valid in that HP output. |
 
 Only HP output is formal reusable cache. That means only HP output may feed
 subsequent HP compute, disk cache, long-term storage, and other reusable cache
 behavior. RT output is not stored on `Node`; it lives in `RealtimeProxyGraph`,
-which mirrors node ids and stores low-resolution proxy output, HP-space ROI,
+which mirrors node ids and stores low-resolution proxy output, HP-space Region,
 version, and RT dirty-source generation.
 
 Dirty RT worker tasks stage proxy output through `RealtimeProxyWriteBuffer`
@@ -275,12 +277,13 @@ propagation.
   by runtime, graph, compute, inspection, or cache contracts and is not owned
   by `GraphDefinition`, persistent `Node` fields, or `OutputPort`.
   Static/effective parameters, output-port configuration, and named operation
-  outputs are `ParameterValue` trees. Graph extents, spatial metadata, dirty
-  snapshots, and compute-task geometry use kernel-owned `PixelSize` and
+  outputs are `ParameterValue` trees. Logical dirty work and cache validity use
+  normalized `RegionSet`; current image extents, physical tiles, Host/IPC v2
+  inspection, and operation ABI v2 use checked derived `PixelSize` and
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
 
-### Implemented V-3 ownership and cache identity surface
+### Implemented V-3 ownership and V-4 Region surface
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete generic-value replacement. V-2 introduced the bounded CPU
@@ -320,12 +323,18 @@ task-graph keys, cache paths, graph/YAML documents, or artifact bytes.
 The shared operation runtime is the one process-wide minting authority for the
 static Host and every Value-using DSO.
 
-Named `ParameterMap` results and graph/dirty/planning `PixelRect` geometry are
-unchanged. `DataSpec`, `RegionSet`, device routing, readiness, transfer,
-quantization, and provider ABI v3 remain later no-shim slices. During those
-slices, named computed outputs become named immutable Values, `ParameterMap`
-becomes configuration-only, and migrated Region boundaries replace
-`PixelRect` with the `ImageRect` atom of `RegionSet`.
+V-4 installs `RegionDomainKey`, `ImageRect`, rank-general `TensorSlice`,
+`RegionAtom`, immutable normalized `RegionSet`, bounded algebra, typed
+operation outcomes, and containment. `Node::hp_region` is validity metadata
+published with the one formal HP cache authority. Dirty source history,
+per-node state, monolithic work, and edge mappings retain Region; image-only
+tile rectangles are derived beside their source Region. The core dense invert
+path executes exact ImageRect or TensorSlice selections, while RT rejects
+TensorSlice and operation ABI v2 remains unchanged.
+
+`DataSpec`, device routing, readiness, transfer, quantization, provider ABI v3,
+and general named immutable Value outputs remain later no-shim slices.
+`ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. Issue #62 completes the
@@ -340,6 +349,7 @@ neither document changes the current fields described above.
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/region.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_model.*`
@@ -355,6 +365,8 @@ neither document changes the current fields described above.
 - `src/lib/core/cache_metadata_codec.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
@@ -369,4 +381,5 @@ neither document changes the current fields described above.
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

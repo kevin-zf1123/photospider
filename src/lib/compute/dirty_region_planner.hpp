@@ -29,6 +29,13 @@ namespace ps::compute {
  * owned by HighPrecisionDirtyPlan for a single dirty update request.
  */
 struct HpPlanEntry {
+  /**
+   * @brief Exact normalized logical HP work and validity Region.
+   * @note This is the planning authority. roi_hp is a derived projection for
+   *       current image tiling/inspection and remains empty for TensorSlice.
+   */
+  RegionSet region_hp = RegionSet::empty();
+
   /** @brief HP-space dirty ROI that should be recomputed for this node. */
   PixelRect roi_hp;
 
@@ -50,6 +57,12 @@ struct HpPlanEntry {
  * policy and must be refreshed whenever roi_hp or hp_size changes.
  */
 struct RtPlanEntry {
+  /**
+   * @brief Exact normalized logical HP-space ImageRect Region.
+   * @note RT proxy execution rejects TensorSlice before an entry is published.
+   */
+  RegionSet region_hp = RegionSet::empty();
+
   /** @brief HP-space dirty ROI used for propagation and debug metadata. */
   PixelRect roi_hp;
 
@@ -162,6 +175,22 @@ class DirtyRegionPlanner {
                                              const PixelRect& dirty_roi);
 
   /**
+   * @brief Plans an HP dirty update from one exact logical Region.
+   *
+   * @param graph Graph whose topology and staged dirty generation are used.
+   * @param node_id Target node receiving the dirty selection.
+   * @param dirty_region Exact normalized ImageRect or TensorSlice Region.
+   * @return HP plan retaining Region as logical authority.
+   * @throws GraphError when the Region is empty, unsupported by the target,
+   *         cannot be clipped to a concrete descriptor, or yields no work.
+   * @throws std::bad_alloc when planning storage cannot allocate.
+   * @note ImageRect delegates through the checked current edge adapter.
+   *       TensorSlice is supported only by the core dense identity path.
+   */
+  HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
+                                             const RegionSet& dirty_region);
+
+  /**
    * @brief Plans an RT dirty update rooted at a target node.
    *
    * @param graph Graph whose topology, extent metadata, and dirty generation
@@ -181,6 +210,19 @@ class DirtyRegionPlanner {
                                    const PixelRect& dirty_roi);
 
   /**
+   * @brief Plans RT proxy work from one exact logical Region.
+   * @param graph Graph whose image extents are used.
+   * @param node_id Target node receiving the dirty selection.
+   * @param dirty_region Exact normalized Region.
+   * @return RT plan for one exact ImageRect.
+   * @throws GraphError when TensorSlice, Whole, or an unsupported clause enters
+   *         the current image-only RT proxy.
+   * @note No TensorSlice-to-PixelRect projection is attempted.
+   */
+  RealTimeDirtyPlan plan_real_time(GraphModel& graph, int node_id,
+                                   const RegionSet& dirty_region);
+
+  /**
    * @brief Records the beginning of a dirty source lifecycle event.
    *
    * @param graph Graph whose dirty snapshot is updated.
@@ -196,6 +238,23 @@ class DirtyRegionPlanner {
                                          const PixelRect& source_roi);
 
   /**
+   * @brief Records the beginning of an exact logical dirty source Region.
+   *
+   * @param graph Graph whose dirty snapshot is updated.
+   * @param node_id Source node that started producing dirty Regions.
+   * @param domain Dirty domain associated with the source Region.
+   * @param source_region Exact ImageRect or TensorSlice source fact.
+   * @return Updated graph-scoped dirty snapshot.
+   * @throws GraphError when the node/Region/domain contract is invalid or a
+   * TensorSlice cannot be clipped to a concrete supported tensor descriptor.
+   * @note ImageRect remains Region authority and is projected only for current
+   * image materialization. TensorSlice is accepted only in HP.
+   */
+  DirtyRegionSnapshot begin_dirty_source(GraphModel& graph, int node_id,
+                                         DirtyDomain domain,
+                                         const RegionSet& source_region);
+
+  /**
    * @brief Records an incremental dirty source ROI update.
    *
    * @param graph Graph whose dirty snapshot is updated.
@@ -209,6 +268,23 @@ class DirtyRegionPlanner {
   DirtyRegionSnapshot update_dirty_source(GraphModel& graph, int node_id,
                                           DirtyDomain domain,
                                           const PixelRect& source_roi);
+
+  /**
+   * @brief Records an incremental exact logical dirty source Region.
+   *
+   * @param graph Graph whose dirty snapshot is updated.
+   * @param node_id Source node that emitted another Region.
+   * @param domain Dirty domain associated with the source Region.
+   * @param source_region Exact ImageRect or TensorSlice source fact.
+   * @return Updated graph-scoped dirty snapshot.
+   * @throws GraphError under the same validation contract as the Region begin
+   * overload.
+   * @note The normalized Region is appended without replacing prior source
+   * facts for the generation.
+   */
+  DirtyRegionSnapshot update_dirty_source(GraphModel& graph, int node_id,
+                                          DirtyDomain domain,
+                                          const RegionSet& source_region);
 
   /**
    * @brief Records the end of a dirty source lifecycle event.
@@ -309,16 +385,19 @@ class DirtyRegionPlanner {
    * @param graph Graph whose dirty snapshot is updated.
    * @param node_id Source node receiving the lifecycle transition.
    * @param domain Dirty domain associated with the source node.
-   * @param source_roi Optional ROI appended for begin/update transitions.
+   * @param source_roi Optional current image ROI appended at a v2 edge.
+   * @param source_region Optional authoritative Region appended directly.
    * @param lifecycle New lifecycle state for the source node.
    * @return Updated graph-scoped dirty snapshot.
-   * @throws GraphError when node_id is missing or source_roi is empty.
+   * @throws GraphError when node_id is missing or a supplied source fact is
+   * empty/unsupported.
    * @note This helper owns the shared begin/update/end storage flow; snapshot
    * derivation is delegated to DirtyRegionSnapshotBuilder.
    */
   DirtyRegionSnapshot update_dirty_source_snapshot(
       GraphModel& graph, int node_id, DirtyDomain domain,
-      const PixelRect* source_roi, DirtySourceLifecycleState lifecycle);
+      const PixelRect* source_roi, const RegionSet* source_region,
+      DirtySourceLifecycleState lifecycle);
 
   /**
    * @brief Populates dirty source metadata from finalized plan entries.

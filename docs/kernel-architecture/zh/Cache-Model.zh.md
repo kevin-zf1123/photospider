@@ -21,20 +21,20 @@ HP 计算写入 `cached_output_high_precision`。HP 缓存是节点的权威完�
 | 字段 | 含义 |
 | --- | --- |
 | `hp_version` | HP 输出变化的版本计数器。 |
-| `hp_roi` | 最近更新或合并后的 HP 区域。 |
+| `hp_region` | 正式 HP output 中已知有效的规范化逻辑 Region。 |
 
 ## RT 状态
 
-RT 计算写入 `RealtimeProxyGraph`。每个 proxy node 以原 graph node id 为 key，只保存低分辨率输出、HP-space ROI metadata、version 和 RT dirty-source generation。它不复制 Node 参数、输入、拓扑、cache 或正式 HP 状态。当观察到的 graph topology generation 改变时，同步会重置 live proxy entries，而不是按复用 node id 保留 state，因此 reload/edit workflow 不会暴露上一份 graph 的陈旧低分辨率输出。
+RT 计算写入 `RealtimeProxyGraph`。每个 proxy node 以原 graph node id 为 key，只保存低分辨率输出、HP-space Region metadata、version 和 RT dirty-source generation。它不复制 Node 参数、输入、拓扑、cache 或正式 HP 状态。当观察到的 graph topology generation 改变时，同步会重置 live proxy entries，而不是按复用 node id 保留 state，因此 reload/edit workflow 不会暴露上一份 graph 的陈旧低分辨率输出。
 
-Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理输出、ROI metadata、版本计数和 dirty-source commit generation stage 到 `RealtimeProxyWriteBuffer`，然后在 RT dirty work set drain 后把 staged state 提交到 `RealtimeProxyGraph`。Dirty HP execution 同样会先把 HP 输出 stage 到 `HighPrecisionDirtyWriteBuffer`，再提交到 `GraphModel`，因此 HP/RT sibling 可以并发计算，同时保持 RT-first commit 顺序。
+Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理输出、Region metadata、版本计数和 dirty-source commit generation stage 到 `RealtimeProxyWriteBuffer`，然后在 RT dirty work set drain 后把 staged state 提交到 `RealtimeProxyGraph`。Dirty HP execution 同样会先把 HP 输出 stage 到 `HighPrecisionDirtyWriteBuffer`，再提交到 `GraphModel`，因此 HP/RT sibling 可以并发计算，同时保持 RT-first commit 顺序。
 
 相关字段：
 
 | Proxy 字段 | 含义 |
 | --- | --- |
 | `version` | RT proxy 输出变化的版本计数器。 |
-| `roi_hp` | RT 更新所代表的最近或合并后的 HP 空间区域。 |
+| `region_hp` | RT 更新所代表的规范化 HP-space ImageRect Region。 |
 | `dirty_source_generation` | 用于 stale source 检查的 RT dirty source generation。 |
 
 ## 磁盘缓存
@@ -135,7 +135,24 @@ snapshot，因此之后对 compatibility snapshot 的 mutation 不会改变持�
 `AllocationIdentity` 和 `ValueRevisionId` 都不会被序列化、从 path 重建或用作持久 cache/task
 key。两类 token 都是 opaque、process-local runtime identity；disk reload 必然铸造新 token。
 
-### 已接受的未来关系（不是当前行为）
+## V-4 Region Validity
+
+`Node::hp_region` 是唯一正式 HP cache authority 的规范化逻辑 validity metadata；它不是另一份
+output、allocation identity、Value revision、disk path 或 persistence key。Full compute、
+sequential publication、result commit 与成功 disk load 会发布 complete Region（`ImageRect`、
+TensorSlice bounds，或仅已知 non-image named data 时的 Whole）。
+
+Dirty HP staging 会一起携带 output、Region、version 与 source generation。精确且可表示的
+union 会保留累计 validity。当两个 update 无法由有界 one-clause contract 表示时，staging
+保留新鲜的精确 update 作为安全 under-approximation，而不是发布错误的 bounding superset。
+现有 revision/current-generation predicate 会原子地发布或丢弃完整 staged state。
+
+RT proxy state 使用 HP-space `region_hp`，但仍只支持 image。Checked adapter 只会从一个精确
+内建 ImageRect 派生当前 rectangular downsample/inspection metadata。TensorSlice 与 Whole
+不会进入 RT 或 downsample rectangle boundary。Region value 与 Tensor axis 会计入
+retained-memory accounting。
+
+### 已接受的未来持久化关系（不是当前行为）
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 把未来 persistence 分成 graph document、canonical descriptor envelope、artifact/cache
@@ -161,11 +178,15 @@ authority。
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/core/value_image_adapter.*`
+- `include/photospider/data/region.hpp`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`

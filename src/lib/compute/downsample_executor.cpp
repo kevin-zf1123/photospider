@@ -9,6 +9,7 @@
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_run.hpp"
 #include "core/image_buffer_processing.hpp"
+#include "core/region_image_adapter.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -61,7 +62,7 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source) {
 RealtimeProxyGraph::NodeState clone_proxy_state(
     const RealtimeProxyGraph::NodeState& state) {
   RealtimeProxyGraph::NodeState cloned;
-  cloned.roi_hp = state.roi_hp;
+  cloned.region_hp = state.region_hp;
   cloned.version = state.version;
   cloned.dirty_source_generation = state.dirty_source_generation;
   if (state.output) {
@@ -242,11 +243,19 @@ PixelRect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
 void DownsampleExecutor::commit_rt_metadata(
     RealtimeProxyGraph::NodeState& proxy_state, const PixelRect& roi_hp,
     const PixelSize& hp_size, int hp_version) {
+  (void)hp_size;
   if (!is_rect_empty(roi_hp)) {
-    proxy_state.roi_hp =
-        proxy_state.roi_hp.has_value()
-            ? clip_rect(merge_rect(*proxy_state.roi_hp, roi_hp), hp_size)
-            : roi_hp;
+    const RegionSet update = region_image_adapter::from_pixel_rect(roi_hp);
+    if (proxy_state.region_hp.has_value()) {
+      const RegionOperationResult merged =
+          union_regions(*proxy_state.region_hp, update);
+      proxy_state.region_hp = merged.status() == RegionOperationStatus::Exact &&
+                                      merged.region().has_value()
+                                  ? *merged.region()
+                                  : update;
+    } else {
+      proxy_state.region_hp = update;
+    }
   }
   proxy_state.version = hp_version;
 }

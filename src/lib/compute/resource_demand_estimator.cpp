@@ -8,9 +8,11 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "compute/dirty_region_planner.hpp"
+#include "photospider/data/region.hpp"
 #include "photospider/plugin/node_view.hpp"
 
 namespace ps::compute {
@@ -118,6 +120,23 @@ void add_parameter_value_dynamic(const plugin::ParameterValue& value,
                                  RetainedMemoryEstimator* estimate);
 
 /**
+ * @brief Adds atom and TensorSlice-axis allocations nested in one Region.
+ * @param region Canonical Region whose dynamic storage is charged.
+ * @param estimate Checked destination estimator.
+ * @return Nothing.
+ * @throws GraphError when checked structural arithmetic overflows.
+ */
+void add_region_dynamic(const RegionSet& region,
+                        RetainedMemoryEstimator* estimate) {
+  add_vector_capacity(region.atoms(), estimate);
+  for (const RegionAtom& atom : region.atoms()) {
+    if (const auto* tensor = std::get_if<TensorSlice>(&atom)) {
+      add_vector_capacity(tensor->axes, estimate);
+    }
+  }
+}
+
+/**
  * @brief Adds node, key, and value storage for one parameter object.
  * @param object Ordered string-keyed parameter object.
  * @param estimate Checked destination estimator.
@@ -202,14 +221,50 @@ void add_dirty_snapshot_dynamic(const DirtyRegionSnapshot& snapshot,
   for (const auto& [node_id, state] : snapshot.dirty_source_state) {
     (void)node_id;
     add_vector_capacity(state.source_rois, estimate);
+    add_vector_capacity(state.source_regions, estimate);
+    for (const RegionSet& region : state.source_regions) {
+      add_region_dynamic(region, estimate);
+    }
   }
 
   add_unordered_vector_map(snapshot.source_roi_records, estimate);
+  add_unordered_vector_map(snapshot.source_region_records, estimate);
+  for (const auto& [node_id, records] : snapshot.source_region_records) {
+    (void)node_id;
+    for (const DirtySourceRegionRecord& record : records) {
+      add_region_dynamic(record.source_region, estimate);
+    }
+  }
   add_vector_capacity(snapshot.dirty_tiles, estimate);
+  for (const DirtyTileKey& tile : snapshot.dirty_tiles) {
+    add_region_dynamic(tile.region, estimate);
+  }
   add_vector_capacity(snapshot.dirty_monolithic_nodes, estimate);
+  for (const DirtyMonolithicRegion& monolithic :
+       snapshot.dirty_monolithic_nodes) {
+    add_region_dynamic(monolithic.region, estimate);
+  }
   add_unordered_vector_map(snapshot.per_node_dirty_rois, estimate);
+  add_unordered_vector_map(snapshot.per_node_dirty_regions, estimate);
+  for (const auto& [node_id, regions] : snapshot.per_node_dirty_regions) {
+    (void)node_id;
+    for (const RegionSet& region : regions) {
+      add_region_dynamic(region, estimate);
+    }
+  }
   add_unordered_vector_map(snapshot.actual_dirty_rois, estimate);
+  add_unordered_vector_map(snapshot.actual_dirty_regions, estimate);
+  for (const auto& [node_id, regions] : snapshot.actual_dirty_regions) {
+    (void)node_id;
+    for (const RegionSet& region : regions) {
+      add_region_dynamic(region, estimate);
+    }
+  }
   add_vector_capacity(snapshot.edge_mappings, estimate);
+  for (const DirtyEdgeMapping& mapping : snapshot.edge_mappings) {
+    add_region_dynamic(mapping.from_region, estimate);
+    add_region_dynamic(mapping.to_region, estimate);
+  }
 }
 
 }  // namespace
@@ -272,6 +327,13 @@ std::uint64_t dirty_selection_dynamic_retained_memory_bytes(
   return estimate.bytes();
 }
 
+/** @copydoc region_dynamic_retained_memory_bytes */
+std::uint64_t region_dynamic_retained_memory_bytes(const RegionSet& region) {
+  RetainedMemoryEstimator estimate("RegionSet");
+  add_region_dynamic(region, &estimate);
+  return estimate.bytes();
+}
+
 /** @copydoc high_precision_dirty_plan_retained_memory_bytes */
 std::uint64_t high_precision_dirty_plan_retained_memory_bytes(
     const HighPrecisionDirtyPlan& plan) {
@@ -284,6 +346,10 @@ std::uint64_t high_precision_dirty_plan_retained_memory_bytes(
       static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
+  for (const auto& [node_id, entry] : plan.entries) {
+    (void)node_id;
+    add_region_dynamic(entry.region_hp, &estimate);
+  }
   add_dirty_snapshot_dynamic(plan.snapshot, &estimate);
   return estimate.bytes();
 }
@@ -300,6 +366,10 @@ std::uint64_t real_time_dirty_plan_retained_memory_bytes(
       static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
   estimate.add_objects<void*>(static_cast<std::uint64_t>(plan.entries.size()));
+  for (const auto& [node_id, entry] : plan.entries) {
+    (void)node_id;
+    add_region_dynamic(entry.region_hp, &estimate);
+  }
   add_dirty_snapshot_dynamic(plan.snapshot, &estimate);
   return estimate.bytes();
 }

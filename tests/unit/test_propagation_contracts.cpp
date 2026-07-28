@@ -46,7 +46,8 @@ static_assert(std::is_same_v<decltype(InputTileView::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(OutputTileView::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(InputTile::roi), PixelRect>);
 static_assert(std::is_same_v<decltype(OutputTile::roi), PixelRect>);
-static_assert(std::is_same_v<decltype(Node::hp_roi), std::optional<PixelRect>>);
+static_assert(
+    std::is_same_v<decltype(Node::hp_region), std::optional<RegionSet>>);
 static_assert(std::is_same_v<decltype(Node::last_input_size_hp),
                              std::optional<PixelSize>>);
 static_assert(std::is_same_v<typename decltype(DependencyLutCacheIdentity::
@@ -59,9 +60,13 @@ static_assert(
 static_assert(
     std::is_same_v<decltype(compute::HpPlanEntry::roi_hp), PixelRect>);
 static_assert(
+    std::is_same_v<decltype(compute::HpPlanEntry::region_hp), RegionSet>);
+static_assert(
     std::is_same_v<decltype(compute::HpPlanEntry::hp_size), PixelSize>);
 static_assert(
     std::is_same_v<decltype(compute::RtPlanEntry::roi_rt), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::RtPlanEntry::region_hp), RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::RtPlanEntry::rt_size), PixelSize>);
 static_assert(std::is_same_v<
@@ -69,14 +74,25 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<typename decltype(compute::DirtySourceNodeState::
                                                    source_rois)::value_type,
                              PixelRect>);
+static_assert(std::is_same_v<typename decltype(compute::DirtySourceNodeState::
+                                                   source_regions)::value_type,
+                             RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::DirtyTileKey::pixel_roi), PixelRect>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyTileKey::region), RegionSet>);
 static_assert(std::is_same_v<
               decltype(compute::DirtyMonolithicRegion::pixel_roi), PixelRect>);
+static_assert(std::is_same_v<decltype(compute::DirtyMonolithicRegion::region),
+                             RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::DirtyEdgeMapping::from_roi), PixelRect>);
 static_assert(
     std::is_same_v<decltype(compute::DirtyEdgeMapping::to_roi), PixelRect>);
+static_assert(std::is_same_v<decltype(compute::DirtyEdgeMapping::from_region),
+                             RegionSet>);
+static_assert(
+    std::is_same_v<decltype(compute::DirtyEdgeMapping::to_region), RegionSet>);
 static_assert(
     std::is_same_v<
         typename decltype(compute::DirtyRegionSnapshot::per_node_dirty_rois)::
@@ -86,6 +102,11 @@ static_assert(std::is_same_v<
               typename decltype(compute::DirtyRegionSnapshot::
                                     actual_dirty_rois)::mapped_type::value_type,
               PixelRect>);
+static_assert(
+    std::is_same_v<
+        typename decltype(compute::DirtyRegionSnapshot::actual_dirty_regions)::
+            mapped_type::value_type,
+        RegionSet>);
 static_assert(
     std::is_same_v<decltype(compute::PlannedDependency::to_roi), PixelRect>);
 static_assert(

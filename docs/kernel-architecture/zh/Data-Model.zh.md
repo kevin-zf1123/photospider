@@ -153,8 +153,10 @@ conversion 继续保留为局部 OpenCV algorithm call。Normalization context �
 | 字段 | 状态 | 含义 |
 | --- | --- | --- |
 | `cached_output_high_precision` | 正式缓存 | 完整质量、可复用输出的 HP 缓存。 |
+| `hp_version` | 正式缓存 metadata | 可复用 HP output 的单调 revision。 |
+| `hp_region` | 正式缓存 metadata | 该 HP output 中已知有效的规范化逻辑 Region。 |
 
-只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为。RT 输出不存放在 `Node` 上，而是位于 `RealtimeProxyGraph`，后者镜像 node id，并保存低分辨率 proxy output、HP-space ROI、version 和 RT dirty-source generation。
+只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为。RT 输出不存放在 `Node` 上，而是位于 `RealtimeProxyGraph`，后者镜像 node id，并保存低分辨率 proxy output、HP-space Region、version 和 RT dirty-source generation。
 
 Dirty RT worker task 会先通过 `RealtimeProxyWriteBuffer` stage proxy output，再提交到
 `RealtimeProxyGraph`。Dirty HP worker task 会先通过 `HighPrecisionDirtyWriteBuffer`
@@ -220,12 +222,13 @@ RT proxy commit 之后。
 - `YAML::Node` 只保留在用于 graph document、共享 value translation 与已配置 cache metadata 的
   私有 YAML adapter 内。Runtime、graph、compute、inspection 或 cache contract 不再声明它，
   `GraphDefinition`、持久 `Node` 字段与 `OutputPort` 也不拥有它。静态/有效参数、output-port
-  configuration 与 operation 命名 output 都是 `ParameterValue` tree。Graph extent、spatial
-  metadata、dirty snapshot 与 compute-task geometry 使用内核自有的 `PixelSize` 和
-  `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
+  configuration 与 operation 命名 output 都是 `ParameterValue` tree。逻辑 dirty work 与
+  cache validity 使用规范化 `RegionSet`；当前 image extent、physical tile、Host/IPC v2
+  inspection 与 operation ABI v2 使用 checked derived `PixelSize` 和 `PixelRect` value。
+  只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
-### 已实现的 V-3 ownership 与 cache identity surface
+### 已实现的 V-3 ownership 与 V-4 Region surface
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受完整的通用 Value 替换。V-2 引入了有界 CPU DenseTensor 子集；V-3 现已接通其
@@ -259,11 +262,16 @@ replacement 与 disk decode 生成新 identity。allocation/revision token 只�
 Shared operation runtime 是 static Host 与每个 Value-using DSO 共用的唯一进程级 minting
 authority。
 
-命名 `ParameterMap` result 与 graph/dirty/planning 的 `PixelRect` geometry 保持不变。
-`DataSpec`、`RegionSet`、device routing、readiness、transfer、quantization 与 provider
-ABI v3 仍属于后续 no-shim slice。在这些切片中，命名 computed output 会变成命名的
-immutable Value，`ParameterMap` 只保留 configuration 用途，已迁移的 Region 边界会用
-`RegionSet` 的 `ImageRect` atom 替换 `PixelRect`。
+V-4 安装了 `RegionDomainKey`、`ImageRect`、rank-general `TensorSlice`、`RegionAtom`、
+immutable normalized `RegionSet`、bounded algebra、typed operation outcome 与 containment。
+`Node::hp_region` 是随唯一正式 HP cache authority 一起发布的 validity metadata。Dirty
+source history、per-node state、monolithic work 与 edge mapping 都保留 Region；image-only
+tile rectangle 从其 source Region 派生并与其并存。Core dense invert path 执行精确
+ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice，operation ABI v2 保持不变。
+
+`DataSpec`、device routing、readiness、transfer、quantization、provider ABI v3 与通用命名
+immutable Value output 仍属于后续 no-shim slice。`ParameterMap` 仍用于 configuration 与
+当前命名 scalar-result storage。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
@@ -277,6 +285,7 @@ dependency 工作由
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/region.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_model.*`
@@ -292,6 +301,8 @@ dependency 工作由
 - `src/lib/core/cache_metadata_codec.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
@@ -306,4 +317,5 @@ dependency 工作由
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

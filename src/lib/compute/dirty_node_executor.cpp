@@ -111,7 +111,7 @@ HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
 void HighPrecisionDirtyNodeExecutor::execute(Node& node,
                                              const HpPlanEntry& entry) {
   observe_dirty_node_cancellation(run_lease_);
-  if (is_rect_empty(entry.roi_hp)) {
+  if (entry.region_hp.is_empty()) {
     return;
   }
   const bool dirty_source = is_dirty_source_node(snapshot_, node.id);
@@ -190,7 +190,7 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
                   image_inputs_ready, *hp_buffer);
     return;
   }
-  execute_monolithic(node, std::get<MonolithicOpFunc>(operation),
+  execute_monolithic(node, entry, std::get<MonolithicOpFunc>(operation),
                      image_inputs_ready);
 }
 
@@ -242,9 +242,12 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
 }
 
 void HighPrecisionDirtyNodeExecutor::execute_monolithic(
-    Node& node, const MonolithicOpFunc& mono_fn,
+    Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
-  NodeOutput result = mono_fn(node, image_inputs_ready);
+  TiledExecutionConfig config;
+  config.output_region = entry.region_hp;
+  NodeOutput result = NodeExecutor::execute(
+      graph_, node, OpRegistry::OpVariant{mono_fn}, image_inputs_ready, config);
   if (!has_image_payload(result.image_buffer) && result.data.empty()) {
     throw GraphError(GraphErrc::ComputeError,
                      "Monolithic HP operator produced no output for " +
@@ -257,7 +260,7 @@ void HighPrecisionDirtyNodeExecutor::execute_monolithic(
 void HighPrecisionDirtyNodeExecutor::commit_node(Node& node,
                                                  const HpPlanEntry& entry,
                                                  bool dirty_source) {
-  hp_write_buffer_.mark_updated(node, entry.roi_hp, entry.hp_size, dirty_source,
+  hp_write_buffer_.mark_updated(node, entry.region_hp, dirty_source,
                                 dirty_generation_);
   events_.push(node.id, node.name, "hp_update", 0.0);
 }
@@ -526,8 +529,8 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
 void RealTimeDirtyNodeExecutor::commit_node(Node& node,
                                             const RtPlanEntry& entry,
                                             bool dirty_source) {
-  rt_write_buffer_.mark_updated(node.id, entry.roi_hp, entry.hp_size,
-                                dirty_source, dirty_generation_);
+  rt_write_buffer_.mark_updated(node.id, entry.region_hp, dirty_source,
+                                dirty_generation_);
   events_.push(node.id, node.name, "rt_update", 0.0);
 }
 

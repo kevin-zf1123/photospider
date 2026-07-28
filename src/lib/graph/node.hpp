@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "core/ps_types.hpp"
+#include "photospider/data/region.hpp"
 #include "photospider/plugin/node_view.hpp"
 
 namespace ps {
@@ -174,8 +175,13 @@ class Node {
   std::optional<NodeOutput> cached_output_high_precision;
   /** @brief Monotonic content revision of the reusable HP output. */
   int hp_version = 0;
-  /** @brief Most recent dirty or updated ROI committed to the HP output. */
-  std::optional<PixelRect> hp_roi;
+  /**
+   * @brief Normalized logical Region currently valid in the formal HP output.
+   * @note This metadata is published atomically with
+   *       cached_output_high_precision and never becomes a second cache owner,
+   *       allocation identity, Value revision, disk path, or persistent key.
+   */
+  std::optional<RegionSet> hp_region;
 
   /** @brief Last committed full-resolution input extent for ROI propagation. */
   std::optional<PixelSize> last_input_size_hp;

@@ -838,8 +838,9 @@ struct PreparedIntentUpdateState final {
  * HP memory cache, optionally loads disk cache, detects cycles, resolves
  * parameter and image inputs on a request-local Node snapshot, dispatches that
  * snapshot to the selected HP operator through NodeExecutor, commits the HP
- * cache, records timing/events, and saves disk cache when configured. Effective
- * runtime parameters are never written into the graph-owned Node.
+ * cache with exact full-validity Region metadata, records timing/events, and
+ * saves disk cache when configured. Effective runtime parameters are never
+ * written into the graph-owned Node.
  *
  * @param graph Graph whose nodes and caches are read and mutated.
  * @param node_id Node id to compute.
@@ -924,7 +925,10 @@ NodeOutput& ComputeService::compute_internal(
         tiled_config);
     observe_open_run_or_throw(context.run_lease);
     value_image_adapter::normalize_node_output_image_value(&computed_output);
+    RegionSet computed_region =
+        value_image_adapter::full_node_output_region(computed_output);
     target_node.cached_output_high_precision = std::move(computed_output);
+    target_node.hp_region = std::move(computed_region);
 
     current_event.execution_end_time =
         std::chrono::high_resolution_clock::now();
@@ -1618,12 +1622,13 @@ ComputeService::prepare_sequential_compute(
  * fails, recursive compute fails, target output is unavailable, or accepted
  * cancellation is observed.
  * @note The method records the same node/cache-pruned plan shape used by the
- * parallel path before delegating to the recursive executor. The direct
- * recursive algorithm has no dispatcher-owned temporary output object; after
- * this method returns, the request wrapper advances the Run to CommitPending
- * before invoking the product commit policy. Observations bracket planning,
- * recursive/provider work, telemetry, and return; a monolithic provider
- * already entered remains non-preemptible.
+ * parallel path before delegating to the recursive executor. Force-recache
+ * clears each planned output and matching Region while retaining its monotonic
+ * HP version. The direct recursive algorithm has no dispatcher-owned temporary
+ * output object; after this method returns, the request wrapper advances the
+ * Run to CommitPending before invoking the product commit policy. Observations
+ * bracket planning, recursive/provider work, telemetry, and return; a
+ * monolithic provider already entered remains non-preemptible.
  */
 NodeOutput& ComputeService::compute_sequential_impl(
     GraphModel& graph, const Request& request,
@@ -1644,7 +1649,9 @@ NodeOutput& ComputeService::compute_sequential_impl(
     graph.clear_full_task_graph_cache();
     std::lock_guard<std::mutex> lock(graph.graph_mutex_);
     for (int node_id : prepared.execution_order) {
-      graph.mutable_node(node_id).cached_output_high_precision.reset();
+      Node& node = graph.mutable_node(node_id);
+      node.cached_output_high_precision.reset();
+      node.hp_region.reset();
     }
   }
   remember_facade_compute_plan(graph, prepared.compute_plan);

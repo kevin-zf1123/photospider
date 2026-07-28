@@ -252,7 +252,7 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
-### Implemented V-3 relationship and remaining target
+### Implemented V-3/V-4 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -274,21 +274,28 @@ process-local allocation/revision identities, byte offsets, bounded signed and
 zero-stride immutable views, and allocation identity authority in formal HP
 cache entries.
 
-V-3 does not implement quantization, Region, device identity, readiness,
-transfer, provider ABI v3, or general named graph Value outputs. The current
-ImageBuffer structure, device field, operation DSO ABI, tiled-write, codec, and
-Host boundaries therefore remain compatibility contracts until their owning
+V-4 adds the installed dependency-neutral Region MVP. Exact built-in ImageRect
+can be checked into or out of `PixelRect`; TensorSlice, Whole, custom domains,
+multi-atom clauses, uncertainty, and overflow are rejected at that adapter.
+The Region-aware core dense operation copies unselected bytes and changes only
+selected logical coordinates through checked strides. ImageBuffer structure,
+device field, operation DSO ABI, tiled writes, codecs, and Host/IPC v2
+rectangles remain role-specific compatibility contracts until their owning
 later slices migrate them. Within a formal CPU image cache entry that carries
 both forms, the valid sealed Value—not the mutable compatibility snapshot—is
 the allocation/revision identity authority.
+
+V-4 still does not implement quantization, device identity, readiness,
+transfer, provider ABI v3, or general named graph Value outputs.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
 
 Separating immutable descriptors from writable payload views prevents parallel
 tile callbacks from racing to replace ownership or device metadata. Keeping
-`PixelRect` in the public view also prevents private OpenCV geometry from
-becoming part of the operation ABI.
+the current image-only `PixelRect` view distinct from Region also prevents
+private OpenCV geometry or TensorSlice reinterpretation from entering the
+operation ABI.
 
 ## Implementation and Validation Entry Points
 
@@ -296,17 +303,21 @@ becoming part of the operation ABI.
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/compute/image_buffer.hpp`
 - `src/lib/adapters/opencv/buffer_adapter_opencv.*`
 - `src/lib/ipc/output_store.*`
 - `tests/unit/test_image_buffer_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

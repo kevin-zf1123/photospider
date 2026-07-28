@@ -3,13 +3,16 @@
 ## Status
 
 Accepted as the target contract for Project 4 generic data and heterogeneous
-execution. This ADR is an architecture decision, not an implementation claim.
-The current source tree still uses `ImageBuffer`, `DataType`, `Device`,
-`PixelRect`, `ParameterMap`, operation plugin ABI v2, and the cache and
-execution ownership documented in `docs/kernel-architecture/`.
+execution. The source tree now implements the bounded V-2 through V-4 subset:
+CPU DenseTensor/ImageView values, checked BufferHandle ownership and runtime
+identity, and the public Region MVP used by dirty planning, validity, and the
+core dense operation. `ImageBuffer`, `DataType`, `Device`, `ParameterMap`, and
+operation plugin ABI v2 remain compatibility contracts at their role-specific
+edges; the unimplemented portions of this ADR remain evolution targets.
 
-Issue #78 ratifies this contract and updates documentation only. Issues
-#79 through #90 remain implementation slices. A synthetic
+Issue #78 ratified this contract. Issues #79 through #81 delivered the bounded
+V-2 through V-4 implementation slices; issues #82 through #90 remain separate
+implementation slices. A synthetic
 `VariableSampleField` proof and an optional OpenEXR Deep provider remain
 separate later changes; neither is implemented by this decision.
 
@@ -344,6 +347,16 @@ The latter three are outcomes, not fake regions. Hull or Whole fallback is
 legal only as a labelled `ConservativeSuperset`; each caller decides whether
 the approximation is safe for planning, invalidation, or execution.
 
+The implemented V-4 subset installs this value/algebra contract with fixed
+built-in image and dense-tensor domain keys, signed 64-bit `ImageRect`
+intervals, rank-general unsigned 64-bit `TensorSlice` intervals, a hard limit
+of eight atoms in the single nonempty clause, and explicit caller budgets.
+Dirty source facts, per-node affected work, edge mappings, HP/RT validity, and
+the core dense operation retain normalized `RegionSet`. Current image tiling,
+ImageBuffer helpers, Host/IPC inspection, and operation ABI v2 retain checked
+derived `PixelRect` projections. RT is image-only; TensorSlice is HP
+monolithic work and is never reinterpreted as two-dimensional geometry.
+
 ### DataSpec, capabilities, properties, and output inference
 
 `DataSpec` describes a set of acceptable concrete descriptors. It may contain
@@ -546,9 +559,9 @@ dependency-disabled product, and transitive install dependencies.
 - The design adds explicit schemas, Facets, registries, leases, and result
   states. This complexity is accepted because the omitted distinctions are
   correctness and lifetime boundaries, not optional metadata.
-- Current runtime behavior does not change until later implementation slices
-  update code, durable tests, current-fact documentation, and installed
-  contracts together.
+- Unimplemented target behavior does not become current merely because this
+  ADR accepts it; each later slice must update code, durable tests,
+  current-fact documentation, and installed contracts together.
 
 ## Rejected Alternatives
 

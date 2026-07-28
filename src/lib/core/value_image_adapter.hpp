@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/region.hpp"
 
 namespace ps::value_image_adapter {
 
@@ -52,5 +53,22 @@ ImageBuffer snapshot_cpu_image_buffer(const Value& value);
  * non-CPU results remain unnormalized.
  */
 void normalize_node_output_image_value(NodeOutput* output);
+
+/**
+ * @brief Derives exact full-validity Region metadata for one complete output.
+ *
+ * @param output Complete output about to enter the formal HP cache.
+ * @return Full ImageRect for an image Value/current ImageBuffer, full
+ *         TensorSlice for a non-image DenseTensor Value, or Whole for a
+ *         data-only/opaque output without finite logical dimensions.
+ * @throws std::logic_error for an invalid Value accessor.
+ * @throws std::invalid_argument when retained image/tensor facts violate their
+ *         declared contracts.
+ * @throws std::overflow_error when a logical extent exceeds Region bounds.
+ * @throws std::bad_alloc when TensorSlice or Region storage cannot allocate.
+ * @note This function derives validity metadata only. It preserves the
+ *       output's allocation identity, Value revision, bytes, and ownership.
+ */
+RegionSet full_node_output_region(const NodeOutput& output);
 
 }  // namespace ps::value_image_adapter

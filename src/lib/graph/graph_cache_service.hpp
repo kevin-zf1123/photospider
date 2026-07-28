@@ -161,6 +161,8 @@ class GraphCacheService {
    * @note This preserves the legacy try-load bool contract while making disk
    * errors distinguishable from misses through graph diagnostics. Successful
    * CPU image decode mints fresh process-local allocation/revision identities.
+   * A hit publishes the output, incremented HP content version, and derived
+   * full-validity Region together on the supplied Node.
    */
   bool try_load_from_disk_cache(GraphModel& graph, Node& node) const;
 

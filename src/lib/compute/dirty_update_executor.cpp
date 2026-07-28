@@ -115,9 +115,10 @@ void advance_dirty_run_for_execution(ComputeRun* run,
  * @param entry Base HP entry selected by dirty planning.
  * @param task Planned task whose ROI should bound execution.
  * @return Entry copy scoped to the task output ROI.
- * @throws Nothing; HpPlanEntry contains only scalar/POD ROI metadata.
- * @note Tile tasks execute one tile; monolithic/node tasks keep planner ROI.
- * Copying and clipping this value performs no dynamic allocation.
+ * @throws std::bad_alloc when copying Region metadata cannot allocate.
+ * @note Tile tasks execute one derived physical tile. The authoritative Region
+ * remains plan-level because publication occurs only after every selected task
+ * succeeds; monolithic/TensorSlice work keeps the same Region and ROI.
  */
 HpPlanEntry entry_for_task(const HpPlanEntry& entry, const PlannedTask& task) {
   HpPlanEntry clipped = entry;
@@ -135,9 +136,9 @@ HpPlanEntry entry_for_task(const HpPlanEntry& entry, const PlannedTask& task) {
  * @param task Planned task whose domain-local ROI should bound execution.
  * @return Entry copy scoped to the task output ROI.
  * @throws Nothing; RtPlanEntry contains only scalar/POD ROI metadata.
- * @note RT task output_roi is already in RT execution coordinates; HP ROI is
- * kept in the base entry for commit and inspection metadata. Copying and
- * clipping this value performs no dynamic allocation.
+ * @throws std::bad_alloc when copying Region metadata cannot allocate.
+ * @note RT task output_roi is already in RT execution coordinates; HP Region
+ * and ROI stay plan-level for commit after all selected tasks succeed.
  */
 RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
   RtPlanEntry clipped = entry;
@@ -616,7 +617,7 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
     Node node = graph.node(node_id);
     if (stabilized.geometry_affected(node_id)) {
       node.cached_output_high_precision.reset();
-      node.hp_roi.reset();
+      node.hp_region.reset();
       node.runtime_parameters =
           stabilized_runtime_parameters(node, graph, stabilized);
     }
@@ -638,7 +639,7 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
     value_image_adapter::normalize_node_output_image_value(&normalized_output);
     node_it->second.cached_output_high_precision = std::move(normalized_output);
     node_it->second.hp_version = staged.hp_version;
-    node_it->second.hp_roi = staged.hp_roi;
+    node_it->second.hp_region = staged.hp_region;
   }
 
   auto planning_graph = std::make_unique<GraphModel>(graph.cache_root);
@@ -1029,21 +1030,20 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
           NodeExecutor::execute(*state_ptr->graph, node_for_exec, operation,
                                 resolved.image_inputs, tiled_config);
       observe_dirty_run_or_throw(state_ptr->run, active_lease);
-      if (!has_image_payload(output) && output.data.empty()) {
+      if (!has_image_payload(output) && !output.image_value.valid() &&
+          output.data.empty()) {
         throw GraphError(
             GraphErrc::ComputeError,
             "Connected-parameter preflight produced no output for " +
                 node_for_exec.type + ":" + node_for_exec.subtype);
       }
-      std::optional<PixelRect> hp_roi;
-      if (has_image_payload(output)) {
-        hp_roi = PixelRect{0, 0, output.image_buffer.width,
-                           output.image_buffer.height};
-      }
+      const RegionSet hp_region =
+          value_image_adapter::full_node_output_region(output);
       result->staged_outputs_.emplace(
-          node_id, StabilizedDirtyNodeOutput{
-                       std::move(output),
-                       state_ptr->graph->node(node_id).hp_version + 1, hp_roi});
+          node_id,
+          StabilizedDirtyNodeOutput{
+              std::move(output), state_ptr->graph->node(node_id).hp_version + 1,
+              hp_region});
     };
     PreparedConnectedDirtyNode step;
     step.node_id = node_id;
@@ -1454,7 +1454,7 @@ void HighPrecisionDirtyExecutor::reset_plan_cache(
     (void)entry;
     Node& node = graph.mutable_node(node_id);
     node.cached_output_high_precision.reset();
-    node.hp_roi.reset();
+    node.hp_region.reset();
     node.hp_version = 0;
   }
 }
@@ -1610,7 +1610,8 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
     for (const auto& [node_id, staged] :
          request.stabilized_parameters->staged_outputs()) {
       hp_write_buffer.import_precomputed_output(
-          graph.node(node_id), staged.output, staged.hp_version, staged.hp_roi,
+          graph.node(node_id), staged.output, staged.hp_version,
+          staged.hp_region,
           request.stabilized_parameters->is_staged_source(node_id)
               ? std::optional<uint64_t>(
                     request.stabilized_parameters->request_generation())

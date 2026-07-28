@@ -268,6 +268,10 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "TensorDirtyStagingPublishesFreshIdentityAndExactRegionAtCommit"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "DiskReloadMintsFreshRuntimeIdentitiesWithoutChangingCachePath"
         ),
         (
@@ -285,6 +289,22 @@ def validate_provider_disabled_inventory(
         (
             "CpuDenseTensorImageOperation."
             "ProductRegistryAndExecutorInvertPaddedMultiChannelInput"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductExecutorInvertsOnlySelectedPaddedImageRect"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductExecutorUsesAllRankFourTensorSliceAxes"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ProductExecutorHandlesEmptyWholeAndRejectsRankMismatch"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtyPlanExecutesRegisteredProductAndStagesExactValidity"
         ),
         (
             "CpuDenseTensorImageOperation."

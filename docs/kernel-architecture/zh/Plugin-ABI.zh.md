@@ -79,9 +79,10 @@ representation 与显式 `1..9` 数值。
 操作插件不会为了访问 registry 符号而链接宽泛的静态 `photospider` 产品。仓库内 operation plugin 通过
 `OperationPluginRegistrar` 注册。普通插件请求 `operation_sdk` package component，并且只链接
 `Photospider::operation_sdk`。该 interface target 提供安装头，并传递链接
-`Photospider::operation_runtime`；后者的 shared library 实现公共 image-buffer factory、immutable
-CPU DenseTensor Value 与 checked view symbol，不反向链接 SDK，也不要求外部 package。静态
-Host product 与独立加载且使用 Value 的 operation DSO 因而都通过同一个 runtime image
+`Photospider::operation_runtime`；后者的 shared library 实现公共 image-buffer factory、
+immutable CPU DenseTensor Value 与 checked view symbol，以及 dependency-neutral Region
+value/algebra，不反向链接 SDK，也不要求外部 package。静态 Host product 与独立加载且使用
+Value 的 operation DSO 因而都通过同一个 runtime image
 解析 allocation/revision minting，而不会把 counter 复制进每个 DSO。这是普通 dynamic
 dependency，不是 ELF/Mach-O symbol interposition 或 plugin ABI callback。这些 data/memory
 header 可用于 dependency-neutral plugin-internal 工作，但 operation v2 callback
@@ -102,8 +103,9 @@ descriptor 及其完整 extent 执行明确的 backend-preserving passthrough；
 
 - 静态 Photospider 进程拥有一个 `OpRegistry` 和一个 operation `PluginManager`，由所有 embedded Host 共享。
 - 动态 operation plugin 从 host 接收注册 callback，因此 registry mutation 始终发生在该进程拥有的实例中。
-- `Photospider::operation_runtime` 只包含 ImageBuffer 与 immutable CPU DenseTensor
-  value/view 实现，不包含 registry、loader、Graph、policy、execution 或 compute state。其唯一
+- `Photospider::operation_runtime` 只包含 ImageBuffer、immutable CPU DenseTensor
+  value/view 与 Region value/algebra 实现，不包含 registry、loader、Graph、policy、execution
+  或 compute state。其唯一
   进程级 identity authority 持有彼此独立的单调 allocation 与 Value-revision 序列。
 - 插件 callback object 和插件实例化的返回值内部状态仍可能指向插件代码，因此进程 owner 和复制值中的 lease
   必须保留插件库，直到这些状态全部销毁。
@@ -410,7 +412,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
-### 已实现的 V-2/V-3 SDK 子集与未来 provider ABI
+### 已实现的 V-2/V-3/V-4 SDK 子集与未来 provider ABI
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受单独版本化的 pure-C provider ABI v3，用于 Schema、Facet、Layout、access、
@@ -427,8 +429,14 @@ Value 的 DSO 都调用同一个 minting authority；长期 loader regression �
 并证明两类 identity 均保持不同。一条内建 operation 会在 private 双重表示 bridge
 后使用该 surface：它保留 sealed result Value，再派生 ImageBuffer compatibility snapshot。
 
-两个切片都不会把 Value、BufferHandle、lease 或 PImpl 放进 v2 callback record，也不会改变
-表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成 migration 前，
+V-4 把 installed `RegionSet` 与 bounded algebra 加入 `operation_runtime`。Region 不会进入新的
+public v2 slot。Source-private bridge 只识别当前选中的精确 core dense callback 并调用其
+Region-aware implementation；same-key plugin override 保持普通 complete-output v2 behavior。
+精确 ImageRect 可以适配当前 propagation callback，而 TensorSlice 绝不跨越 rectangular v2
+contract。
+
+这些切片都不会把 Value、BufferHandle、lease、Region 或 PImpl 放进 v2 callback record，也不会
+改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成 migration 前，
 operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、SDK、
 fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header 或
 v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。

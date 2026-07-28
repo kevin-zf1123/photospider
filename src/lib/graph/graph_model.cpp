@@ -589,7 +589,7 @@ void GraphModel::mutate_node_runtime_state(
       node.preserved,
       node.cached_output_high_precision,
       node.hp_version,
-      node.hp_roi,
+      node.hp_region,
       node.last_input_size_hp,
       node.dependency_lut_cache,
       node.dependency_lut_version,

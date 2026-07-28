@@ -9,13 +9,14 @@
 #include "compute/downsample_executor.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/region.hpp"
 
 namespace ps::compute {
 
 /**
  * @brief Request-local staging buffer for HP dirty writes.
  *
- * HighPrecisionDirtyWriteBuffer owns per-node HP outputs, ROI metadata,
+ * HighPrecisionDirtyWriteBuffer owns per-node HP outputs, Region metadata,
  * version counters, and dirty-source generation updates produced by dirty
  * worker tasks. The owning executor commits the staged data into GraphModel
  * only after the RT sibling commit gate allows original-graph mutation.
@@ -78,7 +79,7 @@ class HighPrecisionDirtyWriteBuffer {
    * @param node Graph node whose final HP state may be committed.
    * @param output Preflight output copied into request-local ownership.
    * @param hp_version Version to publish after complete request success.
-   * @param hp_roi Full image ROI represented by output, when applicable.
+   * @param hp_region Logical HP validity represented by output, when known.
    * @param dirty_source_generation Shared generation for preflight closure
    * roots, otherwise nullopt.
    * @return Nothing.
@@ -88,25 +89,26 @@ class HighPrecisionDirtyWriteBuffer {
    */
   void import_precomputed_output(
       const Node& node, const NodeOutput& output, int hp_version,
-      const std::optional<PixelRect>& hp_roi,
+      const std::optional<RegionSet>& hp_region,
       std::optional<uint64_t> dirty_source_generation = std::nullopt);
 
   /**
    * @brief Records HP metadata for one successful dirty node update.
    *
    * @param node Graph node whose staged output was updated.
-   * @param roi_hp HP-space ROI represented by this update.
-   * @param hp_size Full HP output extent used to clamp merged ROI metadata.
+   * @param region_hp Exact normalized HP-space Region represented by this
+   * update.
    * @param dirty_source Whether the node is a dirty source boundary.
    * @param dirty_generation Dirty generation committed for source nodes.
    * @return New staged HP version after incrementing.
    * @throws std::bad_alloc if the staged entry must be created.
    * @note Version increments once per dirty task, preserving prior executor
-   * semantics while hiding the increment until graph commit.
+   * semantics while hiding the increment until graph commit. Exact unions are
+   * retained when representable; otherwise the fresh exact update replaces
+   * prior validity as a safe under-approximation, never as a false superset.
    */
-  int mark_updated(const Node& node, const PixelRect& roi_hp,
-                   const PixelSize& hp_size, bool dirty_source,
-                   uint64_t dirty_generation);
+  int mark_updated(const Node& node, const RegionSet& region_hp,
+                   bool dirty_source, uint64_t dirty_generation);
 
   /**
    * @brief Moves staged HP state into the original GraphModel.
@@ -127,7 +129,8 @@ class HighPrecisionDirtyWriteBuffer {
    * @return Downsample requests carrying final staged HP versions.
    * @throws std::bad_alloc if result vector allocation fails.
    * @note The requests are valid after commit_to_graph() has made HP outputs
-   * visible on GraphModel.
+   * visible on GraphModel. TensorSlice and Whole validity have no current
+   * image-only projection and are intentionally omitted.
    */
   std::vector<DownsampleExecutor::Request> downsample_requests() const;
 
@@ -171,7 +174,7 @@ class HighPrecisionDirtyWriteBuffer {
     bool initialized = false;
     bool has_output = false;
     NodeOutput output;
-    std::optional<PixelRect> hp_roi;
+    std::optional<RegionSet> hp_region;
     int hp_version = 0;
     std::optional<uint64_t> dirty_source_generation;
   };
@@ -182,7 +185,9 @@ class HighPrecisionDirtyWriteBuffer {
    * @param node Graph node used for initial HP metadata.
    * @return Mutable staged entry.
    * @throws GraphError when image cloning fails.
-   * @note The caller must hold mutex_.
+   * @note The caller must hold mutex_. Existing Region validity is seeded only
+   * with an existing output when seed_existing_outputs_ is true; an empty
+   * force-recache entry never inherits old validity.
    */
   Entry& ensure_entry_locked(const Node& node);
 
@@ -255,15 +260,16 @@ class RealtimeProxyWriteBuffer {
    * @brief Records RT proxy metadata for one successful dirty update.
    *
    * @param node_id Graph node id whose proxy output was updated.
-   * @param roi_hp HP-space ROI represented by this RT update.
-   * @param hp_size Full HP-space extent used to clamp merged ROI metadata.
+   * @param region_hp Exact normalized HP-space ImageRect Region represented by
+   * this RT update.
    * @param dirty_source Whether the node is a dirty source boundary.
    * @param dirty_generation Dirty generation committed for source nodes.
    * @return New staged RT proxy version after incrementing.
-   * @throws std::bad_alloc if the staged entry must be created.
+   * @throws std::invalid_argument or std::overflow_error when region_hp cannot
+   * project exactly to the current PixelRect RT boundary.
+   * @throws std::bad_alloc if the staged entry or Region algebra must allocate.
    */
-  int mark_updated(int node_id, const PixelRect& roi_hp,
-                   const PixelSize& hp_size, bool dirty_source,
+  int mark_updated(int node_id, const RegionSet& region_hp, bool dirty_source,
                    uint64_t dirty_generation);
 
   /**
@@ -320,7 +326,8 @@ class RealtimeProxyWriteBuffer {
    * @param node_id Original GraphModel node id.
    * @return Mutable staged entry.
    * @throws GraphError when image cloning fails.
-   * @note The caller must hold mutex_.
+   * @note The caller must hold mutex_. Existing Region validity is seeded only
+   * with an existing proxy output when seed_existing_outputs_ is true.
    */
   Entry& ensure_entry_locked(int node_id);
 

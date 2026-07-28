@@ -6,6 +6,7 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "photospider/data/image_view.hpp"
+#include "photospider/data/region.hpp"
 
 namespace ps::ops {
 
@@ -47,6 +48,13 @@ struct DenseImageDescriptor {
 struct CpuDenseImageConfiguration {
   /** @brief Deep-owned request-effective parameter snapshot. */
   plugin::ParameterMap parameters;
+
+  /**
+   * @brief Exact normalized logical work selection for this invocation.
+   * @note Absence at higher layers is normalized to canonical Whole before
+   *       constructing this immutable operation snapshot.
+   */
+  RegionSet region = RegionSet::whole();
 };
 
 /**
@@ -109,6 +117,8 @@ struct CpuDenseImageOperation {
  *        configuration passed to both callbacks.
  * @param inputs Current graph/cache image inputs in destination-slot order.
  * @param operation Dense operation definition to run.
+ * @param region Exact normalized logical work selection; Whole preserves the
+ *        previous full-output behavior.
  * @return Newly owned validated current-boundary NodeOutput.
  * @throws GraphError with InvalidParameter for malformed caller inputs or
  *         inference rejection.
@@ -122,7 +132,8 @@ struct CpuDenseImageOperation {
  */
 NodeOutput execute_cpu_dense_image_operation(
     const Node& node, const std::vector<const NodeOutput*>& inputs,
-    const CpuDenseImageOperation& operation);
+    const CpuDenseImageOperation& operation,
+    const RegionSet& region = RegionSet::whole());
 
 /**
  * @brief Creates the dependency-neutral unsigned-8 dense invert definition.

@@ -2523,15 +2523,19 @@ TEST(ComputeServiceSplit,
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
-    const std::optional<PixelRect> source_roi_before = graph.node(1).hp_roi;
-    const std::optional<PixelRect> target_roi_before = graph.node(2).hp_roi;
-    const std::optional<PixelRect> parameter_roi_before = graph.node(3).hp_roi;
+    const std::optional<RegionSet> source_region_before =
+        graph.node(1).hp_region;
+    const std::optional<RegionSet> target_region_before =
+        graph.node(2).hp_region;
+    const std::optional<RegionSet> parameter_region_before =
+        graph.node(3).hp_region;
 
     const compute::RealtimeProxyGraph::NodeState* proxy_before_ptr =
         runtime.realtime_proxy_graph().find_state(2);
     ASSERT_NE(proxy_before_ptr, nullptr);
     const int proxy_version_before = proxy_before_ptr->version;
-    const std::optional<PixelRect> proxy_roi_before = proxy_before_ptr->roi_hp;
+    const std::optional<RegionSet> proxy_region_before =
+        proxy_before_ptr->region_hp;
     const std::optional<std::uint64_t> proxy_generation_before =
         proxy_before_ptr->dirty_source_generation;
     const bool proxy_had_output_before = proxy_before_ptr->output.has_value();
@@ -2598,9 +2602,9 @@ TEST(ComputeServiceSplit,
     EXPECT_EQ(graph.node(1).hp_version, source_version_before);
     EXPECT_EQ(graph.node(2).hp_version, target_version_before);
     EXPECT_EQ(graph.node(3).hp_version, parameter_version_before);
-    EXPECT_EQ(graph.node(1).hp_roi, source_roi_before);
-    EXPECT_EQ(graph.node(2).hp_roi, target_roi_before);
-    EXPECT_EQ(graph.node(3).hp_roi, parameter_roi_before);
+    EXPECT_EQ(graph.node(1).hp_region, source_region_before);
+    EXPECT_EQ(graph.node(2).hp_region, target_region_before);
+    EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
         cv::norm(
             source_pixels_before,
@@ -2627,7 +2631,7 @@ TEST(ComputeServiceSplit,
         runtime.realtime_proxy_graph().find_state(2);
     ASSERT_NE(proxy_after, nullptr);
     EXPECT_EQ(proxy_after->version, proxy_version_before);
-    EXPECT_EQ(proxy_after->roi_hp, proxy_roi_before);
+    EXPECT_EQ(proxy_after->region_hp, proxy_region_before);
     EXPECT_EQ(proxy_after->dirty_source_generation, proxy_generation_before);
     EXPECT_EQ(proxy_after->output.has_value(), proxy_had_output_before);
     if (proxy_after->output && proxy_had_output_before) {
@@ -2771,9 +2775,12 @@ TEST(ComputeServiceCancellation,
     const int source_version_before = graph.node(1).hp_version;
     const int target_version_before = graph.node(2).hp_version;
     const int parameter_version_before = graph.node(3).hp_version;
-    const std::optional<PixelRect> source_roi_before = graph.node(1).hp_roi;
-    const std::optional<PixelRect> target_roi_before = graph.node(2).hp_roi;
-    const std::optional<PixelRect> parameter_roi_before = graph.node(3).hp_roi;
+    const std::optional<RegionSet> source_region_before =
+        graph.node(1).hp_region;
+    const std::optional<RegionSet> target_region_before =
+        graph.node(2).hp_region;
+    const std::optional<RegionSet> parameter_region_before =
+        graph.node(3).hp_region;
     const std::size_t dirty_snapshots_before =
         graph.recent_dirty_region_snapshots.size();
     const std::size_t compute_plans_before = graph.recent_compute_plans.size();
@@ -2831,9 +2838,9 @@ TEST(ComputeServiceCancellation,
     EXPECT_EQ(graph.node(1).hp_version, source_version_before);
     EXPECT_EQ(graph.node(2).hp_version, target_version_before);
     EXPECT_EQ(graph.node(3).hp_version, parameter_version_before);
-    EXPECT_EQ(graph.node(1).hp_roi, source_roi_before);
-    EXPECT_EQ(graph.node(2).hp_roi, target_roi_before);
-    EXPECT_EQ(graph.node(3).hp_roi, parameter_roi_before);
+    EXPECT_EQ(graph.node(1).hp_region, source_region_before);
+    EXPECT_EQ(graph.node(2).hp_region, target_region_before);
+    EXPECT_EQ(graph.node(3).hp_region, parameter_region_before);
     EXPECT_DOUBLE_EQ(
         cv::norm(
             source_pixels_before,
@@ -3179,14 +3186,18 @@ TEST(DownsampleExecutorSplit,
     EXPECT_FALSE(expected_owner.owner_before(output.context));
     EXPECT_EQ(state->output->data.at("marker").as_int64(), 17);
     EXPECT_EQ(state->version, version);
-    ASSERT_TRUE(state->roi_hp.has_value());
-    EXPECT_EQ(*state->roi_hp, expected_roi);
+    ASSERT_TRUE(state->region_hp.has_value());
+    EXPECT_EQ(*state->region_hp,
+              RegionSet::from_image_rect(
+                  {image_region_domain(), expected_roi.x,
+                   expected_roi.x + expected_roi.width, expected_roi.y,
+                   expected_roi.y + expected_roi.height}));
   };
   assert_passthrough(5, (PixelRect{8, 4, 16, 8}));
 
   graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 6; });
   downsample.execute({{1, (PixelRect{40, 20, 8, 4}), 6}});
-  assert_passthrough(6, (PixelRect{8, 4, 40, 20}));
+  assert_passthrough(6, (PixelRect{40, 20, 8, 4}));
 
   const ComputeEventBatch recorded = events.drain(kComputeEventDrainMaxLimit);
   ASSERT_EQ(recorded.events.size(), 2u);
@@ -3249,6 +3260,11 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
   EXPECT_EQ(&output, &*graph.node(1).cached_output_high_precision);
+  EXPECT_EQ(graph.node(1).hp_version, 1);
+  ASSERT_TRUE(graph.node(1).hp_region.has_value());
+  EXPECT_EQ(
+      *graph.node(1).hp_region,
+      RegionSet::from_image_rect({image_region_domain(), 0, 256, 0, 256}));
   ASSERT_EQ(output.image_buffer.width, 256);
   ASSERT_EQ(output.image_buffer.height, 256);
   const cv::Mat output_mat = toCvMat(output.image_buffer);
@@ -3573,13 +3589,16 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   compute::RealtimeProxyGraph::NodeState initial_state;
   initial_state.output = make_image_output(4, 4, 1, 3.0f);
   initial_state.version = 7;
-  initial_state.roi_hp = (PixelRect{0, 0, 1, 1});
+  initial_state.region_hp =
+      RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1});
   proxy_graph.commit_node_state(1, std::move(initial_state));
 
   compute::RealtimeProxyWriteBuffer buffer(proxy_graph);
   NodeOutput& staged = buffer.ensure_output(1);
   toCvMat(staged.image_buffer).setTo(9.0f);
-  buffer.mark_updated(1, (PixelRect{1, 1, 2, 2}), (PixelSize{4, 4}), true, 42);
+  buffer.mark_updated(
+      1, RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
+      42);
 
   ASSERT_NE(proxy_graph.find_output(1), nullptr);
   EXPECT_FLOAT_EQ(
@@ -3594,7 +3613,10 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   EXPECT_FLOAT_EQ(
       toCvMat(committed_state->output->image_buffer).at<float>(0, 0), 9.0f);
   EXPECT_EQ(committed_state->version, 8);
-  EXPECT_EQ(committed_state->roi_hp, (PixelRect{0, 0, 3, 3}));
+  EXPECT_EQ(committed_state->region_hp,
+            RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
+      << "a corner-touching union is not one exact rectangle; proxy validity "
+         "must retain the fresh update instead of a false bounding superset";
   ASSERT_TRUE(committed_state->dirty_source_generation.has_value());
   EXPECT_EQ(*committed_state->dirty_source_generation, 42u);
 }
@@ -3617,7 +3639,8 @@ TEST(RealtimeProxyGraph,
   compute::RealtimeProxyGraph::NodeState initial_state;
   initial_state.output = make_image_output(4, 4, 1, 3.0f);
   initial_state.version = 7;
-  initial_state.roi_hp = (PixelRect{0, 0, 4, 4});
+  initial_state.region_hp =
+      RegionSet::from_image_rect({image_region_domain(), 0, 4, 0, 4});
   initial_state.dirty_source_generation = 42;
   proxy_graph.commit_node_state(1, std::move(initial_state));
 
@@ -3686,14 +3709,17 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
   Node node = make_node(1, "split_plan", "tile");
   node.cached_output_high_precision = make_image_output(4, 4, 1, 2.0f);
   node.hp_version = 3;
-  node.hp_roi = (PixelRect{0, 0, 1, 1});
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1});
   graph.add_node(node);
 
   compute::HighPrecisionDirtyWriteBuffer buffer;
   NodeOutput& staged = buffer.ensure_output(graph.node(1));
   toCvMat(staged.image_buffer).setTo(6.0f);
-  buffer.mark_updated(graph.node(1), (PixelRect{1, 1, 2, 2}), (PixelSize{4, 4}),
-                      true, 77);
+  buffer.mark_updated(
+      graph.node(1),
+      RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}), true,
+      77);
 
   ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
   EXPECT_FLOAT_EQ(
@@ -3701,7 +3727,8 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
           .at<float>(0, 0),
       2.0f);
   EXPECT_EQ(graph.node(1).hp_version, 3);
-  EXPECT_EQ(graph.node(1).hp_roi, (PixelRect{0, 0, 1, 1}));
+  EXPECT_EQ(graph.node(1).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1}));
   EXPECT_FALSE(graph.dirty_source_hp_commit_generation.count(1));
 
   buffer.commit_to_graph(graph);
@@ -3712,7 +3739,10 @@ TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
           .at<float>(0, 0),
       6.0f);
   EXPECT_EQ(graph.node(1).hp_version, 4);
-  EXPECT_EQ(graph.node(1).hp_roi, (PixelRect{0, 0, 3, 3}));
+  EXPECT_EQ(graph.node(1).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 1, 3, 1, 3}))
+      << "a non-representable disjoint validity union must retain the fresh "
+         "exact update, never publish an invalid rectangular superset";
   EXPECT_EQ(graph.dirty_source_hp_commit_generation[1], 77u);
 }
 
@@ -3947,6 +3977,9 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   ASSERT_TRUE(sequential.has_value());
   const uint64_t sequential_hp_version = graph.node(2).hp_version;
   EXPECT_GT(sequential_hp_version, 0u);
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_EQ(*graph.node(2).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16}));
 
   testing::KernelTestAccess::clear_execution_trace(kernel, kGraphName);
   request.execution.parallel = true;
@@ -3968,6 +4001,9 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
                                    GraphRuntime::ExecutionEvent::EXECUTE_TILE;
                           }));
   EXPECT_GT(graph.node(2).hp_version, sequential_hp_version);
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_EQ(*graph.node(2).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16}));
   const cv::Mat sequential_matrix = toCvMat(*sequential);
   const cv::Mat parallel_matrix = toCvMat(*parallel);
   ASSERT_EQ(sequential_matrix.size(), parallel_matrix.size());

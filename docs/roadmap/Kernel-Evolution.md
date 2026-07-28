@@ -607,13 +607,15 @@ remain implemented compatibility contracts. V-2 implemented a bounded
 dependency-neutral CPU DenseTensor `Value`/`ImageView` subset and one built-in
 operation. V-3 now adds checked BufferHandle ownership, lease-controlled
 construction, process-local allocation/revision identity, bounded signed
-layouts, and formal HP cache identity authority for CPU image Values. Their
+layouts, and formal HP cache identity authority for CPU image Values. V-4 now
+adds the public bounded Region contract, logical dirty/cache validity, and
+ImageRect/TensorSlice execution through the exact core dense path. Their
 exact behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
 [Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
 [Kernel Cache Model](../kernel-architecture/Cache-Model.md). The complete model
-below is the accepted target; only the explicit V-2/V-3 subset called out here
+below is the accepted target; only the explicit V-2/V-3/V-4 subset called out here
 is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
@@ -649,7 +651,7 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2/V-3 subset is deliberately narrower:
+The implemented V-2/V-3/V-4 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
@@ -675,8 +677,18 @@ The implemented V-2/V-3 subset is deliberately narrower:
   preserve identity; dirty mutation, replacement, and disk decode create fresh
   identity; disk save reads Value bytes; and runtime tokens are never
   persistent cache/task keys.
+- installed `RegionSet` supports canonical Empty/Whole, one bounded nonempty
+  conjunction of ImageRect or rank-general TensorSlice atoms, checked
+  normalization/clipping/algebra/containment, explicit budgets, and typed
+  Exact/ConservativeSuperset/Unknown/Unsupported/TooComplex outcomes;
+- dirty source, per-node, edge, monolithic, and HP validity records retain
+  normalized Region, while current image tiles, ImageBuffer helpers, Host/IPC
+  v2 inspection, and operation ABI v2 use checked derived PixelRect; and
+- the exact selected core `invert_dense` callback executes ImageRect or
+  TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
+  and same-key plugin replacement cannot inherit that source-private contract.
 
-V-3 has no Region, DataSpec, device registry, readiness fence, transfer,
+V-4 still has no DataSpec, device registry, readiness fence, transfer,
 quantization, packed element, provider ABI v3, or general named graph Value
 outputs. ImageBuffer remains the compatibility representation for operation
 ABI v2, tiled writes, codecs, and Host surfaces.
@@ -688,7 +700,7 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-3 ready CPU subset, `BufferHandle` is a checked immutable
+For the current V-4 CPU subset, `BufferHandle` is a checked immutable
 byte range. Consumer reads and ordinary builder writes require leases; sealed
 Values never issue `WriteLease`, and consumer writes are always rejected. The
 complete target additionally permits a sealed payload whose fence remains
@@ -703,11 +715,11 @@ ProviderDefined Layouts retain bounded buffer envelopes. `DeviceBackend`,
 `DeviceId`, and `MemoryDomain` are separate, and access is an explicit
 `Direct | Map | Import | Transfer | Unsupported` plan.
 
-`RegionSet` is bounded DNF over explicit logical domain keys. The MVP supports
-Whole, Empty, ImageRect, TensorSlice, and one nonempty clause. Region algebra
-returns Exact, labelled ConservativeSuperset, Unknown, Unsupported, or
-TooComplex rather than silently widening. `DataSpec` describes descriptor sets
-and uses subset, disjointness, conditional runtime guards, or
+The implemented `RegionSet` is bounded DNF over explicit logical domain keys.
+The MVP supports Whole, Empty, ImageRect, TensorSlice, and one nonempty clause.
+Region algebra returns Exact, labelled ConservativeSuperset, Unknown,
+Unsupported, or TooComplex rather than silently widening. `DataSpec` describes
+descriptor sets and uses subset, disjointness, conditional runtime guards, or
 `CannotEvaluate`; it never authorizes implicit conversion or device access.
 
 Runtime revision, descriptor/content/Layout digests, and artifact identity are

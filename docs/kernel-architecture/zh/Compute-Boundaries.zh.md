@@ -13,9 +13,10 @@ transport 或进程级 operation plugin
 转换为内部 Kernel 和 `ComputeService` 请求。公共 API 不暴露 `ComputeService`、plan、任务图，
 也不暴露物理 executor/policy pointer。Public compute request 可以携带一个可选正值
 `maximum_parallelism` 作为 Run 上限；它不能调整进程 executor 的大小，也不能选择该 executor。
-Request、propagation、planning 与 execution geometry 直到
-`NodeExecutor` 都保持为 `PixelRect`/`PixelSize`；OpenCV geometry 只存在于 provider 或
-算法实现内部，并且位于真正消费它的 library call 处。
+逻辑 dirty work 与 cache validity 在 planning、staging 和 Region-aware core dense path 中
+保持为规范化 `RegionSet`。当前 image tile shape、Host/IPC v2 inspection、ImageBuffer helper
+与 operation ABI v2 使用 checked derived `PixelRect`/`PixelSize`。OpenCV geometry 只存在于
+provider 或算法实现内部，并且位于真正消费它的 library call 处。
 
 ## 所有权图
 
@@ -110,13 +111,18 @@ Compute collaborator 位于 `src/lib/compute/`；ledger 与 Graph route binding 
 `src/lib/execution/`。这些类都是私有实现模块，不构成可安装 API。本区域唯一已安装的扩展契约是
 `include/photospider/policy/policy_plugin_api.h` 声明的纯 C policy ABI。
 
-V-3 保持 `NodeExecutor` 与 monolithic registry slot 不变，同时由一个 private core runner
-维持更严格的 operation-local 边界。它会复用有效 sealed CPU image Value；不存在 Value 时，
+V-4 保持 public monolithic registry slot 与 operation ABI v2 不变，同时由 source-private
+core lookup bridge 只识别当前选中的精确 core dense callback。Private core runner 会复用有效
+sealed CPU image Value；不存在 Value 时，
 才 snapshot 旧 ImageBuffer。它把 request-effective ParameterMap 深拷贝到一个不含 Node
 output/cache/topology state 的 configuration，只以该 configuration 与 logical
 DenseTensor/Image descriptor 调用 pure inference，再以同一 configuration、checked ImageView
-与 inferred descriptor 调用 execute，并校验完整 Value result。Publication 会保留该精确
-sealed result allocation/revision，再派生独立的 ImageBuffer compatibility snapshot。
+与 inferred descriptor 调用 execute，并校验完整 Value result。它还从
+planning/`NodeExecutor` 接收规范化 Region，复制未选中的逻辑 coordinate，并通过 checked
+stride 对精确 ImageRect 或 rank-general TensorSlice coordinate 执行 invert。同 key plugin
+override 不能继承这份 private contract；通用 v2 monolithic callback 维持 complete-output
+behavior。Publication 会保留该精确 sealed result allocation/revision，再派生独立的
+ImageBuffer compatibility snapshot。
 
 HP compute-service、result-committer、dirty-write 与 disk-load boundary 会在正式 publication
 前补齐缺失的 CPU image Value。可变 dirty clone 会清除旧 Value authority，并重新 seal settle
@@ -220,8 +226,11 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 - 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
-- Host、graph、planning、dirty work-set、staged-write 与 `NodeExecutor` 边界携带内核自有的
-  `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。
+- 逻辑 propagation、dirty planning、source history、per-node state、edge mapping、
+  staged-write validity 与 Region-aware dense callback 携带规范化 `RegionSet`。
+- 当前 image tiling、ImageBuffer processing、Host/IPC v2 inspection 与 operation ABI v2
+  携带 checked derived `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。TensorSlice 是
+  HP-only monolithic work，绝不会获得 rectangle。
 - 在可行时，tiled input normalization 每次 node invocation 只执行一次，而不是每个 tile callback
   执行一次。
 - V-3 dense invert inference callback 无法检查 payload byte；其 execute result 必须与
@@ -440,7 +449,7 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #76 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #81 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源。Graph 只保留复制的 route
 id/generation；不再存在拥有 worker 的 scheduler SDK、scheduler plugin、per-Graph 物理 owner 或
@@ -456,6 +465,7 @@ cancellation entry point 仍是未来行为。
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/region.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
@@ -473,6 +483,8 @@ cancellation entry point 仍是未来行为。
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/policy/policy_registry.*`
@@ -496,3 +508,4 @@ cancellation entry point 仍是未来行为。
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
+- `tests/unit/test_region_contracts.cpp`

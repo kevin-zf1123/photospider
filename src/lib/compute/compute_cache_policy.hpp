@@ -75,11 +75,12 @@ class ComputeCachePolicy {
   static bool can_read_disk_cache(bool disable_disk_cache, bool force_recache);
 
   /**
-   * @brief Clears formal HP output before a recompute.
+   * @brief Clears formal HP output and matching Region before a recompute.
    *
-   * @param node Node whose HP cache should be reset.
+   * @param node Node whose HP cache and validity metadata should be reset.
    * @throws Nothing directly.
-   * @note RT proxy state is owned outside GraphModel and is not affected.
+   * @note The monotonic HP version is retained until replacement publication.
+   * RT proxy state is owned outside GraphModel and is not affected.
    */
   static void clear_for_recompute(Node& node);
 };

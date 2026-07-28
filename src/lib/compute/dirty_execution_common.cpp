@@ -12,6 +12,7 @@
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#include "core/region_image_adapter.hpp"
 #include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
@@ -651,6 +652,15 @@ std::pair<int, DataType> infer_output_spec(
   return {1, DataType::FLOAT32};
 }
 
+/**
+ * @brief Applies selected HP image work to derived ROI and Region metadata.
+ * @param entries HP plan entries retained by the prepared request.
+ * @param selection Active task-selection overlay.
+ * @return Nothing.
+ * @throws std::bad_alloc when exact ImageRect Region storage cannot allocate.
+ * @note TensorSlice plans have no represented_hp_roi and retain their original
+ *       authoritative Region.
+ */
 void apply_planned_work_rois(std::unordered_map<int, HpPlanEntry>& entries,
                              const DirtyTaskSelectionOverlay& selection) {
   for (const auto& [node_id, node_selection] : selection.node_selections) {
@@ -661,10 +671,20 @@ void apply_planned_work_rois(std::unordered_map<int, HpPlanEntry>& entries,
     if (!is_rect_empty(node_selection.represented_hp_roi)) {
       entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
                                           entry_it->second.hp_size);
+      entry_it->second.region_hp =
+          region_image_adapter::from_pixel_rect(entry_it->second.roi_hp);
     }
   }
 }
 
+/**
+ * @brief Applies selected RT image work to HP Region and RT ROI projections.
+ * @param entries RT plan entries retained by the prepared request.
+ * @param selection Active task-selection overlay.
+ * @return Nothing.
+ * @throws std::bad_alloc when exact ImageRect Region storage cannot allocate.
+ * @note RT selection remains image-only; no TensorSlice projection occurs.
+ */
 void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
                              const DirtyTaskSelectionOverlay& selection) {
   for (const auto& [node_id, node_selection] : selection.node_selections) {
@@ -675,6 +695,8 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
     if (!is_rect_empty(node_selection.represented_hp_roi)) {
       entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
                                           entry_it->second.hp_size);
+      entry_it->second.region_hp =
+          region_image_adapter::from_pixel_rect(entry_it->second.roi_hp);
     }
     if (!is_rect_empty(node_selection.execution_roi)) {
       entry_it->second.roi_rt =

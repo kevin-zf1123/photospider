@@ -207,4 +207,39 @@ void normalize_node_output_image_value(NodeOutput* output) {
   output->image_value = snapshot_cpu_image_value(buffer);
 }
 
+/** @copydoc full_node_output_region */
+RegionSet full_node_output_region(const NodeOutput& output) {
+  if (output.image_value.valid()) {
+    if (output.image_value.image_facet().has_value()) {
+      const ImageView view(output.image_value);
+      return RegionSet::from_image_rect(
+          {image_region_domain(), 0, static_cast<std::int64_t>(view.width()), 0,
+           static_cast<std::int64_t>(view.height())});
+    }
+
+    const DenseTensorDescriptor& descriptor =
+        output.image_value.dense_tensor_descriptor();
+    std::vector<RegionInterval> axes;
+    axes.reserve(descriptor.shape.size());
+    for (const std::size_t extent : descriptor.shape) {
+      if constexpr (sizeof(std::size_t) > sizeof(std::uint64_t)) {
+        if (extent > std::numeric_limits<std::uint64_t>::max()) {
+          throw std::overflow_error(
+              "DenseTensor extent exceeds Region uint64 bounds.");
+        }
+      }
+      axes.push_back({0U, static_cast<std::uint64_t>(extent)});
+    }
+    return RegionSet::from_tensor_slice(
+        {dense_tensor_region_domain(), std::move(axes)});
+  }
+
+  const ImageBuffer& buffer = output.image_buffer;
+  if (buffer.width > 0 && buffer.height > 0) {
+    return RegionSet::from_image_rect(
+        {image_region_domain(), 0, buffer.width, 0, buffer.height});
+  }
+  return RegionSet::whole();
+}
+
 }  // namespace ps::value_image_adapter

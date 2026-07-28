@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "compute/compute_geometry.hpp"
+#include "core/ops.hpp"
 #include "core/param_utils.hpp"
 
 namespace ps::compute {
@@ -336,6 +337,13 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
         [&](auto&& op_func) -> NodeOutput {
           using T = std::decay_t<decltype(op_func)>;
           if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+            if (config.output_region.has_value()) {
+              if (auto region_operation =
+                      ops::find_core_region_monolithic_operation(
+                          node.type, node.subtype, op_func)) {
+                return (*region_operation)(node, inputs, *config.output_region);
+              }
+            }
             return op_func(node, inputs);
           } else {
             TiledInputContext input_context =

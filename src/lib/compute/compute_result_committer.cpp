@@ -32,9 +32,12 @@ void ComputeResultCommitter::finalize_timing(TimingCollector& timing_results,
 void ComputeResultCommitter::commit(
     GraphModel& graph, const std::vector<int>& execution_order,
     std::vector<std::optional<NodeOutput>>& temp_results) const {
+  std::vector<std::optional<RegionSet>> full_regions(temp_results.size());
   for (size_t i = 0; i < execution_order.size(); ++i) {
     if (temp_results[i].has_value()) {
       value_image_adapter::normalize_node_output_image_value(&*temp_results[i]);
+      full_regions[i] =
+          value_image_adapter::full_node_output_region(*temp_results[i]);
     }
   }
 
@@ -48,6 +51,7 @@ void ComputeResultCommitter::commit(
         node_id, [&](GraphModel::NodeRuntimeState& state) {
           state.cached_output_high_precision = std::move(*temp_results[i]);
           state.hp_version++;
+          state.hp_region = std::move(full_regions[i]);
         });
     cache_.save_cache_if_configured(graph, graph.node(node_id),
                                     cache_precision_);
@@ -65,6 +69,7 @@ void clear_planned_high_precision_caches(GraphModel& graph,
     graph.mutate_node_runtime_state(
         id, [](GraphModel::NodeRuntimeState& state) {
           state.cached_output_high_precision.reset();
+          state.hp_region.reset();
         });
   }
 }

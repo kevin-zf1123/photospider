@@ -147,8 +147,9 @@ timer thread 或 wall clock 的情况下协作式使 Run 过期。当前 Kernel 
 execution-visible task 可能执行，它就保持不可变。
 
 **`DirtyRegionSnapshot`**
-记录 dirty source、受影响 region、tile 和 edge mapping 的图级 ROI 与生命周期状态。
-它不是计算任务图、policy snapshot、ready store 或 execution route。
+记录 dirty source、authoritative affected Region、derived image tile、monolithic work 与 edge
+mapping 的图级 Region 与生命周期状态。它不是计算任务图、policy snapshot、ready store 或
+execution route。
 
 **`DirtyUpdateWorkSet`**
 由 dirty snapshot 从既有请求 plan 中选出的活动任务子集。选择可以激活或裁剪已规划任务，
@@ -301,11 +302,19 @@ task/cache key。
 中，它是独立 compatibility snapshot，而不是 allocation/revision identity authority。它不是
 通用 Tensor、Deep Image 或 vector-scene 模型。
 
+**`RegionDomainKey` / `RegionSet`**
+`RegionDomainKey` 是永久的 128-bit 逻辑 coordinate-domain identity。`RegionSet` 是 immutable
+normalized 逻辑 work/validity value。V-4 MVP 支持规范 Empty、Whole、一个有界 nonempty
+conjunction、signed half-open ImageRect、rank-general unsigned half-open TensorSlice、显式
+complexity budget、typed algebra outcome 与 containment。它不是 physical tile geometry、
+cache owner、Value revision 或 uncertainty placeholder。
+
 **`PixelRect` / `PixelSize`**
-公共 Host 与 operation 契约以及私有 Graph、ROI propagation、dirty-region、cache identity、
-planning 与 task state 使用的不依赖外部 library 的整数 geometry value。只能在 OpenCV
-adapter 或 provider 实际调用 matrix/library 时局部构造 OpenCV geometry；这些内核契约不会
-存储或传递该类型。
+当前 Host/IPC v2 inspection、operation ABI v2、ImageBuffer processing 与 physical image
+tile/task record 使用的不依赖外部 library 的二维整数 geometry。在需要逻辑 Region authority
+的位置，它只能从一个精确内建 ImageRect 派生。它无法表示 TensorSlice、Whole、custom domain、
+multi-atom clause 或 uncertainty。只能在 OpenCV adapter 或 provider 实际调用 matrix/library
+时局部构造 OpenCV geometry。
 
 **Operation provider**
 operation callback、propagation contract 与 metadata 的实现来源。依赖中立 core operation
@@ -328,6 +337,8 @@ cache、policy 或物理 execution 语义的所有者。
 - HP cache 不是 RT proxy state。
 - `AllocationIdentity` 不是 `ValueRevisionId`；二者都不是持久 content/cache identity。
 - `ImageBuffer` 不是[目标通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
+- `RegionSet` 不是 `PixelRect`；后者是 checked image-edge projection，绝不是 TensorSlice
+  authority。
 - Execution worker request 不是 Run reservation 或 child grant。
 - Policy candidate id 或 decision 不是 execution authority；只有已提交的 reserved-start transaction
   才能进入私有 route。

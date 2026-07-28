@@ -185,9 +185,10 @@ and dependency cone. It remains immutable while execution-visible tasks derived
 from it may execute.
 
 **`DirtyRegionSnapshot`**
-Graph-scoped ROI and lifecycle state that records dirty sources, affected
-regions, tiles, and edge mappings. It is not a compute task graph, policy
-snapshot, ready store, or execution route.
+Graph-scoped Region and lifecycle state that records dirty sources,
+authoritative affected Regions, derived image tiles, monolithic work, and edge
+mappings. It is not a compute task graph, policy snapshot, ready store, or
+execution route.
 
 **`DirtyUpdateWorkSet`**
 The active task subset selected from an existing request plan by a dirty
@@ -382,12 +383,23 @@ backend context. In a formal CPU image cache entry with a valid sealed
 allocation/revision identity authority. It is not a general Tensor, Deep
 Image, or vector-scene model.
 
+**`RegionDomainKey` / `RegionSet`**
+`RegionDomainKey` is a permanent 128-bit logical coordinate-domain identity.
+`RegionSet` is the immutable normalized logical work/validity value. The V-4
+MVP supports canonical Empty, Whole, one bounded nonempty conjunction, signed
+half-open ImageRect, rank-general unsigned half-open TensorSlice, explicit
+complexity budgets, typed algebra outcomes, and containment. It is not
+physical tile geometry, a cache owner, a Value revision, or an uncertainty
+placeholder.
+
 **`PixelRect` / `PixelSize`**
-External-library-neutral integer geometry values used by public Host and
-operation contracts and by private Graph, ROI propagation, dirty-region,
-cache-identity, planning, and task state. OpenCV geometry may be constructed
-only locally in an OpenCV adapter or provider at the actual matrix/library
-call; it is not stored or passed through those kernel contracts.
+External-library-neutral two-dimensional integer geometry used by current
+Host/IPC v2 inspection, operation ABI v2, ImageBuffer processing, and physical
+image tile/task records. It is derived from one exact built-in ImageRect where
+logical Region authority is required. It cannot represent TensorSlice, Whole,
+custom domains, multi-atom clauses, or uncertainty. OpenCV geometry may be
+constructed only locally in an OpenCV adapter or provider at the actual
+matrix/library call.
 
 **Operation provider**
 An implementation source for operation callbacks, propagation contracts, and
@@ -417,6 +429,8 @@ planning, cache, policy, or physical-execution semantics.
   content/cache identity.
 - `ImageBuffer` is not the
   [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
+- `RegionSet` is not `PixelRect`; the latter is a checked image-edge
+  projection and never TensorSlice authority.
 - An execution worker request is not a Run reservation or child grant.
 - A policy candidate id or decision is not execution authority; only a
   committed reserved-start transaction may enter a private route.

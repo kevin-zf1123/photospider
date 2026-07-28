@@ -1028,6 +1028,16 @@ def write_consumer_projects(
                 '                 "<operation-plugin> <session-root> <yaml>\\n";',
                 "    return 64;",
                 "  }",
+                "  const ps::RegionSet region = ps::RegionSet::from_image_rect(",
+                "      {ps::image_region_domain(), 0, 8, 0, 6});",
+                "  const auto clipped = ps::clip_region_to_image_bounds(",
+                "      region, {ps::image_region_domain(), 2, 7, 1, 5});",
+                "  if (clipped.status() != ps::RegionOperationStatus::Exact ||",
+                "      !clipped.region().has_value() ||",
+                "      ps::region_contains(region, *clipped.region()) !=",
+                "          ps::RegionContainmentStatus::Contains) {",
+                "    return 65;",
+                "  }",
                 "  auto host = ps::create_embedded_host();",
                 "  if (!host) {",
                 "    return 1;",
@@ -1825,6 +1835,7 @@ def write_extension_consumer_projects(
 
             #include <photospider/core/image_buffer.hpp>
             #include <photospider/data/image_view.hpp>
+            #include <photospider/data/region.hpp>
             #include <photospider/data/value.hpp>
             #include <photospider/memory/buffer_handle.hpp>
 
@@ -1864,6 +1875,16 @@ def write_extension_consumer_projects(
               const ps::Value value = builder.seal();
               const auto read = value.buffer_handle().acquire_read();
               const ps::ImageView view(value);
+              const ps::RegionSet region = ps::RegionSet::from_tensor_slice(
+                  {ps::dense_tensor_region_domain(),
+                   {{0U, 2U}, {0U, 3U}, {0U, 1U}}});
+              const auto clipped = ps::clip_region_to_tensor_shape(
+                  region, ps::dense_tensor_region_domain(), {1U, 3U, 1U});
+              const bool valid_region =
+                  clipped.status() == ps::RegionOperationStatus::Exact &&
+                  clipped.region().has_value() &&
+                  ps::region_contains(region, *clipped.region()) ==
+                      ps::RegionContainmentStatus::Contains;
               const bool valid_value =
                   read.valid() && read.size() == storage.size() &&
                   read.allocation_identity() ==
@@ -1874,7 +1895,7 @@ def write_extension_consumer_projects(
                   std::to_integer<unsigned int>(
                       *view.channel_data(2U, 1U, 0U)) == 6U;
               return image.data && image.width == 3 && image.height == 2 &&
-                             valid_value
+                             valid_value && valid_region
                          ? 0
                          : 1;
             }
@@ -3040,8 +3061,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
-        "installed public header inventory is exactly 25 files": len(install["headers"])
-        == 25,
+        "installed public header inventory is exactly 26 files": len(install["headers"])
+        == 26,
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],

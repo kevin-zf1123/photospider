@@ -152,7 +152,7 @@ class GraphModel {
     bool& preserved;
     std::optional<NodeOutput>& cached_output_high_precision;
     int& hp_version;
-    std::optional<PixelRect>& hp_roi;
+    std::optional<RegionSet>& hp_region;
     std::optional<PixelSize>& last_input_size_hp;
     std::optional<DependencyLutCache>& dependency_lut_cache;
     uint64_t& dependency_lut_version;

@@ -83,11 +83,13 @@ bool has_memory_cache(const Node& node) {
  *
  * @param node Node whose memory cache fields should be reset.
  * @throws Destructors for cached payload members are expected not to throw.
- * @note Topology, cache entries, and version counters are left unchanged. RT
- * proxy state is not stored on Node.
+ * @note Topology, cache entries, and version counters are left unchanged.
+ * Matching Region validity is cleared with the output. RT proxy state is not
+ * stored on Node.
  */
 void reset_memory_cache(Node& node) {
   node.cached_output_high_precision.reset();
+  node.hp_region.reset();
 }
 
 /**
@@ -464,7 +466,11 @@ bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
       read_first_disk_cache_entry(graph, node, *image_codec_, *metadata_codec_);
   return finalize_disk_cache_load(
       graph, std::move(attempt), start_io, [&](NodeOutput output) {
+        RegionSet full_region =
+            value_image_adapter::full_node_output_region(output);
         node.cached_output_high_precision = std::move(output);
+        node.hp_region = std::move(full_region);
+        node.hp_version++;
       });
 }
 

@@ -4,9 +4,11 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <variant>
 
 #include "compute/compute_geometry.hpp"
 #include "core/ops.hpp"
+#include "core/region_image_adapter.hpp"
 
 namespace ps::compute {
 
@@ -24,6 +26,16 @@ void DirtyRegionSnapshotBuilder::apply_source_lifecycle_event(
                      "Dirty source ROI is empty for node " +
                          std::to_string(update.node_id) + ".");
   }
+  if (update.source_region && update.source_region->is_empty()) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Dirty source Region is empty for node " +
+                         std::to_string(update.node_id) + ".");
+  }
+  if (update.source_roi && update.source_region) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "Dirty source lifecycle accepts either ROI or Region, not both.");
+  }
 
   if (std::find(snapshot.dirty_source_nodes.begin(),
                 snapshot.dirty_source_nodes.end(),
@@ -37,9 +49,19 @@ void DirtyRegionSnapshotBuilder::apply_source_lifecycle_event(
   state.lifecycle = update.lifecycle;
   state.generation = snapshot.graph_generation;
   if (update.source_roi) {
+    const RegionSet region =
+        region_image_adapter::from_pixel_rect(*update.source_roi);
     state.source_rois.push_back(*update.source_roi);
+    state.source_regions.push_back(region);
     snapshot.source_roi_records[update.node_id].push_back(
         {update.node_id, update.domain, *update.source_roi,
+         snapshot.graph_generation});
+    snapshot.source_region_records[update.node_id].push_back(
+        {update.node_id, update.domain, region, snapshot.graph_generation});
+  } else if (update.source_region) {
+    state.source_regions.push_back(*update.source_region);
+    snapshot.source_region_records[update.node_id].push_back(
+        {update.node_id, update.domain, *update.source_region,
          snapshot.graph_generation});
   }
 
@@ -58,29 +80,80 @@ void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
   snapshot.dirty_tiles.clear();
   snapshot.dirty_monolithic_nodes.clear();
   snapshot.per_node_dirty_rois.clear();
+  snapshot.per_node_dirty_regions.clear();
   snapshot.actual_dirty_rois.clear();
+  snapshot.actual_dirty_regions.clear();
   snapshot.edge_mappings.clear();
 
   std::unordered_map<int, PixelSize> hp_size_cache;
-  for (const auto& [node_id, records] : snapshot.source_roi_records) {
+  const auto append_image_source = [&](int node_id, DirtyDomain record_domain,
+                                       const PixelRect& source_roi) {
+    if (!graph.has_node(node_id) || record_domain != domain ||
+        is_rect_empty(source_roi)) {
+      return;
+    }
+    const PixelRect domain_roi =
+        normalize_source_roi(graph, node_id, domain, source_roi, hp_size_cache);
+    if (is_rect_empty(domain_roi)) {
+      return;
+    }
+    const Node& node = graph.node(node_id);
+    const RegionSet domain_region =
+        region_image_adapter::from_pixel_rect(domain_roi);
+    snapshot.per_node_dirty_rois[node_id].push_back(domain_roi);
+    snapshot.actual_dirty_rois[node_id].push_back(domain_roi);
+    snapshot.per_node_dirty_regions[node_id].push_back(domain_region);
+    snapshot.actual_dirty_regions[node_id].push_back(domain_region);
+    append_node_work(snapshot,
+                     DirtyNodeWorkRecord{&node, node_id, domain, domain_roi,
+                                         tile_size_for_domain(domain)});
+  };
+
+  for (const auto& [node_id, records] : snapshot.source_region_records) {
     if (!graph.has_node(node_id)) {
       continue;
     }
-    const Node& node = graph.node(node_id);
     for (const auto& record : records) {
-      if (record.domain != domain || is_rect_empty(record.source_roi)) {
+      if (record.domain != domain || record.source_region.is_empty()) {
         continue;
       }
-      const PixelRect domain_roi = normalize_source_roi(
-          graph, node_id, domain, record.source_roi, hp_size_cache);
-      if (is_rect_empty(domain_roi)) {
+      if (record.source_region.atoms().size() == 1U &&
+          std::holds_alternative<ImageRect>(
+              record.source_region.atoms().front())) {
+        append_image_source(
+            node_id, record.domain,
+            region_image_adapter::to_pixel_rect(record.source_region));
         continue;
       }
-      snapshot.per_node_dirty_rois[node_id].push_back(domain_roi);
-      snapshot.actual_dirty_rois[node_id].push_back(domain_roi);
-      append_node_work(snapshot,
-                       DirtyNodeWorkRecord{&node, node_id, domain, domain_roi,
-                                           tile_size_for_domain(domain)});
+      if (domain != DirtyDomain::HighPrecision ||
+          record.source_region.atoms().size() != 1U ||
+          !std::holds_alternative<TensorSlice>(
+              record.source_region.atoms().front())) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Dirty source Region cannot be materialized in this domain.");
+      }
+      const TensorSlice& tensor =
+          std::get<TensorSlice>(record.source_region.atoms().front());
+      if (!(tensor.domain == dense_tensor_region_domain())) {
+        throw GraphError(
+            GraphErrc::InvalidParameter,
+            "Dirty source TensorSlice requires the built-in dense tensor "
+            "domain.");
+      }
+      snapshot.per_node_dirty_regions[node_id].push_back(record.source_region);
+      snapshot.actual_dirty_regions[node_id].push_back(record.source_region);
+      snapshot.dirty_monolithic_nodes.push_back(
+          {node_id, domain, PixelRect{}, true, record.source_region});
+    }
+  }
+
+  for (const auto& [node_id, records] : snapshot.source_roi_records) {
+    if (snapshot.source_region_records.count(node_id) != 0U) {
+      continue;
+    }
+    for (const auto& record : records) {
+      append_image_source(node_id, record.domain, record.source_roi);
     }
   }
 }
@@ -100,8 +173,10 @@ void DirtyRegionSnapshotBuilder::append_node_work(
     return;
   }
   if (is_monolithic_boundary(*record.node)) {
+    const RegionSet region =
+        region_image_adapter::from_pixel_rect(record.work_roi);
     snapshot.dirty_monolithic_nodes.push_back(
-        {record.node_id, record.domain, record.work_roi, true});
+        {record.node_id, record.domain, record.work_roi, true, region});
     return;
   }
   enumerate_tiles(
@@ -133,11 +208,11 @@ void DirtyRegionSnapshotBuilder::enumerate_tiles(
                              request.tile_size, right - x)),
                          static_cast<int>(std::min<std::int64_t>(
                              request.tile_size, bottom - y))};
-      snapshot.dirty_tiles.push_back({request.node_id, request.domain,
-                                      request.level,
-                                      static_cast<int>(x / request.tile_size),
-                                      static_cast<int>(y / request.tile_size),
-                                      request.tile_size, tile_roi});
+      snapshot.dirty_tiles.push_back(
+          {request.node_id, request.domain, request.level,
+           static_cast<int>(x / request.tile_size),
+           static_cast<int>(y / request.tile_size), request.tile_size, tile_roi,
+           region_image_adapter::from_pixel_rect(tile_roi)});
     }
   }
 }

@@ -27,12 +27,12 @@ Associated fields:
 | Field | Meaning |
 | --- | --- |
 | `hp_version` | Version counter for HP output changes. |
-| `hp_roi` | Most recent or merged HP region updated. |
+| `hp_region` | Normalized logical Region known valid in the formal HP output. |
 
 ## RT State
 
 RT compute writes `RealtimeProxyGraph`. Each proxy node is keyed by the original
-graph node id and stores only low-resolution output, HP-space ROI metadata,
+graph node id and stores only low-resolution output, HP-space Region metadata,
 version, and RT dirty-source generation. It does not copy Node parameters,
 inputs, topology, caches, or formal HP state. When the observed graph topology
 generation changes, synchronization resets live proxy entries rather than
@@ -40,7 +40,7 @@ preserving state by reused node id, so reload/edit workflows cannot expose stale
 low-resolution output from an earlier graph.
 
 Dirty RT execution does not write graph-owned RT fields. Worker tasks stage
-proxy output, ROI metadata, version counters, and dirty-source commit
+proxy output, Region metadata, version counters, and dirty-source commit
 generation in `RealtimeProxyWriteBuffer`, then commit that staged state to
 `RealtimeProxyGraph` after the RT dirty work set drains. Dirty HP execution
 similarly stages HP output in `HighPrecisionDirtyWriteBuffer` before committing
@@ -52,7 +52,7 @@ Associated fields:
 | Proxy field | Meaning |
 | --- | --- |
 | `version` | Version counter for RT proxy output changes. |
-| `roi_hp` | Most recent or merged HP-space region represented by RT update. |
+| `region_hp` | Normalized HP-space ImageRect Region represented by RT update. |
 | `dirty_source_generation` | RT dirty source generation committed for stale source checks. |
 
 ## Disk Cache
@@ -186,7 +186,28 @@ neither `AllocationIdentity` nor `ValueRevisionId` is serialized, reconstructed
 from a path, or used as a persistent cache/task key. Both tokens are opaque,
 process-local runtime identities; a disk reload necessarily mints new ones.
 
-### Accepted future relationship (not current behavior)
+## V-4 Region Validity
+
+`Node::hp_region` is normalized logical validity metadata for the one formal HP
+cache authority; it is not another output, allocation identity, Value
+revision, disk path, or persistence key. Full compute, sequential publication,
+result commit, and successful disk load publish a complete Region (`ImageRect`,
+TensorSlice bounds, or Whole when only non-image named data is known).
+
+Dirty HP staging carries output, Region, version, and source generation
+together. Exact representable unions retain accumulated validity. When two
+updates cannot be represented by the bounded one-clause contract, staging
+keeps the fresh exact update as a safe under-approximation rather than
+publishing a false bounding superset. The existing revision/current-generation
+predicate publishes or discards the entire staged state atomically.
+
+RT proxy state uses HP-space `region_hp` but remains image-only. The checked
+adapter derives current rectangular downsample/inspection metadata only from
+one exact built-in ImageRect. TensorSlice and Whole do not enter the RT or
+downsample rectangle boundary. Region values and Tensor axes are included in
+retained-memory accounting.
+
+### Accepted future persistence relationship (not current behavior)
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 separates future persistence into graph documents, canonical descriptor
@@ -214,11 +235,15 @@ payloads. No future residency replica becomes a second cache authority.
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/core/value_image_adapter.*`
+- `include/photospider/data/region.hpp`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`

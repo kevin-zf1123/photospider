@@ -564,7 +564,7 @@ Node make_resource_product_node(int id) {
  *
  * @param node_id Graph-local node identity.
  * @param subtype Registered HP or RT-fallback operation subtype.
- * @return Node with an 8-by-8 reusable HP output and full-frame ROI.
+ * @return Node with an 8-by-8 reusable HP output and full-frame Region.
  * @throws GraphError or std::bad_alloc when node/output ownership allocates.
  * @note The reusable output supplies deterministic dirty planning geometry;
  * successful execution replaces it through the production staging buffer.
@@ -573,7 +573,8 @@ Node make_resource_dirty_product_node(int node_id, const std::string& subtype) {
   Node node = make_resource_product_node(node_id);
   node.subtype = subtype;
   node.cached_output_high_precision = make_resource_dirty_output(3);
-  node.hp_roi = PixelRect{0, 0, 8, 8};
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
   node.hp_version = 1;
   return node;
 }

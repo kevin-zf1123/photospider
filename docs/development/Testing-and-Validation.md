@@ -852,10 +852,10 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor and ImageView Operation Validation
+## CPU DenseTensor, ImageView, and Region Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2/V-3 boundary. Its 16 durable cases verify:
+binary for the implemented V-2/V-3/V-4 boundary. Its 21 durable cases verify:
 
 - malformed facet, stride, byte-offset, and exact-envelope rejection, including
   checked single-axis/cross-axis writable collision and overflow cases plus
@@ -872,8 +872,16 @@ binary for the implemented V-2/V-3 boundary. Its 16 durable cases verify:
   authority;
 - exact descriptor-only invert inference, direct sealed-input reuse, and exact
   result-revision publication; and
-- padded multi-channel product execution plus `GraphErrc::ComputeError` when
+- padded multi-channel full and ImageRect execution, rank-four TensorSlice,
+  Empty/Whole selection, dirty-plan-to-product staging, plus
+  `GraphErrc::ComputeError` when
   execute returns a valid Value whose descriptor disagrees with inference.
+
+`test_region_contracts` owns 22 durable Region cases for canonical
+Empty/Whole, keys, intervals, normalization, rank-general TensorSlice,
+overflow-safe clipping/algebra, explicit budgets, typed failures, checked
+ImageRect/PixelRect conversion, Region propagation, Tensor planning/task
+selection/edge mapping, and Region dirty lifecycle.
 
 Active output bytes must equal `255 - input`; input and output row padding is
 not treated as image elements.
@@ -881,18 +889,20 @@ not treated as image elements.
 Run the focused validation with:
 
 ```bash
-cmake --build build --target test_cpu_dense_tensor_image_operation \
+cmake --build build --target test_region_contracts \
+  test_cpu_dense_tensor_image_operation \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^CpuDenseTensorImageOperation\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 16 cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all 21 dense cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.
-The provider-disabled nested build below also compiles and runs all 16 dense
+Both installed consumers construct and evaluate Region without optional
+dependencies. The provider-disabled nested build below also compiles and runs all 21 dense
 cases plus that dual-DSO case, so the real core operation and identity
 authority do not depend on the optional OpenCV operation provider.
 
@@ -927,9 +937,9 @@ suite gate is therefore off. The driver validates the exact CMake cache
 profile, builds the provider-independent focused provider binary, its
 stdlib-only fixture, the CPU DenseTensor/ImageView integration binary, and the
 dedicated disk-cache and kernel-lifecycle concurrency binaries, then queries
-the machine-readable CTest inventory. That inventory must contain exactly 24
+the machine-readable CTest inventory. That inventory must contain exactly 29
 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 16
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 21
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
@@ -1088,7 +1098,8 @@ Low-confidence tests should still be visible in validation rather than silently
 excluded. If a test is not reliable enough to gate development, document that
 status explicitly and create follow-up work to upgrade or replace it.
 
-Milestone tests and `test_propagation_contracts` are registered with CTest so
+Milestone tests, `test_propagation_contracts`, and the long-lived
+`test_region_contracts` behavior suite are registered with CTest so
 they are visible, but they remain low-confidence legacy tests until a follow-up
 pass rewrites them as narrower regression tests with clearer fixtures and
 assertions.

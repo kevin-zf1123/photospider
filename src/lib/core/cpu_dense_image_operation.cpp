@@ -232,9 +232,102 @@ std::size_t dense_storage_size(const DenseTensorDescriptor& descriptor,
 }
 
 /**
+ * @brief Validates one exact Region against an inferred dense image.
+ *
+ * @param region Canonical logical work selection.
+ * @param inferred Exact output tensor and image descriptor.
+ * @throws std::invalid_argument for unsupported atom count/domain/kind,
+ *         negative image endpoints, out-of-bounds image coordinates, tensor
+ *         rank mismatch, or out-of-bounds tensor axes.
+ * @note Whole and Empty are always valid. ImageRect constrains only explicit
+ *       x/y axes; TensorSlice constrains every logical tensor axis directly.
+ */
+void validate_dense_region(const RegionSet& region,
+                           const DenseImageDescriptor& inferred) {
+  if (region.is_whole() || region.is_empty()) {
+    return;
+  }
+  if (region.atoms().size() != 1U) {
+    throw std::invalid_argument(
+        "Dense operation accepts one exact Region atom.");
+  }
+  const RegionAtom& atom = region.atoms().front();
+  if (const auto* image = std::get_if<ImageRect>(&atom)) {
+    if (!(image->domain == image_region_domain())) {
+      throw std::invalid_argument(
+          "Dense ImageRect uses an unsupported logical domain.");
+    }
+    if (image->x_begin < 0 || image->y_begin < 0 ||
+        image->x_end < image->x_begin || image->y_end < image->y_begin) {
+      throw std::invalid_argument("Dense ImageRect endpoints are invalid.");
+    }
+    const std::uint64_t x_end = static_cast<std::uint64_t>(image->x_end);
+    const std::uint64_t y_end = static_cast<std::uint64_t>(image->y_end);
+    if (x_end > inferred.tensor.shape[inferred.image.x_axis] ||
+        y_end > inferred.tensor.shape[inferred.image.y_axis]) {
+      throw std::invalid_argument(
+          "Dense ImageRect exceeds the inferred image bounds.");
+    }
+    return;
+  }
+  const TensorSlice& tensor = std::get<TensorSlice>(atom);
+  if (!(tensor.domain == dense_tensor_region_domain())) {
+    throw std::invalid_argument(
+        "Dense TensorSlice uses an unsupported logical domain.");
+  }
+  if (tensor.axes.size() != inferred.tensor.shape.size()) {
+    throw std::invalid_argument(
+        "Dense TensorSlice rank differs from the inferred tensor.");
+  }
+  for (std::size_t axis = 0U; axis < tensor.axes.size(); ++axis) {
+    if (tensor.axes[axis].end > inferred.tensor.shape[axis]) {
+      throw std::invalid_argument(
+          "Dense TensorSlice exceeds the inferred tensor bounds.");
+    }
+  }
+}
+
+/**
+ * @brief Tests whether one logical coordinate is selected by a valid Region.
+ *
+ * @param region Region validated by validate_dense_region().
+ * @param inferred Exact tensor and image-axis mapping.
+ * @param coordinates Complete logical tensor coordinates in axis order.
+ * @return True when the coordinate belongs to Whole or the exact atom.
+ * @throws Nothing under validated rank and bounds.
+ */
+bool dense_coordinate_selected(
+    const RegionSet& region, const DenseImageDescriptor& inferred,
+    const std::vector<std::size_t>& coordinates) noexcept {
+  if (region.is_whole()) {
+    return true;
+  }
+  if (region.is_empty()) {
+    return false;
+  }
+  const RegionAtom& atom = region.atoms().front();
+  if (const auto* image = std::get_if<ImageRect>(&atom)) {
+    const std::size_t x = coordinates[inferred.image.x_axis];
+    const std::size_t y = coordinates[inferred.image.y_axis];
+    return x >= static_cast<std::uint64_t>(image->x_begin) &&
+           x < static_cast<std::uint64_t>(image->x_end) &&
+           y >= static_cast<std::uint64_t>(image->y_begin) &&
+           y < static_cast<std::uint64_t>(image->y_end);
+  }
+  const TensorSlice& tensor = std::get<TensorSlice>(atom);
+  for (std::size_t axis = 0U; axis < coordinates.size(); ++axis) {
+    if (coordinates[axis] < tensor.axes[axis].begin ||
+        coordinates[axis] >= tensor.axes[axis].end) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * @brief Infers the exact logical descriptor of unsigned-8 dense inversion.
  *
- * @param configuration Unused request-effective parameter snapshot.
+ * @param configuration Request-effective parameters and logical Region.
  * @param inputs Exactly one logical image input.
  * @return Unchanged complete input logical descriptor.
  * @throws std::invalid_argument for wrong arity, malformed image facts, or an
@@ -270,26 +363,33 @@ DenseImageDescriptor infer_dense_invert(
  * @throws std::overflow_error for unrepresentable output layout arithmetic.
  * @throws std::bad_alloc when output storage allocation fails.
  * @note Every active x/y/channel element is addressed through ImageView;
+ *       selected elements are inverted, unselected elements are copied, and
  *       input padding is never inspected.
  */
 Value execute_dense_invert(const CpuDenseImageConfiguration& configuration,
                            const std::vector<ImageView>& inputs,
                            const DenseImageDescriptor& inferred) {
-  (void)configuration;
   if (inputs.size() != 1U ||
       !(logical_descriptor(inputs.front()) == inferred)) {
     throw std::invalid_argument(
         "image_process:invert_dense input disagrees with inference.");
   }
+  validate_dense_region(configuration.region, inferred);
 
   StridedLayout layout = make_interleaved_layout(inferred);
   std::vector<std::byte> storage(dense_storage_size(inferred.tensor, layout),
                                  std::byte{0});
   const ImageFacet& image = inferred.image;
+  std::vector<std::size_t> coordinates(inferred.tensor.shape.size(), 0U);
   for (std::size_t y = 0U; y < inputs.front().height(); ++y) {
+    coordinates[image.y_axis] = y;
     for (std::size_t x = 0U; x < inputs.front().width(); ++x) {
+      coordinates[image.x_axis] = x;
       for (std::size_t channel = 0U; channel < inputs.front().channels();
            ++channel) {
+        if (image.channel_axis.has_value()) {
+          coordinates[*image.channel_axis] = channel;
+        }
         std::size_t offset =
             y * static_cast<std::size_t>(layout.byte_strides[image.y_axis]) +
             x * static_cast<std::size_t>(layout.byte_strides[image.x_axis]);
@@ -300,7 +400,10 @@ Value execute_dense_invert(const CpuDenseImageConfiguration& configuration,
         const std::uint8_t input_value = std::to_integer<std::uint8_t>(
             *inputs.front().channel_data(x, y, channel));
         storage[offset] =
-            std::byte{static_cast<std::uint8_t>(255U - input_value)};
+            dense_coordinate_selected(configuration.region, inferred,
+                                      coordinates)
+                ? std::byte{static_cast<std::uint8_t>(255U - input_value)}
+                : std::byte{input_value};
       }
     }
   }
@@ -314,7 +417,7 @@ Value execute_dense_invert(const CpuDenseImageConfiguration& configuration,
 /** @copydoc ps::ops::execute_cpu_dense_image_operation */
 NodeOutput execute_cpu_dense_image_operation(
     const Node& node, const std::vector<const NodeOutput*>& inputs,
-    const CpuDenseImageOperation& operation) {
+    const CpuDenseImageOperation& operation, const RegionSet& region) {
   if (!operation.infer || !operation.execute) {
     throw GraphError(GraphErrc::ComputeError,
                      "CPU dense image operation definition is incomplete.");
@@ -323,6 +426,7 @@ NodeOutput execute_cpu_dense_image_operation(
   CpuDenseImageConfiguration configuration;
   try {
     configuration.parameters = node.runtime_parameters;
+    configuration.region = region;
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {

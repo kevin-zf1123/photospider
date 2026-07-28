@@ -34,6 +34,7 @@ bool ComputeCachePolicy::can_read_disk_cache(bool disable_disk_cache,
 
 void ComputeCachePolicy::clear_for_recompute(Node& node) {
   node.cached_output_high_precision.reset();
+  node.hp_region.reset();
 }
 
 }  // namespace ps::compute

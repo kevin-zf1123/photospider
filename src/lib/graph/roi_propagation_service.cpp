@@ -8,14 +8,88 @@
 #include <queue>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "core/ops.hpp"
+#include "core/region_image_adapter.hpp"
 
 namespace ps {
 
 namespace {
+
+/**
+ * @brief Reports the selected source-private rank-general identity transform.
+ * @param node Node whose current HP operation snapshot is inspected.
+ * @return True only for the exact registered core dense implementation.
+ * @throws std::bad_alloc when registry callback snapshotting allocates.
+ * @note This bounded V-4 hook does not add operation metadata routing or alter
+ *       plugin ABI v2. Selected callback identity prevents a same-key plugin
+ *       override from inheriting the core transform contract.
+ */
+bool has_core_region_identity_transform(const Node& node) {
+  const std::optional<OpRegistry::OpVariant> selected =
+      OpRegistry::instance().resolve_for_intent(
+          node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+  if (!selected.has_value() ||
+      !std::holds_alternative<MonolithicOpFunc>(*selected)) {
+    return false;
+  }
+  return ops::find_core_region_monolithic_operation(
+             node.type, node.subtype, std::get<MonolithicOpFunc>(*selected))
+      .has_value();
+}
+
+/**
+ * @brief Traverses only edges whose destination applies the core identity.
+ *
+ * @param graph Graph topology to inspect.
+ * @param start_node_id Frontier origin.
+ * @param target_node_id Desired destination.
+ * @param forward True for downstream traversal, false for upstream traversal.
+ * @return True when one fully explicit identity path reaches the target.
+ * @throws std::bad_alloc when queue or visited storage cannot grow.
+ * @note Backward traversal validates the current destination node before
+ *       entering each upstream edge because that node owns the inverse demand
+ *       transform.
+ */
+bool has_explicit_region_identity_path(const GraphModel& graph,
+                                       int start_node_id, int target_node_id,
+                                       bool forward) {
+  std::queue<int> pending;
+  std::unordered_set<int> visited;
+  pending.push(start_node_id);
+  visited.insert(start_node_id);
+  while (!pending.empty()) {
+    const int current = pending.front();
+    pending.pop();
+    if (current == target_node_id) {
+      return true;
+    }
+    if (!forward && !has_core_region_identity_transform(graph.node(current))) {
+      continue;
+    }
+    const auto& edges = forward ? graph.downstream_edges(current)
+                                : graph.upstream_edges(current);
+    for (const GraphTopologyEdge& edge : edges) {
+      if (edge.kind != GraphTopologyEdgeKind::ImageInput) {
+        continue;
+      }
+      const int next = forward ? edge.to_node_id : edge.from_node_id;
+      if (next < 0 || !graph.has_node(next)) {
+        continue;
+      }
+      if (forward && !has_core_region_identity_transform(graph.node(next))) {
+        continue;
+      }
+      if (visited.insert(next).second) {
+        pending.push(next);
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * @brief Checks whether a rectangle contains no positive-area pixels.
@@ -727,6 +801,115 @@ void enqueue_backward_parent_rois(const GraphModel& graph, int current_id,
 }
 
 }  // namespace
+
+/** @copydoc RoiPropagationService::compute_upstream_region */
+RegionOperationResult RoiPropagationService::compute_upstream_region(
+    const Node& node, const RegionSet& downstream_region,
+    const GraphModel& graph,
+    std::unordered_map<int, PixelSize>& size_cache) const {
+  if (downstream_region.is_empty()) {
+    return RegionOperationResult::exact(RegionSet::empty());
+  }
+  if (downstream_region.is_whole()) {
+    return RegionOperationResult::failure(
+        RegionOperationStatus::Unknown,
+        "Whole Region requires finite node bounds before propagation.");
+  }
+  if (downstream_region.atoms().size() != 1U) {
+    return RegionOperationResult::failure(
+        RegionOperationStatus::Unsupported,
+        "Current propagation accepts one exact Region atom.");
+  }
+  if (std::holds_alternative<TensorSlice>(downstream_region.atoms().front())) {
+    if (!has_core_region_identity_transform(node)) {
+      return RegionOperationResult::failure(
+          RegionOperationStatus::Unsupported,
+          "Operation has no explicit TensorSlice propagation transform.");
+    }
+    return RegionOperationResult::exact(downstream_region);
+  }
+
+  const PixelRect downstream =
+      region_image_adapter::to_pixel_rect(downstream_region);
+  const PixelRect upstream =
+      compute_upstream_roi(node, downstream, graph, size_cache);
+  return RegionOperationResult::exact(
+      region_image_adapter::from_pixel_rect(upstream));
+}
+
+/** @copydoc RoiPropagationService::project_region_forward */
+RegionOperationResult RoiPropagationService::project_region_forward(
+    const GraphModel& graph, int start_node_id, const RegionSet& start_region,
+    int target_node_id) const {
+  if (!graph.has_node(start_node_id) || !graph.has_node(target_node_id)) {
+    return RegionOperationResult::failure(
+        RegionOperationStatus::Unknown,
+        "Region propagation endpoint is absent from the current graph.");
+  }
+  if (start_region.is_empty()) {
+    return RegionOperationResult::exact(RegionSet::empty());
+  }
+  if (!start_region.is_whole() && start_region.atoms().size() == 1U &&
+      std::holds_alternative<ImageRect>(start_region.atoms().front())) {
+    const std::optional<PixelRect> projected = project_roi_forward(
+        graph, start_node_id, region_image_adapter::to_pixel_rect(start_region),
+        target_node_id);
+    return RegionOperationResult::exact(
+        projected ? region_image_adapter::from_pixel_rect(*projected)
+                  : RegionSet::empty());
+  }
+  if (!start_region.is_whole() && start_region.atoms().size() == 1U &&
+      std::holds_alternative<TensorSlice>(start_region.atoms().front())) {
+    if (has_explicit_region_identity_path(graph, start_node_id, target_node_id,
+                                          true)) {
+      return RegionOperationResult::exact(start_region);
+    }
+    return RegionOperationResult::failure(
+        RegionOperationStatus::Unsupported,
+        "No explicit TensorSlice forward transform reaches the target.");
+  }
+  return RegionOperationResult::failure(
+      RegionOperationStatus::Unsupported,
+      "Current forward propagation accepts one finite ImageRect or "
+      "TensorSlice atom.");
+}
+
+/** @copydoc RoiPropagationService::project_region_backward */
+RegionOperationResult RoiPropagationService::project_region_backward(
+    const GraphModel& graph, int target_node_id, const RegionSet& target_region,
+    int source_node_id) const {
+  if (!graph.has_node(target_node_id) || !graph.has_node(source_node_id)) {
+    return RegionOperationResult::failure(
+        RegionOperationStatus::Unknown,
+        "Region propagation endpoint is absent from the current graph.");
+  }
+  if (target_region.is_empty()) {
+    return RegionOperationResult::exact(RegionSet::empty());
+  }
+  if (!target_region.is_whole() && target_region.atoms().size() == 1U &&
+      std::holds_alternative<ImageRect>(target_region.atoms().front())) {
+    const std::optional<PixelRect> projected = project_roi_backward(
+        graph, target_node_id,
+        region_image_adapter::to_pixel_rect(target_region), source_node_id);
+    return RegionOperationResult::exact(
+        projected ? region_image_adapter::from_pixel_rect(*projected)
+                  : RegionSet::empty());
+  }
+  if (!target_region.is_whole() && target_region.atoms().size() == 1U &&
+      std::holds_alternative<TensorSlice>(target_region.atoms().front())) {
+    if (has_explicit_region_identity_path(graph, target_node_id, source_node_id,
+                                          false)) {
+      return RegionOperationResult::exact(target_region);
+    }
+    return RegionOperationResult::failure(
+        RegionOperationStatus::Unsupported,
+        "No explicit TensorSlice backward transform reaches the source.");
+  }
+  return RegionOperationResult::failure(
+      RegionOperationStatus::Unsupported,
+      "Current backward propagation accepts one finite ImageRect or "
+      "TensorSlice atom.");
+}
 
 PixelRect UpstreamRoiProjection::roi_for_input(
     std::size_t input_index) const noexcept {

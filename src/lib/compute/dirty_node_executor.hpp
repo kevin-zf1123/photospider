@@ -135,8 +135,9 @@ class HighPrecisionDirtyNodeExecutor {
    * @return Nothing.
    * @throws GraphError when dependencies or operators are missing, or when the
    * selected operation fails, including accepted Run cancellation.
-   * @note Empty HP ROIs and stale dirty-source generations are valid no-op
-   * entries after the initial cancellation observation. Tiled providers
+   * @note Empty logical Regions and stale dirty-source generations are valid
+   * no-op entries after the initial cancellation observation. TensorSlice
+   * entries intentionally retain an empty derived roi_hp. Tiled providers
    * observe before every tile; a monolithic provider already entered is
    * non-preemptible. Cancellation observed after provider return suppresses
    * ROI/version/event staging, leaving any partial write-buffer data
@@ -212,13 +213,14 @@ class HighPrecisionDirtyNodeExecutor {
    * @brief Runs a monolithic HP implementation and stores its output.
    *
    * @param node Node being computed.
+   * @param entry Exact logical Region selected by HP planning.
    * @param mono_fn Monolithic HP operation implementation.
    * @param image_inputs_ready Resolved HP image inputs.
    * @throws GraphError if the operation produces no output.
    * @note Monolithic HP fallback preserves the previous dirty update behavior.
    */
   void execute_monolithic(
-      Node& node, const MonolithicOpFunc& mono_fn,
+      Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,
       const std::vector<const NodeOutput*>& image_inputs_ready) const;
 
   /**

@@ -7,6 +7,7 @@
 #include "compute/tiled_input_normalizer.hpp"
 #include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/region.hpp"
 
 namespace ps::compute {
 
@@ -14,7 +15,7 @@ namespace ps::compute {
  * @brief Runtime controls for tiled node execution.
  *
  * TiledExecutionConfig scopes tile size, halo policy, output extent, optional
- * dirty ROI clipping, and metadata overrides for one tiled node invocation.
+ * dirty Region/ROI clipping, and metadata overrides for one node invocation.
  *
  * @note The config is borrowed by NodeExecutor only for the duration of the
  * call. on_tile is invoked synchronously before each tile callback.
@@ -29,6 +30,15 @@ struct TiledExecutionConfig {
 
   /** @brief Optional output ROI limiting which output pixels are recomputed. */
   std::optional<PixelRect> output_roi;
+
+  /**
+   * @brief Exact normalized logical work selection for Region-aware core work.
+   * @note Current tiled callbacks continue to consume output_roi as a derived
+   *       physical projection. Generic monolithic callbacks retain their
+   *       existing complete-output behavior when no matching core bridge
+   * exists.
+   */
+  std::optional<RegionSet> output_region;
 
   /** @brief Optional full output size when output_buffer is not the size
    * source. */
@@ -49,7 +59,8 @@ struct TiledExecutionConfig {
 /**
  * @brief Executes monolithic and tiled operator implementations for one node.
  *
- * NodeExecutor owns node-local execution mechanics: input normalization for
+ * NodeExecutor owns node-local execution mechanics: Region-aware core
+ * monolithic dispatch, input normalization for
  * tiled image_mixing, output buffer allocation, tile ROI clipping, input ROI
  * mapping, and exception wrapping. Higher-level compute services still own
  * dependency resolution, cache policy, scheduling, and commit decisions.
@@ -72,8 +83,9 @@ class NodeExecutor {
    * @throws std::bad_alloc if input normalization, output allocation, or the
    *         selected operation exhausts memory.
    * @throws GraphError for other dependency, parameter, or compute failures.
-   * @note Monolithic operators receive the original inputs. Tiled operators
-   * receive normalized input views when image_mixing requires
+   * @note Region-aware core monolithic operators receive output_region when
+   * present; other monolithic operators retain complete-output behavior. Tiled
+   * operators receive normalized input views when image_mixing requires
    * resize/crop/channel conversion.
    */
   static NodeOutput execute(GraphModel& graph, Node& node,

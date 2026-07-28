@@ -2540,6 +2540,9 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   ASSERT_TRUE(cache.try_load_from_disk_cache(graph, loaded));
   ASSERT_TRUE(loaded.cached_output_high_precision.has_value());
   EXPECT_EQ(loaded.cached_output_high_precision->data, expected);
+  EXPECT_EQ(loaded.hp_version, 1);
+  ASSERT_TRUE(loaded.hp_region.has_value());
+  EXPECT_TRUE(loaded.hp_region->is_whole());
 
   std::filesystem::remove_all(root);
 }

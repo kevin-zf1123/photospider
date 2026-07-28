@@ -12,6 +12,12 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
 
+namespace ps {
+
+class RegionSet;
+
+}  // namespace ps
+
 namespace ps::compute {
 
 struct HighPrecisionDirtyPlan;
@@ -123,6 +129,16 @@ std::uint64_t compute_plan_dynamic_retained_memory_bytes(
  */
 std::uint64_t dirty_selection_dynamic_retained_memory_bytes(
     const DirtyTaskSelectionOverlay& selection);
+
+/**
+ * @brief Estimates dynamic storage owned by one canonical logical Region.
+ * @param region Region whose atom and TensorSlice-axis capacities are charged.
+ * @return Checked dynamic bytes excluding `sizeof(RegionSet)`.
+ * @throws GraphError when checked structural arithmetic overflows.
+ * @note ImageRect atoms have no nested allocation. The atom vector capacity is
+ *       charged for every Region kind; Empty and Whole normally report zero.
+ */
+std::uint64_t region_dynamic_retained_memory_bytes(const RegionSet& region);
 
 /**
  * @brief Estimates complete Host-owned HP dirty-plan storage.

@@ -2,12 +2,14 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。本 ADR 是架构决策，并不声称实现已经
-完成。当前源码树仍使用 `ImageBuffer`、`DataType`、`Device`、`PixelRect`、
-`ParameterMap`、operation plugin ABI v2，以及 `docs/kernel-architecture/` 所记录的缓存和
-执行所有权。
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-4
+子集：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
+以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP。
+`ImageBuffer`、`DataType`、`Device`、`ParameterMap` 与 operation plugin ABI v2 仍是各自
+角色边缘上的兼容契约；本 ADR 中尚未实现的部分仍是演进目标。
 
-Issue #78 只批准本契约并更新文档。Issue #79 至 #90 仍是实现切片。合成的
+Issue #78 批准了本契约。Issue #79 至 #81 交付了有界的 V-2 至 V-4 实现切片；Issue #82
+至 #90 仍是彼此独立的实现切片。合成的
 `VariableSampleField` 证明与可选 OpenEXR Deep provider 仍是彼此独立的后续 change；
 本决策不实现二者。
 
@@ -289,6 +291,14 @@ TooComplex
 `ConservativeSuperset` 时才合法；每个 caller 自行判断该近似是否适用于 planning、
 invalidation 或 execution。
 
+已实现的 V-4 子集安装了该 value/algebra 契约：固定的内建 image 与 dense-tensor domain
+key、signed 64-bit `ImageRect` interval、rank-general unsigned 64-bit `TensorSlice`
+interval、单个 nonempty clause 最多八个 atom 的硬上限，以及显式 caller budget。Dirty
+source fact、per-node affected work、edge mapping、HP/RT validity 和 core dense operation
+都保留规范化 `RegionSet`。当前 image tiling、ImageBuffer helper、Host/IPC inspection 与
+operation ABI v2 仍保留 checked derived `PixelRect` projection。RT 只支持 image；
+TensorSlice 是 HP monolithic work，绝不被重新解释成二维 geometry。
+
 ### DataSpec、capability、property 与 output inference
 
 `DataSpec` 描述一组可接受的具体 descriptor。它可以包含 symbolic dimension、range、
@@ -459,8 +469,8 @@ product 与 transitive install dependency 中都不存在 OpenEXR。
   或 exception ownership。
 - 设计增加了显式 Schema、Facet、registry、lease 与 result state。接受这些复杂度，是因为被
   拆出的内容是正确性与生命周期边界，而非可选 metadata。
-- 在后续实现切片同时更新 code、长期 test、当前事实文档与 installed contract 前，当前 runtime
-  behavior 不会改变。
+- 未实现的目标行为不会仅因本 ADR 接受它就变成当前事实；每个后续切片都必须同步更新 code、
+  长期 test、当前事实文档与 installed contract。
 
 ## 被拒绝的替代方案
 

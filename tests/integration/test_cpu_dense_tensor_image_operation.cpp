@@ -18,17 +18,23 @@
 #include <vector>
 
 #include "compute/compute_result_committer.hpp"
+#include "compute/dirty_node_executor.hpp"
+#include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/node_executor.hpp"
 #include "core/cpu_dense_image_operation.hpp"
 #include "core/ops.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"         // NOLINT(build/include_subdir)
+#include "graph/graph_traversal_service.hpp"
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
+#include "graph/roi_propagation_service.hpp"
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "photospider/data/image_view.hpp"
+#include "runtime/graph_event_service.hpp"
 #include "support/fake_cache_metadata_codec.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 
@@ -87,6 +93,46 @@ Value make_unsigned8_value(std::size_t width, std::size_t height,
   image.y_axis = 0U;
   image.channel_axis = 2U;
   StridedLayout layout{{static_cast<std::ptrdiff_t>(row_stride),
+                        static_cast<std::ptrdiff_t>(channels), 1}};
+  return Value::from_cpu_dense_tensor(std::move(descriptor), image,
+                                      std::move(layout), std::move(storage));
+}
+
+/**
+ * @brief Creates one padded rank-four unsigned-8 image Value.
+ *
+ * @param width Positive x-axis extent.
+ * @param height Positive y-axis extent.
+ * @param channels Positive channel-axis extent.
+ * @param row_stride Positive padded y-axis stride.
+ * @return Immutable Value with shape `[1,height,width,channels]`.
+ * @throws std::invalid_argument from Value validation for invalid arguments.
+ * @throws std::bad_alloc when descriptor, layout, or storage allocation fails.
+ * @note Axis zero is an explicit singleton non-image dimension. Active bytes
+ *       increase from one; padding is initialized to 0xA5.
+ */
+Value make_unsigned8_rank4_value(std::size_t width, std::size_t height,
+                                 std::size_t channels, std::size_t row_stride) {
+  const std::size_t row_bytes = width * channels;
+  const std::size_t storage_size = (height - 1U) * row_stride + row_bytes;
+  std::vector<std::byte> storage(storage_size, std::byte{0xA5});
+  std::uint8_t next = 1U;
+  for (std::size_t y = 0U; y < height; ++y) {
+    for (std::size_t x = 0U; x < width; ++x) {
+      for (std::size_t channel = 0U; channel < channels; ++channel) {
+        storage[y * row_stride + x * channels + channel] = std::byte{next++};
+      }
+    }
+  }
+
+  DenseTensorDescriptor descriptor{{1U, height, width, channels},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  ImageFacet image;
+  image.x_axis = 2U;
+  image.y_axis = 1U;
+  image.channel_axis = 3U;
+  StridedLayout layout{{1, static_cast<std::ptrdiff_t>(row_stride),
                         static_cast<std::ptrdiff_t>(channels), 1}};
   return Value::from_cpu_dense_tensor(std::move(descriptor), image,
                                       std::move(layout), std::move(storage));
@@ -612,6 +658,12 @@ TEST(CpuDenseTensorImageOperation,
             (std::vector<std::ptrdiff_t>{4, 1}));
   EXPECT_EQ(std::to_integer<std::uint8_t>(read.data()[0]), 1U);
   EXPECT_EQ(std::to_integer<std::uint8_t>(read.data()[6]), 6U);
+
+  NodeOutput tensor_output;
+  tensor_output.image_value = value;
+  EXPECT_EQ(value_image_adapter::full_node_output_region(tensor_output),
+            RegionSet::from_tensor_slice(
+                {dense_tensor_region_domain(), {{0U, 2U}, {0U, 3U}}}));
 }
 
 /**
@@ -679,6 +731,9 @@ TEST(CpuDenseTensorImageOperation,
   committer.commit(graph, {80}, results);
 
   ASSERT_TRUE(graph.node(80).cached_output_high_precision.has_value());
+  ASSERT_TRUE(graph.node(80).hp_region.has_value());
+  EXPECT_EQ(*graph.node(80).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 3, 0, 2}));
   const Value first = graph.node(80).cached_output_high_precision->image_value;
   ASSERT_TRUE(first.valid());
   const ReadLease first_read = first.buffer_handle().acquire_read();
@@ -692,13 +747,18 @@ TEST(CpuDenseTensorImageOperation,
   NodeOutput& staged = dirty.ensure_output(graph.node(80));
   ASSERT_FALSE(staged.image_value.valid());
   static_cast<std::byte*>(staged.image_buffer.data.get())[0] = std::byte{99U};
-  (void)dirty.mark_updated(graph.node(80), (PixelRect{0, 0, 1, 1}),
-                           (PixelSize{3, 2}), false, 0U);
+  (void)dirty.mark_updated(
+      graph.node(80),
+      RegionSet::from_image_rect({image_region_domain(), 0, 1, 0, 1}), false,
+      0U);
   dirty.commit_to_graph(graph);
 
   const Value dirty_value =
       graph.node(80).cached_output_high_precision->image_value;
   ASSERT_TRUE(dirty_value.valid());
+  ASSERT_TRUE(graph.node(80).hp_region.has_value());
+  EXPECT_EQ(*graph.node(80).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 3, 0, 2}));
   EXPECT_NE(dirty_value.allocation_identity(), first.allocation_identity());
   EXPECT_NE(dirty_value.revision_id(), first.revision_id());
   EXPECT_EQ(std::to_integer<std::uint8_t>(first_read.data()[0]), 0U);
@@ -719,6 +779,72 @@ TEST(CpuDenseTensorImageOperation,
             dirty_value.allocation_identity());
   EXPECT_NE(replacement.revision_id(), dirty_value.revision_id());
   EXPECT_EQ(graph.node(80).hp_version, 3);
+  ASSERT_TRUE(graph.node(80).hp_region.has_value());
+  EXPECT_EQ(*graph.node(80).hp_region,
+            RegionSet::from_image_rect({image_region_domain(), 0, 3, 0, 2}));
+
+  compute::clear_planned_high_precision_caches(graph, graph_mutex, {80});
+  EXPECT_FALSE(graph.node(80).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(80).hp_region.has_value());
+  EXPECT_EQ(graph.node(80).hp_version, 3);
+}
+
+/**
+ * @brief Proves request staging publishes TensorSlice validity with fresh
+ * immutable Value identities only at commit.
+ *
+ * @return Nothing; GoogleTest reports premature publication, identity reuse,
+ * Region loss, version, or generation failures.
+ * @throws Allocation, Value, Region, Graph, or staging exceptions unchanged.
+ * @note The buffer disables existing-output seeding, so old full validity must
+ * not leak into the fresh rank-general partial publication.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorDirtyStagingPublishesFreshIdentityAndExactRegionAtCommit) {
+  GraphModel graph("cache/tensor-region-staging");
+  Node node;
+  node.id = 86;
+  node.name = "tensor_region_staging";
+  node.type = "image_process";
+  node.subtype = "invert_dense";
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->image_value =
+      make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+  node.hp_version = 5;
+  node.hp_region = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 3U}, {0U, 4U}, {0U, 3U}}});
+  graph.add_node(node);
+
+  const Value original =
+      graph.node(86).cached_output_high_precision->image_value;
+  const RegionSet update = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}});
+  compute::HighPrecisionDirtyWriteBuffer staging(false);
+  NodeOutput& staged = staging.ensure_output(graph.node(86));
+  staged.image_value = make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+  const Value staged_value = staged.image_value;
+  (void)staging.mark_updated(graph.node(86), update, true, 91U);
+
+  EXPECT_EQ(
+      graph.node(86).cached_output_high_precision->image_value.revision_id(),
+      original.revision_id());
+  EXPECT_EQ(graph.node(86).hp_version, 5);
+  ASSERT_TRUE(graph.node(86).hp_region.has_value());
+  EXPECT_FALSE(*graph.node(86).hp_region == update);
+  EXPECT_FALSE(graph.dirty_source_hp_commit_generation.count(86));
+
+  staging.commit_to_graph(graph);
+
+  const Value committed =
+      graph.node(86).cached_output_high_precision->image_value;
+  EXPECT_EQ(committed.allocation_identity(),
+            staged_value.allocation_identity());
+  EXPECT_EQ(committed.revision_id(), staged_value.revision_id());
+  EXPECT_NE(committed.allocation_identity(), original.allocation_identity());
+  EXPECT_NE(committed.revision_id(), original.revision_id());
+  EXPECT_EQ(graph.node(86).hp_region, update);
+  EXPECT_EQ(graph.node(86).hp_version, 6);
+  EXPECT_EQ(graph.dirty_source_hp_commit_generation.at(86), 91U);
 }
 
 TEST(CpuDenseTensorImageOperation,
@@ -866,6 +992,18 @@ TEST(CpuDenseTensorImageOperation,
       "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(resolved.has_value());
   ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*resolved));
+  const MonolithicOpFunc& core_operation =
+      std::get<MonolithicOpFunc>(*resolved);
+  EXPECT_TRUE(ops::find_core_region_monolithic_operation(
+                  "image_process", "invert_dense", core_operation)
+                  .has_value());
+  const MonolithicOpFunc override_operation =
+      [](const Node&, const std::vector<const NodeOutput*>&) {
+        return NodeOutput{};
+      };
+  EXPECT_FALSE(ops::find_core_region_monolithic_operation(
+                   "image_process", "invert_dense", override_operation)
+                   .has_value());
 
   NodeOutput input;
   input.image_buffer = make_aligned_cpu_image_buffer(5, 3, 3, DataType::UINT8);
@@ -902,6 +1040,225 @@ TEST(CpuDenseTensorImageOperation,
     EXPECT_EQ(active_output[index],
               static_cast<std::uint8_t>(255U - active_input[index]));
   }
+}
+
+TEST(CpuDenseTensorImageOperation,
+     ProductExecutorInvertsOnlySelectedPaddedImageRect) {
+  ops::register_core_operations();
+  const auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved.has_value());
+
+  NodeOutput input;
+  input.image_value = make_unsigned8_value(5U, 4U, 2U, 16U);
+  const ImageView input_view(input.image_value);
+  GraphModel graph("");
+  Node node;
+  node.id = 83;
+  node.name = "region_image_invert";
+  node.type = "image_process";
+  node.subtype = "invert_dense";
+  compute::TiledExecutionConfig config;
+  config.output_region =
+      RegionSet::from_image_rect({image_region_domain(), 1, 4, 1, 3});
+
+  const NodeOutput output =
+      compute::NodeExecutor::execute(graph, node, *resolved, {&input}, config);
+  const ImageView output_view(output.image_value);
+
+  for (std::size_t y = 0U; y < input_view.height(); ++y) {
+    for (std::size_t x = 0U; x < input_view.width(); ++x) {
+      for (std::size_t channel = 0U; channel < input_view.channels();
+           ++channel) {
+        const std::uint8_t source = std::to_integer<std::uint8_t>(
+            *input_view.channel_data(x, y, channel));
+        const std::uint8_t expected =
+            x >= 1U && x < 4U && y >= 1U && y < 3U
+                ? static_cast<std::uint8_t>(255U - source)
+                : source;
+        EXPECT_EQ(std::to_integer<std::uint8_t>(
+                      *output_view.channel_data(x, y, channel)),
+                  expected);
+      }
+    }
+  }
+}
+
+TEST(CpuDenseTensorImageOperation,
+     ProductExecutorUsesAllRankFourTensorSliceAxes) {
+  ops::register_core_operations();
+  const auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved.has_value());
+
+  NodeOutput input;
+  input.image_value = make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+  const ImageView input_view(input.image_value);
+  GraphModel graph("");
+  Node node;
+  node.id = 84;
+  node.name = "region_tensor_invert";
+  node.type = "image_process";
+  node.subtype = "invert_dense";
+  compute::TiledExecutionConfig config;
+  config.output_region = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}});
+
+  const NodeOutput output =
+      compute::NodeExecutor::execute(graph, node, *resolved, {&input}, config);
+  const ImageView output_view(output.image_value);
+
+  EXPECT_EQ(output_view.descriptor().shape,
+            (std::vector<std::size_t>{1U, 3U, 4U, 3U}));
+  for (std::size_t y = 0U; y < input_view.height(); ++y) {
+    for (std::size_t x = 0U; x < input_view.width(); ++x) {
+      for (std::size_t channel = 0U; channel < input_view.channels();
+           ++channel) {
+        const std::uint8_t source = std::to_integer<std::uint8_t>(
+            *input_view.channel_data(x, y, channel));
+        const bool selected = y >= 1U && x >= 1U && channel >= 1U;
+        const std::uint8_t expected =
+            selected ? static_cast<std::uint8_t>(255U - source) : source;
+        EXPECT_EQ(std::to_integer<std::uint8_t>(
+                      *output_view.channel_data(x, y, channel)),
+                  expected);
+      }
+    }
+  }
+}
+
+TEST(CpuDenseTensorImageOperation,
+     ProductExecutorHandlesEmptyWholeAndRejectsRankMismatch) {
+  ops::register_core_operations();
+  const auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved.has_value());
+  NodeOutput input;
+  input.image_value = make_unsigned8_rank4_value(2U, 2U, 2U, 8U);
+  const ImageView input_view(input.image_value);
+  GraphModel graph("");
+  Node node;
+  node.id = 85;
+  node.name = "region_empty_whole";
+  node.type = "image_process";
+  node.subtype = "invert_dense";
+
+  compute::TiledExecutionConfig empty_config;
+  empty_config.output_region = RegionSet::empty();
+  const NodeOutput unchanged = compute::NodeExecutor::execute(
+      graph, node, *resolved, {&input}, empty_config);
+  const ImageView unchanged_view(unchanged.image_value);
+  EXPECT_EQ(
+      std::to_integer<std::uint8_t>(*unchanged_view.channel_data(1U, 1U, 1U)),
+      std::to_integer<std::uint8_t>(*input_view.channel_data(1U, 1U, 1U)));
+
+  compute::TiledExecutionConfig whole_config;
+  whole_config.output_region = RegionSet::whole();
+  const NodeOutput inverted = compute::NodeExecutor::execute(
+      graph, node, *resolved, {&input}, whole_config);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(
+                *ImageView(inverted.image_value).channel_data(1U, 1U, 1U)),
+            static_cast<std::uint8_t>(
+                255U - std::to_integer<std::uint8_t>(
+                           *input_view.channel_data(1U, 1U, 1U))));
+
+  compute::TiledExecutionConfig mismatch_config;
+  mismatch_config.output_region = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 2U}, {0U, 2U}}});
+  try {
+    (void)compute::NodeExecutor::execute(graph, node, *resolved, {&input},
+                                         mismatch_config);
+    FAIL() << "rank mismatch should fail before NodeOutput publication";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+  }
+}
+
+/**
+ * @brief Proves one clipped TensorSlice flows from dirty planning through the
+ * production HP dirty node executor into the registered dense operation.
+ *
+ * @return Nothing; GoogleTest reports planning, staging, byte-selection,
+ * Region-validity, or generation publication failures.
+ * @throws Graph, Value, Region, registry, staging, or execution exceptions
+ * unchanged.
+ * @note GraphModel remains untouched until the request-owned write buffer
+ * commits, matching the existing stale/current-generation commit boundary.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorDirtyPlanExecutesRegisteredProductAndStagesExactValidity) {
+  ops::register_core_operations();
+  GraphModel graph("cache/tensor-region-product");
+  Node source;
+  source.id = 87;
+  source.name = "tensor_region_source";
+  source.type = "image_generator";
+  source.subtype = "constant";
+  source.cached_output_high_precision = NodeOutput{};
+  source.cached_output_high_precision->image_value =
+      make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+  graph.add_node(std::move(source));
+  Node target;
+  target.id = 88;
+  target.name = "tensor_region_target";
+  target.type = "image_process";
+  target.subtype = "invert_dense";
+  target.image_inputs.push_back({87, "image"});
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const RegionSet requested = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}});
+  const compute::HighPrecisionDirtyPlan plan =
+      planner.plan_high_precision(graph, 88, requested);
+  const auto resolved = OpRegistry::instance().resolve_for_intent(
+      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved.has_value());
+  const compute::DirtyResolvedOperationMap operations{
+      {88, compute::DirtyResolvedOperation{*resolved, Device::CPU}}};
+  GraphEventService events;
+  compute::DirtyNodeSynchronization synchronization(graph.node_ids());
+  compute::HighPrecisionDirtyWriteBuffer staging(false);
+  compute::DirtyNodeExecutionContext context{
+      graph,          nullptr,    events,
+      plan.snapshot,  operations, plan.snapshot.graph_generation,
+      synchronization};
+  compute::HighPrecisionDirtyNodeExecutor executor(context, staging);
+  Node execution_target = graph.node(88);
+
+  executor.execute(execution_target, plan.entries.at(88));
+
+  EXPECT_FALSE(graph.node(88).cached_output_high_precision.has_value());
+  ASSERT_NE(staging.find_output(88), nullptr);
+  const ImageView input_view(
+      graph.node(87).cached_output_high_precision->image_value);
+  const ImageView staged_view(staging.find_output(88)->image_value);
+  for (std::size_t y = 0U; y < input_view.height(); ++y) {
+    for (std::size_t x = 0U; x < input_view.width(); ++x) {
+      for (std::size_t channel = 0U; channel < input_view.channels();
+           ++channel) {
+        const std::uint8_t source_byte = std::to_integer<std::uint8_t>(
+            *input_view.channel_data(x, y, channel));
+        const bool selected = y >= 1U && x >= 1U && channel >= 1U;
+        const std::uint8_t expected =
+            selected ? static_cast<std::uint8_t>(255U - source_byte)
+                     : source_byte;
+        EXPECT_EQ(std::to_integer<std::uint8_t>(
+                      *staged_view.channel_data(x, y, channel)),
+                  expected);
+      }
+    }
+  }
+
+  staging.commit_to_graph(graph);
+  ASSERT_TRUE(graph.node(88).cached_output_high_precision.has_value());
+  EXPECT_EQ(graph.node(88).hp_region, requested);
+  EXPECT_EQ(graph.node(88).hp_version, 1);
+  EXPECT_EQ(graph.dirty_source_hp_commit_generation.at(88),
+            plan.snapshot.graph_generation);
 }
 
 TEST(CpuDenseTensorImageOperation,

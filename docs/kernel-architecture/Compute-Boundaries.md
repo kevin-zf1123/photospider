@@ -16,10 +16,12 @@ translates public `HostComputeRequest` values into internal Kernel and
 `ComputeService` requests. No public API exposes a `ComputeService`, plan, task
 graph, or physical executor/policy pointer. A public compute request may carry
 an optional positive `maximum_parallelism` Run ceiling; it cannot resize or
-select the process executor. Request, propagation, planning, and execution
-geometry remains `PixelRect`/`PixelSize` through `NodeExecutor`; OpenCV geometry
-exists only inside a provider or algorithm implementation at the library call
-that consumes it.
+select the process executor. Logical dirty work and cache validity remain
+normalized `RegionSet` through planning, staging, and the Region-aware core
+dense path. Current image tile shapes, Host/IPC v2 inspection, ImageBuffer
+helpers, and operation ABI v2 use checked derived `PixelRect`/`PixelSize`.
+OpenCV geometry exists only inside a provider or algorithm implementation at
+the library call that consumes it.
 
 ## Ownership Map
 
@@ -128,16 +130,21 @@ not form an installable API. The only installed extension contract in this
 area is the pure-C policy ABI declared by
 `include/photospider/policy/policy_plugin_api.h`.
 
-V-3 keeps `NodeExecutor` and the monolithic registry slot unchanged while one
-private core runner maintains a stricter operation-local boundary. It reuses a
+V-4 keeps the public monolithic registry slot and operation ABI v2 unchanged
+while one source-private core lookup bridge recognizes only the exact selected
+core dense callback. The private core runner reuses a
 valid sealed CPU image Value or snapshots the legacy ImageBuffer when no Value
 exists, deep-copies the request-effective ParameterMap into a configuration
 that omits Node output/cache/topology state, invokes pure inference with only
 that configuration and logical DenseTensor/Image descriptors, invokes execute
 with the same configuration, checked ImageViews, and inferred descriptor, and
-validates the complete Value result. Publication preserves that exact sealed
-result allocation/revision and derives a separate ImageBuffer compatibility
-snapshot.
+validates the complete Value result. It also receives the normalized Region
+from planning/`NodeExecutor`, copies unselected logical coordinates, and
+inverts exact ImageRect or rank-general TensorSlice coordinates through
+checked strides. A same-key plugin override cannot inherit this private
+contract; generic v2 monolithic callbacks retain complete-output behavior.
+Publication preserves the exact sealed result allocation/revision and derives
+a separate ImageBuffer compatibility snapshot.
 
 HP compute-service, result-committer, dirty-write, and disk-load boundaries
 normalize missing CPU image Values before formal publication. Mutable dirty
@@ -278,8 +285,12 @@ pure-C policy ABI v1 and receives no execution resource.
   from it may still execute.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
-- Host, graph, planning, dirty work-set, staged-write, and `NodeExecutor`
-  boundaries carry kernel-owned `PixelRect`/`PixelSize`, never OpenCV geometry.
+- Logical propagation, dirty planning, source history, per-node state, edge
+  mappings, staged-write validity, and the Region-aware dense callback carry
+  normalized `RegionSet`.
+- Current image tiling, ImageBuffer processing, Host/IPC v2 inspection, and
+  operation ABI v2 carry checked derived `PixelRect`/`PixelSize`, never OpenCV
+  geometry. TensorSlice is HP-only monolithic work and never gets a rectangle.
 - Tiled input normalization occurs once per node invocation where possible,
   rather than once per tile callback.
 - The V-3 dense invert inference callback cannot inspect payload bytes, and its
@@ -566,7 +577,7 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #76: all HP/RT ready work enters one Host-owned
+is authoritative through issue #81: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources before a closed private route starts execution. Graphs retain
@@ -586,6 +597,7 @@ points remain future behavior.
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/region.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
@@ -603,6 +615,8 @@ points remain future behavior.
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/policy/policy_registry.*`
@@ -626,3 +640,4 @@ points remain future behavior.
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
+- `tests/unit/test_region_contracts.cpp`

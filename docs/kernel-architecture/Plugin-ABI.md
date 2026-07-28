@@ -102,9 +102,10 @@ registry symbols. An ordinary plugin requests the `operation_sdk` package
 component and links only `Photospider::operation_sdk`. That interface target
 carries the installed headers and transitively links
 `Photospider::operation_runtime`, whose shared library implements public
-image-buffer factories plus the immutable CPU DenseTensor Value and checked
-view symbols, without linking back to the SDK or requiring an external
-package. The static Host product and independently loaded Value-using
+image-buffer factories, immutable CPU DenseTensor Value and checked view
+symbols, and dependency-neutral Region value/algebra, without linking back to
+the SDK or requiring an external package. The static Host product and
+independently loaded Value-using
 operation DSOs therefore resolve allocation/revision minting through that one
 runtime image instead of copying counters into each DSO. This is an ordinary
 dynamic dependency, not ELF/Mach-O symbol interposition or a plugin ABI
@@ -136,8 +137,9 @@ This split supports the static-host direction:
   `PluginManager`, shared by every embedded Host.
 - Dynamic operation plugins receive registration callbacks from the host, so
   registry mutation stays in that process-owned instance.
-- `Photospider::operation_runtime` contains ImageBuffer and immutable CPU
-  DenseTensor value/view implementation only; it contains no registry, loader,
+- `Photospider::operation_runtime` contains ImageBuffer, immutable CPU
+  DenseTensor value/view, and Region value/algebra implementation only; it
+  contains no registry, loader,
   Graph, policy, execution, or compute state. Its one process-wide identity
   authority owns separate monotonic allocation and Value-revision sequences.
 - Plugin callback objects and plugin-instantiated return-value internals may
@@ -542,7 +544,7 @@ profiles:
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
-### Implemented V-2/V-3 SDK subset and future provider ABI
+### Implemented V-2/V-3/V-4 SDK subset and future provider ABI
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts a separately versioned pure-C provider ABI v3 for Schema, Facet,
@@ -563,13 +565,21 @@ distinct. One built-in operation uses that
 surface behind a private dual-representation bridge: it preserves the sealed
 result Value and derives an ImageBuffer compatibility snapshot.
 
-Neither slice places Value, BufferHandle, leases, or a PImpl in a v2 callback
-record, and neither changes the two current boundaries in the table. Operation
-ABI v2 remains the current operation contract until every repository-owned
-operation and installed consumer has migrated. The completion boundary then
-deletes v2, its entry point, SDK, fixtures, and package surface without a
-permanent dual loader, wrapper, alias, forwarding header, or v2-to-v3 shim.
-Policy ABI v1 remains independently versioned and is not renamed to v3.
+V-4 adds installed `RegionSet` and bounded algebra to `operation_runtime`.
+Region does not enter a new public v2 slot. A source-private bridge recognizes
+only the exact currently selected core dense callback and invokes its
+Region-aware implementation; a same-key plugin override keeps ordinary
+complete-output v2 behavior. Exact ImageRect may adapt current propagation
+callbacks, while TensorSlice never crosses the rectangular v2 contract.
+
+None of these slices places Value, BufferHandle, leases, Region, or a PImpl in
+a v2 callback record, and none changes the two current boundaries in the
+table. Operation ABI v2 remains the current operation contract until every
+repository-owned operation and installed consumer has migrated. The completion
+boundary then deletes v2, its entry point, SDK, fixtures, and package surface
+without a permanent dual loader, wrapper, alias, forwarding header, or
+v2-to-v3 shim. Policy ABI v1 remains independently versioned and is not renamed
+to v3.
 
 The operation C-linkage entry name is an identity/generation gate, not a stable
 C data ABI. Binary compatibility still depends on the matching SDK, compiler,

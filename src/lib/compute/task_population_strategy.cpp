@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "compute/compute_geometry.hpp"
 #include "compute/domain_op_metadata.hpp"
@@ -97,13 +98,172 @@ PixelRect dirty_roi_for_node(const DirtyRegionSnapshot* snapshot, int node_id,
 }
 
 /**
+ * @brief Reports whether one Region is nonempty logical dirty work.
+ * @param region Immutable Region value to inspect.
+ * @return True for Whole or any nonempty normalized clause.
+ * @throws Nothing.
+ * @note Empty is the only Region kind that does not select work.
+ */
+bool is_logical_dirty_region(const RegionSet& region) noexcept {
+  return !region.is_empty();
+}
+
+/**
+ * @brief Reports whether one logical Region cannot be projected to PixelRect.
+ * @param region Immutable Region value to inspect.
+ * @return False only for Empty or one built-in ImageRect atom.
+ * @throws Nothing.
+ * @note Whole, TensorSlice, custom domains, and multi-atom clauses must retain
+ *       monolithic logical work without fabricating two-dimensional geometry.
+ */
+bool is_nonprojectable_logical_region(const RegionSet& region) noexcept {
+  if (region.is_empty()) {
+    return false;
+  }
+  if (region.is_whole() || region.atoms().size() != 1U ||
+      !std::holds_alternative<ImageRect>(region.atoms().front())) {
+    return true;
+  }
+  return !(std::get<ImageRect>(region.atoms().front()).domain ==
+           image_region_domain());
+}
+
+/**
+ * @brief Scans a Region vector for logical dirty work.
+ * @param regions Immutable Region records from one snapshot bucket.
+ * @return True when at least one record is nonempty.
+ * @throws Nothing.
+ */
+bool has_logical_dirty_region(const std::vector<RegionSet>& regions) noexcept {
+  return std::any_of(regions.begin(), regions.end(), is_logical_dirty_region);
+}
+
+/**
+ * @brief Scans a Region vector for work without an exact PixelRect projection.
+ * @param regions Immutable Region records from one snapshot bucket.
+ * @return True when at least one record must remain logical-only.
+ * @throws Nothing.
+ */
+bool has_nonprojectable_logical_region(
+    const std::vector<RegionSet>& regions) noexcept {
+  return std::any_of(regions.begin(), regions.end(),
+                     is_nonprojectable_logical_region);
+}
+
+/**
+ * @brief Checks authoritative logical dirty records for one node/domain.
+ * @param snapshot Optional graph-scoped dirty snapshot.
+ * @param node_id Node whose Region records are inspected.
+ * @param domain HP or RT task domain being populated.
+ * @return True when a matching nonempty logical Region exists.
+ * @throws Nothing.
+ * @note Per-node and actual Region maps inherit the snapshot's documented
+ *       single-domain invariant. Source, tile, and monolithic records are also
+ *       checked against their explicit domain.
+ */
+bool has_logical_dirty_region(const DirtyRegionSnapshot* snapshot, int node_id,
+                              DirtyDomain domain) noexcept {
+  if (!snapshot) {
+    return false;
+  }
+  auto actual_it = snapshot->actual_dirty_regions.find(node_id);
+  if (actual_it != snapshot->actual_dirty_regions.end() &&
+      has_logical_dirty_region(actual_it->second)) {
+    return true;
+  }
+  auto node_it = snapshot->per_node_dirty_regions.find(node_id);
+  if (node_it != snapshot->per_node_dirty_regions.end() &&
+      has_logical_dirty_region(node_it->second)) {
+    return true;
+  }
+  auto source_it = snapshot->source_region_records.find(node_id);
+  if (source_it != snapshot->source_region_records.end() &&
+      std::any_of(source_it->second.begin(), source_it->second.end(),
+                  [domain](const DirtySourceRegionRecord& record) {
+                    return record.domain == domain &&
+                           is_logical_dirty_region(record.source_region);
+                  })) {
+    return true;
+  }
+  if (std::any_of(snapshot->dirty_tiles.begin(), snapshot->dirty_tiles.end(),
+                  [node_id, domain](const DirtyTileKey& tile) {
+                    return tile.node_id == node_id && tile.domain == domain &&
+                           is_logical_dirty_region(tile.region);
+                  })) {
+    return true;
+  }
+  return std::any_of(snapshot->dirty_monolithic_nodes.begin(),
+                     snapshot->dirty_monolithic_nodes.end(),
+                     [node_id, domain](const DirtyMonolithicRegion& record) {
+                       return record.node_id == node_id &&
+                              record.domain == domain &&
+                              is_logical_dirty_region(record.region);
+                     });
+}
+
+/**
+ * @brief Checks for logical work that must not acquire PixelRect task geometry.
+ * @param snapshot Optional graph-scoped dirty snapshot.
+ * @param node_id Node whose Region records are inspected.
+ * @param domain HP or RT task domain being populated.
+ * @return True when a matching Whole, TensorSlice, custom-domain, or
+ *         multi-atom Region exists.
+ * @throws Nothing.
+ * @note The same single-domain rule as has_logical_dirty_region applies to
+ *       untagged per-node and actual Region maps.
+ */
+bool has_nonprojectable_logical_dirty_region(
+    const DirtyRegionSnapshot* snapshot, int node_id,
+    DirtyDomain domain) noexcept {
+  if (!snapshot) {
+    return false;
+  }
+  auto actual_it = snapshot->actual_dirty_regions.find(node_id);
+  if (actual_it != snapshot->actual_dirty_regions.end() &&
+      has_nonprojectable_logical_region(actual_it->second)) {
+    return true;
+  }
+  auto node_it = snapshot->per_node_dirty_regions.find(node_id);
+  if (node_it != snapshot->per_node_dirty_regions.end() &&
+      has_nonprojectable_logical_region(node_it->second)) {
+    return true;
+  }
+  auto source_it = snapshot->source_region_records.find(node_id);
+  if (source_it != snapshot->source_region_records.end() &&
+      std::any_of(source_it->second.begin(), source_it->second.end(),
+                  [domain](const DirtySourceRegionRecord& record) {
+                    return record.domain == domain &&
+                           is_nonprojectable_logical_region(
+                               record.source_region);
+                  })) {
+    return true;
+  }
+  if (std::any_of(snapshot->dirty_tiles.begin(), snapshot->dirty_tiles.end(),
+                  [node_id, domain](const DirtyTileKey& tile) {
+                    return tile.node_id == node_id && tile.domain == domain &&
+                           is_nonprojectable_logical_region(tile.region);
+                  })) {
+    return true;
+  }
+  return std::any_of(snapshot->dirty_monolithic_nodes.begin(),
+                     snapshot->dirty_monolithic_nodes.end(),
+                     [node_id, domain](const DirtyMonolithicRegion& record) {
+                       return record.node_id == node_id &&
+                              record.domain == domain &&
+                              is_nonprojectable_logical_region(record.region);
+                     });
+}
+
+/**
  * @brief Decides whether one pre-expanded task intersects selected dirty work.
  * @param task Planned task whose output geometry is checked.
  * @param snapshot Optional graph-scoped dirty snapshot.
- * @return True for ordinary planning, unknown task ROI, or a positive dirty
- *         intersection; false when dirty planning selects no matching area.
+ * @return True for ordinary planning, matching non-tile logical Region work,
+ *         unknown task ROI, or a positive image intersection; false when dirty
+ *         planning selects no matching work.
  * @throws Nothing.
- * @note Intersection uses checked kernel geometry and never creates new tasks.
+ * @note TensorSlice and other nonprojectable Regions select only non-tile work;
+ *       the helper never invents PixelRect geometry for them.
  */
 bool intersects_dirty_roi(const PlannedTask& task,
                           const DirtyRegionSnapshot* snapshot) noexcept {
@@ -113,7 +273,8 @@ bool intersects_dirty_roi(const PlannedTask& task,
   const PixelRect dirty_roi =
       dirty_roi_for_node(snapshot, task.node_id, task.domain);
   if (dirty_roi.width <= 0 || dirty_roi.height <= 0) {
-    return false;
+    return task.kind != PlannedTaskKind::Tile &&
+           has_logical_dirty_region(snapshot, task.node_id, task.domain);
   }
   if (task.output_roi.width <= 0 || task.output_roi.height <= 0) {
     return true;
@@ -299,8 +460,9 @@ class GraphTaskPopulationStrategy {
       if (!graph.has_node(work.node_id)) {
         continue;
       }
-      append_graph_tasks_for_work(result, graph, work, domain, shape_strategy,
-                                  extent_resolver, extent_cache, appender);
+      append_graph_tasks_for_work(result, graph, work, snapshot, domain,
+                                  shape_strategy, extent_resolver, extent_cache,
+                                  appender);
     }
   }
 
@@ -311,6 +473,7 @@ class GraphTaskPopulationStrategy {
    * @param result Plan receiving tasks through `appender`.
    * @param graph Graph containing the referenced node and output extent inputs.
    * @param work Planned node work being materialized.
+   * @param snapshot Optional logical dirty metadata for the work item.
    * @param domain HP or RT task domain.
    * @param shape_strategy Domain-bound callback and metadata selector.
    * @param extent_resolver Resolver used to derive full output dimensions.
@@ -323,17 +486,24 @@ class GraphTaskPopulationStrategy {
    * resolution.
    * @note A selected tiled callback expands into tiles only with a positive
    * extent. Otherwise one `Node` task preserves full-node tiled execution.
+   * Nonprojectable logical Region work suppresses extent-derived PixelRect
+   * geometry and remains one non-tile task.
    */
   void append_graph_tasks_for_work(
       ComputePlan& result, const GraphModel& graph, const PlannedNodeWork& work,
-      DirtyDomain domain, const DomainTaskShapeStrategy& shape_strategy,
+      const DirtyRegionSnapshot* snapshot, DirtyDomain domain,
+      const DomainTaskShapeStrategy& shape_strategy,
       GraphExtentResolver& extent_resolver,
       std::unordered_map<int, PixelSize>& extent_cache,
       TaskAppender& appender) const {
     (void)result;
     const Node& node = graph.node(work.node_id);
-    PixelSize extent = extent_resolver.resolve_output_extent(
-        graph, work.node_id, extent_cache);
+    const bool logical_only =
+        has_nonprojectable_logical_dirty_region(snapshot, work.node_id, domain);
+    const PixelSize extent = logical_only
+                                 ? PixelSize{}
+                                 : extent_resolver.resolve_output_extent(
+                                       graph, work.node_id, extent_cache);
     PixelRect full_output{0, 0, std::max(0, extent.width),
                           std::max(0, extent.height)};
     const PlannedTaskKind selected_kind =
@@ -349,7 +519,9 @@ class GraphTaskPopulationStrategy {
                                      ? PlannedTaskKind::Node
                                      : selected_kind;
     const PixelRect output_roi =
-        full_output.width > 0 ? full_output : work.execution_roi;
+        logical_only
+            ? PixelRect{}
+            : (full_output.width > 0 ? full_output : work.execution_roi);
     appender.add(make_task(work.node_id, kind, domain, output_roi, -1, -1, 0,
                            kind == PlannedTaskKind::Monolithic));
   }

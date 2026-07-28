@@ -46,7 +46,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_execution_internal` | Build-only private physical-execution accounting primitive. | `ResourceLedger` is compiled here; each composition-root `ExecutionService` owns its sole Host-authoritative instance. |
 | `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, policy-aware ready store, reserved-start transaction, private route execution, runtime, and dirty-region helpers. | Runs and physical route mechanisms remain private. |
 | `photospider_host_internal` | Build-only embedded Host adapter and Kernel facade closure. | It is not exported and exposes no private execution owner to consumers. |
-| `photospider_operation_runtime` | Installable shared image-buffer/immutable Value implementation. | It owns the sole process-wide allocation/revision minting authority and has no external package or back-link to the operation SDK. |
+| `photospider_operation_runtime` | Installable shared image-buffer/immutable Value and Region implementation. | It owns the sole process-wide allocation/revision minting authority plus dependency-neutral Region algebra, with no external package or back-link to the operation SDK. |
 | `photospider_operation_sdk` | Installable operation v2 interface SDK. | It transitively carries `operation_runtime`, so it is the sole ordinary plugin link target. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
 | `photospider_policy_sdk` | Installable dependency-neutral pure-C policy ABI v1 SDK. | It carries one C11/C++17-compatible header and no execution/runtime dependency. |
@@ -210,6 +210,7 @@ include/photospider/host/
 include/photospider/data/
   value.hpp
   image_view.hpp
+  region.hpp
 
 include/photospider/memory/
   buffer_handle.hpp
@@ -335,7 +336,7 @@ Current target shape:
 | `photospider_policy_internal` | Static | No | Pure-C policy registry/loader, built-ins, bindings, contexts, faults, and DSO leases. |
 | `photospider_execution_internal` | Static | No | Private physical-execution accounting and `ResourceLedger` implementation. |
 | `photospider_host_internal` | Static | No | Embedded Host adapter and Kernel facade closure. |
-| `photospider_operation_runtime` | Shared | Yes | Public image-buffer/immutable Value implementation and sole process-wide allocation/revision minting authority, with no external-package dependency or SDK back-link. |
+| `photospider_operation_runtime` | Shared | Yes | Public image-buffer/immutable Value and Region implementation plus sole process-wide allocation/revision minting authority, with no external-package dependency or SDK back-link. |
 | `photospider_operation_sdk` | Interface | Yes | Operation v2 headers and transitive `operation_runtime` link. |
 | `photospider_operation_opencv` | Static | Yes | Opt-in public OpenCV adapter with only OpenCV `core`. |
 | `photospider_policy_sdk` | Interface | Yes | One dependency-neutral pure-C ABI v1 header with C11/C++17 usage requirements. |

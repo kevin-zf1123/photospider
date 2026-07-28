@@ -131,8 +131,8 @@ struct StabilizedDirtyNodeOutput {
   /** @brief HP content version to publish if the complete request succeeds. */
   int hp_version = 0;
 
-  /** @brief Full HP image ROI represented by output, when it has an image. */
-  std::optional<PixelRect> hp_roi;
+  /** @brief Exact logical HP validity represented by the staged output. */
+  std::optional<RegionSet> hp_region;
 };
 
 /**

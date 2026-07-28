@@ -679,10 +679,10 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor 与 ImageView Operation 验证
+## CPU DenseTensor、ImageView 与 Region 验证
 
-`test_cpu_dense_tensor_image_operation` 是已实现 V-2/V-3 边界的 provider-independent
-integration binary。它的 16 个长期用例验证：
+`test_cpu_dense_tensor_image_operation` 是已实现 V-2/V-3/V-4 边界的 provider-independent
+integration binary。它的 21 个长期用例验证：
 
 - malformed facet、stride、byte offset 与 exact-envelope rejection，包括受检的单轴/跨轴
   writable collision 与 overflow case，以及可接受的 padded、transposed 和 singleton-axis
@@ -698,25 +698,33 @@ integration binary。它的 16 个长期用例验证：
   cache path 不变，以及 disk-save Value authority；
 - 精确 descriptor-only invert inference、直接复用 sealed input 与精确 result-revision
   publication；
-- padded multi-channel product execution，以及 execute 返回 descriptor 与 inference 不一致的
+- padded multi-channel full 与 ImageRect execution、rank-four TensorSlice、Empty/Whole
+  selection、dirty-plan-to-product staging，以及 execute 返回 descriptor 与 inference 不一致的
   合法 Value 时以 `GraphErrc::ComputeError` 拒绝。
+
+`test_region_contracts` 拥有 22 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
+normalization、rank-general TensorSlice、overflow-safe clipping/algebra、显式 budget、typed
+failure、checked ImageRect/PixelRect conversion、Region propagation、Tensor planning/task
+selection/edge mapping 与 Region dirty lifecycle。
 
 Active output byte 必须等于 `255 - input`；input/output row padding 不被当作 image element。
 
 聚焦验证命令为：
 
 ```bash
-cmake --build build --target test_cpu_dense_tensor_image_operation \
+cmake --build build --target test_region_contracts \
+  test_cpu_dense_tensor_image_operation \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^CpuDenseTensorImageOperation\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 16 个
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 21 个 dense
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
-DSO，证明它们从同一个 shared runtime authority mint identity。下述 provider-disabled nested
-build 也会编译并运行全部 16 个 dense case 与该双 DSO case，因此真实 core operation 与 identity
+DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
+都会在没有 optional dependency 时构造并计算 Region。下述 provider-disabled nested build
+也会编译并运行全部 21 个 dense case 与该双 DSO case，因此真实 core operation 与 identity
 authority 都不依赖 optional OpenCV operation provider。
 
 ## 可选 OpenCV Operation Provider 验证
@@ -743,8 +751,8 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 provider-independent focused binary 与 stdlib-only fixture，并额外构建 CPU
 DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary 与
 kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须
-精确包含 24 项：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 16 个
+精确包含 29 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 21 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case 与
@@ -865,7 +873,9 @@ operation-concurrency 变更时，应重新运行准确命令，并解释新输�
 
 低置信度测试仍应在验证中可见，而不是被静默排除。如果测试不足以可靠地作为开发门禁，应明确记录该状态，并创建后续工作升级或替换它。
 
-里程碑测试和 `test_propagation_contracts` 已注册到 CTest，因此它们可见；但在后续 pass 将它们重写为更窄、更清晰 fixture 和断言的回归测试前，它们仍是低置信度遗留测试。
+里程碑测试、`test_propagation_contracts` 与长期 `test_region_contracts` 行为 suite 已注册到
+CTest，因此它们可见；但在后续 pass 将前两类重写为更窄、更清晰 fixture 和断言的回归测试前，
+它们仍是低置信度遗留测试。
 
 `test_propagation` 不同：它是脚本式 REPL/tool 目标，不是 GoogleTest 二进制。CMake 保持它可构建，供手工脚本和临时验证使用，但 CTest 不会发现或运行它。不要声称 CTest 覆盖了 `test_propagation`；需要时应单独运行准确的手工命令。
 

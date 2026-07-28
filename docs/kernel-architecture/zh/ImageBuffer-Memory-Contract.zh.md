@@ -207,7 +207,7 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
-### 已实现的 V-3 关系与剩余目标
+### 已实现的 V-3/V-4 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -227,18 +227,24 @@ read lease、独占 builder write lease、process-local allocation/revision iden
 受界限约束的 signed/zero-stride immutable view，以及正式 HP cache entry 中的 allocation
 identity authority。
 
-V-3 不实现 quantization、Region、device identity、readiness、transfer、provider ABI v3
-或通用 named graph Value output。因此，在后续各自拥有的切片完成迁移前，当前 ImageBuffer
-structure、device field、operation DSO ABI、tiled-write、codec 与 Host 边界仍是 compatibility
-contract。对于同时携带两种形式的正式 CPU image cache entry，有效 sealed Value（而不是
-mutable compatibility snapshot）才是 allocation/revision identity authority。
+V-4 新增已安装、dependency-neutral 的 Region MVP。精确内建 ImageRect 可以经过 checked
+conversion 进入或离开 `PixelRect`；TensorSlice、Whole、custom domain、multi-atom clause、
+uncertainty 与 overflow 都会在该 adapter 被拒绝。Region-aware core dense operation 会复制
+未选中的 byte，并通过 checked stride 只修改选中的逻辑 coordinate。在各自后续切片完成迁移
+之前，ImageBuffer structure、device field、operation DSO ABI、tiled write、codec 与 Host/IPC
+v2 rectangle 仍是角色区分明确的 compatibility contract。对于同时携带两种形式的正式 CPU
+image cache entry，有效 sealed Value（而不是 mutable compatibility snapshot）才是
+allocation/revision identity authority。
+
+V-4 仍不实现 quantization、device identity、readiness、transfer、provider ABI v3 或通用命名
+graph Value output。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
 
 把不可变 descriptor 与可写 payload view 分开，可以防止并行 tile callback 竞态替换 ownership
-或 device metadata。公共 view 使用 `PixelRect`，也能避免私有 OpenCV geometry 成为 operation ABI
-的一部分。
+或 device metadata。让当前 image-only `PixelRect` view 与 Region 保持区分，也能避免私有
+OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 
 ## 实现与验证入口
 
@@ -246,17 +252,21 @@ mutable compatibility snapshot）才是 allocation/revision identity authority�
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`
+- `src/lib/core/region.*`
+- `src/lib/core/region_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/compute/image_buffer.hpp`
 - `src/lib/adapters/opencv/buffer_adapter_opencv.*`
 - `src/lib/ipc/output_store.*`
 - `tests/unit/test_image_buffer_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

@@ -6,6 +6,7 @@
 
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/data/region.hpp"
 
 namespace ps {
 
@@ -73,6 +74,62 @@ struct UpstreamRoiProjection {
  */
 class RoiPropagationService {
  public:
+  /**
+   * @brief Projects one logical Region forward through graph image edges.
+   *
+   * @param graph Graph whose topology and current operation contracts apply.
+   * @param start_node_id Node where affected work originates.
+   * @param start_region Exact normalized Region in the start node domain.
+   * @param target_node_id Downstream node whose affected Region is requested.
+   * @return Exact ImageRect/TensorSlice result or a typed failure.
+   * @throws GraphError or callback exceptions from exact ImageRect propagation.
+   * @throws std::bad_alloc when traversal or result storage cannot allocate.
+   * @note Current v2 callbacks are invoked only for one exact ImageRect through
+   *       the checked private adapter. TensorSlice traverses only the explicit
+   *       source-private core dense identity contract.
+   */
+  RegionOperationResult project_region_forward(const GraphModel& graph,
+                                               int start_node_id,
+                                               const RegionSet& start_region,
+                                               int target_node_id) const;
+
+  /**
+   * @brief Projects one logical Region backward through graph image edges.
+   *
+   * @param graph Graph whose topology and current operation contracts apply.
+   * @param target_node_id Downstream node where demand originates.
+   * @param target_region Exact normalized Region in the target node domain.
+   * @param source_node_id Upstream node whose required Region is requested.
+   * @return Exact ImageRect/TensorSlice result or a typed failure.
+   * @throws GraphError or callback exceptions from exact ImageRect propagation.
+   * @throws std::bad_alloc when traversal or result storage cannot allocate.
+   * @note A missing TensorSlice transform returns Unsupported and never invokes
+   *       a rectangular callback or widens to Whole.
+   */
+  RegionOperationResult project_region_backward(const GraphModel& graph,
+                                                int target_node_id,
+                                                const RegionSet& target_region,
+                                                int source_node_id) const;
+
+  /**
+   * @brief Computes one node's immediate logical upstream demand.
+   *
+   * @param node Destination node whose transform is applied.
+   * @param downstream_region Exact normalized output Region.
+   * @param graph Graph supplying topology, extents, and cached metadata.
+   * @param size_cache Request-local image extent cache.
+   * @return Exact logical upstream demand or a typed unsupported outcome.
+   * @throws GraphError or callback exceptions for the ImageRect path.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   * @note TensorSlice is preserved only by the explicit core dense identity
+   *       operation; other current operations have only rectangular v2
+   *       propagation semantics.
+   */
+  RegionOperationResult compute_upstream_region(
+      const Node& node, const RegionSet& downstream_region,
+      const GraphModel& graph,
+      std::unordered_map<int, PixelSize>& size_cache) const;
+
   /**
    * @brief Computes shared and input-selected upstream ROI contributions.
    * @param node Node whose input demand is being computed.

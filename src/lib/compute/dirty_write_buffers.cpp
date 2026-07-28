@@ -9,6 +9,7 @@
 #include "compute/compute_geometry.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "core/image_buffer_processing.hpp"
+#include "core/region_image_adapter.hpp"
 #include "core/value_image_adapter.hpp"
 
 namespace ps::compute {
@@ -74,6 +75,30 @@ NodeOutput clone_node_output(const NodeOutput& source,
   return cloned;
 }
 
+/**
+ * @brief Merges validity Regions without inventing unverified coordinates.
+ *
+ * @param existing Previously staged exact validity, when any.
+ * @param update Newly validated exact update Region.
+ * @return Exact representable union; when the bounded subset cannot represent
+ *         both, returns `update` as a safe under-approximation.
+ * @throws std::bad_alloc when Region algebra storage cannot allocate.
+ * @note Validity metadata must never use a conservative superset because that
+ *       could authorize reuse of bytes not proven current.
+ */
+RegionSet merge_valid_regions(const std::optional<RegionSet>& existing,
+                              const RegionSet& update) {
+  if (!existing.has_value()) {
+    return update;
+  }
+  const RegionOperationResult merged = union_regions(*existing, update);
+  if (merged.status() == RegionOperationStatus::Exact &&
+      merged.region().has_value()) {
+    return *merged.region();
+  }
+  return update;
+}
+
 }  // namespace
 
 HighPrecisionDirtyWriteBuffer::HighPrecisionDirtyWriteBuffer(
@@ -107,29 +132,26 @@ NodeOutput& HighPrecisionDirtyWriteBuffer::ensure_output(const Node& node) {
 /** @copydoc HighPrecisionDirtyWriteBuffer::import_precomputed_output */
 void HighPrecisionDirtyWriteBuffer::import_precomputed_output(
     const Node& node, const NodeOutput& output, int hp_version,
-    const std::optional<PixelRect>& hp_roi,
+    const std::optional<RegionSet>& hp_region,
     std::optional<uint64_t> dirty_source_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
   Entry& entry = ensure_entry_locked(node);
   entry.output = output;
   entry.has_output = true;
   entry.hp_version = hp_version;
-  entry.hp_roi = hp_roi;
+  entry.hp_region = hp_region;
   entry.dirty_source_generation = dirty_source_generation;
 }
 
 /** @copydoc HighPrecisionDirtyWriteBuffer::mark_updated */
 int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,
-                                                const PixelRect& roi_hp,
-                                                const PixelSize& hp_size,
+                                                const RegionSet& region_hp,
                                                 bool dirty_source,
                                                 uint64_t dirty_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
   Entry& entry = ensure_entry_locked(node);
-  if (!is_rect_empty(roi_hp)) {
-    entry.hp_roi = entry.hp_roi.has_value()
-                       ? clip_rect(merge_rect(*entry.hp_roi, roi_hp), hp_size)
-                       : roi_hp;
+  if (!region_hp.is_empty()) {
+    entry.hp_region = merge_valid_regions(entry.hp_region, region_hp);
   }
   entry.hp_version++;
   if (dirty_source) {
@@ -150,7 +172,7 @@ void HighPrecisionDirtyWriteBuffer::commit_to_graph(GraphModel& graph) {
     graph.mutate_node_runtime_state(
         node_id, [&](GraphModel::NodeRuntimeState& state) {
           state.cached_output_high_precision = std::move(entry.output);
-          state.hp_roi = entry.hp_roi;
+          state.hp_region = entry.hp_region;
           state.hp_version = entry.hp_version;
         });
     if (entry.dirty_source_generation) {
@@ -165,10 +187,16 @@ HighPrecisionDirtyWriteBuffer::downsample_requests() const {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<DownsampleExecutor::Request> requests;
   for (const auto& [node_id, entry] : entries_) {
-    if (!entry.has_output || !entry.hp_roi) {
+    if (!entry.has_output || !entry.hp_region) {
       continue;
     }
-    requests.push_back({node_id, *entry.hp_roi, entry.hp_version});
+    try {
+      requests.push_back({node_id,
+                          region_image_adapter::to_pixel_rect(*entry.hp_region),
+                          entry.hp_version});
+    } catch (const std::invalid_argument&) {
+      // TensorSlice and Whole have no current image-only downsample projection.
+    }
   }
   return requests;
 }
@@ -185,6 +213,10 @@ std::uint64_t HighPrecisionDirtyWriteBuffer::retained_memory_bytes() const {
   estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
   for (const auto& [node_id, entry] : entries_) {
     (void)node_id;
+    if (entry.hp_region.has_value()) {
+      estimate.add_bytes(
+          region_dynamic_retained_memory_bytes(*entry.hp_region));
+    }
     if (entry.has_output) {
       estimate.add_bytes(
           node_output_dynamic_retained_memory_bytes(entry.output));
@@ -213,12 +245,16 @@ HighPrecisionDirtyWriteBuffer::missing_entry_retained_memory_bytes(
     estimate.add_objects<decltype(entries_)::value_type>();
     estimate.add_objects<void*>(3U);
     const Node& node = graph.node(node_id);
-    const NodeOutput* seeded_output =
-        seed_existing_outputs_ && node.cached_output_high_precision
-            ? &*node.cached_output_high_precision
-            : &empty_output;
+    const bool seed_existing_output =
+        seed_existing_outputs_ && node.cached_output_high_precision.has_value();
+    const NodeOutput* seeded_output = seed_existing_output
+                                          ? &*node.cached_output_high_precision
+                                          : &empty_output;
     estimate.add_bytes(
         node_output_dynamic_retained_memory_bytes(*seeded_output));
+    if (seed_existing_output && node.hp_region.has_value()) {
+      estimate.add_bytes(region_dynamic_retained_memory_bytes(*node.hp_region));
+    }
   }
   return estimate.bytes();
 }
@@ -228,9 +264,9 @@ HighPrecisionDirtyWriteBuffer::ensure_entry_locked(const Node& node) {
   Entry& entry = entries_[node.id];
   if (!entry.initialized) {
     entry.initialized = true;
-    entry.hp_roi = node.hp_roi;
     entry.hp_version = node.hp_version;
     if (seed_existing_outputs_ && node.cached_output_high_precision) {
+      entry.hp_region = node.hp_region;
       entry.output =
           clone_node_output(*node.cached_output_high_precision, "HP");
       entry.has_output = true;
@@ -268,17 +304,16 @@ NodeOutput& RealtimeProxyWriteBuffer::ensure_output(int node_id) {
 }
 
 /** @copydoc RealtimeProxyWriteBuffer::mark_updated */
-int RealtimeProxyWriteBuffer::mark_updated(int node_id, const PixelRect& roi_hp,
-                                           const PixelSize& hp_size,
+int RealtimeProxyWriteBuffer::mark_updated(int node_id,
+                                           const RegionSet& region_hp,
                                            bool dirty_source,
                                            uint64_t dirty_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
   Entry& entry = ensure_entry_locked(node_id);
-  if (!is_rect_empty(roi_hp)) {
-    entry.state.roi_hp =
-        entry.state.roi_hp.has_value()
-            ? clip_rect(merge_rect(*entry.state.roi_hp, roi_hp), hp_size)
-            : roi_hp;
+  if (!region_hp.is_empty()) {
+    (void)region_image_adapter::to_pixel_rect(region_hp);
+    entry.state.region_hp =
+        merge_valid_regions(entry.state.region_hp, region_hp);
   }
   entry.state.version++;
   if (dirty_source) {
@@ -311,6 +346,10 @@ std::uint64_t RealtimeProxyWriteBuffer::retained_memory_bytes() const {
   estimate.add_objects<void*>(static_cast<std::uint64_t>(entries_.size()));
   for (const auto& [node_id, entry] : entries_) {
     (void)node_id;
+    if (entry.state.region_hp.has_value()) {
+      estimate.add_bytes(
+          region_dynamic_retained_memory_bytes(*entry.state.region_hp));
+    }
     if (entry.has_output && entry.state.output.has_value()) {
       estimate.add_bytes(
           node_output_dynamic_retained_memory_bytes(*entry.state.output));
@@ -336,11 +375,16 @@ std::uint64_t RealtimeProxyWriteBuffer::missing_entry_retained_memory_bytes(
     estimate.add_objects<void*>(3U);
     const RealtimeProxyGraph::NodeState* state =
         proxy_graph_.find_state(node_id);
+    const bool seed_existing_output =
+        seed_existing_outputs_ && state && state->output.has_value();
     const NodeOutput* seeded_output =
-        seed_existing_outputs_ && state && state->output ? &*state->output
-                                                         : &empty_output;
+        seed_existing_output ? &*state->output : &empty_output;
     estimate.add_bytes(
         node_output_dynamic_retained_memory_bytes(*seeded_output));
+    if (seed_existing_output && state->region_hp.has_value()) {
+      estimate.add_bytes(
+          region_dynamic_retained_memory_bytes(*state->region_hp));
+    }
   }
   return estimate.bytes();
 }
@@ -352,10 +396,10 @@ RealtimeProxyWriteBuffer::Entry& RealtimeProxyWriteBuffer::ensure_entry_locked(
     entry.initialized = true;
     if (const RealtimeProxyGraph::NodeState* state =
             proxy_graph_.find_state(node_id)) {
-      entry.state.roi_hp = state->roi_hp;
       entry.state.version = state->version;
       entry.state.dirty_source_generation = state->dirty_source_generation;
       if (seed_existing_outputs_ && state->output) {
+        entry.state.region_hp = state->region_hp;
         entry.state.output = clone_node_output(*state->output, "RT proxy");
         entry.has_output = true;
       }

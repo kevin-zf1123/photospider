@@ -236,7 +236,38 @@ NodeOutput op_invert_dense(const Node& node,
   return execute_cpu_dense_image_operation(node, inputs, operation);
 }
 
+/**
+ * @brief Executes core dense inversion for one exact logical Region.
+ * @param node Borrowed operation node snapshot.
+ * @param inputs Borrowed destination-indexed inputs.
+ * @param region Exact normalized ImageRect, TensorSlice, Whole, or Empty.
+ * @return Independently owned sealed dense output and ImageBuffer snapshot.
+ * @throws GraphError or std::bad_alloc from the validated dense runner.
+ * @note The static operation definition is immutable and reentrant.
+ */
+NodeOutput op_invert_dense_region(const Node& node,
+                                  const std::vector<const NodeOutput*>& inputs,
+                                  const RegionSet& region) {
+  static const CpuDenseImageOperation operation = make_dense_invert_operation();
+  return execute_cpu_dense_image_operation(node, inputs, operation, region);
+}
+
 }  // namespace
+
+/** @copydoc ps::ops::find_core_region_monolithic_operation */
+std::optional<CoreRegionMonolithicOpFunc> find_core_region_monolithic_operation(
+    const std::string& type, const std::string& subtype,
+    const MonolithicOpFunc& selected_operation) {
+  using MonolithicFunctionPointer =
+      NodeOutput (*)(const Node&, const std::vector<const NodeOutput*>&);
+  const MonolithicFunctionPointer* selected_target =
+      selected_operation.target<MonolithicFunctionPointer>();
+  if (type == "image_process" && subtype == "invert_dense" &&
+      selected_target != nullptr && *selected_target == &op_invert_dense) {
+    return CoreRegionMonolithicOpFunc(op_invert_dense_region);
+  }
+  return std::nullopt;
+}
 
 /** @copydoc ps::ops::builtin_input_halo_radius */
 int builtin_input_halo_radius(const std::string& type,
