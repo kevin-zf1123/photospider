@@ -152,7 +152,7 @@ output、allocation identity、Value revision、disk path 或 persistence key。
 sequential publication、result commit 与成功 disk load 会发布 complete Region（`ImageRect`、
 TensorSlice bounds，或仅已知 non-image named data 时的 Whole）。
 
-Dirty HP staging 会一起携带 output、Region、version 与 source generation。精确且可表示的
+Dirty HP staging 会一起携带 output、Region、version 与 source generation。
 对于 exact core Region bridge，compatible complete-shaped result 只贡献 selected
 byte：selected coordinate 会替换 prior byte，unselected coordinate 继续来自 staged
 output。即使 existing complete validity 的证明是 ImageRect，而 update 是 TensorSlice，
