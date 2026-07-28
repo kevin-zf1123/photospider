@@ -173,8 +173,8 @@ void add_parameter_value_dynamic(const plugin::ParameterValue& value,
 }
 
 /**
- * @brief Adds dynamic vectors nested in one planned node summary.
- * @param work Planned node work whose vector capacities are charged.
+ * @brief Adds dynamic vectors and route metadata in one planned node summary.
+ * @param work Planned node work whose vectors and route key are charged.
  * @param estimate Checked destination estimator.
  * @return Nothing.
  * @throws GraphError when checked arithmetic overflows.
@@ -185,6 +185,9 @@ void add_planned_work_dynamic(const PlannedNodeWork& work,
   add_vector_capacity(work.dependency_node_ids, estimate);
   add_vector_capacity(work.dependent_node_ids, estimate);
   add_vector_capacity(work.task_ids, estimate);
+  if (work.operation_route.has_value()) {
+    add_string_payload(work.operation_route->metadata.exclusive_key, estimate);
+  }
 }
 
 /**
@@ -288,6 +291,7 @@ std::uint64_t compute_plan_dynamic_retained_memory_bytes(
     add_string_payload(dependency.input_kind, &estimate);
   }
   add_vector_capacity(plan.task_graph.initial_task_ids, &estimate);
+  add_vector_capacity(plan.available_devices, &estimate);
   return estimate.bytes();
 }
 

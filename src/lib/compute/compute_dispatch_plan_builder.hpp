@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "compute/task_graph_planning.hpp"
 
 namespace ps {
@@ -39,6 +41,7 @@ class ComputeDispatchPlanBuilder {
    *
    * @param graph GraphModel containing the target node and runtime cache state.
    * @param node_id Target node id for the compute request.
+   * @param available_devices Route-visible devices used for operation planning.
    * @param publish_inspection Whether to publish the plan to GraphModel
    * inspection fields before returning.
    * @return Cache-pruned ComputePlan whose planned_nodes define execution
@@ -48,8 +51,10 @@ class ComputeDispatchPlanBuilder {
    * @note Admission-aware callers pass false, retain the returned plan, and
    * call publish_plan_inspection() only after registry installation.
    */
-  ComputePlan build_high_precision_plan(GraphModel& graph, int node_id,
-                                        bool publish_inspection = true) const;
+  ComputePlan build_high_precision_plan(
+      GraphModel& graph, int node_id,
+      const std::vector<Device>& available_devices = {Device::CPU},
+      bool publish_inspection = true) const;
 
   /**
    * @brief Publishes one already-built plan to bounded graph inspection state.

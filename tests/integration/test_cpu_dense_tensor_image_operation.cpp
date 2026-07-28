@@ -1283,11 +1283,16 @@ TEST(CpuDenseTensorImageOperation,
       {dense_tensor_region_domain(), {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}});
   const compute::HighPrecisionDirtyPlan plan =
       planner.plan_high_precision(graph, 88, requested);
-  const auto resolved = OpRegistry::instance().resolve_for_intent(
-      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  const auto resolved = OpRegistry::instance().select_implementation(
+      "image_process", "invert_dense", {Device::CPU},
+      ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(resolved.has_value());
-  const compute::DirtyResolvedOperationMap operations{
-      {88, compute::DirtyResolvedOperation{*resolved, Device::CPU}}};
+  const compute::DirtyResolvedOperationMap operations{{
+      88,
+      compute::DirtyResolvedOperation{
+          resolved->func, resolved->metadata.device_preference,
+          resolved->implementation_identity, resolved->metadata},
+  }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
   compute::HighPrecisionDirtyWriteBuffer staging(false);
@@ -1402,12 +1407,18 @@ TEST(CpuDenseTensorImageOperation,
     EXPECT_EQ(plan.snapshot.source_region_records.at(91).front().source_region,
               requested);
 
-    const auto resolved = OpRegistry::instance().resolve_for_intent(
-        "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+    const auto resolved = OpRegistry::instance().select_implementation(
+        "image_process", "invert_dense", {Device::CPU},
+        ComputeIntent::GlobalHighPrecision);
     ASSERT_TRUE(resolved.has_value());
     const compute::DirtyResolvedOperationMap operations{
-        {91, compute::DirtyResolvedOperation{*resolved, Device::CPU}},
-        {92, compute::DirtyResolvedOperation{*resolved, Device::CPU}}};
+        {91,
+         compute::DirtyResolvedOperation{
+             resolved->func, resolved->metadata.device_preference,
+             resolved->implementation_identity, resolved->metadata}},
+        {92, compute::DirtyResolvedOperation{
+                 resolved->func, resolved->metadata.device_preference,
+                 resolved->implementation_identity, resolved->metadata}}};
     GraphEventService events;
     compute::DirtyNodeSynchronization synchronization(graph.node_ids());
     compute::HighPrecisionDirtyWriteBuffer staging;
@@ -1471,14 +1482,15 @@ TEST(CpuDenseTensorImageOperation,
   graph.add_node(std::move(target));
   graph.validate_topology();
 
-  const auto resolved = OpRegistry::instance().resolve_for_intent(
-      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  const auto resolved = OpRegistry::instance().select_implementation(
+      "image_process", "invert_dense", {Device::CPU},
+      ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(resolved.has_value());
   NodeOutput old_source;
   old_source.image_value = make_unsigned8_rank4_value(4U, 3U, 3U, 16U, 1U);
   Node execution_target = graph.node(94);
   NodeOutput old_target = compute::NodeExecutor::execute(
-      graph, execution_target, *resolved, {&old_source});
+      graph, execution_target, resolved->func, {&old_source});
   const Value old_target_value = old_target.image_value;
   const RegionSet complete_target_region =
       value_image_adapter::full_node_output_region(old_target);
@@ -1496,8 +1508,12 @@ TEST(CpuDenseTensorImageOperation,
       planner.plan_high_precision(graph, 94, requested);
   ASSERT_EQ(plan.execution_order, (std::vector<int>{94}));
 
-  const compute::DirtyResolvedOperationMap operations{
-      {94, compute::DirtyResolvedOperation{*resolved, Device::CPU}}};
+  const compute::DirtyResolvedOperationMap operations{{
+      94,
+      compute::DirtyResolvedOperation{
+          resolved->func, resolved->metadata.device_preference,
+          resolved->implementation_identity, resolved->metadata},
+  }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
   compute::HighPrecisionDirtyWriteBuffer staging;
@@ -1579,11 +1595,16 @@ TEST(CpuDenseTensorImageOperation,
       {dense_tensor_region_domain(), {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}});
   const compute::HighPrecisionDirtyPlan plan =
       planner.plan_high_precision(graph, 96, requested);
-  const auto resolved = OpRegistry::instance().resolve_for_intent(
-      "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+  const auto resolved = OpRegistry::instance().select_implementation(
+      "image_process", "invert_dense", {Device::CPU},
+      ComputeIntent::GlobalHighPrecision);
   ASSERT_TRUE(resolved.has_value());
-  const compute::DirtyResolvedOperationMap operations{
-      {96, compute::DirtyResolvedOperation{*resolved, Device::CPU}}};
+  const compute::DirtyResolvedOperationMap operations{{
+      96,
+      compute::DirtyResolvedOperation{
+          resolved->func, resolved->metadata.device_preference,
+          resolved->implementation_identity, resolved->metadata},
+  }};
   GraphEventService events;
   compute::DirtyNodeSynchronization synchronization(graph.node_ids());
   compute::HighPrecisionDirtyWriteBuffer staging(false);
@@ -1608,7 +1629,7 @@ TEST(CpuDenseTensorImageOperation,
   execution_target = graph.node(96);
   std::vector<std::optional<NodeOutput>> results(1U);
   results[0] = compute::NodeExecutor::execute(graph, execution_target,
-                                              *resolved, {source_output});
+                                              resolved->func, {source_output});
   auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>();
   auto metadata_codec = std::make_shared<testing::FakeCacheMetadataCodec>();
   GraphCacheService cache(image_codec, metadata_codec);

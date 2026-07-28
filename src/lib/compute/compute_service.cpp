@@ -920,8 +920,24 @@ NodeOutput& ComputeService::compute_internal(
     tiled_config.on_tile = [&run_lease = context.run_lease](const PixelRect&) {
       observe_open_run_or_throw(run_lease);
     };
+    const OpImplementation& implementation = resolved_operation->second;
+    const compute::OperationExecutionConstraints operation_constraints{
+        implementation.implementation_identity,
+        implementation.metadata.reentrant,
+        implementation.metadata.maximum_parallelism,
+        implementation.metadata.exclusive_key,
+    };
+    const compute::ReadyTaskResourceDemand operation_demand{
+        implementation.metadata.retained_memory_bytes,
+        implementation.metadata.scratch_bytes,
+        0U,
+        1U,
+    };
+    compute::OperationExecutionLease operation_lease =
+        execution_service_.acquire_operation_execution(
+            context.run_lease, operation_constraints, operation_demand);
     NodeOutput computed_output = compute::NodeExecutor::execute(
-        graph, execution_node, resolved_operation->second, monolithic_inputs,
+        graph, execution_node, implementation.func, monolithic_inputs,
         tiled_config);
     observe_open_run_or_throw(context.run_lease);
     value_image_adapter::normalize_node_output_image_value(&computed_output);
@@ -1584,18 +1600,32 @@ ComputeService::prepare_sequential_compute(
   observe_open_run_or_throw(run_lease);
   execution_order = compute_plan.planned_nodes;
 
-  std::unordered_map<int, OpRegistry::OpVariant> resolved_operations;
+  std::unordered_map<int, OpImplementation> resolved_operations;
   resolved_operations.reserve(execution_order.size());
   std::unordered_map<int, bool> visiting;
   visiting.reserve(execution_order.size());
   for (int node_id : execution_order) {
     const Node& node = graph.node(node_id);
-    std::optional<OpRegistry::OpVariant> operation =
-        OpRegistry::instance().resolve_for_intent(
-            node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+    std::optional<OpImplementation> operation =
+        OpRegistry::instance().select_implementation(
+            node.type, node.subtype, {Device::CPU},
+            ComputeIntent::GlobalHighPrecision);
     if (!operation.has_value()) {
       throw GraphError(GraphErrc::NoOperation,
                        "No op for " + node.type + ":" + node.subtype);
+    }
+    const auto planned_work = std::find_if(
+        compute_plan.planned_work.begin(), compute_plan.planned_work.end(),
+        [node_id](const compute::PlannedNodeWork& work) {
+          return work.node_id == node_id;
+        });
+    if (planned_work == compute_plan.planned_work.end() ||
+        !planned_work->operation_route.has_value() ||
+        planned_work->operation_route->implementation_identity !=
+            operation->implementation_identity) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Operation registry changed after planning for " +
+                           node.type + ":" + node.subtype);
     }
     resolved_operations.emplace(node_id, std::move(*operation));
     visiting.emplace(node_id, false);

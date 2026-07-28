@@ -1337,6 +1337,7 @@ RetainedSubmissionObservation observe_retained_submission(
  * @param entered Counter incremented when the service executes the value.
  * @param priority Ready-store ordering hint.
  * @param resource_demand Exact trusted-host task demand.
+ * @param operation_constraints Exact operation gate metadata.
  * @return Move-owned ready task.
  * @throws std::bad_alloc from metadata or executable ownership.
  * @note The helper is intentionally independent from TaskSubmissionPlan so
@@ -1347,7 +1348,8 @@ ReadyTaskSubmission make_counted_ready_submission(
     std::atomic_int& entered,
     ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
     ReadyTaskResourceDemand resource_demand =
-        ReadyTaskSubmission::default_resource_demand()) {
+        ReadyTaskSubmission::default_resource_demand(),
+    OperationExecutionConstraints operation_constraints = {}) {
   const ComputeRunTaskIdentity identity = lease.task_identity(local_task_id);
   return ReadyTaskSubmission(
       std::move(lease), identity, trace_node_id, true,
@@ -1361,7 +1363,29 @@ ReadyTaskSubmission make_counted_ready_submission(
         entered.fetch_add(1, std::memory_order_relaxed);
         runtime.dec_tasks_to_complete();
       },
-      priority, resource_demand);
+      priority, resource_demand, Device::CPU, std::move(operation_constraints));
+}
+
+/**
+ * @brief Waits until an atomic counter reaches one minimum value.
+ *
+ * @param value Counter advanced by service callbacks.
+ * @param expected Minimum accepted value.
+ * @return True when expected is reached within two seconds.
+ * @throws Nothing.
+ * @note This helper observes outcomes only and grants no scheduling authority.
+ */
+bool wait_for_atomic_count(const std::atomic_int& value,
+                           int expected) noexcept {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  do {
+    if (value.load(std::memory_order_acquire) >= expected) {
+      return true;
+    }
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  return value.load(std::memory_order_acquire) >= expected;
 }
 
 /**
@@ -1452,6 +1476,76 @@ static_assert(std::is_nothrow_move_constructible_v<AsyncPolicyRun>,
               "Async policy owner adoption must not throw during movement.");
 static_assert(std::is_nothrow_move_assignable_v<AsyncPolicyRun>,
               "Async policy owner replacement must not throw during movement.");
+
+/**
+ * @brief Publishes one Run whose constrained callbacks share a release gate.
+ *
+ * @param service Fixed-worker execution domain under test.
+ * @param submission Descriptor naming one Graph/Run.
+ * @param task_count Positive number of initially ready callbacks.
+ * @param constraints Exact implementation cap and exclusion declaration.
+ * @param entered Total callbacks that reached provider work.
+ * @param active Currently entered callbacks.
+ * @param maximum_active Maximum overlapping callbacks observed.
+ * @param release Shared callback release future.
+ * @param throwing_task Optional local task id that throws after entering.
+ * @return Owned asynchronous Run, Host, and completion future.
+ * @throws std::invalid_argument when task_count is not positive.
+ * @throws std::bad_alloc, std::future_error, or std::system_error from setup.
+ * @note Every normal callback retires one logical completion unit. Throwing
+ * callbacks leave failure settlement to ReadyTaskSubmission and the service.
+ */
+AsyncPolicyRun launch_constrained_operation_run(
+    ExecutionService& service, ComputeRunSubmission submission, int task_count,
+    const OperationExecutionConstraints& constraints, std::atomic_int& entered,
+    std::atomic_int& active, std::atomic_int& maximum_active,
+    std::shared_future<void> release, int throwing_task = -1) {
+  if (task_count <= 0) {
+    throw std::invalid_argument(
+        "Constrained operation test Run requires positive task count.");
+  }
+  auto host = std::make_unique<ExecutionServiceHost>();
+  auto run = std::make_unique<ComputeRun>(std::move(submission));
+  std::vector<ReadyTaskSubmission> ready;
+  ready.reserve(static_cast<std::size_t>(task_count));
+  for (int task_id = 0; task_id < task_count; ++task_id) {
+    ComputeRunLease lease = run->acquire_lease();
+    const ComputeRunTaskIdentity identity =
+        lease.task_identity(static_cast<std::uint64_t>(task_id));
+    ready.emplace_back(
+        std::move(lease), identity, task_id, true,
+        [&entered, &active, &maximum_active, release, task_id, throwing_task](
+            ComputeRunLease&, const ComputeRunTaskIdentity&,
+            ExecutionTaskRuntime& runtime) {
+          const int now_active =
+              active.fetch_add(1, std::memory_order_acq_rel) + 1;
+          int observed_maximum = maximum_active.load(std::memory_order_acquire);
+          while (observed_maximum < now_active &&
+                 !maximum_active.compare_exchange_weak(
+                     observed_maximum, now_active, std::memory_order_acq_rel,
+                     std::memory_order_acquire)) {
+          }
+          entered.fetch_add(1, std::memory_order_release);
+          release.wait();
+          active.fetch_sub(1, std::memory_order_acq_rel);
+          if (task_id == throwing_task) {
+            throw std::runtime_error("constrained provider failure");
+          }
+          runtime.dec_tasks_to_complete();
+        },
+        ExecutionTaskPriority::Normal,
+        ReadyTaskSubmission::default_resource_demand(), Device::CPU,
+        constraints);
+  }
+
+  ExecutionServiceHost* host_pointer = host.get();
+  std::future<void> completion = std::async(
+      std::launch::async,
+      [&service, host_pointer, ready = std::move(ready), task_count]() mutable {
+        service.execute_run(*host_pointer, "cpu", std::move(ready), task_count);
+      });
+  return AsyncPolicyRun{std::move(host), std::move(run), std::move(completion)};
+}
 
 /**
  * @brief Publishes one policy-test Run whose initial tasks record markers.
@@ -2212,8 +2306,11 @@ ResourceVector independently_estimate_large_dirty_phase_resources(
       static_cast<std::uint64_t>(sizeof(LargeDirtyPhaseTask)));
   const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
                                          Device::CPU);
+  const std::vector<OperationExecutionConstraints> task_constraints(
+      compute_plan.task_graph.tasks.size());
   auto context = std::make_shared<DirtyReadyTaskContext>(
-      compute_plan, nullptr, phase_task_ids, task_devices,
+      compute_plan, nullptr, phase_task_ids, task_devices, task_constraints,
+      ReadyTaskSubmission::default_resource_demand(),
       std::function<void(int)>(LargeDirtyPhaseTask(task_probe)), callable_bytes,
       run.acquire_lease(), !source_phase,
       source_phase ? ExecutionTaskPriority::High
@@ -2271,6 +2368,8 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
       source_phase ? std::vector<int>{} : phase_task_ids;
   const std::vector<Device> task_devices(compute_plan.task_graph.tasks.size(),
                                          Device::CPU);
+  const std::vector<OperationExecutionConstraints> task_constraints(
+      compute_plan.task_graph.tasks.size());
   DirtySourceFirstRunRequest request;
   request.intent = ComputeIntent::GlobalHighPrecision;
   request.execution_service = &service;
@@ -2278,6 +2377,7 @@ DirtyCallablePhaseRunResult execute_large_dirty_callable_phase_case(
   request.run = &run;
   request.compute_plan = &compute_plan;
   request.task_devices = &task_devices;
+  request.task_constraints = &task_constraints;
   request.additional_shared_retained_memory_bytes = additional_shared_bytes;
   request.source_task_ids = &source_task_ids;
   request.downstream_task_ids = &downstream_task_ids;
@@ -2632,6 +2732,145 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
   EXPECT_EQ(cpu_output.data.at("value").as_int64(), 75);
   EXPECT_EQ(g_issue75_gpu_operation_calls.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(g_issue75_cpu_operation_calls.load(std::memory_order_relaxed), 1);
+}
+
+/**
+ * @brief Verifies full planning carries one coherent operation route to ready.
+ *
+ * @return Nothing; assertions report identity, metadata, or resource mismatch.
+ * @throws Registry, Graph, Run, planning, and callback-copy exceptions.
+ * @note The test stops before provider execution. It proves the immutable route
+ * selected during planning is the same identity/metadata snapshot attached to
+ * admission and resource declarations.
+ */
+TEST(OperationMetadataRouting, FullPlanCarriesIdentityConstraintsAndResources) {
+  constexpr const char* kType = "issue82_plan";
+  constexpr const char* kSubtype = "metadata";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  OpMetadata metadata;
+  metadata.reentrant = false;
+  metadata.maximum_parallelism = 2U;
+  metadata.retained_memory_bytes = 1234U;
+  metadata.scratch_bytes = 5678U;
+  metadata.exclusive_key = "issue82-plan-context";
+  registry.register_impl(
+      kType, kSubtype, Device::CPU,
+      MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
+        NodeOutput output;
+        output.data["value"] = 82;
+        return output;
+      }),
+      metadata);
+
+  GraphModel graph("cache/issue82-plan");
+  Node node = make_plan_node(582);
+  node.type = kType;
+  node.subtype = kSubtype;
+  graph.add_node(std::move(node));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  ComputeRun run(
+      make_test_submission("issue82-plan", graph.revision().value(), 582));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, 582, std::vector<Device>{Device::CPU});
+  std::vector<ReadyTaskSubmission> ready =
+      plan.make_initial_ready_submissions(run.acquire_lease());
+
+  ASSERT_EQ(plan.compute_plan().planned_work.size(), 1U);
+  ASSERT_TRUE(
+      plan.compute_plan().planned_work.front().operation_route.has_value());
+  const PlannedOperationRoute& route =
+      *plan.compute_plan().planned_work.front().operation_route;
+  ASSERT_NE(route.implementation_identity, 0U);
+  EXPECT_EQ(route.device, Device::CPU);
+  EXPECT_FALSE(route.metadata.reentrant);
+  EXPECT_EQ(route.metadata.maximum_parallelism, 2U);
+  EXPECT_EQ(route.metadata.retained_memory_bytes, 1234U);
+  EXPECT_EQ(route.metadata.scratch_bytes, 5678U);
+  EXPECT_EQ(route.metadata.exclusive_key, "issue82-plan-context");
+  EXPECT_EQ(plan.task_resource_demand().retained_memory_bytes, 1234U);
+  EXPECT_EQ(plan.task_resource_demand().scratch_bytes, 5678U);
+
+  ASSERT_EQ(ready.size(), 1U);
+  const OperationExecutionConstraints& constraints =
+      ready.front().operation_constraints();
+  EXPECT_EQ(constraints.implementation_identity, route.implementation_identity);
+  EXPECT_FALSE(constraints.reentrant);
+  EXPECT_EQ(constraints.maximum_parallelism, 2U);
+  EXPECT_EQ(constraints.exclusive_key, "issue82-plan-context");
+  EXPECT_EQ(ready.front().resource_demand(), plan.task_resource_demand());
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Verifies route inventory canonicalization and mixed-operation demand.
+ *
+ * @return Nothing; assertions report cache-key or component maximum mismatch.
+ * @throws Registry, Graph, Run, planning, and callback-copy exceptions.
+ * @note The two operations place their maxima in different byte dimensions,
+ * proving the uniform task vector is a component-wise maximum rather than one
+ * selected operation's complete vector.
+ */
+TEST(OperationMetadataRouting,
+     MixedPlanCanonicalizesInventoryAndMaximizesEachResource) {
+  constexpr const char* kType = "issue82_mixed_plan";
+  constexpr const char* kProducerSubtype = "producer";
+  constexpr const char* kTargetSubtype = "target";
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kProducerSubtype));
+  registry.unregister_key(make_key(kType, kTargetSubtype));
+
+  const MonolithicOpFunc operation = [](const Node&,
+                                        const std::vector<const NodeOutput*>&) {
+    return NodeOutput{};
+  };
+  OpMetadata producer_metadata;
+  producer_metadata.retained_memory_bytes = 4321U;
+  producer_metadata.scratch_bytes = 99U;
+  registry.register_impl(kType, kProducerSubtype, Device::CPU, operation,
+                         producer_metadata);
+  OpMetadata target_metadata;
+  target_metadata.retained_memory_bytes = 1234U;
+  target_metadata.scratch_bytes = 5678U;
+  registry.register_impl(kType, kTargetSubtype, Device::CPU, operation,
+                         target_metadata);
+
+  GraphModel graph("cache/issue82-mixed-plan");
+  Node producer = make_plan_node(583);
+  producer.type = kType;
+  producer.subtype = kProducerSubtype;
+  Node target = make_plan_node(584);
+  target.type = kType;
+  target.subtype = kTargetSubtype;
+  target.image_inputs.push_back(ImageInput{583, "image"});
+  graph.add_node(std::move(producer));
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  ComputeRun run(make_test_submission("issue82-mixed-plan",
+                                      graph.revision().value(), 584));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, 584, std::vector<Device>{Device::CPU, Device::CPU});
+
+  EXPECT_EQ(plan.compute_plan().available_devices,
+            (std::vector<Device>{Device::CPU}));
+  EXPECT_EQ(plan.task_resource_demand().retained_memory_bytes, 4321U);
+  EXPECT_EQ(plan.task_resource_demand().scratch_bytes, 5678U);
+  EXPECT_EQ(full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
+                                      {Device::CPU, Device::CPU}),
+            full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
+                                      {Device::CPU}));
+  EXPECT_NE(
+      full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision, {}),
+      full_task_graph_cache_key(graph, ComputeIntent::GlobalHighPrecision,
+                                {Device::CPU}));
+
+  registry.unregister_key(make_key(kType, kProducerSubtype));
+  registry.unregister_key(make_key(kType, kTargetSubtype));
 }
 
 /**
@@ -3682,6 +3921,267 @@ TEST(ExecutionService, ExecutesSequentialRunsWithRunScopedIdentity) {
 }
 
 /**
+ * @brief Proves non-reentrant metadata serializes one exact implementation.
+ *
+ * @return Nothing; assertions report overlap or settlement leaks.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Two initially ready callbacks share one identity. The first blocks
+ * while the second remains startable only after gate release.
+ */
+TEST(OperationExecutionGate, NonReentrantImplementationSerializesCallbacks) {
+  ExecutionService service(4U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{101U, false, 0U, ""};
+  AsyncPolicyRun run = launch_constrained_operation_run(
+      service, make_test_submission("non-reentrant", 101U, 1), 2, constraints,
+      entered, active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 1));
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(run.completion.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves reentrant metadata permits overlap on available CPU workers.
+ *
+ * @return Nothing; assertions report missing overlap or settlement leaks.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Both callbacks block in provider work until the test opens one shared
+ * release gate, making overlap deterministic.
+ */
+TEST(OperationExecutionGate, ReentrantImplementationAllowsOverlap) {
+  ExecutionService service(2U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{102U, true, 0U, ""};
+  AsyncPolicyRun run = launch_constrained_operation_run(
+      service, make_test_submission("reentrant", 102U, 1), 2, constraints,
+      entered, active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 2));
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run.completion.get());
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves a positive implementation cap bounds callback overlap.
+ *
+ * @return Nothing; assertions report cap violations or settlement leaks.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Four ready callbacks use four workers, but only two may enter provider
+ * work at once for the same exact implementation identity.
+ */
+TEST(OperationExecutionGate, MaximumParallelismCapsExactImplementation) {
+  ExecutionService service(4U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{103U, true, 2U, ""};
+  AsyncPolicyRun run = launch_constrained_operation_run(
+      service, make_test_submission("capped", 103U, 1), 4, constraints, entered,
+      active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 2));
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(run.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(run.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 4);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves equal exclusive keys serialize across Graphs and identities.
+ *
+ * @return Nothing; assertions report cross-Graph overlap or leaked roots.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note The two Runs carry different Graph identities and implementation
+ * revisions. Their equal nonempty key is the only shared exclusion contract.
+ */
+TEST(OperationExecutionGate, EqualExclusiveKeySerializesAcrossGraphsAndRuns) {
+  ExecutionService service(2U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints first_constraints{
+      201U, true, 0U, "shared-device-context"};
+  const OperationExecutionConstraints second_constraints{
+      202U, true, 0U, "shared-device-context"};
+  AsyncPolicyRun first = launch_constrained_operation_run(
+      service, make_test_submission("exclusive-graph-a", 201U, 1), 1,
+      first_constraints, entered, active, maximum_active, release_future);
+  AsyncPolicyRun second = launch_constrained_operation_run(
+      service, make_test_submission("exclusive-graph-b", 202U, 1), 1,
+      second_constraints, entered, active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 1));
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(first.completion.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_EQ(second.completion.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(first.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(second.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(first.completion.get());
+  EXPECT_NO_THROW(second.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves different exclusive keys retain independent parallelism.
+ *
+ * @return Nothing; assertions report false serialization or leaked roots.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Each callback has a distinct implementation identity and key.
+ */
+TEST(OperationExecutionGate, DifferentExclusiveKeysAllowOverlap) {
+  ExecutionService service(2U);
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  AsyncPolicyRun first = launch_constrained_operation_run(
+      service, make_test_submission("key-graph-a", 203U, 1), 1,
+      OperationExecutionConstraints{203U, true, 0U, "context-a"}, entered,
+      active, maximum_active, release_future);
+  AsyncPolicyRun second = launch_constrained_operation_run(
+      service, make_test_submission("key-graph-b", 204U, 1), 1,
+      OperationExecutionConstraints{204U, true, 0U, "context-b"}, entered,
+      active, maximum_active, release_future);
+  ScopedPromiseRelease release_guard(release);
+
+  ASSERT_TRUE(wait_for_atomic_count(entered, 2));
+  EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 2);
+  EXPECT_TRUE(release_guard.release());
+  ASSERT_EQ(first.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(second.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(first.completion.get());
+  EXPECT_NO_THROW(second.completion.get());
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves callback failure releases identity/key gates for later Runs.
+ *
+ * @return Nothing; assertions report the injected failure or recovery outcome.
+ * @throws Standard service, Run, future, and synchronization exceptions.
+ * @note Recovery uses the same exact identity and key, so any leaked gate count
+ * would keep the second Run from reaching provider work.
+ */
+TEST(OperationExecutionGate, ProviderFailureReleasesGateAndResources) {
+  ExecutionService service(2U);
+  std::promise<void> released;
+  released.set_value();
+  const std::shared_future<void> release_future = released.get_future().share();
+  std::atomic_int entered{0};
+  std::atomic_int active{0};
+  std::atomic_int maximum_active{0};
+  const OperationExecutionConstraints constraints{205U, false, 0U,
+                                                  "failure-recovery"};
+  AsyncPolicyRun failing = launch_constrained_operation_run(
+      service, make_test_submission("failing-operation", 205U, 1), 1,
+      constraints, entered, active, maximum_active, release_future, 0);
+  ASSERT_EQ(failing.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_THROW(failing.completion.get(), std::runtime_error);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  AsyncPolicyRun recovery = launch_constrained_operation_run(
+      service, make_test_submission("recovered-operation", 206U, 1), 1,
+      constraints, entered, active, maximum_active, release_future);
+  ASSERT_EQ(recovery.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(recovery.completion.get());
+  EXPECT_EQ(entered.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves direct sequential leases charge declared bytes and roll back.
+ *
+ * @return Nothing; assertions report missing charges, rejection, or release.
+ * @throws Standard Run, service, and resource-admission exceptions.
+ * @note A rejected scratch declaration stages then releases the same gate
+ * before a smaller declaration with the exact identity and key succeeds.
+ */
+TEST(OperationExecutionGate, DirectLeaseChargesBytesAndRecoversAfterRejection) {
+  constexpr std::uint64_t kRetainedLimit = 1U << 20U;
+  ExecutionResourceLimits limits = ExecutionService::default_resource_limits();
+  limits.cpu_slots = 1U;
+  limits.retained_memory_bytes = kRetainedLimit;
+  limits.scratch_bytes = 7U;
+  limits.interactive_headroom = ResourceVector{};
+  ExecutionService service(1U, limits);
+  ComputeRun run(make_test_submission("direct-operation", 207U, 1));
+  const OperationExecutionConstraints constraints{207U, false, 0U,
+                                                  "direct-operation-context"};
+
+  EXPECT_THROW((void)service.acquire_operation_execution(
+                   run.acquire_lease(), constraints,
+                   ReadyTaskResourceDemand{4096U, 8U, 0U, 1U}),
+               GraphError);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  {
+    OperationExecutionLease lease = service.acquire_operation_execution(
+        run.acquire_lease(), constraints,
+        ReadyTaskResourceDemand{4096U, 7U, 0U, 1U});
+    const ResourceVector reserved = service.resource_snapshot().reserved;
+    EXPECT_EQ(reserved.cpu_slots, 1U);
+    EXPECT_GE(reserved.retained_memory_bytes, 4096U);
+    EXPECT_EQ(reserved.scratch_bytes, 7U);
+    EXPECT_EQ(reserved.ready_entries, 0U);
+    EXPECT_EQ(reserved.ready_bytes, 0U);
+  }
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
  * @brief Verifies every non-CPU Run dimension is admitted all-or-none.
  *
  * @return Nothing.
@@ -4101,6 +4601,8 @@ TEST(DirtyExecutionCommon,
             success_probe.live_targets.load(std::memory_order_relaxed);
         return std::make_shared<DirtyReadyTaskContext>(
             compute_plan, nullptr, task_ids, task_devices,
+            std::vector<OperationExecutionConstraints>(task_devices.size()),
+            ReadyTaskSubmission::default_resource_demand(),
             std::move(transferred_holder).release_for_context(), callable_bytes,
             run.acquire_lease(), true, ExecutionTaskPriority::Normal);
       });
@@ -4260,6 +4762,8 @@ TEST(ExecutionServiceProductResources,
   const std::vector<int> downstream_task_ids{1};
   const std::vector<Device> task_devices(combined_plan.task_graph.tasks.size(),
                                          Device::CPU);
+  const std::vector<OperationExecutionConstraints> task_constraints(
+      combined_plan.task_graph.tasks.size());
 
   ExecutionService combined_service(1U);
   ExecutionServiceHost combined_host;
@@ -4280,6 +4784,7 @@ TEST(ExecutionServiceProductResources,
   combined_request.run = &combined_run;
   combined_request.compute_plan = &combined_plan;
   combined_request.task_devices = &task_devices;
+  combined_request.task_constraints = &task_constraints;
   combined_request.phase_shared_retained_memory_bytes =
       [&combined_probe, &phase_live_targets,
        &phase_observation_index](const std::vector<int>&) {
@@ -4621,6 +5126,8 @@ TEST(ExecutionServiceProductResources,
   std::atomic_int source_calls{0};
   auto source_context = std::make_shared<DirtyReadyTaskContext>(
       compute_plan, nullptr, std::vector<int>{0}, task_devices,
+      std::vector<OperationExecutionConstraints>(task_devices.size()),
+      ReadyTaskSubmission::default_resource_demand(),
       [&graph, &hp_buffer, &source_calls](int) {
         (void)hp_buffer.ensure_output(graph.node(kSourceNodeId));
         source_calls.fetch_add(1, std::memory_order_relaxed);
@@ -4663,6 +5170,8 @@ TEST(ExecutionServiceProductResources,
   const std::vector<int> downstream_task_ids{1, 2};
   auto downstream_context = std::make_shared<DirtyReadyTaskContext>(
       compute_plan, nullptr, downstream_task_ids, task_devices,
+      std::vector<OperationExecutionConstraints>(task_devices.size()),
+      ReadyTaskSubmission::default_resource_demand(),
       [&downstream_calls](int) {
         downstream_calls.fetch_add(1, std::memory_order_relaxed);
       },
@@ -7222,7 +7731,8 @@ TEST(ExecutionServiceCancellation,
  * @note The Host hook runs after the worker counts the task in flight. The
  * submission executable must remain unentered. Production now destroys the
  * worker's QueueEntry/callable/lease before decrementing `in_flight`, so
- * synchronous return itself proves exact root settlement without polling.
+ * synchronous return itself proves exact root settlement without polling. A
+ * second Run reuses the same operation identity and key to prove gate release.
  */
 TEST(ExecutionServiceCancellation,
      CancellationAfterDequeueSuppressesExecutableAndDrainsExactly) {
@@ -7232,9 +7742,12 @@ TEST(ExecutionServiceCancellation,
   const ComputeRunCancellationSource source = run.cancellation_source();
   host.cancel_on_next_initial_assignment(source);
   std::atomic_int entered{0};
+  const OperationExecutionConstraints constraints{
+      301U, false, 0U, "cancelled-operation-context"};
   std::vector<ReadyTaskSubmission> ready;
-  ready.push_back(
-      make_counted_ready_submission(run.acquire_lease(), 0U, 72, entered));
+  ready.push_back(make_counted_ready_submission(
+      run.acquire_lease(), 0U, 72, entered, ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
 
   EXPECT_NO_THROW(service.execute_run(host, "cpu", std::move(ready), 1));
   EXPECT_EQ(entered.load(std::memory_order_relaxed), 0);
@@ -7243,6 +7756,17 @@ TEST(ExecutionServiceCancellation,
   EXPECT_FALSE(host.trace_recording_failed());
   ASSERT_TRUE(run.terminal_outcome().has_value());
   EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+
+  ComputeRun recovery(
+      make_test_submission("cancel-after-dequeue-recovery", 63U, 73));
+  std::vector<ReadyTaskSubmission> recovery_ready;
+  recovery_ready.push_back(make_counted_ready_submission(
+      recovery.acquire_lease(), 0U, 73, entered, ExecutionTaskPriority::Normal,
+      ReadyTaskSubmission::default_resource_demand(), constraints));
+  EXPECT_NO_THROW(
+      service.execute_run(host, "cpu", std::move(recovery_ready), 1));
+  EXPECT_EQ(entered.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
 

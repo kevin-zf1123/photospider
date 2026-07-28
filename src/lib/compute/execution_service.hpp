@@ -45,6 +45,38 @@ class ExecutionServiceTestAccess;
 namespace ps::compute {
 
 /**
+ * @brief Immutable process-domain concurrency constraints for one operation.
+ *
+ * @throws std::bad_alloc when copied exclusive-key storage cannot allocate.
+ * @note A completely default value represents generic service work with no
+ * operation-specific gate. Product operation submissions carry a nonzero
+ * registry identity. Equal nonempty keys serialize across identities and Runs
+ * inside the injected execution domain.
+ */
+struct OperationExecutionConstraints final {
+  /** @brief Maximum accepted bytes in a nonempty exclusive key. */
+  static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
+
+  /** @brief Nonzero registry revision identifying the exact implementation. */
+  std::uint64_t implementation_identity = 0U;
+
+  /** @brief Whether callbacks of this exact identity may overlap. */
+  bool reentrant = true;
+
+  /**
+   * @brief Maximum overlapping callbacks for this exact identity.
+   * @note Zero means no implementation-specific cap.
+   */
+  std::uint32_t maximum_parallelism = 0U;
+
+  /**
+   * @brief Optional execution-domain mutual-exclusion key.
+   * @note Equal nonempty keys cannot overlap across Graphs or Runs.
+   */
+  std::string exclusive_key;
+};
+
+/**
  * @brief Private composition-root limits for one CPU execution domain.
  *
  * This source-tree type carries every ledger dimension explicitly and converts
@@ -188,6 +220,7 @@ struct CpuRunResourceDemand final {
 class ExecutionService;
 struct PreparedExecutionRunState;
 struct PreparedExecutionSharedReservationState;
+struct OperationExecutionLeaseState;
 
 /**
  * @brief Move-only pre-publication ownership for one physical Run batch.
@@ -340,6 +373,69 @@ class PreparedExecutionSharedReservation final {
 
   /** @brief Complete unpublished retained-only root ownership. */
   std::unique_ptr<PreparedExecutionSharedReservationState> state_;
+};
+
+/**
+ * @brief Move-only ownership for one directly executing operation callback.
+ *
+ * @throws Nothing from movement and destruction.
+ * @note The lease owns one CPU/retained/scratch root reservation plus the same
+ * exact-identity/exclusive-key gate used by service workers. Sequential callers
+ * keep it alive only across the provider callback and release it on every
+ * normal, exceptional, or cancellation unwind.
+ */
+class OperationExecutionLease final {
+ public:
+  /** @brief Creates an inactive moved-from lease. */
+  OperationExecutionLease() noexcept;
+
+  /**
+   * @brief Transfers complete resource and gate ownership.
+   * @param other Lease made inactive.
+   * @throws Nothing.
+   */
+  OperationExecutionLease(OperationExecutionLease&& other) noexcept;
+
+  /**
+   * @brief Replaces only inactive ownership by transfer.
+   * @param other Lease made inactive.
+   * @return Reference to this lease.
+   * @throws Nothing; replacing an active lease terminates.
+   */
+  OperationExecutionLease& operator=(OperationExecutionLease&& other) noexcept;
+
+  /**
+   * @brief Releases resource and operation-gate ownership exactly once.
+   * @throws Nothing; trusted cleanup failure terminates.
+   */
+  ~OperationExecutionLease() noexcept;
+
+  /** @brief Prevents duplicating direct execution ownership. */
+  OperationExecutionLease(const OperationExecutionLease&) = delete;
+
+  /** @brief Prevents assigning duplicate direct execution ownership. */
+  OperationExecutionLease& operator=(const OperationExecutionLease&) = delete;
+
+  /**
+   * @brief Reports whether this lease owns one direct operation start.
+   * @return True before movement or destruction.
+   * @throws Nothing.
+   */
+  bool active() const noexcept { return state_ != nullptr; }
+
+ private:
+  friend class ExecutionService;
+
+  /**
+   * @brief Adopts complete service-private direct execution state.
+   * @param state Resource reservation, gate declaration, and Run lease.
+   * @throws Nothing.
+   */
+  explicit OperationExecutionLease(
+      std::unique_ptr<OperationExecutionLeaseState> state) noexcept;
+
+  /** @brief Complete exact-once direct execution ownership. */
+  std::unique_ptr<OperationExecutionLeaseState> state_;
 };
 
 /**
@@ -533,6 +629,8 @@ class ReadyTaskSubmission final {
    * @param resource_demand Trusted immutable retained, scratch, ready-byte,
    * and positive work declaration.
    * @param device Device selected with the retained operation implementation.
+   * @param operation_constraints Exact-identity concurrency and exclusion
+   * constraints selected with the operation metadata.
    * @throws std::invalid_argument when executable is empty or the identity Run
    * differs from the lease Run.
    * @throws std::bad_alloc when metadata or executable storage allocates.
@@ -544,7 +642,8 @@ class ReadyTaskSubmission final {
       bool is_initial_ready, Executable executable,
       ExecutionTaskPriority priority = ExecutionTaskPriority::Normal,
       ReadyTaskResourceDemand resource_demand = default_resource_demand(),
-      Device device = Device::CPU);
+      Device device = Device::CPU,
+      OperationExecutionConstraints operation_constraints = {});
 
   /**
    * @brief Returns the empty adapter-owned demand.
@@ -623,6 +722,15 @@ class ReadyTaskSubmission final {
   }
 
   /**
+   * @brief Returns the exact operation-specific start constraints.
+   * @return Borrowed immutable constraints owned by this submission.
+   * @throws Nothing.
+   */
+  const OperationExecutionConstraints& operation_constraints() const noexcept {
+    return operation_constraints_;
+  }
+
+  /**
    * @brief Executes this accepted ready task through its matching lease.
    * @param task_runtime Active service runtime receiving completion and newly
    * ready submissions.
@@ -659,6 +767,9 @@ class ReadyTaskSubmission final {
 
   /** @brief Immutable host-authored resources checked at Run admission. */
   ReadyTaskResourceDemand resource_demand_;
+
+  /** @brief Exact-identity process-domain start constraints. */
+  OperationExecutionConstraints operation_constraints_;
 };
 
 /**
@@ -1148,6 +1259,29 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       const ComputeRunLease& run_lease, std::uint64_t retained_memory_bytes);
 
   /**
+   * @brief Acquires resources and operation gates for one direct CPU callback.
+   * @param run_lease Matching installed Run lease used for cancellation and
+   * resource-settlement observation.
+   * @param constraints Exact implementation identity and concurrency metadata.
+   * @param demand Additional retained/scratch bytes declared by that operation.
+   * @return Move-only ownership held only while the provider callback executes.
+   * @throws std::invalid_argument for malformed constraints or zero work units.
+   * @throws std::logic_error during service shutdown.
+   * @throws GraphError when cancellation wins while waiting or the
+   * policy/ledger cannot admit the direct callback vector.
+   * @throws std::bad_alloc or std::system_error from gate/resource staging.
+   * @note Waiting for identity/key availability holds no resource reservation.
+   * Resource admission is attempted only after the gate becomes startable; a
+   * failed reservation releases staged gate ownership before returning.
+   * Direct sequential entry uses ledger capacity without requiring physical
+   * workers to be configured or started.
+   */
+  OperationExecutionLease acquire_operation_execution(
+      const ComputeRunLease& run_lease,
+      const OperationExecutionConstraints& constraints,
+      ReadyTaskResourceDemand demand);
+
+  /**
    * @brief Publishes and synchronously settles one prepared physical Run.
    * @param prepared Active matching preparation created by this service.
    * @return Nothing after every callback and exact reservation settle.
@@ -1313,12 +1447,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   friend class ::ps::testing::ExecutionServiceTestAccess;
   friend struct PreparedExecutionRunState;
   friend struct PreparedExecutionSharedReservationState;
+  friend struct OperationExecutionLeaseState;
 
   /** @brief Per-Run completion, failure, trace, and settlement state. */
   struct RunState;
 
   /** @brief One owned ready queue entry paired with matching Run state. */
   struct QueueEntry;
+
+  /** @brief Execution-domain exact-identity and exclusive-key start gate. */
+  class OperationStartGate;
 
   /** @brief Authority-free strategy for one explicit QoS service class. */
   class BuiltinPolicy;

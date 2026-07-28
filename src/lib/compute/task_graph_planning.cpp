@@ -23,7 +23,7 @@ namespace ps::compute {
 namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */
-constexpr const char* kTaskShapeConfigVersion = "task-shape-v2";
+constexpr const char* kTaskShapeConfigVersion = "task-shape-v3";
 
 /** @brief Maximum attempts to observe one stable operation-registry shape. */
 constexpr int kMaxRegistryStableExpansionAttempts = 8;
@@ -34,17 +34,43 @@ constexpr int kMaxRegistryStableExpansionAttempts = 8;
  * @param graph Graph supplying the topology generation.
  * @param intent HP or RT planning domain.
  * @param registry_generation Captured operation-registry task-shape revision.
+ * @param available_devices Canonical route-visible device inventory.
  * @return Stable key for these planning inputs and the shape configuration.
  * @throws std::bad_alloc if string construction allocates.
  * @note Callers must verify that `registry_generation` remains current before
  *       returning a cached or newly expanded graph.
  */
-std::string make_full_task_graph_cache_key(const GraphModel& graph,
-                                           ComputeIntent intent,
-                                           std::uint64_t registry_generation) {
-  return std::to_string(graph.topology_generation()) + ":" +
-         std::to_string(static_cast<int>(intent)) + ":" +
-         std::to_string(registry_generation) + ":" + kTaskShapeConfigVersion;
+std::string make_full_task_graph_cache_key(
+    const GraphModel& graph, ComputeIntent intent,
+    std::uint64_t registry_generation,
+    const std::vector<Device>& available_devices) {
+  std::string key = std::to_string(graph.topology_generation()) + ":" +
+                    std::to_string(static_cast<int>(intent)) + ":" +
+                    std::to_string(registry_generation) + ":" +
+                    kTaskShapeConfigVersion + ":devices";
+  for (Device device : available_devices) {
+    key += ":" + std::to_string(static_cast<int>(device));
+  }
+  return key;
+}
+
+/**
+ * @brief Sorts and deduplicates one route-visible device inventory.
+ *
+ * @param available_devices Caller-provided device labels.
+ * @return Canonical inventory ordered by the underlying enum value.
+ * @throws std::bad_alloc if copied result storage cannot allocate.
+ * @note An empty inventory remains empty and therefore selects no operation;
+ * the helper never fabricates CPU availability.
+ */
+std::vector<Device> canonicalize_available_devices(
+    const std::vector<Device>& available_devices) {
+  std::vector<Device> result = available_devices;
+  std::sort(result.begin(), result.end(), [](Device lhs, Device rhs) {
+    return static_cast<int>(lhs) < static_cast<int>(rhs);
+  });
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
 }
 
 /**
@@ -800,16 +826,17 @@ void clear_dirty_work_metadata(ComputePlan& result) {
  * @note This helper is the shared spine for full graph expansion, node/cache
  * pruning, and dirty snapshot inspection.
  */
-ComputePlan build_plan_from_nodes(const ComputeRequest& request,
-                                  const std::vector<int>& planned_nodes,
-                                  const DirtyRegionSnapshot* snapshot,
-                                  const GraphModel* graph) {
+ComputePlan build_plan_from_nodes(
+    const ComputeRequest& request, const std::vector<int>& planned_nodes,
+    const DirtyRegionSnapshot* snapshot, const GraphModel* graph,
+    const std::vector<Device>& available_devices) {
   ComputePlan result;
   result.intent = request.intent;
   result.target_node_id = request.target_node_id;
   result.parallel = request.parallel;
   result.execution_order = planned_nodes;
   result.planned_nodes = planned_nodes;
+  result.available_devices = available_devices;
 
   const DirtyDomain domain = domain_for_intent(request.intent);
   result.planned_work.reserve(result.planned_nodes.size());
@@ -825,7 +852,7 @@ ComputePlan build_plan_from_nodes(const ComputeRequest& request,
   populate_dependencies_from_snapshot(result, snapshot, domain);
   populate_node_dependency_lists(result);
   TaskPopulationStrategy task_population;
-  task_population.populate(result, snapshot, domain, graph);
+  task_population.populate(result, snapshot, domain, graph, available_devices);
   populate_task_dependencies(result, graph);
   return result;
 }
@@ -1040,20 +1067,27 @@ std::vector<int> initial_ready_task_ids_for_view(
 
 }  // namespace
 
-std::string full_task_graph_cache_key(const GraphModel& graph,
-                                      ComputeIntent intent) {
+std::string full_task_graph_cache_key(
+    const GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices) {
+  const std::vector<Device> canonical_devices =
+      canonicalize_available_devices(available_devices);
   return make_full_task_graph_cache_key(
-      graph, intent, OpRegistry::instance().task_shape_generation());
+      graph, intent, OpRegistry::instance().task_shape_generation(),
+      canonical_devices);
 }
 
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
-    GraphModel& graph, ComputeIntent intent) {
+    GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices) {
   auto& registry = OpRegistry::instance();
+  const std::vector<Device> canonical_devices =
+      canonicalize_available_devices(available_devices);
   for (int attempt = 0; attempt < kMaxRegistryStableExpansionAttempts;
        ++attempt) {
     const std::uint64_t registry_generation = registry.task_shape_generation();
-    const std::string key =
-        make_full_task_graph_cache_key(graph, intent, registry_generation);
+    const std::string key = make_full_task_graph_cache_key(
+        graph, intent, registry_generation, canonical_devices);
     if (auto cached = graph.cached_full_task_graph(key)) {
       if (registry.task_shape_generation() == registry_generation) {
         return cached;
@@ -1061,8 +1095,8 @@ std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
       continue;
     }
     FullTaskGraphExpander expander;
-    auto expanded =
-        std::make_shared<FullTaskGraph>(expander.expand(graph, intent));
+    auto expanded = std::make_shared<FullTaskGraph>(
+        expander.expand(graph, intent, canonical_devices));
     if (registry.task_shape_generation() != registry_generation) {
       continue;
     }
@@ -1085,8 +1119,8 @@ ComputePlanSummary summarize_compute_plan(
   summary.target_node_id = compute_plan.target_node_id;
   summary.parallel = compute_plan.parallel;
   summary.topology_generation = graph.topology_generation();
-  summary.full_graph_cache_key =
-      full_task_graph_cache_key(graph, compute_plan.intent);
+  summary.full_graph_cache_key = full_task_graph_cache_key(
+      graph, compute_plan.intent, compute_plan.available_devices);
   summary.planned_node_count = compute_plan.planned_nodes.size();
   summary.task_count = compute_plan.task_graph.tasks.size();
   summary.dependency_count = compute_plan.task_graph.dependencies.size();
@@ -1168,12 +1202,15 @@ void populate_full_task_graph_indexes(FullTaskGraph& expanded) {
   }
 }
 
-FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
-                                            ComputeIntent intent) const {
+FullTaskGraph FullTaskGraphExpander::expand(
+    const GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices) const {
+  const std::vector<Device> canonical_devices =
+      canonicalize_available_devices(available_devices);
   ComputeRequest request;
   request.intent = intent;
-  const ComputePlan full_plan =
-      build_plan_from_nodes(request, graph.node_ids(), nullptr, &graph);
+  const ComputePlan full_plan = build_plan_from_nodes(
+      request, graph.node_ids(), nullptr, &graph, canonical_devices);
 
   FullTaskGraph expanded;
   expanded.intent = intent;
@@ -1181,6 +1218,7 @@ FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
   expanded.expanded_node_ids = full_plan.planned_nodes;
   expanded.expanded_work = full_plan.planned_work;
   expanded.task_graph = full_plan.task_graph;
+  expanded.available_devices = canonical_devices;
   populate_full_task_graph_indexes(expanded);
   return expanded;
 }
@@ -1194,6 +1232,7 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
   result.parallel = request.parallel;
   result.execution_order = execution_order;
   result.planned_nodes = execution_order;
+  result.available_devices = full_graph.available_devices;
 
   std::unordered_set<int> selected_nodes(execution_order.begin(),
                                          execution_order.end());

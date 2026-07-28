@@ -37,6 +37,26 @@ enum class PlannedTaskKind {
 };
 
 /**
+ * @brief Callback-free operation route frozen by task-shape planning.
+ *
+ * @throws std::bad_alloc when copied exclusive-key storage cannot allocate.
+ * @note The scalar identity and metadata originate from one coherent
+ * OpRegistry snapshot. Planning deliberately retains no callback or plugin DSO
+ * lease; execution must re-resolve the same nonzero identity before admission.
+ */
+struct PlannedOperationRoute {
+  /** @brief Nonzero registry ownership revision of the selected callback. */
+  std::uint64_t implementation_identity = 0U;
+  /** @brief Device selected by registry intent/cost policy. */
+  Device device = Device::CPU;
+  /** @brief Complete scheduling and resource metadata from the same snapshot.
+   */
+  OpMetadata metadata;
+  /** @brief Whether the selected callback uses the tiled operation shape. */
+  bool tiled = false;
+};
+
+/**
  * @brief Node-level dependency edge represented in a ComputeTaskGraph.
  *
  * PlannedDependency records the logical relationship between two planned
@@ -136,6 +156,12 @@ struct PlannedNodeWork {
   std::vector<int> dependent_node_ids;
   /** @brief Task ids in ComputeTaskGraph::tasks that belong to this node. */
   std::vector<int> task_ids;
+  /**
+   * @brief Callback-free route selected while this node's task shape was built.
+   * @note Graphless compatibility plans may leave this empty. Product graph
+   * execution re-resolves and validates the exact identity before admission.
+   */
+  std::optional<PlannedOperationRoute> operation_route;
 };
 
 /**
@@ -286,6 +312,8 @@ struct ComputePlan {
   std::vector<PlannedNodeWork> planned_work;
   /** @brief Executable task graph derived from planned work. */
   ComputeTaskGraph task_graph;
+  /** @brief Canonical device inventory used for operation route selection. */
+  std::vector<Device> available_devices;
 };
 
 /**
@@ -361,6 +389,8 @@ struct FullTaskGraph {
   std::vector<PlannedNodeWork> expanded_work;
   /** @brief Full task graph before request pruning. */
   ComputeTaskGraph task_graph;
+  /** @brief Canonical device inventory covered by this cached expansion. */
+  std::vector<Device> available_devices;
   /**
    * @brief Expanded work index keyed by graph node id.
    *
@@ -398,11 +428,14 @@ class FullTaskGraphExpander {
    *
    * @param graph Source graph whose nodes and op metadata are inspected.
    * @param intent Compute intent used to choose HP or RT task domain.
+   * @param available_devices Canonical route-visible device inventory.
    * @return FullTaskGraph containing all expanded node work and tasks.
    * @throws GraphError or standard exceptions from graph access, extent
    * resolution, op metadata lookup, or allocation.
    */
-  FullTaskGraph expand(const GraphModel& graph, ComputeIntent intent) const;
+  FullTaskGraph expand(const GraphModel& graph, ComputeIntent intent,
+                       const std::vector<Device>& available_devices = {
+                           Device::CPU}) const;
 };
 
 /**
@@ -535,6 +568,7 @@ class TaskGraphReadyChecker {
  *
  * @param graph Graph whose topology generation participates in the key.
  * @param intent Compute intent whose HP/RT domain is expanded.
+ * @param available_devices Route-visible device inventory.
  * @return Cache key covering topology generation, intent, task-shape
  * configuration version, and operation-registry task-shape generation.
  * @throws std::bad_alloc if string construction fails.
@@ -542,14 +576,16 @@ class TaskGraphReadyChecker {
  *       selection semantics change. A plugin callback-shape override or unload
  *       advances the registry generation and cannot reuse predecessor tasks.
  */
-std::string full_task_graph_cache_key(const GraphModel& graph,
-                                      ComputeIntent intent);
+std::string full_task_graph_cache_key(
+    const GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices = {Device::CPU});
 
 /**
  * @brief Returns a cached immutable FullTaskGraph or expands and stores one.
  *
  * @param graph GraphModel owning the per-topology full graph cache.
  * @param intent Compute intent whose single-domain full graph is required.
+ * @param available_devices Route-visible device inventory.
  * @return Shared immutable full graph for request/cache/dirty pruning.
  * @throws GraphError when the operation registry changes continuously across
  *         all bounded expansion attempts.
@@ -560,7 +596,8 @@ std::string full_task_graph_cache_key(const GraphModel& graph,
  *       is discarded and retried.
  */
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
-    GraphModel& graph, ComputeIntent intent);
+    GraphModel& graph, ComputeIntent intent,
+    const std::vector<Device>& available_devices = {Device::CPU});
 
 /**
  * @brief Builds a bounded summary for compute plan inspection.

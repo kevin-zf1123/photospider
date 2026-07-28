@@ -41,6 +41,16 @@ struct DirtyResolvedOperation {
 
   /** @brief Device whose private lane must execute the callable. */
   Device device = Device::CPU;
+
+  /** @brief Nonzero registry revision of the exact selected implementation. */
+  std::uint64_t implementation_identity = 0U;
+
+  /**
+   * @brief Metadata frozen coherently with the selected callable and identity.
+   * @note Execution must not query the registry again for tile, resource, or
+   * concurrency behavior.
+   */
+  OpMetadata metadata;
 };
 
 /** @brief Node-id index of immutable dirty operation/device snapshots. */
@@ -163,7 +173,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node being computed.
    * @param entry HP ROI and extent metadata.
    * @param image_inputs_ready Resolved HP image inputs.
-   * @param operation Planning-time selected operation snapshot.
+   * @param operation Planning-time selected operation and metadata snapshot.
    * @return Nothing.
    * @throws std::bad_alloc when operation execution or staging exhausts
    * memory.
@@ -173,7 +183,7 @@ class HighPrecisionDirtyNodeExecutor {
   void execute_operation(
       Node& node, const HpPlanEntry& entry,
       const std::vector<const NodeOutput*>& image_inputs_ready,
-      const OpRegistry::OpVariant& operation) const;
+      const DirtyResolvedOperation& operation) const;
 
   /**
    * @brief Ensures the HP cache image buffer can receive tiled dirty output.
@@ -196,6 +206,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node being computed.
    * @param tile_fn Tiled HP operation implementation.
    * @param entry HP ROI, extent, and halo metadata.
+   * @param metadata Metadata frozen with the selected tiled implementation.
    * @param image_inputs_ready Resolved HP image inputs.
    * @param hp_buffer Request-local destination buffer.
    * @return Nothing.
@@ -205,7 +216,7 @@ class HighPrecisionDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const HpPlanEntry& entry,
+                     const HpPlanEntry& entry, const OpMetadata& metadata,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
                      ImageBuffer& hp_buffer) const;
 
@@ -372,7 +383,7 @@ class RealTimeDirtyNodeExecutor {
    * @param entry RT dirty ROI and extent metadata.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
-   * @param op_variant Selected monolithic or tiled operation.
+   * @param operation Selected operation and metadata snapshot.
    * @return Nothing.
    * @throws std::bad_alloc when RT operation execution exhausts memory.
    * @throws GraphError wrapping other OpenCV and standard exceptions with node
@@ -382,7 +393,7 @@ class RealTimeDirtyNodeExecutor {
   void execute_operation(
       Node& node, const RtPlanEntry& entry,
       const std::vector<const NodeOutput*>& image_inputs_ready,
-      ImageBuffer& rt_buffer, const OpRegistry::OpVariant& op_variant) const;
+      ImageBuffer& rt_buffer, const DirtyResolvedOperation& operation) const;
 
   /**
    * @brief Runs a monolithic operation and copies the affected RT ROI.
@@ -422,6 +433,7 @@ class RealTimeDirtyNodeExecutor {
    * @param node Node being computed.
    * @param tile_fn Tiled operation implementation.
    * @param entry RT dirty ROI, extent, and halo metadata.
+   * @param metadata Metadata frozen with the selected tiled implementation.
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
    * @return Nothing.
@@ -431,7 +443,7 @@ class RealTimeDirtyNodeExecutor {
    * observed before every tile callback enters provider work.
    */
   void execute_tiled(Node& node, const TileOpFunc& tile_fn,
-                     const RtPlanEntry& entry,
+                     const RtPlanEntry& entry, const OpMetadata& metadata,
                      const std::vector<const NodeOutput*>& image_inputs_ready,
                      ImageBuffer& rt_buffer) const;
 

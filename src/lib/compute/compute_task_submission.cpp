@@ -57,46 +57,6 @@ std::exception_ptr dispatch_failure(const GraphModel& graph, int node_id,
 }
 
 /**
- * @brief Checks whether a candidate matches the planned task shape.
- *
- * @param impl Registered operation implementation candidate.
- * @param require_tiled Whether the task graph materializes tile work.
- * @return true when the implementation shape is compatible.
- * @throws Nothing.
- */
-bool implementation_shape_compatible(const OpImplementation& impl,
-                                     bool require_tiled) {
-  return !require_tiled || impl.is_tiled();
-}
-
-/**
- * @brief Chooses a shape-compatible per-device implementation for HP compute.
- *
- * @param node Graph node whose operation is being resolved.
- * @param available_devices Devices exposed by the execution runtime.
- * @param require_tiled Whether the task graph requires TileOpFunc.
- * @return Selected implementation snapshot, or nullopt.
- * @throws std::bad_alloc if registry candidate storage allocates
- * unsuccessfully.
- * @note Device priority and cost scoring remain registry policy.
- */
-std::optional<OpImplementation> select_device_aware_hp_implementation(
-    const Node& node, const std::vector<Device>& available_devices,
-    bool require_tiled) {
-  const OpRegistry& registry = OpRegistry::instance();
-  const auto best = registry.select_best_implementation(
-      node.type, node.subtype, available_devices,
-      ComputeIntent::GlobalHighPrecision,
-      [require_tiled](const OpImplementation& impl) {
-        return implementation_shape_compatible(impl, require_tiled);
-      });
-  if (!best) {
-    return std::nullopt;
-  }
-  return best;
-}
-
-/**
  * @brief Best-effort settles a batch whose bootstrap submission threw.
  *
  * @param task_runtime Runtime whose empty batch owns one completion unit.
@@ -146,7 +106,7 @@ TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
       graph_(graph),
       compute_plan_(
           ComputeDispatchPlanBuilder(traversal).build_high_precision_plan(
-              graph, node_id, publish_plan_inspection)),
+              graph, node_id, available_devices, publish_plan_inspection)),
       execution_order_(compute_plan_.planned_nodes),
       available_devices_(std::move(available_devices)),
       dependency_state_(execution_order_, compute_plan_.task_graph) {
@@ -248,6 +208,13 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
   }
   estimate.add_objects<std::optional<OpRegistry::OpVariant>>(
       static_cast<std::uint64_t>(resolved_ops_.capacity()));
+  estimate.add_objects<OperationExecutionConstraints>(
+      static_cast<std::uint64_t>(operation_constraints_.capacity()));
+  for (const OperationExecutionConstraints& constraints :
+       operation_constraints_) {
+    estimate.add_objects<char>(
+        static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
+  }
   return estimate.bytes();
 }
 
@@ -310,9 +277,9 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
          ExecutionTaskRuntime& task_runtime) {
         ready_lease.execute_task(ready_identity, task_runtime);
       },
-      ExecutionTaskPriority::Normal,
-      ReadyTaskSubmission::default_resource_demand(),
-      execution_devices_.at(execution_index));
+      ExecutionTaskPriority::Normal, task_resource_demand_,
+      execution_devices_.at(execution_index),
+      operation_constraints_.at(execution_index));
 }
 
 /**
@@ -491,44 +458,48 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
   }
 }
 
-/**
- * @brief Resolves operation variants once for all planned nodes.
- *
- * @return Nothing.
- * @throws std::bad_alloc from registry candidate or output allocation.
- */
+/** @copydoc TaskSubmissionPlan::resolve_operations */
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
   execution_devices_.assign(execution_order_.size(), Device::CPU);
+  operation_constraints_.resize(execution_order_.size());
+  task_resource_demand_ = ReadyTaskSubmission::default_resource_demand();
   for (std::size_t i = 0; i < execution_order_.size(); ++i) {
     const auto& node = graph_.node(execution_order_[i]);
-    const bool has_tile_task = std::any_of(
-        compute_plan_.task_graph.tasks.begin(),
-        compute_plan_.task_graph.tasks.end(), [&](const PlannedTask& task) {
-          return task.node_id == node.id && task.kind == PlannedTaskKind::Tile;
+    const auto planned_work = std::find_if(
+        compute_plan_.planned_work.begin(), compute_plan_.planned_work.end(),
+        [&](const PlannedNodeWork& work) {
+          return work.node_id == execution_order_[i];
         });
-    if (has_tile_task) {
-      if (auto implementation = select_device_aware_hp_implementation(
-              node, available_devices_, true)) {
-        execution_devices_[i] = implementation->metadata.device_preference;
-        resolved_ops_[i] = std::move(implementation->func);
-        continue;
-      }
-      const auto impls =
-          OpRegistry::instance().get_implementations(node.type, node.subtype);
-      if (impls && impls->tiled_hp) {
-        resolved_ops_[i] = OpRegistry::OpVariant{*impls->tiled_hp};
-        continue;
-      }
-    }
-    if (auto implementation = select_device_aware_hp_implementation(
-            node, available_devices_, false)) {
-      execution_devices_[i] = implementation->metadata.device_preference;
-      resolved_ops_[i] = std::move(implementation->func);
+    if (planned_work == compute_plan_.planned_work.end() ||
+        !planned_work->operation_route.has_value()) {
       continue;
     }
-    resolved_ops_[i] = OpRegistry::instance().resolve_for_intent(
-        node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+
+    const PlannedOperationRoute& route = *planned_work->operation_route;
+    const auto implementation = OpRegistry::instance().select_implementation(
+        node.type, node.subtype, available_devices_,
+        ComputeIntent::GlobalHighPrecision);
+    if (!implementation ||
+        implementation->implementation_identity !=
+            route.implementation_identity ||
+        implementation->metadata.device_preference != route.device ||
+        implementation->is_tiled() != route.tiled) {
+      continue;
+    }
+    execution_devices_[i] = route.device;
+    resolved_ops_[i] = std::move(implementation->func);
+    operation_constraints_[i] = OperationExecutionConstraints{
+        route.implementation_identity,
+        route.metadata.reentrant,
+        route.metadata.maximum_parallelism,
+        route.metadata.exclusive_key,
+    };
+    task_resource_demand_.retained_memory_bytes =
+        std::max(task_resource_demand_.retained_memory_bytes,
+                 route.metadata.retained_memory_bytes);
+    task_resource_demand_.scratch_bytes = std::max(
+        task_resource_demand_.scratch_bytes, route.metadata.scratch_bytes);
   }
 }
 
@@ -838,8 +809,7 @@ void dispatch_planned_tasks(GraphModel& graph,
   std::vector<ReadyTaskSubmission> initial_submissions =
       plan.make_initial_ready_submissions(dispatcher_lease);
   const CpuRunResourceDemand resource_demand{
-      dispatcher_lease.retained_memory_bytes(),
-      ReadyTaskSubmission::default_resource_demand()};
+      dispatcher_lease.retained_memory_bytes(), plan.task_resource_demand()};
   execution_service.execute_run(host, execution_type,
                                 std::move(initial_submissions),
                                 static_cast<int>(plan.size()), resource_demand);

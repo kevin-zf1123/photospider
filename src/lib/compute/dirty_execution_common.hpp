@@ -185,6 +185,21 @@ struct DirtySourceFirstRunRequest {
   const std::vector<Device>* task_devices = nullptr;
 
   /**
+   * @brief Operation start constraints aligned with planned task ids.
+   * @note Required for every request. Missing operations use the all-default
+   * value and fail authoritatively in node execution before provider entry.
+   */
+  const std::vector<OperationExecutionConstraints>* task_constraints = nullptr;
+
+  /**
+   * @brief Component-wise maximum operation demand for any task in this Run.
+   * @note The source-first adapter adds its owned callback demand before
+   * admission; operation retained and scratch bytes are not structural context
+   * storage and therefore remain per-task charges.
+   */
+  ReadyTaskResourceDemand task_operation_resource_demand;
+
+  /**
    * @brief Other request-owned structural bytes retained across phase service
    * settlement.
    *
@@ -354,6 +369,9 @@ class DirtyReadyTaskContext final
    * @param selection Optional dirty dependency overlay copied into ownership.
    * @param active_task_ids Exact task ids active in this phase.
    * @param task_devices Selected devices aligned with compute-plan task ids.
+   * @param task_constraints Operation gates aligned with compute-plan task ids.
+   * @param task_operation_resource_demand Uniform component-wise maximum
+   * operation demand for this physical Run.
    * @param run_task Owned callable that executes one dense task id.
    * @param run_task_retained_memory_bytes Audited capture/allocation bytes
    * owned by run_task beyond its inline `std::function` object. This value
@@ -367,14 +385,16 @@ class DirtyReadyTaskContext final
    * @throws std::invalid_argument if run_task is empty.
    * @throws std::bad_alloc from owned state construction.
    */
-  DirtyReadyTaskContext(const ComputePlan& compute_plan,
-                        const DirtyTaskSelectionOverlay* selection,
-                        const std::vector<int>& active_task_ids,
-                        const std::vector<Device>& task_devices,
-                        std::function<void(int)> run_task,
-                        std::uint64_t run_task_retained_memory_bytes,
-                        ComputeRunLease lease, bool release_dependents,
-                        ExecutionTaskPriority priority);
+  DirtyReadyTaskContext(
+      const ComputePlan& compute_plan,
+      const DirtyTaskSelectionOverlay* selection,
+      const std::vector<int>& active_task_ids,
+      const std::vector<Device>& task_devices,
+      const std::vector<OperationExecutionConstraints>& task_constraints,
+      ReadyTaskResourceDemand task_operation_resource_demand,
+      std::function<void(int)> run_task,
+      std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
+      bool release_dependents, ExecutionTaskPriority priority);
 
   /**
    * @brief Estimates complete context-owned structural storage.
@@ -444,6 +464,12 @@ class DirtyReadyTaskContext final
   /** @brief Selected devices aligned with dense compute-plan task ids. */
   std::vector<Device> task_devices_;
 
+  /** @brief Operation gates aligned with dense compute-plan task ids. */
+  std::vector<OperationExecutionConstraints> task_constraints_;
+
+  /** @brief Uniform operation retained/scratch demand for every task. */
+  ReadyTaskResourceDemand task_operation_resource_demand_;
+
   /** @brief Fast active membership guard for composite identity validation. */
   std::unordered_set<int> active_task_id_set_;
 
@@ -497,6 +523,8 @@ void remember_compute_plan(
  * @param graph Graph that supplies topology, node metadata, and cache state.
  * @param request Intent, target node, and dirty ROI for the request.
  * @param execution_order Topological order selected by dirty planning.
+ * @param available_devices Canonical route inventory used for coherent
+ * operation selection and task-shape expansion.
  * @return Node/cache-pruned compute plan before dirty snapshot selection.
  * @throws GraphError from task graph expansion or pruning.
  * @note The returned plan is still domain-specific and contains no mixed HP/RT
@@ -504,7 +532,8 @@ void remember_compute_plan(
  */
 ComputePlan prune_node_cache_task_graph(
     GraphModel& graph, const ComputeRequest& request,
-    const std::vector<int>& execution_order);
+    const std::vector<int>& execution_order,
+    const std::vector<Device>& available_devices = {Device::CPU});
 
 /**
  * @brief Applies dirty snapshot pruning to a node/cache-pruned plan.
@@ -639,6 +668,8 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * dirty selection. It may be a stabilized shadow graph.
  * @param dirty_plan Dirty planner output for one intent domain.
  * @param request Compute request matching the same dirty domain.
+ * @param available_devices Canonical route inventory frozen for planning and
+ * later exact-identity resolution.
  * @param externally_satisfied_node_ids Optional nodes already executed by
  * parameter stabilization and excluded from phase-two task selection.
  * @return Prepared plan with node groups ready for task construction.
@@ -651,9 +682,10 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
     GraphModel& graph, DirtyPlan&& dirty_plan, const ComputeRequest& request,
+    const std::vector<Device>& available_devices = {Device::CPU},
     const std::unordered_set<int>* externally_satisfied_node_ids = nullptr) {
-  const ComputePlan node_cache_plan =
-      prune_node_cache_task_graph(graph, request, dirty_plan.execution_order);
+  const ComputePlan node_cache_plan = prune_node_cache_task_graph(
+      graph, request, dirty_plan.execution_order, available_devices);
   DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
   DirtyTaskSelectionOverlay selection =
       dirty_snapshot_pruner.select(node_cache_plan, dirty_plan.snapshot, graph,

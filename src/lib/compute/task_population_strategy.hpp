@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "compute/task_graph_planning.hpp"
 
 namespace ps {
@@ -42,6 +44,7 @@ class TaskPopulationStrategy {
    * @param snapshot Optional dirty snapshot used only for dirty metadata.
    * @param domain HP or RT compute domain for this single-domain plan.
    * @param graph Optional graph used to resolve output extents and op shapes.
+   * @param available_devices Route-visible devices used for registry selection.
    * @throws GraphError or standard exceptions from graph lookups, extent
    * resolution, operation metadata lookup, or vector growth.
    * @note Dirty snapshots never create task shapes. Graph-backed plans derive
@@ -49,7 +52,9 @@ class TaskPopulationStrategy {
    * per planned work item.
    */
   void populate(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
-                DirtyDomain domain, const GraphModel* graph) const;
+                DirtyDomain domain, const GraphModel* graph,
+                const std::vector<Device>& available_devices = {
+                    Device::CPU}) const;
 };
 
 }  // namespace ps::compute

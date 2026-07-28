@@ -140,8 +140,10 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
   if (!run_task || request.compute_plan == nullptr ||
       request.source_task_ids == nullptr ||
       request.downstream_task_ids == nullptr ||
-      request.task_devices == nullptr ||
+      request.task_devices == nullptr || request.task_constraints == nullptr ||
       request.task_devices->size() !=
+          request.compute_plan->task_graph.tasks.size() ||
+      request.task_constraints->size() !=
           request.compute_plan->task_graph.tasks.size()) {
     throw std::invalid_argument(
         "Dirty source-first preparation requires complete plan and task "
@@ -170,7 +172,8 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
     if (!source_task_ids.empty()) {
       auto source_context = std::make_shared<DirtyReadyTaskContext>(
           compute_plan, state->request.selection, source_task_ids,
-          *state->request.task_devices, owned_run_task,
+          *state->request.task_devices, *state->request.task_constraints,
+          state->request.task_operation_resource_demand, owned_run_task,
           run_task_retained_memory_bytes, phase_lease, false,
           ExecutionTaskPriority::High);
       std::vector<ReadyTaskSubmission> source_submissions =
@@ -201,8 +204,10 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
           owned_run_task, [&](std::function<void(int)> transferred_run_task) {
             return std::make_shared<DirtyReadyTaskContext>(
                 compute_plan, state->request.selection, downstream_task_ids,
-                *state->request.task_devices, std::move(transferred_run_task),
-                run_task_retained_memory_bytes, phase_lease, true,
+                *state->request.task_devices, *state->request.task_constraints,
+                state->request.task_operation_resource_demand,
+                std::move(transferred_run_task), run_task_retained_memory_bytes,
+                phase_lease, true,
                 state->request.intent == ComputeIntent::RealTimeUpdate
                     ? ExecutionTaskPriority::High
                     : ExecutionTaskPriority::Normal);
@@ -334,7 +339,10 @@ std::uint64_t DirtyNodeSynchronization::retained_memory_bytes() const {
 DirtyReadyTaskContext::DirtyReadyTaskContext(
     const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay* selection,
     const std::vector<int>& active_task_ids,
-    const std::vector<Device>& task_devices, std::function<void(int)> run_task,
+    const std::vector<Device>& task_devices,
+    const std::vector<OperationExecutionConstraints>& task_constraints,
+    ReadyTaskResourceDemand task_operation_resource_demand,
+    std::function<void(int)> run_task,
     std::uint64_t run_task_retained_memory_bytes, ComputeRunLease lease,
     bool release_dependents, ExecutionTaskPriority priority)
     : compute_plan_(compute_plan),
@@ -343,6 +351,8 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
                      : std::nullopt),
       active_task_ids_(active_task_ids),
       task_devices_(task_devices),
+      task_constraints_(task_constraints),
+      task_operation_resource_demand_(task_operation_resource_demand),
       active_task_id_set_(active_task_ids.begin(), active_task_ids.end()),
       run_task_(std::move(run_task)),
       run_task_retained_memory_bytes_(run_task_retained_memory_bytes),
@@ -356,6 +366,11 @@ DirtyReadyTaskContext::DirtyReadyTaskContext(
   if (task_devices_.size() != compute_plan_.task_graph.tasks.size()) {
     throw std::invalid_argument(
         "DirtyReadyTaskContext requires one device per planned task.");
+  }
+  if (task_constraints_.size() != compute_plan_.task_graph.tasks.size()) {
+    throw std::invalid_argument(
+        "DirtyReadyTaskContext requires one operation constraint per planned "
+        "task.");
   }
   if (selection_) {
     dependency_state_ = std::make_unique<TaskDependencyState>(
@@ -382,6 +397,12 @@ std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
       static_cast<std::uint64_t>(active_task_ids_.capacity()));
   estimate.add_objects<Device>(
       static_cast<std::uint64_t>(task_devices_.capacity()));
+  estimate.add_objects<OperationExecutionConstraints>(
+      static_cast<std::uint64_t>(task_constraints_.capacity()));
+  for (const OperationExecutionConstraints& constraints : task_constraints_) {
+    estimate.add_objects<char>(
+        static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
+  }
   estimate.add_objects<void*>(
       static_cast<std::uint64_t>(active_task_id_set_.bucket_count()));
   estimate.add_objects<decltype(active_task_id_set_)::value_type>(
@@ -405,9 +426,19 @@ CpuRunResourceDemand DirtyReadyTaskContext::run_resource_demand(
   shared.add_bytes(retained_memory_bytes());
   shared.add_bytes(lease_.retained_memory_bytes());
   shared.add_bytes(additional_shared_retained_memory_bytes);
-  return CpuRunResourceDemand{
-      shared.bytes(), owned_callback_resource_demand(static_cast<std::uint64_t>(
-                          sizeof(std::shared_ptr<DirtyReadyTaskContext>)))};
+  const ReadyTaskResourceDemand callback_demand =
+      owned_callback_resource_demand(static_cast<std::uint64_t>(
+          sizeof(std::shared_ptr<DirtyReadyTaskContext>)));
+  RetainedMemoryEstimator per_task_retained("dirty operation task demand");
+  per_task_retained.add_bytes(callback_demand.retained_memory_bytes);
+  per_task_retained.add_bytes(
+      task_operation_resource_demand_.retained_memory_bytes);
+  ReadyTaskResourceDemand combined_demand = callback_demand;
+  combined_demand.retained_memory_bytes = per_task_retained.bytes();
+  combined_demand.scratch_bytes = task_operation_resource_demand_.scratch_bytes;
+  combined_demand.work_units = std::max(
+      callback_demand.work_units, task_operation_resource_demand_.work_units);
+  return CpuRunResourceDemand{shared.bytes(), combined_demand};
 }
 
 /** @copydoc DirtyReadyTaskContext::make_submissions */
@@ -416,6 +447,7 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
   std::vector<ReadyTaskSubmission> submissions;
   submissions.reserve(task_ids.size());
   const std::shared_ptr<DirtyReadyTaskContext> self = shared_from_this();
+  const ReadyTaskResourceDemand task_demand = run_resource_demand(0U).task;
   for (int task_id : task_ids) {
     if (task_id < 0 ||
         task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size()) ||
@@ -434,10 +466,9 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
                ExecutionTaskRuntime& task_runtime) {
           self->execute(lease, accepted_identity, task_runtime);
         },
-        priority_,
-        owned_callback_resource_demand(
-            static_cast<std::uint64_t>(sizeof(self))),
-        task_devices_.at(static_cast<std::size_t>(task_id)));
+        priority_, task_demand,
+        task_devices_.at(static_cast<std::size_t>(task_id)),
+        task_constraints_.at(static_cast<std::size_t>(task_id)));
   }
   return submissions;
 }
@@ -528,10 +559,11 @@ void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan,
 
 ComputePlan prune_node_cache_task_graph(
     GraphModel& graph, const ComputeRequest& request,
-    const std::vector<int>& execution_order) {
+    const std::vector<int>& execution_order,
+    const std::vector<Device>& available_devices) {
   NodeCacheTaskGraphPruner node_cache_pruner;
   const std::shared_ptr<const FullTaskGraph> full_graph =
-      get_or_expand_full_task_graph(graph, request.intent);
+      get_or_expand_full_task_graph(graph, request.intent, available_devices);
   return node_cache_pruner.prune(*full_graph, request, execution_order, graph);
 }
 

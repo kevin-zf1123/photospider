@@ -143,6 +143,18 @@ class TaskSubmissionPlan {
   }
 
   /**
+   * @brief Returns the uniform conservative per-task operation demand.
+   * @return Component-wise maximum retained/scratch demand across selected
+   * operation routes, with one ordering work unit.
+   * @throws Nothing.
+   * @note The complete Run reserves this value using its maximum callback
+   * concurrency, so heterogeneous planned nodes cannot be undercounted.
+   */
+  ReadyTaskResourceDemand task_resource_demand() const noexcept {
+    return task_resource_demand_;
+  }
+
+  /**
    * @brief Constructs and owns the worker runner for this Run plan.
    *
    * @param context Graph services, plan vectors, telemetry, and options
@@ -375,13 +387,16 @@ class TaskSubmissionPlan {
   };
 
   /**
-   * @brief Resolves GlobalHighPrecision operation variants for planned nodes.
+   * @brief Re-resolves exact planned HP operation identities and declarations.
    *
    * @return Nothing.
-   * @throws std::bad_alloc from registry candidate or result storage.
-   * @note Missing variants remain empty so callers that only exercise
-   * Run-owned storage retain worker-time error semantics. Admission-aware
-   * production preparation validates the complete vector before installation.
+   * @throws std::bad_alloc from registry candidates, callback/key copies, or
+   * result storage.
+   * @note Identity/device/shape mismatches remain empty so admission-aware
+   * production preparation rejects them before installation. Successful
+   * snapshots populate aligned execution devices and operation constraints;
+   * their retained/scratch declarations form one component-wise maximum task
+   * demand for the physical Run.
    */
   void resolve_operations();
 
@@ -479,7 +494,9 @@ class TaskSubmissionPlan {
    * @throws std::invalid_argument for an unexpected lease/identity mismatch.
    * @throws std::bad_alloc from metadata or executable ownership.
    * @note The executable captures no plan, runner, Graph, or dispatcher stack
-   * pointer; it reaches Run-owned state only through the supplied lease.
+   * pointer; it reaches Run-owned state only through the supplied lease. The
+   * submission carries the aligned exact-identity constraints and uniform
+   * conservative operation demand resolved before admission.
    */
   ReadyTaskSubmission make_ready_submission(
       const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
@@ -579,6 +596,12 @@ class TaskSubmissionPlan {
 
   /** @brief Resolved operations aligned with execution_order_. */
   std::vector<std::optional<OpRegistry::OpVariant>> resolved_ops_;
+
+  /** @brief Exact-identity start constraints aligned with execution_order_. */
+  std::vector<OperationExecutionConstraints> operation_constraints_;
+
+  /** @brief Uniform conservative demand carried by every service task. */
+  ReadyTaskResourceDemand task_resource_demand_;
 };
 
 /**

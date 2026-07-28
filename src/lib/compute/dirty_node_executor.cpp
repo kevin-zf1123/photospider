@@ -136,7 +136,7 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
                          node_for_exec.type + ":" + node_for_exec.subtype);
   }
   execute_operation(node_for_exec, entry, resolved_inputs.image_inputs,
-                    operation_it->second.operation);
+                    operation_it->second);
 
   observe_dirty_node_cancellation(run_lease_);
   {
@@ -180,18 +180,19 @@ ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
 void HighPrecisionDirtyNodeExecutor::execute_operation(
     Node& node, const HpPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready,
-    const OpRegistry::OpVariant& operation) const {
-  if (std::holds_alternative<TileOpFunc>(operation)) {
+    const DirtyResolvedOperation& operation) const {
+  if (std::holds_alternative<TileOpFunc>(operation.operation)) {
     ImageBuffer* hp_buffer = nullptr;
     {
       std::lock_guard<std::mutex> lock(node_mutex(node.id));
       hp_buffer = &ensure_hp_buffer(node, entry, image_inputs_ready);
     }
-    execute_tiled(node, std::get<TileOpFunc>(operation), entry,
-                  image_inputs_ready, *hp_buffer);
+    execute_tiled(node, std::get<TileOpFunc>(operation.operation), entry,
+                  operation.metadata, image_inputs_ready, *hp_buffer);
     return;
   }
-  execute_monolithic(node, entry, std::get<MonolithicOpFunc>(operation),
+  execute_monolithic(node, entry,
+                     std::get<MonolithicOpFunc>(operation.operation),
                      image_inputs_ready);
 }
 
@@ -219,6 +220,7 @@ ImageBuffer& HighPrecisionDirtyNodeExecutor::ensure_hp_buffer(
 /** @copydoc HighPrecisionDirtyNodeExecutor::execute_tiled */
 void HighPrecisionDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const HpPlanEntry& entry,
+    const OpMetadata& metadata,
     const std::vector<const NodeOutput*>& image_inputs_ready,
     ImageBuffer& hp_buffer) const {
   TiledExecutionConfig config;
@@ -226,10 +228,7 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
   config.output_roi = entry.roi_hp;
   config.output_size = entry.hp_size;
   config.forced_halo = entry.halo_hp;
-  if (auto metadata =
-          OpRegistry::instance().get_metadata(node.type, node.subtype)) {
-    config.metadata = *metadata;
-  }
+  config.metadata = metadata;
   config.on_tile = [this](const PixelRect&) {
     observe_dirty_node_cancellation(run_lease_);
   };
@@ -330,7 +329,8 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
                      "No operator registered for node " + node_for_exec.type +
                          ":" + node_for_exec.subtype);
   }
-  const OpRegistry::OpVariant& operation = operation_it->second.operation;
+  const DirtyResolvedOperation& selected_operation = operation_it->second;
+  const OpRegistry::OpVariant& operation = selected_operation.operation;
   if (std::holds_alternative<MonolithicOpFunc>(operation)) {
     NodeOutput result = std::get<MonolithicOpFunc>(operation)(
         node_for_exec, resolved_inputs.image_inputs);
@@ -356,7 +356,8 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
       rt_buffer = &ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
     }
     execute_tiled(node_for_exec, std::get<TileOpFunc>(operation), entry,
-                  resolved_inputs.image_inputs, *rt_buffer);
+                  selected_operation.metadata, resolved_inputs.image_inputs,
+                  *rt_buffer);
   }
 
   observe_dirty_node_cancellation(run_lease_);
@@ -434,7 +435,8 @@ ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
 void RealTimeDirtyNodeExecutor::execute_operation(
     Node& node, const RtPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready,
-    ImageBuffer& rt_buffer, const OpRegistry::OpVariant& op_variant) const {
+    ImageBuffer& rt_buffer, const DirtyResolvedOperation& operation) const {
+  const OpRegistry::OpVariant& op_variant = operation.operation;
   try {
     if (std::holds_alternative<MonolithicOpFunc>(op_variant)) {
       execute_monolithic(node, entry, image_inputs_ready, rt_buffer,
@@ -442,7 +444,7 @@ void RealTimeDirtyNodeExecutor::execute_operation(
       return;
     }
     execute_tiled(node, std::get<TileOpFunc>(op_variant), entry,
-                  image_inputs_ready, rt_buffer);
+                  operation.metadata, image_inputs_ready, rt_buffer);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError&) {
@@ -511,6 +513,7 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
 /** @copydoc RealTimeDirtyNodeExecutor::execute_tiled */
 void RealTimeDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const RtPlanEntry& entry,
+    const OpMetadata& metadata,
     const std::vector<const NodeOutput*>& image_inputs_ready,
     ImageBuffer& rt_buffer) const {
   TiledExecutionConfig config;
@@ -518,10 +521,7 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
   config.output_roi = entry.roi_rt;
   config.output_size = entry.rt_size;
   config.forced_halo = entry.halo_rt;
-  if (auto metadata =
-          metadata_for_domain(node.type, node.subtype, DirtyDomain::RealTime)) {
-    config.metadata = *metadata;
-  }
+  config.metadata = metadata;
   config.on_tile = [this](const PixelRect&) {
     observe_dirty_node_cancellation(run_lease_);
   };
