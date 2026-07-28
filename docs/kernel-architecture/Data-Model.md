@@ -292,7 +292,8 @@ CPU DenseTensor subset of that target:
 - final copyable `Value` shares one immutable PImpl containing the descriptor,
   optional facet, positive signed `StridedLayout`, and exact owned CPU byte
   envelope;
-- `DenseTensorView` and `ImageView` retain the complete Value and expose only
+- `DenseTensorView` and `ImageView` retain the complete Value, use copy-like
+  move semantics that leave both source and destination valid, and expose only
   bounds-checked read-only addresses; and
 - `image_process:invert_dense` performs descriptor-only inference and
   stride-aware unsigned-8 execution on those views.

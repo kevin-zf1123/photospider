@@ -130,7 +130,7 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation` binary。安装前，它会在该真实 disabled producer 中运行
-全部七个 dense-image case，包括
+全部九个 dense-image case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 隔离回归。它会验证派生的 provider/plugin/CLI 默认值，以及三类无效显式组合的精确诊断。
 Clean install 后，它会拒绝 OpenCV header、target、export reference 与 yaml-cpp link 泄漏；
@@ -662,9 +662,10 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor 与 ImageView Operation 验证
 
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2 边界的 provider-independent integration
-binary。它的七个长期用例验证 malformed facet/stride/exact-envelope rejection、immutable
-Value copy sharing 与 ImageView-retained lifetime、payload/shape/stride 的 lvalue/rvalue
-construction allocation 隔离、pure exact invert inference、经过
+binary。它的九个长期用例验证 malformed facet/stride/exact-envelope rejection、immutable
+Value copy sharing 与 ImageView-retained lifetime、让 source 与 destination 都持续可读的
+DenseTensorView/ImageView copy-like move construction 与 assignment、payload/shape/stride 的
+lvalue/rvalue construction allocation 隔离、pure exact invert inference、经过
 `register_core_operations -> OpRegistry::resolve_for_intent ->
 NodeExecutor::execute` 的 padded multi-channel execution，以及 execute 返回 descriptor 与
 inference 不一致的合法 Value 时以 `GraphErrc::ComputeError` 拒绝。Active output byte 必须
@@ -679,9 +680,9 @@ ctest --test-dir build --output-on-failure \
   -R '^CpuDenseTensorImageOperation\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部七个
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部九个
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
-installed consumer。下述 provider-disabled nested build 也会编译并运行全部七个用例，因此真实
+installed consumer。下述 provider-disabled nested build 也会编译并运行全部九个用例，因此真实
 core operation 不依赖 optional OpenCV operation provider。
 
 ## 可选 OpenCV Operation Provider 验证
@@ -708,8 +709,8 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 provider-independent focused binary 与 stdlib-only fixture，并额外构建 CPU
 DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary 与
 kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须
-精确包含 14 项：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部七个
+精确包含 16 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部九个
 `CpuDenseTensorImageOperation.*` case、三个 `DiskCacheDiagnosticConcurrency.*` case 与
 两个 `KernelLifecycleConcurrency.*` case。Disk-cache case 必须只保留
 `kernel-concurrency` label 与 20 秒 timeout；lifecycle case 保留同一 label 与 60 秒

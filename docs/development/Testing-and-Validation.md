@@ -173,7 +173,7 @@ OpenCV and YAML capabilities disabled, disables both package discoveries,
 turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
 `test_cpu_dense_tensor_image_operation` binary. Before installation it runs all
-seven dense-image cases in that actual disabled producer, including the
+nine dense-image cases in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 allocation-isolation regressions. It verifies the derived provider/plugin/CLI
 defaults and the precise diagnostics for three invalid explicit combinations.
@@ -833,11 +833,12 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor and ImageView Operation Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 boundary. Its seven durable cases verify
+binary for the implemented V-2 boundary. Its nine durable cases verify
 malformed facet/stride/exact-envelope rejection, immutable Value copy sharing
-and ImageView-retained lifetime, allocation-isolated lvalue and rvalue
-construction for payload/shape/strides, pure exact invert inference, padded
-multi-channel execution through
+and ImageView-retained lifetime, copy-like DenseTensorView and ImageView move
+construction and assignment that keep both objects readable, allocation-
+isolated lvalue and rvalue construction for payload/shape/strides, pure exact
+invert inference, padded multi-channel execution through
 `register_core_operations -> OpRegistry::resolve_for_intent ->
 NodeExecutor::execute`, and `GraphErrc::ComputeError` rejection when execute
 returns a valid Value whose descriptor disagrees with inference. Active output
@@ -853,10 +854,10 @@ ctest --test-dir build --output-on-failure \
   -R '^CpuDenseTensorImageOperation\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all seven cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all nine cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
-The provider-disabled nested build below also compiles and runs all seven
+The provider-disabled nested build below also compiles and runs all nine
 cases, so the real core operation does not depend on the optional OpenCV
 operation provider.
 
@@ -891,9 +892,9 @@ suite gate is therefore off. The driver validates the exact CMake cache
 profile, builds the provider-independent focused provider binary, its
 stdlib-only fixture, the CPU DenseTensor/ImageView integration binary, and the
 dedicated disk-cache and kernel-lifecycle concurrency binaries, then queries
-the machine-readable CTest inventory. That inventory must contain exactly 14
+the machine-readable CTest inventory. That inventory must contain exactly 16
 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all seven
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all nine
 `CpuDenseTensorImageOperation.*` cases, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
 `KernelLifecycleConcurrency.*` cases. Disk-cache cases retain only the

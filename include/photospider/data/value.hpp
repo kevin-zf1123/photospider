@@ -271,6 +271,50 @@ class DenseTensorView final {
   explicit DenseTensorView(Value value);
 
   /**
+   * @brief Copies a view that retains the same immutable Value.
+   *
+   * @param other Valid view whose retained Value is shared.
+   * @throws Nothing.
+   * @note Both views remain complete, valid, and independently assignable.
+   */
+  DenseTensorView(const DenseTensorView& other) noexcept = default;
+
+  /**
+   * @brief Copy-assigns the immutable Value retained by another view.
+   *
+   * @param other Valid view whose retained Value replaces the current Value.
+   * @return This complete retaining view.
+   * @throws Nothing.
+   * @note Both views remain complete and valid, including during
+   *       self-assignment.
+   */
+  DenseTensorView& operator=(const DenseTensorView& other) noexcept = default;
+
+  /**
+   * @brief Move-constructs a view without invalidating the source view.
+   *
+   * @param other Valid view whose immutable retained Value is shared.
+   * @throws Nothing.
+   * @note Move is intentionally copy-like because DenseTensorView has no public
+   *       invalid state. Source and destination both remain fully readable.
+   */
+  DenseTensorView(DenseTensorView&& other) noexcept : DenseTensorView(other) {}
+
+  /**
+   * @brief Move-assigns a view without invalidating the source view.
+   *
+   * @param other Valid view whose immutable retained Value replaces the current
+   *        Value.
+   * @return This complete retaining view.
+   * @throws Nothing.
+   * @note Move assignment intentionally delegates to copy assignment. Source
+   *       and destination both remain fully readable, including for self-move.
+   */
+  DenseTensorView& operator=(DenseTensorView&& other) noexcept {
+    return *this = other;
+  }
+
+  /**
    * @brief Returns the retained immutable Value.
    *
    * @return Borrowed Value handle.

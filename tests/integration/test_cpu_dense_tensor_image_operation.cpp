@@ -5,6 +5,7 @@
 #include <cstring>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -21,6 +22,15 @@
 
 namespace ps {
 namespace {
+
+static_assert(std::is_nothrow_copy_constructible_v<DenseTensorView>);
+static_assert(std::is_nothrow_copy_assignable_v<DenseTensorView>);
+static_assert(std::is_nothrow_move_constructible_v<DenseTensorView>);
+static_assert(std::is_nothrow_move_assignable_v<DenseTensorView>);
+static_assert(std::is_nothrow_copy_constructible_v<ImageView>);
+static_assert(std::is_nothrow_copy_assignable_v<ImageView>);
+static_assert(std::is_nothrow_move_constructible_v<ImageView>);
+static_assert(std::is_nothrow_move_assignable_v<ImageView>);
 
 /**
  * @brief Creates one valid padded unsigned-8 HWC Value for test inspection.
@@ -166,6 +176,150 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(std::to_integer<std::uint8_t>(*image.channel_data(2U, 1U, 1U)),
             12U);
   EXPECT_THROW(image.channel_data(3U, 0U, 0U), std::out_of_range);
+}
+
+TEST(CpuDenseTensorImageOperation,
+     DenseTensorViewMovesPreserveSourceAndReplaceDestination) {
+  DenseTensorView source(make_unsigned8_value(3U, 2U, 2U, 8U));
+  const Value expected = source.value();
+  const std::vector<std::size_t> coordinate{1U, 2U, 1U};
+
+  DenseTensorView constructed(std::move(source));
+
+  ASSERT_TRUE(source.value().valid());
+  EXPECT_EQ(source.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(source.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(source.storage_size(), expected.storage_size());
+  EXPECT_EQ(source.data(), expected.data());
+  EXPECT_EQ(source.element_data(coordinate), expected.data() + 13U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*source.element_data(coordinate)),
+            12U);
+
+  ASSERT_TRUE(constructed.value().valid());
+  EXPECT_EQ(constructed.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(constructed.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(constructed.storage_size(), expected.storage_size());
+  EXPECT_EQ(constructed.data(), expected.data());
+  EXPECT_EQ(constructed.element_data(coordinate), expected.data() + 13U);
+  EXPECT_EQ(
+      std::to_integer<std::uint8_t>(*constructed.element_data(coordinate)),
+      12U);
+
+  DenseTensorView assigned(make_unsigned8_value(1U, 1U, 1U, 1U));
+  const Value displaced = assigned.value();
+  ASSERT_NE(displaced.data(), expected.data());
+
+  assigned = std::move(constructed);
+
+  ASSERT_TRUE(constructed.value().valid());
+  EXPECT_EQ(constructed.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(constructed.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(constructed.storage_size(), expected.storage_size());
+  EXPECT_EQ(constructed.data(), expected.data());
+  EXPECT_EQ(constructed.element_data(coordinate), expected.data() + 13U);
+  EXPECT_EQ(
+      std::to_integer<std::uint8_t>(*constructed.element_data(coordinate)),
+      12U);
+
+  ASSERT_TRUE(assigned.value().valid());
+  EXPECT_EQ(assigned.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(assigned.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(assigned.storage_size(), expected.storage_size());
+  EXPECT_EQ(assigned.data(), expected.data());
+  EXPECT_EQ(assigned.element_data(coordinate), expected.data() + 13U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*assigned.element_data(coordinate)),
+            12U);
+  EXPECT_TRUE(displaced.valid());
+  EXPECT_EQ(displaced.storage_size(), 1U);
+  EXPECT_NE(assigned.data(), displaced.data());
+}
+
+TEST(CpuDenseTensorImageOperation,
+     ImageViewMovesPreserveSourceAndReplaceDestination) {
+  ImageView source(make_unsigned8_value(3U, 2U, 2U, 8U));
+  const Value expected = source.value();
+  ASSERT_TRUE(expected.image_facet().has_value());
+
+  ImageView constructed(std::move(source));
+
+  ASSERT_TRUE(source.value().valid());
+  EXPECT_EQ(source.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(source.image_facet(), *expected.image_facet());
+  EXPECT_EQ(source.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(source.value().storage_size(), expected.storage_size());
+  EXPECT_EQ(source.value().data(), expected.data());
+  EXPECT_EQ(source.width(), 3U);
+  EXPECT_EQ(source.height(), 2U);
+  EXPECT_EQ(source.channels(), 2U);
+  EXPECT_EQ(source.element_bytes(), 1U);
+  EXPECT_EQ(source.row_stride(), 8);
+  EXPECT_EQ(source.channel_data(2U, 1U, 1U), expected.data() + 13U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*source.channel_data(2U, 1U, 1U)),
+            12U);
+
+  ASSERT_TRUE(constructed.value().valid());
+  EXPECT_EQ(constructed.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(constructed.image_facet(), *expected.image_facet());
+  EXPECT_EQ(constructed.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(constructed.value().storage_size(), expected.storage_size());
+  EXPECT_EQ(constructed.value().data(), expected.data());
+  EXPECT_EQ(constructed.width(), 3U);
+  EXPECT_EQ(constructed.height(), 2U);
+  EXPECT_EQ(constructed.channels(), 2U);
+  EXPECT_EQ(constructed.element_bytes(), 1U);
+  EXPECT_EQ(constructed.row_stride(), 8);
+  EXPECT_EQ(constructed.channel_data(2U, 1U, 1U), expected.data() + 13U);
+  EXPECT_EQ(
+      std::to_integer<std::uint8_t>(*constructed.channel_data(2U, 1U, 1U)),
+      12U);
+
+  ImageView assigned(make_unsigned8_value(1U, 1U, 1U, 1U));
+  const Value displaced = assigned.value();
+  ASSERT_NE(displaced.data(), expected.data());
+
+  assigned = std::move(constructed);
+
+  ASSERT_TRUE(constructed.value().valid());
+  EXPECT_EQ(constructed.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(constructed.image_facet(), *expected.image_facet());
+  EXPECT_EQ(constructed.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(constructed.value().storage_size(), expected.storage_size());
+  EXPECT_EQ(constructed.value().data(), expected.data());
+  EXPECT_EQ(constructed.width(), 3U);
+  EXPECT_EQ(constructed.height(), 2U);
+  EXPECT_EQ(constructed.channels(), 2U);
+  EXPECT_EQ(constructed.element_bytes(), 1U);
+  EXPECT_EQ(constructed.row_stride(), 8);
+  EXPECT_EQ(constructed.channel_data(2U, 1U, 1U), expected.data() + 13U);
+  EXPECT_EQ(
+      std::to_integer<std::uint8_t>(*constructed.channel_data(2U, 1U, 1U)),
+      12U);
+
+  ASSERT_TRUE(assigned.value().valid());
+  EXPECT_EQ(assigned.descriptor(), expected.dense_tensor_descriptor());
+  EXPECT_EQ(assigned.image_facet(), *expected.image_facet());
+  EXPECT_EQ(assigned.layout().byte_strides,
+            expected.strided_layout().byte_strides);
+  EXPECT_EQ(assigned.value().storage_size(), expected.storage_size());
+  EXPECT_EQ(assigned.value().data(), expected.data());
+  EXPECT_EQ(assigned.width(), 3U);
+  EXPECT_EQ(assigned.height(), 2U);
+  EXPECT_EQ(assigned.channels(), 2U);
+  EXPECT_EQ(assigned.element_bytes(), 1U);
+  EXPECT_EQ(assigned.row_stride(), 8);
+  EXPECT_EQ(assigned.channel_data(2U, 1U, 1U), expected.data() + 13U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*assigned.channel_data(2U, 1U, 1U)),
+            12U);
+  EXPECT_TRUE(displaced.valid());
+  EXPECT_EQ(displaced.storage_size(), 1U);
+  EXPECT_NE(assigned.value().data(), displaced.data());
 }
 
 TEST(CpuDenseTensorImageOperation,

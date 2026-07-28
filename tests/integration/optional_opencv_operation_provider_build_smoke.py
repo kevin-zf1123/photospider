@@ -236,6 +236,14 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "DenseTensorViewMovesPreserveSourceAndReplaceDestination"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ImageViewMovesPreserveSourceAndReplaceDestination"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "ValueDeepCopiesLvaluePayloadShapeAndStrides"
         ),
         (

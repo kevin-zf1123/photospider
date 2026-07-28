@@ -38,6 +38,48 @@ class ImageView final {
   explicit ImageView(Value value);
 
   /**
+   * @brief Copies an image view retaining the same immutable Value.
+   *
+   * @param other Valid image view whose retained Value and image metadata are
+   *        shared or copied.
+   * @throws Nothing.
+   * @note Both views remain complete, valid, and independently assignable.
+   */
+  ImageView(const ImageView& other) noexcept = default;
+
+  /**
+   * @brief Copy-assigns another image view's retained Value and metadata.
+   *
+   * @param other Valid image view replacing the current retained state.
+   * @return This complete retaining image view.
+   * @throws Nothing.
+   * @note Both views remain complete and valid, including during
+   *       self-assignment.
+   */
+  ImageView& operator=(const ImageView& other) noexcept = default;
+
+  /**
+   * @brief Move-constructs an image view without invalidating the source.
+   *
+   * @param other Valid image view whose retained state is shared or copied.
+   * @throws Nothing.
+   * @note Move is intentionally copy-like because ImageView has no public
+   *       invalid state. Source and destination both remain fully readable.
+   */
+  ImageView(ImageView&& other) noexcept : ImageView(other) {}
+
+  /**
+   * @brief Move-assigns an image view without invalidating the source.
+   *
+   * @param other Valid image view replacing the current retained state.
+   * @return This complete retaining image view.
+   * @throws Nothing.
+   * @note Move assignment intentionally delegates to copy assignment. Source
+   *       and destination both remain fully readable, including for self-move.
+   */
+  ImageView& operator=(ImageView&& other) noexcept { return *this = other; }
+
+  /**
    * @brief Returns the retained immutable Value.
    *
    * @return Borrowed Value handle.

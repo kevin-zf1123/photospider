@@ -234,7 +234,8 @@ RT proxy commit 之后。
 - installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
 - final、copyable `Value` 共享一个 immutable PImpl，其中包含 descriptor、optional facet、
   positive signed `StridedLayout` 与精确拥有的 CPU byte envelope；
-- `DenseTensorView` 与 `ImageView` 保留完整 Value，只暴露经过 bounds check 的只读 address；
+- `DenseTensorView` 与 `ImageView` 保留完整 Value；它们使用 copy-like move 语义，
+  让 source 与 destination 都保持有效，并且只暴露经过 bounds check 的只读 address；
 - `image_process:invert_dense` 对这些 view 执行 descriptor-only inference 与
   stride-aware unsigned-8 execution。
 

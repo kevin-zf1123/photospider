@@ -63,6 +63,14 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
+        "DenseTensorViewMovesPreserveSourceAndReplaceDestination"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ImageViewMovesPreserveSourceAndReplaceDestination"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
         "ValueDeepCopiesLvaluePayloadShapeAndStrides"
     ),
     (
@@ -111,7 +119,7 @@ def ctest_json_test(
 def provider_disabled_ctest_payload() -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
-    @return JSON payload containing two profile entries, seven dense-image
+    @return JSON payload containing two profile entries, nine dense-image
       cases, three disk cases, and two production lifecycle cases.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
