@@ -77,6 +77,16 @@ Value make_region_rank_four_tensor() {
                                       std::move(layout), std::move(storage));
 }
 
+/**
+ * @brief Returns complete validity for make_region_rank_four_tensor().
+ * @return Exact rank-four TensorSlice covering shape `[1,3,4,3]`.
+ * @throws std::bad_alloc when Region storage cannot allocate.
+ */
+RegionSet full_region_rank_four_tensor() {
+  return RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 3U}, {0U, 4U}, {0U, 3U}}});
+}
+
 TEST(RegionContract, DistinguishesCanonicalWholeAndEmpty) {
   const RegionSet empty = RegionSet::empty();
   const RegionSet whole = RegionSet::whole();
@@ -203,6 +213,24 @@ TEST(RegionContract, CanonicalizesDisjointIntersectionsToEmpty) {
   EXPECT_TRUE(tensor.region()->is_empty());
 }
 
+TEST(RegionContract, ReturnsTooComplexBeforeNineAtomIntersectionConstruction) {
+  std::vector<RegionAtom> left_atoms;
+  std::vector<RegionAtom> right_atoms;
+  for (std::uint64_t index = 1U; index <= 5U; ++index) {
+    left_atoms.push_back(ImageRect{{10U, index}, 0, 2, 0, 2});
+  }
+  for (std::uint64_t index = 1U; index <= 4U; ++index) {
+    right_atoms.push_back(ImageRect{{20U, index}, 0, 2, 0, 2});
+  }
+
+  const RegionOperationResult result =
+      intersect_regions(RegionSet::from_atoms(std::move(left_atoms)),
+                        RegionSet::from_atoms(std::move(right_atoms)));
+
+  EXPECT_EQ(result.status(), RegionOperationStatus::TooComplex);
+  EXPECT_FALSE(result.region().has_value());
+}
+
 TEST(RegionContract, ClipsTensorShapeAndRejectsRankMismatch) {
   const RegionSet slice = RegionSet::from_tensor_slice(
       {dense_tensor_region_domain(), {{1U, 7U}, {0U, 9U}, {0U, 1U}, {2U, 8U}}});
@@ -256,6 +284,59 @@ TEST(RegionContract, ComputesRepresentableUnionAndDifference) {
   ASSERT_EQ(remainder.status(), RegionOperationStatus::Exact);
   EXPECT_EQ(std::get<ImageRect>(remainder.region()->atoms().front()),
             (ImageRect{image_region_domain(), 0, 8, 4, 9}));
+}
+
+TEST(RegionContract, MergesOneVaryingAtomWhilePreservingSharedClauseAtoms) {
+  const RegionDomainKey image_domain{31U, 1U};
+  const RegionDomainKey shared_domain{31U, 2U};
+  const TensorSlice shared{shared_domain, {{2U, 5U}, {7U, 9U}}};
+  const RegionSet left =
+      RegionSet::from_atoms({ImageRect{image_domain, 0, 2, 0, 3}, shared});
+  const RegionSet right =
+      RegionSet::from_atoms({ImageRect{image_domain, 2, 4, 0, 3}, shared});
+
+  const RegionOperationResult joined = union_regions(left, right);
+
+  ASSERT_EQ(joined.status(), RegionOperationStatus::Exact);
+  ASSERT_TRUE(joined.region().has_value());
+  EXPECT_EQ(
+      *joined.region(),
+      RegionSet::from_atoms({ImageRect{image_domain, 0, 4, 0, 3}, shared}));
+}
+
+TEST(RegionContract, MergesOneVaryingTensorAtomInSharedClause) {
+  const RegionDomainKey tensor_domain{32U, 1U};
+  const RegionDomainKey shared_domain{32U, 2U};
+  const ImageRect shared{shared_domain, -2, 3, 4, 8};
+  const RegionSet left = RegionSet::from_atoms(
+      {TensorSlice{tensor_domain, {{0U, 1U}, {0U, 2U}, {3U, 5U}}}, shared});
+  const RegionSet right = RegionSet::from_atoms(
+      {TensorSlice{tensor_domain, {{0U, 1U}, {2U, 4U}, {3U, 5U}}}, shared});
+
+  const RegionOperationResult joined = union_regions(left, right);
+
+  ASSERT_EQ(joined.status(), RegionOperationStatus::Exact);
+  ASSERT_TRUE(joined.region().has_value());
+  EXPECT_EQ(*joined.region(),
+            RegionSet::from_atoms(
+                {TensorSlice{tensor_domain, {{0U, 1U}, {0U, 4U}, {3U, 5U}}},
+                 shared}));
+}
+
+TEST(RegionContract, RejectsUnionWhenTwoClauseAtomsDiffer) {
+  const RegionDomainKey first_domain{33U, 1U};
+  const RegionDomainKey second_domain{33U, 2U};
+  const RegionSet left =
+      RegionSet::from_atoms({ImageRect{first_domain, 0, 2, 0, 1},
+                             ImageRect{second_domain, 0, 2, 0, 1}});
+  const RegionSet right =
+      RegionSet::from_atoms({ImageRect{first_domain, 2, 4, 0, 1},
+                             ImageRect{second_domain, 2, 4, 0, 1}});
+
+  const RegionOperationResult joined = union_regions(left, right);
+
+  EXPECT_EQ(joined.status(), RegionOperationStatus::TooComplex);
+  EXPECT_FALSE(joined.region().has_value());
 }
 
 TEST(RegionContract, PreservesTypedBudgetAndKindFailures) {
@@ -409,6 +490,7 @@ TEST(RegionPlanning, ClipsRankGeneralTensorAndRejectsRtProjection) {
   source.cached_output_high_precision = NodeOutput{};
   source.cached_output_high_precision->image_value =
       make_region_rank_four_tensor();
+  source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
   graph.validate_topology();
@@ -471,6 +553,7 @@ TEST(RegionPlanning, RejectsRankMismatchAndMissingTensorContract) {
   source.cached_output_high_precision = NodeOutput{};
   source.cached_output_high_precision->image_value =
       make_region_rank_four_tensor();
+  source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
   graph.add_node(make_region_child(3, 1, "gaussian_blur"));
@@ -498,6 +581,7 @@ TEST(RegionLifecycle, RetainsTensorSourceFactsWithoutPixelProjection) {
   source.cached_output_high_precision = NodeOutput{};
   source.cached_output_high_precision->image_value =
       make_region_rank_four_tensor();
+  source.hp_region = full_region_rank_four_tensor();
   graph.add_node(std::move(source));
   graph.add_node(make_region_child(2, 1, "invert_dense"));
   graph.validate_topology();

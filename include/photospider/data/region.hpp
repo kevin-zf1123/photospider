@@ -430,7 +430,9 @@ enum class RegionContainmentStatus {
  * @return Typed normalized outcome.
  * @throws std::bad_alloc when result storage cannot allocate.
  * @note Unsupported rank/kind combinations remain typed and never become
- *       Empty.
+ *       Empty. A normalized result beyond the caller or hard atom limit
+ *       returns TooComplex before RegionSet construction can throw
+ *       std::length_error.
  */
 RegionOperationResult intersect_regions(const RegionSet& left,
                                         const RegionSet& right,
@@ -443,7 +445,10 @@ RegionOperationResult intersect_regions(const RegionSet& left,
  * @param budget Complexity limit and conservative-widening opt-in.
  * @return Exact, ConservativeSuperset, Unsupported, or TooComplex.
  * @throws std::bad_alloc when result or diagnostic storage cannot allocate.
- * @note A nonrectangular union never silently becomes a hull.
+ * @note Clauses with identical constrained domains may merge exactly when all
+ *       but one atom are equal and the sole differing compatible atom has an
+ *       exact one-atom union. A nonrectangular union never silently becomes a
+ *       hull.
  */
 RegionOperationResult union_regions(const RegionSet& left,
                                     const RegionSet& right,

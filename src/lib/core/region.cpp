@@ -259,6 +259,74 @@ bool atom_union_is_exact(const RegionAtom& left,
 }
 
 /**
+ * @brief Reports whether compatible atoms have an empty exact intersection.
+ * @param left First same-domain, same-kind atom.
+ * @param right Second same-domain, same-kind, same-rank atom.
+ * @return True when at least one required half-open interval is disjoint.
+ * @throws Nothing under the documented compatibility preconditions.
+ * @note Detecting canonical Empty before atom-budget rejection preserves exact
+ *       annihilation without allocating a temporary normalized clause.
+ */
+bool compatible_intersection_is_empty(const RegionAtom& left,
+                                      const RegionAtom& right) noexcept {
+  if (const auto* left_image = std::get_if<ImageRect>(&left)) {
+    const ImageRect& right_image = std::get<ImageRect>(right);
+    return std::max(left_image->x_begin, right_image.x_begin) >=
+               std::min(left_image->x_end, right_image.x_end) ||
+           std::max(left_image->y_begin, right_image.y_begin) >=
+               std::min(left_image->y_end, right_image.y_end);
+  }
+  const TensorSlice& left_tensor = std::get<TensorSlice>(left);
+  const TensorSlice& right_tensor = std::get<TensorSlice>(right);
+  for (std::size_t axis = 0U; axis < left_tensor.axes.size(); ++axis) {
+    if (std::max(left_tensor.axes[axis].begin, right_tensor.axes[axis].begin) >=
+        std::min(left_tensor.axes[axis].end, right_tensor.axes[axis].end)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief Counts distinct domains across two canonical sorted clauses.
+ * @param left First normalized atom vector.
+ * @param right Second normalized atom vector.
+ * @return Exact number of domains in the conjunction of both clauses.
+ * @throws Nothing.
+ * @note RegionSet canonicalization guarantees one atom per domain and
+ *       deterministic domain ordering in each input vector.
+ */
+std::size_t combined_domain_count(
+    const std::vector<RegionAtom>& left,
+    const std::vector<RegionAtom>& right) noexcept {
+  std::size_t left_index = 0U;
+  std::size_t right_index = 0U;
+  std::size_t count = 0U;
+  while (left_index < left.size() || right_index < right.size()) {
+    ++count;
+    if (right_index >= right.size()) {
+      ++left_index;
+      continue;
+    }
+    if (left_index >= left.size()) {
+      ++right_index;
+      continue;
+    }
+    const RegionDomainKey left_domain = atom_domain(left[left_index]);
+    const RegionDomainKey right_domain = atom_domain(right[right_index]);
+    if (left_domain == right_domain) {
+      ++left_index;
+      ++right_index;
+    } else if (left_domain < right_domain) {
+      ++left_index;
+    } else {
+      ++right_index;
+    }
+  }
+  return count;
+}
+
+/**
  * @brief Validates the caller's explicit atom budget.
  * @param budget Candidate operation budget.
  * @return True when the budget is nonzero and within the hard V-4 maximum.
@@ -278,6 +346,19 @@ RegionOperationResult invalid_budget_result() {
   return RegionOperationResult::failure(
       RegionOperationStatus::TooComplex,
       "Region operation atom budget is zero or exceeds the V-4 hard limit.");
+}
+
+/**
+ * @brief Returns one typed bounded-representation failure.
+ * @param reason Owned diagnostic describing the exceeded exact subset.
+ * @return TooComplex without a replacement Region.
+ * @throws std::bad_alloc when diagnostic storage cannot allocate.
+ * @note This helper is distinct from invalid_budget_result() because a valid
+ *       caller budget can still be too small for one exact result.
+ */
+RegionOperationResult too_complex_result(std::string reason) {
+  return RegionOperationResult::failure(RegionOperationStatus::TooComplex,
+                                        std::move(reason));
 }
 
 /**
@@ -408,13 +489,15 @@ RegionOperationResult intersect_regions(const RegionSet& left,
   }
   if (left.is_whole()) {
     if (right.atoms().size() > budget.maximum_atoms) {
-      return invalid_budget_result();
+      return too_complex_result(
+          "Region intersection operand exceeds the bounded atom budget.");
     }
     return RegionOperationResult::exact(right);
   }
   if (right.is_whole()) {
     if (left.atoms().size() > budget.maximum_atoms) {
-      return invalid_budget_result();
+      return too_complex_result(
+          "Region intersection operand exceeds the bounded atom budget.");
     }
     return RegionOperationResult::exact(left);
   }
@@ -438,13 +521,23 @@ RegionOperationResult intersect_regions(const RegionSet& left,
             "Region intersection found a TensorSlice rank mismatch.");
       }
     }
+    if (compatible_intersection_is_empty(left_atom, *right_atom)) {
+      return RegionOperationResult::exact(RegionSet::empty());
+    }
+  }
+
+  if (combined_domain_count(left.atoms(), right.atoms()) >
+      budget.maximum_atoms) {
+    return too_complex_result(
+        "Region intersection exceeds the bounded normalized atom budget.");
   }
 
   std::vector<RegionAtom> atoms = left.atoms();
   atoms.insert(atoms.end(), right.atoms().begin(), right.atoms().end());
   RegionSet result = RegionSet::from_atoms(std::move(atoms));
   if (!result.is_empty() && result.atoms().size() > budget.maximum_atoms) {
-    return invalid_budget_result();
+    return too_complex_result(
+        "Region intersection exceeds the bounded normalized atom budget.");
   }
   return RegionOperationResult::exact(std::move(result));
 }
@@ -500,15 +593,22 @@ RegionOperationResult union_regions(const RegionSet& left,
   }
   if (left.is_empty()) {
     if (right.atoms().size() > budget.maximum_atoms) {
-      return invalid_budget_result();
+      return too_complex_result(
+          "Region union operand exceeds the bounded atom budget.");
     }
     return RegionOperationResult::exact(right);
   }
   if (right.is_empty()) {
     if (left.atoms().size() > budget.maximum_atoms) {
-      return invalid_budget_result();
+      return too_complex_result(
+          "Region union operand exceeds the bounded atom budget.");
     }
     return RegionOperationResult::exact(left);
+  }
+  if (left.atoms().size() > budget.maximum_atoms ||
+      right.atoms().size() > budget.maximum_atoms) {
+    return too_complex_result(
+        "Region union operands exceed the bounded atom budget.");
   }
   const RegionContainmentStatus left_contains =
       region_contains(left, right, budget);
@@ -526,25 +626,55 @@ RegionOperationResult union_regions(const RegionSet& left,
         RegionOperationStatus::Unsupported,
         "Region union cannot compare incompatible atom kinds or ranks.");
   }
-  if (left.atoms().size() != 1U || right.atoms().size() != 1U ||
-      !(atom_domain(left.atoms().front()) ==
-        atom_domain(right.atoms().front())) ||
-      atom_kind(left.atoms().front()) != atom_kind(right.atoms().front())) {
-    return RegionOperationResult::failure(
-        RegionOperationStatus::TooComplex,
-        "Region union is not representable by one bounded clause.");
+
+  if (left.atoms().size() != right.atoms().size()) {
+    return too_complex_result(
+        "Region union has different constrained domain sets.");
   }
-  const RegionAtom& left_atom = left.atoms().front();
-  const RegionAtom& right_atom = right.atoms().front();
-  if (const auto* left_tensor = std::get_if<TensorSlice>(&left_atom)) {
-    if (left_tensor->axes.size() !=
-        std::get<TensorSlice>(right_atom).axes.size()) {
+
+  std::vector<RegionAtom> hull_atoms = left.atoms();
+  std::optional<std::size_t> differing_index;
+  for (std::size_t index = 0U; index < left.atoms().size(); ++index) {
+    const RegionAtom& left_atom = left.atoms()[index];
+    const RegionAtom& right_atom = right.atoms()[index];
+    if (!(atom_domain(left_atom) == atom_domain(right_atom))) {
+      return too_complex_result(
+          "Region union has different constrained domain sets.");
+    }
+    if (atom_kind(left_atom) != atom_kind(right_atom)) {
       return RegionOperationResult::failure(
           RegionOperationStatus::Unsupported,
-          "Region union found a TensorSlice rank mismatch.");
+          "Region union found incompatible atom kinds for one domain.");
     }
+    if (const auto* left_tensor = std::get_if<TensorSlice>(&left_atom)) {
+      if (left_tensor->axes.size() !=
+          std::get<TensorSlice>(right_atom).axes.size()) {
+        return RegionOperationResult::failure(
+            RegionOperationStatus::Unsupported,
+            "Region union found a TensorSlice rank mismatch.");
+      }
+    }
+    if (left_atom == right_atom) {
+      continue;
+    }
+    if (differing_index.has_value()) {
+      return too_complex_result(
+          "Region union differs in more than one constrained domain.");
+    }
+    differing_index = index;
   }
-  RegionSet hull = RegionSet::from_atoms({atom_hull(left_atom, right_atom)});
+
+  if (!differing_index.has_value()) {
+    return RegionOperationResult::exact(left);
+  }
+  const RegionAtom& left_atom = left.atoms()[*differing_index];
+  const RegionAtom& right_atom = right.atoms()[*differing_index];
+  hull_atoms[*differing_index] = atom_hull(left_atom, right_atom);
+  RegionSet hull = RegionSet::from_atoms(std::move(hull_atoms));
+  if (hull.atoms().size() > budget.maximum_atoms) {
+    return too_complex_result(
+        "Region union result exceeds the bounded atom budget.");
+  }
   if (atom_union_is_exact(left_atom, right_atom)) {
     return RegionOperationResult::exact(std::move(hull));
   }
@@ -553,8 +683,7 @@ RegionOperationResult union_regions(const RegionSet& left,
         std::move(hull),
         "Nonrectangular union widened to an explicit bounding Region.");
   }
-  return RegionOperationResult::failure(
-      RegionOperationStatus::TooComplex,
+  return too_complex_result(
       "Nonrectangular union exceeds the one-clause exact Region subset.");
 }
 
