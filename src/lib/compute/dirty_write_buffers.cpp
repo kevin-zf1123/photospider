@@ -9,6 +9,7 @@
 #include "compute/compute_geometry.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "core/image_buffer_processing.hpp"
+#include "core/value_image_adapter.hpp"
 
 namespace ps::compute {
 namespace {
@@ -57,16 +58,19 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
  *
  * @param source Source output owned by graph or proxy state.
  * @param label Human-readable buffer domain used in error messages.
- * @return Independent output with cloned image payload and copied metadata.
+ * @return Independent output with cloned image payload, cleared image Value
+ * identity, and copied non-image metadata.
  * @throws std::bad_alloc when output or metadata copying exhausts memory.
  * @throws GraphError when image payload cloning otherwise fails.
  * @note Named ParameterValue data, spatial context, and debug metadata are
- * value-copied.
+ * value-copied. Clearing `image_value` prevents mutable staged bytes from
+ * retaining the source cache revision; HP commit reseals final bytes.
  */
 NodeOutput clone_node_output(const NodeOutput& source,
                              const std::string& label) {
   NodeOutput cloned = source;
   cloned.image_buffer = clone_image_buffer(source.image_buffer, label);
+  cloned.image_value = Value{};
   return cloned;
 }
 
@@ -142,6 +146,7 @@ void HighPrecisionDirtyWriteBuffer::commit_to_graph(GraphModel& graph) {
     if (!entry.has_output) {
       continue;
     }
+    value_image_adapter::normalize_node_output_image_value(&entry.output);
     graph.mutate_node_runtime_state(
         node_id, [&](GraphModel::NodeRuntimeState& state) {
           state.cached_output_high_precision = std::move(entry.output);

@@ -3,13 +3,13 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "core/value_image_adapter.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/core/image_buffer.hpp"
 
@@ -50,142 +50,6 @@ std::size_t checked_add(std::size_t left, std::size_t right,
     throw std::overflow_error(diagnostic);
   }
   return left + right;
-}
-
-/**
- * @brief Converts one current ImageBuffer storage type to V-2 element facts.
- *
- * @param type Valid current ImageBuffer channel storage type.
- * @return Matching logical semantics and physical bit width.
- * @throws std::invalid_argument for an unknown DataType value.
- * @note The conversion is private to the bounded current-product edge.
- */
-std::pair<ElementSemantics, StorageEncoding> dense_element_from_image_type(
-    DataType type) {
-  switch (type) {
-    case DataType::UINT8:
-      return {ElementSemantics::UnsignedInteger, StorageEncoding{8U}};
-    case DataType::INT8:
-      return {ElementSemantics::SignedInteger, StorageEncoding{8U}};
-    case DataType::UINT16:
-      return {ElementSemantics::UnsignedInteger, StorageEncoding{16U}};
-    case DataType::INT16:
-      return {ElementSemantics::SignedInteger, StorageEncoding{16U}};
-    case DataType::FLOAT32:
-      return {ElementSemantics::FloatingPoint, StorageEncoding{32U}};
-    case DataType::FLOAT64:
-      return {ElementSemantics::FloatingPoint, StorageEncoding{64U}};
-  }
-  throw std::invalid_argument("ImageBuffer DataType is not declared.");
-}
-
-/**
- * @brief Converts supported V-2 element facts to a current ImageBuffer type.
- *
- * @param descriptor Valid V-2 DenseTensor descriptor.
- * @return Equivalent current ImageBuffer channel type.
- * @throws std::invalid_argument when the element combination is unsupported.
- * @note The current type vocabulary exactly covers the V-2 element matrix.
- */
-DataType image_type_from_dense_element(
-    const DenseTensorDescriptor& descriptor) {
-  const std::uint32_t bit_width = descriptor.storage_encoding.bit_width;
-  switch (descriptor.element_semantics) {
-    case ElementSemantics::UnsignedInteger:
-      if (bit_width == 8U) {
-        return DataType::UINT8;
-      }
-      if (bit_width == 16U) {
-        return DataType::UINT16;
-      }
-      break;
-    case ElementSemantics::SignedInteger:
-      if (bit_width == 8U) {
-        return DataType::INT8;
-      }
-      if (bit_width == 16U) {
-        return DataType::INT16;
-      }
-      break;
-    case ElementSemantics::FloatingPoint:
-      if (bit_width == 32U) {
-        return DataType::FLOAT32;
-      }
-      if (bit_width == 64U) {
-        return DataType::FLOAT64;
-      }
-      break;
-  }
-  throw std::invalid_argument(
-      "DenseTensor element cannot be adapted to ImageBuffer.");
-}
-
-/**
- * @brief Copies one current CPU image into an immutable DenseTensor snapshot.
- *
- * @param buffer Current image descriptor and payload to snapshot.
- * @return Value with shape [height, width, channels], explicit y/x/channel
- *         axes, and the same positive row stride.
- * @throws std::invalid_argument for malformed, non-CPU, or unrepresentable
- *         current descriptors.
- * @throws std::overflow_error for unrepresentable envelope arithmetic.
- * @throws std::bad_alloc when snapshot allocation fails.
- * @note Only active row bytes are read. Inter-row padding in the exact Value
- *       envelope is initialized independently, and trailing last-row padding
- *       is neither represented nor read.
- */
-Value snapshot_image_buffer(const ImageBuffer& buffer) {
-  validate_image_buffer(buffer);
-  if (buffer.device != Device::CPU || buffer.width <= 0 || buffer.height <= 0 ||
-      buffer.channels <= 0) {
-    throw std::invalid_argument(
-        "Dense image operation requires a nonempty CPU ImageBuffer.");
-  }
-  if (buffer.step >
-      static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
-    throw std::invalid_argument(
-        "ImageBuffer row stride exceeds the V-2 signed stride domain.");
-  }
-
-  const std::size_t element_bytes = image_buffer_bytes_per_channel(buffer.type);
-  const std::size_t pixel_bytes =
-      checked_multiply(static_cast<std::size_t>(buffer.channels), element_bytes,
-                       "ImageBuffer pixel size exceeds size_t.");
-  if (pixel_bytes > static_cast<std::size_t>(
-                        std::numeric_limits<std::ptrdiff_t>::max()) ||
-      element_bytes > static_cast<std::size_t>(
-                          std::numeric_limits<std::ptrdiff_t>::max())) {
-    throw std::invalid_argument(
-        "ImageBuffer element stride exceeds the V-2 signed stride domain.");
-  }
-  const std::size_t row_bytes = image_buffer_row_bytes(buffer);
-  const std::size_t preceding_rows =
-      checked_multiply(static_cast<std::size_t>(buffer.height - 1), buffer.step,
-                       "ImageBuffer snapshot row offsets exceed size_t.");
-  const std::size_t storage_size =
-      checked_add(preceding_rows, row_bytes,
-                  "ImageBuffer snapshot envelope exceeds size_t.");
-  std::vector<std::byte> storage(storage_size, std::byte{0});
-  for (int row = 0; row < buffer.height; ++row) {
-    std::memcpy(storage.data() + static_cast<std::size_t>(row) * buffer.step,
-                image_buffer_row_data(buffer, row), row_bytes);
-  }
-
-  const auto [semantics, encoding] = dense_element_from_image_type(buffer.type);
-  DenseTensorDescriptor descriptor{{static_cast<std::size_t>(buffer.height),
-                                    static_cast<std::size_t>(buffer.width),
-                                    static_cast<std::size_t>(buffer.channels)},
-                                   semantics,
-                                   encoding};
-  ImageFacet image;
-  image.x_axis = 1U;
-  image.y_axis = 0U;
-  image.channel_axis = 2U;
-  StridedLayout layout{{static_cast<std::ptrdiff_t>(buffer.step),
-                        static_cast<std::ptrdiff_t>(pixel_bytes),
-                        static_cast<std::ptrdiff_t>(element_bytes)}};
-  return Value::from_cpu_dense_tensor(std::move(descriptor), image,
-                                      std::move(layout), std::move(storage));
 }
 
 /**
@@ -255,72 +119,28 @@ void validate_logical_image_descriptor(const DenseImageDescriptor& descriptor) {
 }
 
 /**
- * @brief Reports whether an ImageView layout is current-buffer adaptable.
- *
- * @param view Valid immutable result view.
- * @return True for positive row stride and contiguous interleaved x/channel
- *         element strides.
- * @throws std::overflow_error when active-row multiplication exceeds size_t.
- * @note Singleton unassigned axes were already checked by ImageView.
- */
-bool has_interleaved_image_layout(const ImageView& view) {
-  const StridedLayout& layout = view.layout();
-  const ImageFacet& image = view.image_facet();
-  const std::size_t element_bytes = view.element_bytes();
-  const std::size_t pixel_bytes = checked_multiply(
-      view.channels(), element_bytes, "Dense image pixel size exceeds size_t.");
-  const std::size_t row_bytes = checked_multiply(
-      view.width(), pixel_bytes, "Dense image row size exceeds size_t.");
-  if (layout.byte_strides[image.x_axis] !=
-          static_cast<std::ptrdiff_t>(pixel_bytes) ||
-      view.row_stride() < 0 ||
-      static_cast<std::size_t>(view.row_stride()) < row_bytes) {
-    return false;
-  }
-  if (image.channel_axis.has_value() &&
-      layout.byte_strides[*image.channel_axis] !=
-          static_cast<std::ptrdiff_t>(element_bytes)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * @brief Copies a validated immutable result into a current NodeOutput.
+ * @brief Publishes a validated immutable result and compatibility snapshot.
  *
  * @param value Execute result to validate and publish.
  * @param inferred Exact logical descriptor returned by inference.
- * @return Newly allocated validated CPU ImageBuffer result.
+ * @return NodeOutput retaining the exact Value plus a derived CPU ImageBuffer.
  * @throws std::invalid_argument or std::overflow_error for descriptor, facet,
  *         layout, or current-adapter mismatches.
  * @throws std::bad_alloc when current output allocation fails.
- * @note The output Value is retained by ImageView until all active bytes have
- *       been copied; no shared owner crosses into NodeOutput.
+ * @note The exact sealed Value is the identity authority. ImageBuffer receives
+ * an independent active-element snapshot for current ABI/Host consumers.
  */
 NodeOutput publish_image_value(Value value,
                                const DenseImageDescriptor& inferred) {
-  ImageView view(std::move(value));
+  ImageView view(value);
   if (!(logical_descriptor(view) == inferred)) {
     throw std::invalid_argument(
         "Dense image execute result disagrees with inference.");
   }
-  if (!has_interleaved_image_layout(view)) {
-    throw std::invalid_argument(
-        "Dense image execute result is not interleaved-adaptable.");
-  }
 
-  const DataType type = image_type_from_dense_element(view.descriptor());
   NodeOutput output;
-  output.image_buffer = make_aligned_cpu_image_buffer(
-      static_cast<int>(view.width()), static_cast<int>(view.height()),
-      static_cast<int>(view.channels()), type);
-  const std::size_t row_bytes = image_buffer_row_bytes(output.image_buffer);
-  auto* output_base = static_cast<std::byte*>(output.image_buffer.data.get());
-  for (std::size_t row = 0U; row < view.height(); ++row) {
-    std::memcpy(output_base + row * output.image_buffer.step,
-                view.channel_data(0U, row, 0U), row_bytes);
-  }
-  validate_image_buffer(output.image_buffer);
+  output.image_buffer = value_image_adapter::snapshot_cpu_image_buffer(value);
+  output.image_value = std::move(value);
   return output;
 }
 
@@ -524,7 +344,12 @@ NodeOutput execute_cpu_dense_image_operation(
         throw std::invalid_argument(
             "CPU dense image operation input is missing.");
       }
-      input_views.emplace_back(snapshot_image_buffer(input->image_buffer));
+      if (input->image_value.valid()) {
+        input_views.emplace_back(input->image_value);
+      } else {
+        input_views.emplace_back(
+            value_image_adapter::snapshot_cpu_image_value(input->image_buffer));
+      }
       input_descriptors.push_back(logical_descriptor(input_views.back()));
     }
   } catch (const std::bad_alloc&) {

@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
+#include "photospider/memory/buffer_handle.hpp"
 #include "photospider/memory/strided_layout.hpp"
 
 /**
@@ -130,15 +132,210 @@ struct ImageFacet {
 std::size_t dense_tensor_element_bytes(const DenseTensorDescriptor& descriptor);
 
 /**
+ * @brief Opaque process-local identity of one immutable Value publication.
+ *
+ * @throws Nothing for default construction, copying, comparison, and
+ * destruction.
+ * @note A revision is distinct from allocation, descriptor, content, layout,
+ * artifact, graph-version, scheduler, and persistent cache identities.
+ */
+class ValueRevisionId final {
+ public:
+  /**
+   * @brief Creates an invalid revision sentinel.
+   *
+   * @throws Nothing.
+   * @note Every successfully published Value has a nonzero revision.
+   */
+  constexpr ValueRevisionId() noexcept = default;
+
+  /**
+   * @brief Reports whether this token identifies a Value publication.
+   *
+   * @return True when the process-local token is nonzero.
+   * @throws Nothing.
+   */
+  constexpr bool valid() const noexcept { return value_ != 0U; }
+
+  /**
+   * @brief Returns the opaque process-local token for diagnostics.
+   *
+   * @return Zero for an invalid sentinel; otherwise a process-local token.
+   * @throws Nothing.
+   * @note Callers must not serialize this token or use it as an artifact,
+   * registry, task-graph, disk-cache, or cross-process identity.
+   */
+  constexpr std::uint64_t value() const noexcept { return value_; }
+
+  /**
+   * @brief Compares complete Value revision tokens.
+   *
+   * @param other Revision to compare.
+   * @return True when both opaque process-local values match.
+   * @throws Nothing.
+   */
+  constexpr bool operator==(const ValueRevisionId& other) const noexcept {
+    return value_ == other.value_;
+  }
+
+  /**
+   * @brief Compares Value revisions for inequality.
+   *
+   * @param other Revision to compare.
+   * @return True when opaque process-local values differ.
+   * @throws Nothing.
+   */
+  constexpr bool operator!=(const ValueRevisionId& other) const noexcept {
+    return !(*this == other);
+  }
+
+ private:
+  /**
+   * @brief Creates one valid token from the Value revision source.
+   *
+   * @param value Nonzero process-local token.
+   * @throws Nothing.
+   * @note Only successful Value publication may mint this type.
+   */
+  explicit constexpr ValueRevisionId(std::uint64_t value) noexcept
+      : value_(value) {}
+
+  /** @brief Opaque nonzero token, or zero for the invalid sentinel. */
+  std::uint64_t value_ = 0U;
+
+  friend class Value;
+  friend class ValueBuilder;
+};
+
+class Value;
+
+/**
+ * @brief Exclusive producer for one future immutable CPU DenseTensor Value.
+ *
+ * ValueBuilder validates a positive-stride exact producer envelope before
+ * allocation, issues at most one active move-only WriteLease, and closes all
+ * producer authority at seal. No BufferHandle escapes before seal.
+ *
+ * @throws Nothing for move construction, move assignment, and destruction.
+ * @note The builder is externally serialized. It provides raw allocation-byte
+ * access only; no writable logical tensor view or aliasing layout is exposed.
+ */
+class ValueBuilder final {
+ public:
+  /** @brief Copy construction is forbidden for exclusive producer authority. */
+  ValueBuilder(const ValueBuilder&) = delete;
+
+  /** @brief Copy assignment is forbidden for exclusive producer authority. */
+  ValueBuilder& operator=(const ValueBuilder&) = delete;
+
+  /**
+   * @brief Transfers complete unsealed or sealed builder state.
+   *
+   * @param other Builder to consume.
+   * @throws Nothing.
+   * @note The source becomes an invalid moved-from builder.
+   */
+  ValueBuilder(ValueBuilder&& other) noexcept;
+
+  /**
+   * @brief Replaces this builder with transferred state.
+   *
+   * @param other Builder to consume.
+   * @return This builder after transfer.
+   * @throws Nothing.
+   * @note Existing unsealed state is abandoned only after any lease has
+   * already released its separately retained authority.
+   */
+  ValueBuilder& operator=(ValueBuilder&& other) noexcept;
+
+  /**
+   * @brief Destroys an unpublished allocation or released sealed state.
+   *
+   * @throws Nothing.
+   * @note An active WriteLease independently retains both allocation and
+   * authority until that lease is destroyed.
+   */
+  ~ValueBuilder() noexcept;
+
+  /**
+   * @brief Allocates one exact positive-stride CPU DenseTensor producer.
+   *
+   * Validation checks positive shape, supported element encoding, optional
+   * distinct in-rank image axes, one positive stride per axis, checked
+   * envelope arithmetic, zero layout byte offset, and exact storage size.
+   *
+   * @param descriptor Logical descriptor copied into private builder state.
+   * @param image_facet Optional explicit image-axis mapping.
+   * @param layout Positive producer layout copied into private builder state.
+   * @param storage_size Exact positive allocation byte length.
+   * @return Move-only exclusive builder ready to issue one WriteLease.
+   * @throws std::invalid_argument for malformed descriptor, facet, layout, or
+   * storage-size mismatch.
+   * @throws std::overflow_error when envelope or identity arithmetic overflows.
+   * @throws std::bad_alloc when state or CPU allocation cannot be created.
+   * @note No caller allocation is retained.
+   */
+  static ValueBuilder allocate_cpu_dense_tensor(
+      DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
+      StridedLayout layout, std::size_t storage_size);
+
+  /**
+   * @brief Acquires the builder's sole active exclusive write lease.
+   *
+   * @return Move-only lease over the complete private allocation.
+   * @throws std::logic_error when the builder is moved-from, sealed, or already
+   * has an active lease.
+   * @note Seal remains forbidden until the returned lease is destroyed.
+   */
+  WriteLease acquire_write();
+
+  /**
+   * @brief Closes producer authority and publishes one immutable Value.
+   *
+   * @return Valid Value with a fresh revision and the builder allocation.
+   * @throws std::logic_error when the builder is moved-from, already sealed, or
+   * still has an active WriteLease.
+   * @throws std::overflow_error when Value revision identity is exhausted.
+   * @throws std::bad_alloc when immutable publication state cannot allocate.
+   * @note A successful seal is irreversible. All bytes, including padding,
+   * become immutable.
+   */
+  Value seal();
+
+  /**
+   * @brief Reports whether this builder has successfully sealed.
+   *
+   * @return True after seal; false for unsealed or moved-from state.
+   * @throws Nothing.
+   */
+  bool sealed() const noexcept;
+
+ private:
+  /** @brief Private descriptor, allocation, and producer-authority state. */
+  struct Impl;
+
+  /**
+   * @brief Creates a builder from completely validated private state.
+   *
+   * @param impl Exclusive implementation state.
+   * @throws Nothing.
+   */
+  explicit ValueBuilder(std::unique_ptr<Impl> impl) noexcept;
+
+  /** @brief Exclusive builder state, or null after move. */
+  std::unique_ptr<Impl> impl_;
+};
+
+/**
  * @brief Immutable owning handle for one validated CPU DenseTensor payload.
  *
- * Value uses a shared immutable PImpl. Copies share the same descriptor,
- * layout, facet, and owned byte envelope; no public API exposes writable
- * payload access.
+ * Value uses a shared immutable PImpl. Copies share one descriptor, layout,
+ * facet, BufferHandle, allocation identity, and Value revision. Readable
+ * pointers are available only through retaining checked views and ReadLease.
  *
  * @throws Nothing for default, copy, move, assignment, and destruction.
- * @note V-2 owns CPU bytes directly. BufferHandle identity, offsets, leases,
- *       replicas, readiness, and mutable aliases remain later contracts.
+ * @note V-3 implements CPU ownership and runtime identity only. Replicas,
+ * device routing, readiness, transfers, and fences remain later contracts.
  */
 class Value final {
  public:
@@ -154,8 +351,9 @@ class Value final {
    * @brief Publishes one exclusively owned immutable CPU DenseTensor.
    *
    * Validation checks nonempty positive shape, supported element encoding,
-   * optional distinct in-rank image axes, one positive stride per axis,
-   * checked envelope arithmetic, and exact storage size before publication.
+   * optional distinct in-rank image axes, one positive stride per axis, zero
+   * producer byte offset, checked envelope arithmetic, and exact storage size
+   * before publication.
    *
    * @param descriptor Concrete logical tensor descriptor copied into isolated
    *        immutable state after validation.
@@ -179,6 +377,31 @@ class Value final {
                                      std::optional<ImageFacet> image_facet,
                                      StridedLayout layout,
                                      std::vector<std::byte> storage);
+
+  /**
+   * @brief Publishes an immutable logical view over a sealed CPU buffer.
+   *
+   * Validation checks the descriptor and facet, then computes the complete
+   * lower/upper signed-stride envelope from `layout.byte_offset`. Positive,
+   * zero, and negative read strides are accepted only when every addressed
+   * element lies inside `buffer`.
+   *
+   * @param descriptor Concrete logical descriptor copied into immutable state.
+   * @param image_facet Optional explicit image-axis mapping.
+   * @param layout Signed byte strides and logical-origin byte offset.
+   * @param buffer Sealed immutable range retained by the new Value.
+   * @return Valid Value with a fresh revision and buffer allocation identity.
+   * @throws std::invalid_argument for malformed descriptor, facet, layout rank,
+   * or an invalid buffer.
+   * @throws std::out_of_range when the signed layout envelope escapes buffer.
+   * @throws std::overflow_error when envelope or revision arithmetic overflows.
+   * @throws std::bad_alloc when immutable publication state cannot allocate.
+   * @note Publishing another logical view over the same BufferHandle preserves
+   * allocation identity but creates a distinct ValueRevisionId.
+   */
+  static Value from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
+                                     std::optional<ImageFacet> image_facet,
+                                     StridedLayout layout, BufferHandle buffer);
 
   /**
    * @brief Reports whether this handle owns a published DenseTensor.
@@ -223,13 +446,33 @@ class Value final {
   std::size_t storage_size() const;
 
   /**
-   * @brief Returns the start of the immutable owned CPU byte envelope.
+   * @brief Returns the immutable checked CPU allocation range.
    *
-   * @return Read-only pointer retained by this Value.
+   * @return Borrowed BufferHandle retained by this Value.
    * @throws std::logic_error when the handle is invalid.
-   * @note The pointer remains valid while this Value or a retaining view lives.
+   * @note Callers may copy, subrange, or acquire a ReadLease from the handle;
+   * no raw pointer is exposed by Value.
    */
-  const std::byte* data() const;
+  const BufferHandle& buffer_handle() const;
+
+  /**
+   * @brief Returns this Value's physical allocation identity.
+   *
+   * @return Nonzero process-local identity shared by allocation aliases.
+   * @throws std::logic_error when the handle is invalid.
+   * @note This identity is neither a Value revision nor a persistent cache key.
+   */
+  AllocationIdentity allocation_identity() const;
+
+  /**
+   * @brief Returns this immutable publication's Value revision.
+   *
+   * @return Nonzero process-local revision shared by Value copies.
+   * @throws std::logic_error when the handle is invalid.
+   * @note Publishing a new view over the same BufferHandle mints a new
+   * revision.
+   */
+  ValueRevisionId revision_id() const;
 
  private:
   /** @brief Immutable implementation containing descriptor, layout, and bytes.
@@ -248,6 +491,8 @@ class Value final {
   /** @brief Shared immutable DenseTensor state, or null for an invalid handle.
    */
   std::shared_ptr<const Impl> impl_;
+
+  friend class ValueBuilder;
 };
 
 /**
@@ -265,7 +510,7 @@ class DenseTensorView final {
    *
    * @param value Value copied or moved into the view.
    * @throws std::invalid_argument when value is invalid.
-   * @note Value construction already validated descriptor, layout, and bytes.
+   * @note Construction acquires one ReadLease retained with the Value.
    */
   explicit DenseTensorView(Value value);
 
@@ -346,10 +591,12 @@ class DenseTensorView final {
   std::size_t storage_size() const noexcept;
 
   /**
-   * @brief Returns the immutable storage-envelope base address.
+   * @brief Returns the immutable logical coordinate-zero address.
    *
-   * @return Read-only retained payload pointer.
+   * @return Read-only pointer at `layout().byte_offset` within the lease.
    * @throws Nothing after successful view construction.
+   * @note The pointer remains valid only while this view or a copy retains the
+   * ReadLease.
    */
   const std::byte* data() const noexcept;
 
@@ -371,6 +618,14 @@ class DenseTensorView final {
   /** @brief Complete retained Value establishing descriptor and byte lifetime.
    */
   Value value_;
+
+  /**
+   * @brief Retaining read lease establishing every exposed pointer lifetime.
+   *
+   * @note During assignment the old lease retains its allocation while Value
+   * state changes; during destruction the lease releases before the Value.
+   */
+  ReadLease read_lease_;
 };
 
 }  // namespace ps

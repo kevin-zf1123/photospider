@@ -28,6 +28,7 @@
 #include "compute/node_input_resolver.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "compute/resource_demand_estimator.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
@@ -602,8 +603,9 @@ plugin::ParameterMap stabilized_runtime_parameters(
  * @return Independent graph used only for extent/task/dirty planning.
  * @throws GraphError or std::bad_alloc from node cloning and graph validation.
  * @note Geometry-affected caches are cleared before stabilized outputs are
- * installed. The shadow has its own FullTaskGraph cache and therefore cannot
- * reuse a stale live-graph task expansion.
+ * installed. Staged legacy CPU images are normalized to sealed Value identity
+ * before becoming shadow HP cache. The shadow has its own FullTaskGraph cache
+ * and therefore cannot reuse a stale live-graph task expansion.
  */
 std::unique_ptr<GraphModel> make_stabilized_planning_graph(
     const GraphModel& graph, const StabilizedDirtyParameters& stabilized,
@@ -632,7 +634,9 @@ std::unique_ptr<GraphModel> make_stabilized_planning_graph(
                                                 std::to_string(node_id) +
                                                 " is missing.");
     }
-    node_it->second.cached_output_high_precision = staged.output;
+    NodeOutput normalized_output = staged.output;
+    value_image_adapter::normalize_node_output_image_value(&normalized_output);
+    node_it->second.cached_output_high_precision = std::move(normalized_output);
     node_it->second.hp_version = staged.hp_version;
     node_it->second.hp_roi = staged.hp_roi;
   }

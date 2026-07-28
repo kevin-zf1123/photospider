@@ -135,37 +135,48 @@ previous positive/negative infinity empty-range sentinels. Opaque non-CPU
 resources retain provider-supplied diagnostics because only their device
 adapter may map them.
 
-## V-2 Value-Backed CPU Operation Bridge
+## V-3 Value-Backed CPU Ownership Bridge
 
 The dependency-neutral operation runtime also implements the installed
-`Value`, `DenseTensorView`, and `ImageView` CPU subset. A published Value owns
-an exact immutable byte envelope; concrete shape and element facts remain
-separate from an optional explicit Image Facet and positive signed byte
-strides. Checked views retain the complete Value and expose no writable
-pointer.
+`BufferHandle`, `ValueBuilder`, `Value`, `DenseTensorView`, and `ImageView` CPU
+subset. `BufferHandle` is a checked nonempty byte range over one process-local
+allocation identity. Consumers acquire retaining `ReadLease` objects;
+`ValueBuilder` alone can acquire one move-only `WriteLease`, refuses to seal
+while that lease is live, and revokes further writes when it publishes the
+immutable bytes with a fresh process-local `ValueRevisionId`.
+
+Concrete shape and element facts remain separate from an optional explicit
+Image Facet and a `StridedLayout`. Producer layouts require a zero byte offset
+and positive exact-envelope strides. Immutable Values constructed over a
+sealed handle may instead use a bounded byte offset plus positive, zero, or
+negative signed byte strides. Checked views retain both the complete Value and
+a read lease, and expose no writable pointer.
 
 The built-in `image_process:invert_dense` operation proves this surface on the
 production path:
 
-1. the current monolithic callback validates one nonempty CPU `ImageBuffer`;
-2. a private adapter allocates an exact Value envelope, preserves
-   `[height, width, channels]` and `step`, copies active rows without sharing
-   the mutable ImageBuffer owner, and initializes inter-row padding
-   independently;
+1. the current monolithic callback validates one nonempty CPU image input;
+2. when `NodeOutput::image_value` is valid, the private runner reuses that
+   sealed Value directly; otherwise a compatibility adapter snapshots the
+   legacy `ImageBuffer` into a new sealed allocation while preserving
+   `[height, width, channels]`, `step`, active rows, and independently
+   initialized padding;
 3. pure inference receives only a deep-owned effective parameter snapshot and
    logical DenseTensor/Image descriptors, with no Node output/cache state;
 4. execute receives checked ImageViews, follows explicit x/y/channel strides,
-   and returns a separately owned padded unsigned-8 Value; and
+   and returns a separately owned sealed unsigned-8 Value; and
 5. the runner compares the complete result descriptor and Image Facet with
-   inference, requires an interleaved current-adapter layout, copies only
-   active bytes to a new ImageBuffer, and validates it before publication.
+   inference, publishes that exact result allocation/revision as
+   `NodeOutput::image_value`, and derives a separately owned compatibility
+   `ImageBuffer` snapshot for the current ABI, tiled-write, codec, and Host
+   boundaries.
 
 Malformed caller input is `GraphErrc::InvalidParameter`; an unsupported or
 mismatched operation result is `GraphErrc::ComputeError`; `std::bad_alloc`
-propagates unchanged. This bridge is source-tree private. Graph/cache/Host,
-operation ABI v2, and other operations continue to use ImageBuffer, and #80
-replaces this copy edge when BufferHandle ownership and cache allocation
-identity become explicit.
+propagates unchanged. The runner and compatibility adapter remain source-tree
+private. Operation ABI v2 and unconverted operations still use ImageBuffer;
+the private formal HP cache carries both representations and treats a valid
+sealed Value as allocation/revision identity authority.
 
 ## GPU Buffer Contract
 
@@ -233,7 +244,7 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
-### Implemented V-2 relationship and remaining target
+### Implemented V-3 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -247,14 +258,21 @@ PixelRect   -> RegionSet atom ImageRect
 
 The target separates logical `DataDescriptor` from physical
 `StorageBinding`, and accesses memory only through checked `BufferHandle`
-ranges and leases. V-2 implements only the CPU DenseTensor descriptor,
-ImageFacet, positive signed StridedLayout, immutable direct byte owner, and
-checked ImageView used by the bounded operation bridge above. It does not
-implement BufferHandle/ranges/leases, allocation identity, cache ownership,
-quantization, Region, device identity, readiness, transfer, or provider ABI
-v3. The current ImageBuffer structure, allocation, device, DSO, and outer
-graph/cache contracts therefore remain authoritative until their owning later
-slices update code, ABI, tests, and this current-fact document together.
+ranges and leases. V-2 introduced the CPU DenseTensor descriptor, ImageFacet,
+positive producer `StridedLayout`, immutable byte ownership, and checked
+ImageView used by the bounded operation bridge. V-3 adds public checked
+BufferHandle ranges, retaining read leases, exclusive builder write leases,
+process-local allocation/revision identities, byte offsets, bounded signed and
+zero-stride immutable views, and allocation identity authority in formal HP
+cache entries.
+
+V-3 does not implement quantization, Region, device identity, readiness,
+transfer, provider ABI v3, or general named graph Value outputs. The current
+ImageBuffer structure, device field, operation DSO ABI, tiled-write, codec, and
+Host boundaries therefore remain compatibility contracts until their owning
+later slices migrate them. Within a formal CPU image cache entry that carries
+both forms, the valid sealed Value—not the mutable compatibility snapshot—is
+the allocation/revision identity authority.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
@@ -267,12 +285,14 @@ becoming part of the operation ABI.
 ## Implementation and Validation Entry Points
 
 - `include/photospider/core/image_buffer.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/value_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/compute/image_buffer.hpp`
 - `src/lib/adapters/opencv/buffer_adapter_opencv.*`

@@ -128,7 +128,8 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 
 | 字段 | 含义 |
 | --- | --- |
-| `image_buffer` | 以公共 `ImageBuffer` 契约表示的图像负载。 |
+| `image_buffer` | 独立的当前 plugin ABI v2、tiled-write、codec 与 Host compatibility snapshot。 |
+| `image_value` | 有效时作为 CPU 图像 Value 及 allocation/revision identity authority 的 sealed Value。 |
 | `data` | 作为 `plugin::ParameterMap` 保存的命名标量或结构化输出。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
 | `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过 `ImageBuffer::step` 遍历 active scalar byte；padding 被排除，opaque device value 保留 provider diagnostic。 |
@@ -224,29 +225,42 @@ RT proxy commit 之后。
   `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
-### 已实现的 V-2 data surface 与剩余 migration
+### 已实现的 V-3 ownership 与 cache identity surface
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
-接受完整的通用 Value 替换。V-2 现已实现该目标中一个有界的 CPU DenseTensor 子集：
+接受完整的通用 Value 替换。V-2 引入了有界 CPU DenseTensor 子集；V-3 现已接通其
+physical ownership 与正式 HP cache identity：
 
 - installed `DenseTensorDescriptor` 把 concrete shape、`ElementSemantics` 与
   `StorageEncoding` 分开；
 - installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
-- final、copyable `Value` 共享一个 immutable PImpl，其中包含 descriptor、optional facet、
-  positive signed `StridedLayout` 与精确拥有的 CPU byte envelope；
-- `DenseTensorView` 与 `ImageView` 保留完整 Value；它们使用 copy-like move 语义，
-  让 source 与 destination 都保持有效，并且只暴露经过 bounds check 的只读 address；
+- `BufferHandle` 是同一 CPU allocation identity 上受检、不可变、非空的 range；它不暴露
+  pointer，并创建保留 identity 的 checked subrange；
+- `ValueBuilder` 拥有唯一 move-only `WriteLease`，live lease 存在时拒绝 seal，并以全新
+  `ValueRevisionId` 发布 immutable byte；
+- vector 便捷 constructor 仍会在 seal 前 deep-copy lvalue/rvalue 的
+  descriptor/layout/payload allocation；
+- `StridedLayout::byte_offset` 锚定 logical coordinate zero；sealed handle 上的 immutable
+  Value 可以使用受界限约束的正、零或负 stride；
+- `DenseTensorView` 与 `ImageView` 同时保留 Value 和 `ReadLease`，使用 copy-like move
+  语义，并只在该 lease 内暴露 pointer；
 - `image_process:invert_dense` 对这些 view 执行 descriptor-only inference 与
-  stride-aware unsigned-8 execution。
+  stride-aware unsigned-8 execution；它会复用已有 sealed input Value，并发布完全相同的
+  sealed result revision。
 
-这项已实现 surface 不改变上文 graph 字段。内建 dense operation 在当前 product edge 使用
-private deep-copy bridge；`NodeOutput` 仍包含 `ImageBuffer` 与命名 `ParameterMap` data，
-connected computed result 仍使用 `ParameterMap`，graph/dirty/planning geometry 仍使用
-`PixelRect`。BufferHandle allocation identity、cache integration、`DataSpec`、`RegionSet`、
-device routing、readiness、transfer 与 provider ABI v3 仍属于后续 no-shim migration slice。
-在这些切片中，命名 computed output 会变成命名的不可变 Value，`ParameterMap` 只保留
-configuration 用途，已迁移的 Region 边界会用 `RegionSet` 的 `ImageRect` atom 替换
-`PixelRect`。
+私有 `NodeOutput` 现在同时保留 `image_value` 与 `image_buffer`。有效的 sealed Value 是
+CPU image allocation/revision identity authority；ImageBuffer 是独立 compatibility
+snapshot。普通 HP commit、sequential HP compute、connected-preflight shadow cache、
+dirty HP commit 与 disk decode 都会在正式发布前规范化 legacy CPU buffer。immutable cache
+copy 保留两类 identity；dirty clone 在 mutation 前清除旧 Value 并对最终 byte 重新 seal；
+replacement 与 disk decode 生成新 identity。allocation/revision token 只在进程内有效，
+永不进入 task-graph key、cache path、graph/YAML document 或 artifact byte。
+
+命名 `ParameterMap` result 与 graph/dirty/planning 的 `PixelRect` geometry 保持不变。
+`DataSpec`、`RegionSet`、device routing、readiness、transfer、quantization 与 provider
+ABI v3 仍属于后续 no-shim slice。在这些切片中，命名 computed output 会变成命名的
+immutable Value，`ParameterMap` 只保留 configuration 用途，已迁移的 Region 边界会用
+`RegionSet` 的 `ImageRect` atom 替换 `PixelRect`。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
@@ -260,6 +274,7 @@ dependency 工作由
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
@@ -273,6 +288,7 @@ dependency 工作由
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/value_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`

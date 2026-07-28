@@ -232,6 +232,14 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "BuilderScopesWriteAuthorityAndReadLeaseLifetime"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ImmutableSignedOffsetViewsShareAllocationAndMintRevisions"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "ValueCopiesShareBytesAndViewsRetainLifetime"
         ),
         (
@@ -248,11 +256,27 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "ValueDoesNotAdoptMovedInputAllocations"
+            "ValueRemainsStableWhenMovedInputsAreReused"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FormalHpCachePreservesAliasesAndResealsDirtyAndReplacementBytes"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DiskReloadMintsFreshRuntimeIdentitiesWithoutChangingCachePath"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DiskSaveSerializesSealedValueInsteadOfMutableCompatibilitySnapshot"
         ),
         (
             "CpuDenseTensorImageOperation."
             "DenseInvertInferencePreservesExactLogicalDescriptor"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DenseRunnerConsumesSealedValueAndPublishesExactResultRevision"
         ),
         (
             "CpuDenseTensorImageOperation."

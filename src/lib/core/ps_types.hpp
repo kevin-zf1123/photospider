@@ -23,6 +23,7 @@
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/geometry.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/data/value.hpp"
 #include "photospider/plugin/node_view.hpp"
 
 namespace ps {
@@ -132,9 +133,10 @@ struct DebugMeta {
  *
  * Private operation callbacks and compute services exchange this value after
  * the operation host adapter has converted the public `OperationOutput`.
- * Besides image, format-neutral named data, spatial, and debug state, the host
- * may attach a dynamic-library lease so plugin-provided image deleters cannot
- * run after their library is unmapped.
+ * Besides the current ImageBuffer compatibility snapshot, an identity-bearing
+ * sealed CPU image Value, format-neutral named data, spatial, and debug state,
+ * the host may attach a dynamic-library lease so plugin-provided image deleters
+ * cannot run after their library is unmapped.
  *
  * Copy construction first retains the source lease and then copies payload
  * state. Copy assignment stages a complete replacement before swapping, while
@@ -240,6 +242,7 @@ struct NodeOutput {
   void swap(NodeOutput& other) noexcept {
     static_assert(std::is_nothrow_swappable_v<std::shared_ptr<void>> &&
                       std::is_nothrow_swappable_v<ImageBuffer> &&
+                      std::is_nothrow_swappable_v<Value> &&
                       std::is_nothrow_swappable_v<decltype(data)> &&
                       std::is_nothrow_swappable_v<SpatialContext> &&
                       std::is_nothrow_swappable_v<DebugMeta>,
@@ -247,6 +250,7 @@ struct NodeOutput {
     using std::swap;
     plugin_library_lifetime.swap(other.plugin_library_lifetime);
     swap(image_buffer, other.image_buffer);
+    swap(image_value, other.image_value);
     data.swap(other.data);
     swap(space, other.space);
     swap(debug, other.debug);
@@ -271,6 +275,17 @@ struct NodeOutput {
    * result's dynamic-library lease is released.
    */
   ps::ImageBuffer image_buffer;
+
+  /**
+   * @brief Sealed CPU image Value and formal cache memory identity authority.
+   *
+   * @note A valid value is authoritative for allocation/revision identity and
+   * disk-cache image bytes. `image_buffer` remains an independent plugin ABI
+   * v2, tiled-write, codec, Host, and legacy-operation compatibility snapshot.
+   * Dirty staging must clear this member before mutating cloned CPU bytes and
+   * reseal at the HP commit boundary.
+   */
+  ps::Value image_value;
 
   /**
    * @brief Named non-image outputs represented as owned ParameterValue values.

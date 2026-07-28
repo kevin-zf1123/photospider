@@ -99,10 +99,11 @@ struct CpuDenseImageOperation {
 /**
  * @brief Runs a private dense operation behind the current ImageBuffer edge.
  *
- * The runner validates and snapshots every CPU ImageBuffer input into an
- * immutable Value, invokes descriptor-only inference, executes through checked
- * ImageViews, validates the complete result against inference, and only then
- * copies active elements into a new validated NodeOutput ImageBuffer.
+ * The runner reuses each sealed NodeOutput image Value when present and
+ * otherwise snapshots its CPU ImageBuffer, invokes descriptor-only inference,
+ * executes through checked ImageViews, validates the complete result against
+ * inference, and publishes that exact sealed Value plus an independent current
+ * NodeOutput ImageBuffer compatibility snapshot.
  *
  * @param node Node whose request-effective parameters are copied into the
  *        configuration passed to both callbacks.
@@ -115,8 +116,9 @@ struct CpuDenseImageOperation {
  *         inferred descriptor, execute failure, mismatched result, or
  *         unadaptable result.
  * @throws std::bad_alloc unchanged for resource exhaustion in any phase.
- * @note Input snapshots share no writable ImageBuffer owner. No partially
- *       validated output is published.
+ * @note Legacy input snapshots share no writable ImageBuffer owner. Sealed
+ * Value inputs preserve allocation/revision identity without a second copy.
+ * No partially validated output is published.
  */
 NodeOutput execute_cpu_dense_image_operation(
     const Node& node, const std::vector<const NodeOutput*>& inputs,

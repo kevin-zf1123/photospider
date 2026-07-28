@@ -110,13 +110,18 @@ Compute collaborator 位于 `src/lib/compute/`；ledger 与 Graph route binding 
 `src/lib/execution/`。这些类都是私有实现模块，不构成可安装 API。本区域唯一已安装的扩展契约是
 `include/photospider/policy/policy_plugin_api.h` 声明的纯 C policy ABI。
 
-V-2 保持 `NodeExecutor` 与 monolithic registry slot 不变，同时由一个 private core runner
-新增更严格的 operation-local 边界。它把当前 CPU ImageBuffer input 快照为 immutable Value，
-把 request-effective ParameterMap 深拷贝到一个不含 Node output/cache/topology state 的
-configuration，只以该 configuration 与 logical DenseTensor/Image descriptor 调用 pure
-inference，再以同一 configuration、checked ImageView 与 inferred descriptor 调用 execute，
-并在发布新 NodeOutput 前校验完整 Value result。这不是 general planner inference、resource
-metadata、cache identity 或新的 plugin callback slot；这些责任仍由 Project 4 后续切片拥有。
+V-3 保持 `NodeExecutor` 与 monolithic registry slot 不变，同时由一个 private core runner
+维持更严格的 operation-local 边界。它会复用有效 sealed CPU image Value；不存在 Value 时，
+才 snapshot 旧 ImageBuffer。它把 request-effective ParameterMap 深拷贝到一个不含 Node
+output/cache/topology state 的 configuration，只以该 configuration 与 logical
+DenseTensor/Image descriptor 调用 pure inference，再以同一 configuration、checked ImageView
+与 inferred descriptor 调用 execute，并校验完整 Value result。Publication 会保留该精确
+sealed result allocation/revision，再派生独立的 ImageBuffer compatibility snapshot。
+
+HP compute-service、result-committer、dirty-write 与 disk-load boundary 会在正式 publication
+前补齐缺失的 CPU image Value。可变 dirty clone 会清除旧 Value authority，并重新 seal settle
+后的 byte。这不会新增 general planner inference、resource metadata、runtime identity task
+key 或新的 plugin callback slot；这些责任仍在本切片范围之外。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
@@ -219,8 +224,9 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
   `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。
 - 在可行时，tiled input normalization 每次 node invocation 只执行一次，而不是每个 tile callback
   执行一次。
-- V-2 dense invert inference callback 无法检查 payload byte；其 execute result 必须与
-  inferred DenseTensor descriptor 及 Image Facet 一致，之后才可在当前边界发布。
+- V-3 dense invert inference callback 无法检查 payload byte；其 execute result 必须与
+  inferred DenseTensor descriptor 及 Image Facet 一致，之后 publication 才可保留精确的
+  sealed result revision。
 
 这些规则使规划保持确定性，并让 policy/物理执行独立于图语义。因此，规划成本遵循先 full
 expansion、再 pruning；lazy task creation 不属于当前 planning contract。

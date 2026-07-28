@@ -387,12 +387,13 @@ class ComputeService {
    * cancellation translated from the retained Run.
    * @note The context and its references must outlive the recursive call tree.
    * Effective parameters and execution-facing node state remain on a
-   * request-local Node snapshot. The method commits only the resolved
-   * graph-owned input-size hint, HP cache/version, disk-cache effects, and
-   * telemetry on the calling thread. Cooperative observations surround
-   * recursive dependency resolution, disk cache, provider/tile execution,
-   * cache publication, and return; a monolithic provider already entered is
-   * non-preemptible.
+   * request-local Node snapshot. Before HP publication, a nonempty legacy CPU
+   * image result is normalized to a sealed identity-bearing Value. The method
+   * commits only the resolved graph-owned input-size hint, HP cache/version,
+   * disk-cache effects, and telemetry on the calling thread. Cooperative
+   * observations surround recursive dependency resolution, disk cache,
+   * provider/tile execution, cache publication, and return; a monolithic
+   * provider already entered is non-preemptible.
    */
   NodeOutput& compute_internal(GraphModel& graph, int node_id,
                                const RecursiveComputeContext& context);

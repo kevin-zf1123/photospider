@@ -6,11 +6,13 @@
 #include <chrono>
 #include <memory>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
 
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -226,6 +228,7 @@ DiskCacheReadAttempt read_cache_entry(
     if (has_metadata_file) {
       attempt.output.data = metadata_codec.read(metadata_file);
     }
+    value_image_adapter::normalize_node_output_image_value(&attempt.output);
     attempt.result =
         make_load_result(node.id, &cache_entry, cache_file, metadata_file,
                          DiskCacheLoadStatus::Hit, GraphErrc::Unknown,
@@ -423,10 +426,16 @@ void GraphCacheService::save_cache_if_configured(
 
     auto start_io = std::chrono::high_resolution_clock::now();
 
-    if (output->image_buffer.width > 0 && output->image_buffer.height > 0 &&
-        output->image_buffer.device == Device::CPU &&
-        output->image_buffer.data) {
-      image_codec_->encode(final_path, output->image_buffer,
+    std::optional<ImageBuffer> value_snapshot;
+    const ImageBuffer* image = &output->image_buffer;
+    if (output->image_value.valid()) {
+      value_snapshot =
+          value_image_adapter::snapshot_cpu_image_buffer(output->image_value);
+      image = &*value_snapshot;
+    }
+    if (image->width > 0 && image->height > 0 && image->device == Device::CPU &&
+        image->data) {
+      image_codec_->encode(final_path, *image,
                            artifact_precision(cache_precision));
     }
 

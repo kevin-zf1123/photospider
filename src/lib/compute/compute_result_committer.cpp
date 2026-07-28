@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 
 namespace ps::compute {
@@ -31,6 +32,12 @@ void ComputeResultCommitter::finalize_timing(TimingCollector& timing_results,
 void ComputeResultCommitter::commit(
     GraphModel& graph, const std::vector<int>& execution_order,
     std::vector<std::optional<NodeOutput>>& temp_results) const {
+  for (size_t i = 0; i < execution_order.size(); ++i) {
+    if (temp_results[i].has_value()) {
+      value_image_adapter::normalize_node_output_image_value(&*temp_results[i]);
+    }
+  }
+
   std::scoped_lock lock(graph_mutex_);
   for (size_t i = 0; i < execution_order.size(); ++i) {
     if (!temp_results[i].has_value()) {

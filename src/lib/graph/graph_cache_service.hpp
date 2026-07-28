@@ -138,10 +138,12 @@ class GraphCacheService {
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
    * unsupported cache entries, empty locations, or nodes without HP output.
-   * Image serialization accepts only CPU buffers with owned data. Opaque
-   * non-CPU images are skipped without unsafe mapping, while named
-   * ParameterValue outputs cross the metadata codec; a future device adapter
-   * may add explicit download.
+   * A valid sealed CPU image Value is the serialization authority and is copied
+   * into a temporary codec-compatible ImageBuffer; otherwise the legacy
+   * ImageBuffer is used. Opaque non-CPU images are skipped without unsafe
+   * mapping, while named ParameterValue outputs cross the metadata codec; a
+   * future device adapter may add explicit download. Runtime allocation and
+   * Value revision identities are never persisted.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
@@ -153,11 +155,12 @@ class GraphCacheService {
    * @param node Node receiving the loaded HP output on cache hit.
    * @return true when HP output is already present or disk cache was loaded;
    * false on cache miss, skipped load, or read/parse error.
-   * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
-   * failures are recorded through GraphModel's locked disk-cache diagnostic API
-   * and reported as false.
+   * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
+   * parse, and CPU Value normalization failures are recorded through
+   * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note This preserves the legacy try-load bool contract while making disk
-   * errors distinguishable from misses through graph diagnostics.
+   * errors distinguishable from misses through graph diagnostics. Successful
+   * CPU image decode mints fresh process-local allocation/revision identities.
    */
   bool try_load_from_disk_cache(GraphModel& graph, Node& node) const;
 
@@ -169,9 +172,9 @@ class GraphCacheService {
    * @param out Receives the loaded output on cache hit.
    * @return true on disk cache hit; false on cache miss, skipped load, or
    * read/parse error.
-   * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
-   * failures are recorded through GraphModel's locked disk-cache diagnostic API
-   * and reported as false.
+   * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
+   * parse, and CPU Value normalization failures are recorded through
+   * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note Used by execution worker paths that stage outputs outside the
    * formal HP cache before committing.
    */

@@ -603,16 +603,18 @@ leakage, and runs an external Host consumer.
 
 Current baseline: `ImageBuffer`, `DataType`, `Device`, `PixelRect`,
 `ParameterMap`, operation ABI v2, and the existing cache/execution ownership
-remain implemented contracts. V-2 additionally implements a bounded
+remain implemented compatibility contracts. V-2 implemented a bounded
 dependency-neutral CPU DenseTensor `Value`/`ImageView` subset and one built-in
-operation behind the current ImageBuffer edge. Their exact behavior is
-documented in
+operation. V-3 now adds checked BufferHandle ownership, lease-controlled
+construction, process-local allocation/revision identity, bounded signed
+layouts, and formal HP cache identity authority for CPU image Values. Their
+exact behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
 [Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
 [Kernel Cache Model](../kernel-architecture/Cache-Model.md). The complete model
-below is the accepted target; only the explicit V-2 subset called out here is a
-current runtime fact.
+below is the accepted target; only the explicit V-2/V-3 subset called out here
+is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -647,25 +649,37 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 subset is deliberately narrower:
+The implemented V-2/V-3 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
   byte-addressed storage encoding;
 - `ImageFacet` explicitly maps distinct x/y and optional channel axes;
-- final copyable `Value` shares an immutable PImpl with one exact owned CPU
-  byte envelope and positive signed `StridedLayout`;
-- retaining checked `DenseTensorView`/`ImageView` expose read-only addresses;
-  and
+- public `BufferHandle` is a checked nonempty range over one opaque
+  process-local CPU `AllocationIdentity`; subranges retain allocation lifetime
+  and expose no raw pointer;
+- move-only `ValueBuilder` controls the only move-only `WriteLease`, requires a
+  zero-offset positive exact-envelope producer layout, refuses seal while the
+  lease is live, and publishes a fresh process-local `ValueRevisionId`;
+- final copyable `Value` shares immutable descriptor/layout/handle state;
+  Values over sealed handles may use a bounded byte offset and positive, zero,
+  or negative signed strides;
+- retaining checked `DenseTensorView`/`ImageView` hold a `ReadLease` and expose
+  read-only addresses;
 - `image_process:invert_dense` separates exact descriptor-only inference from
-  stride-aware unsigned-8 execution and validates its result before converting
-  back to the current NodeOutput.
+  stride-aware unsigned-8 execution, reuses a sealed input Value when present,
+  and publishes the exact sealed result revision plus an independent
+  ImageBuffer compatibility snapshot; and
+- private formal HP CPU image cache entries treat a valid sealed
+  `NodeOutput::image_value` as allocation/revision authority. Ordinary copies
+  preserve identity; dirty mutation, replacement, and disk decode create fresh
+  identity; disk save reads Value bytes; and runtime tokens are never
+  persistent cache/task keys.
 
-V-2 has no BufferHandle, allocation identity, offset, lease, cache integration,
-Region, DataSpec, device registry, fence, transfer, quantization, packed
-element, provider ABI v3, or general graph Value storage. Its private
-ImageBuffer-to-Value copy edge is removed rather than retained when #80
-connects BufferHandle and cache ownership.
+V-3 has no Region, DataSpec, device registry, readiness fence, transfer,
+quantization, packed element, provider ABI v3, or general named graph Value
+outputs. ImageBuffer remains the compatibility representation for operation
+ABI v2, tiled writes, codecs, and Host surfaces.
 
 `ElementSemantics`, `StorageEncoding`, and `QuantizationSchema` are independent.
 Describable, executable, and convertible support are also independent, and
@@ -674,10 +688,11 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-`BufferHandle` is a checked immutable byte range. Consumer reads and ordinary
-builder writes require leases; sealed Values never issue `WriteLease`, and
-consumer writes are always rejected. A sealed payload whose fence remains
-Pending may be completed only by the registered producer, or a native owner
+For the current V-3 ready CPU subset, `BufferHandle` is a checked immutable
+byte range. Consumer reads and ordinary builder writes require leases; sealed
+Values never issue `WriteLease`, and consumer writes are always rejected. The
+complete target additionally permits a sealed payload whose fence remains
+Pending to be completed only by the registered producer, or a native owner
 acting as that producer, through its noncopyable producer-scoped capability,
 within the prevalidated binding/Layout/handle envelope. The producer retires
 that capability

@@ -115,8 +115,10 @@ optional component 会保持 not-found，而不会使 package 无效。
 生成的源码会探测精确 policy ABI constant 与 layout。外部 embedded consumer 随后会加载该已安装
 policy DSO 与一个已安装 operation DSO，配置 policy/execution default，验证其 public snapshot，
 并通过两种 extension 完成 compute。任何生成的 consumer 都不会获得 source-tree include 目录。
-operation-SDK-only factory 还会通过 ImageView 构造并读取 installed immutable CPU DenseTensor
-Value，证明新 header 与 implementation symbol 在不发现 OpenCV、yaml-cpp 或 Threads 时仍完整。
+operation-SDK-only factory 还会使用 installed `ValueBuilder`、`WriteLease`、
+`BufferHandle`、`ReadLease`、runtime identity 与 ImageView 发布并读取 immutable CPU
+DenseTensor Value。这证明 V-3 header 与 implementation symbol 在不发现 OpenCV、yaml-cpp
+或 Threads 时仍完整。
 
 长期 `IpcDisabledInstallSmoke` 会用
 `PHOTOSPIDER_BUILD_IPC=OFF` 与 `BUILD_TESTING=OFF` 配置另一个 clean producer；它验证不会
@@ -130,15 +132,17 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation` binary。安装前，它会在该真实 disabled producer 中运行
-全部九个 dense-image case，包括
+全部 15 个 dense-image case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
-隔离回归。它会验证派生的 provider/plugin/CLI 默认值，以及三类无效显式组合的精确诊断。
+ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
+默认值，以及三类无效显式组合的精确诊断。
 Clean install 后，它会拒绝 OpenCV header、target、export reference 与 yaml-cpp link 泄漏；
 optional `operation_opencv` 保持 unavailable，required component 则失败。外部 consumer 会在
-两个 discovery 均禁用时配置，链接并运行 `Photospider::photospider`，分配中立 image，构造并
-读取同一 Value/ImageView surface，加载并关闭 empty Host session，并观察显式 YAML operation
-返回 `GraphErrc::Io`。CI 只有在校验 producer cache identity、configuration、完整 capability
-profile 与已构建 dense integration target 后才可复用该 producer。
+两个 discovery 均禁用时配置，链接并运行 `Photospider::photospider`，分配中立 image，并通过
+installed package 使用 `ValueBuilder`、write/read lease、runtime identity 与 ImageView，
+加载并关闭 empty Host session，并观察显式 YAML operation 返回 `GraphErrc::Io`。CI 只有在校验
+producer cache identity、configuration、完整 capability profile 与已构建 dense integration
+target 后才可复用该 producer。
 
 当所选 CMake generator 提供多个 configuration 时，smoke 会为 producer 与 consumer 使用同一个
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从
@@ -661,15 +665,24 @@ ctest --test-dir build --output-on-failure \
 
 ## CPU DenseTensor 与 ImageView Operation 验证
 
-`test_cpu_dense_tensor_image_operation` 是已实现 V-2 边界的 provider-independent integration
-binary。它的九个长期用例验证 malformed facet/stride/exact-envelope rejection、immutable
-Value copy sharing 与 ImageView-retained lifetime、让 source 与 destination 都持续可读的
-DenseTensorView/ImageView copy-like move construction 与 assignment、payload/shape/stride 的
-lvalue/rvalue construction allocation 隔离、pure exact invert inference、经过
-`register_core_operations -> OpRegistry::resolve_for_intent ->
-NodeExecutor::execute` 的 padded multi-channel execution，以及 execute 返回 descriptor 与
-inference 不一致的合法 Value 时以 `GraphErrc::ComputeError` 拒绝。Active output byte 必须
-等于 `255 - input`；input/output row padding 不被当作 image element。
+`test_cpu_dense_tensor_image_operation` 是已实现 V-2/V-3 边界的 provider-independent
+integration binary。它的 15 个长期用例验证：
+
+- malformed facet、stride、byte offset 与 exact-envelope rejection；
+- exclusive builder write authority、seal revocation、retaining read-lease lifetime、
+  BufferHandle subrange 与 process-local identity；
+- 在 shared allocation 上受界限约束的正、零与负 immutable stride，以及彼此不同的 Value
+  revision；
+- immutable Value copy sharing、copy-like DenseTensorView/ImageView move，以及 lvalue/rvalue
+  descriptor、layout 与 payload input 的 allocation 隔离；
+- 正式 HP cache alias 保留、dirty reseal、replacement identity、disk reload identity 更新、
+  cache path 不变，以及 disk-save Value authority；
+- 精确 descriptor-only invert inference、直接复用 sealed input 与精确 result-revision
+  publication；
+- padded multi-channel product execution，以及 execute 返回 descriptor 与 inference 不一致的
+  合法 Value 时以 `GraphErrc::ComputeError` 拒绝。
+
+Active output byte 必须等于 `255 - input`；input/output row padding 不被当作 image element。
 
 聚焦验证命令为：
 
@@ -680,9 +693,9 @@ ctest --test-dir build --output-on-failure \
   -R '^CpuDenseTensorImageOperation\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部九个
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 15 个
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
-installed consumer。下述 provider-disabled nested build 也会编译并运行全部九个用例，因此真实
+installed consumer。下述 provider-disabled nested build 也会编译并运行全部 15 个用例，因此真实
 core operation 不依赖 optional OpenCV operation provider。
 
 ## 可选 OpenCV Operation Provider 验证
@@ -709,8 +722,8 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 provider-independent focused binary 与 stdlib-only fixture，并额外构建 CPU
 DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary 与
 kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须
-精确包含 16 项：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部九个
+精确包含 22 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 15 个
 `CpuDenseTensorImageOperation.*` case、三个 `DiskCacheDiagnosticConcurrency.*` case 与
 两个 `KernelLifecycleConcurrency.*` case。Disk-cache case 必须只保留
 `kernel-concurrency` label 与 20 秒 timeout；lifecycle case 保留同一 label 与 60 秒

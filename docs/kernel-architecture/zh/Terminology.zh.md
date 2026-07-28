@@ -272,9 +272,32 @@ deadline 或 cooperative cancellation token。
 **`RealtimeProxyGraph`**
 runtime-owned 的临时 RT 输出状态。它不是权威 HP cache，也不会作为可复用图缓存持久化。
 
+**`AllocationIdentity`**
+一个 CPU allocation control block 的 opaque process-local identity。即使 range 不同，同一
+allocation 上的 BufferHandle subrange 也具有相同 allocation identity。它不是 Value revision、
+content digest、持久 cache key 或 task identity。
+
+**`BufferHandle`**
+同一个 allocation identity 上受检、不可变、非空的 byte range。它不暴露 raw pointer。
+Consumer 通过会保留所有权的 `ReadLease` 访问 byte；construction-time write 由
+`ValueBuilder` 控制。
+
+**`ReadLease` / `WriteLease`**
+`ReadLease` 是可复制且会保留所有权的 immutable byte access capability。`WriteLease` 是
+seal 前用于 mutable byte access 的唯一 move-only、builder-scoped capability。Live write
+lease 会阻止 seal；sealed Value 永不签发该 lease。
+
+**`ValueRevisionId`**
+`ValueBuilder` 每次 seal 新 Value publication 时铸造的 opaque process-local identity。
+普通 Value/cache copy 会保留该 identity；dirty mutation、replacement 与 disk reload 会铸造
+新 identity。它不是 `GraphRevision`、allocation identity、持久 digest/artifact id 或
+task/cache key。
+
 **`ImageBuffer`**
 当前图像 payload 契约：二维 extent、通道数、单一 scalar type、device、row stride、共享数据
-所有权和可选 backend context。它不是通用 Tensor、Deep Image 或 vector-scene 模型。
+所有权和可选 backend context。在带有效 sealed `image_value` 的正式 CPU image cache entry
+中，它是独立 compatibility snapshot，而不是 allocation/revision identity authority。它不是
+通用 Tensor、Deep Image 或 vector-scene 模型。
 
 **`PixelRect` / `PixelSize`**
 公共 Host 与 operation 契约以及私有 Graph、ROI propagation、dirty-region、cache identity、
@@ -301,6 +324,7 @@ cache、policy 或物理 execution 语义的所有者。
 - `DirtyRegionSnapshot` 不是 `ComputeTaskGraph`。
 - ready task 不是任务图。
 - HP cache 不是 RT proxy state。
+- `AllocationIdentity` 不是 `ValueRevisionId`；二者都不是持久 content/cache identity。
 - `ImageBuffer` 不是[目标通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
 - Execution worker request 不是 Run reservation 或 child grant。
 - Policy candidate id 或 decision 不是 execution authority；只有已提交的 reserved-start transaction
@@ -317,6 +341,8 @@ cache、policy 或物理 execution 语义的所有者。
 
 ## 实现与验证入口
 
+- `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/data/value.hpp`
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
 - `include/photospider/core/image_buffer.hpp`

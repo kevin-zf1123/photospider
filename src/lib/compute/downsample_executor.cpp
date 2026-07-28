@@ -53,7 +53,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source) {
  * @brief Deep-copies committed proxy node state for staged downsample writes.
  *
  * @param state Committed proxy state to copy.
- * @return Independent proxy state safe for ROI mutation before commit.
+ * @return Independent proxy state with cleared image Value identity, safe for
+ * ROI mutation before transient proxy commit.
  * @throws std::bad_alloc when image or metadata copying exhausts memory.
  * @throws GraphError when image payload cloning otherwise fails.
  */
@@ -66,6 +67,7 @@ RealtimeProxyGraph::NodeState clone_proxy_state(
   if (state.output) {
     NodeOutput output = *state.output;
     output.image_buffer = clone_image_buffer(state.output->image_buffer);
+    output.image_value = Value{};
     cloned.output = std::move(output);
   }
   return cloned;

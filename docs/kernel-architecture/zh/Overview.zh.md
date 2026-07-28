@@ -414,14 +414,18 @@ snapshot 注册；public callback 不会获得可变 `Node`、`GraphModel`、`Op
 
 内核拥有的 CPU 缓冲区必须提供 64 字节对齐的行起点。`step` 是字节单位的行步长，可以大于紧凑行大小以保持对齐。ARM Mac 高性能路径可能需要或受益于 128 字节对齐，但 128 字节对齐是优化目标，而不是可移植最低要求。
 
-V-2 还安装 immutable CPU DenseTensor `Value`、`DenseTensorView` 与 explicit-axis
-`ImageView` contract。内建 `image_process:invert_dense` operation 会经过正常 core
-seeding、`OpRegistry` resolution 与 `NodeExecutor` monolithic invocation 抵达这些 type。
-其 private callback bridge 会把当前 ImageBuffer input 深拷贝为 Value，把
-descriptor-only inference 与 stride-aware execution 分开，校验返回的完整
-descriptor/facet/layout，再把 active result byte 复制回新的 validated ImageBuffer。
-Graph/cache/Host state 与 operation plugin ABI v2 会继续停留在当前 ImageBuffer 边界，直到其
-后续 migration slice。
+V-2 安装 immutable CPU DenseTensor `Value`、`DenseTensorView` 与 explicit-axis
+`ImageView` contract。V-3 新增 `BufferHandle`、read/write lease、`ValueBuilder`、byte offset、
+受界限约束的 signed immutable view，以及 process-local allocation/revision identity。内建
+`image_process:invert_dense` operation 会经过正常 core seeding、`OpRegistry` resolution 与
+`NodeExecutor` monolithic invocation 抵达这些 type。其 private callback bridge 会复用有效
+sealed input Value；不存在时才 snapshot 旧 ImageBuffer。它把 descriptor-only inference 与
+stride-aware execution 分开，校验返回的完整 descriptor/facet/layout，保留精确 result Value，
+再派生新的 validated ImageBuffer compatibility snapshot。
+
+私有正式 HP cache state 会携带该 Value authority；copy 保留 identity，dirty mutation、
+replacement 与 disk reload 则铸造新 runtime identity。Host 与 operation plugin ABI v2 会继续
+停留在当前 ImageBuffer compatibility 边界，直到后续 migration slice。
 
 ### 脏区传播
 

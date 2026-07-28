@@ -167,7 +167,8 @@ Graph state.
 
 | Field | Meaning |
 | --- | --- |
-| `image_buffer` | Image payload as the public `ImageBuffer` contract. |
+| `image_buffer` | Independent current plugin ABI v2, tiled-write, codec, and Host compatibility snapshot. |
+| `image_value` | Sealed CPU image Value and allocation/revision identity authority when valid. |
 | `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
 | `space` | Spatial transform, scale, and ROI metadata. |
 | `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through `ImageBuffer::step`; padding is excluded and opaque device values retain provider diagnostics. |
@@ -279,35 +280,49 @@ propagation.
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
 
-### Implemented V-2 data surface and remaining migration
+### Implemented V-3 ownership and cache identity surface
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
-accepts the complete generic-value replacement. V-2 now implements one bounded
-CPU DenseTensor subset of that target:
+accepts the complete generic-value replacement. V-2 introduced the bounded CPU
+DenseTensor subset; V-3 now connects its physical ownership and formal HP cache
+identity:
 
 - installed `DenseTensorDescriptor` keeps concrete shape,
   `ElementSemantics`, and `StorageEncoding` separate;
 - installed `ImageFacet` explicitly assigns distinct x/y and optional channel
   axes;
-- final copyable `Value` shares one immutable PImpl containing the descriptor,
-  optional facet, positive signed `StridedLayout`, and exact owned CPU byte
-  envelope;
-- `DenseTensorView` and `ImageView` retain the complete Value, use copy-like
-  move semantics that leave both source and destination valid, and expose only
-  bounds-checked read-only addresses; and
+- `BufferHandle` is a checked immutable nonempty range over one CPU allocation
+  identity, exposes no pointer, and creates checked identity-preserving
+  subranges;
+- `ValueBuilder` owns the only move-only `WriteLease`, refuses seal while a
+  lease is live, and publishes immutable bytes with a fresh `ValueRevisionId`;
+- the vector convenience constructor still deep-copies lvalue and rvalue
+  descriptor/layout/payload allocations before seal;
+- `StridedLayout::byte_offset` anchors logical coordinate zero; immutable
+  Values over sealed handles may use bounded positive, zero, or negative
+  strides;
+- `DenseTensorView` and `ImageView` retain both the Value and a `ReadLease`, use
+  copy-like move semantics, and expose pointers only within that lease; and
 - `image_process:invert_dense` performs descriptor-only inference and
-  stride-aware unsigned-8 execution on those views.
+  stride-aware unsigned-8 execution, reuses a sealed input Value when present,
+  and publishes its exact sealed result revision.
 
-This implemented surface does not change the graph fields above. The built-in
-dense operation uses a private deep-copy bridge at its current product edge;
-`NodeOutput` still contains `ImageBuffer` plus named `ParameterMap` data,
-connected computed results still use `ParameterMap`, and graph/dirty/planning
-geometry still uses `PixelRect`. BufferHandle allocation identity, cache
-integration, `DataSpec`, `RegionSet`, device routing, readiness, transfer, and
-provider ABI v3 remain later no-shim migration slices. During those slices,
-named computed outputs become named immutable Values, `ParameterMap` becomes
-configuration-only, and migrated Region boundaries replace `PixelRect` with
-the `ImageRect` atom of `RegionSet`.
+Private `NodeOutput` now retains `image_value` beside `image_buffer`. A valid
+sealed Value is the CPU image allocation/revision identity authority; the
+ImageBuffer is an independent compatibility snapshot. Ordinary HP commit,
+sequential HP compute, connected-preflight shadow cache, dirty HP commit, and
+disk decode normalize legacy CPU buffers before formal publication. Immutable
+cache copies preserve both identities; dirty clones clear the old Value before
+mutation and reseal final bytes; replacement and disk decode mint fresh
+identities. Allocation and revision tokens remain process-local and never enter
+task-graph keys, cache paths, graph/YAML documents, or artifact bytes.
+
+Named `ParameterMap` results and graph/dirty/planning `PixelRect` geometry are
+unchanged. `DataSpec`, `RegionSet`, device routing, readiness, transfer,
+quantization, and provider ABI v3 remain later no-shim slices. During those
+slices, named computed outputs become named immutable Values, `ParameterMap`
+becomes configuration-only, and migrated Region boundaries replace
+`PixelRect` with the `ImageRect` atom of `RegionSet`.
 
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. Issue #62 completes the
@@ -322,6 +337,7 @@ neither document changes the current fields described above.
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
@@ -335,6 +351,7 @@ neither document changes the current fields described above.
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/value_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`

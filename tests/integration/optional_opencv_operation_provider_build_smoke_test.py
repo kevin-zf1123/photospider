@@ -59,6 +59,14 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
+        "BuilderScopesWriteAuthorityAndReadLeaseLifetime"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "ImmutableSignedOffsetViewsShareAllocationAndMintRevisions"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
         "ValueCopiesShareBytesAndViewsRetainLifetime"
     ),
     (
@@ -75,11 +83,27 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "ValueDoesNotAdoptMovedInputAllocations"
+        "ValueRemainsStableWhenMovedInputsAreReused"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "FormalHpCachePreservesAliasesAndResealsDirtyAndReplacementBytes"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DiskReloadMintsFreshRuntimeIdentitiesWithoutChangingCachePath"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DiskSaveSerializesSealedValueInsteadOfMutableCompatibilitySnapshot"
     ),
     (
         "CpuDenseTensorImageOperation."
         "DenseInvertInferencePreservesExactLogicalDescriptor"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "DenseRunnerConsumesSealedValueAndPublishesExactResultRevision"
     ),
     (
         "CpuDenseTensorImageOperation."
@@ -119,7 +143,7 @@ def ctest_json_test(
 def provider_disabled_ctest_payload() -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
-    @return JSON payload containing two profile entries, nine dense-image
+    @return JSON payload containing two profile entries, 15 dense-image
       cases, three disk cases, and two production lifecycle cases.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
@@ -834,7 +858,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves sixteen names and concurrency
+        @return None after parsing preserves 22 names and concurrency
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
         @note Exact labels exclude the build-smoke label from disk test cases.

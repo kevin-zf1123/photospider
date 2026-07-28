@@ -478,14 +478,16 @@ Issue #62 让 runtime/cache value 纵向切片成为当前行为：共享 YAML c
 ## 通用数据与 Region
 
 当前 baseline：`ImageBuffer`、`DataType`、`Device`、`PixelRect`、`ParameterMap`、
-operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的契约。V-2 还实现了一个
-有界、dependency-neutral 的 CPU DenseTensor `Value`/`ImageView` 子集，以及一条位于当前
-ImageBuffer edge 后的内建 operation。精确行为记录在
+operation ABI v2 以及既有 cache/execution ownership 仍是已经实现的 compatibility contract。
+V-2 实现了有界、dependency-neutral 的 CPU DenseTensor `Value`/`ImageView` 子集与一条内建
+operation。V-3 现已新增 checked BufferHandle ownership、由 lease 控制的 construction、
+process-local allocation/revision identity、受界限约束的 signed layout，以及 CPU image Value
+在正式 HP cache 中的 identity authority。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 子集是当前 runtime 事实。
+只有这里明确指出的 V-2/V-3 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -516,32 +518,41 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 子集刻意保持更窄的范围：
+已实现的 V-2/V-3 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics，以及 8/16/32/64-bit byte-addressed storage encoding；
 - `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis；
-- final、copyable `Value` 共享 immutable PImpl，其中包含一个精确拥有的 CPU byte envelope
-  与 positive signed `StridedLayout`；
-- retaining checked `DenseTensorView`/`ImageView` 暴露只读 address；
+- public `BufferHandle` 是同一个 opaque process-local CPU `AllocationIdentity` 上受检、非空的
+  range；subrange 会保留 allocation lifetime，且不暴露 raw pointer；
+- move-only `ValueBuilder` 控制唯一 move-only `WriteLease`，要求 byte offset 为零的 positive
+  exact-envelope producer layout，在 lease 存活时拒绝 seal，并发布全新 process-local
+  `ValueRevisionId`；
+- final、copyable `Value` 共享 immutable descriptor/layout/handle state；通过 sealed handle
+  构造的 Value 可以使用受界限约束的 byte offset 与正、零或负 signed stride；
+- retaining checked `DenseTensorView`/`ImageView` 持有 `ReadLease` 并暴露只读 address；
 - `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
-  unsigned-8 execution 分开，并在转换回当前 NodeOutput 前校验 result。
+  unsigned-8 execution 分开，已有 sealed input Value 时直接复用，并发布精确 sealed result
+  revision 与独立 ImageBuffer compatibility snapshot；
+- 私有正式 HP CPU image cache entry 把有效 sealed `NodeOutput::image_value` 作为
+  allocation/revision authority。普通 copy 保留 identity；dirty mutation、replacement 与
+  disk decode 创建新 identity；disk save 读取 Value byte；runtime token 永不成为持久
+  cache/task key。
 
-V-2 不含 BufferHandle、allocation identity、offset、lease、cache integration、Region、
-DataSpec、device registry、fence、transfer、quantization、packed element、provider ABI v3
-或 general graph Value storage。#80 贯通 BufferHandle 与 cache ownership 时，会删除而不是
-保留这条 private ImageBuffer-to-Value copy edge。
+V-3 不含 Region、DataSpec、device registry、readiness fence、transfer、quantization、packed
+element、provider ABI v3 或通用 named graph Value output。ImageBuffer 仍是 operation ABI v2、
+tiled write、codec 与 Host surface 的 compatibility representation。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通 builder write 需要 lease；
-已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。Fence 仍为 Pending 的
-sealed payload 只能由已登记的 producer，或代表该 producer 执行的 native owner，通过其
-不可复制的 producer-scoped capability，在预先验证的 binding/Layout/handle envelope 内
-完成。Producer capability 退役
+对于当前 V-3 ready CPU 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与
+普通 builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被
+拒绝。完整目标还允许 Fence 仍为 Pending 的 sealed payload 只能由已登记的 producer，或代表
+该 producer 执行的 native owner，通过其不可复制的 producer-scoped capability，在预先验证的
+binding/Layout/handle envelope 内完成。Producer capability 退役
 happen-before Ready、Failed 或 ProducerCancelled 发布。Pending、Failed 与
 ProducerCancelled 不暴露 consumer-readable payload；Ready 之后仍须由 `AccessPlan` 完成
 visibility，才能取得 `ReadLease`。Strided、Blocked 与 ProviderDefined Layout 都保留有界

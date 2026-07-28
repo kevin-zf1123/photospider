@@ -18,7 +18,8 @@ namespace ps::compute {
  *
  * ComputeResultCommitter owns the post-dispatch mutation phase that workers
  * deliberately avoid: timing total calculation, GraphModel high-precision
- * cache updates, HP version increments, and configured disk cache writes.
+ * cache updates, CPU image Value normalization, HP version increments, and
+ * configured disk cache writes.
  *
  * @note commit() holds the graph mutex while moving temp outputs into node
  * runtime state so GraphModel remains the sole owner of committed HP cache
@@ -57,9 +58,11 @@ class ComputeResultCommitter {
    * @param graph Graph whose high-precision node caches are updated.
    * @param execution_order Dense planned node id order.
    * @param temp_results Temporary outputs aligned with execution_order.
-   * @throws Exceptions from GraphModel mutation or GraphCacheService writes.
+   * @throws Exceptions from CPU image Value normalization, GraphModel mutation,
+   * or GraphCacheService writes.
    * @note temp_results values are moved. After commit(), populated slots no
-   * longer own valid output values.
+   * longer own valid output values. CPU normalization completes before the
+   * graph mutex is acquired, so allocation does not occur during publication.
    */
   void commit(GraphModel& graph, const std::vector<int>& execution_order,
               std::vector<std::optional<NodeOutput>>& temp_results) const;

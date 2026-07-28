@@ -537,7 +537,7 @@ profiles:
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
-### Implemented V-2 SDK subset and future provider ABI
+### Implemented V-2/V-3 SDK subset and future provider ABI
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts a separately versioned pure-C provider ABI v3 for Schema, Facet,
@@ -549,9 +549,14 @@ leases and `Active -> Retiring -> Unloaded` replacement.
 
 V-2 implements the dependency-neutral C++ CPU DenseTensor `Value`,
 `StridedLayout`, `DenseTensorView`, and `ImageView` subset in
-`operation_runtime`, and one built-in operation uses it behind a private
-ImageBuffer copy bridge. It does not place Value or its PImpl in a v2 callback
-record and does not change the two current boundaries in the table. Operation
+`operation_runtime`. V-3 adds installed BufferHandle ranges, read/write leases,
+ValueBuilder sealing, byte offsets, bounded signed immutable views, and
+process-local allocation/revision identity. One built-in operation uses that
+surface behind a private dual-representation bridge: it preserves the sealed
+result Value and derives an ImageBuffer compatibility snapshot.
+
+Neither slice places Value, BufferHandle, leases, or a PImpl in a v2 callback
+record, and neither changes the two current boundaries in the table. Operation
 ABI v2 remains the current operation contract until every repository-owned
 operation and installed consumer has migrated. The completion boundary then
 deletes v2, its entry point, SDK, fixtures, and package surface without a

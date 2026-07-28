@@ -154,6 +154,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     host/event_stream.hpp
     host/graph_session.hpp
     host/host.hpp
+    memory/buffer_handle.hpp
     memory/strided_layout.hpp
     plugin/node_view.hpp
     plugin/op_contract.hpp
@@ -172,7 +173,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 20)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 21)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -438,6 +439,7 @@ endif()
 set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/core/cpu_dense_image_operation.cpp
     src/lib/core/ops.cpp
+    src/lib/core/value_image_adapter.cpp
     src/lib/graph/in_memory_graph_document_adapter.cpp
     src/lib/graph/graph_model.cpp
     src/lib/graph/graph_state_executor.cpp

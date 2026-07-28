@@ -207,6 +207,14 @@ include/photospider/host/
   compute_request.hpp
   event_stream.hpp
 
+include/photospider/data/
+  value.hpp
+  image_view.hpp
+
+include/photospider/memory/
+  buffer_handle.hpp
+  strided_layout.hpp
+
 include/photospider/plugin/
   plugin_api.hpp
   op_contract.hpp
@@ -236,7 +244,8 @@ Header rules:
 - OpenCV appears only in the opt-in `plugin/opencv_adapter.hpp` contract;
   operation SDK, policy SDK, Host, core, and IPC headers do not require it.
   No public header exposes yaml-cpp. `ImageBuffer` remains a public value
-  contract.
+  compatibility contract; generic CPU Value ownership is exposed through the
+  dependency-neutral `data/` and `memory/` headers.
 - CLI, benchmark, and test-only headers are not public install headers.
 
 ## Current and Target Source Layout
@@ -247,6 +256,8 @@ The source tree should make ownership visible before reading a single file:
 include/photospider/
   core/
   host/
+  data/
+  memory/
   plugin/
   policy/
   ipc/

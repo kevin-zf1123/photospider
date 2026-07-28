@@ -406,7 +406,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
-### 已实现的 V-2 SDK 子集与未来 provider ABI
+### 已实现的 V-2/V-3 SDK 子集与未来 provider ABI
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受单独版本化的 pure-C provider ABI v3，用于 Schema、Facet、Layout、access、
@@ -416,12 +416,16 @@ conversion、inference、query、region、digest 与 execution provider suite。
 `Active -> Retiring -> Unloaded` 完成 replacement。
 
 V-2 在 `operation_runtime` 中实现 dependency-neutral C++ CPU DenseTensor `Value`、
-`StridedLayout`、`DenseTensorView` 与 `ImageView` 子集，并让一条内建 operation 在 private
-ImageBuffer copy bridge 后使用该子集。它不会把 Value 或其 PImpl 放进 v2 callback record，也
-不会改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成 migration
-前，operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、
-SDK、fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header
-或 v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
+`StridedLayout`、`DenseTensorView` 与 `ImageView` 子集。V-3 新增 installed BufferHandle
+range、read/write lease、ValueBuilder seal、byte offset、受界限约束的 signed immutable view
+与 process-local allocation/revision identity。一条内建 operation 会在 private 双重表示 bridge
+后使用该 surface：它保留 sealed result Value，再派生 ImageBuffer compatibility snapshot。
+
+两个切片都不会把 Value、BufferHandle、lease 或 PImpl 放进 v2 callback record，也不会改变
+表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成 migration 前，
+operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、SDK、
+fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header 或
+v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
 
 操作插件的 C linkage 入口名称只是身份/代次 gate，并不是稳定 C data ABI。
 二进制兼容性仍依赖匹配的 SDK、编译器、标准库、C++ ABI、分配器/runtime、

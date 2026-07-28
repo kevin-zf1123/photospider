@@ -20,11 +20,12 @@ namespace ps::compute {
  * worker tasks. The owning executor commits the staged data into GraphModel
  * only after the RT sibling commit gate allows original-graph mutation.
  *
- * @note Existing CPU output is deep-copied before tiled ROI writes so worker
- * execution never mutates visible GraphModel image storage before commit.
- * Opaque non-CPU descriptors are shared only until tiled allocation or
- * monolithic whole-output replacement; their payload is never mutated through
- * the generic staging path.
+ * @note Existing CPU output is deep-copied and its sealed Value identity is
+ * cleared before tiled ROI writes, so worker execution never mutates visible
+ * GraphModel image storage before commit. Successful commit reseals final CPU
+ * bytes with fresh allocation/revision identity. Opaque non-CPU descriptors
+ * are shared only until tiled allocation or monolithic whole-output
+ * replacement; their payload is never mutated through the generic staging path.
  */
 class HighPrecisionDirtyWriteBuffer {
  public:
@@ -112,8 +113,11 @@ class HighPrecisionDirtyWriteBuffer {
    *
    * @param graph Graph receiving HP outputs and metadata.
    * @throws GraphError when a staged node no longer exists.
+   * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc when
+   * final CPU image Value normalization fails.
    * @note The caller must hold graph.graph_mutex_. This method performs no
-   * locking on GraphModel so the commit boundary remains explicit.
+   * locking on GraphModel so the commit boundary remains explicit. Each
+   * mutable CPU staging clone is sealed before graph publication.
    */
   void commit_to_graph(GraphModel& graph);
 

@@ -146,7 +146,7 @@ class ImageView final {
   /**
    * @brief Returns the signed byte stride of the explicit y axis.
    *
-   * @return Positive row stride retained by the tensor layout.
+   * @return Positive, zero, or negative row stride retained by the layout.
    * @throws Nothing.
    */
   std::ptrdiff_t row_stride() const noexcept;
@@ -161,8 +161,10 @@ class ImageView final {
    * @return Read-only pointer to the requested element's first byte.
    * @throws std::out_of_range when any coordinate is outside its explicit
    *         image extent.
+   * @throws std::bad_alloc when temporary full-rank coordinate storage cannot
+   *         allocate.
    * @note Successful Value and ImageView validation prove the address remains
-   *       inside the retained immutable byte envelope.
+   *       inside the retained immutable BufferHandle range.
    */
   const std::byte* channel_data(std::size_t x, std::size_t y,
                                 std::size_t channel) const;

@@ -110,30 +110,40 @@ CPU scalar value、排除 padding，并记录 range/non-finite diagnostic。Acti
 时，继续保留此前正/负无穷的 empty-range sentinel。Opaque non-CPU resource 继续保留 provider
 提供的 diagnostic，因为只有对应 device adapter 可以映射它们。
 
-## V-2 Value-backed CPU Operation Bridge
+## V-3 Value-backed CPU Ownership Bridge
 
 dependency-neutral operation runtime 现在也实现 installed `Value`、`DenseTensorView` 与
-`ImageView` 的 CPU 子集。已发布 Value 拥有精确的 immutable byte envelope；concrete shape 与
-element fact 和 optional explicit Image Facet、positive signed byte stride 保持分离。
-Checked view 保留完整 Value，且不暴露 writable pointer。
+`ImageView` 的 CPU 子集，以及 installed `BufferHandle` 与 `ValueBuilder`。`BufferHandle`
+是在一个 process-local allocation identity 上受检、非空的 byte range。Consumer 获取会保留
+所有权的 `ReadLease`；只有 `ValueBuilder` 能获取唯一 move-only `WriteLease`。Builder 在该
+lease 仍存活时拒绝 seal，并在以全新 process-local `ValueRevisionId` 发布 immutable byte 后
+撤销后续写权限。
+
+Concrete shape 与 element fact 和 optional explicit Image Facet、`StridedLayout` 保持分离。
+Producer layout 要求 byte offset 为零且使用精确 envelope 的正 stride。通过 sealed handle
+构造的 immutable Value 则可以使用受界限约束的 byte offset 以及正、零或负 signed byte
+stride。Checked view 同时保留完整 Value 和 read lease，且不暴露 writable pointer。
 
 内建 `image_process:invert_dense` operation 在生产路径证明这项 surface：
 
-1. 当前 monolithic callback 校验一个非空 CPU `ImageBuffer`；
-2. private adapter 分配精确 Value envelope，保留 `[height, width, channels]` 与 `step`，
-   复制 active row 而不共享 mutable ImageBuffer owner，并独立初始化 inter-row padding；
+1. 当前 monolithic callback 校验一个非空 CPU 图像 input；
+2. `NodeOutput::image_value` 有效时，private runner 直接复用该 sealed Value；否则，
+   compatibility adapter 会把旧 `ImageBuffer` snapshot 到新的 sealed allocation，保留
+   `[height, width, channels]`、`step` 与 active row，并独立初始化 padding；
 3. pure inference 只接收 deep-owned effective parameter snapshot 与 logical
    DenseTensor/Image descriptor，不接收 Node output/cache state；
 4. execute 接收 checked ImageView，遵循显式 x/y/channel stride，并返回独立拥有的 padded
-   unsigned-8 Value；
+   sealed unsigned-8 Value；
 5. runner 将完整 result descriptor 与 Image Facet 和 inference 比较，要求可由当前 adapter
-   处理的 interleaved layout，只把 active byte 复制到新的 ImageBuffer，并在发布前完成校验。
+   处理的 interleaved layout，把该精确 result allocation/revision 发布为
+   `NodeOutput::image_value`，再为当前 ABI、tiled-write、codec 与 Host 边界派生独立拥有的
+   compatibility `ImageBuffer` snapshot。
 
 Malformed caller input 映射为 `GraphErrc::InvalidParameter`；unsupported 或 mismatched
 operation result 映射为 `GraphErrc::ComputeError`；`std::bad_alloc` 原样传播。这项 bridge
-只在 source tree 内部使用。Graph/cache/Host、operation ABI v2 与其他 operation 继续使用
-ImageBuffer；#80 会在 BufferHandle ownership 与 cache allocation identity 明确后替换这条
-copy edge。
+与 compatibility adapter 只在 source tree 内部使用。Operation ABI v2 与尚未转换的其他
+operation 继续使用 ImageBuffer；私有正式 HP cache 会保留两种表示，并把有效 sealed Value
+作为 allocation/revision identity authority。
 
 ## GPU 缓冲区契约
 
@@ -191,7 +201,7 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
-### 已实现的 V-2 关系与剩余目标
+### 已实现的 V-3 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -204,12 +214,18 @@ PixelRect   -> RegionSet atom ImageRect
 ```
 
 目标把逻辑 `DataDescriptor` 与物理 `StorageBinding` 分离，并且只通过已检查的
-`BufferHandle` range 与 lease 访问内存。V-2 只实现上述有界 operation bridge 使用的 CPU
-DenseTensor descriptor、ImageFacet、positive signed StridedLayout、immutable direct byte
-owner 与 checked ImageView。它不实现 BufferHandle/range/lease、allocation identity、cache
-ownership、quantization、Region、device identity、readiness、transfer 或 provider ABI v3。
-因此，在各自后续切片同步更新 code、ABI、test 与本当前事实文档前，当前 ImageBuffer 的
-structure、allocation、device、DSO 与外围 graph/cache 契约仍是权威。
+`BufferHandle` range 与 lease 访问内存。V-2 引入上述有界 operation bridge 使用的 CPU
+DenseTensor descriptor、ImageFacet、positive producer `StridedLayout`、immutable byte
+ownership 与 checked ImageView。V-3 新增 public checked BufferHandle range、保留所有权的
+read lease、独占 builder write lease、process-local allocation/revision identity、byte offset、
+受界限约束的 signed/zero-stride immutable view，以及正式 HP cache entry 中的 allocation
+identity authority。
+
+V-3 不实现 quantization、Region、device identity、readiness、transfer、provider ABI v3
+或通用 named graph Value output。因此，在后续各自拥有的切片完成迁移前，当前 ImageBuffer
+structure、device field、operation DSO ABI、tiled-write、codec 与 Host 边界仍是 compatibility
+contract。对于同时携带两种形式的正式 CPU image cache entry，有效 sealed Value（而不是
+mutable compatibility snapshot）才是 allocation/revision identity authority。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
@@ -221,12 +237,14 @@ structure、allocation、device、DSO 与外围 graph/cache 契约仍是权威�
 ## 实现与验证入口
 
 - `include/photospider/core/image_buffer.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/value_image_adapter.*`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/compute/image_buffer.hpp`
 - `src/lib/adapters/opencv/buffer_adapter_opencv.*`

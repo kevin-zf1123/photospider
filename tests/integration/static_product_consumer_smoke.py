@@ -1818,6 +1818,7 @@ def write_extension_consumer_projects(
     (operation_source_dir / "main.cpp").write_text(
         dedent(
             """
+            #include <algorithm>
             #include <cstddef>
             #include <utility>
             #include <vector>
@@ -1825,11 +1826,12 @@ def write_extension_consumer_projects(
             #include <photospider/core/image_buffer.hpp>
             #include <photospider/data/image_view.hpp>
             #include <photospider/data/value.hpp>
+            #include <photospider/memory/buffer_handle.hpp>
 
             /**
-             * @brief Calls SDK-transitive image and immutable Value symbols.
-             * @return Zero only when current and Value-backed image dimensions
-             *         and read-only bytes are valid.
+             * @brief Calls SDK-transitive image and V-3 memory/Value symbols.
+             * @return Zero only when builder writes, sealed lease reads,
+             *         runtime identities, and image dimensions are valid.
              * @throws std::bad_alloc or validation exceptions terminate the smoke
              *         process because the executable intentionally has no recovery
              *         path.
@@ -1852,12 +1854,22 @@ def write_extension_consumer_projects(
               std::vector<std::byte> storage{
                   std::byte{1}, std::byte{2}, std::byte{3},
                   std::byte{4}, std::byte{5}, std::byte{6}};
-              const ps::Value value = ps::Value::from_cpu_dense_tensor(
+              auto builder = ps::ValueBuilder::allocate_cpu_dense_tensor(
                   std::move(descriptor), facet, std::move(layout),
-                  std::move(storage));
+                  storage.size());
+              {
+                auto write = builder.acquire_write();
+                std::copy(storage.begin(), storage.end(), write.data());
+              }
+              const ps::Value value = builder.seal();
+              const auto read = value.buffer_handle().acquire_read();
               const ps::ImageView view(value);
               const bool valid_value =
-                  view.width() == 3U && view.height() == 2U &&
+                  read.valid() && read.size() == storage.size() &&
+                  read.allocation_identity() ==
+                      value.allocation_identity() &&
+                  value.revision_id().valid() && view.width() == 3U &&
+                  view.height() == 2U &&
                   view.channels() == 1U &&
                   std::to_integer<unsigned int>(
                       *view.channel_data(2U, 1U, 0U)) == 6U;
@@ -3023,8 +3035,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
-        "installed public header inventory is exactly 24 files": len(install["headers"])
-        == 24,
+        "installed public header inventory is exactly 25 files": len(install["headers"])
+        == 25,
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],

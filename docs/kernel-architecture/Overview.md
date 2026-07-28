@@ -510,16 +510,21 @@ preserve alignment. ARM Mac high-performance paths may need or benefit from
 128-byte alignment, but 128-byte alignment is an optimization target rather than
 the portable minimum.
 
-V-2 additionally installs immutable CPU DenseTensor `Value`,
-`DenseTensorView`, and explicit-axis `ImageView` contracts. The built-in
-`image_process:invert_dense` operation reaches those types through normal core
-seeding, `OpRegistry` resolution, and `NodeExecutor` monolithic invocation.
-Its private callback bridge deep-copies current ImageBuffer inputs to Values,
+V-2 installs immutable CPU DenseTensor `Value`, `DenseTensorView`, and
+explicit-axis `ImageView` contracts. V-3 adds `BufferHandle`, read/write leases,
+`ValueBuilder`, byte offsets, bounded signed immutable views, and process-local
+allocation/revision identity. The built-in `image_process:invert_dense`
+operation reaches those types through normal core seeding, `OpRegistry`
+resolution, and `NodeExecutor` monolithic invocation. Its private callback
+bridge reuses a valid sealed input Value or snapshots the legacy ImageBuffer,
 separates descriptor-only inference from stride-aware execution, validates the
-complete returned descriptor/facet/layout, and copies active result bytes back
-to a new validated ImageBuffer. Graph/cache/Host state and operation plugin ABI
-v2 remain on the current ImageBuffer boundary until their later migration
-slices.
+complete returned descriptor/facet/layout, preserves the exact result Value,
+and derives a new validated ImageBuffer compatibility snapshot.
+
+Private formal HP cache state carries that Value authority; copy preserves
+identity, while dirty mutation, replacement, and disk reload mint new runtime
+identities. Host and operation plugin ABI v2 remain on the current ImageBuffer
+compatibility boundary until their later migration slices.
 
 ### Dirty Region Propagation
 

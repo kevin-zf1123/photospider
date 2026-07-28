@@ -162,6 +162,30 @@ neither and returns `GraphErrc::Io` for explicit representation IO.
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
 describe the final adapter and document boundary.
 
+## V-3 Runtime Allocation and Revision Identity
+
+A formal HP `NodeOutput` may carry both `image_value` and `image_buffer`.
+For a nonempty CPU image, a valid sealed Value is the allocation/revision
+identity authority; the ImageBuffer is an independently owned compatibility
+snapshot. Ordinary HP publication and cache-load boundaries normalize a
+missing Value from the current CPU ImageBuffer before the output becomes
+formal cache. Copying a formal cache entry preserves its
+`AllocationIdentity` and `ValueRevisionId`.
+
+Mutable dirty work cannot retain the old authority. Its clone clears
+`image_value` before any ImageBuffer write and seals the settled bytes into a
+fresh allocation and revision before HP commit. Replacement output and disk
+decode likewise create fresh identities. RT proxy output remains transient and
+does not become a formal cache identity source.
+
+Disk save prefers the sealed Value when present and derives a temporary
+ImageBuffer snapshot from its checked image view, so later mutation of the
+compatibility snapshot cannot change the persisted bytes. The existing image
+and YAML formats still persist only representation bytes and named metadata:
+neither `AllocationIdentity` nor `ValueRevisionId` is serialized, reconstructed
+from a path, or used as a persistent cache/task key. Both tokens are opaque,
+process-local runtime identities; a disk reload necessarily mints new ones.
+
 ### Accepted future relationship (not current behavior)
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
@@ -171,6 +195,8 @@ state. `DescriptorDigest`, `ContentDigest`, `StorageLayoutDigest`,
 `ArtifactId`, and `ValueRevisionId` answer different identity questions;
 device/allocation identity, fences, leases, access plans, and residency
 replicas never enter persistent logical content identity.
+The current V-3 process-local `ValueRevisionId` is runtime publication identity,
+not any future canonical descriptor, content, layout, or artifact digest.
 
 This target does not change the current cache format or authority described
 above. HP output remains the only formal reusable cache, RT proxy output
@@ -187,10 +213,12 @@ payloads. No future residency replica becomes a second cache authority.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
+- `src/lib/core/value_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`

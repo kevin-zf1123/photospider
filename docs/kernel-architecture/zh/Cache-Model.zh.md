@@ -116,6 +116,25 @@ representation IO 时返回 `GraphErrc::Io`。
 和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述最终 adapter 与
 document boundary。
 
+## V-3 Runtime Allocation 与 Revision Identity
+
+正式 HP `NodeOutput` 可以同时携带 `image_value` 与 `image_buffer`。对于非空 CPU 图像，
+有效 sealed Value 是 allocation/revision identity authority；ImageBuffer 是独立拥有的
+compatibility snapshot。普通 HP publication 与 cache-load boundary 会在 output 成为正式
+cache 前，根据当前 CPU ImageBuffer 补齐缺失的 Value。复制正式 cache entry 会保留其
+`AllocationIdentity` 与 `ValueRevisionId`。
+
+可变 dirty work 不能保留旧 authority。其 clone 会在任何 ImageBuffer 写入前清除
+`image_value`，再在 HP commit 前把 settle 后的 byte seal 为全新的 allocation 与 revision。
+Replacement output 与 disk decode 同样创建新 identity。RT proxy output 继续保持 transient，
+不会成为正式 cache identity source。
+
+Disk save 会优先使用已存在的 sealed Value，并从其 checked image view 派生临时 ImageBuffer
+snapshot，因此之后对 compatibility snapshot 的 mutation 不会改变持久化 byte。现有 image
+与 YAML format 仍只持久化 representation byte 与 named metadata：
+`AllocationIdentity` 和 `ValueRevisionId` 都不会被序列化、从 path 重建或用作持久 cache/task
+key。两类 token 都是 opaque、process-local runtime identity；disk reload 必然铸造新 token。
+
 ### 已接受的未来关系（不是当前行为）
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
@@ -124,6 +143,8 @@ manifest 与 chunk，以及绝不持久化的 runtime state。`DescriptorDigest`
 `StorageLayoutDigest`、`ArtifactId` 与 `ValueRevisionId` 回答不同 identity 问题；
 device/allocation identity、fence、lease、access plan 与 residency replica 永远不会进入持久
 logical content identity。
+当前 V-3 的 process-local `ValueRevisionId` 是 runtime publication identity，不是任何未来
+canonical descriptor、content、layout 或 artifact digest。
 
 该目标不会改变上文描述的当前 cache format 或 authority。HP output 仍是唯一正式可复用 cache，
 RT proxy output 继续保持 transient，当前注入的 artifact/metadata codec 继续作为实现边界，
@@ -139,10 +160,12 @@ authority。
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
+- `src/lib/core/value_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`

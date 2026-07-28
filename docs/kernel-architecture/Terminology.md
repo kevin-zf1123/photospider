@@ -347,10 +347,36 @@ image result stored on a graph node.
 Runtime-owned transient RT output state. It is not authoritative HP cache and
 is not persisted as reusable graph cache.
 
+**`AllocationIdentity`**
+An opaque process-local identity for one CPU allocation control block.
+BufferHandle subranges over that allocation compare equal by allocation
+identity even when their ranges differ. It is not a Value revision, content
+digest, persistent cache key, or task identity.
+
+**`BufferHandle`**
+A checked immutable nonempty byte range over one allocation identity. It does
+not expose a raw pointer. Consumers reach bytes through retaining `ReadLease`
+objects; construction-time writes are controlled by `ValueBuilder`.
+
+**`ReadLease` / `WriteLease`**
+`ReadLease` is a copyable retaining capability for immutable byte access.
+`WriteLease` is the unique move-only builder-scoped capability for mutable byte
+access before seal. A live write lease blocks seal; sealed Values never issue
+one.
+
+**`ValueRevisionId`**
+An opaque process-local identity minted whenever `ValueBuilder` seals a new
+Value publication. Ordinary Value/cache copies preserve it; dirty mutation,
+replacement, and disk reload mint a new one. It is not `GraphRevision`, an
+allocation identity, a persistent digest/artifact id, or a task/cache key.
+
 **`ImageBuffer`**
 The current image payload contract: two-dimensional extent, channel count,
 one scalar type, device, row stride, shared data ownership, and optional
-backend context. It is not a general Tensor, Deep Image, or vector-scene model.
+backend context. In a formal CPU image cache entry with a valid sealed
+`image_value`, it is an independent compatibility snapshot rather than the
+allocation/revision identity authority. It is not a general Tensor, Deep
+Image, or vector-scene model.
 
 **`PixelRect` / `PixelSize`**
 External-library-neutral integer geometry values used by public Host and
@@ -383,6 +409,8 @@ planning, cache, policy, or physical-execution semantics.
 - `DirtyRegionSnapshot` is not `ComputeTaskGraph`.
 - A ready task is not a task graph.
 - HP cache is not RT proxy state.
+- `AllocationIdentity` is not `ValueRevisionId`; neither is a persistent
+  content/cache identity.
 - `ImageBuffer` is not the
   [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 - An execution worker request is not a Run reservation or child grant.
@@ -402,6 +430,8 @@ planning, cache, policy, or physical-execution semantics.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/data/value.hpp`
 - `include/photospider/host/host.hpp`
 - `include/photospider/core/compute_intent.hpp`
 - `include/photospider/core/image_buffer.hpp`

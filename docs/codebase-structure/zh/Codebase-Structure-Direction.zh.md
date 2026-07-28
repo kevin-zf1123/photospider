@@ -171,6 +171,14 @@ include/photospider/host/
   compute_request.hpp
   event_stream.hpp
 
+include/photospider/data/
+  value.hpp
+  image_view.hpp
+
+include/photospider/memory/
+  buffer_handle.hpp
+  strided_layout.hpp
+
 include/photospider/plugin/
   plugin_api.hpp
   op_contract.hpp
@@ -197,7 +205,8 @@ include/photospider/
 - 公开头应优先使用值对象、不透明 handle、小引用和 request/result 结构。
 - OpenCV 只出现在显式 opt-in 的 `plugin/opencv_adapter.hpp` 契约；operation SDK、policy SDK、
   Host、core 与 IPC header 都不需要它。任何 public header 都不暴露 yaml-cpp；`ImageBuffer` 继续作为
-  public value contract。
+  public value compatibility contract；通用 CPU Value ownership 通过 dependency-neutral 的
+  `data/` 与 `memory/` header 暴露。
 - CLI、benchmark 和 test-only 头不是 public install header。
 
 ## 当前与目标源码布局
@@ -208,6 +217,8 @@ include/photospider/
 include/photospider/
   core/
   host/
+  data/
+  memory/
   plugin/
   policy/
   ipc/

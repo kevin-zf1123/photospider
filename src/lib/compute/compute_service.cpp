@@ -41,6 +41,7 @@
 #include "compute/run_group.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "core/param_utils.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_traversal_service.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -922,6 +923,7 @@ NodeOutput& ComputeService::compute_internal(
         graph, execution_node, resolved_operation->second, monolithic_inputs,
         tiled_config);
     observe_open_run_or_throw(context.run_lease);
+    value_image_adapter::normalize_node_output_image_value(&computed_output);
     target_node.cached_output_high_precision = std::move(computed_output);
 
     current_event.execution_end_time =

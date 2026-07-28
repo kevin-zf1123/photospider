@@ -154,9 +154,10 @@ external embedded consumer then loads that installed policy DSO and an
 installed operation DSO, configures policy and execution defaults, validates
 their public snapshots, and computes through both extensions. No generated
 consumer receives a source-tree include directory. The operation-SDK-only
-factory also constructs and reads an installed immutable CPU DenseTensor Value
-through ImageView, proving that the new headers and implementation symbols are
-complete without OpenCV, yaml-cpp, or Threads discovery.
+factory also uses installed `ValueBuilder`, `WriteLease`, `BufferHandle`,
+`ReadLease`, runtime identities, and ImageView to publish and read an immutable
+CPU DenseTensor Value. This proves that the V-3 headers and implementation
+symbols are complete without OpenCV, yaml-cpp, or Threads discovery.
 
 The durable
 `IpcDisabledInstallSmoke` configures a separate clean producer with
@@ -173,19 +174,20 @@ OpenCV and YAML capabilities disabled, disables both package discoveries,
 turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
 `test_cpu_dense_tensor_image_operation` binary. Before installation it runs all
-nine dense-image cases in that actual disabled producer, including the
+15 dense-image cases in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
-allocation-isolation regressions. It verifies the derived provider/plugin/CLI
-defaults and the precise diagnostics for three invalid explicit combinations.
+ownership, lease, signed-view, and cache-identity regressions. It verifies the
+derived provider/plugin/CLI defaults and the precise diagnostics for three
+invalid explicit combinations.
 After a clean install it rejects OpenCV headers, targets, export references,
 and yaml-cpp link leakage; optional `operation_opencv` remains unavailable
 while the required component fails. An external consumer configures with both
 discoveries disabled, links/runs `Photospider::photospider`, allocates a neutral
-image, constructs and reads the same Value/ImageView surface, loads and closes
-an empty Host session, and observes `GraphErrc::Io` from an explicit YAML
-operation. CI may reuse a producer only after its cache identity, configuration,
-complete capability profile, and already-built dense integration target are
-validated.
+image, uses `ValueBuilder`, write/read leases, runtime identities, and
+ImageView through the installed package, loads and closes an empty Host
+session, and observes `GraphErrc::Io` from an explicit YAML operation. CI may
+reuse a producer only after its cache identity, configuration, complete
+capability profile, and already-built dense integration target are validated.
 
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
@@ -833,17 +835,25 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor and ImageView Operation Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 boundary. Its nine durable cases verify
-malformed facet/stride/exact-envelope rejection, immutable Value copy sharing
-and ImageView-retained lifetime, copy-like DenseTensorView and ImageView move
-construction and assignment that keep both objects readable, allocation-
-isolated lvalue and rvalue construction for payload/shape/strides, pure exact
-invert inference, padded multi-channel execution through
-`register_core_operations -> OpRegistry::resolve_for_intent ->
-NodeExecutor::execute`, and `GraphErrc::ComputeError` rejection when execute
-returns a valid Value whose descriptor disagrees with inference. Active output
-bytes must equal `255 - input`; input and output row padding is not treated as
-image elements.
+binary for the implemented V-2/V-3 boundary. Its 15 durable cases verify:
+
+- malformed facet, stride, byte-offset, and exact-envelope rejection;
+- exclusive builder write authority, seal revocation, retaining read-lease
+  lifetime, BufferHandle subranges, and process-local identities;
+- bounded positive, zero, and negative immutable strides over shared
+  allocations, with distinct Value revisions;
+- immutable Value copy sharing, copy-like DenseTensorView/ImageView moves, and
+  allocation-isolated lvalue/rvalue descriptor, layout, and payload inputs;
+- formal HP cache alias preservation, dirty reseal, replacement identity, disk
+  reload identity renewal, unchanged cache paths, and disk-save Value
+  authority;
+- exact descriptor-only invert inference, direct sealed-input reuse, and exact
+  result-revision publication; and
+- padded multi-channel product execution plus `GraphErrc::ComputeError` when
+  execute returns a valid Value whose descriptor disagrees with inference.
+
+Active output bytes must equal `255 - input`; input and output row padding is
+not treated as image elements.
 
 Run the focused validation with:
 
@@ -854,10 +864,10 @@ ctest --test-dir build --output-on-failure \
   -R '^CpuDenseTensorImageOperation\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all nine cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all 15 cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
-The provider-disabled nested build below also compiles and runs all nine
+The provider-disabled nested build below also compiles and runs all 15
 cases, so the real core operation does not depend on the optional OpenCV
 operation provider.
 
@@ -892,9 +902,9 @@ suite gate is therefore off. The driver validates the exact CMake cache
 profile, builds the provider-independent focused provider binary, its
 stdlib-only fixture, the CPU DenseTensor/ImageView integration binary, and the
 dedicated disk-cache and kernel-lifecycle concurrency binaries, then queries
-the machine-readable CTest inventory. That inventory must contain exactly 16
+the machine-readable CTest inventory. That inventory must contain exactly 22
 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all nine
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 15
 `CpuDenseTensorImageOperation.*` cases, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
 `KernelLifecycleConcurrency.*` cases. Disk-cache cases retain only the
