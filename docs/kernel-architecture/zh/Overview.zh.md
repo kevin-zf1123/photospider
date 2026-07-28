@@ -42,7 +42,7 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction、event、固定 worker service、reserved-start 与私有 route 实现；它单向依赖 policy 和 execution internal。 |
 | `photospider_host_internal` | 仅用于构建的 Kernel/Interaction facade 与 embedded Host composition root。它根据 producer capability 选择真实 YAML persistence adapter 或显式 unavailable adapter。 |
 | `photospider_kernel` | 可构建的聚合 target，编译实际选中的 core、graph、operation-plugin、policy、execution、compute、Host 以及可选 provider/adapter 模块；它不是安装 artifact，也不是占位 library。 |
-| `photospider_operation_runtime` | 可安装的 public image-buffer factory 与 immutable CPU DenseTensor Value/ImageView 子集静态实现；不依赖 OpenCV、yaml-cpp、Threads、graph、registry 或 embedded product。 |
+| `photospider_operation_runtime` | 可安装的 public image-buffer factory 与 immutable CPU DenseTensor Value/ImageView 子集共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Threads、graph、registry 或 embedded product。 |
 | `photospider_operation_sdk` | operation v2 与 dependency-neutral data/memory header 的可安装 interface target；传递链接 `operation_runtime`。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter，只使用 OpenCV `core` component；仅在 `PHOTOSPIDER_ENABLE_OPENCV=ON` 时存在。 |
 | `photospider_policy_sdk` | 携带自包含纯 C policy ABI header 与 C11/C++17 requirement 的可安装、无依赖 interface target。 |
@@ -91,6 +91,10 @@ Package 边界：
   只对仓库内部构建私有。在 build tree 中，该 target 的 generated public include root 只包含
   `photospider/` forwarding header。CMake 会跟踪 header 的新增和删除，wrapper 直接读取实时
   source header，不需要目录 symlink。
+- `Photospider::operation_runtime` 是唯一 installed shared library。
+  `Photospider::operation_sdk` 与 static embedded product 都链接该 target，因此独立加载且使用
+  Value 的 operation DSO 会调用同一个确定性 allocation/revision authority。该 runtime 不依赖
+  ELF/Mach-O symbol interposition，也不新增 package component。
 - Package component 包括 `embedded`、`ipc_client`、`operation_sdk`、`operation_runtime`、
   `operation_opencv` 与 `policy_sdk`。省略 component 时保留 embedded 默认行为。
   `policy_sdk`、`operation_sdk` 和 `operation_runtime` 不发现外部 package；
@@ -104,7 +108,8 @@ Package 边界：
 - 启用时的 OpenCV（`core`、`imgproc`、`imgcodecs`、`videoio`）和 `yaml-cpp`，以及始终需要的
   `Threads`、平台
   dynamic-loader 库，以及 Apple `Metal`/`Foundation` framework 标志，是静态归档的实现链接依赖。
-  Library dependency 会作为 `$<LINK_ONLY:...>` entry 出现在安装后的 target 上；Apple framework
+  Shared operation runtime 与其他 library dependency 会作为 `$<LINK_ONLY:...>` entry 出现在
+  安装后的 target 上；Apple framework
   flag 来自 Apple-only 的 private product link block。Public Host/core 头避免暴露 OpenCV 和
   `yaml-cpp` 类型；Windows consumer 会收到 `PHOTOSPIDER_STATIC`，因此 declaration 不使用 DLL
   import/export 标注。
@@ -416,7 +421,9 @@ snapshot 注册；public callback 不会获得可变 `Node`、`GraphModel`、`Op
 
 V-2 安装 immutable CPU DenseTensor `Value`、`DenseTensorView` 与 explicit-axis
 `ImageView` contract。V-3 新增 `BufferHandle`、read/write lease、`ValueBuilder`、byte offset、
-受界限约束的 signed immutable view，以及 process-local allocation/revision identity。内建
+受界限约束的 signed immutable view，以及 process-local allocation/revision identity。Shared
+operation runtime 持有唯一进程级 minting authority；非零 identity token 只记录已签发状态，
+不会查询其 allocation 是否仍存活。内建
 `image_process:invert_dense` operation 会经过正常 core seeding、`OpRegistry` resolution 与
 `NodeExecutor` monolithic invocation 抵达这些 type。其 private callback bridge 会复用有效
 sealed input Value；不存在时才 snapshot 旧 ImageBuffer。它把 descriptor-only inference 与
@@ -544,5 +551,6 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_value_identity_dso.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

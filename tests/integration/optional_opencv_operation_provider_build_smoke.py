@@ -236,6 +236,10 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "AllocationIdentityValidityDoesNotQueryAllocationLiveness"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "ImmutableSignedOffsetViewsShareAllocationAndMintRevisions"
         ),
         (
@@ -256,7 +260,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "ValueRemainsStableWhenMovedInputsAreReused"
+            "ValueDeepCopiesRvaluePayloadBeforeSourceOwnerRetires"
         ),
         (
             "CpuDenseTensorImageOperation."
@@ -287,13 +291,22 @@ def validate_provider_disabled_inventory(
             "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
         ),
     }
+    value_runtime_tests = {
+        "ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide"
+    }
     expected = {
         "DependencyDisabledInstallSmoke",
         (
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
-    } | disk_cache_tests | lifecycle_tests | dense_image_tests
+    }
+    expected |= (
+        disk_cache_tests
+        | lifecycle_tests
+        | dense_image_tests
+        | value_runtime_tests
+    )
     names = set(inventory)
     if names != expected:
         raise RuntimeError(
@@ -309,6 +322,10 @@ def validate_provider_disabled_inventory(
         **{
             name: {"LABELS": ["kernel-concurrency"], "TIMEOUT": 60}
             for name in lifecycle_tests
+        },
+        **{
+            name: {"LABELS": ["value-runtime"], "TIMEOUT": 30}
+            for name in value_runtime_tests
         },
     }
     property_mismatches = {
@@ -390,7 +407,8 @@ def configured_test_executable(
 def main() -> int:
     """@brief Configure, build, and run the provider-disabled regression.
 
-    @return Zero after the focused provider and concurrency cases succeed.
+    @return Zero after the focused provider, Value-runtime, and concurrency
+      cases succeed.
     @throws OSError If path handling or command startup fails.
     @throws SystemExit If command-line parsing rejects the invocation.
     @throws UnicodeError If the nested CMake cache is not valid UTF-8 text.
@@ -443,6 +461,7 @@ def main() -> int:
         "--target",
         "test_optional_opencv_operation_provider",
         "test_cpu_dense_tensor_image_operation",
+        "test_value_identity_across_dsos",
         "test_disk_cache_diagnostic_concurrency",
         "test_kernel_lifecycle_concurrency",
         "-j",
@@ -474,6 +493,7 @@ def main() -> int:
                 "^(DiskCacheDiagnosticConcurrency\\..*|"
                 "CpuDenseTensorImageOperation\\..*|"
                 "KernelLifecycleConcurrency\\..*|"
+                "ValueIdentityAcrossDsos\\..*|"
                 "OptionalOpenCvOperationProvider\\."
                 "ReplacementExecutesAndRestores)$"
             ),

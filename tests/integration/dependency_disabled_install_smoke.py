@@ -172,11 +172,14 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
         )
 
 
-def configured_dense_test_executable(build: Path, config: str) -> Path:
-    """@brief Resolve the built dependency-neutral dense integration binary.
+def configured_test_executable(
+    build: Path, config: str, target_name: str
+) -> Path:
+    """@brief Resolve one built dependency-neutral integration binary.
 
     @param build Configured dependency-disabled producer build directory.
     @param config Requested single- or multi-config build configuration.
+    @param target_name Exact executable target basename without platform suffix.
     @return Expected executable path for the cached generator mode.
     @throws OSError If the producer cache cannot be read.
     @throws RuntimeError If configuration metadata is missing or contradicts
@@ -208,9 +211,7 @@ def configured_dense_test_executable(build: Path, config: str) -> Path:
             )
         output_directory = build / "tests"
     executable_suffix = ".exe" if sys.platform == "win32" else ""
-    return output_directory / (
-        "test_cpu_dense_tensor_image_operation" + executable_suffix
-    )
+    return output_directory / (target_name + executable_suffix)
 
 
 def write_component_probe(source: Path, *, required: bool) -> None:
@@ -385,12 +386,12 @@ def main() -> int:
     @throws RuntimeError If any build, export, component, or runtime invariant
       contradicts the dependency-disabled profile.
     @note A validated, already-built ``--producer-build`` may be reused without
-      configuration or compilation. Its dependency-neutral dense integration
-      binary is still executed. Installation and consumer artifacts always
-      remain under ``work`` and are removed before return. On Darwin, every
-      child configure inherits the selected producer's meaningful
-      ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
-      receive no macOS-specific option.
+      configuration or compilation. Its dependency-neutral dense and
+      cross-DSO identity integration binaries are still executed. Installation
+      and consumer artifacts always remain under ``work`` and are removed
+      before return. On Darwin, every child configure inherits the selected
+      producer's meaningful ``CMAKE_OSX_ARCHITECTURES`` value as one argv
+      element; other platforms receive no macOS-specific option.
     """
 
     parser = argparse.ArgumentParser()
@@ -459,6 +460,7 @@ def main() -> int:
                     "photospider_kernel",
                     "photospider",
                     "test_cpu_dense_tensor_image_operation",
+                    "test_value_identity_across_dsos",
                     "--config",
                     args.config,
                     "--parallel",
@@ -467,10 +469,14 @@ def main() -> int:
                 repo,
             )
 
-        dense_test_executable = configured_dense_test_executable(
-            build, args.config
+        dense_test_executable = configured_test_executable(
+            build, args.config, "test_cpu_dense_tensor_image_operation"
+        )
+        identity_test_executable = configured_test_executable(
+            build, args.config, "test_value_identity_across_dsos"
         )
         run([str(dense_test_executable)], repo)
+        run([str(identity_test_executable)], repo)
 
         child_architecture_arguments = (
             producer_osx_architecture_arguments(build)

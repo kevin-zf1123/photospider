@@ -101,10 +101,14 @@ Operation plugins do not link the broad static `photospider` product to reach
 registry symbols. An ordinary plugin requests the `operation_sdk` package
 component and links only `Photospider::operation_sdk`. That interface target
 carries the installed headers and transitively links
-`Photospider::operation_runtime`, whose static archive implements public
+`Photospider::operation_runtime`, whose shared library implements public
 image-buffer factories plus the immutable CPU DenseTensor Value and checked
 view symbols, without linking back to the SDK or requiring an external
-package. Those data/memory headers are available for dependency-neutral
+package. The static Host product and independently loaded Value-using
+operation DSOs therefore resolve allocation/revision minting through that one
+runtime image instead of copying counters into each DSO. This is an ordinary
+dynamic dependency, not ELF/Mach-O symbol interposition or a plugin ABI
+callback. Those data/memory headers are available for dependency-neutral
 plugin-internal work, but operation v2 callback records still receive and
 return the current ImageBuffer/OperationOutput values.
 
@@ -134,7 +138,8 @@ This split supports the static-host direction:
   registry mutation stays in that process-owned instance.
 - `Photospider::operation_runtime` contains ImageBuffer and immutable CPU
   DenseTensor value/view implementation only; it contains no registry, loader,
-  Graph, policy, execution, or compute state.
+  Graph, policy, execution, or compute state. Its one process-wide identity
+  authority owns separate monotonic allocation and Value-revision sequences.
 - Plugin callback objects and plugin-instantiated return-value internals may
   still point into plugin code, so the process owner and copied value leases
   retain libraries until all such state has been destroyed.
@@ -551,7 +556,10 @@ V-2 implements the dependency-neutral C++ CPU DenseTensor `Value`,
 `StridedLayout`, `DenseTensorView`, and `ImageView` subset in
 `operation_runtime`. V-3 adds installed BufferHandle ranges, read/write leases,
 ValueBuilder sealing, byte offsets, bounded signed immutable views, and
-process-local allocation/revision identity. One built-in operation uses that
+process-local allocation/revision identity. The runtime is shared so the Host
+and every Value-using DSO call one minting authority; the durable loader
+regression opens two independent DSOs and proves both identity domains remain
+distinct. One built-in operation uses that
 surface behind a private dual-representation bridge: it preserves the sealed
 result Value and derives an ImageBuffer compatibility snapshot.
 
@@ -628,5 +636,7 @@ record the follow-up direction.
 - `tests/unit/test_op_registry_m31.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/fixtures/value_identity_dso.cpp`
+- `tests/integration/test_value_identity_dso.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

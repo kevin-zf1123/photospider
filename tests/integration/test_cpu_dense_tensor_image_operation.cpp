@@ -272,6 +272,23 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(std::to_integer<std::uint8_t>(retained.data()[3]), 40U);
 }
 
+/**
+ * @brief Proves AllocationIdentity validity is token state, not liveness.
+ */
+TEST(CpuDenseTensorImageOperation,
+     AllocationIdentityValidityDoesNotQueryAllocationLiveness) {
+  AllocationIdentity issued;
+  {
+    const Value value = make_unsigned8_value(1U, 1U, 1U, 1U);
+    issued = value.allocation_identity();
+    ASSERT_TRUE(issued.valid());
+    ASSERT_NE(issued.value(), 0U);
+  }
+
+  EXPECT_TRUE(issued.valid());
+  EXPECT_NE(issued.value(), 0U);
+}
+
 TEST(CpuDenseTensorImageOperation,
      ImmutableSignedOffsetViewsShareAllocationAndMintRevisions) {
   DenseTensorDescriptor descriptor{{4U},
@@ -538,7 +555,15 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(std::to_integer<std::uint8_t>(read.data()[6]), 6U);
 }
 
-TEST(CpuDenseTensorImageOperation, ValueRemainsStableWhenMovedInputsAreReused) {
+/**
+ * @brief Proves rvalue construction copies payload instead of adopting it.
+ *
+ * @note The source address is converted to an integer while its vector still
+ *       owns the allocation. The test never reads, writes, or compares a
+ *       dangling pointer after the moved parameter is destroyed.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ValueDeepCopiesRvaluePayloadBeforeSourceOwnerRetires) {
   DenseTensorDescriptor descriptor{{2U, 3U},
                                    ElementSemantics::UnsignedInteger,
                                    StorageEncoding{8U}};
@@ -546,16 +571,20 @@ TEST(CpuDenseTensorImageOperation, ValueRemainsStableWhenMovedInputsAreReused) {
   std::vector<std::byte> storage{std::byte{1U}, std::byte{2U}, std::byte{3U},
                                  std::byte{0U}, std::byte{4U}, std::byte{5U},
                                  std::byte{6U}};
+  const std::uintptr_t source_storage_address =
+      reinterpret_cast<std::uintptr_t>(storage.data());
 
   const Value value =
       Value::from_cpu_dense_tensor(std::move(descriptor), std::nullopt,
                                    std::move(layout), std::move(storage));
+  const ReadLease read = value.buffer_handle().acquire_read();
+  EXPECT_NE(reinterpret_cast<std::uintptr_t>(read.data()),
+            source_storage_address);
 
   descriptor.shape = {9U};
   layout.byte_strides = {9};
   storage.assign(9U, std::byte{9U});
 
-  const ReadLease read = value.buffer_handle().acquire_read();
   EXPECT_EQ(value.dense_tensor_descriptor().shape,
             (std::vector<std::size_t>{2U, 3U}));
   EXPECT_EQ(value.strided_layout().byte_strides,

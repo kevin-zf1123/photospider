@@ -49,7 +49,7 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, event, fixed worker service, reserved-start, and private route implementation; it depends one-way on policy and execution internals. |
 | `photospider_host_internal` | Build-only Kernel/Interaction facades and embedded Host composition root. It selects real YAML persistence adapters or explicit unavailable adapters according to the producer capability. |
 | `photospider_kernel` | Buildable aggregate target that compiles the real selected core, graph, operation-plugin, policy, execution, compute, Host, and optional provider/adapter modules; it is not an install artifact or a placeholder library. |
-| `photospider_operation_runtime` | Installable static implementation of public image-buffer factories and the immutable CPU DenseTensor Value/ImageView subset, with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
+| `photospider_operation_runtime` | Installable shared implementation of public image-buffer factories and the immutable CPU DenseTensor Value/ImageView subset. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
 | `photospider_operation_sdk` | Installable interface target for operation v2 and dependency-neutral data/memory headers; it transitively links `operation_runtime`. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_policy_sdk` | Installable dependency-neutral interface target carrying the self-contained pure-C policy ABI header plus C11/C++17 requirements. |
@@ -107,6 +107,11 @@ Package boundary:
   the target's generated public include root contains only `photospider/`
   forwarding headers. CMake tracks additions and removals and the wrappers read
   live source headers without directory symlinks.
+- `Photospider::operation_runtime` is one installed shared library.
+  `Photospider::operation_sdk` and the static embedded product both link that
+  target, so independently loaded Value-using operation DSOs call the same
+  deterministic allocation/revision authority. The runtime does not rely on
+  ELF/Mach-O symbol interposition and does not add a package component.
 - Package components are `embedded`, `ipc_client`, `operation_sdk`,
   `operation_runtime`, `operation_opencv`, and `policy_sdk`. Omitting
   components preserves the embedded default. `policy_sdk` discovers no
@@ -124,8 +129,9 @@ Package boundary:
 - When enabled, OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`) and
   `yaml-cpp`, plus always-required `Threads`,
   platform dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
-  flags are implementation link dependencies of the static archive. Library
-  dependencies appear as `$<LINK_ONLY:...>` entries on the installed target;
+  flags are implementation link dependencies of the static archive. The
+  shared operation runtime and other library dependencies appear as
+  `$<LINK_ONLY:...>` entries on the installed target;
   Apple framework flags are propagated from a private Apple-only product link
   block. Public Host/core headers avoid OpenCV and `yaml-cpp` types; Windows
   consumers receive `PHOTOSPIDER_STATIC` so declarations do not use DLL
@@ -513,7 +519,10 @@ the portable minimum.
 V-2 installs immutable CPU DenseTensor `Value`, `DenseTensorView`, and
 explicit-axis `ImageView` contracts. V-3 adds `BufferHandle`, read/write leases,
 `ValueBuilder`, byte offsets, bounded signed immutable views, and process-local
-allocation/revision identity. The built-in `image_process:invert_dense`
+allocation/revision identity. The shared operation runtime owns the only
+process-wide minting authority; a nonzero identity token records issuance and
+does not query whether its allocation is still alive. The built-in
+`image_process:invert_dense`
 operation reaches those types through normal core seeding, `OpRegistry`
 resolution, and `NodeExecutor` monolithic invocation. Its private callback
 bridge reuses a valid sealed input Value or snapshots the legacy ImageBuffer,
@@ -668,5 +677,6 @@ this current-state document.
 - `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_value_identity_dso.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

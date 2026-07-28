@@ -235,15 +235,21 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
     CACHE STRING "Install directory for Photospider CMake package files")
 
-# Public image-buffer factory implementation. This target deliberately has no
-# OpenCV, yaml-cpp, Threads, graph, registry, or embedded product dependency.
-add_library(photospider_operation_runtime STATIC
+# Public image-buffer factory and process-wide Value identity implementation.
+# Host products and Value-using operation DSOs dynamically depend on this one
+# runtime image so allocation/revision minting cannot restart per DSO. The
+# target deliberately has no OpenCV, yaml-cpp, Threads, graph, registry, or
+# embedded product dependency.
+add_library(photospider_operation_runtime SHARED
     src/lib/core/image_buffer.cpp
     src/lib/core/value.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
 set_target_properties(photospider_operation_runtime PROPERTIES
-    EXPORT_NAME operation_runtime)
+    EXPORT_NAME operation_runtime
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
 target_compile_features(photospider_operation_runtime PUBLIC cxx_std_17)
 target_include_directories(photospider_operation_runtime
     PUBLIC
@@ -1219,6 +1225,25 @@ if(BUILD_TESTING)
     set_target_properties(v1_only_op_plugin PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/v1_only"
         RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/v1_only")
+
+    foreach(VALUE_IDENTITY_DSO_NAME
+            value_identity_dso_a value_identity_dso_b)
+        add_library(${VALUE_IDENTITY_DSO_NAME} SHARED
+            tests/fixtures/value_identity_dso.cpp)
+        set_target_properties(${VALUE_IDENTITY_DSO_NAME} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY
+                "${CMAKE_BINARY_DIR}/test_value_identity_dsos/${VALUE_IDENTITY_DSO_NAME}"
+            RUNTIME_OUTPUT_DIRECTORY
+                "${CMAKE_BINARY_DIR}/test_value_identity_dsos/${VALUE_IDENTITY_DSO_NAME}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+            WINDOWS_EXPORT_ALL_SYMBOLS ON)
+        if(APPLE)
+            set_target_properties(${VALUE_IDENTITY_DSO_NAME} PROPERTIES
+                MACOSX_RPATH ON)
+        endif()
+        target_link_libraries(${VALUE_IDENTITY_DSO_NAME} PRIVATE
+            Photospider::operation_sdk)
+    endforeach()
 endif()
 
 # ==============================================================================
@@ -1332,6 +1357,28 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_cpu_dense_tensor_image_operation
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+
+    add_executable(test_value_identity_across_dsos
+        tests/integration/test_value_identity_dso.cpp)
+    set_target_properties(test_value_identity_across_dsos PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+    target_compile_definitions(test_value_identity_across_dsos PRIVATE
+        PS_VALUE_IDENTITY_RUNTIME_PATH="$<TARGET_FILE:photospider_operation_runtime>"
+        PS_VALUE_IDENTITY_DSO_A_PATH="$<TARGET_FILE:value_identity_dso_a>"
+        PS_VALUE_IDENTITY_DSO_B_PATH="$<TARGET_FILE:value_identity_dso_b>")
+    target_link_libraries(test_value_identity_across_dsos PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+        ${CMAKE_DL_LIBS})
+    add_dependencies(test_value_identity_across_dsos
+        photospider_operation_runtime
+        value_identity_dso_a
+        value_identity_dso_b)
+    gtest_discover_tests(test_value_identity_across_dsos
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS value-runtime
+            TIMEOUT 30)
 
     add_test(NAME DependencyDisabledInstallSmoke
         COMMAND ${Python3_EXECUTABLE} -B

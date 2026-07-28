@@ -275,7 +275,9 @@ runtime-owned 的临时 RT 输出状态。它不是权威 HP cache，也不会�
 **`AllocationIdentity`**
 一个 CPU allocation control block 的 opaque process-local identity。即使 range 不同，同一
 allocation 上的 BufferHandle subrange 也具有相同 allocation identity。它不是 Value revision、
-content digest、持久 cache key 或 task identity。
+content digest、持久 cache key 或 task identity。`valid()` 只表示 token 非零且已经签发，
+不是 liveness 查询；最后一个 allocation owner 销毁后，复制出的 token 仍保持非零。Shared
+operation runtime 通过 Host 与 Value-using DSO 共用的唯一进程级 authority 铸造这些 token。
 
 **`BufferHandle`**
 同一个 allocation identity 上受检、不可变、非空的 byte range。它不暴露 raw pointer。

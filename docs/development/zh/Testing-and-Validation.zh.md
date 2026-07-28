@@ -131,8 +131,9 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 长期 `DependencyDisabledInstallSmoke` 会配置一个 OpenCV 与 YAML capability 均禁用的 clean
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
-`test_cpu_dense_tensor_image_operation` binary。安装前，它会在该真实 disabled producer 中运行
-全部 15 个 dense-image case，包括
+`test_cpu_dense_tensor_image_operation`、`test_value_identity_across_dsos`
+binary。安装前，它会在该真实 disabled producer 中运行全部 16 个 dense-image case 与一个
+双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
 默认值，以及三类无效显式组合的精确诊断。
@@ -666,11 +667,12 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor 与 ImageView Operation 验证
 
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2/V-3 边界的 provider-independent
-integration binary。它的 15 个长期用例验证：
+integration binary。它的 16 个长期用例验证：
 
 - malformed facet、stride、byte offset 与 exact-envelope rejection；
 - exclusive builder write authority、seal revocation、retaining read-lease lifetime、
-  BufferHandle subrange 与 process-local identity；
+  BufferHandle subrange、process-local identity，以及非零 `AllocationIdentity` 不表示
+  allocation liveness；
 - 在 shared allocation 上受界限约束的正、零与负 immutable stride，以及彼此不同的 Value
   revision；
 - immutable Value copy sharing、copy-like DenseTensorView/ImageView move，以及 lvalue/rvalue
@@ -693,10 +695,12 @@ ctest --test-dir build --output-on-failure \
   -R '^CpuDenseTensorImageOperation\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 15 个
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 16 个
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
-installed consumer。下述 provider-disabled nested build 也会编译并运行全部 15 个用例，因此真实
-core operation 不依赖 optional OpenCV operation provider。
+installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
+DSO，证明它们从同一个 shared runtime authority mint identity。下述 provider-disabled nested
+build 也会编译并运行全部 16 个 dense case 与该双 DSO case，因此真实 core operation 与 identity
+authority 都不依赖 optional OpenCV operation provider。
 
 ## 可选 OpenCV Operation Provider 验证
 
@@ -722,13 +726,16 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 provider-independent focused binary 与 stdlib-only fixture，并额外构建 CPU
 DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary 与
 kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须
-精确包含 22 项：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 15 个
-`CpuDenseTensorImageOperation.*` case、三个 `DiskCacheDiagnosticConcurrency.*` case 与
+精确包含 24 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 16 个
+`CpuDenseTensorImageOperation.*` case、
+`ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
+`DiskCacheDiagnosticConcurrency.*` case 与
 两个 `KernelLifecycleConcurrency.*` case。Disk-cache case 必须只保留
 `kernel-concurrency` label 与 20 秒 timeout；lifecycle case 保留同一 label 与 60 秒
-timeout；dense-image case 保留 30 秒 timeout。不得残留任何依赖 provider 的 broad test。
-Driver 随后通过 CTest 运行全部 focused case。禁用 profile 要求 dependency-neutral
+timeout；dense-image 与 Value-runtime case 保留 30 秒 timeout，后者只携带
+`value-runtime` label。不得残留任何依赖 provider 的 broad test。Driver 随后通过 CTest
+运行全部 focused case。禁用 profile 要求 dependency-neutral
 analyzer/math/dense-invert operation 仍被 seed、OpenCV-backed operation key 不存在，并要求
 replacement provider 能发布、执行且完整退役其 resize key。该临时 build 是长期 product
 configuration 检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前阶段禁用的是

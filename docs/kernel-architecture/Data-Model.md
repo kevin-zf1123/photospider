@@ -293,7 +293,8 @@ identity:
   axes;
 - `BufferHandle` is a checked immutable nonempty range over one CPU allocation
   identity, exposes no pointer, and creates checked identity-preserving
-  subranges;
+  subranges; identity `valid()` checks only a nonzero issued token, not whether
+  the allocation still has a live owner;
 - `ValueBuilder` owns the only move-only `WriteLease`, refuses seal while a
   lease is live, and publishes immutable bytes with a fresh `ValueRevisionId`;
 - the vector convenience constructor still deep-copies lvalue and rvalue
@@ -316,6 +317,8 @@ cache copies preserve both identities; dirty clones clear the old Value before
 mutation and reseal final bytes; replacement and disk decode mint fresh
 identities. Allocation and revision tokens remain process-local and never enter
 task-graph keys, cache paths, graph/YAML documents, or artifact bytes.
+The shared operation runtime is the one process-wide minting authority for the
+static Host and every Value-using DSO.
 
 Named `ParameterMap` results and graph/dirty/planning `PixelRect` geometry are
 unchanged. `DataSpec`, `RegionSet`, device routing, readiness, transfer,
@@ -366,3 +369,4 @@ neither document changes the current fields described above.
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_value_identity_dso.cpp`

@@ -33,10 +33,13 @@ class AllocationIdentity final {
   constexpr AllocationIdentity() noexcept = default;
 
   /**
-   * @brief Reports whether this token identifies a live process allocation.
+   * @brief Reports whether this object contains an issued allocation token.
    *
    * @return True when the token is nonzero.
    * @throws Nothing.
+   * @note This is an issued-token check, not an allocation-liveness query. A
+   *       copied identity remains nonzero after the last BufferHandle,
+   *       ReadLease, or Value retaining that allocation is destroyed.
    */
   constexpr bool valid() const noexcept { return value_ != 0U; }
 

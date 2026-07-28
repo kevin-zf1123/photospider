@@ -50,6 +50,11 @@ OPTIONAL_PROVIDER_CTEST_NAME = (
 #: @brief Stable build-smoke entry required by every provider-disabled profile.
 #: @note Its own build-smoke label is not inherited by diagnostic cases.
 DEPENDENCY_DISABLED_CTEST_NAME = "DependencyDisabledInstallSmoke"
+#: @brief Stable process-wide Value identity case required by the profile.
+#: @note The fixture loads two independently linked Value-using DSOs.
+VALUE_RUNTIME_CTEST_NAME = (
+    "ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide"
+)
 #: @brief Stable Value-backed dense-image cases required without the provider.
 #: @note The names independently mirror the dedicated integration target.
 CPU_DENSE_IMAGE_CTEST_NAMES = (
@@ -60,6 +65,10 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     (
         "CpuDenseTensorImageOperation."
         "BuilderScopesWriteAuthorityAndReadLeaseLifetime"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "AllocationIdentityValidityDoesNotQueryAllocationLiveness"
     ),
     (
         "CpuDenseTensorImageOperation."
@@ -83,7 +92,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "ValueRemainsStableWhenMovedInputsAreReused"
+        "ValueDeepCopiesRvaluePayloadBeforeSourceOwnerRetires"
     ),
     (
         "CpuDenseTensorImageOperation."
@@ -143,8 +152,9 @@ def ctest_json_test(
 def provider_disabled_ctest_payload() -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
-    @return JSON payload containing two profile entries, 15 dense-image
-      cases, three disk cases, and two production lifecycle cases.
+    @return JSON payload containing two profile entries, 16 dense-image cases,
+      one Value-runtime case, three disk cases, and two production lifecycle
+      cases.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
       60-second timeout. Both groups use the exact `kernel-concurrency` label.
@@ -153,6 +163,7 @@ def provider_disabled_ctest_payload() -> str:
     names = {
         DEPENDENCY_DISABLED_CTEST_NAME,
         OPTIONAL_PROVIDER_CTEST_NAME,
+        VALUE_RUNTIME_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
         *KERNEL_LIFECYCLE_CTEST_NAMES,
         *CPU_DENSE_IMAGE_CTEST_NAMES,
@@ -162,17 +173,27 @@ def provider_disabled_ctest_payload() -> str:
             "tests": [
                 ctest_json_test(
                     name,
-                    labels=["kernel-concurrency"]
-                    if name in DISK_CACHE_CTEST_NAMES
-                    or name in KERNEL_LIFECYCLE_CTEST_NAMES
-                    else None,
+                    labels=(
+                        ["kernel-concurrency"]
+                        if name in DISK_CACHE_CTEST_NAMES
+                        or name in KERNEL_LIFECYCLE_CTEST_NAMES
+                        else (
+                            ["value-runtime"]
+                            if name == VALUE_RUNTIME_CTEST_NAME
+                            else None
+                        )
+                    ),
                     timeout=(
                         20
                         if name in DISK_CACHE_CTEST_NAMES
                         else (
                             60
                             if name in KERNEL_LIFECYCLE_CTEST_NAMES
-                            else None
+                            else (
+                                30
+                                if name == VALUE_RUNTIME_CTEST_NAME
+                                else None
+                            )
                         )
                     ),
                 )
@@ -858,15 +879,17 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves 22 names and concurrency
+        @return None after parsing preserves 24 names and focused-test
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
-        @note Exact labels exclude the build-smoke label from disk test cases.
+        @note Exact labels exclude the build-smoke label from disk and
+          Value-runtime test cases.
         """
 
         expected = {
             DEPENDENCY_DISABLED_CTEST_NAME,
             OPTIONAL_PROVIDER_CTEST_NAME,
+            VALUE_RUNTIME_CTEST_NAME,
             *DISK_CACHE_CTEST_NAMES,
             *KERNEL_LIFECYCLE_CTEST_NAMES,
             *CPU_DENSE_IMAGE_CTEST_NAMES,

@@ -86,11 +86,18 @@ run_logged runtime_capability_test \
 run_logged ci_routing_test bash "$SCRIPT_DIR/ci_routing_test.sh"
 
 if ((${#cpp_files[@]} == 0)); then
+  # Keep the mutually exclusive static-check evidence coherent when a
+  # no-C++ run follows a run that produced changed-file and tool logs.
+  rm -f -- "$CI_ARTIFACT_DIR/changed-cpp-files.txt" \
+    "$CI_ARTIFACT_DIR/clang_format_check.log" \
+    "$CI_ARTIFACT_DIR/cpplint_check.log"
   echo "No changed C++ files; clang-format and cpplint skipped." |
     tee "$CI_ARTIFACT_DIR/static-summary.log"
   exit 0
 fi
 
+# A C++ run supersedes any earlier skip summary.
+rm -f -- "$CI_ARTIFACT_DIR/static-summary.log"
 printf '%q\n' "${cpp_files[@]}" |
   tee "$CI_ARTIFACT_DIR/changed-cpp-files.txt"
 

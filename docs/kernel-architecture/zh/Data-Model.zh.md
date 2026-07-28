@@ -235,7 +235,8 @@ physical ownership 与正式 HP cache identity：
   `StorageEncoding` 分开；
 - installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
 - `BufferHandle` 是同一 CPU allocation identity 上受检、不可变、非空的 range；它不暴露
-  pointer，并创建保留 identity 的 checked subrange；
+  pointer，并创建保留 identity 的 checked subrange；identity `valid()` 只检查非零且已签发的
+  token，不检查 allocation 是否仍有 live owner；
 - `ValueBuilder` 拥有唯一 move-only `WriteLease`，live lease 存在时拒绝 seal，并以全新
   `ValueRevisionId` 发布 immutable byte；
 - vector 便捷 constructor 仍会在 seal 前 deep-copy lvalue/rvalue 的
@@ -255,6 +256,8 @@ dirty HP commit 与 disk decode 都会在正式发布前规范化 legacy CPU buf
 copy 保留两类 identity；dirty clone 在 mutation 前清除旧 Value 并对最终 byte 重新 seal；
 replacement 与 disk decode 生成新 identity。allocation/revision token 只在进程内有效，
 永不进入 task-graph key、cache path、graph/YAML document 或 artifact byte。
+Shared operation runtime 是 static Host 与每个 Value-using DSO 共用的唯一进程级 minting
+authority。
 
 命名 `ParameterMap` result 与 graph/dirty/planning 的 `PixelRect` geometry 保持不变。
 `DataSpec`、`RegionSet`、device routing、readiness、transfer、quantization 与 provider
@@ -303,3 +306,4 @@ dependency 工作由
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_value_identity_dso.cpp`

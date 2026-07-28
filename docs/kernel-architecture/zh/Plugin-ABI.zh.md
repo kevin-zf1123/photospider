@@ -79,9 +79,12 @@ representation 与显式 `1..9` 数值。
 操作插件不会为了访问 registry 符号而链接宽泛的静态 `photospider` 产品。仓库内 operation plugin 通过
 `OperationPluginRegistrar` 注册。普通插件请求 `operation_sdk` package component，并且只链接
 `Photospider::operation_sdk`。该 interface target 提供安装头，并传递链接
-`Photospider::operation_runtime`；后者的静态归档实现公共 image-buffer factory、immutable
-CPU DenseTensor Value 与 checked view symbol，不反向链接 SDK，也不要求外部 package。这些
-data/memory header 可用于 dependency-neutral plugin-internal 工作，但 operation v2 callback
+`Photospider::operation_runtime`；后者的 shared library 实现公共 image-buffer factory、immutable
+CPU DenseTensor Value 与 checked view symbol，不反向链接 SDK，也不要求外部 package。静态
+Host product 与独立加载且使用 Value 的 operation DSO 因而都通过同一个 runtime image
+解析 allocation/revision minting，而不会把 counter 复制进每个 DSO。这是普通 dynamic
+dependency，不是 ELF/Mach-O symbol interposition 或 plugin ABI callback。这些 data/memory
+header 可用于 dependency-neutral plugin-internal 工作，但 operation v2 callback
 record 仍接收并返回当前 ImageBuffer/OperationOutput value。
 
 OpenCV 是显式 opt-in。使用 `photospider/plugin/opencv_adapter.hpp` 的插件额外请求并链接
@@ -100,7 +103,8 @@ descriptor 及其完整 extent 执行明确的 backend-preserving passthrough；
 - 静态 Photospider 进程拥有一个 `OpRegistry` 和一个 operation `PluginManager`，由所有 embedded Host 共享。
 - 动态 operation plugin 从 host 接收注册 callback，因此 registry mutation 始终发生在该进程拥有的实例中。
 - `Photospider::operation_runtime` 只包含 ImageBuffer 与 immutable CPU DenseTensor
-  value/view 实现，不包含 registry、loader、Graph、policy、execution 或 compute state。
+  value/view 实现，不包含 registry、loader、Graph、policy、execution 或 compute state。其唯一
+  进程级 identity authority 持有彼此独立的单调 allocation 与 Value-revision 序列。
 - 插件 callback object 和插件实例化的返回值内部状态仍可能指向插件代码，因此进程 owner 和复制值中的 lease
   必须保留插件库，直到这些状态全部销毁。
 
@@ -418,7 +422,9 @@ conversion、inference、query、region、digest 与 execution provider suite。
 V-2 在 `operation_runtime` 中实现 dependency-neutral C++ CPU DenseTensor `Value`、
 `StridedLayout`、`DenseTensorView` 与 `ImageView` 子集。V-3 新增 installed BufferHandle
 range、read/write lease、ValueBuilder seal、byte offset、受界限约束的 signed immutable view
-与 process-local allocation/revision identity。一条内建 operation 会在 private 双重表示 bridge
+与 process-local allocation/revision identity。该 runtime 为 shared，因此 Host 与每个使用
+Value 的 DSO 都调用同一个 minting authority；长期 loader regression 会打开两个独立 DSO，
+并证明两类 identity 均保持不同。一条内建 operation 会在 private 双重表示 bridge
 后使用该 surface：它保留 sealed result Value，再派生 ImageBuffer compatibility snapshot。
 
 两个切片都不会把 Value、BufferHandle、lease 或 PImpl 放进 v2 callback record，也不会改变
@@ -482,5 +488,7 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `tests/unit/test_op_registry_m31.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/fixtures/value_identity_dso.cpp`
+- `tests/integration/test_value_identity_dso.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

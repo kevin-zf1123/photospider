@@ -13,35 +13,91 @@
 namespace ps {
 namespace {
 
-/** @brief Next process-local allocation token; zero is permanently invalid. */
-std::atomic<std::uint64_t> next_allocation_identity{1U};
-
-/** @brief Next process-local Value revision; zero is permanently invalid. */
-std::atomic<std::uint64_t> next_value_revision{1U};
-
 /**
- * @brief Mints one nonzero process-local identity without wraparound reuse.
+ * @brief Owns both process-wide runtime identity sequences.
  *
- * @param source Atomic next-token source.
- * @param diagnostic Stable exhaustion diagnostic.
- * @return Unique nonzero token for the current process lifetime.
- * @throws std::overflow_error when the source reaches its terminal value.
- * @note The terminal maximum value is reserved so increment never wraps to
- * zero and later calls can never reuse an earlier token.
+ * This authority is instantiated exactly once inside the shared
+ * `Photospider::operation_runtime`. The static Host product and every
+ * Value-using operation DSO dynamically depend on that same runtime image, so
+ * allocation and revision tokens cannot restart at a DSO boundary.
+ *
+ * @throws Nothing during construction and destruction.
+ * @note The two sequences remain distinct identity domains. The shared-runtime
+ *       ownership, rather than symbol interposition or a probabilistic token,
+ *       establishes their process-wide uniqueness.
  */
-std::uint64_t mint_identity(std::atomic<std::uint64_t>* source,
-                            const char* diagnostic) {
-  std::uint64_t current = source->load(std::memory_order_relaxed);
-  while (true) {
-    if (current == 0U || current == std::numeric_limits<std::uint64_t>::max()) {
-      throw std::overflow_error(diagnostic);
-    }
-    if (source->compare_exchange_weak(current, current + 1U,
-                                      std::memory_order_relaxed,
-                                      std::memory_order_relaxed)) {
-      return current;
+class ProcessIdentityAuthority final {
+ public:
+  /**
+   * @brief Mints one allocation identity for this process runtime.
+   *
+   * @return Unique nonzero allocation token.
+   * @throws std::overflow_error when allocation identity space is exhausted.
+   * @note Calls are thread-safe and never reuse a previously returned token.
+   */
+  std::uint64_t mint_allocation_identity() {
+    return mint_from(&next_allocation_identity_,
+                     "Allocation identity space is exhausted.");
+  }
+
+  /**
+   * @brief Mints one Value revision identity for this process runtime.
+   *
+   * @return Unique nonzero Value revision token.
+   * @throws std::overflow_error when Value revision space is exhausted.
+   * @note Calls are thread-safe and never reuse a previously returned token.
+   */
+  std::uint64_t mint_value_revision() {
+    return mint_from(&next_value_revision_,
+                     "Value revision identity space is exhausted.");
+  }
+
+ private:
+  /**
+   * @brief Mints one nonzero token without wraparound reuse.
+   *
+   * @param source Atomic next-token source owned by this authority.
+   * @param diagnostic Stable exhaustion diagnostic.
+   * @return Unique nonzero token from the selected identity domain.
+   * @throws std::overflow_error when the source reaches its terminal value.
+   * @note The terminal maximum value is reserved so increment never wraps to
+   *       zero and later calls can never reuse an earlier token.
+   */
+  static std::uint64_t mint_from(std::atomic<std::uint64_t>* source,
+                                 const char* diagnostic) {
+    std::uint64_t current = source->load(std::memory_order_relaxed);
+    while (true) {
+      if (current == 0U ||
+          current == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error(diagnostic);
+      }
+      if (source->compare_exchange_weak(current, current + 1U,
+                                        std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+        return current;
+      }
     }
   }
+
+  /** @brief Next allocation token; zero is permanently invalid. */
+  std::atomic<std::uint64_t> next_allocation_identity_{1U};
+
+  /** @brief Next Value revision token; zero is permanently invalid. */
+  std::atomic<std::uint64_t> next_value_revision_{1U};
+};
+
+/**
+ * @brief Returns the shared runtime's sole identity-minting authority.
+ *
+ * @return Process-lifetime authority owned by `operation_runtime`.
+ * @throws Nothing.
+ * @note Function-local initialization is thread-safe. The enclosing shared
+ *       runtime supplies one storage instance to the Host and every linked
+ *       operation DSO.
+ */
+ProcessIdentityAuthority& process_identity_authority() noexcept {
+  static ProcessIdentityAuthority authority;
+  return authority;
 }
 
 /**
@@ -328,8 +384,8 @@ BufferHandle BufferHandle::allocate_for_builder(std::size_t size) {
     throw std::invalid_argument(
         "BufferHandle allocation size must be positive.");
   }
-  const AllocationIdentity identity(mint_identity(
-      &next_allocation_identity, "Allocation identity space is exhausted."));
+  const AllocationIdentity identity(
+      process_identity_authority().mint_allocation_identity());
   return BufferHandle(std::make_shared<ControlBlock>(identity, size), 0U, size);
 }
 
@@ -680,8 +736,8 @@ Value ValueBuilder::seal() {
         "ValueBuilder cannot seal while a WriteLease is active.");
   }
 
-  const ValueRevisionId revision(mint_identity(
-      &next_value_revision, "Value revision identity space is exhausted."));
+  const ValueRevisionId revision(
+      process_identity_authority().mint_value_revision());
   auto published = std::make_shared<const Value::Impl>(
       impl_->descriptor, impl_->image_facet, impl_->layout, impl_->buffer,
       revision);
@@ -732,8 +788,8 @@ Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
         "DenseTensor signed layout exceeds its BufferHandle.");
   }
 
-  const ValueRevisionId revision(mint_identity(
-      &next_value_revision, "Value revision identity space is exhausted."));
+  const ValueRevisionId revision(
+      process_identity_authority().mint_value_revision());
   DenseTensorDescriptor isolated_descriptor = descriptor;
   const std::optional<ImageFacet> isolated_image_facet = image_facet;
   StridedLayout isolated_layout = layout;

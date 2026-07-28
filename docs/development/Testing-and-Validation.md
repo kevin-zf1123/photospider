@@ -173,8 +173,10 @@ The durable `DependencyDisabledInstallSmoke` configures a clean producer with
 OpenCV and YAML capabilities disabled, disables both package discoveries,
 turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
-`test_cpu_dense_tensor_image_operation` binary. Before installation it runs all
-15 dense-image cases in that actual disabled producer, including the
+`test_cpu_dense_tensor_image_operation` and
+`test_value_identity_across_dsos` binaries. Before installation it runs all
+16 dense-image cases plus the dual-DSO identity case in that actual disabled
+producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
 derived provider/plugin/CLI defaults and the precise diagnostics for three
@@ -835,11 +837,12 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor and ImageView Operation Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2/V-3 boundary. Its 15 durable cases verify:
+binary for the implemented V-2/V-3 boundary. Its 16 durable cases verify:
 
 - malformed facet, stride, byte-offset, and exact-envelope rejection;
 - exclusive builder write authority, seal revocation, retaining read-lease
-  lifetime, BufferHandle subranges, and process-local identities;
+  lifetime, BufferHandle subranges, process-local identities, and the
+  non-liveness meaning of a nonzero `AllocationIdentity`;
 - bounded positive, zero, and negative immutable strides over shared
   allocations, with distinct Value revisions;
 - immutable Value copy sharing, copy-like DenseTensorView/ImageView moves, and
@@ -864,12 +867,14 @@ ctest --test-dir build --output-on-failure \
   -R '^CpuDenseTensorImageOperation\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 15 cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all 16 cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
-The provider-disabled nested build below also compiles and runs all 15
-cases, so the real core operation does not depend on the optional OpenCV
-operation provider.
+`DependencyDisabledInstallSmoke` also loads two independently linked
+Value-using DSOs and proves that they mint from one shared runtime authority.
+The provider-disabled nested build below also compiles and runs all 16 dense
+cases plus that dual-DSO case, so the real core operation and identity
+authority do not depend on the optional OpenCV operation provider.
 
 ## Optional OpenCV Operation Provider Validation
 
@@ -902,15 +907,17 @@ suite gate is therefore off. The driver validates the exact CMake cache
 profile, builds the provider-independent focused provider binary, its
 stdlib-only fixture, the CPU DenseTensor/ImageView integration binary, and the
 dedicated disk-cache and kernel-lifecycle concurrency binaries, then queries
-the machine-readable CTest inventory. That inventory must contain exactly 22
+the machine-readable CTest inventory. That inventory must contain exactly 24
 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 15
-`CpuDenseTensorImageOperation.*` cases, the three
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 16
+`CpuDenseTensorImageOperation.*` cases,
+`ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
 `KernelLifecycleConcurrency.*` cases. Disk-cache cases retain only the
 `kernel-concurrency` label and a 20-second timeout; lifecycle cases retain that
-label and a 60-second timeout; dense-image cases retain their 30-second timeout.
-No broad provider-dependent test may remain registered. The driver runs every
+label and a 60-second timeout; dense-image and Value-runtime cases retain their
+30-second timeout, with the latter carrying only the `value-runtime` label. No
+broad provider-dependent test may remain registered. The driver runs every
 focused case through CTest. The disabled profile requires dependency-neutral
 analyzer/math/dense-invert operations to remain seeded, OpenCV-backed operation
 keys to be absent, and the replacement provider to publish, execute, and fully

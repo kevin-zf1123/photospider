@@ -351,7 +351,11 @@ is not persisted as reusable graph cache.
 An opaque process-local identity for one CPU allocation control block.
 BufferHandle subranges over that allocation compare equal by allocation
 identity even when their ranges differ. It is not a Value revision, content
-digest, persistent cache key, or task identity.
+digest, persistent cache key, or task identity. `valid()` reports only that the
+token is nonzero and was issued; it is not a liveness query, and a copied token
+remains nonzero after the final allocation owner is destroyed. The shared
+operation runtime mints tokens through one process-wide authority used by the
+Host and Value-using DSOs.
 
 **`BufferHandle`**
 A checked immutable nonempty byte range over one allocation identity. It does
