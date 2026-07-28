@@ -258,8 +258,9 @@ def write_consumer(source: Path) -> None:
     @param source Source directory created for the consumer.
     @return None.
     @throws OSError If source files cannot be written.
-    @note The executable verifies neutral allocation, empty-session lifecycle,
-      and explicit persistence failure without any parser or image-library API.
+    @note The executable verifies neutral allocation, the extended operation
+      metadata layout, empty-session lifecycle, and explicit persistence
+      failure without any parser or image-library API.
     """
 
     source.mkdir(parents=True)
@@ -268,10 +269,12 @@ def write_consumer(source: Path) -> None:
             [
                 "cmake_minimum_required(VERSION 3.16)",
                 "project(dependency_disabled_consumer LANGUAGES CXX)",
-                "find_package(Photospider CONFIG REQUIRED COMPONENTS embedded)",
+                "find_package(Photospider CONFIG REQUIRED",
+                "  COMPONENTS embedded operation_sdk)",
                 "add_executable(dependency_disabled_consumer main.cpp)",
                 "target_link_libraries(dependency_disabled_consumer",
-                "  PRIVATE Photospider::photospider)",
+                "  PRIVATE Photospider::photospider",
+                "          Photospider::operation_sdk)",
                 "",
             ]
         ),
@@ -282,6 +285,7 @@ def write_consumer(source: Path) -> None:
             [
                 "#include <algorithm>",
                 "#include <cstddef>",
+                "#include <cstdint>",
                 "#include <filesystem>",
                 "#include <fstream>",
                 "#include <memory>",
@@ -297,11 +301,25 @@ def write_consumer(source: Path) -> None:
                 "#include <photospider/data/value.hpp>",
                 "#include <photospider/host/host.hpp>",
                 "#include <photospider/memory/buffer_handle.hpp>",
+                "#include <photospider/plugin/op_contract.hpp>",
                 "",
                 "int main(int argc, char** argv) {",
                 "  if (argc != 2) return 10;",
                 "  const std::filesystem::path root(argv[1]);",
                 "  std::filesystem::create_directories(root);",
+                "",
+                "  ps::plugin::OperationMetadata metadata;",
+                "  metadata.reentrant = false;",
+                "  metadata.maximum_parallelism = 2U;",
+                "  metadata.retained_memory_bytes = 1024U;",
+                "  metadata.scratch_bytes = 512U;",
+                '  metadata.exclusive_key = "dependency-disabled";',
+                "  if (metadata.reentrant || metadata.maximum_parallelism != 2U ||",
+                "      metadata.retained_memory_bytes != 1024U ||",
+                "      metadata.scratch_bytes != 512U ||",
+                '      metadata.exclusive_key != "dependency-disabled") {',
+                "    return 18;",
+                "  }",
                 "",
                 "  ps::ImageBuffer image = ps::make_aligned_cpu_image_buffer(",
                 "      3, 2, 4, ps::DataType::UINT8);",

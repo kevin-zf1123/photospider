@@ -1627,10 +1627,11 @@ def installed_cpp_policy_plugin_source() -> str:
 def installed_operation_plugin_source() -> str:
     """@brief Build an operation DSO that needs only ``operation_sdk``.
 
-    @return C++17 source registering one factory-backed monolithic operation.
+    @return C++17 source registering one metadata-routed factory operation.
     @throws None The source is one immutable in-memory string.
-    @note Calling the image factory from the DSO forces the SDK's transitive
-      runtime archive to satisfy the symbol at link time.
+    @note Calling the image factory forces transitive runtime linkage, while
+      explicitly populating every V-5 CPU field proves the installed
+      provisional metadata layout is consumable.
     """
 
     return dedent(
@@ -1683,6 +1684,12 @@ def installed_operation_plugin_source() -> str:
           if (registrar == nullptr) {
             throw std::invalid_argument("installed operation registrar is null");
           }
+          ps::plugin::OperationMetadata metadata;
+          metadata.reentrant = false;
+          metadata.maximum_parallelism = 3U;
+          metadata.retained_memory_bytes = 4096U;
+          metadata.scratch_bytes = 2048U;
+          metadata.exclusive_key = "installed-sdk";
           registrar->register_op_hp_monolithic(
               "installed", "factory",
               [](const ps::plugin::NodeView&,
@@ -1691,7 +1698,8 @@ def installed_operation_plugin_source() -> str:
                 output.image_buffer = ps::make_aligned_cpu_image_buffer(
                     2, 2, 1, ps::DataType::UINT8);
                 return output;
-              });
+              },
+              std::move(metadata));
         }
         """
     ).lstrip()
