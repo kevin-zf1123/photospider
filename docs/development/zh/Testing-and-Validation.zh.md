@@ -143,7 +143,7 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_value_identity_across_dsos`
-binary。安装前，它会在该真实 disabled producer 中运行全部 16 个 dense-image case 与一个
+binary。安装前，它会在该真实 disabled producer 中运行全部 25 个 dense-image case 与一个
 双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI

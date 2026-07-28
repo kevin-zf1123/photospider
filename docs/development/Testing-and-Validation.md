@@ -189,7 +189,7 @@ turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
 `test_cpu_dense_tensor_image_operation` and
 `test_value_identity_across_dsos` binaries. Before installation it runs all
-16 dense-image cases plus the dual-DSO identity case in that actual disabled
+25 dense-image cases plus the dual-DSO identity case in that actual disabled
 producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
