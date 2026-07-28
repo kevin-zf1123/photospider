@@ -77,12 +77,14 @@ output 输出紧凑 matrix。Artifact key 由有界 ASCII slug 与测试名 SHA-
 - `ImageArtifactCodecDependencyDisabledBuild`
 - `IpcDisabledInstallSmoke`
 - `OpenCvOperationProviderDisabledBuild`
+- `PhotospiderdInstallLayoutSmoke`
 - `PublicHeaderSelfContainment`
 - `StaticProductConsumerSmoke`
 
-四个 dependency/configuration driver 与 static-product consumer 会创建或校验隔离的 nested
-build profile；public-header self-containment 会调用专用 compile target。它们属于长期
-product、package、configuration 与 compile 边界，不是 migration 或 source-layout 检查。
+四个 dependency/configuration driver、daemon install-layout driver 与 static-product consumer
+会创建或校验隔离的 nested build profile；public-header self-containment 会调用专用 compile
+target。它们属于长期 product、package、configuration 与 compile 边界，不是 migration 或
+source-layout 检查。
 `OpenCvOperationProviderBuildSmokeSafety` 继续作为 OpenCV nested-build driver 的普通完整 CTest
 safety regression：其 Python unittest 会在进程内验证 cleanup guard 与 cache-layout helper，
 但不会启动 child configure、build、install 或 compile target。

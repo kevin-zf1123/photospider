@@ -89,14 +89,15 @@ The current labelled inventory is:
 - `ImageArtifactCodecDependencyDisabledBuild`
 - `IpcDisabledInstallSmoke`
 - `OpenCvOperationProviderDisabledBuild`
+- `PhotospiderdInstallLayoutSmoke`
 - `PublicHeaderSelfContainment`
 - `StaticProductConsumerSmoke`
 
-The four dependency/configuration drivers and the static-product consumer
-create or validate isolated nested build profiles; public-header
-self-containment invokes its dedicated compile target. These are durable
-product, package, configuration, and compile boundaries, not migration or
-source-layout checks. `OpenCvOperationProviderBuildSmokeSafety` remains an
+The four dependency/configuration drivers, daemon install-layout driver, and
+static-product consumer create or validate isolated nested build profiles;
+public-header self-containment invokes its dedicated compile target. These are
+durable product, package, configuration, and compile boundaries, not migration
+or source-layout checks. `OpenCvOperationProviderBuildSmokeSafety` remains an
 ordinary full-CTest safety regression for the OpenCV nested-build driver: its
 Python unittest exercises cleanup guards and cache-layout helpers in-process,
 but does not start a child configure, build, install, or compile target.

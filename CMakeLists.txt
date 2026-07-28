@@ -921,15 +921,39 @@ if(PHOTOSPIDER_BUILD_IPC)
         photospider_ipc_client
         photospider
         Threads::Threads)
+    # GNUInstallDirs permits nested relative directories and absolute
+    # destinations. For a relative LIBDIR, derive the loader-relative lookup
+    # from the configured full daemon directory to the configured full runtime
+    # directory instead of assuming one ".." level. An absolute LIBDIR is an
+    # explicit non-relocatable request and must remain an absolute lookup;
+    # DESTDIR is intentionally absent because it is only a staging prefix.
+    if(APPLE OR UNIX)
+        if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+            set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
+                "${CMAKE_INSTALL_FULL_LIBDIR}")
+        else()
+            file(RELATIVE_PATH PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR
+                "${CMAKE_INSTALL_FULL_BINDIR}"
+                "${CMAKE_INSTALL_FULL_LIBDIR}")
+            if(PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR STREQUAL "")
+                set(PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR ".")
+            endif()
+            if(APPLE)
+                set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
+                    "@loader_path/${PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR}")
+            else()
+                set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
+                    "$ORIGIN/${PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR}")
+            endif()
+        endif()
+    endif()
     if(APPLE)
         set_target_properties(photospiderd PROPERTIES
             MACOSX_RPATH ON
-            INSTALL_RPATH
-                "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "${PHOTOSPIDERD_INSTALL_RUNTIME_RPATH}")
     elseif(UNIX)
         set_target_properties(photospiderd PROPERTIES
-            INSTALL_RPATH
-                "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "${PHOTOSPIDERD_INSTALL_RUNTIME_RPATH}")
     endif()
 
     message(STATUS
@@ -1897,6 +1921,22 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 --config $<CONFIG>
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
         set_tests_properties(StaticProductConsumerSmoke PROPERTIES
+            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
+            RUN_SERIAL TRUE
+            TIMEOUT 900)
+        add_test(NAME PhotospiderdInstallLayoutSmoke
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --build-root "${CMAKE_BINARY_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_smoke"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --generator "${CMAKE_GENERATOR}"
+                --config $<CONFIG>
+                --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(PhotospiderdInstallLayoutSmoke PROPERTIES
             LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
             RUN_SERIAL TRUE
             TIMEOUT 900)

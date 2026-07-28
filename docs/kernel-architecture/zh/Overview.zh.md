@@ -87,10 +87,15 @@ Package 边界：
   `photospiderd`，同时让 server library 保持 private。IPC-only consumer 请求
   `COMPONENTS ipc_client` 时只解析 `Threads`；省略 component 则保留 embedded 默认行为及其
   backend dependency。由于 daemon 的 static Host closure 会加载 shared operation runtime，
-  其 install lookup 相对于 loader：macOS 使用
-  `@loader_path/../${CMAKE_INSTALL_LIBDIR}`，其他 Unix/ELF 平台使用
-  `$ORIGIN/../${CMAKE_INSTALL_LIBDIR}`；Windows 不设置 RPATH。Package smoke 会移除 loader
-  override variable，并从非系统临时 prefix 执行 installed `photospiderd --help`。
+  当 `CMAKE_INSTALL_LIBDIR` 为相对目录时，install lookup 会从
+  `CMAKE_INSTALL_FULL_BINDIR` 到 `CMAKE_INSTALL_FULL_LIBDIR` 推导 loader-relative
+  路径：macOS 使用 `@loader_path/<computed-relative-path>`，其他 Unix/ELF 平台使用
+  `$ORIGIN/<computed-relative-path>`。这同时覆盖默认与嵌套相对目录，以及 absolute
+  bindir。若显式配置 absolute `CMAKE_INSTALL_LIBDIR`，则直接使用该 absolute full
+  runtime directory，不拼接 loader token。`DESTDIR` 只作为 staging prefix，不会写入任一
+  lookup；Windows 不设置 RPATH。默认 package smoke 与隔离的 nested-relative、
+  absolute-libdir、absolute-bindir layout matrix 都会移除 loader override variable，并执行
+  installed `photospiderd --help`。
 - `Photospider::photospider` 为 consumer 携带 `PHOTOSPIDER_STATIC`，并让 `src/lib/` include root
   只对仓库内部构建私有。在 build tree 中，该 target 的 generated public include root 只包含
   `photospider/` forwarding header。CMake 会跟踪 header 的新增和删除，wrapper 直接读取实时
@@ -552,6 +557,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/photospiderd_install_layout_smoke.py`
 - `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

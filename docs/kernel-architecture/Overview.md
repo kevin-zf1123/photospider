@@ -102,11 +102,18 @@ Package boundary:
   library private. An IPC-only consumer requests `COMPONENTS ipc_client` and
   resolves only `Threads`; component-less discovery preserves the embedded
   default and its backend dependencies. Because the daemon's static Host
-  closure loads the shared operation runtime, its install lookup is
-  loader-relative: `@loader_path/../${CMAKE_INSTALL_LIBDIR}` on macOS and
-  `$ORIGIN/../${CMAKE_INSTALL_LIBDIR}` on other Unix/ELF platforms. Windows
-  receives no RPATH. The package smoke removes loader override variables and
-  executes installed `photospiderd --help` from a non-system temporary prefix.
+  closure loads the shared operation runtime, a relative
+  `CMAKE_INSTALL_LIBDIR` receives a loader-relative install lookup derived from
+  `CMAKE_INSTALL_FULL_BINDIR` to `CMAKE_INSTALL_FULL_LIBDIR`:
+  `@loader_path/<computed-relative-path>` on macOS and
+  `$ORIGIN/<computed-relative-path>` on other Unix/ELF platforms. This covers
+  default and nested relative directories as well as an absolute bindir. An
+  explicitly absolute `CMAKE_INSTALL_LIBDIR` instead receives that absolute
+  full runtime directory without a loader token. `DESTDIR` remains only a
+  staging prefix and is not encoded in either lookup; Windows receives no
+  RPATH. The default package smoke and the isolated nested-relative,
+  absolute-libdir, and absolute-bindir layout matrix both remove loader
+  override variables and execute installed `photospiderd --help`.
 - `Photospider::photospider` carries `PHOTOSPIDER_STATIC` for consumers and
   keeps the `src/lib/` include root private to repository builds. In the build tree,
   the target's generated public include root contains only `photospider/`
@@ -679,6 +686,7 @@ this current-state document.
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/photospiderd_install_layout_smoke.py`
 - `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
