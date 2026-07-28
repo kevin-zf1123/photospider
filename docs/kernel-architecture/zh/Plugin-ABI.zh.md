@@ -42,6 +42,23 @@ output、ROI 与 dependency callback 类型，不能复用旧符号。
 | Dependency LUT builder | 数据依赖空间依赖映射。 |
 | Device implementation | CPU、Metal、CUDA 或其他受支持的公共 `Device` capability。 |
 
+每个可执行 registration 都携带一个 `OperationMetadata` 值。除 tile、device、cost 与
+dependency hint 外，CPU execution contract 还包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `reentrant` | 精确 implementation 的 callback 是否可以重叠；默认 `true`。 |
+| `maximum_parallelism` | 精确 implementation 的 callback 上限；零表示没有 implementation-specific cap。 |
+| `retained_memory_bytes` | 每个飞行中 callback 额外占用的 Host-retained byte；零是显式声明。 |
+| `scratch_bytes` | 每个飞行中 callback 额外占用的 Host scratch byte；零是显式声明。 |
+| `exclusive_key` | 跨 implementation、Run 与 Graph 共享的可选 execution-domain exclusion key。 |
+
+无论 `maximum_parallelism` 为何，`reentrant=false` 的有效上限都是一。非空
+`exclusive_key` 最多 128 byte，且不能包含 embedded NUL。Host 会在发布前对 core 与 plugin
+registration 执行相同校验。这些字段扩展了临时 C++ v2 metadata layout，但没有改变 registrar
+symbol 或 callback signature。已有 v2 DSO 必须针对匹配 SDK 重新构建；不存在 missing-tail、
+stale-layout 或 compatibility interpretation。
+
 Canonical registry identity 为 `type:subtype`。两个 segment 都必须非空，且都不能包含保留分隔符 `:`，
 否则不同 pair 可能发生 identity collision。Public C++ registrar helper 还会在调用 `.c_str()` 前拒绝
 embedded NUL byte，防止 raw ABI 截断改变 identity；host raw callback 会独立校验它实际可见的 C-string
@@ -184,11 +201,14 @@ swap 进已经清空的 gap；移除尾部时因此只会析构空 owner。任�
 都不会在 registry lock 内被复制、移动、析构，也不会在锁内释放最后一个 library lease。新的稳定 value
 或 compatibility bridge 构造失败发生在 key、callback 或 ownership 发布之前，并保持 registry 不变。
 
-稳定所有权不等于执行 mutex。第一个 CPU device value 与其 HP compatibility bridge 会保留同一个 callback
-target，executor 或 reader snapshot 也可能保留同一个逻辑 target。这些路径可以并发调用它。因此，callback
-provider 必须保证 target 可重入，或自行同步其共享可变 state。Registry 只串行化 ownership mutation、
-coherent snapshot capture、publication 与 unload；它绝不会持有 state lock 来串行化 callback execution。
-Caller 不得因为 operation key、device 或 intent 相同，就推断 callback 只会单线程执行。
+稳定所有权本身不等于执行 mutex。Registry 只串行化 ownership mutation、coherent snapshot capture、
+publication 与 unload；callback execution 期间绝不会持有 registry state lock。Product planning
+会选择一份 coherent callback、metadata、device 与非零 ownership revision，在 plan 中只保存
+callback-free identity/metadata，并在 admission 前重新解析并要求精确 identity 相同。随后，在同一个
+注入的 `ExecutionService` 内，Host 会在 reserved start 时跨 Run 与 Graph 执行 `reentrant`、
+`maximum_parallelism` 与 `exclusive_key`。共享 operation key、device、intent 或 callback owner
+本身不意味着串行，除非选中的 metadata 明确声明。Provider 仍必须保护从该 Host boundary 外部访问、
+或者没有在声明中覆盖的共享 state。
 
 仓库自有 CPU OpenCV provider 会用不可变 input、callback-local 或 task-owned `cv::Mat` state，
 以及不使用进程范围的外层 operation mutex 来实现该契约。可选 builtin provider 会在 callback

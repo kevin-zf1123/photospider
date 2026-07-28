@@ -114,8 +114,8 @@ reserved-start transaction.
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, and callback owner for one full HP request | Execution-route workers, Run terminal state, or dirty-path execution |
-| `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one private lifecycle-admission registry, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, or visible commit |
+| `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
+| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, or visible commit |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
@@ -130,9 +130,12 @@ not form an installable API. The only installed extension contract in this
 area is the pure-C policy ABI declared by
 `include/photospider/policy/policy_plugin_api.h`.
 
-V-4 keeps the public monolithic registry slot and operation ABI v2 unchanged
-while one source-private core lookup bridge recognizes only the exact selected
-core dense callback. The private core runner reuses a
+V-4 kept the public monolithic registry slot, registrar entry, and callback
+signatures unchanged while one source-private core lookup bridge recognizes
+only the exact selected core dense callback. V-5 retains those entry/callback
+shapes but intentionally extends the provisional C++ v2 metadata layout; an
+operation DSO therefore requires a matching-SDK rebuild. The private core
+runner reuses a
 valid sealed CPU image Value or snapshots the legacy ImageBuffer when no Value
 exists, deep-copies the request-effective ParameterMap into a configuration
 that omits Node output/cache/topology state, invokes pure inference with only
@@ -148,9 +151,10 @@ a separate ImageBuffer compatibility snapshot.
 
 HP compute-service, result-committer, dirty-write, and disk-load boundaries
 normalize missing CPU image Values before formal publication. Mutable dirty
-clones clear old Value authority and reseal settled bytes. This does not add
-general planner inference, resource metadata, runtime identity task keys, or a
-new plugin callback slot; those remain outside this slice.
+clones clear old Value authority and reseal settled bytes. V-5 adds no new
+callback slot or general planner inference. It does add a callback-free
+implementation identity/metadata route to planned work and requires exact
+identity re-resolution before provider entry.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
@@ -162,6 +166,12 @@ task so dependency release is already covered. The same cap is enforced again
 against Run in-flight state at reserved start; it does not resize the fixed
 pool. Initial and dependent entries use the same estimator and insertion
 boundary.
+For a mixed-operation physical Run, the adapter component-wise maximizes the
+selected operations' declared `retained_memory_bytes` and `scratch_bytes`, then
+checked-adds its existing owned-callback envelope. The resulting conservative
+uniform task vector is used for full HP, dirty HP/RT, and connected preflight.
+Zero is an explicit provider declaration; absent or malformed metadata does not
+silently become zero and is rejected before provider entry.
 Copied graph-identity metadata is charged by actual string capacity plus its
 terminator. After every initial value and ready grant has moved into a staged
 queue entry, `ExecutionService` destroys the caller-side submission-vector
@@ -275,7 +285,8 @@ pure-C policy ABI v1 and receives no execution resource.
 
 ## Planning Invariants
 
-- Full expansion is keyed by graph topology generation, compute intent, and
+- Full expansion is keyed by graph topology generation, compute intent,
+  canonical route-visible device inventory, operation-registry generation, and
   task-shape configuration.
 - A force-recache request invalidates reusable expansion when current input or
   parameter state may change output extent without changing topology.
@@ -283,6 +294,9 @@ pure-C policy ABI v1 and receives no execution resource.
   shapes; they do not redefine graph topology.
 - A `ComputeTaskGraph` is immutable while an execution-visible callback derived
   from it may still execute.
+- Planned node work retains only selected implementation identity, device,
+  metadata, and callback shape. Submission must re-resolve the same nonzero
+  identity before retaining a callback, so cached plans own no DSO lease.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
 - Logical propagation, dirty planning, source history, per-node state, edge
@@ -385,11 +399,25 @@ dimensions.
 The canonical inventory is route and Host aware: `cpu` and `serial_debug`
 expose CPU only; `gpu_pipeline` exposes Metal then CPU when Metal is available,
 otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
-the chosen implementation and device before admission. CPU work enters the
+the chosen implementation identity, metadata, shape, and device before
+admission. Submission re-resolves the same identity; replacement or unload
+racing a cached plan therefore fails before provider entry instead of mixing
+callback and metadata revisions. CPU work enters the
 fixed pool and Metal work enters the single GPU lane, while both consume the
 same Run root grants and maximum-parallelism ceiling. An unavailable device is
 rejected before active-Run publication, and completion, exception, cancellation,
 reuse, shutdown, and drainage retire the exact common ledger/Run state.
+
+Every operation ready submission also carries the exact implementation
+identity plus `reentrant`, `maximum_parallelism`, and `exclusive_key`.
+Candidate startability checks the implementation counter and nonempty key in
+the process execution domain. Reserved start commits those gates with the
+resource child grant, physical route, ready removal, fairness charge, and
+in-flight ownership. Worker retirement releases the resource grant and both
+operation gates after provider exit or callback skip, then wakes blocked work.
+Sequential compute acquires a move-only direct lease around provider entry; it
+uses the same gate and ledger and holds neither while recursively computing
+upstream inputs.
 
 ## OpenCV Operation Concurrency
 
@@ -402,12 +430,13 @@ may run concurrently across tiles, Graphs, and HP/RT intent routes. Callback
 inputs are immutable; mutable `cv::Mat` headers, temporaries, and output regions
 are callback-local or task-owned.
 
-The same rule applies at the registry boundary. Registry locks serialize
-ownership mutation, publication, coherent snapshot capture, and unload, but
-they are released before callback invocation. Every provider must therefore
-make its callback reentrant or synchronize its own shared mutable state. A
-shared operation key, device, intent, or callback owner never implies
-single-threaded execution.
+Registry locks still serialize only ownership mutation, publication, coherent
+snapshot capture, and unload, and are released before callback invocation.
+Repository OpenCV operations explicitly retain the default `reentrant=true`
+metadata with no implementation cap or exclusive key. Other providers may
+declare non-reentrancy, a positive cap, or a shared exclusive key, which the
+Host enforces across Graphs and Runs. A shared operation registry key, device,
+intent, or callback owner alone never implies single-threaded execution.
 
 The optional OpenCV provider calls `cv::setNumThreads(1)` exactly once before
 publishing its callbacks. It uses `cv::Mat`, does not call
@@ -577,11 +606,13 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #81: all HP/RT ready work enters one Host-owned
+is authoritative through issue #82: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
-commits resources before a closed private route starts execution. Graphs retain
-only copied route ids/generations; no worker-owning scheduler SDK, scheduler
+commits resources plus exact implementation/key gates before a closed private
+route starts execution. Sequential provider entry uses the same ledger and
+gates through a direct lease. Graphs retain only copied route ids/generations;
+no worker-owning scheduler SDK, scheduler
 plugin, per-Graph physical owner, or compatibility adapter remains. Separate
 realtime child Runs, request-owned staging, strong identity/revision checks,
 latest-wins supersession, cancellation observation, exact-Run queued purge,

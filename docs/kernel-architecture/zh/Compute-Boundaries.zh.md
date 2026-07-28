@@ -98,8 +98,8 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `IntentUpdateCoordinator` | HP-only 或 HP/RT sibling 语义 | 物理优先级或 worker 所有权 |
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit、policy ranking 或物理执行 |
 | `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、冻结的 implementation/device snapshot、结果槽与 callback owner | execution-route worker、Run terminal state 或 dirty-path execution |
-| `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、selected `Device`、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
-| `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority 或 visible commit |
+| `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、selected `Device`、精确 operation constraint、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
+| `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、一个 process-domain operation gate、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority 或 visible commit |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | execution trace 所有权 |
 | `PolicyRegistry` 与 policy binding | 验证 built-in/DSO policy type，拥有进程级 context 与 DSO lease，并为 Host-authored 不可变 candidate snapshot 排序 | worker、queue、resource grant、Run、Graph、completion 或 start authority |
@@ -111,8 +111,10 @@ Compute collaborator 位于 `src/lib/compute/`；ledger 与 Graph route binding 
 `src/lib/execution/`。这些类都是私有实现模块，不构成可安装 API。本区域唯一已安装的扩展契约是
 `include/photospider/policy/policy_plugin_api.h` 声明的纯 C policy ABI。
 
-V-4 保持 public monolithic registry slot 与 operation ABI v2 不变，同时由 source-private
-core lookup bridge 只识别当前选中的精确 core dense callback。Private core runner 会复用有效
+V-4 保持 public monolithic registry slot、registrar entry 与 callback signature 不变，同时由
+source-private core lookup bridge 只识别当前选中的精确 core dense callback。V-5 保留这些
+entry/callback 形态，但有意扩展临时 C++ v2 metadata layout；operation DSO 因而必须使用匹配 SDK
+重新构建。Private core runner 会复用有效
 sealed CPU image Value；不存在 Value 时，
 才 snapshot 旧 ImageBuffer。它把 request-effective ParameterMap 深拷贝到一个不含 Node
 output/cache/topology state 的 configuration，只以该 configuration 与 logical
@@ -126,8 +128,9 @@ ImageBuffer compatibility snapshot。
 
 HP compute-service、result-committer、dirty-write 与 disk-load boundary 会在正式 publication
 前补齐缺失的 CPU image Value。可变 dirty clone 会清除旧 Value authority，并重新 seal settle
-后的 byte。这不会新增 general planner inference、resource metadata、runtime identity task
-key 或新的 plugin callback slot；这些责任仍在本切片范围之外。
+后的 byte。V-5 不新增 callback slot 或 general planner inference；它会在 planned work 中新增
+callback-free implementation identity/metadata route，并要求 provider entry 前重新解析且精确
+identity 相同。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
@@ -135,7 +138,11 @@ scratch demand 按最大 callback 并发数相乘；该并发数是固定 worker
 正值 `maximum_parallelism` 三者的最小值。Ready entry 与 byte 仍按所有逻辑任务相乘，因此
 dependency release 已被预先覆盖。Reserved start 会针对 Run in-flight state 再次执行同一上限；
 该上限不会调整固定 pool 的大小。初始与 dependent entry 使用同一个 estimator 和 insertion
-boundary。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在所有
+boundary。对于 mixed-operation physical Run，adapter 会对选中 operation 声明的
+`retained_memory_bytes` 与 `scratch_bytes` 分别取最大值，再以 checked-add 合并既有
+owned-callback envelope。由此得到的保守统一 task vector 同时用于 full HP、dirty HP/RT 与
+connected preflight。零是 provider 的显式声明；缺失或格式错误的 metadata 不会被静默解释成零，
+而是在 provider entry 前被拒绝。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在所有
 initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
 active Run 和等待 settlement 之前销毁 caller-side submission vector 的 backing；此后只有暂存
 entry 以及 bounded store 保留这些 submission。在每个 dirty 或 connected-preflight service
@@ -220,11 +227,14 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 
 ## 规划不变量
 
-- Full expansion 以 graph topology generation、compute intent 和 task-shape configuration 为键。
+- Full expansion 以 graph topology generation、compute intent、规范化 route-visible device
+  inventory、operation-registry generation 与 task-shape configuration 为键。
 - 当当前 input/parameter 可能在拓扑不变时改变 output extent，force-recache 会使可复用 expansion
   失效。
 - 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
+- Planned node work 只保留选中的 implementation identity、device、metadata 与 callback shape。
+  Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
 - 逻辑 propagation、dirty planning、source history、per-node state、edge mapping、
   staged-write validity 与 Region-aware dense callback 携带规范化 `RegionSet`。
@@ -306,10 +316,20 @@ ready admission、只清除其 queued entry，并等待已经运行的 callback 
 
 规范 inventory 同时感知 route 与 Host：`cpu` 和 `serial_debug` 只暴露 CPU；Metal 可用时，
 `gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与 connected-preflight
-planning 会在准入前冻结选中的 implementation 与 device。CPU work 进入固定 pool，Metal work
+planning 会在准入前冻结选中的 implementation identity、metadata、shape 与 device。Submission
+会重新解析同一个 identity；因此，与 cached plan 并发的 replacement 或 unload 会在 provider
+entry 前失败，而不会混用 callback 与 metadata revision。CPU work 进入固定 pool，Metal work
 进入单一 GPU lane；二者仍消耗同一个 Run root grant 和 maximum-parallelism ceiling。不可用
 device 会在 active Run 发布前被拒绝；completion、exception、cancellation、reuse、shutdown 与
 drainage 会退役精确的公共 ledger/Run state。
+
+每个 operation ready submission 还会携带精确 implementation identity，以及 `reentrant`、
+`maximum_parallelism` 与 `exclusive_key`。Candidate startability 会在 process execution domain
+内检查 implementation counter 与非空 key。Reserved start 会把这些 gate 与 resource child
+grant、physical route、ready removal、fairness charge 及 in-flight ownership 一起提交。Worker
+retirement 会在 provider exit 或 callback skip 后释放 resource grant 与两类 operation gate，
+随后唤醒被阻塞的 work。Sequential compute 会在 provider entry 周围获取 move-only direct lease；
+它使用同一 gate 与 ledger，且递归计算 upstream input 时不持有二者。
 
 ## OpenCV Operation 并发
 
@@ -320,10 +340,11 @@ operation mutex。其 monolithic `convolve`、`resize`、`crop`、`extract_chann
 Graph 和 HP/RT intent route 并发运行。Callback input 不可变；可变 `cv::Mat` header、temporary
 与 output region 由 callback 局部拥有或 task 独占。
 
-Registry 边界遵循同一规则。Registry lock 会串行化 ownership mutation、发布、一致 snapshot
-capture 与卸载，但会在 callback invocation 前释放。因此，每个 provider 都必须保证 callback
-可重入，或自行同步其共享可变状态。共享 operation key、device、intent 或 callback owner 绝不
-意味着单线程执行。
+Registry lock 仍只串行化 ownership mutation、publication、coherent snapshot capture 与 unload，
+并在 callback invocation 前释放。仓库 OpenCV operation 会显式保持默认 `reentrant=true`
+metadata，不设置 implementation cap 或 exclusive key。其他 provider 可以声明 non-reentrancy、
+positive cap 或 shared exclusive key，Host 会跨 Graph 与 Run 执行这些约束。仅仅共享 operation
+registry key、device、intent 或 callback owner 绝不意味着单线程执行。
 
 可选 OpenCV provider 会在发布自身 callback 前恰好一次调用 `cv::setNumThreads(1)`。它使用
 `cv::Mat`，不调用 `cv::ocl::setUseOpenCL(false)`，也不会在 callback 可能活跃时重新配置
@@ -449,9 +470,10 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #81 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #82 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
-reserved-start transaction 在封闭私有 route 启动执行前提交资源。Graph 只保留复制的 route
+reserved-start transaction 在封闭私有 route 启动执行前提交资源以及精确 implementation/key gate。
+Sequential provider entry 通过 direct lease 使用同一 ledger 与 gate。Graph 只保留复制的 route
 id/generation；不再存在拥有 worker 的 scheduler SDK、scheduler plugin、per-Graph 物理 owner 或
 compatibility adapter。独立 realtime child Run、request-owned staging、强 identity/revision check、
 latest-wins supersession、cancellation observation、精确 Run queued purge、dependent suppression 与

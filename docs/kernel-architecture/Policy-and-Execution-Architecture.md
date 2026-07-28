@@ -28,7 +28,8 @@ Host. It owns:
   `serial_debug` and `gpu_pipeline` routes;
 - Host-authored candidate, Graph, Run, entry-version, enqueue, snapshot, and
   selection identities;
-- ready-to-execution resource exchange and in-flight callback ownership.
+- ready-to-execution resource exchange, exact implementation/exclusive-key
+  gates, and in-flight callback ownership.
 
 `GraphRuntime` stores only copied HP and RT route ids with nonzero generations.
 It owns Graph state, compute/event/trace observation, and request serialization,
@@ -168,11 +169,15 @@ affected Run as `GraphErrc::ComputeError`.
 
 A returned candidate id is not execution authority. The Host keeps a private
 `SelectionPin` containing the original entry identity/version and rechecks
-current state under the documented lock order. `StartTransaction` stages the
-CPU, retained-memory, and scratch grants with no-throw RAII.
+current state under the documented lock order. Before irreversible
+ready/fairness mutation, `StartTransaction` stages the CPU, retained-memory,
+and scratch child grant plus any first-use implementation/key gate rows.
+Fallible gate allocation precedes active-counter mutation, and no-throw RAII
+releases the staged grant on every rejection.
 
-The final commit is allocation-free and non-throwing. It atomically:
+The remaining commit is allocation-free and non-throwing. It atomically:
 
+- acquires the exact implementation count and nonempty exclusive key;
 - removes the exact ready entry;
 - exchanges its ready grant for execution grants;
 - advances class, Graph, and Run service accounting;
@@ -181,8 +186,10 @@ The final commit is allocation-free and non-throwing. It atomically:
 
 No executor callback begins before that commit. Every rejection or exception
 before commit preserves ready/fairness/burst/in-flight state and releases staged
-grants exactly once. Completion, cancellation, supersession, dependency release,
-and Run settlement also release their grants exactly once.
+grants and gate rows exactly once. Completion, cancellation, supersession,
+dependency release, and Run settlement also release their owned state exactly
+once. A started callback retains its operation gate until provider exit or
+callback skip, even if cancellation or failure purges its queued siblings.
 
 Temporary execution-grant exhaustion after revalidation is not a plugin fault
 or obsolete-decision retry. The ready store marks the exact candidate/version
@@ -195,6 +202,13 @@ release, completion/grant release, cancellation/failure purge, policy
 replacement, and shutdown. Spurious wakes do not retry; a 50 ms low-frequency
 fallback covers an otherwise unobservable external child-grant release, after
 which cycle marks are cleared and current Host state is revalidated.
+
+An implementation cap or occupied exclusive key removes that candidate from
+the startable frontier without exposing operation metadata to policy plugins.
+Worker retirement advances the same notification epoch when it releases the
+gate. Direct sequential callers wait cancellation-aware without holding a
+resource reservation, then acquire the same gate and one CPU/byte/scratch root
+only around provider entry.
 
 ## Private Execution Routes
 
@@ -219,9 +233,13 @@ ownerless binding, serializes against active same-session requests, and
 publishes a new nonzero generation. A same-name replacement also advances the
 generation. Failure preserves the old route.
 
-Operation selection freezes both the implementation callable and its `Device`
-before Run admission. Full HP, dirty HP/RT, and connected-parameter preflight
-all consume the same route-aware inventory. Connected-preflight preparation
+Operation selection freezes one coherent callback, metadata, `Device`, and
+nonzero implementation revision before Run admission. Planning retains only
+the callback-free identity/metadata/shape, and submission must re-resolve the
+same identity before it may retain the callable/DSO lease. Full HP, dirty HP/RT,
+and connected-parameter preflight all consume the same canonical route-aware
+inventory; full-task cache identity includes that inventory and the registry
+generation. Connected-preflight preparation
 also freezes each callable/DSO lease and complete service root without entering
 provider code; only an installed Run may perform reserved start and invoke the
 provider, after which output-dependent dirty planning remains Run-owned. Every
@@ -230,9 +248,9 @@ device outside the configured route/Host inventory before publishing the Run.
 CPU submissions enter the
 fixed CPU pool; Metal submissions enter the single GPU lane. Both lanes share
 the common ready store, policy decision, reserved-start transaction, Host
-ledger, Run maximum-parallelism grant, cancellation, completion, exception,
-reuse, shutdown, and drainage rules; no second device-capacity authority or
-per-Graph executor is created.
+ledger, Run maximum-parallelism grant, operation implementation/key gates,
+cancellation, completion, exception, reuse, shutdown, and drainage rules; no
+second device-capacity authority or per-Graph executor is created.
 
 Full HP, dirty HP/RT, connected preflight, initial ready work, and
 dependency-released work all enter the common ready-store, policy,
@@ -294,6 +312,10 @@ process-isolated plugin supervision belongs to Issue #91.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/ps_types.hpp` and `.cpp`
+- `src/lib/compute/task_graph_planning.hpp` and `.cpp`
+- `src/lib/compute/compute_task_submission.hpp` and `.cpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/policy/policy_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_service.hpp` and `.cpp`

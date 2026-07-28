@@ -22,7 +22,7 @@
 - 固定 CPU 工作线程池、一个由 service 拥有的 Metal 工作线程 lane，以及私有
   `serial_debug` 和 `gpu_pipeline` 路由；
 - 由 Host 生成的候选项、Graph、Run、条目版本、入队、快照和选择身份；
-- 从就绪到执行的资源交换，以及飞行中回调的所有权。
+- 从就绪到执行的资源交换、精确 implementation/exclusive-key gate，以及飞行中回调的所有权。
 
 `GraphRuntime` 只保存复制得到的 HP 和 RT 路由 ID 及其非零代次。它拥有 Graph
 状态、计算/事件/跟踪观察能力和请求串行化，但不拥有物理工作线程池或策略插件
@@ -143,11 +143,14 @@ Host 首先根据原始调用校验回调完成状态和每一个决策字节：
 ## 预留后启动
 
 返回的候选项 ID 并不是执行权限。Host 保留一个私有 `SelectionPin`，其中包含
-原始条目身份/版本，并按规定的锁顺序重新检查当前状态。`StartTransaction` 使用
-不抛异常的 RAII 暂存 CPU、保留内存和临时空间授权。
+原始条目身份/版本，并按规定的锁顺序重新检查当前状态。在不可逆的 ready/fairness
+mutation 之前，`StartTransaction` 会暂存 CPU、retained-memory 与 scratch child grant，
+以及首次使用的 implementation/key gate row。可能失败的 gate allocation 先于 active-counter
+mutation；任何拒绝都会通过不抛异常的 RAII 释放暂存 grant。
 
-最终提交不进行分配且不抛异常。它以原子方式：
+余下的提交不进行分配且不抛异常。它以原子方式：
 
+- 获取精确 implementation count 与非空 exclusive key；
 - 移除精确匹配的就绪条目；
 - 将其就绪授权交换成执行授权；
 - 推进类别、Graph 和 Run 服务计账；
@@ -155,8 +158,10 @@ Host 首先根据原始调用校验回调完成状态和每一个决策字节：
 - 把回调所有权转移给所选私有路由。
 
 提交之前不会开始任何执行器回调。提交前的每一次拒绝或异常都会保持就绪/公平性/
-突发/飞行中状态不变，并且只释放一次暂存授权。完成、取消、取代、依赖释放和
-Run 结算同样只释放一次各自授权。
+突发/飞行中状态不变，并且只释放一次暂存 grant 与 gate row。完成、取消、取代、
+依赖释放和 Run 结算同样只释放一次各自拥有的状态。已启动 callback 会一直持有
+operation gate，直到 provider exit 或 callback skip；即使 cancellation 或 failure 已清除
+其 queued sibling 也不例外。
 
 重验后 execution grant 暂时耗尽不属于 plugin fault 或 obsolete-decision retry。ready
 store 只在该 worker 的当前 cycle 中标记精确 candidate/version，并在不移除 entry、不释放
@@ -166,6 +171,11 @@ ready grant、也不 charge fairness 的情况下重算 class/frontier selection
 completion/grant release、cancellation/failure purge、policy replacement 与 shutdown 都会推进
 该 epoch。spurious wake 不触发 retry；50 ms low-frequency fallback 覆盖其他不可观测的外部
 child-grant release，随后清除 cycle mark，并重验 current Host state。
+
+Implementation cap 或已占用 exclusive key 会把对应 candidate 从 startable frontier 移除，
+但不会向 policy plugin 暴露 operation metadata。Worker retirement 释放 gate 时会推进同一个
+notification epoch。Direct sequential caller 会在不持有 resource reservation 的情况下进行
+cancellation-aware wait，随后只在 provider entry 周围获取同一 gate 以及一份 CPU/byte/scratch root。
 
 ## 私有执行路由
 
@@ -187,16 +197,19 @@ child-grant release，随后清除 cycle mark，并重验 current Host state。
 与同一会话的活动请求串行化，并发布新的非零代次。同名替换同样推进代次。
 失败时保留旧路由。
 
-操作选择会在 Run 准入前同时冻结实现 callback 及其 `Device`。完整 HP、dirty HP/RT
-和连接参数预检都使用同一份 route-aware inventory。connected-preflight preparation 还会在
+操作选择会在 Run 准入前冻结一份 coherent callback、metadata、`Device` 与非零 implementation
+revision。Planning 只保留 callback-free identity/metadata/shape；submission 必须重新解析同一个
+identity，之后才能保留 callable/DSO lease。完整 HP、dirty HP/RT 和连接参数预检都使用同一份
+规范化 route-aware inventory；full-task cache identity 会包含该 inventory 与 registry generation。
+connected-preflight preparation 还会在
 不进入 provider code 的情况下冻结每个 callable/DSO lease 与完整 service root；只有已安装 Run
 才能执行 reserved start 并调用 provider，之后依赖 output 的 dirty planning 仍由 Run 拥有。
 每个 ready submission 都携带冻结的 device；如果 device 不在已配置 route/Host inventory 中，
 `ExecutionService` 会在发布 Run 前拒绝它。CPU submission 进入固定 CPU 池，Metal submission
 进入单一 GPU lane。两个 lane 共用 ready store、policy decision、reserved-start transaction、Host
-ledger、Run maximum-parallelism grant、cancellation、completion、exception、reuse、
-shutdown 与 drainage 规则；不会创建第二套 device-capacity authority 或 per-Graph
-executor。
+ledger、Run maximum-parallelism grant、operation implementation/key gate、cancellation、
+completion、exception、reuse、shutdown 与 drainage 规则；不会创建第二套 device-capacity
+authority 或 per-Graph executor。
 
 完整 HP、dirty HP/RT、连通性预检、初始就绪工作和依赖释放工作，都会进入同一套
 就绪存储、策略、预留后启动、私有路由及 Run 租约完成路径。
@@ -247,6 +260,10 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 
 ## 实现与验证入口
 
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/ps_types.hpp` 与 `.cpp`
+- `src/lib/compute/task_graph_planning.hpp` 与 `.cpp`
+- `src/lib/compute/compute_task_submission.hpp` 与 `.cpp`
 - `include/photospider/policy/policy_plugin_api.h`
 - `src/lib/policy/policy_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_service.hpp` 和 `.cpp`

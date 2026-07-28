@@ -50,6 +50,26 @@ Supported operation registrations include:
 | Dependency LUT builder | Data-dependent spatial dependency map. |
 | Device implementation | CPU, Metal, CUDA, or another supported public `Device` capability. |
 
+Every executable registration carries one `OperationMetadata` value. In
+addition to tile, device, cost, and dependency hints, the CPU execution
+contract contains:
+
+| Field | Meaning |
+| --- | --- |
+| `reentrant` | Whether callbacks of the exact implementation may overlap; defaults to `true`. |
+| `maximum_parallelism` | Exact-implementation callback cap; zero means no implementation-specific cap. |
+| `retained_memory_bytes` | Additional Host-retained bytes per in-flight callback; zero is an explicit declaration. |
+| `scratch_bytes` | Additional Host scratch bytes per in-flight callback; zero is an explicit declaration. |
+| `exclusive_key` | Optional execution-domain exclusion key shared across implementations, Runs, and Graphs. |
+
+`reentrant=false` has an effective cap of one regardless of
+`maximum_parallelism`. A nonempty exclusive key is limited to 128 bytes and
+must not contain an embedded NUL. The Host validates the same rules for core
+and plugin registrations before publication. These fields extend the
+provisional C++ v2 metadata layout without changing the registrar symbol or
+callback signatures. Existing v2 DSOs must be rebuilt against the matching
+SDK; no missing-tail, stale-layout, or compatibility interpretation exists.
+
 The canonical registry identity is `type:subtype`. Both segments must be
 non-empty and neither may contain the reserved `:` separator, otherwise two
 different pairs could collide. The public C++ registrar helpers additionally
@@ -225,14 +245,17 @@ registry lock. Failure to construct the new stable value or compatibility
 bridge occurs before key, callback, or ownership publication and leaves the
 registry unchanged.
 
-Stable ownership is not an execution mutex. The first CPU device value and its
-HP compatibility bridge retain the same callback target, and executor or
-reader snapshots may retain that same logical target as well. These paths may
-invoke it concurrently. The callback provider must therefore make the target
-reentrant or synchronize its shared mutable state. The registry serializes only
-ownership mutation, coherent snapshot capture, publication, and unload; it never
-holds its state lock to serialize callback execution. Callers must not infer
-single-threaded execution from a shared operation key, device, or intent.
+Stable ownership is not itself an execution mutex. The registry serializes only
+ownership mutation, coherent snapshot capture, publication, and unload; it
+never holds its state lock during callback execution. Product planning selects
+one coherent callback, metadata, device, and nonzero ownership revision, stores
+only callback-free identity/metadata in the plan, and re-resolves the exact
+identity before admission. Within one injected `ExecutionService`, the Host
+then enforces `reentrant`, `maximum_parallelism`, and `exclusive_key` at
+reserved start across Runs and Graphs. A shared operation key, device, intent,
+or callback owner does not imply serialization unless the selected metadata
+declares it. Providers must still protect shared state reached outside this
+Host boundary or omitted from their declaration.
 
 Repository-owned CPU OpenCV providers implement that contract with immutable
 inputs, callback-local or task-owned `cv::Mat` state, and no process-wide outer
