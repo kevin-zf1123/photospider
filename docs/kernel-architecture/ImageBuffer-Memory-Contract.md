@@ -147,10 +147,18 @@ immutable bytes with a fresh process-local `ValueRevisionId`.
 
 Concrete shape and element facts remain separate from an optional explicit
 Image Facet and a `StridedLayout`. Producer layouts require a zero byte offset
-and positive exact-envelope strides. Immutable Values constructed over a
-sealed handle may instead use a bounded byte offset plus positive, zero, or
-negative signed byte strides. Checked views retain both the complete Value and
-a read lease, and expose no writable pointer.
+and positive exact-envelope strides. Before allocation or a WriteLease, the
+builder orders all non-singleton axes by increasing byte stride. A checked
+covered span starts at the element byte width; each next stride must be at
+least that span before its axis contribution extends the span. This
+rank-general induction proves that writable coordinate slabs do not overlap
+without enumerating elements. Singleton axes add no alternative address and
+zero extents remain invalid descriptors. Contiguous, padded, transposed, and
+other axis-permuted layouts pass; single-axis and cross-axis byte collisions or
+unrepresentable span arithmetic fail before authority escapes. Immutable
+Values constructed over a sealed handle may instead use a bounded byte offset
+plus positive, zero, or negative signed byte strides. Checked views retain both
+the complete Value and a read lease, and expose no writable pointer.
 
 The built-in `image_process:invert_dense` operation proves this surface on the
 production path:

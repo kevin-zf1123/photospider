@@ -212,9 +212,10 @@ class Value;
 /**
  * @brief Exclusive producer for one future immutable CPU DenseTensor Value.
  *
- * ValueBuilder validates a positive-stride exact producer envelope before
- * allocation, issues at most one active move-only WriteLease, and closes all
- * producer authority at seal. No BufferHandle escapes before seal.
+ * ValueBuilder validates a positive-stride exact producer envelope and proves
+ * that all logical element byte ranges are non-overlapping before allocation.
+ * It issues at most one active move-only WriteLease and closes all producer
+ * authority at seal. No BufferHandle escapes before seal.
  *
  * @throws Nothing for move construction, move assignment, and destruction.
  * @note The builder is externally serialized. It provides raw allocation-byte
@@ -262,16 +263,19 @@ class ValueBuilder final {
    *
    * Validation checks positive shape, supported element encoding, optional
    * distinct in-rank image axes, one positive stride per axis, checked
-   * envelope arithmetic, zero layout byte offset, and exact storage size.
+   * envelope arithmetic, a rank-general non-overlap proof, zero layout byte
+   * offset, and exact storage size.
    *
    * @param descriptor Logical descriptor copied into private builder state.
    * @param image_facet Optional explicit image-axis mapping.
    * @param layout Positive producer layout copied into private builder state.
    * @param storage_size Exact positive allocation byte length.
    * @return Move-only exclusive builder ready to issue one WriteLease.
-   * @throws std::invalid_argument for malformed descriptor, facet, layout, or
-   * storage-size mismatch.
-   * @throws std::overflow_error when envelope or identity arithmetic overflows.
+   * @throws std::invalid_argument for malformed descriptor, facet, layout,
+   * storage-size mismatch, or a writable layout whose non-overlap cannot be
+   * proven.
+   * @throws std::overflow_error when envelope, non-overlap, or identity
+   * arithmetic overflows.
    * @throws std::bad_alloc when state or CPU allocation cannot be created.
    * @note No caller allocation is retained.
    */
@@ -352,8 +356,8 @@ class Value final {
    *
    * Validation checks nonempty positive shape, supported element encoding,
    * optional distinct in-rank image axes, one positive stride per axis, zero
-   * producer byte offset, checked envelope arithmetic, and exact storage size
-   * before publication.
+   * producer byte offset, checked envelope arithmetic, rank-general
+   * non-overlap proof, and exact storage size before publication.
    *
    * @param descriptor Concrete logical tensor descriptor copied into isolated
    *        immutable state after validation.
@@ -365,7 +369,7 @@ class Value final {
    * @return Valid immutable Value whose shape, strides, and payload allocations
    *         are distinct from every caller-owned input allocation.
    * @throws std::invalid_argument for malformed descriptors, facets, layouts,
-   *         or a storage-size mismatch.
+   *         a storage-size mismatch, or an unproven writable layout.
    * @throws std::overflow_error when the required address envelope cannot be
    *         represented by std::size_t.
    * @throws std::bad_alloc when immutable state allocation fails.

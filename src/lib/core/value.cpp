@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -253,17 +254,68 @@ AddressEnvelope compute_address_envelope(
 }
 
 /**
+ * @brief Proves that one positive producer layout has disjoint element bytes.
+ *
+ * Non-singleton axes are ordered by increasing byte stride. The running span
+ * starts at one element width and encloses every byte reachable through the
+ * axes already processed. Requiring each next stride to be at least that span
+ * makes adjacent coordinate slabs disjoint; extending the span then preserves
+ * the invariant inductively for the remaining axes.
+ *
+ * @param descriptor Valid positive-shape descriptor.
+ * @param layout Rank-matched layout whose strides are already positive.
+ * @param element_bytes Valid positive physical element width.
+ * @throws std::invalid_argument when the stride-span proof cannot establish
+ * non-overlapping writes.
+ * @throws std::overflow_error when a covered span is unrepresentable.
+ * @throws std::bad_alloc when the rank-bounded axis inventory cannot allocate.
+ * @note Singleton axes add no alternative address and are omitted. The proof
+ * is O(rank log rank), enumerates no logical elements, and accepts contiguous,
+ * padded, transposed, and otherwise permuted monotonic layouts.
+ */
+void validate_non_overlapping_producer_layout(
+    const DenseTensorDescriptor& descriptor, const StridedLayout& layout,
+    std::size_t element_bytes) {
+  std::vector<std::pair<std::size_t, std::size_t>> active_axes;
+  active_axes.reserve(descriptor.shape.size());
+  for (std::size_t axis = 0U; axis < descriptor.shape.size(); ++axis) {
+    if (descriptor.shape[axis] > 1U) {
+      active_axes.emplace_back(stride_magnitude(layout.byte_strides[axis]),
+                               descriptor.shape[axis]);
+    }
+  }
+  std::sort(active_axes.begin(), active_axes.end(),
+            [](const auto& left, const auto& right) {
+              return left.first < right.first;
+            });
+
+  std::size_t covered_span = element_bytes;
+  for (const auto& [byte_stride, extent] : active_axes) {
+    if (byte_stride < covered_span) {
+      throw std::invalid_argument(
+          "DenseTensor producer layout cannot prove non-overlapping writes.");
+    }
+    covered_span =
+        checked_add(covered_span, checked_multiply(extent - 1U, byte_stride));
+  }
+}
+
+/**
  * @brief Validates the exact positive-stride producer allocation envelope.
  *
  * @param descriptor Valid positive-shape descriptor.
  * @param layout Producer layout to validate.
  * @param element_bytes Valid positive physical element width.
  * @param storage_size Proposed exact allocation byte length.
- * @throws std::invalid_argument for nonzero offset, non-positive stride, or
- * storage-size mismatch.
- * @throws std::overflow_error when envelope arithmetic is unrepresentable.
- * @note Producer behavior remains the V-2 positive-stride exact-envelope
- * subset. Signed aliases are published only over already sealed handles.
+ * @throws std::invalid_argument for nonzero offset, non-positive stride,
+ * storage-size mismatch, or a layout whose writes cannot be proven disjoint.
+ * @throws std::overflow_error when envelope or non-overlap arithmetic is
+ * unrepresentable.
+ * @throws std::bad_alloc when rank-bounded non-overlap proof state cannot
+ * allocate.
+ * @note Producer behavior remains the positive-stride, exact-envelope,
+ * non-overlapping writable subset. Signed aliases are published only over
+ * already sealed handles.
  */
 void validate_producer_envelope(const DenseTensorDescriptor& descriptor,
                                 const StridedLayout& layout,
@@ -285,6 +337,7 @@ void validate_producer_envelope(const DenseTensorDescriptor& descriptor,
     throw std::invalid_argument(
         "DenseTensor storage size must equal its exact byte envelope.");
   }
+  validate_non_overlapping_producer_layout(descriptor, layout, element_bytes);
 }
 
 /**

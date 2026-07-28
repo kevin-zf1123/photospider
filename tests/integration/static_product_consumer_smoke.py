@@ -2893,6 +2893,7 @@ def behavior_diagnostic_summary(
         "producer_configure",
         "build_photospider",
         "install",
+        "installed_daemon_help",
         "embedded_consumer_configure",
         "embedded_consumer_build",
         "ipc_consumer_configure",
@@ -3024,6 +3025,10 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         ),
         "photospider target build succeeded": commands["build_photospider"] == 0,
         "install command succeeded": commands["install"] == 0,
+        "installed photospiderd help runs from isolated prefix": commands[
+            "installed_daemon_help"
+        ]
+        == 0,
         "installed static archive exists": install["archive_exists"],
         "installed product archive omits internal test symbols": install[
             "production_archive_omits_internal_test_symbols"
@@ -3222,7 +3227,9 @@ def main() -> int:
       test work directory, or if the work path itself is destructive.
     @note The CTest-facing result covers package behavior only. Commands and
       assertions write directly to the streams captured by CTest; the work
-      directory contains only normal producer/consumer build inputs and outputs.
+      directory contains only normal producer/consumer build inputs and
+      outputs. Installed daemon help runs from the non-system prefix through
+      the loader-scrubbing shared capability driver.
       On Darwin, every child configure inherits the producer's meaningful
       ``CMAKE_OSX_ARCHITECTURES`` value as one argv element; other platforms
       receive no macOS-specific option.
@@ -3262,6 +3269,7 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
 
     prefix = work / "install-prefix"
+    platform_system = platform.system()
     embedded_consumer_src = work / "embedded-consumer-src"
     embedded_consumer_build = work / "embedded-consumer-build"
     ipc_consumer_src = work / "ipc-consumer-src"
@@ -3349,6 +3357,27 @@ def main() -> int:
     if args.config:
         install_command.extend(["--config", args.config])
     install_code = run_command(install_command, repo)
+    install_bindir = cmake_cache_value(build, "CMAKE_INSTALL_BINDIR") or "bin"
+    installed_bindir = Path(install_bindir)
+    if not installed_bindir.is_absolute():
+        installed_bindir = prefix / installed_bindir
+    installed_daemon = installed_bindir / (
+        "photospiderd.exe" if platform_system == "Windows" else "photospiderd"
+    )
+    installed_daemon_help_code = run_command(
+        [
+            args.cmake_executable,
+            f"-DPHOTOSPIDERD={installed_daemon}",
+            "-P",
+            str(
+                repo
+                / "tests"
+                / "integration"
+                / "photospiderd_capability_help.cmake"
+            ),
+        ],
+        prefix,
+    )
 
     embedded_configure_command = [
         args.cmake_executable,
@@ -3688,7 +3717,6 @@ def main() -> int:
             flush=True,
         )
 
-    platform_system = platform.system()
     producer_build_testing = cmake_cache_value(build, "BUILD_TESTING")
     install_tree = inspect_install_tree(
         repo,
@@ -3702,6 +3730,7 @@ def main() -> int:
             "producer_configure": producer_configure_code,
             "build_photospider": build_product_code,
             "install": install_code,
+            "installed_daemon_help": installed_daemon_help_code,
             "embedded_consumer_configure": embedded_configure_code,
             "embedded_consumer_build": embedded_build_code,
             "ipc_consumer_configure": ipc_configure_code,
@@ -3729,6 +3758,7 @@ def main() -> int:
         "install_tree": install_tree,
         "paths": {
             "cmake_executable": args.cmake_executable,
+            "install_bindir": install_bindir,
             "install_libdir": install_libdir,
             "package_cmake_dir": package_cmake_dir,
             "consumer_osx_architectures": osx_architectures,

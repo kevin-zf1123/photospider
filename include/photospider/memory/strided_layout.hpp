@@ -16,11 +16,13 @@ namespace ps {
  * The stride vector is deliberately separate from logical tensor shape and
  * element semantics. The byte offset anchors logical coordinate zero within a
  * BufferHandle range. Producer builders accept positive strides and zero
- * offset; immutable views may use checked positive, zero, or negative strides.
+ * offset only after proving that logical element byte ranges do not overlap;
+ * immutable views may use checked positive, zero, or negative strides.
  *
  * @throws std::bad_alloc when copying the stride vector allocates and fails.
  * @note A StridedLayout is not independently valid. Value publication checks
- * rank, signed envelope arithmetic, offset, and the complete retained range.
+ * rank, signed envelope arithmetic, writable non-overlap when applicable,
+ * offset, and the complete retained range.
  */
 struct StridedLayout {
   /** @brief Signed byte stride for each logical tensor axis. */

@@ -86,7 +86,10 @@ private free functions, so the macro does not change the production
 
 `StaticProductConsumerSmoke` enforces that boundary for both
 `BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
-real product is installed, Darwin first invokes and validates
+real product is installed to a non-system temporary prefix, the smoke reuses
+the daemon capability driver to remove LD/DYLD loader overrides and execute
+installed `photospiderd --help`; a missing relocatable operation runtime
+therefore fails instead of passing on file existence. Darwin then invokes and validates
 `xcrun --find llvm-nm`, then falls back to PATH `llvm-nm` and PATH `nm`;
 non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
 that order. Canonically identical executable paths run once. A candidate is
@@ -289,6 +292,9 @@ the maintained product. The daemon help test uses a CMake script driver to run
 the real configuration-specific `photospiderd --help`, captures stdout and
 stderr, requires a numeric zero process result before matching the stable
 capability sentence, and diagnoses launch failure separately from nonzero exit.
+The driver removes loader override variables and is reused after package
+installation, so build-tree and install-tree resolution exercise their own
+declared lookup paths.
 `IpcDisabledInstallSmoke`, `DependencyDisabledInstallSmoke`, focused
 `test_ipc_protocol`/`test_ipc_host` cases, and real-process `test_ipc_daemon`
 cases follow the same rule: they exercise
@@ -839,7 +845,9 @@ ctest --test-dir build --output-on-failure \
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
 binary for the implemented V-2/V-3 boundary. Its 16 durable cases verify:
 
-- malformed facet, stride, byte-offset, and exact-envelope rejection;
+- malformed facet, stride, byte-offset, and exact-envelope rejection, including
+  checked single-axis/cross-axis writable collision and overflow cases plus
+  accepted padded, transposed, and singleton-axis layouts;
 - exclusive builder write authority, seal revocation, retaining read-lease
   lifetime, BufferHandle subranges, process-local identities, and the
   non-liveness meaning of a nonzero `AllocationIdentity`;

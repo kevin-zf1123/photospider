@@ -86,7 +86,11 @@ Package 边界：
   `Photospider::photospider_ipc_client`，安装精确三个 `include/photospider/ipc/` header 与
   `photospiderd`，同时让 server library 保持 private。IPC-only consumer 请求
   `COMPONENTS ipc_client` 时只解析 `Threads`；省略 component 则保留 embedded 默认行为及其
-  backend dependency。
+  backend dependency。由于 daemon 的 static Host closure 会加载 shared operation runtime，
+  其 install lookup 相对于 loader：macOS 使用
+  `@loader_path/../${CMAKE_INSTALL_LIBDIR}`，其他 Unix/ELF 平台使用
+  `$ORIGIN/../${CMAKE_INSTALL_LIBDIR}`；Windows 不设置 RPATH。Package smoke 会移除 loader
+  override variable，并从非系统临时 prefix 执行 installed `photospiderd --help`。
 - `Photospider::photospider` 为 consumer 携带 `PHOTOSPIDER_STATIC`，并让 `src/lib/` include root
   只对仓库内部构建私有。在 build tree 中，该 target 的 generated public include root 只包含
   `photospider/` forwarding header。CMake 会跟踪 header 的新增和删除，wrapper 直接读取实时

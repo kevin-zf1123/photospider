@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -226,6 +227,64 @@ TEST(CpuDenseTensorImageOperation,
       Value::from_cpu_dense_tensor(descriptor, duplicate_axis, padded,
                                    std::vector<std::byte>(14U, std::byte{0})),
       std::invalid_argument);
+
+  const DenseTensorDescriptor unsigned16_line{{2U},
+                                              ElementSemantics::UnsignedInteger,
+                                              StorageEncoding{16U}};
+  EXPECT_THROW(ValueBuilder::allocate_cpu_dense_tensor(
+                   unsigned16_line, std::nullopt, StridedLayout{{1}}, 3U),
+               std::invalid_argument);
+
+  const DenseTensorDescriptor cross_axis_collision{
+      {2U, 3U},
+      ElementSemantics::UnsignedInteger,
+      StorageEncoding{8U}};
+  EXPECT_THROW(
+      ValueBuilder::allocate_cpu_dense_tensor(
+          cross_axis_collision, std::nullopt, StridedLayout{{2, 1}}, 5U),
+      std::invalid_argument);
+
+  const DenseTensorDescriptor unsigned16_matrix{
+      {2U, 2U},
+      ElementSemantics::UnsignedInteger,
+      StorageEncoding{16U}};
+  ValueBuilder padded_builder = ValueBuilder::allocate_cpu_dense_tensor(
+      unsigned16_matrix, std::nullopt, StridedLayout{{8, 2}}, 12U);
+  EXPECT_TRUE(padded_builder.seal().valid());
+
+  const DenseTensorDescriptor transposed_descriptor{
+      {2U, 3U},
+      ElementSemantics::UnsignedInteger,
+      StorageEncoding{16U}};
+  ValueBuilder transposed_builder = ValueBuilder::allocate_cpu_dense_tensor(
+      transposed_descriptor, std::nullopt, StridedLayout{{2, 4}}, 12U);
+  EXPECT_TRUE(transposed_builder.seal().valid());
+
+  const DenseTensorDescriptor singleton_axis{{1U, 3U},
+                                             ElementSemantics::UnsignedInteger,
+                                             StorageEncoding{16U}};
+  ValueBuilder singleton_builder = ValueBuilder::allocate_cpu_dense_tensor(
+      singleton_axis, std::nullopt, StridedLayout{{1, 2}}, 6U);
+  EXPECT_TRUE(singleton_builder.seal().valid());
+
+  const DenseTensorDescriptor zero_extent{{0U, 3U},
+                                          ElementSemantics::UnsignedInteger,
+                                          StorageEncoding{8U}};
+  EXPECT_THROW(ValueBuilder::allocate_cpu_dense_tensor(
+                   zero_extent, std::nullopt, StridedLayout{{3, 1}}, 1U),
+               std::invalid_argument);
+
+  const DenseTensorDescriptor overflow_boundary{
+      {3U},
+      ElementSemantics::UnsignedInteger,
+      StorageEncoding{16U}};
+  EXPECT_THROW(ValueBuilder::allocate_cpu_dense_tensor(
+                   overflow_boundary, std::nullopt,
+                   StridedLayout{{
+                       std::numeric_limits<std::ptrdiff_t>::max(),
+                   }},
+                   1U),
+               std::overflow_error);
 }
 
 TEST(CpuDenseTensorImageOperation,

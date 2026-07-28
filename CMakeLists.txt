@@ -921,6 +921,16 @@ if(PHOTOSPIDER_BUILD_IPC)
         photospider_ipc_client
         photospider
         Threads::Threads)
+    if(APPLE)
+        set_target_properties(photospiderd PROPERTIES
+            MACOSX_RPATH ON
+            INSTALL_RPATH
+                "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+    elseif(UNIX)
+        set_target_properties(photospiderd PROPERTIES
+            INSTALL_RPATH
+                "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+    endif()
 
     message(STATUS
         "Photospider IPC: enabled (Unix socket client + photospiderd v${PROJECT_VERSION})")

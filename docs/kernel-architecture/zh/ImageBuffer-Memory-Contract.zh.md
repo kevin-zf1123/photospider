@@ -120,7 +120,13 @@ lease 仍存活时拒绝 seal，并在以全新 process-local `ValueRevisionId` 
 撤销后续写权限。
 
 Concrete shape 与 element fact 和 optional explicit Image Facet、`StridedLayout` 保持分离。
-Producer layout 要求 byte offset 为零且使用精确 envelope 的正 stride。通过 sealed handle
+Producer layout 要求 byte offset 为零且使用精确 envelope 的正 stride。在 allocation 或
+WriteLease 之前，builder 会按 byte stride 递增顺序处理所有非 singleton axis。受检
+covered span 从 element byte width 开始；每个后续 stride 必须不小于该 span，随后才把本
+axis 的贡献加入 span。这项按 rank 通用的归纳证明无需枚举 element，即可证明 writable
+coordinate slab 不重叠。Singleton axis 不增加备选地址，零 extent 仍是无效 descriptor。
+Contiguous、padded、transposed 及其他 axis-permuted layout 会通过；单轴或跨轴 byte
+collision，以及不可表示的 span 算术，会在 authority 逸出前失败。通过 sealed handle
 构造的 immutable Value 则可以使用受界限约束的 byte offset 以及正、零或负 signed byte
 stride。Checked view 同时保留完整 Value 和 read lease，且不暴露 writable pointer。
 

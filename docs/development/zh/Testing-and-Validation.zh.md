@@ -64,7 +64,10 @@ product 也不会进入 install 或 export set。Issue #75 probe declaration 是
 free function，因此该宏不会改变 production `ExecutionService` class definition 或 object layout。
 
 `StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
-configuration 强制执行这条边界。真实 product 安装后，Darwin 会先调用并验证
+configuration 强制执行这条边界。真实 product 安装到非系统临时 prefix 后，smoke 会复用
+daemon capability driver，移除 LD/DYLD loader override，并执行 installed
+`photospiderd --help`；这样，缺失可重定位 operation runtime 时不会因只检查文件存在而通过。
+随后 Darwin 会先调用并验证
 `xcrun --find llvm-nm`，然后依次回退到 PATH `llvm-nm` 与 PATH `nm`；非 Darwin 平台绝不会
 调用 `xcrun`，只按上述顺序使用两个 PATH candidate。Canonical path 相同的 executable 只运行
 一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露五个 production seam object 的
@@ -216,6 +219,8 @@ Primary repository 中的 CTest 与 CI entry 只用于长期软件行为：正�
 因为它们会执行或编译维护中的产品。Daemon help 测试通过 CMake script driver 运行当前
 configuration 对应的真实 `photospiderd --help`，分别捕获 stdout 与 stderr，先要求进程结果是
 数值零，再匹配稳定 capability sentence；启动失败与非零退出会得到不同诊断。
+该 driver 会移除 loader override variable，并在 package 安装后复用，因此 build-tree 与
+install-tree resolution 都会验证自身声明的 lookup path。
 `IpcDisabledInstallSmoke`、`DependencyDisabledInstallSmoke`、focused
 `test_ipc_protocol`/`test_ipc_host` case 与 real-process `test_ipc_daemon` case 同样符合该规则：
 它们验证 package、framing、typed client、完整 IPC Host
@@ -669,7 +674,9 @@ ctest --test-dir build --output-on-failure \
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2/V-3 边界的 provider-independent
 integration binary。它的 16 个长期用例验证：
 
-- malformed facet、stride、byte offset 与 exact-envelope rejection；
+- malformed facet、stride、byte offset 与 exact-envelope rejection，包括受检的单轴/跨轴
+  writable collision 与 overflow case，以及可接受的 padded、transposed 和 singleton-axis
+  layout；
 - exclusive builder write authority、seal revocation、retaining read-lease lifetime、
   BufferHandle subrange、process-local identity，以及非零 `AllocationIdentity` 不表示
   allocation liveness；

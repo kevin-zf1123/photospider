@@ -101,7 +101,12 @@ Package boundary:
   `include/photospider/ipc/` headers and `photospiderd`, and keeps the server
   library private. An IPC-only consumer requests `COMPONENTS ipc_client` and
   resolves only `Threads`; component-less discovery preserves the embedded
-  default and its backend dependencies.
+  default and its backend dependencies. Because the daemon's static Host
+  closure loads the shared operation runtime, its install lookup is
+  loader-relative: `@loader_path/../${CMAKE_INSTALL_LIBDIR}` on macOS and
+  `$ORIGIN/../${CMAKE_INSTALL_LIBDIR}` on other Unix/ELF platforms. Windows
+  receives no RPATH. The package smoke removes loader override variables and
+  executes installed `photospiderd --help` from a non-system temporary prefix.
 - `Photospider::photospider` carries `PHOTOSPIDER_STATIC` for consumers and
   keeps the `src/lib/` include root private to repository builds. In the build tree,
   the target's generated public include root contains only `photospider/`
