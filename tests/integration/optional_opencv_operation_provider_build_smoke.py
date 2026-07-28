@@ -268,6 +268,10 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "PartialHpValidityRemovesDiskArtifactsAndCannotBeReused"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "TensorDirtyStagingPublishesFreshIdentityAndExactRegionAtCommit"
         ),
         (
@@ -305,6 +309,18 @@ def validate_provider_disabled_inventory(
         (
             "CpuDenseTensorImageOperation."
             "TensorDirtyPlanExecutesRegisteredProductAndStagesExactValidity"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtyPlanRecomputesMissingAndPartialIntermediateParents"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorDirtyUpdateMergesSelectedBytesIntoExistingFullOutput"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FreshTensorPartialOutputBecomesReusableOnlyAfterWholeCommit"
         ),
         (
             "CpuDenseTensorImageOperation."

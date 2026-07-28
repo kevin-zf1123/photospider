@@ -100,6 +100,10 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
+        "PartialHpValidityRemovesDiskArtifactsAndCannotBeReused"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
         "TensorDirtyStagingPublishesFreshIdentityAndExactRegionAtCommit"
     ),
     (
@@ -140,6 +144,18 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
+        "TensorDirtyPlanRecomputesMissingAndPartialIntermediateParents"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "TensorDirtyUpdateMergesSelectedBytesIntoExistingFullOutput"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
+        "FreshTensorPartialOutputBecomesReusableOnlyAfterWholeCommit"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
         "RunnerRejectsExecuteDescriptorMismatchAsComputeError"
     ),
 )
@@ -172,7 +188,7 @@ def ctest_json_test(
 def provider_disabled_ctest_payload() -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
-    @return JSON payload containing two profile entries, 21 dense-image cases,
+    @return JSON payload containing two profile entries, 25 dense-image cases,
       one Value-runtime case, three disk cases, and two production lifecycle
       cases.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
@@ -899,7 +915,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves 29 names and focused-test
+        @return None after parsing preserves 33 names and focused-test
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
         @note Exact labels exclude the build-smoke label from disk and
