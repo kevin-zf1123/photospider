@@ -320,6 +320,9 @@ neither document changes the current fields described above.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/graph_definition.hpp`
@@ -331,6 +334,9 @@ neither document changes the current fields described above.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/value.cpp`
+- `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
@@ -342,3 +348,4 @@ neither document changes the current fields described above.
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

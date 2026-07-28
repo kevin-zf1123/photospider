@@ -253,11 +253,10 @@ class Value final {
 /**
  * @brief Retaining read-only, bounds-checked view of one DenseTensor Value.
  *
- * @throws std::bad_alloc only when the retained Value itself is copied by a
- *         caller-defined allocator implementation; current shared_ptr copies
- *         do not allocate.
- * @note The view stores a complete Value, so addresses outlive a caller's
- *       separate handle but never outlive the view.
+ * @throws std::invalid_argument when construction receives an invalid Value.
+ * @note Copy and copy-like move operations are noexcept. The view stores a
+ *       complete Value, so addresses outlive a caller's separate handle but
+ *       never outlive the view.
  */
 class DenseTensorView final {
  public:

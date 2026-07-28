@@ -461,9 +461,14 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 
 ## 实现与验证入口
 
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/plugin_api.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `include/photospider/policy/policy_plugin_api.h`
+- `src/lib/core/value.cpp`
+- `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
@@ -472,5 +477,6 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `tests/integration/test_plugin_manager.cpp`
 - `tests/unit/test_op_registry_m31.cpp`
 - `tests/unit/test_policy_registry.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/graph_cli_plugin_compute_smoke.py`

@@ -578,6 +578,8 @@ points remain future behavior.
 
 ## Implementation and Validation Entry Points
 
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/image_view.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
@@ -594,6 +596,7 @@ points remain future behavior.
 - `src/lib/compute/dirty_region_planner.*`
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
+- `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/policy/policy_registry.*`
@@ -614,5 +617,6 @@ points remain future behavior.
 - `tests/unit/test_compute_supersession.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_opencv_operation_concurrency.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

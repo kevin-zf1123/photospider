@@ -510,6 +510,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 
 - `CMakeLists.txt`
 - `include/photospider/host/host.hpp`
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_document_reader.hpp`
 - `src/lib/graph/graph_document_writer.hpp`
 - `src/lib/adapters/yaml/yaml_graph_document_adapter.*`
@@ -517,6 +520,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
 - `src/lib/core/image_buffer_processing.*`
+- `src/lib/core/value.cpp`
+- `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
 - `src/lib/adapters/opencv/image_buffer_processing_opencv.cpp`
 - `src/lib/providers/configured_image_artifact_codec.*`
@@ -533,5 +539,6 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/integration/static_product_consumer_smoke.py`
 - `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

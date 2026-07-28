@@ -267,8 +267,13 @@ becoming part of the operation ABI.
 ## Implementation and Validation Entry Points
 
 - `include/photospider/core/image_buffer.hpp`
+- `include/photospider/data/value.hpp`
+- `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
+- `src/lib/core/value.cpp`
+- `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/compute/image_buffer.hpp`
 - `src/lib/adapters/opencv/buffer_adapter_opencv.*`
 - `src/lib/ipc/output_store.*`
@@ -276,3 +281,4 @@ becoming part of the operation ABI.
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
