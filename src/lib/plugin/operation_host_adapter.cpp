@@ -550,6 +550,20 @@ OpMetadata operation_metadata_to_private(
           "Operation metadata has invalid input access pattern");
   }
   result.data_dependent = metadata.data_dependent;
+  result.reentrant = metadata.reentrant;
+  result.maximum_parallelism = metadata.maximum_parallelism;
+  result.retained_memory_bytes = metadata.retained_memory_bytes;
+  result.scratch_bytes = metadata.scratch_bytes;
+  if (metadata.exclusive_key.size() >
+      plugin::OperationMetadata::kExclusiveKeyMaxBytes) {
+    throw std::invalid_argument(
+        "Operation metadata exclusive key exceeds 128 bytes");
+  }
+  if (metadata.exclusive_key.find('\0') != std::string::npos) {
+    throw std::invalid_argument(
+        "Operation metadata exclusive key contains an embedded NUL");
+  }
+  result.exclusive_key = metadata.exclusive_key;
   return result;
 }
 

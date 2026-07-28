@@ -66,7 +66,8 @@ struct OperationPluginRegistrar {
    * @param type Borrowed null-terminated operation type.
    * @param subtype Borrowed null-terminated operation subtype.
    * @param callback Owned plugin callback moved into staged host state.
-   * @param metadata Scheduling metadata copied into staged host state.
+   * @param metadata Scheduling and resource metadata copied into staged host
+   * state.
    * @return Nothing.
    * @throws Host validation, callback-copy, or allocation exceptions unchanged.
    * @note No registration becomes process-visible before candidate commit.
@@ -79,7 +80,8 @@ struct OperationPluginRegistrar {
    * @param type Borrowed null-terminated operation type.
    * @param subtype Borrowed null-terminated operation subtype.
    * @param callback Owned tiled callback moved into staged host state.
-   * @param metadata Scheduling metadata copied into staged host state.
+   * @param metadata Scheduling and resource metadata copied into staged host
+   * state.
    * @return Nothing.
    * @throws Host validation, callback-copy, or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
@@ -92,7 +94,8 @@ struct OperationPluginRegistrar {
    * @param type Borrowed null-terminated operation type.
    * @param subtype Borrowed null-terminated operation subtype.
    * @param callback Owned tiled callback moved into staged host state.
-   * @param metadata Scheduling metadata copied into staged host state.
+   * @param metadata Scheduling and resource metadata copied into staged host
+   * state.
    * @return Nothing.
    * @throws Host validation, callback-copy, or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
@@ -147,7 +150,8 @@ struct OperationPluginRegistrar {
    * @param subtype Borrowed null-terminated operation subtype.
    * @param device Device capability label for the implementation.
    * @param callback Owned callback moved into staged host state.
-   * @param metadata Scheduling metadata copied into staged host state.
+   * @param metadata Scheduling and resource metadata copied into staged host
+   * state.
    * @return Nothing.
    * @throws Host validation, callback-copy, or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
@@ -162,7 +166,8 @@ struct OperationPluginRegistrar {
    * @param subtype Borrowed null-terminated operation subtype.
    * @param device Device capability label for the implementation.
    * @param callback Owned callback moved into staged host state.
-   * @param metadata Scheduling metadata copied into staged host state.
+   * @param metadata Scheduling and resource metadata copied into staged host
+   * state.
    * @return Nothing.
    * @throws Host validation, callback-copy, or allocation exceptions unchanged.
    * @note Registration is transaction-local until candidate commit.
@@ -194,7 +199,7 @@ struct OperationPluginRegistrar {
    * @param type Operation type.
    * @param subtype Operation subtype.
    * @param callback Plugin callback to move into the host transaction.
-   * @param metadata Scheduling metadata.
+   * @param metadata Scheduling and resource metadata.
    * @return Nothing.
    * @throws std::invalid_argument for an invalid type/subtype segment or empty
    * callback.
@@ -218,7 +223,7 @@ struct OperationPluginRegistrar {
    * @param type Operation type.
    * @param subtype Operation subtype.
    * @param callback Plugin callback to move into the host transaction.
-   * @param metadata Scheduling metadata.
+   * @param metadata Scheduling and resource metadata.
    * @return Nothing.
    * @throws std::invalid_argument for an invalid type/subtype segment or empty
    * callback.
@@ -241,7 +246,7 @@ struct OperationPluginRegistrar {
    * @param type Operation type.
    * @param subtype Operation subtype.
    * @param callback Plugin callback to move into the host transaction.
-   * @param metadata Scheduling metadata.
+   * @param metadata Scheduling and resource metadata.
    * @return Nothing.
    * @throws std::invalid_argument for an invalid type/subtype segment or empty
    * callback.
@@ -334,7 +339,7 @@ struct OperationPluginRegistrar {
    * @param subtype Operation subtype.
    * @param device Device capability label.
    * @param callback Plugin callback to move into the host transaction.
-   * @param metadata Scheduling metadata.
+   * @param metadata Scheduling and resource metadata.
    * @return Nothing.
    * @throws std::invalid_argument for an invalid type/subtype segment or empty
    * callback.
@@ -358,7 +363,7 @@ struct OperationPluginRegistrar {
    * @param subtype Operation subtype.
    * @param device Device capability label.
    * @param callback Plugin callback to move into the host transaction.
-   * @param metadata Scheduling metadata.
+   * @param metadata Scheduling and resource metadata.
    * @return Nothing.
    * @throws std::invalid_argument for an invalid type/subtype segment or empty
    * callback.

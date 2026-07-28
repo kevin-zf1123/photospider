@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
@@ -389,6 +390,138 @@ TEST_F(OpRegistryM31Test, CandidateFilterCanInspectRegistrySnapshot) {
   ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.cost_score, 7);
   registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Verifies unified selection preserves complete metadata and identity.
+ *
+ * @return Nothing; GoogleTest assertions report mismatched metadata.
+ * @throws Registry allocation and callback-copy exceptions unchanged.
+ * @note The selected value is one coherent CPU implementation snapshot; no
+ * legacy metadata lookup participates after selection.
+ */
+TEST_F(OpRegistryM31Test, UnifiedSelectionCarriesSchedulingResourceMetadata) {
+  constexpr const char* kType = "issue82_metadata";
+  constexpr const char* kSubtype = "complete";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata metadata;
+  metadata.reentrant = false;
+  metadata.maximum_parallelism = 3U;
+  metadata.retained_memory_bytes = 4096U;
+  metadata.scratch_bytes = 8192U;
+  metadata.exclusive_key = "issue82-shared-context";
+  metadata.cost_score = 17;
+  registry.register_impl(kType, kSubtype, Device::CPU, dummy_cpu_op, metadata);
+
+  const auto selected = registry.select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_NE(selected->implementation_identity, 0U);
+  EXPECT_EQ(selected->metadata.device_preference, Device::CPU);
+  EXPECT_FALSE(selected->metadata.reentrant);
+  EXPECT_EQ(selected->metadata.maximum_parallelism, 3U);
+  EXPECT_EQ(selected->metadata.retained_memory_bytes, 4096U);
+  EXPECT_EQ(selected->metadata.scratch_bytes, 8192U);
+  EXPECT_EQ(selected->metadata.exclusive_key, "issue82-shared-context");
+  EXPECT_EQ(selected->metadata.cost_score, 17);
+  EXPECT_FALSE(registry
+                   .select_implementation(kType, kSubtype, {},
+                                          ComputeIntent::GlobalHighPrecision)
+                   .has_value());
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Verifies plugin-style scalar override and restoration change identity.
+ *
+ * @return Nothing; assertions report wrong override, metadata, or restoration.
+ * @throws Registry capture, callback-copy, and restoration exceptions.
+ * @note The registration capture models the plugin manager's transactional
+ * override. Restoring the capture reinstates the exact core identity instead of
+ * synthesizing a new revision.
+ */
+TEST_F(OpRegistryM31Test, PluginOverrideRestoresExactCoreIdentityAndMetadata) {
+  constexpr const char* kType = "issue82_override";
+  constexpr const char* kSubtype = "core_plugin";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata core_metadata;
+  core_metadata.reentrant = false;
+  core_metadata.maximum_parallelism = 1U;
+  core_metadata.retained_memory_bytes = 101U;
+  core_metadata.exclusive_key = "core-context";
+  registry.register_op(kType, kSubtype, dummy_cpu_op, core_metadata);
+  const auto core = registry.select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(core.has_value());
+  ASSERT_NE(core->implementation_identity, 0U);
+
+  OpRegistry::RegistrationCapture plugin_capture;
+  registry.capture_registration(
+      [&registry] {
+        OpMetadata plugin_metadata;
+        plugin_metadata.reentrant = true;
+        plugin_metadata.maximum_parallelism = 4U;
+        plugin_metadata.retained_memory_bytes = 202U;
+        plugin_metadata.scratch_bytes = 303U;
+        plugin_metadata.exclusive_key = "plugin-context";
+        registry.register_op(kType, kSubtype, dummy_metal_op, plugin_metadata);
+      },
+      plugin_capture);
+  const auto plugin = registry.select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(plugin.has_value());
+  EXPECT_NE(plugin->implementation_identity, core->implementation_identity);
+  EXPECT_TRUE(plugin->metadata.reentrant);
+  EXPECT_EQ(plugin->metadata.maximum_parallelism, 4U);
+  EXPECT_EQ(plugin->metadata.retained_memory_bytes, 202U);
+  EXPECT_EQ(plugin->metadata.scratch_bytes, 303U);
+  EXPECT_EQ(plugin->metadata.exclusive_key, "plugin-context");
+
+  registry.restore_registration_capture(plugin_capture);
+  const auto restored = registry.select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_EQ(restored->implementation_identity, core->implementation_identity);
+  EXPECT_FALSE(restored->metadata.reentrant);
+  EXPECT_EQ(restored->metadata.maximum_parallelism, 1U);
+  EXPECT_EQ(restored->metadata.retained_memory_bytes, 101U);
+  EXPECT_EQ(restored->metadata.scratch_bytes, 0U);
+  EXPECT_EQ(restored->metadata.exclusive_key, "core-context");
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Verifies malformed private metadata is rejected before mutation.
+ *
+ * @return Nothing; assertions report accepted oversized or embedded-NUL keys.
+ * @throws Registry validation exceptions are consumed by GoogleTest.
+ * @note The canonical key remains absent after both rejected registrations.
+ */
+TEST_F(OpRegistryM31Test, RejectsMalformedExclusiveKeysWithoutRegistration) {
+  constexpr const char* kType = "issue82_invalid";
+  constexpr const char* kSubtype = "exclusive_key";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata oversized;
+  oversized.exclusive_key.assign(OpMetadata::kExclusiveKeyMaxBytes + 1U, 'x');
+  EXPECT_THROW(registry.register_impl(kType, kSubtype, Device::CPU,
+                                      dummy_cpu_op, oversized),
+               std::invalid_argument);
+
+  OpMetadata embedded_nul;
+  embedded_nul.exclusive_key = std::string("invalid\0key", 11U);
+  EXPECT_THROW(registry.register_impl(kType, kSubtype, Device::CPU,
+                                      dummy_cpu_op, embedded_nul),
+               std::invalid_argument);
+  EXPECT_FALSE(registry
+                   .select_implementation(kType, kSubtype, {Device::CPU},
+                                          ComputeIntent::GlobalHighPrecision)
+                   .has_value());
 }
 
 // 测试：向后兼容性 - 传统 API 仍然可用

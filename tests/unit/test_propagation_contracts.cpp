@@ -896,6 +896,39 @@ TEST(OperationHostAdapter,
   }
 }
 
+/**
+ * @brief Verifies the installed operation ABI forwards all routing metadata.
+ *
+ * @return Nothing; GoogleTest assertions report translation mismatches.
+ * @throws Adapter validation and string-allocation exceptions unchanged.
+ * @note This tests the ABI-to-private boundary only; execution gates consume
+ * the resulting private value in ExecutionService tests.
+ */
+TEST(OperationHostAdapter, ConvertsCompleteOperationRoutingMetadata) {
+  plugin::OperationMetadata metadata;
+  metadata.reentrant = false;
+  metadata.maximum_parallelism = 5U;
+  metadata.retained_memory_bytes = 4096U;
+  metadata.scratch_bytes = 8192U;
+  metadata.exclusive_key = "plugin-shared-context";
+
+  const OpMetadata converted =
+      plugin_host::operation_metadata_to_private(metadata);
+  EXPECT_FALSE(converted.reentrant);
+  EXPECT_EQ(converted.maximum_parallelism, 5U);
+  EXPECT_EQ(converted.retained_memory_bytes, 4096U);
+  EXPECT_EQ(converted.scratch_bytes, 8192U);
+  EXPECT_EQ(converted.exclusive_key, "plugin-shared-context");
+}
+
+/**
+ * @brief Verifies malformed ABI metadata is rejected before registration.
+ *
+ * @return Nothing; GoogleTest assertions report accepted invalid values.
+ * @throws Adapter validation exceptions are consumed by GoogleTest.
+ * @note Every case starts from a fresh default metadata value so failures are
+ * attributable to exactly one malformed field.
+ */
 TEST(OperationHostAdapter, RejectsInvalidRegistrarMetadataValues) {
   plugin::OperationMetadata metadata;
   metadata.tile_preference = static_cast<plugin::TileSizePreference>(999);
@@ -911,6 +944,15 @@ TEST(OperationHostAdapter, RejectsInvalidRegistrarMetadataValues) {
                std::invalid_argument);
   metadata = plugin::OperationMetadata{};
   metadata.cost_score = -1;
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.exclusive_key.assign(
+      plugin::OperationMetadata::kExclusiveKeyMaxBytes + 1U, 'x');
+  EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
+               std::invalid_argument);
+  metadata = plugin::OperationMetadata{};
+  metadata.exclusive_key = std::string("invalid\0key", 11U);
   EXPECT_THROW(plugin_host::operation_metadata_to_private(metadata),
                std::invalid_argument);
   EXPECT_THROW(

@@ -112,6 +112,28 @@ void sort_unique_keys(std::vector<std::string>& keys) {
 }
 
 /**
+ * @brief Validates bounded process-domain operation metadata.
+ *
+ * @param metadata Metadata supplied by a core registration API.
+ * @return Nothing.
+ * @throws std::invalid_argument when an exclusive key is too long or contains
+ *         an embedded NUL.
+ * @note Public plugin metadata receives the same validation in the host
+ *       adapter. Repeating it here prevents direct core registrations from
+ *       publishing values that execution cannot identify unambiguously.
+ */
+void validate_operation_metadata(const OpMetadata& metadata) {
+  if (metadata.exclusive_key.size() > OpMetadata::kExclusiveKeyMaxBytes) {
+    throw std::invalid_argument(
+        "Operation metadata exclusive key exceeds 128 bytes");
+  }
+  if (metadata.exclusive_key.find('\0') != std::string::npos) {
+    throw std::invalid_argument(
+        "Operation metadata exclusive key contains an embedded NUL");
+  }
+}
+
+/**
  * @brief Maps one implementation to an intent-specific device priority.
  *
  * @param intent Compute path selecting the HP or RT priority policy.
@@ -200,7 +222,8 @@ bool implementation_group_is_empty(
  *
  * @param slots Stable implementation owners retained from one coherent
  *        registry snapshot.
- * @return Device implementation values in registration order.
+ * @param revisions Ownership revisions parallel to slots.
+ * @return Device implementation values in registration order with identities.
  * @throws std::bad_alloc if result or callback-target copying allocates.
  * @throws Any exception raised while copying a callback target.
  * @note Callers invoke this only after releasing the registry state lock. The
@@ -208,12 +231,16 @@ bool implementation_group_is_empty(
  *       and exceptional cleanup path.
  */
 std::vector<OpImplementation> materialize_device_implementations(
-    const std::vector<std::shared_ptr<const OpImplementation>>& slots) {
+    const std::vector<std::shared_ptr<const OpImplementation>>& slots,
+    const std::vector<std::uint64_t>& revisions) {
   std::vector<OpImplementation> result;
   result.reserve(slots.size());
-  for (const auto& slot : slots) {
+  for (std::size_t index = 0U; index < slots.size(); ++index) {
+    const auto& slot = slots[index];
     if (slot) {
       result.push_back(*slot);
+      result.back().implementation_identity =
+          index < revisions.size() ? revisions[index] : 0U;
     }
   }
   return result;
@@ -1115,6 +1142,7 @@ void OpRegistry::swap_state(OpRegistry& other) noexcept {
 void OpRegistry::register_op(const std::string& type,
                              const std::string& subtype, MonolithicOpFunc fn,
                              OpMetadata meta) {
+  validate_operation_metadata(meta);
   auto key = make_key(type, subtype);
   OpVariant legacy_replacement = fn;
   std::optional<MonolithicOpFunc> hp_replacement(std::in_place, std::move(fn));
@@ -1143,6 +1171,7 @@ void OpRegistry::register_op(const std::string& type,
 void OpRegistry::register_op(const std::string& type,
                              const std::string& subtype, TileOpFunc fn,
                              OpMetadata meta) {
+  validate_operation_metadata(meta);
   auto key = make_key(type, subtype);
   OpVariant legacy_replacement = fn;
   std::optional<TileOpFunc> hp_replacement(std::in_place, std::move(fn));
@@ -1305,6 +1334,7 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
                                            const std::string& subtype,
                                            MonolithicOpFunc fn,
                                            OpMetadata meta) {
+  validate_operation_metadata(meta);
   auto key = make_key(type, subtype);
   std::optional<MonolithicOpFunc> replacement(std::in_place, std::move(fn));
   {
@@ -1326,6 +1356,7 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
 void OpRegistry::register_op_hp_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
+  validate_operation_metadata(meta);
   auto key = make_key(type, subtype);
   std::optional<TileOpFunc> replacement(std::in_place, std::move(fn));
   {
@@ -1346,6 +1377,7 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
 void OpRegistry::register_op_rt_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
+  validate_operation_metadata(meta);
   auto key = make_key(type, subtype);
   std::optional<TileOpFunc> replacement(std::in_place, std::move(fn));
   {
@@ -1568,6 +1600,7 @@ OpRegistry::get_dependency_builder_snapshot(const std::string& type,
 std::optional<OpRegistry::OpImplementations> OpRegistry::get_implementations(
     const std::string& type, const std::string& subtype) const {
   std::optional<OpImplementations> result;
+  std::vector<std::uint64_t> revisions;
   {
     StateLockGuard lock(*this);
     auto key = make_key(type, subtype);
@@ -1576,10 +1609,14 @@ std::optional<OpRegistry::OpImplementations> OpRegistry::get_implementations(
       return std::nullopt;
     }
     result = it->second;
+    const auto ownership = ownership_table_.find(key);
+    if (ownership != ownership_table_.end()) {
+      revisions = ownership->second.device_impls;
+    }
   }
 
   result->device_impls =
-      materialize_device_implementations(result->device_impl_slots);
+      materialize_device_implementations(result->device_impl_slots, revisions);
   result->device_impl_slots.clear();
   return result;
 }
@@ -1594,6 +1631,7 @@ void OpRegistry::register_impl(const std::string& type,
                                MonolithicOpFunc fn, OpMetadata meta) {
   // 设置元数据中的设备偏好
   meta.device_preference = device;
+  validate_operation_metadata(meta);
   OpImplementation impl;
   impl.func = std::move(fn);
   impl.metadata = meta;
@@ -1648,6 +1686,7 @@ void OpRegistry::register_impl(const std::string& type,
                                TileOpFunc fn, OpMetadata meta) {
   // 设置元数据中的设备偏好
   meta.device_preference = device;
+  validate_operation_metadata(meta);
   OpImplementation impl;
   impl.func = std::move(fn);
   impl.metadata = meta;
@@ -1699,6 +1738,7 @@ void OpRegistry::register_impl(const std::string& type,
 std::vector<OpImplementation> OpRegistry::get_implementations_by_device(
     const std::string& type, const std::string& subtype, Device device) const {
   std::vector<std::shared_ptr<const OpImplementation>> slots;
+  std::vector<std::uint64_t> revisions;
   {
     StateLockGuard lock(*this);
     auto key = make_key(type, subtype);
@@ -1707,19 +1747,20 @@ std::vector<OpImplementation> OpRegistry::get_implementations_by_device(
       return {};
     }
     slots = it->second.device_impl_slots;
+    const auto ownership = ownership_table_.find(key);
+    if (ownership != ownership_table_.end()) {
+      revisions = ownership->second.device_impls;
+    }
   }
 
-  std::vector<OpImplementation> result;
-  result.reserve(slots.size());
-  for (const auto& slot : slots) {
-    if (!slot) {
-      continue;
-    }
-    const OpImplementation& impl = *slot;
-    if (impl.metadata.device_preference == device) {
-      result.push_back(impl);
-    }
-  }
+  std::vector<OpImplementation> result =
+      materialize_device_implementations(slots, revisions);
+  result.erase(std::remove_if(result.begin(), result.end(),
+                              [device](const OpImplementation& impl) {
+                                return impl.metadata.device_preference !=
+                                       device;
+                              }),
+               result.end());
   return result;
 }
 
@@ -1727,6 +1768,7 @@ std::vector<OpImplementation> OpRegistry::get_implementations_by_device(
 std::vector<OpImplementation> OpRegistry::get_all_implementations(
     const std::string& type, const std::string& subtype) const {
   std::vector<std::shared_ptr<const OpImplementation>> slots;
+  std::vector<std::uint64_t> revisions;
   {
     StateLockGuard lock(*this);
     auto key = make_key(type, subtype);
@@ -1735,8 +1777,128 @@ std::vector<OpImplementation> OpRegistry::get_all_implementations(
       return {};
     }
     slots = it->second.device_impl_slots;
+    const auto ownership = ownership_table_.find(key);
+    if (ownership != ownership_table_.end()) {
+      revisions = ownership->second.device_impls;
+    }
   }
-  return materialize_device_implementations(slots);
+  return materialize_device_implementations(slots, revisions);
+}
+
+/** @copydoc OpRegistry::select_implementation */
+std::optional<OpImplementation> OpRegistry::select_implementation(
+    const std::string& type, const std::string& subtype,
+    const std::vector<Device>& available_devices, ComputeIntent intent,
+    const std::function<bool(const OpImplementation&)>& candidate_filter)
+    const {  // NOLINT(whitespace/indent_namespace)
+  const std::string key = make_key(type, subtype);
+  std::optional<OpImplementations> implementations;
+  std::optional<OpVariant> legacy;
+  std::optional<OpMetadata> legacy_metadata;
+  RegistryEntryOwnership revisions;
+  {
+    StateLockGuard lock(*this);
+    const auto implementation_it = impl_table_.find(key);
+    if (implementation_it != impl_table_.end()) {
+      implementations = implementation_it->second;
+    }
+    const auto legacy_it = table_.find(key);
+    if (legacy_it != table_.end()) {
+      legacy = legacy_it->second;
+    }
+    const auto metadata_it = metadata_table_.find(key);
+    if (metadata_it != metadata_table_.end()) {
+      legacy_metadata = metadata_it->second;
+    }
+    const auto ownership_it = ownership_table_.find(key);
+    if (ownership_it != ownership_table_.end()) {
+      revisions = ownership_it->second;
+    }
+  }
+
+  if (implementations) {
+    std::vector<OpImplementation> device_implementations =
+        materialize_device_implementations(implementations->device_impl_slots,
+                                           revisions.device_impls);
+    std::vector<const OpImplementation*> candidates;
+    candidates.reserve(device_implementations.size());
+    for (const OpImplementation& implementation : device_implementations) {
+      if (implementation.implementation_identity == 0U ||
+          std::find(available_devices.begin(), available_devices.end(),
+                    implementation.metadata.device_preference) ==
+              available_devices.end() ||
+          (candidate_filter && !candidate_filter(implementation))) {
+        continue;
+      }
+      candidates.push_back(&implementation);
+    }
+    if (!candidates.empty()) {
+      const auto best = std::min_element(
+          candidates.begin(), candidates.end(),
+          [intent](const OpImplementation* lhs, const OpImplementation* rhs) {
+            return implementation_less_for_intent(lhs, rhs, intent);
+          });
+      return **best;
+    }
+  }
+
+  const auto scalar_candidate =
+      [&](const std::optional<OpVariant>& callback,
+          const std::optional<OpMetadata>& metadata,
+          std::uint64_t identity) -> std::optional<OpImplementation> {
+    if (!callback || !metadata || identity == 0U ||
+        std::find(available_devices.begin(), available_devices.end(),
+                  metadata->device_preference) == available_devices.end()) {
+      return std::nullopt;
+    }
+    OpImplementation candidate{*callback, *metadata, identity};
+    if (candidate_filter && !candidate_filter(candidate)) {
+      return std::nullopt;
+    }
+    return candidate;
+  };
+
+  if (implementations) {
+    if (intent == ComputeIntent::GlobalHighPrecision) {
+      if (implementations->monolithic_hp) {
+        if (auto candidate = scalar_candidate(
+                OpVariant{*implementations->monolithic_hp},
+                implementations->meta_hp, revisions.monolithic_hp)) {
+          return candidate;
+        }
+      }
+      if (implementations->tiled_hp) {
+        if (auto candidate = scalar_candidate(
+                OpVariant{*implementations->tiled_hp}, implementations->meta_hp,
+                revisions.tiled_hp)) {
+          return candidate;
+        }
+      }
+    } else if (intent == ComputeIntent::RealTimeUpdate) {
+      if (implementations->tiled_rt) {
+        if (auto candidate = scalar_candidate(
+                OpVariant{*implementations->tiled_rt}, implementations->meta_rt,
+                revisions.tiled_rt)) {
+          return candidate;
+        }
+      }
+      if (implementations->tiled_hp) {
+        if (auto candidate = scalar_candidate(
+                OpVariant{*implementations->tiled_hp}, implementations->meta_hp,
+                revisions.tiled_hp)) {
+          return candidate;
+        }
+      }
+      if (implementations->monolithic_hp) {
+        if (auto candidate = scalar_candidate(
+                OpVariant{*implementations->monolithic_hp},
+                implementations->meta_hp, revisions.monolithic_hp)) {
+          return candidate;
+        }
+      }
+    }
+  }
+  return scalar_candidate(legacy, legacy_metadata, revisions.legacy_op);
 }
 
 /** @copydoc OpRegistry::select_best_implementation */

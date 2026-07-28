@@ -591,12 +591,16 @@ enum class TileSizePreference {
 };
 
 /**
- * @brief Private scheduling and dependency metadata for one implementation.
- * @throws Nothing for value operations.
+ * @brief Private scheduling, resource, and dependency metadata for one
+ * implementation.
+ * @throws std::bad_alloc when copied exclusive-key storage cannot allocate.
  * @note The registry copies this value with its callback snapshot. Dependency
  * builder state uses a separate revisioned snapshot for cache identity.
  */
 struct OpMetadata {
+  /** @brief Maximum accepted bytes in a nonempty process exclusive key. */
+  static constexpr std::size_t kExclusiveKeyMaxBytes = 128U;
+
   /** @brief Preferred private tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
   /** @brief Preferred execution device. */
@@ -615,6 +619,22 @@ struct OpMetadata {
   InputAccessPattern access_pattern = InputAccessPattern::SpatialAligned;
   /** @brief Whether dependency mapping depends on upstream pixel content. */
   bool data_dependent = false;
+  /** @brief Whether callbacks of this exact implementation may overlap. */
+  bool reentrant = true;
+  /**
+   * @brief Process-domain cap for this exact implementation identity.
+   * @note Zero means no implementation-specific cap.
+   */
+  std::uint32_t maximum_parallelism = 0U;
+  /** @brief Additional retained bytes held for each in-flight callback. */
+  std::uint64_t retained_memory_bytes = 0U;
+  /** @brief Additional scratch bytes held for each in-flight callback. */
+  std::uint64_t scratch_bytes = 0U;
+  /**
+   * @brief Optional process-domain mutual-exclusion key.
+   * @note Registration validates bounded length and rejects embedded NUL.
+   */
+  std::string exclusive_key;
 };
 
 /**
@@ -798,6 +818,15 @@ struct OpImplementation {
    *       this field as an independent lifetime owner.
    */
   OpMetadata metadata;
+
+  /**
+   * @brief Nonzero process-unique revision identifying this callback slot.
+   *
+   * @note Planning retains this scalar without retaining the callback or plugin
+   * DSO. Replacement mints a different value and unload restores the
+   * predecessor's recorded revision.
+   */
+  std::uint64_t implementation_identity = 0U;
 
   /**
    * @brief Checks whether the callable consumes complete NodeOutput values.
@@ -1592,6 +1621,31 @@ class OpRegistry {
       const std::string& type, const std::string& subtype,
       const std::vector<Device>& available_devices, ComputeIntent intent,
       const std::function<bool(const OpImplementation&)>& candidate_filter)
+      const;
+
+  /**
+   * @brief Selects one coherent revisioned implementation including fallbacks.
+   *
+   * Device-specific candidates retain the existing intent/device/cost ordering.
+   * When no device candidate survives, the method selects the matching HP/RT
+   * scalar slot and its metadata/ownership revision, then the legacy slot.
+   *
+   * @param type Operation type.
+   * @param subtype Operation subtype.
+   * @param available_devices Route-visible devices.
+   * @param intent HP or RT selection policy.
+   * @param candidate_filter Optional task-shape compatibility predicate.
+   * @return Selected callback, metadata, device, and nonzero identity, or
+   * nullopt when no coherent candidate exists.
+   * @throws std::bad_alloc or callback-copy exceptions from snapshot creation.
+   * @throws Any exception raised by candidate_filter.
+   * @note The selected value owns its callback and any plugin DSO lease. A
+   * missing metadata record or ownership identity is not silently synthesized.
+   */
+  std::optional<OpImplementation> select_implementation(
+      const std::string& type, const std::string& subtype,
+      const std::vector<Device>& available_devices, ComputeIntent intent,
+      const std::function<bool(const OpImplementation&)>& candidate_filter = {})
       const;
 
   /**
