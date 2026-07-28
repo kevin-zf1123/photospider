@@ -223,6 +223,13 @@ replaces it and derives complete validity. Generic ABI v2 monolithic callbacks
 continue to replace complete outputs; selected-byte merging is limited to the
 source-private exact core Region implementation.
 
+Every whole-output execution route applies that rule through
+`ComputeCachePolicy`, including empty-plan validation, monolithic and tiled
+runner cache guards, committed upstream dependency resolution, and final target
+return. A dependency-complete current-request temporary result may flow
+downstream, but raw presence of partial persistent output never suppresses its
+planned recomputation or exposes its bytes to a whole-output consumer.
+
 RT proxy state uses HP-space `region_hp` but remains image-only. The checked
 adapter derives current rectangular downsample/inspection metadata only from
 one exact built-in ImageRect. TensorSlice and Whole do not enter the RT or
@@ -262,6 +269,9 @@ payloads. No future residency replica becomes a second cache authority.
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
+- `src/lib/compute/compute_cache_policy.*`
+- `src/lib/compute/compute_node_task_runner.*`
+- `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

@@ -592,10 +592,12 @@ class TaskSubmissionPlan {
  * @param dispatcher_lease Lease retained by dispatcher/commit and copied into
  * the bootstrap callback.
  * @return Nothing.
- * @throws GraphError when an empty plan lacks reusable target output.
+ * @throws GraphError when an empty plan lacks exact complete reusable target
+ * output.
  * @throws Execution-runtime or task exceptions through completion wait.
  * @note The full HP path submits no non-empty ExecutionTaskHandle and exposes
- * no borrowed ExecutionTaskExecutor pointer. Empty plans bypass batch setup.
+ * no borrowed ExecutionTaskExecutor pointer. Empty plans bypass batch setup
+ * only after ComputeCachePolicy accepts complete Region validity.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionTaskRuntime& task_runtime, int node_id,
@@ -605,18 +607,21 @@ void dispatch_planned_tasks(GraphModel& graph,
 /**
  * @brief Submits one planned full-HP Run through the injected CPU service.
  *
- * @param graph GraphModel used only to validate an empty reusable target.
+ * @param graph GraphModel used only to validate an empty target with exact
+ * complete reusable validity.
  * @param execution_service Process-owned CPU execution service.
  * @param host Active Graph execution observation context.
  * @param node_id Target node used in empty-plan diagnostics.
  * @param plan Run-owned execution submission plan.
  * @param dispatcher_lease Matching lease copied into ready submissions.
  * @return Nothing after the service batch settles.
- * @throws GraphError when an empty plan lacks reusable target output.
+ * @throws GraphError when an empty plan lacks exact complete reusable target
+ * output.
  * @throws std::bad_alloc from submission/service setup.
  * @throws The exact service worker or operation exception after settlement.
  * @note Dispatcher readiness and completion state stay inside plan/Run
- * ownership. Only move-owned ready submissions cross into the service.
+ * ownership. Only move-owned ready submissions cross into the service. Empty
+ * plans require ComputeCachePolicy to accept complete Region validity.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,

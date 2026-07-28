@@ -66,6 +66,31 @@ namespace {
 std::atomic_int g_disk_cache_guard_tile_calls{0};
 
 /**
+ * @brief Counts recomputations of a producer with partial persistent validity.
+ *
+ * @note The owning regression resets the counter after publishing the partial
+ * dirty state and reads it only after synchronous parallel settlement.
+ */
+std::atomic_int g_partial_cache_producer_calls{0};
+
+/**
+ * @brief Counts whole-output consumers reached after producer recomputation.
+ *
+ * @note Exactly one call proves dependency release occurred after the planned
+ * producer task completed.
+ */
+std::atomic_int g_partial_cache_consumer_calls{0};
+
+/**
+ * @brief Records the first producer pixel observed by the whole-output
+ * consumer.
+ *
+ * @note The regression distinguishes the recomputed value 5 from stale partial
+ * state 91 without retaining a borrowed NodeOutput pointer.
+ */
+std::atomic_int g_partial_cache_consumer_observed_value{0};
+
+/**
  * @brief Request-visible kernel size emitted by the dynamic blur parameter op.
  * @note Tests update the value only between completed compute requests.
  */
@@ -322,6 +347,61 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
       make_aligned_cpu_image_buffer(width, height, channels, DataType::FLOAT32);
   toCvMat(output.image_buffer).setTo(value);
   return output;
+}
+
+/**
+ * @brief Recomputes one complete producer output for a Whole dependency.
+ *
+ * @param node Producer identity used in dependency diagnostics.
+ * @param inputs Exactly one complete image dependency.
+ * @return Complete same-shaped image filled with the stable value 5.
+ * @throws GraphError when the required image dependency is missing.
+ * @throws std::invalid_argument or std::bad_alloc when output allocation fails.
+ * @throws std::runtime_error or cv::Exception when CPU image adaptation or
+ * filling fails.
+ * @note The callback count is the primary witness that partial persistent HP
+ * state did not suppress the planned producer task.
+ */
+NodeOutput execute_partial_cache_producer(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.size() != 1U || inputs.front() == nullptr) {
+    throw GraphError(
+        GraphErrc::MissingDependency,
+        "partial-cache producer requires one image input: " + node.name);
+  }
+  g_partial_cache_producer_calls.fetch_add(1, std::memory_order_relaxed);
+  return make_image_output(inputs.front()->image_buffer.width,
+                           inputs.front()->image_buffer.height,
+                           inputs.front()->image_buffer.channels, 5.0f);
+}
+
+/**
+ * @brief Captures and republishes a producer value at a whole-read boundary.
+ *
+ * @param node Consumer identity used in dependency diagnostics.
+ * @param inputs Exactly one complete producer image.
+ * @return Complete same-shaped image filled with the observed first pixel.
+ * @throws GraphError when the required producer dependency is missing.
+ * @throws std::invalid_argument or std::bad_alloc when input adaptation or
+ * output allocation fails.
+ * @throws std::runtime_error or cv::Exception when CPU pixel access or filling
+ * fails.
+ * @note Seeing 91 would expose the stale exact-partial producer output; seeing
+ * 5 proves the producer recomputed before dependency release.
+ */
+NodeOutput execute_partial_cache_consumer(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.size() != 1U || inputs.front() == nullptr) {
+    throw GraphError(
+        GraphErrc::MissingDependency,
+        "partial-cache consumer requires one image input: " + node.name);
+  }
+  const ImageBuffer& input = inputs.front()->image_buffer;
+  const float observed = toCvMat(input).at<float>(0, 0);
+  g_partial_cache_consumer_observed_value.store(static_cast<int>(observed),
+                                                std::memory_order_release);
+  g_partial_cache_consumer_calls.fetch_add(1, std::memory_order_relaxed);
+  return make_image_output(input.width, input.height, input.channels, observed);
 }
 
 /**
@@ -690,6 +770,12 @@ void register_split_ops() {
               output.data["ksize"] = generation;
               return output;
             }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "partial_cache_producer",
+        MonolithicOpFunc(execute_partial_cache_producer));
+    registry.register_op_hp_monolithic(
+        "split_plan", "partial_cache_consumer",
+        MonolithicOpFunc(execute_partial_cache_consumer));
     registry.register_op_hp_monolithic(
         "image_generator", "host_preparation_source",
         MonolithicOpFunc(execute_host_preparation_source));
@@ -3214,6 +3300,99 @@ TEST(DownsampleExecutorSplit,
                           [](const ComputeEventSnapshot& event) {
                             return event.source == "downsample_passthrough";
                           }));
+}
+
+/**
+ * @brief Proves a Whole parallel read recomputes an exact-partial producer.
+ *
+ * @return Nothing; GoogleTest reports producer execution, dependency value,
+ * validity, or final-output failures.
+ * @throws Graph, runtime, cache, allocation, Region, or image-adaptation
+ * exceptions when the production fixture cannot execute.
+ * @note The test publishes value 91 through the real HP dirty write buffer with
+ * partial TensorSlice validity. The planned producer must execute and publish
+ * value 5 before its whole-output consumer runs; raw optional-presence checks
+ * would instead bypass the producer and expose 91 downstream.
+ */
+TEST(ComputeTaskRunnerSplit,
+     ParallelWholeReadRecomputesPartialProducerBeforeConsumer) {
+  register_split_ops();
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-partial-producer-whole-read");
+  GraphRuntime::Info info;
+  info.name = "partial-producer-whole-read";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 4;
+  source.parameters["height"] = 4;
+  source.cached_output_high_precision = make_image_output(4, 4, 1, 3.0f);
+  source.hp_region = value_image_adapter::full_node_output_region(
+      *source.cached_output_high_precision);
+
+  Node producer = make_node(2, "split_plan", "partial_cache_producer");
+  producer.image_inputs.push_back({1, "image"});
+  Node consumer = make_node(3, "split_plan", "partial_cache_consumer");
+  consumer.image_inputs.push_back({2, "image"});
+
+  graph.add_node(source);
+  graph.add_node(producer);
+  graph.add_node(consumer);
+  graph.validate_topology();
+
+  const RegionSet partial_region = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 2U}, {0U, 4U}, {0U, 1U}}});
+  compute::HighPrecisionDirtyWriteBuffer dirty_buffer(false);
+  NodeOutput& staged = dirty_buffer.ensure_output(graph.node(2));
+  staged = make_image_output(4, 4, 1, 91.0f);
+  (void)dirty_buffer.mark_updated(graph.node(2), partial_region, true, 1U);
+  dirty_buffer.commit_to_graph(graph);
+
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_EQ(*graph.node(2).hp_region, partial_region);
+  EXPECT_FALSE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
+  EXPECT_FLOAT_EQ(
+      toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
+          .at<float>(0, 0),
+      91.0f);
+
+  g_partial_cache_producer_calls.store(0, std::memory_order_relaxed);
+  g_partial_cache_consumer_calls.store(0, std::memory_order_relaxed);
+  g_partial_cache_consumer_observed_value.store(0, std::memory_order_relaxed);
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+
+  ComputeService::Request request;
+  request.node_id = 3;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  NodeOutput& output = service.compute_parallel(graph, runtime, request);
+
+  EXPECT_EQ(g_partial_cache_producer_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(g_partial_cache_consumer_calls.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(
+      g_partial_cache_consumer_observed_value.load(std::memory_order_acquire),
+      5);
+  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 5.0f);
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(3)));
+  ASSERT_TRUE(graph.node(2).hp_region.has_value());
+  EXPECT_FALSE(*graph.node(2).hp_region == partial_region);
+
+  runtime.stop();
 }
 
 TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {

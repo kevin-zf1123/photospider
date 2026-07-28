@@ -166,6 +166,12 @@ persistence。Normal Whole computation 会替换它并派生 complete validity�
 monolithic callback 继续替换 complete output；selected-byte merge 只用于 source-private
 exact core Region implementation。
 
+每条 whole-output execution route 都会通过 `ComputeCachePolicy` 应用这条规则，包括
+empty-plan validation、monolithic 与 tiled runner cache guard、committed upstream
+dependency resolution，以及 final target return。Dependency 已完成的 current-request
+temporary result 可以流向 downstream，但 raw partial persistent output 的存在绝不能抑制
+它已规划的 recomputation，也不能向 whole-output consumer 暴露其 byte。
+
 RT proxy state 使用 HP-space `region_hp`，但仍只支持 image。Checked adapter 只会从一个精确
 内建 ImageRect 派生当前 rectangular downsample/inspection metadata。TensorSlice 与 Whole
 不会进入 RT 或 downsample rectangle boundary。Region value 与 Tensor axis 会计入
@@ -202,6 +208,9 @@ authority。
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
+- `src/lib/compute/compute_cache_policy.*`
+- `src/lib/compute/compute_node_task_runner.*`
+- `src/lib/compute/compute_task_dispatcher.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/compute_cache_policy.hpp"
 #include "compute/compute_dispatch_plan_builder.hpp"
 #include "compute/compute_node_task_runner.hpp"
 #include "compute/compute_result_committer.hpp"
@@ -331,7 +332,7 @@ PreparedComputeDispatch ComputeTaskDispatcher::prepare(
 
   if (plan.empty()) {
     if (request.force_recache ||
-        !graph.node(node_id).cached_output_high_precision.has_value()) {
+        !ComputeCachePolicy::has_reusable_output(graph.node(node_id))) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Planned dispatch produced no executable tasks for node " +
@@ -416,12 +417,15 @@ NodeOutput& ComputeTaskDispatcher::execute_prepared(
   observe_dispatch_cancellation(state->lifecycle_lease);
 
   const int node_id = state->request.node_id;
-  if (!state->graph->node(node_id).cached_output_high_precision) {
+  NodeOutput* output =
+      ComputeCachePolicy::reusable_output(state->graph->mutable_node(node_id));
+  if (output == nullptr) {
     throw GraphError(GraphErrc::ComputeError,
                      "Parallel computation finished but target node has no "
-                     "output. An upstream error likely occurred.");
+                     "reusable complete output. An upstream error likely "
+                     "occurred.");
   }
-  return *state->graph->mutable_node(node_id).cached_output_high_precision;
+  return *output;
 }
 
 /**
@@ -435,13 +439,17 @@ NodeOutput& ComputeTaskDispatcher::execute_prepared(
  * @param run Request observer that mints all retained leases.
  * @param lifecycle_lease Retained request lease observed and copied into the
  * selected physical route.
- * @return Mutable high-precision output stored on the target graph node.
+ * @return Mutable high-precision output with exact complete Region validity
+ * stored on the target graph node.
  * @throws GraphError or standard exceptions from the selected route and shared
- * semantic stages.
+ * semantic stages, including missing or partial final target validity.
  * @note Only dispatch selection differs; plan, runner, temporary results, and
- * commit remain shared and Run/dispatcher-owned. Cancellation observations
- * surround every semantic stage; tiled providers observe per tile while a
- * monolithic provider already entered remains non-preemptible.
+ * commit remain shared and Run/dispatcher-owned. Empty-plan validation,
+ * upstream dependency reads, tile-cache skips, and final return all share
+ * ComputeCachePolicy, so partial persistent Region state cannot satisfy a
+ * Whole request. Cancellation observations surround every semantic stage;
+ * tiled providers observe per tile while a monolithic provider already
+ * entered remains non-preemptible.
  */
 NodeOutput& ComputeTaskDispatcher::execute_impl(
     GraphModel& graph, ExecutionTaskRuntime& task_runtime,
@@ -533,12 +541,15 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
   committer.commit(graph, plan.execution_order(), plan.temp_results());
   observe_dispatch_cancellation(dispatcher_lease);
 
-  if (!graph.node(node_id).cached_output_high_precision) {
+  NodeOutput* output =
+      ComputeCachePolicy::reusable_output(graph.mutable_node(node_id));
+  if (output == nullptr) {
     throw GraphError(GraphErrc::ComputeError,
                      "Parallel computation finished but target node has no "
-                     "output. An upstream error likely occurred.");
+                     "reusable complete output. An upstream error likely "
+                     "occurred.");
   }
-  return *graph.mutable_node(node_id).cached_output_high_precision;
+  return *output;
 }
 
 }  // namespace ps::compute

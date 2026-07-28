@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include "compute/compute_cache_policy.hpp"
 #include "compute/compute_dispatch_plan_builder.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "graph/graph_traversal_service.hpp"
@@ -758,23 +759,25 @@ void TaskSubmissionPlan::log_initial_assignments(
 /**
  * @brief Establishes one execution epoch and submits a leased bootstrap.
  *
- * @param graph Graph used to validate empty-plan target output.
+ * @param graph Graph used to validate exact complete empty-plan target output.
  * @param task_runtime Runtime receiving the empty epoch batch and callbacks.
  * @param node_id Target node id.
  * @param plan Run-owned plan.
  * @param dispatcher_lease Lease copied into bootstrap callback.
  * @return Nothing.
- * @throws GraphError for an invalid empty plan.
+ * @throws GraphError for an empty plan without ComputeCachePolicy-approved
+ * complete target output.
  * @throws Execution-runtime or task exceptions unchanged.
  * @note The only ExecutionTaskHandle batch is empty; full HP work uses owned
- * callbacks.
+ * callbacks. Partial persistent Region state never authorizes the early
+ * return.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionTaskRuntime& task_runtime, int node_id,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
-    if (!graph.node(node_id).cached_output_high_precision.has_value()) {
+    if (!ComputeCachePolicy::has_reusable_output(graph.node(node_id))) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Planned dispatch produced no executable tasks for node " +
@@ -803,15 +806,17 @@ void dispatch_planned_tasks(GraphModel& graph,
 /**
  * @brief Establishes one service-owned CPU batch from ready submissions.
  *
- * @param graph Graph used only for empty-plan target validation.
+ * @param graph Graph used only for exact complete empty-plan target validation.
  * @param execution_service Injected process CPU service.
  * @param host Active Graph observation context.
  * @param node_id Requested target node.
  * @param plan Run-owned dispatcher submission plan.
  * @param dispatcher_lease Matching Run lease.
  * @return Nothing after service settlement.
- * @throws GraphError for an invalid empty plan.
+ * @throws GraphError for an empty plan without ComputeCachePolicy-approved
+ * complete target output.
  * @throws Service setup or exact task exceptions unchanged.
+ * @note Partial persistent Region state never authorizes the early return.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,
@@ -820,7 +825,7 @@ void dispatch_planned_tasks(GraphModel& graph,
                             TaskSubmissionPlan& plan,
                             const ComputeRunLease& dispatcher_lease) {
   if (plan.empty() && graph.has_node(node_id)) {
-    if (!graph.node(node_id).cached_output_high_precision.has_value()) {
+    if (!ComputeCachePolicy::has_reusable_output(graph.node(node_id))) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Planned dispatch produced no executable tasks for node " +

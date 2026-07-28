@@ -184,18 +184,21 @@ class ComputeTaskDispatcher {
    * @return Mutable target high-precision output stored in the graph.
    * @throws GraphError when the node is missing, no operation exists, a
    * dependency is unavailable, scheduling fails, or dispatch finishes without
-   * target output. It may also rethrow operation, OpenCV, or cache exceptions
-   * wrapped with compute-stage context.
+   * reusable target output with exact complete Region validity. It may also
+   * rethrow operation, OpenCV, or cache exceptions wrapped with compute-stage
+   * context.
    * @throws std::bad_alloc unchanged when plan, task, operation, cache,
    * telemetry, or result storage exhausts memory.
    * @note Worker tasks do not mutate GraphModel caches directly. They publish
    * temporary results, and execute() serializes final cache ownership after the
-   * runtime drains. Cancellation is observed before planning, publication,
-   * phase changes, result commit, and return; cancellation observed before
-   * those boundaries suppresses dependent publication and final Graph cache
-   * commit. A monolithic provider already entered is non-preemptible, while
-   * tiled providers observe between tiles. Full-HP callbacks own Run leases and
-   * carry
+   * runtime drains. Every persistent whole-output read, including empty-plan
+   * validation and final return, uses ComputeCachePolicy; partial exact Region
+   * state remains formal but cannot satisfy the request. Cancellation is
+   * observed before planning, publication, phase changes, result commit, and
+   * return; cancellation observed before those boundaries suppresses dependent
+   * publication and final Graph cache commit. A monolithic provider already
+   * entered is non-preemptible, while tiled providers observe between tiles.
+   * Full-HP callbacks own Run leases and carry
    * `(ComputeRunId, ComputeRunLocalTaskId)` identity; they contain no borrowed
    * ExecutionTaskExecutor pointer. The current graph/runtime lifetime and
    * visible commit still require synchronous wait.
@@ -215,13 +218,15 @@ class ComputeTaskDispatcher {
    * @param lifecycle_lease Retained request lease observed and copied into
    * service submissions.
    * @return Mutable target high-precision output stored in Graph state.
-   * @throws GraphError for planning, operation, service, cache, or output
-   * validation failures.
+   * @throws GraphError for planning, operation, service, cache, or complete
+   * output validation failures.
    * @throws std::bad_alloc unchanged from planning, submission, or commit.
    * @throws The exact first service worker exception after batch settlement.
    * @note Only ready submissions cross into execution_service. This overload
    * retains all planning, dependency, result, and commit authority in the
-   * dispatcher/Run boundary. Accepted cancellation retires this Run's queued
+   * dispatcher/Run boundary. Empty-plan validation and final return require
+   * ComputeCachePolicy reusable output, so partial persistent Region state
+   * cannot bypass execution. Accepted cancellation retires this Run's queued
    * service entries and drains callbacks already running; cancellation
    * observed before publication suppresses dependent submission and final
    * Graph cache commit.
@@ -246,12 +251,15 @@ class ComputeTaskDispatcher {
    * @param run Candidate Run retaining the plan and task runner.
    * @param lifecycle_lease Candidate lease retained by callbacks and staging.
    * @return Move-only complete unpublished dispatch.
-   * @throws GraphError or standard exceptions from validation, planning,
-   * operation resolution, resource estimation/reservation, and staging.
+   * @throws GraphError or standard exceptions from validation, complete cache
+   * reuse checks, planning, operation resolution, resource
+   * estimation/reservation, and staging.
    * @throws std::bad_alloc unchanged from any off-registry allocation.
    * @note The method may mutate only request-local Graph planning/cache state.
-   * It does not advance Run phase, publish a ready entry, execute an operation,
-   * commit a result, or install lifecycle admission.
+   * An empty plan is accepted only for exact complete Region validity and never
+   * for partial persistent output. The method does not advance Run phase,
+   * publish a ready entry, execute an operation, commit a result, or install
+   * lifecycle admission.
    */
   PreparedComputeDispatch prepare(GraphModel& graph,
                                   ExecutionService& execution_service,
@@ -267,9 +275,10 @@ class ComputeTaskDispatcher {
    * @param prepared Active local preparation returned by prepare().
    * @return Mutable target high-precision output committed to graph.
    * @throws GraphError or standard exceptions from cancellation, execution,
-   * cache commit, telemetry, or target validation.
+   * cache commit, telemetry, or exact complete target validation.
    * @note The caller must atomically install the matching lifecycle bundle
-   * before entry. This method consumes publication ownership exactly once.
+   * before entry. This method consumes publication ownership exactly once and
+   * returns only output accepted by ComputeCachePolicy for a whole read.
    */
   NodeOutput& execute_prepared(PreparedComputeDispatch prepared);
 

@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include "compute/compute_cache_policy.hpp"
 #include "compute/compute_metrics_recorder.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/node_executor.hpp"
@@ -282,6 +283,7 @@ bool NodeTaskRunner::allow_disk_cache() const {
   return !disable_disk_cache_ && !force_recache_;
 }
 
+/** @copydoc NodeTaskRunner::upstream_output */
 const NodeOutput* NodeTaskRunner::upstream_output(int up_id) const {
   if (up_id < 0) {
     return nullptr;
@@ -297,30 +299,30 @@ const NodeOutput* NodeTaskRunner::upstream_output(int up_id) const {
       return &*temp_results_[up_idx];
     }
   }
-  if (upstream->cached_output_high_precision.has_value()) {
-    return &*upstream->cached_output_high_precision;
-  }
-  return nullptr;
+  return ComputeCachePolicy::reusable_output(*upstream);
 }
 
-bool NodeTaskRunner::has_memory_or_temp_output(const Node& node,
-                                               int node_idx) const {
-  return node.cached_output_high_precision.has_value() ||
-         temp_results_[node_idx].has_value();
+/** @copydoc NodeTaskRunner::has_reusable_memory_or_temp_output */
+bool NodeTaskRunner::has_reusable_memory_or_temp_output(const Node& node,
+                                                        int node_idx) const {
+  return temp_results_[node_idx].has_value() ||
+         ComputeCachePolicy::has_reusable_output(node);
 }
 
+/** @copydoc NodeTaskRunner::compute_node */
 void NodeTaskRunner::compute_node(int node_idx, int node_id) {
   const Node& target_node = graph_.node(node_id);
   std::atomic_thread_fence(std::memory_order_acquire);
 
-  if (!has_memory_or_temp_output(target_node, node_idx)) {
+  if (!has_reusable_memory_or_temp_output(target_node, node_idx)) {
     try_load_disk_cache(target_node, node_idx);
   }
-  if (!has_memory_or_temp_output(target_node, node_idx)) {
+  if (!has_reusable_memory_or_temp_output(target_node, node_idx)) {
     compute_uncached_node(target_node, node_idx);
   }
 }
 
+/** @copydoc NodeTaskRunner::compute_tile_task */
 void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   auto idx_it = id_to_idx_.find(task.node_id);
   if (idx_it == id_to_idx_.end()) {
@@ -330,7 +332,7 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   }
   const int node_idx = idx_it->second;
   const Node& target_node = graph_.node(task.node_id);
-  if (!force_recache_ && target_node.cached_output_high_precision) {
+  if (!force_recache_ && ComputeCachePolicy::has_reusable_output(target_node)) {
     node_precomputed_[node_idx].store(true, std::memory_order_release);
     return;
   }
