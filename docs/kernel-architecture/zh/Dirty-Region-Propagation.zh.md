@@ -104,6 +104,12 @@ snapshot。Planner 会验证 target 与 Region，取得从 target 出发的 topo
 authoritative extent，并反向遍历选中 graph 以推导 upstream demand。结果 plan 的 upstream root
 会成为 settled dirty source。
 
+对于 TensorSlice，该遍历只会在 exact validity 能证明 complete coverage 的 upstream
+formal output 处停止。缺失或部分有效的 intermediate exact-core dense node 会在 consumer
+前继续保留在 plan 中，并接收同一 logical demand。uncached leaf source 是分类明确的
+missing dependency。Planner 会记录 direct TensorSlice source Region，而不会从空
+PixelRect compatibility projection 推断 source provenance。
+
 Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projection 是独立的
 `RoiPropagationService` inspection behavior，不是当前 dirty execution plan 的物化遍历方式。
 
@@ -156,8 +162,10 @@ alignment，且不会再次裁剪生成的 key，因此边界处的 `DirtyTileKe
 extent 之外；已经展开的 execution task 则保留其自身裁剪后的边界 shape。
 
 TensorSlice planning 只支持 HP。它把每个 axis 裁剪到具体 sealed DenseTensor shape，在 source、
-node、monolithic 与 edge record 中保留 exact Region，并创建一个没有 PixelRect 或 tile coordinate
-的 monolithic task。
+node、monolithic 与 edge record 中保留 exact Region，并创建没有 PixelRect 或 tile
+coordinate、按 dependency-first 排列的 monolithic work。complete upstream cache 是 read
+boundary；缺失或 partial intermediate output 会在 downstream execution 前进入 plan 并完成
+staging。
 
 ## Task 选择与执行
 
@@ -206,6 +214,15 @@ request 拥有一个 `ComputeRun`。每个 `RealTimeUpdate` 会在 preflight 前
 Run，并将它们放入一个 request-owned `RunGroup`；两者捕获相同的强 Graph instance identity、
 authoritative revision 与 request supersession generation，同时保留各自独立的 domain、lease、
 phase、terminal 与 staging state。当前不会创建 mixed-domain Run。
+
+Exact core Region bridge 会返回 complete-shaped dense result，但对于 partial invocation，
+只有 selected coordinate 是 authoritative。`HighPrecisionDirtyWriteBuffer` 会把这些
+coordinate 合并进 existing staged byte，再 seal 为一个 fresh Value；unselected
+coordinate 保持不变。若 prior output 为 complete，即使 full ImageRect proof 与
+TensorSlice update 使用不同 Region domain，其 complete validity 仍保持为 true。fresh
+partial output 只有 partial validity，因此 whole-output dependency resolution 与当前
+regionless disk persistence 会拒绝它，直到 normal Whole commit 将其替换。Generic ABI v2
+monolithic callback 保持 complete-output replacement behavior。
 
 Kernel 的 product commit policy 会先物化 publication copy，随后在 graph-state work item 内检查：
 每个 child Run 已处于 `CommitPending`、拥有精确 staged Graph/proxy，并且仍匹配 live Graph
@@ -275,3 +292,4 @@ route。上述明确限制界定了当前 generation 与 epoch check 能够保�
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

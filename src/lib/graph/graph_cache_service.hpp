@@ -138,6 +138,9 @@ class GraphCacheService {
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
    * unsupported cache entries, empty locations, or nodes without HP output.
+   * Partial hp_region validity is never serialized; any older configured
+   * artifact for that node is removed so a later load cannot relabel stale
+   * bytes as complete.
    * A valid sealed CPU image Value is the serialization authority and is copied
    * into a temporary codec-compatible ImageBuffer; otherwise the legacy
    * ImageBuffer is used. Opaque non-CPU images are skipped without unsafe
@@ -153,8 +156,9 @@ class GraphCacheService {
    *
    * @param graph Graph whose cache root, timing, and diagnostics are updated.
    * @param node Node receiving the loaded HP output on cache hit.
-   * @return true when HP output is already present or disk cache was loaded;
-   * false on cache miss, skipped load, or read/parse error.
+   * @return true when complete HP output is already present or disk cache was
+   * loaded; false for partial memory validity, cache miss, skipped load, or
+   * read/parse error.
    * @throws std::bad_alloc from diagnostic/output/Value storage. Disk read,
    * parse, and CPU Value normalization failures are recorded through
    * GraphModel's locked disk-cache diagnostic API and reported as false.
@@ -178,7 +182,9 @@ class GraphCacheService {
    * parse, and CPU Value normalization failures are recorded through
    * GraphModel's locked disk-cache diagnostic API and reported as false.
    * @note Used by execution worker paths that stage outputs outside the
-   * formal HP cache before committing.
+   * formal HP cache before committing. Existing complete or partial formal
+   * memory state prevents disk load so regionless artifacts cannot override
+   * current runtime validity.
    */
   bool try_load_from_disk_cache_into(GraphModel& graph, const Node& node,
                                      NodeOutput& out) const;

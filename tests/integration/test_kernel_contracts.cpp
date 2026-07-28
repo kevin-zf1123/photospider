@@ -33,6 +33,7 @@
 #include "compute/realtime_proxy_graph.hpp"
 #include "core/param_utils.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include "graph/graph_cache_service_test_access.hpp"  // NOLINT(build/include_subdir)
@@ -1739,6 +1740,8 @@ class KernelCodecTeardownScenario final {
                 state.cached_output_high_precision = NodeOutput{};
                 state.cached_output_high_precision->image_buffer =
                     make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+                state.hp_region = value_image_adapter::full_node_output_region(
+                    *state.cached_output_high_precision);
               });
         })
         .get();
@@ -2526,6 +2529,8 @@ TEST(CacheSemantics, ConfiguredYamlMetadataCodecRoundTripsNamedValues) {
   expected.emplace("answer", plugin::ParameterValue(42));
   expected.emplace("nested", plugin::ParameterValue(std::move(nested)));
   saved.cached_output_high_precision->data = expected;
+  saved.hp_region = value_image_adapter::full_node_output_region(
+      *saved.cached_output_high_precision);
 
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
                           testing::make_yaml_cache_metadata_codec()};
@@ -2622,6 +2627,8 @@ TEST(CacheSemantics,
   saved.cached_output_high_precision = NodeOutput{};
   saved.cached_output_high_precision->data.emplace(
       "written", plugin::ParameterValue("value"));
+  saved.hp_region = value_image_adapter::full_node_output_region(
+      *saved.cached_output_high_precision);
   const plugin::ParameterMap read_values{
       {"loaded", plugin::ParameterValue(73)}};
 
@@ -2858,6 +2865,8 @@ TEST(CacheSemantics, InjectedCodecLifetimeAndPrecisionFollowCacheService) {
   node.cached_output_high_precision = NodeOutput{};
   node.cached_output_high_precision->image_buffer =
       make_aligned_cpu_image_buffer(2, 1, 1, DataType::FLOAT32);
+  node.hp_region = value_image_adapter::full_node_output_region(
+      *node.cached_output_high_precision);
   const std::filesystem::path expected_path =
       root / std::to_string(node.id) / node.caches.front().location;
 

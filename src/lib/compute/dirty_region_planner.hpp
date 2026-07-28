@@ -409,7 +409,8 @@ class DirtyRegionPlanner {
    * @param entries Finalized non-empty plan entries.
    * @throws std::bad_alloc if snapshot containers grow and allocation fails.
    * @note A source node is any planned entry without another planned image
-   * parent.
+   * parent. Rank-general plans preserve their direct RegionSet facts; image
+   * plans additionally preserve PixelRect compatibility records.
    */
   template <typename EntryMap>
   void populate_dirty_source_metadata(GraphModel& graph,

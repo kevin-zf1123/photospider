@@ -129,6 +129,35 @@ NodeOutput& HighPrecisionDirtyWriteBuffer::ensure_output(const Node& node) {
   return entry.output;
 }
 
+/** @copydoc HighPrecisionDirtyWriteBuffer::stage_region_output */
+void HighPrecisionDirtyWriteBuffer::stage_region_output(
+    const Node& node, NodeOutput output, const RegionSet& updated_region) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Entry& entry = ensure_entry_locked(node);
+  bool preserved_existing_validity = false;
+  if (entry.has_output && entry.hp_region.has_value()) {
+    const NodeOutput* merge_base = &entry.output;
+    if (!entry.output.image_value.valid() &&
+        node.cached_output_high_precision.has_value() &&
+        node.cached_output_high_precision->image_value.valid() &&
+        entry.hp_version == node.hp_version) {
+      merge_base = &*node.cached_output_high_precision;
+    }
+    std::optional<NodeOutput> merged =
+        value_image_adapter::merge_node_output_region(*merge_base, output,
+                                                      updated_region);
+    if (merged.has_value()) {
+      entry.output = std::move(*merged);
+      preserved_existing_validity = true;
+    }
+  }
+  if (!preserved_existing_validity) {
+    entry.output = std::move(output);
+    entry.hp_region.reset();
+  }
+  entry.has_output = true;
+}
+
 /** @copydoc HighPrecisionDirtyWriteBuffer::import_precomputed_output */
 void HighPrecisionDirtyWriteBuffer::import_precomputed_output(
     const Node& node, const NodeOutput& output, int hp_version,
@@ -151,7 +180,20 @@ int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,
   std::lock_guard<std::mutex> lock(mutex_);
   Entry& entry = ensure_entry_locked(node);
   if (!region_hp.is_empty()) {
-    entry.hp_region = merge_valid_regions(entry.hp_region, region_hp);
+    const NodeOutput* validity_output = &entry.output;
+    if (!entry.output.image_value.valid() &&
+        node.cached_output_high_precision.has_value() &&
+        node.cached_output_high_precision->image_value.valid() &&
+        entry.hp_version == node.hp_version) {
+      validity_output = &*node.cached_output_high_precision;
+    }
+    const bool already_complete =
+        entry.has_output && entry.hp_region.has_value() &&
+        value_image_adapter::node_output_region_is_complete(*validity_output,
+                                                            *entry.hp_region);
+    if (!already_complete) {
+      entry.hp_region = merge_valid_regions(entry.hp_region, region_hp);
+    }
   }
   entry.hp_version++;
   if (dirty_source) {

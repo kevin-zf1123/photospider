@@ -8,7 +8,7 @@ document defines the current cache semantics.
 
 | Location | Status | Meaning |
 | --- | --- | --- |
-| `Node::cached_output_high_precision` | Formal cache | Full-quality reusable HP output. |
+| `Node::cached_output_high_precision` | Formal cache | Full-quality HP output owner; whole-output reuse also requires complete `hp_region`. |
 | `RealtimeProxyGraph` node state | Transient RT proxy | Low-resolution interactive preview/update output. |
 
 Only high-precision output is formal reusable cache. That means only HP output
@@ -20,7 +20,11 @@ disk-cache synchronization source, or as long-term storage input.
 ## HP Cache
 
 HP compute writes `cached_output_high_precision`. HP cache is the authoritative
-full-quality result for a node.
+full-quality result owner for a node. A dirty publication may retain a partial
+formal output, but `ComputeCachePolicy` exposes it to whole-output consumers
+only when `hp_region` proves complete coverage. For a sealed image-faceted
+Value, either the complete compatibility ImageRect or the complete
+rank-general TensorSlice is an accepted proof.
 
 Associated fields:
 
@@ -72,6 +76,13 @@ not provide a cache root continue to use `<root_dir>/<graph_name>/cache`.
 Disk cache precision currently supports `int8` and `int16` save paths. Loaded
 image cache data is converted into float image buffers.
 
+The current disk format does not persist Region metadata, so only a complete HP
+output may be saved or protect configured disk artifacts during
+synchronization. A partial formal output is not loaded over and is never
+relabelled as complete. Saving or synchronizing a partial node removes older
+configured image/YAML artifacts instead of encoding partial bytes. A successful
+disk load derives complete validity for the freshly decoded output.
+
 Image bytes cross the private, dependency-neutral `ImageArtifactCodec` contract.
 `Kernel` obtains one configured shared codec from the product composition root
 and injects it into `GraphCacheService`; Graph/cache code supplies only paths,
@@ -122,9 +133,9 @@ indistinguishable from a normal cache miss.
 | Clear drive cache | Remove disk cache directory contents and recreate root. |
 | Clear memory cache | Clear in-memory HP cache tracked by `GraphModel`. |
 | Clear cache | Clear both disk and memory cache. |
-| Cache all nodes | Save nodes with HP output to disk when configured. |
+| Cache all nodes | Save nodes with complete HP output to disk when configured; partial nodes purge stale configured artifacts. |
 | Free transient memory | Clear non-ending node memory cache state. |
-| Synchronize disk cache | Save HP output and remove stale disk files for nodes without HP output. |
+| Synchronize disk cache | Save complete HP output and remove stale disk files for nodes without complete validity. |
 
 Disk cache save, load, and synchronization use `cached_output_high_precision`
 only. RT proxy output does not protect stale disk files and is not promoted to
@@ -195,11 +206,22 @@ result commit, and successful disk load publish a complete Region (`ImageRect`,
 TensorSlice bounds, or Whole when only non-image named data is known).
 
 Dirty HP staging carries output, Region, version, and source generation
-together. Exact representable unions retain accumulated validity. When two
-updates cannot be represented by the bounded one-clause contract, staging
-keeps the fresh exact update as a safe under-approximation rather than
-publishing a false bounding superset. The existing revision/current-generation
-predicate publishes or discards the entire staged state atomically.
+together. For the exact core Region bridge, a compatible complete-shaped result
+contributes selected bytes only: selected coordinates replace prior bytes and
+unselected coordinates remain from the staged output. Existing complete
+validity is retained across that merge even when its proof is an ImageRect and
+the update is a TensorSlice. Exact representable unions retain accumulated
+partial validity. When two partial updates cannot be represented by the bounded
+one-clause contract, staging keeps the fresh exact update as a safe
+under-approximation rather than publishing a false bounding superset. The
+existing revision/current-generation predicate publishes or discards the
+entire staged state atomically.
+
+A fresh partial publication remains formal state but cannot satisfy
+whole-output reuse or current disk persistence. Normal Whole computation
+replaces it and derives complete validity. Generic ABI v2 monolithic callbacks
+continue to replace complete outputs; selected-byte merging is limited to the
+source-private exact core Region implementation.
 
 RT proxy state uses HP-space `region_hp` but remains image-only. The checked
 adapter derives current rectangular downsample/inspection metadata only from

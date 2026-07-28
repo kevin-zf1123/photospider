@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/dirty_region_planning_policy.hpp"
 #include "core/ops.hpp"
@@ -50,37 +51,100 @@ int full_extent_halo(const PixelSize& extent) noexcept {
 }
 
 /**
- * @brief Finds a concrete sealed dense output descriptor for one node.
+ * @brief Finds an upstream-preferred concrete sealed dense output descriptor.
  *
- * @param graph Graph whose target and first image parent caches are inspected.
+ * @param graph Graph whose image dependency cone and caches are inspected.
  * @param node_id Target node id.
  * @return Borrowed-by-value concrete shape, or nullopt when unavailable.
  * @throws std::bad_alloc when shape copying cannot allocate.
- * @note The core dense identity operation preserves its input descriptor, so a
- *       cached first parent is an exact fallback when the target has no cache.
+ * @note The core dense identity chain preserves its input descriptor. Searching
+ *       ancestors before the target avoids preferring stale downstream bytes
+ *       when a current upstream cache still supplies the concrete shape.
  */
 std::optional<std::vector<std::size_t>> dense_shape_for_node(
     const GraphModel& graph, int node_id) {
-  const Node& node = graph.node(node_id);
-  if (node.cached_output_high_precision &&
-      node.cached_output_high_precision->image_value.valid()) {
-    return node.cached_output_high_precision->image_value
-        .dense_tensor_descriptor()
-        .shape;
-  }
-  for (const ImageInput& input : node.image_inputs) {
-    if (input.from_node_id < 0 || !graph.has_node(input.from_node_id)) {
-      continue;
+  std::unordered_set<int> visited;
+  const auto find_shape =
+      [&](const auto& self,
+          int current_id) -> std::optional<std::vector<std::size_t>> {
+    if (!visited.insert(current_id).second || !graph.has_node(current_id)) {
+      return std::nullopt;
     }
-    const Node& parent = graph.node(input.from_node_id);
-    if (parent.cached_output_high_precision &&
-        parent.cached_output_high_precision->image_value.valid()) {
-      return parent.cached_output_high_precision->image_value
+    const Node& current = graph.node(current_id);
+    for (const ImageInput& input : current.image_inputs) {
+      if (input.from_node_id < 0 || !graph.has_node(input.from_node_id)) {
+        continue;
+      }
+      if (std::optional<std::vector<std::size_t>> upstream =
+              self(self, input.from_node_id)) {
+        return upstream;
+      }
+    }
+    if (current.cached_output_high_precision &&
+        current.cached_output_high_precision->image_value.valid()) {
+      return current.cached_output_high_precision->image_value
           .dense_tensor_descriptor()
           .shape;
     }
+    return std::nullopt;
+  };
+  return find_shape(find_shape, node_id);
+}
+
+/**
+ * @brief Reports whether one formal HP cache can satisfy whole-output reads.
+ * @param node Node whose output and exact validity are inspected.
+ * @return True only when ComputeCachePolicy accepts complete reusable output.
+ * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+ * std::bad_alloc when retained output facts cannot be validated.
+ * @note Tensor dirty planning uses only complete caches as dependency
+ * boundaries. Partial or missing parent validity is recomputed and staged.
+ */
+bool complete_tensor_dependency_available(const Node& node) {
+  return ComputeCachePolicy::has_reusable_output(node);
+}
+
+/**
+ * @brief Merges repeated exact TensorSlice demand for one upstream node.
+ * @param existing Mutable optional demand already accumulated.
+ * @param update Exact demand projected through one identity edge.
+ * @throws GraphError when the bounded Region subset cannot represent the exact
+ * union.
+ * @throws std::bad_alloc when Region algebra storage cannot allocate.
+ * @note Conservative widening is forbidden because execution and cache
+ * validity require exact coordinates.
+ */
+void merge_tensor_demand(std::optional<RegionSet>* existing,
+                         const RegionSet& update) {
+  if (!existing->has_value()) {
+    *existing = update;
+    return;
   }
-  return std::nullopt;
+  const RegionOperationResult merged = union_regions(**existing, update);
+  if (merged.status() != RegionOperationStatus::Exact ||
+      !merged.region().has_value()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "TensorSlice dependency demand exceeds the exact Region subset.");
+  }
+  *existing = *merged.region();
+}
+
+/**
+ * @brief Reports whether one node has at least one connected image parent.
+ * @param graph Graph whose topology edges are inspected.
+ * @param node_id Node id to inspect.
+ * @return True when a valid upstream ImageInput edge exists.
+ * @throws std::bad_alloc only if graph edge snapshotting allocates.
+ */
+bool has_image_parent(const GraphModel& graph, int node_id) {
+  for (const GraphTopologyEdge& edge : graph.upstream_edges(node_id)) {
+    if (edge.kind == GraphTopologyEdgeKind::ImageInput &&
+        edge.from_node_id >= 0 && graph.has_node(edge.from_node_id)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -442,51 +506,98 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
   }
   const RegionSet clipped_region =
       clip_tensor_region_or_throw(graph, node_id, dirty_region);
-  const Node& node = graph.node(node_id);
-
   HighPrecisionDirtyPlan result;
-  result.execution_order.push_back(node_id);
   result.snapshot.graph_generation = select_plan_generation(graph);
-  HpPlanEntry entry;
-  entry.region_hp = clipped_region;
-  if (node.cached_output_high_precision &&
-      node.cached_output_high_precision->image_value.valid() &&
-      node.cached_output_high_precision->image_value.image_facet()
-          .has_value()) {
-    const ImageView view(node.cached_output_high_precision->image_value);
-    entry.hp_size = PixelSize{static_cast<int>(view.width()),
-                              static_cast<int>(view.height())};
+  std::vector<int> dependency_order =
+      traversal_.topo_postorder_from(graph, node_id);
+  if (dependency_order.empty()) {
+    dependency_order.push_back(node_id);
   }
-  result.entries.emplace(node_id, entry);
-  result.snapshot.per_node_dirty_regions[node_id].push_back(entry.region_hp);
-  result.snapshot.actual_dirty_regions[node_id].push_back(entry.region_hp);
-  result.snapshot.dirty_monolithic_nodes.push_back(
-      {node_id, DirtyDomain::HighPrecision, PixelRect{}, true,
-       entry.region_hp});
-  result.snapshot.dirty_source_nodes.push_back(node_id);
-  DirtySourceNodeState& source = result.snapshot.dirty_source_state[node_id];
-  source.node_id = node_id;
-  source.domain = DirtyDomain::HighPrecision;
-  source.lifecycle = DirtySourceLifecycleState::Settled;
-  source.generation = result.snapshot.graph_generation;
-  source.source_regions.push_back(entry.region_hp);
-  result.snapshot.source_region_records[node_id].push_back(
-      {node_id, DirtyDomain::HighPrecision, entry.region_hp,
-       result.snapshot.graph_generation});
-  for (const GraphTopologyEdge& edge : graph.upstream_edges(node_id)) {
-    if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
-        edge.from_node_id < 0) {
+
+  std::unordered_map<int, std::optional<RegionSet>> demands;
+  demands[node_id] = clipped_region;
+  for (auto order_it = dependency_order.rbegin();
+       order_it != dependency_order.rend(); ++order_it) {
+    const int current_id = *order_it;
+    auto demand_it = demands.find(current_id);
+    if (demand_it == demands.end() || !demand_it->second.has_value()) {
       continue;
     }
-    DirtyEdgeMapping mapping;
-    mapping.from_node_id = edge.from_node_id;
-    mapping.to_node_id = node_id;
-    mapping.domain = DirtyDomain::HighPrecision;
-    mapping.direction = DirtyEdgeDirection::BackwardDemand;
-    mapping.from_region = entry.region_hp;
-    mapping.to_region = entry.region_hp;
-    result.snapshot.edge_mappings.push_back(std::move(mapping));
+    const RegionSet& current_region = *demand_it->second;
+    const Node& current_node = graph.node(current_id);
+    if (current_id != node_id &&
+        complete_tensor_dependency_available(current_node)) {
+      continue;
+    }
+
+    const bool image_parent = has_image_parent(graph, current_id);
+    if (image_parent && !supports_tensor_region_execution(current_node)) {
+      throw GraphError(
+          GraphErrc::InvalidParameter,
+          "TensorSlice dependency path requires the exact core identity "
+          "operation at node " +
+              std::to_string(current_id) + ".");
+    }
+    if (!image_parent && current_id != node_id) {
+      throw GraphError(
+          GraphErrc::MissingDependency,
+          "TensorSlice dependency path reached an uncached image source at "
+          "node " +
+              std::to_string(current_id) + ".");
+    }
+
+    HpPlanEntry entry;
+    entry.region_hp = current_region;
+    if (current_node.cached_output_high_precision &&
+        current_node.cached_output_high_precision->image_value.valid() &&
+        current_node.cached_output_high_precision->image_value.image_facet()
+            .has_value()) {
+      const ImageView view(
+          current_node.cached_output_high_precision->image_value);
+      entry.hp_size = PixelSize{static_cast<int>(view.width()),
+                                static_cast<int>(view.height())};
+    }
+    result.entries.emplace(current_id, entry);
+    result.snapshot.per_node_dirty_regions[current_id].push_back(
+        entry.region_hp);
+    result.snapshot.actual_dirty_regions[current_id].push_back(entry.region_hp);
+    result.snapshot.dirty_monolithic_nodes.push_back(
+        {current_id, DirtyDomain::HighPrecision, PixelRect{}, true,
+         entry.region_hp});
+
+    for (const GraphTopologyEdge& edge : graph.upstream_edges(current_id)) {
+      if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
+          edge.from_node_id < 0 || !graph.has_node(edge.from_node_id)) {
+        continue;
+      }
+      DirtyEdgeMapping mapping;
+      mapping.from_node_id = edge.from_node_id;
+      mapping.to_node_id = current_id;
+      mapping.domain = DirtyDomain::HighPrecision;
+      mapping.direction = DirtyEdgeDirection::BackwardDemand;
+      mapping.from_region = current_region;
+      mapping.to_region = current_region;
+      result.snapshot.edge_mappings.push_back(std::move(mapping));
+
+      const Node& parent = graph.node(edge.from_node_id);
+      if (complete_tensor_dependency_available(parent)) {
+        continue;
+      }
+      merge_tensor_demand(&demands[edge.from_node_id], current_region);
+    }
   }
+
+  for (int planned_id : dependency_order) {
+    if (result.entries.count(planned_id) != 0U) {
+      result.execution_order.push_back(planned_id);
+    }
+  }
+  if (result.entries.empty() || result.execution_order.empty()) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "TensorSlice planning produced no executable work.");
+  }
+  populate_dirty_source_metadata(graph, result.snapshot,
+                                 DirtyDomain::HighPrecision, result.entries);
   return result;
 }
 
@@ -647,6 +758,20 @@ void DirtyRegionPlanner::populate_dirty_source_metadata(
     state.lifecycle = DirtySourceLifecycleState::Settled;
     state.generation = snapshot.graph_generation;
 
+    bool has_region_records = false;
+    auto region_it = snapshot.per_node_dirty_regions.find(source_node_id);
+    if (region_it != snapshot.per_node_dirty_regions.end()) {
+      for (const auto& region : region_it->second) {
+        if (region.is_empty()) {
+          continue;
+        }
+        has_region_records = true;
+        state.source_regions.push_back(region);
+        snapshot.source_region_records[source_node_id].push_back(
+            {source_node_id, domain, region, snapshot.graph_generation});
+      }
+    }
+
     auto roi_it = snapshot.per_node_dirty_rois.find(source_node_id);
     if (roi_it == snapshot.per_node_dirty_rois.end()) {
       continue;
@@ -656,12 +781,14 @@ void DirtyRegionPlanner::populate_dirty_source_metadata(
         continue;
       }
       state.source_rois.push_back(roi);
-      const RegionSet region = region_image_adapter::from_pixel_rect(roi);
-      state.source_regions.push_back(region);
       snapshot.source_roi_records[source_node_id].push_back(
           {source_node_id, domain, roi, snapshot.graph_generation});
-      snapshot.source_region_records[source_node_id].push_back(
-          {source_node_id, domain, region, snapshot.graph_generation});
+      if (!has_region_records) {
+        const RegionSet region = region_image_adapter::from_pixel_rect(roi);
+        state.source_regions.push_back(region);
+        snapshot.source_region_records[source_node_id].push_back(
+            {source_node_id, domain, region, snapshot.graph_generation});
+      }
     }
   }
   snapshot.dirty_updating_count = 0;

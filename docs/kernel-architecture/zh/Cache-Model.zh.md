@@ -7,14 +7,18 @@
 
 | 位置 | 状态 | 含义 |
 | --- | --- | --- |
-| `Node::cached_output_high_precision` | 正式缓存 | 完整质量、可复用的 HP 输出。 |
+| `Node::cached_output_high_precision` | 正式缓存 | 完整质量 HP output owner；whole-output reuse 还要求 complete `hp_region`。 |
 | `RealtimeProxyGraph` node state | 临时 RT proxy | 低分辨率交互式预览/更新输出。 |
 
 只有高精度输出是正式可复用缓存。这意味着只有 HP 输出可以作为后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为的权威来源。RT proxy 输出是临时交互式状态，不能被视为权威缓存，不能作为磁盘缓存同步来源，也不能作为长期存储输入。
 
 ## HP 缓存
 
-HP 计算写入 `cached_output_high_precision`。HP 缓存是节点的权威完整质量结果。
+HP 计算写入 `cached_output_high_precision`。HP 缓存是节点的权威完整质量 result
+owner。Dirty publication 可以保留 partial formal output，但只有 `hp_region` 能证明
+complete coverage 时，`ComputeCachePolicy` 才会把它暴露给 whole-output consumer。
+对于带 image facet 的 sealed Value，complete compatibility ImageRect 或 complete
+rank-general TensorSlice 都是可接受的证明。
 
 相关字段：
 
@@ -49,6 +53,12 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 未提供 cache root 的直接 `Kernel::load_graph` 调用继续使用 `<root_dir>/<graph_name>/cache`。
 
 磁盘缓存精度当前支持 `int8` 和 `int16` 保存路径。加载的图像缓存数据会转换为浮点图像缓冲区。
+
+当前 disk format 不持久化 Region metadata，因此只有 complete HP output 可以被保存，
+或在 synchronization 时保护 configured disk artifact。Partial formal output 不会被
+disk load 覆盖，也绝不会被重新标记为 complete。保存或同步 partial node 时，会移除较旧的
+configured image/YAML artifact，而不是编码 partial byte。成功 disk load 会为 fresh
+decoded output 派生 complete validity。
 
 图像字节通过私有、依赖中立的 `ImageArtifactCodec` 契约。`Kernel` 从产品组合根取得一个配置好的
 共享 codec，并将其注入 `GraphCacheService`；Graph/cache 代码只提供 path、`ImageBuffer` 与
@@ -86,9 +96,9 @@ worker，都必须在所属 model 销毁前排空并 join；任何访问都不�
 | Clear drive cache | 删除磁盘缓存目录内容并重建根目录。 |
 | Clear memory cache | 清理 `GraphModel` 跟踪的内存 HP 缓存。 |
 | Clear cache | 同时清理磁盘和内存缓存。 |
-| Cache all nodes | 在配置允许时将具有 HP 输出的节点保存到磁盘。 |
+| Cache all nodes | 在配置允许时将具有 complete HP 输出的节点保存到磁盘；partial node 会清理 stale configured artifact。 |
 | Free transient memory | 清理非终点节点的内存缓存状态。 |
-| Synchronize disk cache | 保存 HP 输出，并为没有 HP 输出的节点移除陈旧磁盘文件。 |
+| Synchronize disk cache | 保存 complete HP 输出，并为没有 complete validity 的节点移除陈旧磁盘文件。 |
 
 磁盘缓存保存、加载和同步只使用 `cached_output_high_precision`。RT proxy 输出不会保护陈旧磁盘文件，也不会被提升为磁盘缓存状态。
 
@@ -143,9 +153,18 @@ sequential publication、result commit 与成功 disk load 会发布 complete Re
 TensorSlice bounds，或仅已知 non-image named data 时的 Whole）。
 
 Dirty HP staging 会一起携带 output、Region、version 与 source generation。精确且可表示的
-union 会保留累计 validity。当两个 update 无法由有界 one-clause contract 表示时，staging
-保留新鲜的精确 update 作为安全 under-approximation，而不是发布错误的 bounding superset。
-现有 revision/current-generation predicate 会原子地发布或丢弃完整 staged state。
+对于 exact core Region bridge，compatible complete-shaped result 只贡献 selected
+byte：selected coordinate 会替换 prior byte，unselected coordinate 继续来自 staged
+output。即使 existing complete validity 的证明是 ImageRect，而 update 是 TensorSlice，
+该 merge 也会保留 complete validity。精确且可表示的 union 会保留累计 partial validity。
+当两个 partial update 无法由有界 one-clause contract 表示时，staging 保留新鲜的精确
+update 作为安全 under-approximation，而不是发布错误的 bounding superset。现有
+revision/current-generation predicate 会原子地发布或丢弃完整 staged state。
+
+Fresh partial publication 仍是 formal state，但不能满足 whole-output reuse 或当前 disk
+persistence。Normal Whole computation 会替换它并派生 complete validity。Generic ABI v2
+monolithic callback 继续替换 complete output；selected-byte merge 只用于 source-private
+exact core Region implementation。
 
 RT proxy state 使用 HP-space `region_hp`，但仍只支持 image。Checked adapter 只会从一个精确
 内建 ImageRect 派生当前 rectangular downsample/inspection metadata。TensorSlice 与 Whole

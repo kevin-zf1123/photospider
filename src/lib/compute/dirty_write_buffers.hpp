@@ -74,6 +74,27 @@ class HighPrecisionDirtyWriteBuffer {
   NodeOutput& ensure_output(const Node& node);
 
   /**
+   * @brief Stages one Region-aware monolithic result with byte preservation.
+   *
+   * @param node Graph node whose request-local output is replaced or merged.
+   * @param output Fresh complete-shape result whose selected coordinates are
+   * trusted for this update.
+   * @param updated_region Exact logical coordinates computed by `output`.
+   * @return Nothing.
+   * @throws std::invalid_argument, std::overflow_error, or std::bad_alloc from
+   * dense Region validation, byte merging, or immutable Value publication.
+   * @note When existing staged validity and compatible bytes are available,
+   * selected elements come from `output` while all other bytes are preserved.
+   * The first seeded rank-general merge may read the node's immutable Value
+   * because its mutable compatibility clone intentionally drops that identity.
+   * If safe merging is impossible, prior validity is discarded before the
+   * fresh result is staged, so mark_updated() can publish only
+   * `updated_region` rather than a false union.
+   */
+  void stage_region_output(const Node& node, NodeOutput output,
+                           const RegionSet& updated_region);
+
+  /**
    * @brief Imports one immutable HP preflight result into request staging.
    *
    * @param node Graph node whose final HP state may be committed.
@@ -101,11 +122,15 @@ class HighPrecisionDirtyWriteBuffer {
    * @param dirty_source Whether the node is a dirty source boundary.
    * @param dirty_generation Dirty generation committed for source nodes.
    * @return New staged HP version after incrementing.
-   * @throws std::bad_alloc if the staged entry must be created.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when staged validity or retained output facts cannot be
+   * validated.
    * @note Version increments once per dirty task, preserving prior executor
    * semantics while hiding the increment until graph commit. Exact unions are
-   * retained when representable; otherwise the fresh exact update replaces
-   * prior validity as a safe under-approximation, never as a false superset.
+   * retained when representable, while an already complete Region proof stays
+   * complete across a byte-preserving update even if ImageRect and TensorSlice
+   * use different domains. Otherwise the fresh exact update replaces prior
+   * validity as a safe under-approximation, never as a false superset.
    */
   int mark_updated(const Node& node, const RegionSet& region_hp,
                    bool dirty_source, uint64_t dirty_generation);

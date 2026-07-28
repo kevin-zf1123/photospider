@@ -15,6 +15,7 @@
 #include "compute/domain_op_metadata.hpp"
 #include "compute/node_executor.hpp"
 #include "core/image_buffer_processing.hpp"
+#include "core/ops.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 
@@ -254,7 +255,14 @@ void HighPrecisionDirtyNodeExecutor::execute_monolithic(
                          node.type + ":" + node.subtype);
   }
   std::lock_guard<std::mutex> lock(node_mutex(node.id));
-  hp_write_buffer_.ensure_output(node) = std::move(result);
+  if (ops::find_core_region_monolithic_operation(node.type, node.subtype,
+                                                 mono_fn)
+          .has_value()) {
+    hp_write_buffer_.stage_region_output(node, std::move(result),
+                                         entry.region_hp);
+  } else {
+    hp_write_buffer_.ensure_output(node) = std::move(result);
+  }
 }
 
 void HighPrecisionDirtyNodeExecutor::commit_node(Node& node,

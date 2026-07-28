@@ -119,6 +119,13 @@ target-rooted topological postorder, resolves HP-authoritative extents, and
 walks the selected graph backwards to derive upstream demand. Upstream roots of
 the resulting plan become settled dirty sources.
 
+For TensorSlice, the walk stops only at an upstream formal output whose exact
+validity proves complete coverage. A missing or partially valid intermediate
+exact-core dense node remains in the plan before its consumer and receives the
+same logical demand. An uncached leaf source is a categorized missing
+dependency. The planner records direct TensorSlice source Regions; it does not
+infer source provenance from an empty PixelRect compatibility projection.
+
 The planner records `BackwardDemand` edge mappings. Forward affected-region
 projection exists as a separate `RoiPropagationService` inspection behavior; it
 is not the traversal used to materialize the current dirty execution plan.
@@ -187,8 +194,9 @@ execution tasks retain their own clipped boundary shapes.
 
 TensorSlice planning is HP-only. It clips every axis to a concrete sealed
 DenseTensor shape, retains the exact Region in source, node, monolithic, and
-edge records, and creates one monolithic task with no PixelRect or tile
-coordinates.
+edge records, and creates dependency-first monolithic work with no PixelRect or
+tile coordinates. A complete upstream cache is a read boundary; a missing or
+partial intermediate output is planned and staged before downstream execution.
 
 ## Task Selection and Execution
 
@@ -250,6 +258,17 @@ one request-owned `RunGroup` before preflight; both capture the same strong
 Graph instance identity, authoritative revision, and request supersession
 generation while retaining independent domain, lease, phase, terminal, and
 staging state. No mixed-domain Run is created.
+
+The exact core Region bridge returns a complete-shaped dense result, but only
+the selected coordinates are authoritative for a partial invocation.
+`HighPrecisionDirtyWriteBuffer` merges those coordinates into existing staged
+bytes and reseals one fresh Value; unselected coordinates remain unchanged. If
+the prior output was complete, its complete validity remains true even when a
+full ImageRect proof and TensorSlice update use different Region domains. A
+fresh partial output has only partial validity, so whole-output dependency
+resolution and current regionless disk persistence reject it until a normal
+Whole commit replaces it. Generic ABI v2 monolithic callbacks retain
+complete-output replacement behavior.
 
 Kernel's product commit policy materializes publication copies and then checks
 that each child Run is `CommitPending`, owns the exact staged Graph/proxy, and
@@ -331,3 +350,4 @@ can currently guarantee.
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`
+- `tests/integration/test_cpu_dense_tensor_image_operation.cpp`

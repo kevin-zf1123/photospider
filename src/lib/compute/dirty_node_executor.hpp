@@ -217,7 +217,10 @@ class HighPrecisionDirtyNodeExecutor {
    * @param mono_fn Monolithic HP operation implementation.
    * @param image_inputs_ready Resolved HP image inputs.
    * @throws GraphError if the operation produces no output.
-   * @note Monolithic HP fallback preserves the previous dirty update behavior.
+   * @note The exact core Region bridge stages selected bytes through the HP
+   *       write buffer so prior valid coordinates survive a partial result.
+   *       Generic ABI v2 monolithic callbacks preserve complete-output
+   *       replacement behavior.
    */
   void execute_monolithic(
       Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,

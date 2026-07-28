@@ -66,6 +66,22 @@ const NodeOutput* hp_cache_ptr(const Node& node) {
 }
 
 /**
+ * @brief Reports whether one formal HP output has complete exact validity.
+ * @param node Node whose output and hp_region are inspected together.
+ * @return True when both exist and hp_region covers the derived full output.
+ * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+ * std::bad_alloc when retained output facts cannot be validated.
+ * @note Partial validity must not protect or produce a regionless disk cache
+ * artifact because disk load initializes current artifacts as complete.
+ */
+bool has_complete_hp_cache(const Node& node) {
+  const NodeOutput* output = hp_cache_ptr(node);
+  return output != nullptr && node.hp_region.has_value() &&
+         value_image_adapter::node_output_region_is_complete(*output,
+                                                             *node.hp_region);
+}
+
+/**
  * @brief Tests whether a node has formal HP cache state.
  *
  * @param node Node whose memory cache fields should be inspected.
@@ -416,15 +432,30 @@ void GraphCacheService::save_cache_if_configured(
   if (graph.cache_root.empty() || node.caches.empty() || !output) {
     return;
   }
+  const bool complete_output = has_complete_hp_cache(node);
 
   for (const auto& cache_entry : node.caches) {
     if (cache_entry.cache_type != "image" || cache_entry.location.empty()) {
       continue;
     }
 
-    auto dir = node_cache_dir(graph, node.id);
-    fs::create_directories(dir);
+    const auto dir = node_cache_dir(graph, node.id);
     auto final_path = dir / cache_entry.location;
+    auto metadata_path = final_path;
+    metadata_path.replace_extension(".yml");
+    if (!complete_output) {
+      if (fs::exists(final_path)) {
+        (void)fs::remove(final_path);
+      }
+      if (fs::exists(metadata_path)) {
+        (void)fs::remove(metadata_path);
+      }
+      if (fs::exists(dir) && fs::is_empty(dir)) {
+        (void)fs::remove(dir);
+      }
+      continue;
+    }
+    fs::create_directories(dir);
 
     auto start_io = std::chrono::high_resolution_clock::now();
 
@@ -442,9 +473,7 @@ void GraphCacheService::save_cache_if_configured(
     }
 
     if (!output->data.empty()) {
-      fs::path meta_path = final_path;
-      meta_path.replace_extension(".yml");
-      metadata_codec_->write(meta_path, output->data);
+      metadata_codec_->write(metadata_path, output->data);
     }
 
     add_io_duration(graph, start_io);
@@ -454,11 +483,16 @@ void GraphCacheService::save_cache_if_configured(
 bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
                                                  Node& node) const {
   if (node.cached_output_high_precision.has_value()) {
+    const bool complete_output = has_complete_hp_cache(node);
     record_disk_cache_load_result(
-        graph, make_skipped_attempt(node.id,
-                                    "Node already has formal HP memory cache.")
+        graph, make_skipped_attempt(
+                   node.id,
+                   complete_output
+                       ? "Node already has complete formal HP memory cache."
+                       : "Node has partial formal HP memory cache and requires "
+                         "whole-output recomputation.")
                    .result);
-    return node.cached_output_high_precision.has_value();
+    return complete_output;
   }
 
   auto start_io = std::chrono::high_resolution_clock::now();
@@ -477,6 +511,15 @@ bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
 bool GraphCacheService::try_load_from_disk_cache_into(GraphModel& graph,
                                                       const Node& node,
                                                       NodeOutput& out) const {
+  if (node.cached_output_high_precision.has_value()) {
+    record_disk_cache_load_result(
+        graph, make_skipped_attempt(
+                   node.id,
+                   "Node already has formal HP memory state; disk cache cannot "
+                   "override complete or partial runtime validity.")
+                   .result);
+    return false;
+  }
   auto start_io = std::chrono::high_resolution_clock::now();
   DiskCacheReadAttempt attempt =
       read_first_disk_cache_entry(graph, node, *image_codec_, *metadata_codec_);
@@ -556,7 +599,7 @@ GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
 
   for (int node_id : graph.node_ids()) {
     const Node& node = graph.node(node_id);
-    if (node.cached_output_high_precision.has_value() || node.caches.empty()) {
+    if (has_complete_hp_cache(node) || node.caches.empty()) {
       continue;
     }
 

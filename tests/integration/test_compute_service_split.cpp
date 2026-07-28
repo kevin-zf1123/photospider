@@ -37,6 +37,7 @@
 #include "compute/task_population_strategy.hpp"
 #include "compute/tiled_input_normalizer.hpp"
 #include "core/param_utils.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
@@ -1038,6 +1039,8 @@ TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
       node, compute::CacheReadMode::InteractivePreferred));
 
   node.cached_output_high_precision = make_image_output(8, 8);
+  node.hp_region = value_image_adapter::full_node_output_region(
+      *node.cached_output_high_precision);
   EXPECT_EQ(
       compute::ComputeCachePolicy::reusable_output(node)->image_buffer.width,
       8);
@@ -1057,6 +1060,8 @@ TEST(NodeInputResolverSplit,
   GraphModel graph("cache/split-input-resolver");
   Node parent = make_node(10, "split", "parent");
   parent.cached_output_high_precision = make_image_output(12, 7);
+  parent.hp_region = value_image_adapter::full_node_output_region(
+      *parent.cached_output_high_precision);
   parent.cached_output_high_precision->data["threshold"] = 42;
   graph.add_node(parent);
 
@@ -1616,6 +1621,8 @@ TEST(TaskGraphPlanningSplit, ExpandsFullGraphBeforeNodeCachePruning) {
   source.parameters["width"] = 32;
   source.parameters["height"] = 16;
   source.cached_output_high_precision = make_image_output(32, 16);
+  source.hp_region = value_image_adapter::full_node_output_region(
+      *source.cached_output_high_precision);
   Node downstream = make_node(2, "split_plan", "tile");
   downstream.parameters["width"] = 32;
   downstream.parameters["height"] = 16;
@@ -3132,6 +3139,8 @@ TEST(GraphCacheServiceSplit,
   node.cached_output_high_precision->image_buffer.context =
       std::make_shared<int>(7);
   node.cached_output_high_precision->data["marker"] = 9;
+  node.hp_region = value_image_adapter::full_node_output_region(
+      *node.cached_output_high_precision);
   graph.add_node(node);
 
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
@@ -3228,6 +3237,8 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   cached_tile.caches.push_back({"image", "output.png"});
   cached_tile.cached_output_high_precision =
       make_image_output(256, 256, 1, 64.0f / 255.0f);
+  cached_tile.hp_region = value_image_adapter::full_node_output_region(
+      *cached_tile.cached_output_high_precision);
   graph.add_node(cached_tile);
   graph.validate_topology();
 
@@ -3238,8 +3249,10 @@ TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
   cache.save_cache_if_configured(graph, graph.node(1), "int8");
   const auto cache_file = cache.node_cache_dir(graph, 1) / "output.png";
   ASSERT_TRUE(std::filesystem::exists(cache_file));
-  graph.mutate_node_runtime_state(
-      1, [](auto& state) { state.cached_output_high_precision.reset(); });
+  graph.mutate_node_runtime_state(1, [](auto& state) {
+    state.cached_output_high_precision.reset();
+    state.hp_region.reset();
+  });
 
   compute::ExecutionService execution_service(1U);
   ComputeService compute(traversal, cache, events, execution_service);
