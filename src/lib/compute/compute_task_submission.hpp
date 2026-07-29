@@ -405,9 +405,10 @@ class TaskSubmissionPlan {
    * @note Identity/device/shape mismatches remain empty so admission-aware
    * production preparation rejects them before operation/resource/physical
    * admission. Successful snapshots preserve the exact selected callback,
-   * metadata, and identity, populate aligned execution devices and operation
-   * constraints, and contribute retained/scratch declarations to one
-   * component-wise maximum task demand for the physical Run.
+   * metadata, and identity, populate node-aligned execution devices and one
+   * independently owned constraint record per planned task, and contribute
+   * retained/scratch declarations to one component-wise maximum task demand
+   * for the physical Run.
    */
   void resolve_operations();
 
@@ -506,10 +507,10 @@ class TaskSubmissionPlan {
    * @throws std::bad_alloc from metadata or executable ownership.
    * @note The executable captures no plan, runner, Graph, or dispatcher stack
    * pointer; it reaches Run-owned state only through the supplied lease. The
-   * submission takes the aligned exact-identity constraints from the plan
-   * without duplicating their already-admitted string allocation, and carries
-   * the uniform conservative operation demand resolved before admission. Each
-   * task may be materialized at most once.
+   * submission takes its task-aligned exact-identity constraints from the plan
+   * without duplicating that task's already-admitted string allocation, and
+   * carries the uniform conservative operation demand resolved before
+   * admission. Each task may be materialized at most once.
    */
   ReadyTaskSubmission make_ready_submission(
       const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
@@ -615,9 +616,11 @@ class TaskSubmissionPlan {
   std::vector<std::optional<OpImplementation>> resolved_ops_;
 
   /**
-   * @brief Exact-identity start constraints aligned with execution_order_.
-   * @note A task's key allocation moves into its one service submission after
-   * the complete Run-owned storage estimate is frozen.
+   * @brief Exact-identity start constraints aligned with dense planned task
+   * ids.
+   * @note Tiled tasks receive independent key allocations during resolution.
+   * Each allocation is charged while plan-owned, then moves exactly once into
+   * its matching service submission after the complete Run estimate is frozen.
    */
   std::vector<OperationExecutionConstraints> operation_constraints_;
 

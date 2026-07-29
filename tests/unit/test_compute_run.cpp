@@ -267,6 +267,228 @@ std::atomic_int g_resource_dirty_hp_operation_calls{0};
  */
 std::atomic_int g_resource_dirty_rt_operation_calls{0};
 
+/** @brief Shared process-domain key used by the tiled constraint regression. */
+constexpr char kTiledGateKey[] = "compute-run-tiled-constraint-exclusive-key";
+
+/**
+ * @brief Synchronizes and observes blocking tiled provider entries.
+ *
+ * @throws std::invalid_argument when constructed with an invalid release
+ * future.
+ * @note The operation registry is process-persistent, so the registered
+ * callback obtains this state through a scoped process-global binding instead
+ * of retaining test-local references.
+ */
+class TiledConstraintGateProbe final {
+ public:
+  /**
+   * @brief Retains the shared release signal used by every callback.
+   * @param release Valid shared future opened by the owning test.
+   * @throws std::invalid_argument when release has no shared state.
+   */
+  explicit TiledConstraintGateProbe(std::shared_future<void> release)
+      : release_(std::move(release)) {
+    if (!release_.valid()) {
+      throw std::invalid_argument(
+          "Tiled constraint probe requires a valid release future.");
+    }
+  }
+
+  /**
+   * @brief Records one active provider interval and waits for release.
+   * @return Nothing.
+   * @throws std::future_error if the retained future unexpectedly loses state.
+   * @note Atomic maximum tracking makes unintended overlap observable without
+   * granting scheduling authority to the test.
+   */
+  void enter() {
+    const int now_active = active.fetch_add(1, std::memory_order_acq_rel) + 1;
+    int observed_maximum = maximum_active.load(std::memory_order_acquire);
+    while (observed_maximum < now_active &&
+           !maximum_active.compare_exchange_weak(observed_maximum, now_active,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+    }
+    entered.fetch_add(1, std::memory_order_release);
+    release_.wait();
+    active.fetch_sub(1, std::memory_order_acq_rel);
+  }
+
+  /** @brief Total provider callbacks that crossed their operation gate. */
+  std::atomic_int entered{0};
+
+  /** @brief Provider callbacks currently blocked inside the probe. */
+  std::atomic_int active{0};
+
+  /** @brief Largest concurrently active provider population observed. */
+  std::atomic_int maximum_active{0};
+
+  /** @brief Shared release state retained for all tiled provider entries. */
+  std::shared_future<void> release_;
+};
+
+/** @brief Serializes access to the process-global tiled constraint probe. */
+std::mutex g_tiled_constraint_probe_mutex;
+
+/** @brief Active tiled constraint probe, or null outside its owning test. */
+std::shared_ptr<TiledConstraintGateProbe> g_tiled_constraint_probe;
+
+/**
+ * @brief Copies the currently bound tiled constraint probe for one callback.
+ * @return Shared ownership that remains valid through provider completion.
+ * @throws std::logic_error when no owning test has installed a probe.
+ * @throws std::system_error when process-global probe locking fails.
+ * @note The returned owner contains only test synchronization state and grants
+ * no registry, Run, gate, or resource-ledger authority.
+ */
+std::shared_ptr<TiledConstraintGateProbe> current_tiled_constraint_probe() {
+  std::lock_guard<std::mutex> lock(g_tiled_constraint_probe_mutex);
+  if (!g_tiled_constraint_probe) {
+    throw std::logic_error("No tiled constraint probe is currently installed.");
+  }
+  return g_tiled_constraint_probe;
+}
+
+/**
+ * @brief Installs one test-owned tiled constraint probe for a bounded scope.
+ *
+ * @throws std::invalid_argument when probe is null.
+ * @throws std::logic_error when another test already owns the binding.
+ * @throws std::system_error when process-global probe locking fails.
+ * @note Destruction clears only the exact owner installed by this guard. Test
+ * futures must settle before guard destruction so no callback observes absence.
+ */
+class ScopedTiledConstraintProbeBinding final {
+ public:
+  /**
+   * @brief Publishes one non-null probe to the registered callback.
+   * @param probe Shared probe that outlives every asynchronous test Run.
+   * @throws std::invalid_argument when probe is null.
+   * @throws std::logic_error when another binding is already active.
+   * @throws std::system_error when process-global probe locking fails.
+   */
+  explicit ScopedTiledConstraintProbeBinding(
+      std::shared_ptr<TiledConstraintGateProbe> probe)
+      : probe_(std::move(probe)) {
+    if (!probe_) {
+      throw std::invalid_argument(
+          "Tiled constraint probe binding requires a non-null probe.");
+    }
+    std::lock_guard<std::mutex> lock(g_tiled_constraint_probe_mutex);
+    if (g_tiled_constraint_probe) {
+      throw std::logic_error(
+          "A tiled constraint probe binding is already active.");
+    }
+    g_tiled_constraint_probe = probe_;
+  }
+
+  /**
+   * @brief Clears the exact process-global probe installed by this guard.
+   * @throws Nothing; unexpected mutex failures terminate through noexcept
+   * destruction.
+   */
+  ~ScopedTiledConstraintProbeBinding() noexcept {
+    std::lock_guard<std::mutex> lock(g_tiled_constraint_probe_mutex);
+    if (g_tiled_constraint_probe == probe_) {
+      g_tiled_constraint_probe.reset();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one global probe binding.
+   * @param other Binding whose ownership remains unchanged.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedTiledConstraintProbeBinding(
+      const ScopedTiledConstraintProbeBinding& other) = delete;
+
+  /**
+   * @brief Prevents replacement of one global probe binding.
+   * @param other Binding whose ownership remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedTiledConstraintProbeBinding& operator=(
+      const ScopedTiledConstraintProbeBinding& other) = delete;
+
+ private:
+  /** @brief Exact owner installed in the process-global callback seam. */
+  std::shared_ptr<TiledConstraintGateProbe> probe_;
+};
+
+/**
+ * @brief Registers the tiled CPU operation used by the constraint regression.
+ * @return Nothing.
+ * @throws Registry allocation, metadata-copy, or callback-copy exceptions.
+ * @note Registration is process-persistent and idempotent. The callback writes
+ * no pixel value because this regression observes gate ownership, not image
+ * arithmetic.
+ */
+void ensure_tiled_constraint_operation_registered() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    OpMetadata metadata;
+    metadata.tile_preference = TileSizePreference::MICRO;
+    metadata.reentrant = true;
+    metadata.exclusive_key = kTiledGateKey;
+    OpRegistry::instance().register_op_hp_tiled(
+        "compute_run_tiled_constraint", "filter",
+        TileOpFunc(
+            [](const Node&, const OutputTile&, const std::vector<InputTile>&) {
+              current_tiled_constraint_probe()->enter();
+            }),
+        metadata);
+  });
+}
+
+/**
+ * @brief Builds one complete cached input for the tiled constraint regression.
+ * @param id Stable graph-local node id.
+ * @return Node with exact 32-by-16 formal HP validity.
+ * @throws GraphError or std::bad_alloc when buffer, Region, strings, or
+ * parameters allocate.
+ * @note The complete cache prunes this boundary from execution while still
+ * satisfying the tiled provider's required image input.
+ */
+Node make_tiled_constraint_cached_input_node(int id) {
+  Node node;
+  node.id = id;
+  node.name = "tiled_constraint_input_" + std::to_string(id);
+  node.type = "compute_run_tiled_constraint_input";
+  node.subtype = "source";
+  node.parameters["width"] = 32;
+  node.parameters["height"] = 16;
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->image_buffer =
+      make_aligned_cpu_image_buffer(32, 16, 1, DataType::FLOAT32);
+  node.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 32, 0, 16});
+  node.hp_version = 1;
+  return node;
+}
+
+/**
+ * @brief Builds a filter whose 32-by-16 output expands into two micro tiles.
+ * @param id Stable graph-local node id.
+ * @param input_id Cached upstream image node required by tiled execution.
+ * @return Node resolved by the persistent tiled constraint operation.
+ * @throws std::bad_alloc when node strings, input ownership, or parameters
+ * allocate.
+ * @note The exact two-task shape makes repeated node-level constraint movement
+ * observable on the second task.
+ */
+Node make_tiled_constraint_node(int id, int input_id) {
+  Node node;
+  node.id = id;
+  node.name = "tiled_constraint_node_" + std::to_string(id);
+  node.type = "compute_run_tiled_constraint";
+  node.subtype = "filter";
+  node.parameters["width"] = 32;
+  node.parameters["height"] = 16;
+  node.image_inputs.push_back(ImageInput{input_id, "image"});
+  return node;
+}
+
 /** @brief Test-product category for one retained operation-string owner. */
 using RetainedOperationStringOwner = testing::RetainedOperationStringOwner;
 
@@ -4267,6 +4489,129 @@ TEST(OperationExecutionGate, EqualExclusiveKeySerializesAcrossGraphsAndRuns) {
   EXPECT_EQ(maximum_active.load(std::memory_order_acquire), 1);
   EXPECT_EQ(active.load(std::memory_order_acquire), 0);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Proves every tile keeps its node-level exclusive key after planning.
+ *
+ * @return Nothing; assertions report overlap, missing queueing, or settlement
+ * residue.
+ * @throws Standard registry, graph, cache, Run, service, future, and
+ * synchronization exceptions from product-path setup and execution.
+ * @note One real 32-by-16 filter expands into two initially ready micro tiles.
+ * While its first provider blocks, the second tile and a different Run sharing
+ * the key must both remain ready. A same-key recovery Run then proves all
+ * operation-gate and resource grants were released.
+ */
+TEST(OperationExecutionGate,
+     FullPlanTiledTasksRetainExclusiveKeyAndReleaseGate) {
+  ensure_tiled_constraint_operation_registered();
+  std::promise<void> release;
+  const std::shared_future<void> release_future = release.get_future().share();
+  auto probe = std::make_shared<TiledConstraintGateProbe>(release_future);
+  ScopedTiledConstraintProbeBinding probe_binding(probe);
+
+  constexpr int kInputNodeId = 210;
+  constexpr int kNodeId = 211;
+  ExecutionService service(3U);
+  ExecutionServiceHost tiled_host;
+  GraphModel graph("cache/tiled-constraint-product");
+  graph.add_node(make_tiled_constraint_cached_input_node(kInputNodeId));
+  graph.add_node(make_tiled_constraint_node(kNodeId, kInputNodeId));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ComputeRun tiled_run(make_test_submission("tiled-constraint-product",
+                                            graph.revision().value(), kNodeId));
+  ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = tiled_run.emplace_submission_plan(
+      graph, traversal, kNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 2U);
+  for (const PlannedTask& task : plan.compute_plan().task_graph.tasks) {
+    EXPECT_EQ(task.node_id, kNodeId);
+    EXPECT_EQ(task.kind, PlannedTaskKind::Tile);
+  }
+
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(tiled_run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease tiled_lease = tiled_run.acquire_lease();
+
+  std::future<void> tiled_completion;
+  AsyncPolicyRun peer;
+  {
+    ScopedPromiseRelease release_guard(release);
+    tiled_completion = std::async(std::launch::async, [&] {
+      dispatch_planned_tasks(graph, service, tiled_host, "cpu", kNodeId, plan,
+                             tiled_lease);
+    });
+    if (!wait_for_atomic_count(probe->entered, 1)) {
+      EXPECT_TRUE(release_guard.release());
+      ASSERT_EQ(tiled_completion.wait_for(std::chrono::seconds(2)),
+                std::future_status::ready);
+      EXPECT_NO_THROW(tiled_completion.get());
+      FAIL() << "The first planned tile did not reach provider work.";
+    }
+
+    peer = launch_constrained_operation_run(
+        service,
+        make_test_submission("tiled-constraint-peer", 212U, kNodeId + 1), 1,
+        OperationExecutionConstraints{9001U, true, 0U, kTiledGateKey},
+        probe->entered, probe->active, probe->maximum_active, release_future);
+    ASSERT_TRUE(wait_for_ready_task_count(service, 2U));
+    EXPECT_EQ(probe->entered.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(probe->maximum_active.load(std::memory_order_acquire), 1);
+
+    EXPECT_TRUE(release_guard.release());
+    ASSERT_EQ(tiled_completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    ASSERT_EQ(peer.completion.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    EXPECT_NO_THROW(tiled_completion.get());
+    EXPECT_NO_THROW(peer.completion.get());
+  }
+
+  EXPECT_EQ(probe->entered.load(std::memory_order_acquire), 3);
+  EXPECT_EQ(probe->active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(probe->maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(tiled_host.context_entries(), 2);
+  EXPECT_EQ(tiled_host.context_entries(), tiled_host.context_exits());
+  ASSERT_EQ(plan.temp_results().size(), 1U);
+  EXPECT_TRUE(plan.temp_results().front().has_value());
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
+
+  AsyncPolicyRun recovery = launch_constrained_operation_run(
+      service,
+      make_test_submission("tiled-constraint-recovery", 213U, kNodeId + 2), 1,
+      OperationExecutionConstraints{9002U, true, 0U, kTiledGateKey},
+      probe->entered, probe->active, probe->maximum_active, release_future);
+  ASSERT_EQ(recovery.completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(recovery.completion.get());
+  EXPECT_EQ(probe->entered.load(std::memory_order_acquire), 4);
+  EXPECT_EQ(probe->active.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(probe->maximum_active.load(std::memory_order_acquire), 1);
+  EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
 }
 
 /**

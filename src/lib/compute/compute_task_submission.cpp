@@ -307,7 +307,7 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
       },
       ExecutionTaskPriority::Normal, task_resource_demand_,
       execution_devices_.at(execution_index),
-      std::move(operation_constraints_.at(execution_index)));
+      std::move(operation_constraints_.at(task_index)));
 }
 
 /**
@@ -490,7 +490,7 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
   execution_devices_.assign(execution_order_.size(), Device::CPU);
-  operation_constraints_.resize(execution_order_.size());
+  operation_constraints_.resize(compute_plan_.task_graph.tasks.size());
   task_resource_demand_ = ReadyTaskSubmission::default_resource_demand();
   for (std::size_t i = 0; i < execution_order_.size(); ++i) {
     const auto& node = graph_.node(execution_order_[i]);
@@ -517,12 +517,15 @@ void TaskSubmissionPlan::resolve_operations() {
     }
     execution_devices_[i] = implementation->metadata.device_preference;
     resolved_ops_[i] = *implementation;
-    operation_constraints_[i] = OperationExecutionConstraints{
-        implementation->implementation_identity,
-        implementation->metadata.reentrant,
-        implementation->metadata.maximum_parallelism,
-        implementation->metadata.exclusive_key,
-    };
+    for (const int task_id : planned_work->task_ids) {
+      operation_constraints_.at(static_cast<std::size_t>(task_id)) =
+          OperationExecutionConstraints{
+              implementation->implementation_identity,
+              implementation->metadata.reentrant,
+              implementation->metadata.maximum_parallelism,
+              implementation->metadata.exclusive_key,
+          };
+    }
     task_resource_demand_.retained_memory_bytes =
         std::max(task_resource_demand_.retained_memory_bytes,
                  implementation->metadata.retained_memory_bytes);
@@ -818,8 +821,8 @@ void dispatch_planned_tasks(GraphModel& graph,
  * @throws Service setup or exact task exceptions unchanged.
  * @note Partial persistent Region state never authorizes the early return.
  * The complete shared Run estimate is frozen before initial submission
- * materialization moves already-charged constraint-key allocations out of the
- * plan.
+ * materialization moves each task's already-charged constraint-key allocation
+ * out of the plan.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,
