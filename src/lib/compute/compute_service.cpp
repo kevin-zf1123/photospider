@@ -857,7 +857,11 @@ struct PreparedIntentUpdateState final {
  * hint retains its existing Graph state behavior, while runtime parameters and
  * other operation-facing state remain request-local. Observations surround
  * recursive dependency, disk-cache, provider/tile, cache-commit, and return
- * boundaries; a monolithic provider already entered is non-preemptible.
+ * boundaries; a monolithic provider already entered is non-preemptible. The
+ * direct operation lease is scoped only around NodeExecutor provider entry:
+ * provider exceptions release it during stack unwinding, while result
+ * normalization, Graph cache publication, disk persistence, and any failures
+ * from those Host stages occur after release.
  */
 NodeOutput& ComputeService::compute_internal(
     GraphModel& graph, int node_id, const RecursiveComputeContext& context) {
@@ -933,12 +937,14 @@ NodeOutput& ComputeService::compute_internal(
         0U,
         1U,
     };
-    compute::OperationExecutionLease operation_lease =
-        execution_service_.acquire_operation_execution(
-            context.run_lease, operation_constraints, operation_demand);
-    NodeOutput computed_output = compute::NodeExecutor::execute(
-        graph, execution_node, implementation.func, monolithic_inputs,
-        tiled_config);
+    NodeOutput computed_output = [&]() -> NodeOutput {
+      compute::OperationExecutionLease operation_lease =
+          execution_service_.acquire_operation_execution(
+              context.run_lease, operation_constraints, operation_demand);
+      return compute::NodeExecutor::execute(graph, execution_node,
+                                            implementation.func,
+                                            monolithic_inputs, tiled_config);
+    }();
     observe_open_run_or_throw(context.run_lease);
     value_image_adapter::normalize_node_output_image_value(&computed_output);
     RegionSet computed_region =

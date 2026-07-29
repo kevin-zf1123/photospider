@@ -396,9 +396,14 @@ class ComputeService {
    * observations surround recursive dependency resolution, disk cache,
    * provider/tile execution, cache publication, and return; a monolithic
    * provider already entered is non-preemptible. Immediately before each
-   * provider entry, the method holds a direct operation lease for the planned
-   * implementation identity, exclusive key, and declared retained/scratch
-   * bytes; dependency recursion completes before that lease is acquired.
+   * provider entry, the method acquires a direct operation lease for the
+   * planned implementation identity, exclusive key, and declared
+   * retained/scratch bytes; dependency recursion completes before acquisition.
+   * The lease is destroyed immediately after NodeExecutor returns, before
+   * cancellation observation, result normalization, Graph cache publication,
+   * or disk persistence. Provider exceptions release it by RAII during
+   * unwinding, and Host post-processing exceptions therefore occur after
+   * release.
    */
   NodeOutput& compute_internal(GraphModel& graph, int node_id,
                                const RecursiveComputeContext& context);
