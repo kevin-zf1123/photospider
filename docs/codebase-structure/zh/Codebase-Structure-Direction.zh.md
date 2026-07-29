@@ -35,7 +35,7 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_graph_internal` | 仅用于构建的 `GraphModel` 与 graph-service helper。 | `GraphModel` 继续私有地位于 `src/lib/graph`。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation v2 loader、adapter 与 lifetime helper。 | 不导出。 |
 | `photospider_policy_internal` | 仅用于构建的纯 C policy DSO registry/loader、built-in type、binding、context、fault 与 DSO lease。 | 只拥有 ordering context，不拥有 worker、queue、grant、Run、Graph 或 execution route。 |
-| `photospider_execution_internal` | 仅用于构建的私有物理执行 accounting primitive。 | `ResourceLedger` 在这里编译；每个 composition-root `ExecutionService` 拥有唯一 Host 权威 instance。 |
+| `photospider_execution_internal` | 仅用于构建的私有物理执行资源与 accounting primitive。 | `ResourceLedger`、固定 `DeviceExecutorRegistry` 和平台 executor factory 在这里编译；每个 composition-root `ExecutionService` 拥有唯一 Host 权威 ledger 与 registry。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、request-owned HP/RT `ComputeRun`、policy-aware ready store、reserved-start transaction、私有 route execution、runtime 与 dirty-region helper。 | Run 与物理 route mechanism 保持私有。 |
 | `photospider_host_internal` | 仅用于构建的 embedded Host adapter 与 Kernel facade closure。 | 不导出，也不会向 consumer 暴露私有 execution owner。 |
 | `photospider_operation_runtime` | 可安装的 shared image-buffer/immutable Value 与 Region 实现。 | 持有唯一的进程级 allocation/revision minting authority 与 dependency-neutral Region algebra；没有外部 package，也不反向链接 operation SDK。 |
@@ -290,7 +290,7 @@ owner 都不会成为 public Host 或 IPC type。
 | `photospider_compute_internal` | Static | 否 | Compute planning、dirty-region state、dispatcher、policy-aware ready store、reserved start 与私有 route execution。 |
 | `photospider_plugin_host_internal` | Static | 否 | Host 侧动态插件加载和生命周期所有权。 |
 | `photospider_policy_internal` | Static | 否 | 纯 C policy registry/loader、built-in、binding、context、fault 与 DSO lease。 |
-| `photospider_execution_internal` | Static | 否 | 私有物理 execution accounting 与 `ResourceLedger` 实现。 |
+| `photospider_execution_internal` | Static | 否 | 私有 `DeviceExecutorRegistry`、平台 executor factory、物理 execution accounting 与 `ResourceLedger` 实现。 |
 | `photospider_host_internal` | Static | 否 | Embedded Host adapter 与 Kernel facade closure。 |
 | `photospider_operation_runtime` | Shared | 是 | Public image-buffer/immutable Value 与 Region 实现及唯一进程级 allocation/revision minting authority；同时包含 dependency-neutral Region algebra，无外部 package dependency，也无 SDK 反向链接。 |
 | `photospider_operation_sdk` | Interface | 是 | Operation v2 header，并传递链接 `operation_runtime`。 |
@@ -361,9 +361,11 @@ CMake 规则：
   `embedded` 的 backend dependency 不可用时，该 component 会成为 not-found，但不会使 required
   IPC component 无效。Unknown required component 会失败；IPC-disabled install 中的 required
   IPC component 也会失败。
-- 在 Apple 平台，静态产品为 Objective-C++ runtime 源码携带系统 `Metal` 和 `Foundation` framework
-  链接标志。Metal operation plugin 及其 `CoreImage`/`CoreVideo` 依赖仍是可选 runtime plugin artifact，
-  不是 public package requirement。
+- 在 Apple 平台启用仓库 Metal/OpenCV operation-plugin profile 时，静态产品会为进程拥有的
+  Metal executor 携带系统 `Metal` 与 `Foundation` framework 链接标志。Metal operation plugin
+  借用该 executor 的 invocation context，不再依赖 `CoreImage` 或 `CoreVideo`。Dependency-disabled
+  profile 会编译 stub factory，不向 registry 安装 Metal executor，也不会增加 Metal framework
+  requirement。
 - 在 Windows 上，导出 target 会传播 `PHOTOSPIDER_STATIC`，因此 consumer 链接 `.lib` 静态归档时，
   public declaration 不会带上 DLL import/export 标注。Dynamic operation plugin 的导出使用
   `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`，与静态产品边界彼此独立。
@@ -415,7 +417,14 @@ fence、单调 Graph close、显式 shutdown、精确 settlement 与 source-priv
 - 当前 request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - 当前 `ExecutionService` 拥有一个固定 CPU worker pool、私有 `serial_debug`/`gpu_pipeline` 行为、
-  一个 Host 权威 ledger、
+  一个 Host 权威 ledger、固定 `DeviceExecutorRegistry`，并且在启用仓库 Metal plugin 的 Apple
+  profile 中拥有一个进程级 Metal executor。该 executor 拥有 command queue、
+  invocation-scoped allocator 与经过验证的持久 pipeline cache。GPU work 只会在公共
+  reserved-start transaction 后进入该 executor；operation 只借用已安装的 invocation context，
+  不保留进程级 native resource。Dependency-disabled profile 不安装 Metal executor。通用 CPU/GPU
+  transfer、residency、coherency 与 stale-completion 语义仍归 issue #85；`ResourceLedger`
+  中的 device-memory 与 scratch accounting 仍归 issue #86；
+  `ExecutionService` 还拥有
   policy-aware、受 entry/byte 约束的 ready store、checked full-vector Run admission、work/byte
   cost、class-local Graph/weighted-Run 公平性、稳定 aging、三个 Interactive dispatch 的 burst
   上限、与精确 root lifetime 一致的 Throughput-owned protected-headroom accounting、并发
@@ -629,7 +638,9 @@ ownership。Issue #75 现在已成为当前行为：删除所有 per-Graph sched
 增加 process policy binding 与纯 C policy ABI，通过 Host-authored frontier 收窄 candidate，以
 resource-safe transaction 提交 start，并让所有 work 进入封闭的私有 execution id。Graph load/
 replacement 现在只复制 route value。Issue #76 已收束 lifecycle registry、graph-close/
-process-shutdown、精确 settlement 与 telemetry 不变量。权威的无环
+process-shutdown、精确 settlement 与 telemetry 不变量。Issue #84 也已成为当前行为：一条仓库
+Metal operation 会通过固定 `DeviceExecutorRegistry` 进入进程拥有的 executor；通用 transfer、
+coherency 与 device-resource-accounting 后续边界仍分别归 issue #85 与 #86。权威的无环
 依赖表位于
 [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md#交付依赖契约)。
 

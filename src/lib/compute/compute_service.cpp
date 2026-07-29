@@ -1292,8 +1292,8 @@ ComputeService::prepare_intent_update(
     std::vector<Device> preflight_devices;
     const std::vector<Device>* preflight_devices_override = nullptr;
     if (uses_process_service) {
-      preflight_devices = execution_service_.available_devices(
-          *strategy.runtime, state->hp_execution_type);
+      preflight_devices =
+          execution_service_.available_devices(state->hp_execution_type);
       preflight_devices_override = &preflight_devices;
     }
     state->connected_preflight = compute::prepare_connected_dirty_parameters(

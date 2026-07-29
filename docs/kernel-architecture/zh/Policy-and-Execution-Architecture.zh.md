@@ -19,8 +19,8 @@
 - 有界就绪存储，以及其中完整的就绪字节计费；
 - Interactive 和 Throughput 各一个策略绑定；
 - 进程公平性状态和三比一类别仲裁状态；
-- 固定 CPU 工作线程池、一个由 service 拥有的 Metal 工作线程 lane，以及私有
-  `serial_debug` 和 `gpu_pipeline` 路由；
+- 固定 CPU 工作线程池、一个由 service 拥有的 Metal 工作线程 lane、固定的
+  `DeviceExecutorRegistry`，以及私有 `serial_debug` 和 `gpu_pipeline` 路由；
 - 由 Host 生成的候选项、Graph、Run、条目版本、入队、快照和选择身份；
 - 从就绪到执行的资源交换、精确 implementation/exclusive-key gate，以及飞行中回调的所有权。
 
@@ -196,7 +196,7 @@ byte 的 retained limit 都会在 provider entry 前失败，不留下 gate 或 
 | --- | --- |
 | `cpu` | Host 生命周期固定 CPU 工作线程池，支持可复用的多条目执行；只暴露 CPU |
 | `serial_debug` | CPU 工作线程零，只允许一个回调处于飞行中；只暴露 CPU |
-| `gpu_pipeline` | CPU fallback 使用同一个固定 CPU 池，Metal 使用一个由 service 拥有的 lane；Host 报告 Metal 时依次暴露 Metal、CPU，否则只暴露 CPU |
+| `gpu_pipeline` | CPU fallback 使用同一个固定 CPU 池，Metal 使用一个由 service 拥有的 lane；固定 registry 拥有 Metal executor 时依次暴露 Metal、CPU，否则只暴露 CPU |
 
 `heterogeneous` 不是别名。执行路由不是插件，不能扫描或加载。
 
@@ -224,9 +224,10 @@ callable resolution 或 admission 前，把这些冻结 route 与 active task-po
 connected-preflight preparation 还会在不进入 provider code 的情况下冻结每个 callable/DSO
 lease 与完整 service root；只有已安装 Run 才能执行 reserved start 并调用 provider，之后依赖
 output 的 dirty planning 仍由 Run 拥有。
-每个 ready submission 都携带冻结的 device；如果 device 不在已配置 route/Host inventory 中，
+每个 ready submission 都携带冻结的 device；如果 device 不在已配置 route/registry inventory 中，
 `ExecutionService` 会在发布 Run 前拒绝它。CPU submission 进入固定 CPU 池，Metal submission
-进入单一 GPU lane。两个 lane 共用 ready store、policy decision、reserved-start transaction、Host
+进入单一 GPU lane，再进入匹配的 registry executor。两个 lane 共用 ready store、policy
+decision、reserved-start transaction、Host
 ledger、Run maximum-parallelism grant、operation implementation/key gate、cancellation、
 completion、exception、reuse、shutdown 与 drainage 规则；不会创建第二套 device-capacity
 authority 或 per-Graph executor。
@@ -242,9 +243,17 @@ V-6 不新增 configured execution route，也不新增第二套 ready store。
 state 与 source-private `ValueTransferTask` 都不拥有 worker 或 queue。仓库 fake executor 只是
 确定性且线程安全的测试机制；C++17 mutex/condition-variable rendezvous 会在不使用 sleep 的
 情况下执行真实的 registration/publication、cancellation/callback-entry 与
-transfer-destruction/callback-entry 竞争。#84 将注册 process-owned physical device executor；
-#85 将新增通用 access/residency/visibility transfer planning，同时不会把这些 owner 移入 Value
-或 policy state。
+transfer-destruction/callback-entry 竞争。
+
+V-7 在同一个 `ExecutionService` domain 中增加 source-private 的固定
+`DeviceExecutorRegistry`。仓库 Metal plugin 启用时，Apple entry 拥有一个 device 与 command
+queue，提供 invocation-scoped texture/buffer allocator，并保留经过校验的 process-lifetime
+pipeline cache。
+Reserved-start worker 会同步进入该 executor，并通过同一条 Run completion/exception path 调用
+已经选中的 operation。Metal Perlin provider 现在只借用这些 resource，不保留 static native
+state；`GraphRuntime`、`Kernel`、operation metadata 与 policy state 都不暴露 native handle 或
+capability hook。V-7 不增加通用 transfer/residency/coherency model，也不增加 device-memory
+ledger；二者分别仍属于 #85 与 #86。
 
 ## Host、CLI 与 IPC 接口面
 

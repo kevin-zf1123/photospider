@@ -237,8 +237,8 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
     CACHE STRING "Install directory for Photospider CMake package files")
 
-# Public image-buffer factory, ReadyFence, and process-wide Value identity
-# implementation.
+# Public image-buffer factory, ReadyFence, process-wide Value identity, and
+# shared private device-invocation context implementation.
 # Host products and Value-using operation DSOs dynamically depend on this one
 # runtime image so allocation/revision minting cannot restart per DSO. The
 # target deliberately has no OpenCV, yaml-cpp, Threads, graph, registry, or
@@ -247,7 +247,8 @@ add_library(photospider_operation_runtime SHARED
     src/lib/core/image_buffer.cpp
     src/lib/core/ready_fence.cpp
     src/lib/core/region.cpp
-    src/lib/core/value.cpp)
+    src/lib/core/value.cpp
+    src/lib/execution/device_execution_context.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
 set_target_properties(photospider_operation_runtime PROPERTIES
@@ -559,10 +560,37 @@ target_link_libraries(photospider_policy_internal PRIVATE
 
 # Module: private physical execution resources and accounting.
 set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+    src/lib/execution/device_executor_registry.cpp
     src/lib/execution/physical_execution_routes.cpp
     src/lib/execution/value_transfer_task.cpp
     src/lib/runtime/resource_ledger.cpp
 )
+set(PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES)
+if(APPLE)
+    enable_language(OBJCXX)
+    find_library(METAL_FRAMEWORK NAMES Metal)
+    find_library(FOUNDATION_FRAMEWORK NAMES Foundation)
+    if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK)
+        message(FATAL_ERROR
+            "Photospider requires Metal and Foundation on Apple platforms")
+    endif()
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+        list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+            src/lib/execution/metal_device_executor.mm)
+        list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
+            ${METAL_FRAMEWORK}
+            ${FOUNDATION_FRAMEWORK})
+        set_source_files_properties(
+            src/lib/execution/metal_device_executor.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    else()
+        list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+            src/lib/execution/metal_device_executor_stub.cpp)
+    endif()
+else()
+    list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+        src/lib/execution/metal_device_executor_stub.cpp)
+endif()
 
 add_library(photospider_execution_internal STATIC
     ${PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES})
@@ -570,7 +598,9 @@ target_include_directories(photospider_execution_internal PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(photospider_execution_internal PRIVATE
     photospider_core_internal
-    Threads::Threads)
+    Photospider::operation_runtime
+    Threads::Threads
+    ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
@@ -620,14 +650,8 @@ set(PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES
     src/lib/compute/compute_service.cpp
     src/lib/runtime/graph_event_service.cpp
     src/lib/runtime/interaction.cpp
-    src/lib/runtime/graph_runtime.mm
+    src/lib/runtime/graph_runtime.cpp
 )
-
-if(APPLE)
-    enable_language(OBJCXX)
-else()
-    set_source_files_properties(src/lib/runtime/graph_runtime.mm PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
-endif()
 
 add_library(photospider_compute_internal STATIC
     ${PHOTOSPIDER_COMPUTE_INTERNAL_SOURCES})
@@ -1302,36 +1326,27 @@ if(APPLE)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
-    find_library(METAL_FRAMEWORK NAMES Metal)
-    find_library(FOUNDATION_FRAMEWORK NAMES Foundation)
-    if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK)
-        message(FATAL_ERROR
-            "Photospider requires Metal and Foundation on Apple platforms")
-    endif()
-
-    # Core product needs Metal framework for Objective-C++ runtime sources.
-    target_link_libraries(photospider PRIVATE
-        "-framework Metal"
-        "-framework Foundation"
-    )
-    if(TARGET photospider_internal_test_product)
-        target_link_libraries(photospider_internal_test_product PRIVATE
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+        # The real process executor makes the product depend on native Metal.
+        target_link_libraries(photospider PRIVATE
             "-framework Metal"
             "-framework Foundation"
         )
+        if(TARGET photospider_internal_test_product)
+            target_link_libraries(photospider_internal_test_product PRIVATE
+                "-framework Metal"
+                "-framework Foundation"
+            )
+        endif()
     endif()
 
     if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-        find_library(COREIMAGE_FRAMEWORK NAMES CoreImage)
-        find_library(COREVIDEO_FRAMEWORK NAMES CoreVideo)
-        if(NOT COREIMAGE_FRAMEWORK OR NOT COREVIDEO_FRAMEWORK)
-            message(FATAL_ERROR
-                "Photospider Metal operation plugins require CoreImage and CoreVideo")
-        endif()
-
         # 1. The Implementation Library (the actual op logic)
         add_library(perlin_noise_metal SHARED
             plugins/ops/metal/perlin_noise_metal.mm)
+        set_source_files_properties(
+            plugins/ops/metal/perlin_noise_metal.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         set_target_properties(perlin_noise_metal PROPERTIES
             LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
             MACOSX_RPATH ON
@@ -1340,11 +1355,10 @@ if(APPLE)
             Photospider::operation_opencv
             ${METAL_FRAMEWORK}
             ${FOUNDATION_FRAMEWORK}
-            ${COREIMAGE_FRAMEWORK}
-            ${COREVIDEO_FRAMEWORK}
         )
         target_include_directories(perlin_noise_metal PRIVATE
             "${PROJECT_SOURCE_DIR}/plugins/ops"
+            "${PROJECT_SOURCE_DIR}/src/lib"
         )
 
         # 2. The Loader Plugin (registers the op with the Kernel)
@@ -1758,6 +1772,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_physical_execution_routes
         tests/unit/test_physical_execution_routes.cpp
         photospider_execution_internal)
+    add_ps_test(test_device_executor_registry
+        tests/unit/test_device_executor_registry.cpp
+        photospider_execution_internal)
     add_ps_test(test_policy_registry tests/unit/test_policy_registry.cpp
         photospider_policy_internal)
     target_compile_definitions(test_policy_registry PRIVATE
@@ -1802,9 +1819,15 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             plugins/ops/metal/perlin_noise_metal.mm)
         target_link_libraries(test_bad_alloc_boundaries PRIVATE
             ${METAL_FRAMEWORK}
-            ${FOUNDATION_FRAMEWORK}
-            ${COREIMAGE_FRAMEWORK}
-            ${COREVIDEO_FRAMEWORK})
+            ${FOUNDATION_FRAMEWORK})
+    endif()
+    if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+        add_ps_test(test_metal_device_executor
+            tests/integration/test_metal_device_executor.cpp)
+        target_include_directories(test_metal_device_executor PRIVATE
+            "${PROJECT_SOURCE_DIR}/plugins/ops")
+        target_link_libraries(test_metal_device_executor PRIVATE
+            perlin_noise_metal)
     endif()
     add_ps_test(test_cli_dirty_snapshot_formatter
         tests/integration/test_cli_dirty_snapshot_formatter.cpp)
@@ -2105,6 +2128,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     gtest_discover_tests(test_resource_ledger
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_device_executor_registry
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS execution
+            TIMEOUT 30)
     gtest_discover_tests(test_policy_registry
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
@@ -2125,6 +2153,13 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_bad_alloc_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
+        gtest_discover_tests(test_metal_device_executor
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES
+                LABELS metal
+                TIMEOUT 60)
+    endif()
     gtest_discover_tests(test_cli_dirty_snapshot_formatter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}

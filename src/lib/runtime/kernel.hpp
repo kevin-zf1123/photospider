@@ -865,18 +865,6 @@ class Kernel {
   std::optional<double> get_last_io_time(const std::string& name);
 
   /**
-   * @brief Copies the platform Metal device handle for one published runtime.
-   * @param name Graph/session name to resolve.
-   * @return Runtime device handle, or null when the name is absent.
-   * @throws std::system_error if graph-registry locking fails.
-   * @note Kernel retains a shared runtime owner while copying the handle, so a
-   * concurrent close cannot destroy the runtime during lookup. The returned
-   * platform handle follows the existing platform ownership contract and does
-   * not grant Graph admission.
-   */
-  id get_metal_device(const std::string& name);
-
-  /**
    * @brief Copies canonical policy types visible to this process domain.
    * @return Lexically sorted built-in and DSO policy type names.
    * @throws std::bad_alloc or std::system_error when observation storage or

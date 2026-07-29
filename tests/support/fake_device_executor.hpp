@@ -1,0 +1,153 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+
+#include "execution/device_execution_context.hpp"
+#include "execution/device_executor_registry.hpp"
+
+/**
+ * @file fake_device_executor.hpp
+ * @brief Dependency-neutral fake device executor for repository tests.
+ */
+
+namespace ps::testing {
+
+/**
+ * @brief Shared observations retained independently of fake executor ownership.
+ *
+ * @throws Nothing for construction and atomic observation.
+ * @note Counters are test evidence only and mint no product authority.
+ */
+struct FakeDeviceExecutorState final {
+  /** @brief Number of fake executor invocation entries. */
+  std::atomic_uint64_t invocation_count{0U};
+};
+
+/**
+ * @brief Minimal borrowed Metal context for callbacks that do not use SDK
+ * resources.
+ *
+ * @throws Resource allocation and pipeline methods throw `std::logic_error`
+ * because capability-focused tests execute ordinary host callbacks only.
+ * @note A non-null queue token lets tests distinguish an installed context
+ * without fabricating a native Metal object.
+ */
+class FakeMetalExecutionContext final
+    : public execution::MetalExecutionContext {
+ public:
+  /** @copydoc execution::MetalExecutionContext::command_queue_handle */
+  NativeHandle command_queue_handle() const noexcept override {
+    return const_cast<std::uint8_t*>(&queue_token_);
+  }
+
+  /** @copydoc execution::MetalExecutionContext::allocate_float32_texture_2d */
+  NativeHandle allocate_float32_texture_2d(std::uint32_t,
+                                           std::uint32_t) override {
+    throw std::logic_error(
+        "FakeMetalExecutionContext does not allocate native textures.");
+  }
+
+  /** @copydoc execution::MetalExecutionContext::allocate_shared_buffer_copy */
+  NativeHandle allocate_shared_buffer_copy(const void*, std::size_t) override {
+    throw std::logic_error(
+        "FakeMetalExecutionContext does not allocate native buffers.");
+  }
+
+  /** @copydoc
+   * execution::MetalExecutionContext::find_or_create_compute_pipeline */
+  NativeHandle find_or_create_compute_pipeline(std::string_view,
+                                               std::string_view,
+                                               std::string_view) override {
+    throw std::logic_error(
+        "FakeMetalExecutionContext does not compile native pipelines.");
+  }
+
+ private:
+  /** @brief Stable non-native token borrowed only for the fake scope. */
+  const std::uint8_t queue_token_ = 1U;
+};
+
+/**
+ * @brief Synchronous fake executor that publishes a matching borrowed context.
+ *
+ * @throws Provider exceptions unchanged.
+ * @note This fixture has no callback queue, native resource, or worker owner.
+ */
+class FakeMetalDeviceExecutor final : public execution::DeviceExecutor {
+ public:
+  /**
+   * @brief Creates one executor with externally observable shared state.
+   * @param state Non-null observation owner.
+   * @throws std::invalid_argument for a null state.
+   */
+  explicit FakeMetalDeviceExecutor(
+      std::shared_ptr<FakeDeviceExecutorState> state)
+      : state_(std::move(state)) {
+    if (!state_) {
+      throw std::invalid_argument(
+          "FakeMetalDeviceExecutor requires observation state.");
+    }
+  }
+
+  /** @copydoc execution::DeviceExecutor::device */
+  Device device() const noexcept override { return Device::GPU_METAL; }
+
+  /** @copydoc execution::DeviceExecutor::execute */
+  void execute(execution::DeviceExecutorInvocation& invocation) override {
+    state_->invocation_count.fetch_add(1U, std::memory_order_relaxed);
+    FakeMetalExecutionContext context;
+    execution::ScopedMetalExecutionContext scope(context);
+    invocation.run();
+  }
+
+  /** @copydoc execution::DeviceExecutor::diagnostics */
+  execution::DeviceExecutorDiagnostics diagnostics() const override {
+    return execution::DeviceExecutorDiagnostics{
+        Device::GPU_METAL,
+        true,
+        state_->invocation_count.load(std::memory_order_relaxed),
+        0U,
+        0U,
+        0U,
+    };
+  }
+
+ private:
+  /** @brief Test-owned observations retained after registry destruction. */
+  std::shared_ptr<FakeDeviceExecutorState> state_;
+};
+
+/**
+ * @brief Creates one fixed registry containing the synchronous fake Metal
+ * executor.
+ * @param state Non-null observation owner retained by the executor.
+ * @return Move-only registry ready for service injection.
+ * @throws std::invalid_argument for null state.
+ * @throws std::bad_alloc when executor ownership cannot allocate.
+ */
+inline execution::DeviceExecutorRegistry make_fake_metal_executor_registry(
+    const std::shared_ptr<FakeDeviceExecutorState>& state) {
+  execution::DeviceExecutorRegistry registry;
+  registry.register_executor(std::make_unique<FakeMetalDeviceExecutor>(state));
+  return registry;
+}
+
+/**
+ * @brief Creates one fake Metal registry with internal observation state.
+ * @return Move-only registry ready for service injection.
+ * @throws std::bad_alloc when shared state or executor ownership cannot
+ * allocate.
+ * @note Use the state-taking overload when a test needs invocation counts.
+ */
+inline execution::DeviceExecutorRegistry make_fake_metal_executor_registry() {
+  return make_fake_metal_executor_registry(
+      std::make_shared<FakeDeviceExecutorState>());
+}
+
+}  // namespace ps::testing

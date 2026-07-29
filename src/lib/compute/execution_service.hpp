@@ -11,6 +11,7 @@
 #include "compute/compute_run.hpp"
 #include "compute/execution_lifecycle_telemetry.hpp"
 #include "compute/run_lifecycle_registry.hpp"
+#include "execution/device_executor_registry.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "runtime/resource_ledger.hpp"
 
@@ -808,8 +809,9 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
 /**
  * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
- * The service owns a fixed CPU worker pool plus one private Metal worker lane
- * and accepts only `ReadyTaskSubmission`. Each active Run has isolated
+ * The service owns a fixed CPU worker pool, one private Metal worker lane, and
+ * one fixed process-owned device executor registry. It accepts only
+ * `ReadyTaskSubmission`. Each active Run has isolated
  * completion, exception, trace-target, and settlement state while independent
  * Runs may overlap. The service also exclusively owns the host-authoritative
  * resource ledger and policy-aware entry/byte-bounded ready store. Two private
@@ -854,6 +856,20 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @note The composition root must freeze workers before first Run admission.
    */
   explicit ExecutionService(ExecutionResourceLimits resource_limits);
+
+  /**
+   * @brief Creates an unconfigured domain with an injected fixed device
+   * registry.
+   * @param resource_limits Complete private Host-composed limits.
+   * @param device_executors Complete registry moved into process ownership.
+   * @throws std::invalid_argument if interactive headroom exceeds a limit.
+   * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
+   * @note Tests and alternate composition roots finish registration before
+   * construction. The service exposes no runtime mutation surface and must be
+   * configured before first Run admission.
+   */
+  ExecutionService(ExecutionResourceLimits resource_limits,
+                   execution::DeviceExecutorRegistry device_executors);
 
   /**
    * @brief Creates and configures one fixed execution domain.
@@ -1036,6 +1052,28 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::system_error from ledger snapshot locking.
    */
   ResourceLedger::Snapshot resource_snapshot() const;
+
+  /**
+   * @brief Tests whether the fixed process registry owns one device executor.
+   * @param device Device label to inspect.
+   * @return True only for a registered non-CPU executor.
+   * @throws Nothing.
+   * @note This observational query grants no native handle or execution
+   * authority.
+   */
+  bool has_device_executor(Device device) const noexcept;
+
+  /**
+   * @brief Copies diagnostics from one registered device executor.
+   * @param device Required registered non-CPU device.
+   * @return Thread-safe value snapshot containing no native handles.
+   * @throws std::invalid_argument when the device has no registered executor.
+   * @throws std::system_error from concrete executor synchronization.
+   * @note Counters are observational and do not mint `ResourceLedger`
+   * capacity.
+   */
+  execution::DeviceExecutorDiagnostics device_executor_diagnostics(
+      Device device) const;
 
   /**
    * @brief Registers one fully initialized GraphRuntime lifecycle anchor.
@@ -1352,18 +1390,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   std::vector<Device> available_devices() const override;
 
   /**
-   * @brief Reports devices exposed by one exact private route and Host.
-   * @param host Borrowed process capability observer.
+   * @brief Reports devices exposed by one exact private route and registry.
    * @param execution_type Exact `cpu`, `gpu_pipeline`, or `serial_debug` id.
-   * @return `gpu_pipeline` returns Metal then CPU when Metal is available;
-   * CPU and serial-debug return CPU only.
+   * @return `gpu_pipeline` returns Metal then CPU when a Metal executor is
+   * registered; CPU and serial-debug return CPU only.
    * @throws GraphError with `GraphErrc::NotFound` for an unknown route.
    * @throws std::bad_alloc when result storage cannot allocate.
    * @note The copied labels contain no native handle. This is the canonical
    * inventory for full, preflight, and dirty operation selection.
    */
   std::vector<Device> available_devices(
-      const ExecutionHostContext& host,
       const std::string& execution_type) const;
 
   /**
@@ -1601,6 +1637,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * its exact candidate/version only for this worker cycle, and recomputes all
    * selection inputs. An all-blocked lane waits on the worker-notification
    * epoch with a bounded low-frequency fallback; spurious wakes do not retry.
+   * A committed non-CPU start enters the matching fixed device executor before
+   * invoking the same submission callback and completion path.
    */
   void worker_loop(int worker_id,
                    execution::PhysicalExecutionLane lane) noexcept;

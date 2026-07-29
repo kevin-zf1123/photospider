@@ -115,7 +115,7 @@ reserved-start transaction.
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, and callback owner for one full HP request | Execution-route workers, Run terminal state, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, or visible commit |
+| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, general device residency/coherency/transfer planning, or device-memory accounting |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
@@ -170,9 +170,19 @@ callback alone acquires source payload access, copies the validated envelope,
 retires destination producer access, and publishes the terminal state. The
 fence and task own no worker, queue, route, ledger grant, or device identity.
 The deterministic thread-safe fake executor and test-only C++17 mutex/CV race
-rendezvous are test-owned; #84 owns real physical-device executor registration,
-while #85 owns general access planning, residency, visibility, bidirectional
-transfer, and stale-completion commit arbitration.
+rendezvous are test-owned.
+
+V-7 adds a source-private fixed `DeviceExecutorRegistry` to
+`ExecutionService`. In the enabled repository Metal-plugin profile, the Apple
+executor owns and reuses its device, command queue, and validated
+compute-pipeline cache; one callback-scoped
+allocator retains textures and buffers until provider return. A reserved-start
+Metal submission enters the matching executor synchronously and uses the same
+Run completion/exception/retirement path. The Perlin provider borrows those
+resources and returns a CPU-owned compatibility image, while `GraphRuntime`
+owns no native Metal state. This slice adds no general `AccessPlan`, residency,
+visibility, bidirectional transfer, stale-completion arbitration, or
+device-memory/scratch ledger dimensions; those remain #85 and #86.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
@@ -426,9 +436,10 @@ dependent work is released by `TaskSubmissionPlan` as another
 `ReadyTaskSubmission`; the Host alone validates the candidate, commits its
 start, and transfers callback ownership to the copied Graph route binding.
 
-The CPU service delivered by Issues #70 and #71 is explicitly composed before
-Kernel and owns one direct fixed CPU worker pool, one private Metal worker lane,
-one host-authoritative ledger, and one bounded ready store. Configuration
+The process service is explicitly composed before Kernel and owns one direct
+fixed CPU worker pool, one private Metal worker lane, one fixed
+device-executor registry, one host-authoritative ledger, and one bounded ready
+store. Configuration
 resolves and freezes `[1,8]` CPU infrastructure workers once; Graph load,
 replacement, Run execution, and dirty phases never resize either lane.
 Benchmark `execution.threads` is a per-Run ceiling rather than an execution
@@ -477,15 +488,16 @@ and publishes a fresh generation without constructing a per-Graph executor or
 reservation. The ledger does not invent device, I/O, or plugin-specific
 dimensions.
 
-The canonical inventory is route and Host aware: `cpu` and `serial_debug`
-expose CPU only; `gpu_pipeline` exposes Metal then CPU when Metal is available,
-otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
+The canonical inventory is route and registry aware: `cpu` and `serial_debug`
+expose CPU only; `gpu_pipeline` exposes Metal then CPU when a Metal executor is
+registered, otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
 the chosen implementation identity, metadata, shape, and device before
 admission. Submission re-resolves the same identity; replacement or unload
 racing a cached plan therefore fails before provider entry instead of mixing
 callback and metadata revisions. CPU work enters the
-fixed pool and Metal work enters the single GPU lane, while both consume the
-same Run root grants and maximum-parallelism ceiling. An unavailable device is
+fixed pool and Metal work enters the single GPU lane and then the matching
+registry executor, while both consume the same Run root grants and
+maximum-parallelism ceiling. An unavailable device is
 rejected before active-Run publication, and completion, exception, cancellation,
 reuse, shutdown, and drainage retire the exact common ledger/Run state.
 
@@ -543,9 +555,11 @@ the absent operation, or replace an enabled OpenCV operation through the same
 slots. Manager-driven unload retires the replacement and restores the captured
 predecessor.
 
-Synchronization around genuine backend state remains provider-local. The
-Metal Perlin provider retains a DSO-private mutex around its shared Metal
-device, queue, pipeline, and buffers; that mutex is neither an OpenCV operation
+Synchronization around genuine backend state remains backend-owned. The
+process Metal executor serializes access to its command queue, invocation
+allocator counters, and pipeline cache. The Metal Perlin provider retains no
+static native state or DSO-private executor mutex; it borrows executor resources
+only for the callback scope. This executor lock is neither an OpenCV operation
 lock nor a scheduler exclusivity contract. OpenCV use outside repository-owned
 providers, third-party internal threads, and platform runtime workers remain
 outside Host execution accounting.

@@ -26,9 +26,13 @@ scheduler SDK/ABI and adds pure-C policy ABI v1, atomic binding replacement,
 generation-local sticky faults, reserved start, and closed private execution
 routes, including one fixed CPU pool and one private Metal lane. Issue #76
 implements the lifecycle registry, monotonic Graph close, explicit process
-execution shutdown, exact settlement, and source-private telemetry. Public
-Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes
-this ADR only as the detailed
+execution shutdown, exact settlement, and source-private telemetry. Issue #84
+removes per-Graph native Metal ownership and installs a fixed
+`DeviceExecutorRegistry` in `ExecutionService`; its Metal executor owns one
+device, command queue, invocation allocator, and persistent pipeline cache and
+enters the selected operation only after reserved start. Public Host/CLI/IPC
+cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
+as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
 and its historical context remain in force.
 
@@ -39,17 +43,20 @@ The route vocabulary is closed to `cpu`, `serial_debug`, and
 `gpu_pipeline`; their physical workers, queues, device routing, completion, and
 exceptions remain private to Host execution modules. Policy binding is
 process/service state and never Graph state. The service freezes one CPU worker
-count from composition-root configuration, owns one fixed Metal worker lane,
-and keeps isolated
+count from composition-root configuration, owns one fixed Metal worker lane
+and one immutable device-executor registry, and keeps isolated
 completion/failure/trace state per Run, and permits independent HP and RT Runs
 from multiple Graphs to overlap.
 
 The canonical device inventory is route aware. `cpu` and `serial_debug` expose
-CPU only. `gpu_pipeline` exposes Metal then CPU when the Host reports Metal,
-otherwise CPU only. Full, dirty HP/RT, and connected-preflight planning freeze
-the selected implementation and device before admission. CPU and Metal work
-use distinct fixed lanes but the same ready store, Run parallelism ceiling,
-ledger grants, cancellation, completion, exception, reuse, and drainage state.
+CPU only. `gpu_pipeline` exposes Metal then CPU when the fixed registry contains
+a usable Metal executor, otherwise CPU only. Full, dirty HP/RT, and
+connected-preflight planning freeze the selected implementation and device
+before admission. CPU and Metal work use distinct fixed lanes but the same
+ready store, Run parallelism ceiling, ledger grants, cancellation, completion,
+exception, reuse, and drainage state. After reserved start, non-CPU work enters
+the matching registry executor synchronously; no Graph or policy object
+receives a native handle.
 
 Current software uses each Host ledger's default 32-slot CPU dimension for Run
 execution grants. Fixed service workers and route machinery are
@@ -103,9 +110,14 @@ Physical execution is divided into resource executors:
 - a plugin invocation adapter backed by a separate
   `PluginRuntimeSupervisor` for process, IPC, security, and failure isolation.
 
-The current #75 slice realizes the CPU executor and one service-owned Metal
-lane. It does not expose a device-executor API or add a second device-capacity
-ledger; later resource executors remain target architecture.
+The current #84 slice realizes the CPU executor, one service-owned Metal lane,
+and a source-private fixed device-executor registry. In the enabled repository
+Metal-plugin profile, the Apple entry owns and reuses its native device/queue
+and validated pipeline cache, while each entry receives an invocation-scoped
+native allocator. It adds no public
+device-executor API and no second device-capacity ledger. General CPU/GPU
+transfer, residency, coherency, visibility, and stale-completion arbitration
+remain #85; device-memory and scratch accounting remain #86.
 
 The worker-owning scheduler plugin ABI, SDK target, `IScheduler` hierarchy, and
 per-Graph physical owners have been removed as a complete breaking migration.

@@ -1,0 +1,239 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+#include "photospider/core/device.hpp"
+
+/**
+ * @file device_executor_registry.hpp
+ * @brief Private fixed process-domain device executor ownership.
+ */
+
+namespace ps::execution {
+
+/**
+ * @brief Copied observational diagnostics for one registered executor.
+ *
+ * @throws Nothing for value construction, copying, and destruction.
+ * @note Counters grant no native resource or `ResourceLedger` authority.
+ */
+struct DeviceExecutorDiagnostics final {
+  /** @brief Device label owned by the observed executor. */
+  Device device = Device::CPU;
+
+  /** @brief Whether the executor owns a usable native command queue. */
+  bool queue_ready = false;
+
+  /** @brief Number of invocation entries accepted by this executor. */
+  std::uint64_t invocation_count = 0U;
+
+  /** @brief Cumulative invocation-owned native allocations. */
+  std::uint64_t total_allocations = 0U;
+
+  /** @brief Allocations retained by the currently active invocation. */
+  std::uint64_t live_allocations = 0U;
+
+  /** @brief Persistent executor-owned compute pipeline entries. */
+  std::uint64_t pipeline_cache_entries = 0U;
+};
+
+/**
+ * @brief Stack-bounded callback entered by one matching device executor.
+ *
+ * @throws `run()` propagates provider exceptions unchanged.
+ * @note The registry and executor borrow this object only for `execute()`.
+ */
+class DeviceExecutorInvocation {
+ public:
+  /**
+   * @brief Releases a concrete stack invocation.
+   * @throws Nothing under the concrete invocation contract.
+   */
+  virtual ~DeviceExecutorInvocation() = default;
+
+  /**
+   * @brief Enters the owned provider callback exactly once.
+   * @return Nothing.
+   * @throws Any provider exception unchanged.
+   */
+  virtual void run() = 0;
+};
+
+/**
+ * @brief Owns physical resources for one non-CPU device label.
+ *
+ * @throws Concrete execution and diagnostics operations document native,
+ * allocation, and synchronization failures.
+ * @note Implementations are process-domain resources and own no Run, Graph,
+ * ready queue, completion route, or `ResourceLedger` grant.
+ */
+class DeviceExecutor {
+ public:
+  /**
+   * @brief Releases native resources after service workers have joined.
+   * @throws Nothing.
+   */
+  virtual ~DeviceExecutor() noexcept = default;
+
+  /**
+   * @brief Returns the fixed non-CPU device label.
+   * @return Immutable executor device.
+   * @throws Nothing.
+   */
+  virtual Device device() const noexcept = 0;
+
+  /**
+   * @brief Runs one borrowed invocation inside the native executor scope.
+   * @param invocation Stack-bounded callback borrowed until return.
+   * @return Nothing.
+   * @throws Provider or native executor failures unchanged.
+   * @note Implementations invoke `run()` exactly once and create no second
+   * ready/completion queue.
+   */
+  virtual void execute(DeviceExecutorInvocation& invocation) = 0;
+
+  /**
+   * @brief Copies thread-safe observational executor diagnostics.
+   * @return Value snapshot containing no native handles.
+   * @throws std::system_error when synchronization fails.
+   */
+  virtual DeviceExecutorDiagnostics diagnostics() const = 0;
+};
+
+/**
+ * @brief Fixed registry of process-owned non-CPU device executors.
+ *
+ * Composition builds and validates the registry before moving it into
+ * `ExecutionService`. The service exposes no mutation surface after that move.
+ *
+ * @throws std::bad_alloc when executor ownership or copied device inventories
+ * cannot allocate.
+ * @note This class is source-private, move-only, and contains no singleton.
+ */
+class DeviceExecutorRegistry final {
+ public:
+  /**
+   * @brief Creates an empty platform-neutral registry.
+   * @throws Nothing.
+   */
+  DeviceExecutorRegistry() noexcept = default;
+
+  /**
+   * @brief Releases all registered executors.
+   * @throws Nothing.
+   */
+  ~DeviceExecutorRegistry() noexcept = default;
+
+  /**
+   * @brief Transfers complete executor ownership.
+   * @param other Registry whose fixed slots move into this value.
+   * @throws Nothing.
+   */
+  DeviceExecutorRegistry(DeviceExecutorRegistry&& other) noexcept = default;
+
+  /**
+   * @brief Replaces this unobserved registry by moving another value.
+   * @param other Registry whose fixed slots move into this value.
+   * @return This registry.
+   * @throws Nothing.
+   * @note Callers use assignment only during single-threaded composition.
+   */
+  DeviceExecutorRegistry& operator=(DeviceExecutorRegistry&& other) noexcept =
+      default;
+
+  /**
+   * @brief Prevents copying native executor ownership.
+   * @param other Unused source because copying is forbidden.
+   * @throws Nothing because this operation is deleted.
+   */
+  DeviceExecutorRegistry(const DeviceExecutorRegistry& other) = delete;
+
+  /**
+   * @brief Prevents assigning duplicate native executor ownership.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing because this operation is deleted.
+   */
+  DeviceExecutorRegistry& operator=(const DeviceExecutorRegistry& other) =
+      delete;
+
+  /**
+   * @brief Registers one complete non-CPU executor during composition.
+   * @param executor Non-null executor whose ownership moves into the slot.
+   * @return Nothing.
+   * @throws std::invalid_argument for null, CPU, unknown, or duplicate device.
+   * @note Callers complete all registrations before concurrent observation.
+   */
+  void register_executor(std::unique_ptr<DeviceExecutor> executor);
+
+  /**
+   * @brief Tests whether one device has a registered executor.
+   * @param device Device label to inspect.
+   * @return True only for a populated valid non-CPU slot.
+   * @throws Nothing.
+   */
+  bool contains(Device device) const noexcept;
+
+  /**
+   * @brief Returns the number of registered non-CPU executors.
+   * @return Populated slot count.
+   * @throws Nothing.
+   */
+  std::size_t size() const noexcept;
+
+  /**
+   * @brief Copies registered device labels in stable preference order.
+   * @return `GPU_METAL`, `GPU_CUDA`, and `ASIC_NPU` when present.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   */
+  std::vector<Device> available_devices() const;
+
+  /**
+   * @brief Dispatches one invocation to the exact registered executor.
+   * @param device Required non-CPU device.
+   * @param invocation Stack-bounded callback borrowed until return.
+   * @return Nothing.
+   * @throws std::invalid_argument when no matching executor exists.
+   * @throws Provider or concrete executor failures unchanged.
+   */
+  void execute(Device device, DeviceExecutorInvocation& invocation);
+
+  /**
+   * @brief Copies diagnostics for one exact registered executor.
+   * @param device Required non-CPU device.
+   * @return Thread-safe observational snapshot.
+   * @throws std::invalid_argument when no matching executor exists.
+   * @throws std::system_error from concrete synchronization.
+   */
+  DeviceExecutorDiagnostics diagnostics(Device device) const;
+
+ private:
+  /** @brief Number of public Device enum slots currently recognized. */
+  static constexpr std::size_t kDeviceSlotCount = 4U;
+
+  /**
+   * @brief Resolves one validated enum to its fixed slot.
+   * @param device Candidate public device label.
+   * @return Slot index, or `kDeviceSlotCount` for an unknown value.
+   * @throws Nothing.
+   */
+  static std::size_t slot_for(Device device) noexcept;
+
+  /** @brief Unique executor owners indexed by stable Device value. */
+  std::array<std::unique_ptr<DeviceExecutor>, kDeviceSlotCount> executors_{};
+};
+
+/**
+ * @brief Builds the production platform device executor registry.
+ * @return Registry containing Metal only when native device/queue creation
+ * succeeds.
+ * @throws std::bad_alloc when executor allocation fails.
+ * @note Unsupported platforms and unavailable devices return an empty value.
+ */
+DeviceExecutorRegistry make_default_device_executor_registry();
+
+}  // namespace ps::execution

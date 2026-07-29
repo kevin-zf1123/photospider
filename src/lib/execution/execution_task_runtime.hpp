@@ -63,22 +63,14 @@ enum class ExecutionTraceAction : std::uint32_t {
  *
  * The Graph runtime owns this object through every accepted Run callback. The
  * service may publish worker/epoch attribution and trace values, but receives
- * no Graph, cache, native device, lifecycle owner, or mutable observation
- * storage through this boundary.
+ * no Graph, cache, device inventory, native device, lifecycle owner, or
+ * mutable observation storage through this boundary.
  *
  * @throws Nothing from every virtual operation.
  * @note The protected destructor prevents deletion through a borrowed pointer.
  */
 class ExecutionHostContext {
  public:
-  /**
-   * @brief Tests one fixed physical device capability.
-   * @param device Device label to test.
-   * @return True when the process owns that capability.
-   * @throws Nothing.
-   */
-  virtual bool is_device_available(Device device) const noexcept = 0;
-
   /**
    * @brief Publishes worker and epoch identity on the calling thread.
    * @param worker_id Private worker id, or -1 when unavailable.

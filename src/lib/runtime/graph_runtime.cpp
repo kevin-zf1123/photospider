@@ -1,9 +1,8 @@
-// Photospider kernel: GraphRuntime implementation (Objective-C++)
+// Photospider kernel: GraphRuntime implementation
 #include "runtime/graph_runtime.hpp"
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <limits>
@@ -18,10 +17,6 @@
 #include "compute/realtime_proxy_graph.hpp"
 #include "compute/run_lifecycle_registry.hpp"
 #include "photospider/core/graph_error.hpp"
-
-#ifdef __APPLE__
-#import <Metal/Metal.h>
-#endif
 
 namespace ps {
 namespace {
@@ -130,20 +125,6 @@ thread_local int GraphRuntime::tls_execution_context_worker_id_ = -1;
 /** @copydoc GraphRuntime::tls_execution_context_epoch_ */
 thread_local uint64_t GraphRuntime::tls_execution_context_epoch_ = 0;
 
-/**
- * @brief Owns private platform GPU objects for one graph runtime.
- * @note The type is complete only in this implementation and never crosses the
- *       private execution host-context boundary.
- */
-struct GraphRuntime::GpuContext {
-#ifdef __APPLE__
-  /** @brief Runtime-owned default Metal device, or nil when unavailable. */
-  id<MTLDevice> device;
-  /** @brief Runtime-owned Metal command queue, or nil without a device. */
-  id<MTLCommandQueue> commandQueue;
-#endif
-};
-
 /** @copydoc GraphRuntime::GraphRuntime */
 GraphRuntime::GraphRuntime(const Info& info)
     : info_(info),
@@ -183,18 +164,6 @@ GraphRuntime::GraphRuntime(const Info& info)
   if (!model_.cache_root.empty()) {
     std::filesystem::create_directories(model_.cache_root);
   }
-
-#ifdef __APPLE__
-  gpu_context_ = std::make_unique<GpuContext>();
-  gpu_context_->device = MTLCreateSystemDefaultDevice();
-  if (gpu_context_->device) {
-    gpu_context_->commandQueue = [gpu_context_->device newCommandQueue];
-  } else {
-    fprintf(stderr, "Warning: Could not create default Metal device.\n");
-  }
-#else
-  // On non-Apple platforms, gpu_context_ remains null
-#endif
 }
 
 /** @copydoc GraphRuntime::~GraphRuntime */
@@ -236,24 +205,6 @@ int GraphRuntime::this_worker_id() noexcept {
   return tls_execution_context_worker_id_;
 }
 
-/** @copydoc GraphRuntime::get_metal_device */
-id GraphRuntime::get_metal_device() noexcept {
-#ifdef __APPLE__
-  return gpu_context_ ? gpu_context_->device : nil;
-#else
-  return nullptr;
-#endif
-}
-
-/** @copydoc GraphRuntime::get_metal_command_queue */
-id GraphRuntime::get_metal_command_queue() noexcept {
-#ifdef __APPLE__
-  return gpu_context_ ? gpu_context_->commandQueue : nil;
-#else
-  return nullptr;
-#endif
-}
-
 /** @copydoc GraphRuntime::realtime_proxy_graph */
 compute::RealtimeProxyGraph& GraphRuntime::realtime_proxy_graph() {
   return *realtime_proxy_graph_;
@@ -285,24 +236,6 @@ void GraphRuntime::set_execution_trace_context(int worker_id,
 void GraphRuntime::clear_execution_trace_context() noexcept {
   tls_execution_context_worker_id_ = -1;
   tls_execution_context_epoch_ = 0;
-}
-
-/** @copydoc GraphRuntime::is_device_available */
-bool GraphRuntime::is_device_available(Device device) const noexcept {
-  switch (device) {
-    case Device::CPU:
-      return true;
-    case Device::GPU_METAL:
-#ifdef __APPLE__
-      return gpu_context_ != nullptr && gpu_context_->device != nil;
-#else
-      return false;
-#endif
-    case Device::GPU_CUDA:
-    case Device::ASIC_NPU:
-      return false;
-  }
-  return false;
 }
 
 /** @copydoc GraphRuntime::set_task_context */

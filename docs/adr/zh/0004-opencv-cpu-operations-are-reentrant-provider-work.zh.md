@@ -44,9 +44,11 @@ callback 可能活跃时重新配置 OpenCV threading。
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` 时才会包含该 provider。禁用时，依赖中立 core
 operation 与 v2 registrar 仍然可用；启用时，v2 provider 可以替换相同 registry slot。
 
-当 provider 确实拥有共享可变状态时，同步仍由 provider 局部负责。因此 Metal Perlin provider
-会保留其 DSO-private mutex，用于保护共享 Metal device、command queue、pipeline 与 buffer
-lifecycle。该锁不是 OpenCV operation lock、scheduler exclusivity flag 或跨 provider 契约。
+真实共享可变状态的同步仍由 backend owner 局部负责。进程 Metal executor（而不是 Perlin
+provider）会串行化其共享 command queue、invocation allocator counter 与 pipeline cache。
+Provider 只在 callback 返回前借用这些 resource，不保留 static native state 或 DSO-private
+executor mutex。该 executor lock 不是 OpenCV operation lock、scheduler exclusivity flag 或跨
+provider 契约。
 
 本决策不增加 scheduler `exclusive` metadata，也不修改 public operation/plugin ABI。第三方
 provider 仍自行负责可重入性与 backend state。

@@ -305,7 +305,7 @@ PreparedComputeDispatch ComputeTaskDispatcher::prepare(
 
   observe_dispatch_cancellation(state->lifecycle_lease);
   std::vector<Device> available_devices =
-      execution_service.available_devices(host, execution_type);
+      execution_service.available_devices(execution_type);
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal_, node_id, std::move(available_devices), false,
       !request.force_recache);
@@ -485,7 +485,7 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
   std::vector<Device> available_devices =
       execution_service != nullptr && host != nullptr &&
               execution_type != nullptr
-          ? execution_service->available_devices(*host, *execution_type)
+          ? execution_service->available_devices(*execution_type)
           : task_runtime.available_devices();
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
       graph, traversal_, node_id, std::move(available_devices), true,

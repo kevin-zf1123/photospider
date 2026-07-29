@@ -24,15 +24,6 @@
 #include "photospider/core/graph_error.hpp"
 #include "runtime/graph_event_service.hpp"
 
-#ifdef __OBJC__
-@protocol MTLDevice;
-@protocol MTLCommandQueue;
-#else
-/** @brief Opaque Objective-C object placeholder for pure C++ translation units.
- */
-typedef void* id;
-#endif
-
 namespace ps {
 
 class GraphRuntime;
@@ -235,7 +226,7 @@ class GraphRuntime : public ExecutionHostContext {
   };
 
   /**
-   * @brief Creates all graph-owned model, observation, and platform resources.
+   * @brief Creates all graph-owned model, observation, and route resources.
    * @param info Filesystem inputs and internal observation-ring test seams.
    * @throws std::invalid_argument if an observation capacity or initial
    *         sequence is zero.
@@ -255,8 +246,9 @@ class GraphRuntime : public ExecutionHostContext {
    * @note The compute-request lane first stops admission, drains accepted work,
    *       and joins its worker while graph-state remains available for final
    *       commit. Graph-state is then drained and joined before route values,
-   *       GPU state, traces, and the model are released. Physical workers and
-   *       route adapters remain owned by the Host-lifetime ExecutionService.
+   *       traces, and the model are released. Physical workers, device
+   *       executors, and route adapters remain owned by the Host-lifetime
+   *       ExecutionService.
    *       An executor join invariant failure terminates rather than tearing
    *       down state beneath a live task.
    */
@@ -566,15 +558,6 @@ class GraphRuntime : public ExecutionHostContext {
   void clear_execution_trace();
 
   /**
-   * @brief Reports a physical device capability to private execution routes.
-   * @param device Stable public device label.
-   * @return True for CPU and for an initialized Metal device on Apple hosts.
-   * @throws Nothing.
-   * @note No native device or command-queue handle crosses this boundary.
-   */
-  bool is_device_available(Device device) const noexcept override;
-
-  /**
    * @brief Publishes execution worker identity into thread-local state.
    * @param worker_id Execution worker id, or -1 when unavailable.
    * @param epoch Active task epoch.
@@ -637,22 +620,6 @@ class GraphRuntime : public ExecutionHostContext {
    * @throws Nothing.
    */
   static void clear_execution_trace_context() noexcept;
-
-  /**
-   * @brief Returns the private native Metal device for internal compute code.
-   * @return Borrowed Objective-C device, or null when unavailable.
-   * @throws Nothing.
-   * @note This native handle is never exposed through `ExecutionHostContext`.
-   */
-  id get_metal_device() noexcept;
-
-  /**
-   * @brief Returns the private native Metal command queue.
-   * @return Borrowed Objective-C command queue, or null when unavailable.
-   * @throws Nothing.
-   * @note This native handle never crosses the private execution boundary.
-   */
-  id get_metal_command_queue() noexcept;
 
   /**
    * @brief Copies one intent's private route binding.
@@ -751,12 +718,6 @@ class GraphRuntime : public ExecutionHostContext {
   static thread_local int tls_execution_context_worker_id_;
   /** @brief Host-observed execution epoch for the calling thread. */
   static thread_local uint64_t tls_execution_context_epoch_;
-
-  /** @brief Private platform device/queue ownership hidden from policy plugins.
-   */
-  struct GpuContext;
-  /** @brief Runtime-owned native GPU state, or null on unsupported hosts. */
-  std::unique_ptr<GpuContext> gpu_context_;
 
   /** @brief Serializes execution-trace publication and page observation. */
   mutable std::mutex log_mutex_;

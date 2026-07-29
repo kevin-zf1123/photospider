@@ -24,8 +24,9 @@ Host. It owns:
 - the bounded ready store and its complete ready-byte charges;
 - one Interactive and one Throughput policy binding;
 - process fairness and three-to-one class arbitration state;
-- the fixed CPU worker pool, one service-owned Metal worker lane, and private
-  `serial_debug` and `gpu_pipeline` routes;
+- the fixed CPU worker pool, one service-owned Metal worker lane, a fixed
+  `DeviceExecutorRegistry`, and private `serial_debug` and `gpu_pipeline`
+  routes;
 - Host-authored candidate, Graph, Run, entry-version, enqueue, snapshot, and
   selection identities;
 - ready-to-execution resource exchange, exact implementation/exclusive-key
@@ -232,7 +233,7 @@ The route vocabulary is closed:
 | --- | --- |
 | `cpu` | Host-lifetime fixed CPU worker pool with reusable multi-entry execution; exposes CPU only |
 | `serial_debug` | CPU worker zero with one callback in flight; exposes CPU only |
-| `gpu_pipeline` | the same fixed CPU pool for CPU fallback plus one service-owned Metal lane; exposes Metal then CPU when the Host reports Metal, otherwise CPU only |
+| `gpu_pipeline` | the same fixed CPU pool for CPU fallback plus one service-owned Metal lane; exposes Metal then CPU when the fixed registry owns a Metal executor, otherwise CPU only |
 
 `heterogeneous` is not an alias. Execution routes are not plugins and cannot be
 scanned or loaded.
@@ -270,9 +271,9 @@ each callable/DSO lease and complete service root without entering provider
 code; only an installed Run may perform reserved start and invoke the provider,
 after which output-dependent dirty planning remains Run-owned. Every ready
 submission carries the frozen device, and `ExecutionService` rejects a device
-outside the configured route/Host inventory before publishing the Run.
-CPU submissions enter the
-fixed CPU pool; Metal submissions enter the single GPU lane. Both lanes share
+outside the configured route/registry inventory before publishing the Run.
+CPU submissions enter the fixed CPU pool; Metal submissions enter the single
+GPU lane and then the matching registry executor. Both lanes share
 the common ready store, policy decision, reserved-start transaction, Host
 ledger, Run maximum-parallelism grant, operation implementation/key gates,
 cancellation, completion, exception, reuse, shutdown, and drainage rules; no
@@ -292,10 +293,19 @@ self-reference. Fence state and the source-private `ValueTransferTask` own no
 worker or queue. The repository fake executor is a deterministic, thread-safe
 test mechanism only; C++17 mutex/condition-variable rendezvous exercises real
 registration/publication, cancellation/callback-entry, and
-transfer-destruction/callback-entry races without sleeps. #84 will register
-process-owned physical device executors, and #85 will add general
-access/residency/visibility transfer planning without moving those owners into
-Value or policy state.
+transfer-destruction/callback-entry races without sleeps.
+
+V-7 adds a source-private, fixed `DeviceExecutorRegistry` to the same
+`ExecutionService` domain. When the repository Metal plugin is enabled, the
+Apple entry owns one device and command queue, supplies an invocation-scoped
+texture/buffer allocator, and keeps a validated process-lifetime pipeline
+cache. Reserved-start workers enter that
+executor synchronously and invoke the already selected operation through the
+same Run completion/exception path. The Metal Perlin provider now borrows those
+resources and keeps no static native state; `GraphRuntime`, `Kernel`, operation
+metadata, and policy state expose no native handle or capability hook. V-7
+adds no general transfer/residency/coherency model and no device-memory ledger:
+those remain #85 and #86 respectively.
 
 ## Host, CLI, and IPC Surfaces
 

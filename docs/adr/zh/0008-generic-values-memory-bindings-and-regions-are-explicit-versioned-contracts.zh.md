@@ -2,15 +2,16 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-6
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-7
 切片：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
 以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP；V-5
 operation-metadata routing 与有界 V-6 ReadyFence、pending CPU Value 和显式 fake-device
-Value-copy 证明也已成为当前行为。
-`ImageBuffer`、`DataType`、`Device`、`ParameterMap` 与 operation plugin ABI v2 仍是各自
+Value-copy 证明也已成为当前行为。V-7 新增一套 source-private 的进程级 device-executor
+registry，并让仓库 Metal Perlin operation 经过其自有 queue、invocation allocator 与 pipeline
+cache。`ImageBuffer`、`DataType`、`Device`、`ParameterMap` 与 operation plugin ABI v2 仍是各自
 角色边缘上的兼容契约；本 ADR 中尚未实现的部分仍是演进目标。
 
-Issue #78 批准了本契约。Issue #79 至 #83 交付了有界的 V-2 至 V-6 实现切片；Issue #84
+Issue #78 批准了本契约。Issue #79 至 #84 交付了有界的 V-2 至 V-7 实现切片；Issue #85
 至 #90 仍是彼此独立的实现切片。合成的
 `VariableSampleField` 证明与可选 OpenEXR Deep provider 仍是彼此独立的后续 change；
 本决策不实现二者。
@@ -260,9 +261,16 @@ capability 与 native owner 都保留定义它们的 provider-generation lease�
 
 已实现的 V-6 子集落实了 fence state machine、executor-enqueued wait、Value read gating 与
 source-private pending CPU producer。其 source-private `ValueTransferTask` 只会在 source
-ready 后复制一个已验证的 CPU envelope，并发布独立 destination。该证明不包含 `DeviceId`、
-device registry、native queue、通用 `AccessPlan`、residency replica 或 stale-completion
-arbitration：#84 负责真实 executor registration，#85 负责这些通用 access 与 transfer 语义。
+ready 后复制一个已验证的 CPU envelope，并发布独立 destination。
+
+已实现的 V-7 子集在 `ExecutionService` 下增加一套单独的 source-private
+`DeviceExecutorRegistry`。在仓库 Metal plugin 已启用的 profile 中，其中的 Apple executor
+拥有一个 native device 与 queue、一个 callback-scoped texture/buffer allocator，以及经过校验的
+持久 pipeline cache。经过 reserved start 的 work 会在该借用 context 内调用 Metal Perlin
+provider，并返回独立的 CPU compatibility image。
+该证明仍不包含通用 `DeviceId`、`AccessPlan`、residency replica、coherency/visibility model、
+bidirectional transfer 或 stale-completion arbitration；这些通用 access 与 transfer 语义属于
+#85，device-memory 与 scratch 核算属于 #86。
 
 `ComputeRun` 会保留 request-local 不可变 Value 及其 authoritative binding。Settlement 会核算
 每个 output 的 terminal fence state、provider-generation lease、access obligation 与

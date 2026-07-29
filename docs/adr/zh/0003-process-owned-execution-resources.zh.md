@@ -20,6 +20,9 @@ authority。Issue #75 移除拥有 worker 的 scheduler SDK/ABI，并增加纯 C
 binding replacement、generation-local sticky fault、reserved start 与封闭的私有 execution route，
 其中包含一个固定 CPU pool 和一个私有 Metal lane。Issue #76 已实现 lifecycle registry、单调
 Graph close、显式 process execution shutdown、精确 settlement 与 source-private telemetry。
+Issue #84 移除了 per-Graph native Metal ownership，并在 `ExecutionService` 中安装固定的
+`DeviceExecutorRegistry`；其中的 Metal executor 拥有一个 device、command queue、
+invocation allocator 与持久 pipeline cache，并且只在 reserved start 后进入选中的 operation。
 Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
 取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 
@@ -29,14 +32,15 @@ Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详
 `cpu`、`serial_debug` 与 `gpu_pipeline`；其物理 worker、queue、device routing、completion
 与 exception 都保持为 Host execution module 的私有实现。Policy binding 是 process/service state，
 绝不属于 Graph state。Service 根据 composition-root configuration 冻结一个 CPU worker 数量，
-拥有一个固定 Metal worker lane，并为每个
+拥有一个固定 Metal worker lane 与一个不可变 device-executor registry，并为每个
 Run 保持隔离的 completion/failure/trace state，并允许来自多个 Graph 的独立 HP 与 RT Run 重叠。
 
-规范 device inventory 感知 route。`cpu` 与 `serial_debug` 只暴露 CPU；Host 报告 Metal 时，
-`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与 connected-preflight
-planning 会在准入前冻结选中的 implementation 与 device。CPU 与 Metal work 使用彼此独立的固定
-lane，但共用 ready store、Run parallelism ceiling、ledger grant、cancellation、completion、
-exception、reuse 与 drainage state。
+规范 device inventory 感知 route。`cpu` 与 `serial_debug` 只暴露 CPU；固定 registry 包含可用
+Metal executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与
+connected-preflight planning 会在准入前冻结选中的 implementation 与 device。CPU 与 Metal work
+使用彼此独立的固定 lane，但共用 ready store、Run parallelism ceiling、ledger grant、
+cancellation、completion、exception、reuse 与 drainage state。Reserved start 后，非 CPU work
+会同步进入匹配的 registry executor；Graph 与 policy object 都不会取得 native handle。
 
 当前软件使用每个 Host ledger 默认的 32-slot CPU 维度作为 Run execution grant。固定 service
 worker 与 route machinery 属于基础设施。Retained Host memory、scratch、ready entry 与 ready byte
@@ -79,8 +83,13 @@ scalar candidate snapshot。
 - 有界 compute I/O executor；
 - plugin invocation adapter，由独立 `PluginRuntimeSupervisor` 负责 process、IPC、安全和故障隔离。
 
-当前 #75 切片实现 CPU executor 与一个由 service 拥有的 Metal lane。它不会暴露 device-executor
-API，也不会增加第二套 device-capacity ledger；后续 resource executor 仍属于目标架构。
+当前 #84 切片实现 CPU executor、一个由 service 拥有的 Metal lane，以及 source-private 的固定
+device-executor registry。在仓库 Metal plugin 已启用的 profile 中，Apple entry 会拥有并复用
+native device/queue 与经过校验的 pipeline cache，而每次 entry 都获得 invocation-scoped native
+allocator。它不增加 public
+device-executor API，也不增加第二套 device-capacity ledger。通用 CPU/GPU transfer、residency、
+coherency、visibility 与 stale-completion arbitration 仍属于 #85；device-memory 与 scratch
+核算仍属于 #86。
 
 拥有 worker 的 scheduler plugin ABI、SDK target、`IScheduler` hierarchy 与 per-Graph 物理 owner
 已经通过一次完整的破坏性迁移被移除。没有留下 compatibility adapter 或 forwarding layer。

@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted and implemented through Issue #76. Issues #70 through #76 are current software
-behavior for the CPU execution/resource, policy, and private-route slice: the
+Accepted and implemented through Issue #84. Issues #70 through #76 and #84 are
+current software behavior for the execution/resource, policy, private-route,
+and first native-device slice: the
 embedded composition root injects one fixed `ExecutionService`; built-in CPU
 HP, RT, connected-parameter preflight, and dirty source/downstream work crosses
 a move-only `ReadyTaskSubmission` boundary. Independent Runs from multiple
@@ -41,6 +42,10 @@ sticky generation-local faults, reserved start, and closed private execution
 routes. Issue #76 adds the process-owned `RunLifecycleRegistry`, Graph lifetime
 anchors/leases, monotonic Graph close, explicit process execution shutdown,
 exact lifecycle/resource settlement, and source-private bounded telemetry.
+Issue #84 adds a fixed `DeviceExecutorRegistry` to that same process domain,
+removes native Metal ownership from `GraphRuntime`, and routes one real Metal
+operation through an executor-owned command queue, invocation allocator, and
+persistent pipeline cache after the existing reserved-start transaction.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -56,9 +61,9 @@ owns none of their workers, ready queues, generations, completion adapters,
 exception publication, or ordering policy. Policy binding is process/service
 state, not Graph state.
 
-The explicitly injected service owns a direct fixed CPU worker pool and one
-private Metal worker lane. It freezes one resolved `[1,8]` CPU count before
-first use, accepts multiple active Runs,
+The explicitly injected service owns a direct fixed CPU worker pool, one
+private Metal worker lane, and one fixed device-executor registry. It freezes
+one resolved `[1,8]` CPU count before first use, accepts multiple active Runs,
 uses a policy-aware entry/byte-bounded ready store, and keeps completion, first
 exception, in-flight drainage, trace Host, and settlement isolated per Run.
 Its private ledger owns immutable composition limits and authority for complete
@@ -76,10 +81,12 @@ reserved-start, Run-lease, and completion path.
 
 Route-aware planning freezes the selected implementation and `Device` before
 admission. `cpu` and `serial_debug` expose CPU only; `gpu_pipeline` exposes
-Metal then CPU when the Host reports Metal, otherwise CPU only. CPU and Metal
-submissions enter distinct fixed lanes but share the Run grant and maximum-
-parallelism ceiling. No Graph, policy binding, or operation provider owns a
-lane or a second device-capacity authority.
+Metal then CPU when the fixed registry contains a Metal executor, otherwise
+CPU only. CPU and Metal submissions enter distinct fixed lanes but share the
+Run grant and maximum-parallelism ceiling. After reserved start, a Metal
+submission enters that registry executor synchronously and borrows its native
+resources only through callback return. No Graph, policy binding, or operation
+provider owns a lane, native resource, or second device-capacity authority.
 
 ADR 0003 chose the direction—request-owned `ComputeRun`, process-owned
 `ExecutionService`, host-owned `ResourceLedger`, and policy-only comparison
@@ -291,9 +298,9 @@ path may not bypass fairness, cancellation, or Run isolation.
 | --- | --- | --- |
 | Request / `RunGroup` | group identity, child observation leases, sibling gate, cancellation fan-out, aggregate outcome/error selection, caller promise | child plans/dispatchers/terminal arbiters, cross-domain dependencies, Graph state, process workers, resource reservations |
 | Request / `ComputeRun` | Run identity, immutable inputs, request plan and dispatcher state, staged/temporary output, exception/cancellation/terminal state, Run reservations, commit policy, Run telemetry | Graph state, process workers, ready-store policy, resource mint authority |
-| `GraphRuntime` | `GraphModel`, graph-scoped state, graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit validation/publication, graph events, stable graph-instance identity, copied HP/RT route ids and generations, graph-lifetime anchor, platform/session metadata | Runs, admitted-Run indexes, CPU/device/I/O/plugin workers, process ready store, admission, `ResourceLedger`, `PolicyRegistry`, policy bindings, physical execution routes |
+| `GraphRuntime` | `GraphModel`, graph-scoped state, graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit validation/publication, graph events, stable graph-instance identity, copied HP/RT route ids and generations, graph-lifetime anchor, platform/session metadata | Runs, admitted-Run indexes, CPU/device/I/O/plugin workers, native devices/queues/allocators/caches, process ready store, admission, `ResourceLedger`, `PolicyRegistry`, policy bindings, physical execution routes |
 | `ExecutionService::RunLifecycleRegistry` | one process admission fence, service accepting/stopping state, graph-indexed open/closing admission rows, pending admission candidates, graph-indexed admitted `RunLease` entries, and process-wide Run enumeration | Run plans, dispatchers, terminal arbitration, staged output, Graph state, resource minting, execution policy |
-| Process `ExecutionService` | the lifecycle registry, a fixed CPU pool, one private Metal lane and later resource executors, private serial-debug/GPU routes, policy-aware bounded ready storage, policy-binding state, Run/resource admission, policy-result validation, reserved start, execution exception fences, completion routing | task planning/dependencies, Graph/document persistence, cache authority, dirty propagation, visible commit, Graph state |
+| Process `ExecutionService` | the lifecycle registry, a fixed CPU pool, one private Metal lane, a fixed `DeviceExecutorRegistry` with process-owned native queue/allocator/pipeline-cache resources, private serial-debug/GPU routes, policy-aware bounded ready storage, policy-binding state, Run/resource admission, policy-result validation, reserved start, execution exception fences, completion routing | task planning/dependencies, Graph/document persistence, cache authority, dirty propagation, visible commit, Graph state, general residency/coherency/transfer planning, device-memory accounting |
 | `ResourceLedger` | checked composition limits, transactional reservations, validated child grants, exact-once release accounting | ordering policy, task dependencies, Graph state, third-party token delegation |
 | Process `PolicyRegistry` | immutable built-in/DSO policy type records, validated pure-C callback tables, registry visibility, DSO leases | service bindings/contexts, ready work, workers, resources, Graph/Run state, completion or lifecycle authority |
 | Policy binding | ranking immutable Host-authored candidate descriptors within service-owned binding state | workers, physical ready store, Runs, Graph state, budget, reservations/grants/tokens, native device handles, executors, completion or lifecycle authority |
@@ -475,10 +482,10 @@ forwarding API, or old worker-count grant.
 
 Every planning path freezes the selected operation callable and device before
 Run publication. The service rejects a device outside the configured route and
-Host inventory before installing active Run state. CPU fallback uses the fixed
-pool; Metal uses the single GPU lane. Completion, exception, cancellation,
-reuse, shutdown, and drainage retire their shared ledger and Run state exactly
-once.
+fixed registry inventory before installing active Run state. CPU fallback uses
+the fixed pool; Metal uses the single GPU lane and then the matching registry
+executor. Completion, exception, cancellation, reuse, shutdown, and drainage
+retire their shared ledger and Run state exactly once.
 
 ### Revision, staged commit, cancellation, and supersession
 

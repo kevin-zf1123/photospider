@@ -613,12 +613,19 @@ ImageRect/TensorSlice execution through the exact core dense path. V-5 routes
 CPU implementation metadata and checked resource demand.
 V-6 now adds a dependency-neutral ReadyFence/Value readiness contract and one
 explicit source-private CPU Value-copy task proved with a deterministic fake
-device executor. Their exact behavior is documented in
+device executor. V-7 now adds a fixed source-private
+`DeviceExecutorRegistry` to the process execution domain and runs the
+repository Metal Perlin operation through its owned device/queue,
+invocation-scoped allocator, and persistent pipeline cache. Their exact
+behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
 [Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
-[Kernel Cache Model](../kernel-architecture/Cache-Model.md). The complete model
-below is the accepted target; only the explicit V-2 through V-6 subset called
+[Kernel Cache Model](../kernel-architecture/Cache-Model.md), with execution
+ownership in
+[Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
+and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
+complete model below is the accepted target; only the explicit V-2 through V-7 subset called
 out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
@@ -654,7 +661,7 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-6 subset is deliberately narrower:
+The implemented V-2 through V-7 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
@@ -683,6 +690,13 @@ The implemented V-2 through V-6 subset is deliberately narrower:
   BufferHandle and checked-view payload access; a source-private
   `ValueTransferTask` prepares a fresh pending CPU allocation and copies the
   validated envelope only as explicit queued work after source readiness;
+- source-private `DeviceExecutorRegistry` composition owns fixed non-CPU
+  executors under `ExecutionService`; in the enabled Apple repository-plugin
+  profile, the Metal executor owns one reusable native device/queue and
+  validated pipeline cache, retains
+  callback-scoped textures/buffers through an invocation allocator, and enters
+  one selected Perlin operation after reserved start without exposing native
+  handles through Graph, policy, metadata, or public Host state;
 - `image_process:invert_dense` separates exact descriptor-only inference from
   stride-aware unsigned-8 execution, reuses a sealed input Value when present,
   and publishes the exact sealed result revision plus an independent
@@ -703,10 +717,13 @@ The implemented V-2 through V-6 subset is deliberately narrower:
   TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
   and same-key plugin replacement cannot inherit that source-private contract.
 
-V-6 still has no DataSpec, real device registry/identity, native executor,
+V-7 still has no DataSpec, general `DeviceId`, public device registry,
 general AccessPlan, residency or visibility model, bidirectional device
-transfer, stale-completion arbitration, quantization, packed element, provider
-ABI v3, or general named graph Value outputs. ImageBuffer remains the
+transfer, stale-completion arbitration, device-memory/scratch ledger
+dimensions, quantization, packed element, provider ABI v3, or general named
+graph Value outputs. Its first native executor is source-private and the
+Perlin callback waits synchronously before returning a CPU compatibility
+image. ImageBuffer remains the
 compatibility representation for operation ABI v2, tiled writes, codecs, and
 Host surfaces.
 
@@ -797,6 +814,11 @@ links, types, symbols, package requirements, and transitive dependencies from
 the kernel, public ABI, and dependency-disabled product.
 
 ## Heterogeneous Executors
+
+A current V-7 Metal executor deliberately proves only process ownership,
+registry dispatch, queue/allocator/cache reuse, and provider-state removal.
+General asynchronous completion, transfer queues, residency, stale-result
+arbitration, and device-resource ledger dimensions remain later slices.
 
 A GPU executor is not a second ordinary CPU worker pool. Each physical device
 executor owns its native queue/stream, allocator, in-flight limit, memory and

@@ -191,9 +191,10 @@ The kernel recognizes two formal compute intents:
 The intent model is formal. `ComputeService` remains the compute facade and
 planning boundary. Private route metadata selects the physical path. The `cpu`
 and `serial_debug` routes expose CPU only. `gpu_pipeline` exposes Metal then CPU
-when the Host reports Metal, and CPU only otherwise. CPU, serial-debug, GPU,
-connected-parameter preflight, full, and dirty phases all use the fixed
-injected service; GraphRuntime stores only copied route ids and generations.
+when the fixed service registry owns a Metal executor, and CPU only otherwise.
+CPU, serial-debug, GPU, connected-parameter preflight, full, and dirty phases
+all use the fixed injected service; GraphRuntime stores only copied route ids
+and generations and owns no native device resource.
 
 HP/RT dual path semantics belong to realtime intent, not to the parallel
 execution mode. In realtime mode, HP computes the full-size authoritative node
@@ -246,10 +247,12 @@ fixed workers, logical tasks, and the Run's optional positive maximum
 parallelism; ready entries and bytes still cover every logical task.
 Initial and dependent entries hold child ready grants; reserved start exchanges
 that authority for CPU/memory/scratch before entering the submission's fixed
-CPU or Metal lane. The service rejects a device outside the configured
-route/Host inventory before Run publication. Failure, queue purge, and
-successful settlement release exact capacity. The fixed lanes never resize
-per Run, and CPU/Metal callbacks share the Run's admitted parallelism ceiling.
+CPU or Metal lane. A Metal-lane start then enters the matching fixed registry
+executor and borrows its queue, invocation allocator, and pipeline cache
+through callback return. The service rejects a device outside the configured
+route/registry inventory before Run publication. Failure, queue purge, and
+successful settlement release exact capacity. The fixed lanes never resize per
+Run, and CPU/Metal callbacks share the Run's admitted parallelism ceiling.
 Execution inspection and replacement share the per-graph
 compute-request lane with compute, so copied route generations remain coherent.
 Replacement validates one closed-vocabulary route and publishes a new nonzero

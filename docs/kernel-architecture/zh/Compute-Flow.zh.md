@@ -149,10 +149,10 @@ work 协调二者，不会创建 cross-domain task dependency。
 | `RealTimeUpdate` | 交互式 realtime 更新，需要 dirty ROI，并启用 HP/RT 双路径。 |
 
 意图模型是正式的。`ComputeService` 仍是 compute facade 和 planning boundary。私有 route
-metadata 会选择物理路径。`cpu` 与 `serial_debug` route 只暴露 CPU；Host 报告 Metal 时，
-`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。CPU、serial-debug、GPU、
-connected-parameter preflight、full 与 dirty 阶段都使用固定注入 service；GraphRuntime 只保存
-复制的 route ID 与 generation。
+metadata 会选择物理路径。`cpu` 与 `serial_debug` route 只暴露 CPU；固定 service registry
+拥有 Metal executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。CPU、
+serial-debug、GPU、connected-parameter preflight、full 与 dirty 阶段都使用固定注入 service；
+GraphRuntime 只保存复制的 route ID 与 generation，不拥有 native device resource。
 
 HP/RT 双路径语义属于 realtime intent，而不是 parallel 执行模式。Realtime 模式下，HP
 计算完整尺寸的权威 node 工作，RT 计算降采样代理版本，目前为宽高各四分之一，也就是像素数的
@@ -195,10 +195,11 @@ Run 发布前，service 会原子预留完整且经过检查的 CPU、retained-m
 与 ready-byte vector。CPU slot 及 uniform per-task retained/scratch envelope 使用固定 worker 数、
 逻辑 task 数与 Run 可选正值 maximum parallelism 三者的最小值；ready entry 与 byte 仍覆盖每个
 逻辑 task。Initial 与 dependent entry 持有 child ready grant；reserved start 会在进入 submission
-所冻结的 CPU 或 Metal lane 前，把该 authority 交换为 CPU/memory/scratch。如果 device 不在已配置
-route/Host inventory 中，service 会在发布 Run 前拒绝它。Failure、queue purge 与成功 settlement
-都会精确释放容量。固定 lane 绝不会按 Run 调整大小，CPU/Metal callback 共用该 Run 已准入的
-parallelism ceiling。Execution inspection 与
+所冻结的 CPU 或 Metal lane 前，把该 authority 交换为 CPU/memory/scratch。Metal-lane start
+随后会进入匹配的固定 registry executor，并在 callback 返回前借用其 queue、invocation allocator
+与 pipeline cache。如果 device 不在已配置 route/registry inventory 中，service 会在发布 Run
+前拒绝它。Failure、queue purge 与成功 settlement 都会精确释放容量。固定 lane 绝不会按 Run
+调整大小，CPU/Metal callback 共用该 Run 已准入的 parallelism ceiling。Execution inspection 与
 replacement 和 compute 共用 per-graph compute-request lane，使复制的 route generation 保持
 一致。Replacement 会校验封闭词汇中的 route，并在一个 transaction 中发布新的非零
 generation；失败保留旧 binding。

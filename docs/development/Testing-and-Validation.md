@@ -629,10 +629,11 @@ through reserved start.
 `test_physical_execution_routes` owns allocation-free route/lane state:
 CPU/Metal overlap, Metal single-flight, serial worker-zero single-flight,
 shutdown rejection, and committed-work drainage. `test_policy_execution`
-uses a deterministic fake-Metal Host to prove the canonical per-route device
-inventory, rejection before Run publication, distinct fixed CPU/GPU workers,
-Metal exception publication/recovery, route reuse, cancellation, and reserved-
-start rollback without candidate/version ABA or leaked grants. It also proves
+uses an injected deterministic fake Metal executor to prove the canonical
+registry-derived per-route device inventory, rejection before Run publication,
+distinct fixed CPU/GPU workers, exact executor entry, Metal exception
+publication/recovery, route reuse, cancellation, and reserved-start rollback
+without candidate/version ABA or leaked grants. It also proves
 that a grant-blocked high-priority Run A cannot starve lower-priority independent
 Run B, that A's ready entry later executes exactly once, and that a sole blocked
 candidate has bounded policy-selection retries and wakes on cancellation.
@@ -647,6 +648,14 @@ not removed or committed for migration in this phase. `Issue75DeviceRouting.*` i
 `test_compute_run`
 proves that full HP, dirty HP/RT, and connected preflight freeze the chosen
 Metal implementation/device and use CPU fallback when Metal is absent.
+`test_device_executor_registry` owns fixed-slot validation, exact dispatch,
+borrowed TLS context restoration, provider-exception identity, and copied
+diagnostics without a platform SDK. On Apple with the repository operation
+plugin enabled,
+`test_metal_device_executor` runs the real repository Perlin operation twice
+through one `ExecutionService`, then proves queue availability, two executor
+entries, six retired invocation allocations, one reused pipeline, CPU-owned
+outputs, the dedicated Metal worker id, and an empty settled ledger.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
 parsing and exact Host application. `test_host_adapter` loads real operation
@@ -670,12 +679,14 @@ Run the focused policy/execution boundary with:
 ```bash
 cmake --build build \
   --target test_policy_registry test_policy_execution \
-  test_physical_execution_routes test_compute_run test_resource_admission \
+  test_physical_execution_routes test_device_executor_registry \
+  test_compute_run test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
+./build/tests/test_device_executor_registry
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -688,6 +699,8 @@ cmake --build build \
   --gtest_filter='IpcDaemonExecution.*:IpcDaemonPolicy.*'
 ctest --test-dir build --output-on-failure \
   -R '^(GraphCliPluginComputeSmoke|StaticProductConsumerSmoke)$'
+# Apple with PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=ON:
+./build/tests/test_metal_device_executor
 ```
 
 Focused companion regressions own the remaining boundaries:

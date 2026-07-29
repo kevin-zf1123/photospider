@@ -42,6 +42,7 @@
 #include "runtime/graph_runtime.hpp"
 #include "support/cache_test_dependencies.hpp"
 #include "support/execution_service_test_access.hpp"
+#include "support/fake_device_executor.hpp"
 #include "support/graph_model_test_access.hpp"
 #include "support/graph_revision_test_access.hpp"
 #include "support/scoped_execution_graph_lifecycle.hpp"
@@ -852,35 +853,6 @@ class ScopedResourceRuntimeDirectory final {
 };
 
 /**
- * @brief GraphRuntime test double with deterministic fake Metal capability.
- *
- * @throws Standard GraphRuntime construction exceptions unchanged.
- * @note The runtime still owns real graph, trace, route, and proxy state. Only
- * capability discovery is overridden; no native Metal object is fabricated.
- */
-class FakeMetalGraphRuntime final : public GraphRuntime {
- public:
-  /**
-   * @brief Constructs a runtime with controlled fake Metal availability.
-   * @param info Ordinary graph-runtime ownership configuration.
-   * @param metal_available Whether `GPU_METAL` is reported available.
-   * @throws Standard GraphRuntime construction exceptions unchanged.
-   */
-  FakeMetalGraphRuntime(const Info& info, bool metal_available)
-      : GraphRuntime(info), metal_available_(metal_available) {}
-
-  /** @copydoc GraphRuntime::is_device_available */
-  bool is_device_available(Device device) const noexcept override {
-    return device == Device::CPU ||
-           (metal_available_ && device == Device::GPU_METAL);
-  }
-
- private:
-  /** @brief Controlled fake Metal capability. */
-  bool metal_available_ = false;
-};
-
-/**
  * @brief Deterministic owned-callback runtime for completion-isolation tests.
  *
  * The fixture accepts only the empty full-HP epoch marker, stores owned
@@ -1159,20 +1131,12 @@ class CompletionTrackingRuntime final : public ExecutionTaskRuntime {
  *
  * @throws std::bad_alloc when a copied trace snapshot cannot allocate.
  * @throws std::system_error when trace snapshot locking fails.
- * @note The fixture owns no Graph or cache state. Worker-facing callbacks
- * remain noexcept; trace recording failures are retained as an explicit test
- * signal.
+ * @note The fixture owns no Graph, cache, or device capability state.
+ * Worker-facing callbacks remain noexcept; trace recording failures are
+ * retained as an explicit test signal.
  */
 class ExecutionServiceHost final : public ExecutionHostContext {
  public:
-  /**
-   * @brief Creates a trace Host with optional fake Metal capability.
-   * @param metal_available Whether `GPU_METAL` is reported available.
-   * @throws Nothing.
-   */
-  explicit ExecutionServiceHost(bool metal_available = false) noexcept
-      : metal_available_(metal_available) {}
-
   /**
    * @brief Complete immutable execution trace tuple observed by one Host.
    *
@@ -1192,17 +1156,6 @@ class ExecutionServiceHost final : public ExecutionHostContext {
     /** @brief Opaque Run epoch active on that worker. */
     std::uint64_t epoch = 0;
   };
-
-  /**
-   * @brief Reports the fixture's only physical capability.
-   * @param device Capability requested by the execution service.
-   * @return True for CPU and for the configured fake Metal capability.
-   * @throws Nothing.
-   */
-  bool is_device_available(Device device) const noexcept override {
-    return device == Device::CPU ||
-           (metal_available_ && device == Device::GPU_METAL);
-  }
 
   /**
    * @brief Records one worker-context entry.
@@ -1320,9 +1273,6 @@ class ExecutionServiceHost final : public ExecutionHostContext {
   }
 
  private:
-  /** @brief Controlled fake Metal capability. */
-  bool metal_available_ = false;
-
   /** @brief Top-level CPU callback context entries. */
   std::atomic_int context_entries_{0};
 
@@ -3122,10 +3072,10 @@ TEST(OperationMetadataRouting,
  * @return Nothing; GoogleTest reports output, worker, or ledger failures.
  * @throws Filesystem, graph, planning, registry, or service exceptions
  * unchanged.
- * @note Each domain uses a fresh fake-Metal GraphRuntime and real source-first
- * service dispatch. Explicit force-recache keeps the seeded dirty product node
- * executable for the GPU-route assertion; HP cache state cannot seed RT
- * selection.
+ * @note Each domain uses a fresh GraphRuntime plus an injected fake process
+ * Metal executor and real source-first service dispatch. Explicit
+ * force-recache keeps the seeded dirty product node executable for the
+ * GPU-route assertion; HP cache state cannot seed RT selection.
  */
 TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
   ensure_issue75_device_operations_registered();
@@ -3146,7 +3096,7 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
     info.cache_root = directory.path() / "cache";
     info.hp_execution_type = "gpu_pipeline";
     info.rt_execution_type = "gpu_pipeline";
-    FakeMetalGraphRuntime runtime(info, true);
+    GraphRuntime runtime(info);
     GraphModel& graph = runtime.model();
     Node node = make_resource_dirty_product_node(503, "source");
     node.type = "issue75_device_route";
@@ -3162,7 +3112,10 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
     request.force_recache = true;
     GraphTraversalService traversal;
     GraphEventService events;
-    ExecutionService service(1U);
+    ExecutionService service(
+        ExecutionService::default_resource_limits(),
+        ::ps::testing::make_fake_metal_executor_registry());
+    service.configure_worker_count(1U);
     ComputeRun run(make_dirty_resource_submission(
         suffix, graph.revision().value(), 503, intent));
     ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
@@ -3193,8 +3146,9 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
  *
  * @return Nothing; GoogleTest reports snapshot, worker, or ledger failures.
  * @throws Graph, registry, service, or callback exceptions unchanged.
- * @note A fake-Metal Host drives the real preflight service path without a
- * native backend; the selected callback remains a normal host function.
+ * @note An injected fake Metal executor drives the real preflight service path
+ * without a native backend; the selected callback remains a normal host
+ * function.
  */
 TEST(Issue75DeviceRouting, ConnectedParameterPreflightUsesGpuLane) {
   ensure_issue75_device_operations_registered();
@@ -3211,8 +3165,10 @@ TEST(Issue75DeviceRouting, ConnectedParameterPreflightUsesGpuLane) {
   graph.add_node(std::move(target));
   graph.validate_topology();
   GraphTraversalService traversal;
-  ExecutionService service(1U);
-  ExecutionServiceHost host(true);
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           ::ps::testing::make_fake_metal_executor_registry());
+  service.configure_worker_count(1U);
+  ExecutionServiceHost host;
   ComputeRun run(
       make_registered_test_submission(graph, "issue75-preflight-gpu", 505));
 

@@ -6,9 +6,9 @@
  * kernel_compute.cpp, kernel_io_cache_facade.cpp,
  * kernel_inspection_facade.cpp, kernel_dirty_roi_facade.cpp, and
  * kernel_execution_facade.cpp. This file keeps ownership setup for Graph
- * runtimes, Graph listing/closing, Metal device access, and execution
- * configuration so the internal adapter-to-Kernel contract remains unchanged
- * while the implementation no longer concentrates every backend wrapper in one
+ * runtimes, Graph listing/closing, and execution configuration so the
+ * internal adapter-to-Kernel contract remains unchanged while the
+ * implementation no longer concentrates every backend wrapper in one
  * translation unit. Public frontend calls enter through `ps::Host` and the
  * embedded Host adapter.
  */
@@ -199,15 +199,6 @@ std::shared_ptr<const GraphRuntime> Kernel::acquire_runtime(
   std::lock_guard<std::mutex> lock(graphs_mutex_);
   const auto it = graphs_.find(name);
   return it == graphs_.end() ? nullptr : it->second;
-}
-
-/** @copydoc Kernel::get_metal_device */
-id Kernel::get_metal_device(const std::string& name) {
-  const auto runtime = acquire_runtime(name);
-  if (!runtime) {
-    return nullptr;
-  }
-  return runtime->get_metal_device();
 }
 
 /** @copydoc Kernel::policy_available_types */

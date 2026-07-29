@@ -43,7 +43,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_graph_internal` | Build-only `GraphModel` and graph-service helper. | `GraphModel` remains private under `src/lib/graph`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation v2 loader, adapter, and lifetime helper. | It is not exported. |
 | `photospider_policy_internal` | Build-only pure-C policy DSO registry/loader, built-in types, bindings, contexts, faults, and DSO leases. | It owns ordering contexts only; it owns no worker, queue, grant, Run, Graph, or execution route. |
-| `photospider_execution_internal` | Build-only private physical-execution accounting primitive. | `ResourceLedger` is compiled here; each composition-root `ExecutionService` owns its sole Host-authoritative instance. |
+| `photospider_execution_internal` | Build-only private physical-execution resources and accounting primitives. | `ResourceLedger`, the fixed `DeviceExecutorRegistry`, and platform executor factories are compiled here; each composition-root `ExecutionService` owns its sole Host-authoritative ledger and registry. |
 | `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, policy-aware ready store, reserved-start transaction, private route execution, runtime, and dirty-region helpers. | Runs and physical route mechanisms remain private. |
 | `photospider_host_internal` | Build-only embedded Host adapter and Kernel facade closure. | It is not exported and exposes no private execution owner to consumers. |
 | `photospider_operation_runtime` | Installable shared image-buffer/immutable Value and Region implementation. | It owns the sole process-wide allocation/revision minting authority plus dependency-neutral Region algebra, with no external package or back-link to the operation SDK. |
@@ -334,7 +334,7 @@ Current target shape:
 | `photospider_compute_internal` | Static | No | Compute planning, dirty-region state, dispatcher, policy-aware ready store, reserved start, and private-route execution. |
 | `photospider_plugin_host_internal` | Static | No | Host-side dynamic plugin loading and lifetime ownership. |
 | `photospider_policy_internal` | Static | No | Pure-C policy registry/loader, built-ins, bindings, contexts, faults, and DSO leases. |
-| `photospider_execution_internal` | Static | No | Private physical-execution accounting and `ResourceLedger` implementation. |
+| `photospider_execution_internal` | Static | No | Private `DeviceExecutorRegistry`, platform executor factories, physical-execution accounting, and `ResourceLedger` implementation. |
 | `photospider_host_internal` | Static | No | Embedded Host adapter and Kernel facade closure. |
 | `photospider_operation_runtime` | Shared | Yes | Public image-buffer/immutable Value and Region implementation plus sole process-wide allocation/revision minting authority, with no external-package dependency or SDK back-link. |
 | `photospider_operation_sdk` | Interface | Yes | Operation v2 headers and transitive `operation_runtime` link. |
@@ -418,10 +418,13 @@ CMake rules:
   component becomes not-found when its backend dependencies are unavailable
   without invalidating a required IPC component. Unknown required components,
   and required IPC from an IPC-disabled install, fail discovery.
-- On Apple, the static product carries system `Metal` and `Foundation` framework
-  link flags for Objective-C++ runtime sources. Metal operation plugins and
-  their `CoreImage`/`CoreVideo` dependencies remain optional runtime plugin
-  artifacts rather than public package requirements.
+- On Apple, when the repository Metal/OpenCV operation-plugin profile is
+  enabled, the static product carries system `Metal` and `Foundation`
+  framework link flags for the process-owned Metal executor. The Metal
+  operation plugin borrows that executor's invocation context and has no
+  `CoreImage` or `CoreVideo` dependency. The dependency-disabled profile
+  compiles the stub factory, leaves the registry without a Metal executor, and
+  adds no Metal framework requirement.
 - On Windows, the exported target propagates `PHOTOSPIDER_STATIC`, so public
   declarations do not acquire DLL import/export annotations when consumers link
   the `.lib` archive. Dynamic operation-plugin exports use
@@ -489,6 +492,17 @@ In the current layout:
   creates cross-domain task dependencies;
 - the current `ExecutionService` owns one fixed CPU worker pool, private
   `serial_debug` and `gpu_pipeline` behavior, one Host-authoritative ledger, a
+  fixed `DeviceExecutorRegistry`, and, in the enabled Apple repository
+  Metal-plugin profile, one process-owned Metal executor. That executor owns
+  its command queue, invocation-scoped allocator, and validated persistent
+  pipeline cache. GPU work enters it only after the common reserved-start
+  transaction, and an operation borrows the installed invocation context
+  rather than retaining native process resources;
+  the dependency-disabled profile installs no Metal executor;
+  general CPU/GPU transfer, residency, coherency, and stale-completion
+  semantics remain issue #85, while device-memory and scratch accounting in
+  `ResourceLedger` remain issue #86;
+  `ExecutionService` also owns a
   policy-aware entry/byte-bounded ready store,
   checked full-vector Run admission, work/byte cost, class-local Graph and
   weighted-Run fairness, stable aging, a three-Interactive burst bound,
@@ -744,7 +758,11 @@ reduces candidates through a Host-authored frontier, commits starts through a
 resource-safe transaction, and routes all work through closed private
 execution ids. Graph load/replacement now copies route values only. Issue #76
 completes the lifecycle registry, graph-close/process-shutdown, exact
-settlement, and telemetry invariants. The authoritative acyclic
+settlement, and telemetry invariants. Issue #84 is also current: one repository
+Metal operation reaches a process-owned executor through the fixed
+`DeviceExecutorRegistry`, while issues #85 and #86 retain the general transfer,
+coherency, and device-resource-accounting follow-up boundaries. The
+authoritative acyclic
 dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 

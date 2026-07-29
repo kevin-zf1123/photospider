@@ -1075,7 +1075,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
       available_devices_override != nullptr
           ? *available_devices_override
           : (execution_service
-                 ? execution_service->available_devices(*host, execution_type)
+                 ? execution_service->available_devices(execution_type)
                  : (task_runtime ? task_runtime->available_devices()
                                  : std::vector<Device>{Device::CPU}));
 
@@ -1770,7 +1770,7 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
           : "cpu";
   const std::vector<Device> available_devices =
       execution_service != nullptr
-          ? execution_service->available_devices(*runtime, execution_type)
+          ? execution_service->available_devices(execution_type)
           : std::vector<Device>{Device::CPU};
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
@@ -2133,7 +2133,7 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
           : "cpu";
   const std::vector<Device> available_devices =
       execution_service != nullptr
-          ? execution_service->available_devices(*runtime, execution_type)
+          ? execution_service->available_devices(execution_type)
           : std::vector<Device>{Device::CPU};
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 

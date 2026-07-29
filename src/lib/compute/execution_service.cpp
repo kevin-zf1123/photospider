@@ -25,12 +25,15 @@
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution_service_test_probe.hpp"
 #endif
+#include "execution/device_executor_registry.hpp"
 #include "execution/physical_execution_routes.hpp"
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
 #include "policy/policy_registry.hpp"
 
 namespace ps::compute {
+
+using execution::make_default_device_executor_registry;
 
 /** @copydoc operator==(const ReadyTaskResourceDemand&, const
  * ReadyTaskResourceDemand&) */
@@ -240,42 +243,55 @@ class ShutdownWorkerJoinGuard final {
 };
 
 /**
+ * @brief Adapts one started ready submission to stack-bounded device entry.
+ *
+ * @throws Provider exceptions unchanged from `run()`.
+ * @note The worker owns both borrowed objects through synchronous executor
+ * return. The adapter creates no queue, completion, grant, or heap owner.
+ */
+class ReadySubmissionDeviceInvocation final
+    : public execution::DeviceExecutorInvocation {
+ public:
+  /**
+   * @brief Binds one worker-owned submission and its existing runtime.
+   * @param submission Started submission retained by the worker QueueEntry.
+   * @param runtime Matching execution service completion boundary.
+   * @throws Nothing.
+   */
+  ReadySubmissionDeviceInvocation(ReadyTaskSubmission& submission,
+                                  ExecutionTaskRuntime& runtime) noexcept
+      : submission_(submission), runtime_(runtime) {}
+
+  /** @copydoc execution::DeviceExecutorInvocation::run */
+  void run() override { submission_.execute(runtime_); }
+
+ private:
+  /** @brief Worker-owned submission borrowed through executor return. */
+  ReadyTaskSubmission& submission_;
+
+  /** @brief Existing Run-scoped task runtime used by provider execution. */
+  ExecutionTaskRuntime& runtime_;
+};
+
+/**
  * @brief Tests a frozen private-route inventory for one selected device.
  * @param execution_type Exact private route id.
- * @param metal_available Metal capability captured before Run publication.
+ * @param metal_registered Registry capability captured before Run publication.
  * @param device Device frozen with the operation snapshot.
- * @return True only for CPU on every route or available Metal on
+ * @return True only for CPU on every route or registered Metal on
  * `gpu_pipeline`.
  * @throws Nothing.
- * @note The scalar snapshot avoids Host virtual calls while service and Run
+ * @note The scalar snapshot avoids registry access while service and Run
  * locks are held.
  */
 bool route_inventory_exposes_device(const std::string& execution_type,
-                                    bool metal_available,
+                                    bool metal_registered,
                                     Device device) noexcept {
   if (device == Device::CPU) {
     return execution::PhysicalExecutionRoutes::is_supported(execution_type);
   }
   return execution_type == "gpu_pipeline" && device == Device::GPU_METAL &&
-         metal_available;
-}
-
-/**
- * @brief Captures whether one Host-aware private route exposes a device.
- * @param host Borrowed process capability observer.
- * @param execution_type Exact private route id.
- * @param device Device requested for the inventory snapshot.
- * @return True when the route and current Host capability expose the device.
- * @throws Nothing.
- * @note Callers invoke this boundary before acquiring service or Run locks.
- */
-bool route_exposes_device(const ExecutionHostContext& host,
-                          const std::string& execution_type,
-                          Device device) noexcept {
-  const bool metal_available = execution_type == "gpu_pipeline" &&
-                               host.is_device_available(Device::GPU_METAL);
-  return route_inventory_exposes_device(execution_type, metal_available,
-                                        device);
+         metal_registered;
 }
 
 }  // namespace
@@ -297,7 +313,7 @@ struct ExecutionService::RunState final
    * @param qos Explicit immutable service-class, deadline, and weight inputs.
    * @param host_context Borrowed Graph observation target.
    * @param execution_type Private physical route fixed for this Run.
-   * @param metal_available Metal capability captured before publication.
+   * @param metal_registered Registry capability captured before publication.
    * @param total_task_count Positive logical completion count.
    * @param task_resources Uniform adapter declaration for every submission.
    * @param ready_task_bytes Complete service-plus-adapter ready charge.
@@ -308,7 +324,7 @@ struct ExecutionService::RunState final
   RunState(ComputeRunId run_id, std::string graph_identity,
            std::string graph_key, ComputeRunQos qos,
            ExecutionHostContext& host_context, std::string execution_type,
-           bool metal_available, int total_task_count,
+           bool metal_registered, int total_task_count,
            ReadyTaskResourceDemand task_resources,
            std::uint64_t ready_task_bytes, std::uint64_t execution_task_bytes,
            ResourceLedger::Reservation run_reservation) noexcept
@@ -318,7 +334,7 @@ struct ExecutionService::RunState final
         policy_qos(std::move(qos)),
         host(&host_context),
         route(std::move(execution_type)),
-        route_metal_available(metal_available),
+        route_metal_registered(metal_registered),
         resource_demand(task_resources),
         ready_bytes_per_task(ready_task_bytes),
         execution_retained_bytes_per_task(execution_task_bytes),
@@ -326,15 +342,16 @@ struct ExecutionService::RunState final
         tasks_to_complete(total_task_count) {}
 
   /**
-   * @brief Tests the immutable route/Host inventory captured for this Run.
+   * @brief Tests the immutable route/registry inventory captured for this Run.
    * @param device Device retained by one ready submission.
    * @return True when the frozen inventory exposes the device.
    * @throws Nothing.
-   * @note This method performs no Host callback and is safe under pool/Run
+   * @note This method performs no registry access and is safe under pool/Run
    * locks during frontier formation and reserved-start revalidation.
    */
   bool exposes_device(Device device) const noexcept {
-    return route_inventory_exposes_device(route, route_metal_available, device);
+    return route_inventory_exposes_device(route, route_metal_registered,
+                                          device);
   }
 
   /**
@@ -375,8 +392,8 @@ struct ExecutionService::RunState final
   /** @brief Immutable private execution route used by every Run callback. */
   const std::string route;
 
-  /** @brief Host Metal capability captured before active-Run publication. */
-  const bool route_metal_available;
+  /** @brief Registry Metal capability frozen before active-Run publication. */
+  const bool route_metal_registered;
 
   /** @brief Nonzero route generation captured when this Run was admitted. */
   const std::uint64_t route_generation = 1U;
@@ -3174,15 +3191,18 @@ class ExecutionService::PoolState final {
   /**
    * @brief Creates one unconfigured execution domain with immutable limits.
    * @param resource_limits Complete ledger and ready-store limits.
+   * @param device_executors Complete fixed device registry.
    * @param telemetry Stable physical counter owner.
    * @param policy_observer Stable non-owning service callback/binding observer.
    * @throws std::invalid_argument when interactive headroom exceeds a limit.
    * @throws std::bad_alloc when ledger state cannot allocate.
    */
   PoolState(ExecutionResourceLimits resource_limits,
+            execution::DeviceExecutorRegistry device_executors,
             ExecutionLifecycleTelemetry& telemetry,
             policy::PolicyLifecycleObserver policy_observer)
       : registry(policy::PolicyRegistry::process_instance()),
+        device_executors(std::move(device_executors)),
         interactive_binding(registry.create_binding(
             "interactive", PolicyClass::Interactive, 1U, policy_observer)),
         throughput_binding(registry.create_binding(
@@ -3264,6 +3284,11 @@ class ExecutionService::PoolState final {
 
   /** @brief Process registry shared by all execution-service instances. */
   policy::PolicyRegistry& registry;
+
+  /**
+   * @brief Fixed process-owned device executors destroyed after worker join.
+   */
+  execution::DeviceExecutorRegistry device_executors;
 
   /** @brief Serializes preparation/publication of policy replacements only. */
   mutable std::mutex policy_mutation_mutex;
@@ -3592,12 +3617,19 @@ ExecutionService::ExecutionService()
     : ExecutionService(default_resource_limits()) {}
 
 /** @copydoc ExecutionService::ExecutionService */
-ExecutionService::ExecutionService(ExecutionResourceLimits resource_limits)
+ExecutionService::ExecutionService(ExecutionResourceLimits limits)
+    : ExecutionService(limits, make_default_device_executor_registry()) {}
+
+/** @copydoc ExecutionService::ExecutionService */
+ExecutionService::ExecutionService(
+    ExecutionResourceLimits resource_limits,
+    execution::DeviceExecutorRegistry device_executors)
     : lifecycle_telemetry_(std::make_unique<ExecutionLifecycleTelemetry>()),
       lifecycle_registry_(
           std::make_unique<RunLifecycleRegistry>(*lifecycle_telemetry_)),
-      pool_(std::make_unique<PoolState>(resource_limits, *lifecycle_telemetry_,
-                                        policy_lifecycle_observer())) {
+      pool_(std::make_unique<PoolState>(
+          resource_limits, std::move(device_executors), *lifecycle_telemetry_,
+          policy_lifecycle_observer())) {
   const ExecutionLifecycleCounters counters = lifecycle_registry_->counters();
   lifecycle_telemetry_->publish(ExecutionLifecycleEventKind::ServiceStarted,
                                 ExecutionLifecycleCategory::None, 0U, 0U, 0U,
@@ -4167,8 +4199,9 @@ PreparedExecutionRun ExecutionService::prepare_run(
     throw std::invalid_argument(
         "ExecutionService initial ready count exceeds total task count.");
   }
-  const bool route_metal_available =
-      route_exposes_device(host, execution_type, Device::GPU_METAL);
+  const bool route_metal_registered =
+      execution_type == "gpu_pipeline" &&
+      pool_->device_executors.contains(Device::GPU_METAL);
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
   ComputeRunLease service_lease = initial_submissions.front().lease_;
   for (const ReadyTaskSubmission& submission : initial_submissions) {
@@ -4180,7 +4213,7 @@ PreparedExecutionRun ExecutionService::prepare_run(
       throw std::invalid_argument(
           "ExecutionService initial batch resource declaration mismatch.");
     }
-    if (!route_inventory_exposes_device(execution_type, route_metal_available,
+    if (!route_inventory_exposes_device(execution_type, route_metal_registered,
                                         submission.metadata().device())) {
       throw std::invalid_argument(
           "ExecutionService submission device is unavailable on its route.");
@@ -4236,7 +4269,7 @@ PreparedExecutionRun ExecutionService::prepare_run(
       run_id, std::move(admission.policy_graph_identity),
       std::move(admission.policy_graph_key),
       initial_submissions.front().metadata().qos(), host, execution_type,
-      route_metal_available, total_task_count, run_resource_demand.task,
+      route_metal_registered, total_task_count, run_resource_demand.task,
       admission.ready_bytes_per_task,
       admission.execution_retained_bytes_per_task, std::move(*reservation));
 
@@ -4631,12 +4664,11 @@ std::vector<Device> ExecutionService::available_devices() const {
   return {Device::CPU};
 }
 
-/** @copydoc ExecutionService::available_devices(const ExecutionHostContext&,
- * const std::string&) */
+/** @copydoc ExecutionService::available_devices(const std::string&) */
 std::vector<Device> ExecutionService::available_devices(
-    const ExecutionHostContext& host, const std::string& execution_type) const {
+    const std::string& execution_type) const {
   if (execution_type == "gpu_pipeline") {
-    if (route_exposes_device(host, execution_type, Device::GPU_METAL)) {
+    if (pool_->device_executors.contains(Device::GPU_METAL)) {
       return {Device::GPU_METAL, Device::CPU};
     }
     return {Device::CPU};
@@ -4646,6 +4678,17 @@ std::vector<Device> ExecutionService::available_devices(
   }
   throw GraphError(GraphErrc::NotFound,
                    "Unknown private execution route: " + execution_type);
+}
+
+/** @copydoc ExecutionService::has_device_executor */
+bool ExecutionService::has_device_executor(Device device) const noexcept {
+  return pool_->device_executors.contains(device);
+}
+
+/** @copydoc ExecutionService::device_executor_diagnostics */
+execution::DeviceExecutorDiagnostics
+ExecutionService::device_executor_diagnostics(Device device) const {
+  return pool_->device_executors.diagnostics(device);
 }
 
 /** @copydoc ExecutionService::submit_initial_task_handles */
@@ -5117,7 +5160,13 @@ void ExecutionService::worker_loop(
         log_event(ExecutionTraceAction::AssignInitial,
                   entry->submission.metadata().trace_node_id());
       }
-      entry->submission.execute(*this);
+      if (entry->submission.metadata().device() == Device::CPU) {
+        entry->submission.execute(*this);
+      } else {
+        ReadySubmissionDeviceInvocation invocation(entry->submission, *this);
+        pool_->device_executors.execute(entry->submission.metadata().device(),
+                                        invocation);
+      }
       const std::optional<ComputeRunCancellationReason> cancellation =
           entry->submission.lease_.observe_cancellation();
       if (cancellation.has_value()) {

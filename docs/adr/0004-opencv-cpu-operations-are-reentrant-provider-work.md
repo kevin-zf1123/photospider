@@ -57,11 +57,12 @@ every other `cv::Exception` is translated to a host-owned `GraphError` with
 core operations and the v2 registrar remain available when it is disabled, and
 a v2 provider can replace the same registry slots when it is enabled.
 
-Synchronization remains provider-local when a provider owns real shared
-mutable state. The Metal Perlin provider therefore retains its DSO-private
-mutex around its shared Metal device, command queue, pipeline, and buffer
-lifecycle. That lock is not an OpenCV operation lock, scheduler exclusivity
-flag, or cross-provider contract.
+Synchronization remains backend-owner-local for real shared mutable state.
+The process Metal executor, rather than the Perlin provider, serializes its
+shared command queue, invocation allocator counters, and pipeline cache. The
+provider borrows those resources only through callback return and retains no
+static native state or DSO-private executor mutex. That executor lock is not an
+OpenCV operation lock, scheduler exclusivity flag, or cross-provider contract.
 
 No scheduler `exclusive` metadata and no public operation/plugin ABI are added.
 Third-party providers remain responsible for their own reentrancy and backend

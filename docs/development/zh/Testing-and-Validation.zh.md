@@ -491,9 +491,10 @@ grant release。
 
 `test_physical_execution_routes` 负责 allocation-free route/lane state：CPU/Metal overlap、Metal
 single-flight、serial worker-zero single-flight、shutdown rejection 与 committed-work drainage。
-`test_policy_execution` 使用 deterministic fake-Metal Host，证明规范的逐 route device inventory、
-Run 发布前拒绝、彼此独立的固定 CPU/GPU worker、Metal exception publication/recovery、route
-reuse、cancellation，以及不会产生 candidate/version ABA 或 grant leak 的 reserved-start rollback。
+`test_policy_execution` 使用注入的 deterministic fake Metal executor，证明规范的 registry-derived
+逐 route device inventory、Run 发布前拒绝、彼此独立的固定 CPU/GPU worker、精确 executor
+entry、Metal exception publication/recovery、route reuse、cancellation，以及不会产生
+candidate/version ABA 或 grant leak 的 reserved-start rollback。
 它还证明：grant-blocked high-priority Run A 不能饿死较低优先级的独立 Run B；A 的 ready entry
 随后恰好执行一次；仅一个 candidate 被阻塞时 policy-selection retry 有界，且 cancellation 会
 唤醒 worker。
@@ -506,6 +507,12 @@ symbol。该声明只限定于这项 probe；既有 initial-submission storage o
 `test_compute_run` 中的
 `Issue75DeviceRouting.*` 证明 full HP、dirty HP/RT 与 connected preflight 会冻结选中的 Metal
 implementation/device，并在 Metal 不存在时使用 CPU fallback。
+`test_device_executor_registry` 不依赖 platform SDK，负责 fixed-slot validation、精确 dispatch、
+借用 TLS context restoration、provider-exception identity 与复制的 diagnostics。在 Apple 上且
+仓库 operation plugin 已启用时，
+`test_metal_device_executor` 会让真实仓库 Perlin operation 通过同一个 `ExecutionService` 连续运行
+两次，然后证明 queue 可用、两次 executor entry、六个 invocation allocation 已退役、一条 pipeline
+被复用、output 归 CPU 所有、使用专用 Metal worker id，并且已结算 ledger 为空。
 
 `test_cli_policy_execution_config` 固定事务型 policy/execution config parsing 与精确 Host
 application。`test_host_adapter` 会加载真实 operation ABI-v2 与纯 C policy ABI-v1 fixture，配置两种
@@ -524,12 +531,14 @@ Installed Host、CLI 与 IPC protocol-v2 surface 仍不暴露 cancellation comma
 ```bash
 cmake --build build \
   --target test_policy_registry test_policy_execution \
-  test_physical_execution_routes test_compute_run test_resource_admission \
+  test_physical_execution_routes test_device_executor_registry \
+  test_compute_run test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
+./build/tests/test_device_executor_registry
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -542,6 +551,8 @@ cmake --build build \
   --gtest_filter='IpcDaemonExecution.*:IpcDaemonPolicy.*'
 ctest --test-dir build --output-on-failure \
   -R '^(GraphCliPluginComputeSmoke|StaticProductConsumerSmoke)$'
+# Apple 且 PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=ON：
+./build/tests/test_metal_device_executor
 ```
 
 以下 focused companion regression 负责其余边界：

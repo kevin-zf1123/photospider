@@ -486,12 +486,16 @@ process-local allocation/revision identity、受界限约束的 signed layout，
 logical dirty/cache validity，以及由精确 core dense path 执行的 ImageRect/TensorSlice。V-5 会
 路由 CPU implementation metadata 与 checked resource demand。V-6 现已新增
 dependency-neutral ReadyFence/Value readiness contract，以及一条由确定性 fake device executor
-证明的显式 source-private CPU Value-copy task。精确行为记录在
+证明的显式 source-private CPU Value-copy task。V-7 现已在进程 execution domain 中新增固定的
+source-private `DeviceExecutorRegistry`，并让仓库 Metal Perlin operation 经过其自有
+device/queue、invocation-scoped allocator 与持久 pipeline cache。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
-[内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-6 子集是当前 runtime 事实。
+[内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
+[策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
+[计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
+只有这里明确指出的 V-2 至 V-7 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -522,7 +526,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-6 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-7 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics，以及 8/16/32/64-bit byte-addressed storage encoding；
@@ -545,6 +549,11 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   metadata，但拒绝 BufferHandle 与 checked-view payload access；source-private
   `ValueTransferTask` 会准备全新 pending CPU allocation，并且只在 source ready 后通过显式
   queued work 复制已验证的 envelope；
+- source-private `DeviceExecutorRegistry` composition 会在 `ExecutionService` 下拥有固定的非 CPU
+  executor；在仓库 plugin 已启用的 Apple profile 中，Metal executor 拥有一个可复用 native
+  device/queue 与经过校验的 pipeline cache，通过 invocation allocator 把 callback-scoped
+  texture/buffer 保留到 callback 返回，并在 reserved start 后进入一条选中的 Perlin operation，
+  且不会通过 Graph、policy、metadata 或 public Host state 暴露 native handle；
 - `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
   unsigned-8 execution 分开，已有 sealed input Value 时直接复用，并发布精确 sealed result
   revision 与独立 ImageBuffer compatibility snapshot；
@@ -562,10 +571,12 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
   source-private contract。
 
-V-6 仍不含 DataSpec、真实 device registry/identity、native executor、通用 AccessPlan、
-residency 或 visibility model、bidirectional device transfer、stale-completion arbitration、
-quantization、packed element、provider ABI v3 或通用 named graph Value output。ImageBuffer
-仍是 operation ABI v2、tiled write、codec 与 Host surface 的 compatibility representation。
+V-7 仍不含 DataSpec、通用 `DeviceId`、public device registry、通用 AccessPlan、residency 或
+visibility model、bidirectional device transfer、stale-completion arbitration、
+device-memory/scratch ledger dimension、quantization、packed element、provider ABI v3 或通用
+named graph Value output。首个 native executor 仍是 source-private；Perlin callback 会同步等待，
+然后返回 CPU compatibility image。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host
+surface 的 compatibility representation。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
@@ -641,6 +652,10 @@ dependency-disabled product 中不得出现 OpenEXR header、link、type、symbo
 requirement 或 transitive dependency。
 
 ## 异构 Executor
+
+当前 V-7 Metal executor 有意只证明 process ownership、registry dispatch、queue/allocator/cache
+复用与 provider-state 移除。通用 asynchronous completion、transfer queue、residency、
+stale-result arbitration 与 device-resource ledger dimension 仍属于后续切片。
 
 GPU executor 不是第二个普通 CPU worker pool。每个物理 device executor 拥有 native queue/stream、
 allocator、in-flight limit、memory/scratch reservation、pipeline cache、transfer queue 和 completion

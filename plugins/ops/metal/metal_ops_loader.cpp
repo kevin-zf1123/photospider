@@ -45,13 +45,11 @@ ps::PixelRect perlin_metal_forward_roi(const ps::plugin::RoiContext& context) {
  * @return Nothing.
  * @throws std::invalid_argument when the loader passes a null registrar.
  * @throws std::logic_error if the host registrar is incomplete.
- * @throws std::bad_alloc if registration or Metal initialization storage
- * exhausts memory.
- * @throws std::system_error if Metal one-time initialization cannot coordinate.
- * @throws std::runtime_error if Metal initialization fails.
+ * @throws std::bad_alloc if registration storage exhausts memory.
  * @note `extern "C"` keeps the symbol name stable for dynamic plugin loading.
  * The registered op is HP monolithic GPU work; tiled Metal execution remains a
- * future capability. Registration is routed through the host-owned registry.
+ * future capability. Registration creates no native Metal resource; execution
+ * enters the process-owned device executor later.
  */
 extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
     ps::plugin::OperationPluginRegistrar* registrar) {
@@ -69,6 +67,4 @@ extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
                                        perlin_metal_dirty_roi);
   registrar->register_forward_propagator(
       "image_generator", "perlin_noise_metal", perlin_metal_forward_roi);
-
-  ps::ops::perlin_noise_metal_eager_init();
 }

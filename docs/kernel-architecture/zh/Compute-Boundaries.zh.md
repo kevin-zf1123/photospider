@@ -99,7 +99,7 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit、policy ranking 或物理执行 |
 | `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、冻结的 implementation/device snapshot、结果槽与 callback owner | execution-route worker、Run terminal state 或 dirty-path execution |
 | `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、selected `Device`、精确 operation constraint、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
-| `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、一个 process-domain operation gate、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority 或 visible commit |
+| `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、一个带 process-owned native resource 的固定 `DeviceExecutorRegistry`、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、一个 process-domain operation gate、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority、visible commit、通用 device residency/coherency/transfer planning 或 device-memory 核算 |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | execution trace 所有权 |
 | `PolicyRegistry` 与 policy binding | 验证 built-in/DSO policy type，拥有进程级 context 与 DSO lease，并为 Host-authored 不可变 candidate snapshot 排序 | worker、queue、resource grant、Run、Graph、completion 或 start authority |
@@ -142,9 +142,17 @@ executor owner 能存活到 callback 完成，同时释放 executor-owned queue 
 queued callback 才会取得 source payload access、复制已验证的 envelope、退役 destination
 producer access 并发布 terminal state。Fence 与 task 都不拥有 worker、queue、route、ledger
 grant 或 device identity。确定性且线程安全的 fake executor 与仅用于测试的 C++17 mutex/CV
-竞争 rendezvous 归测试所有；#84 负责真实 physical-device executor registration，#85 负责通用
-access planning、residency、visibility、bidirectional transfer 与 stale-completion commit
-arbitration。
+竞争 rendezvous 归测试所有。
+
+V-7 在 `ExecutionService` 中增加 source-private 的固定 `DeviceExecutorRegistry`。仓库 Metal
+plugin 启用时，Apple executor 拥有并复用 device、command queue 与经过校验的
+compute-pipeline cache；一个
+callback-scoped allocator 会保留 texture 与 buffer，直到 provider 返回。经过 reserved start 的
+Metal submission 会同步进入匹配 executor，并使用同一条 Run completion/exception/retirement
+path。Perlin provider 会借用这些 resource，并返回 CPU-owned compatibility image；
+`GraphRuntime` 不再拥有 native Metal state。本切片不增加通用 `AccessPlan`、residency、
+visibility、bidirectional transfer、stale-completion arbitration，也不增加 device-memory/scratch
+ledger dimension；这些分别仍属于 #85 与 #86。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
@@ -337,8 +345,9 @@ Policy callback 与私有 route 都不会收到 `GraphModel`、`ComputeTaskGraph
 `TaskSubmissionPlan` 作为另一个 `ReadyTaskSubmission` 释放；只有 Host 能验证 candidate、提交
 start，并把 callback 所有权转移到复制的 Graph route binding。
 
-Issue #70 与 #71 的 CPU service 在 Kernel 之前显式组合，并直接拥有一个固定 CPU worker pool、
-一个私有 Metal worker lane、一个 Host 权威 ledger 和一个有界 ready store。配置只会解析并
+进程 service 在 Kernel 之前显式组合，并直接拥有一个固定 CPU worker pool、一个私有 Metal
+worker lane、一个固定 device-executor registry、一个 Host 权威 ledger 和一个有界 ready store。
+配置只会解析并
 冻结一次 `[1,8]` 个 CPU 基础设施 worker；Graph load、replacement、Run execution 与 dirty
 阶段都不会调整任一 lane 的大小。Benchmark `execution.threads` 是单次 Run 上限，不是
 execution configuration request。缺失或零会选择一个有界自动 cap，`1..8` 会选择精确 cap。
@@ -374,12 +383,14 @@ ready admission、只清除其 queued entry，并等待已经运行的 callback 
 并发布新的 generation，不构造 per-Graph executor 或 reservation。Ledger 不会虚构 device、I/O
 或 plugin-specific dimension。
 
-规范 inventory 同时感知 route 与 Host：`cpu` 和 `serial_debug` 只暴露 CPU；Metal 可用时，
-`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与 connected-preflight
+规范 inventory 同时感知 route 与 registry：`cpu` 和 `serial_debug` 只暴露 CPU；注册了 Metal
+executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与
+connected-preflight
 planning 会在准入前冻结选中的 implementation identity、metadata、shape 与 device。Submission
 会重新解析同一个 identity；因此，与 cached plan 并发的 replacement 或 unload 会在 provider
 entry 前失败，而不会混用 callback 与 metadata revision。CPU work 进入固定 pool，Metal work
-进入单一 GPU lane；二者仍消耗同一个 Run root grant 和 maximum-parallelism ceiling。不可用
+进入单一 GPU lane，再进入匹配的 registry executor；二者仍消耗同一个 Run root grant 和
+maximum-parallelism ceiling。不可用
 device 会在 active Run 发布前被拒绝；completion、exception、cancellation、reuse、shutdown 与
 drainage 会退役精确的公共 ledger/Run state。
 
@@ -423,10 +434,12 @@ core operation 仍保持注册。Registry 与 v2 registrar 不依赖 OpenCV：�
 缺失 operation，也可以通过相同 slot 替换已启用的 OpenCV operation。由 manager 驱动的卸载会
 退役 replacement，并恢复已捕获的 predecessor。
 
-围绕真实 backend state 的同步仍由 provider 局部负责。Metal Perlin provider 保留一个
-DSO-private mutex，保护其共享 Metal device、queue、pipeline 与 buffer；该 mutex 既不是 OpenCV
-operation lock，也不是 scheduler exclusivity contract。仓库自有 provider 之外的 OpenCV 使用、
-第三方内部 thread 与 platform runtime worker 仍不计入 Host execution accounting。
+围绕真实 backend state 的同步仍由 backend owner 负责。进程 Metal executor 会串行化对 command
+queue、invocation allocator counter 与 pipeline cache 的访问。Metal Perlin provider 不保留
+static native state 或 DSO-private executor mutex；它只在 callback scope 内借用 executor
+resource。该 executor lock 既不是 OpenCV operation lock，也不是 scheduler exclusivity
+contract。仓库自有 provider 之外的 OpenCV 使用、第三方内部 thread 与 platform runtime worker
+仍不计入 Host execution accounting。
 
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录本项决策。
 长期 integration coverage 会证明同一个固定 pool 上 `1/2/4/8` Run cap 对应精确 callback
