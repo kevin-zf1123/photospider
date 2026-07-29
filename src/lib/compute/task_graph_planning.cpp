@@ -987,7 +987,7 @@ DirtyNodeSelection& ensure_node_selection(DirtyTaskSelectionOverlay& overlay,
 /**
  * @brief Looks up planned node work by node id for overlay ROI selection.
  *
- * @param plan Immutable node/cache-pruned plan being viewed.
+ * @param plan Immutable retained request-cone plan being viewed.
  * @return Map from node id to PlannedNodeWork pointer.
  * @throws std::bad_alloc if lookup storage grows.
  * @note Pointers remain valid for the lifetime of plan.
@@ -1005,7 +1005,7 @@ std::unordered_map<int, const PlannedNodeWork*> planned_work_by_node(
 /**
  * @brief Applies dirty ROI metadata to an overlay instead of a plan copy.
  *
- * @param plan Immutable node/cache-pruned plan whose nodes are eligible.
+ * @param plan Immutable retained request-cone plan whose nodes are eligible.
  * @param snapshot Dirty snapshot for the current generation.
  * @param domain HP or RT domain being selected.
  * @param overlay Overlay receiving per-node ROI metadata.
@@ -1069,7 +1069,7 @@ void populate_overlay_node_regions(const ComputePlan& plan,
 /**
  * @brief Merges snapshot dependency ROI mappings without copying a plan.
  *
- * @param plan Immutable node/cache-pruned plan whose dependencies are used.
+ * @param plan Immutable retained request-cone plan whose dependencies are used.
  * @param snapshot Dirty snapshot supplying ROI edge mappings.
  * @param domain HP or RT dependency domain.
  * @return Dependency records used by the generation-local overlay.

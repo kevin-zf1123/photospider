@@ -256,7 +256,7 @@ struct DirtyUpdateWorkSet {
  * @brief Dirty ROI metadata selected for one node in a generation overlay.
  *
  * DirtyTaskSelectionOverlay keeps these records outside ComputePlan so the
- * node/cache-pruned plan can remain immutable and reusable across repeated ROI
+ * retained complete request-cone plan remains immutable across repeated ROI
  * updates. The record contains only generation-local ROI overrides required by
  * dirty execution and inspection summaries.
  *
@@ -284,8 +284,8 @@ struct DirtyNodeSelection {
  * and the source/downstream work sets used by source-first dirty execution.
  * It avoids copying the full ComputePlan on high-frequency dirty paths.
  *
- * @note Task ids refer to the node/cache-pruned ComputePlan used to create the
- * overlay. The overlay never creates new task shapes.
+ * @note Task ids refer to the retained request-cone ComputePlan used to create
+ * the overlay. The overlay never creates new task shapes.
  */
 struct DirtyTaskSelectionOverlay {
   /** @brief Dirty snapshot generation used for this active view. */
@@ -584,8 +584,8 @@ class DirtySnapshotTaskGraphPruner {
    * whose outputs are already staged and must not execute in this phase.
    * @return Generation-local active task overlay and source/downstream groups.
    * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
-   * std::bad_alloc when exact cache validity, dependency metadata, or overlay
-   * storage cannot be evaluated.
+   * std::bad_alloc when dependency metadata or overlay storage cannot be
+   * evaluated.
    * @note This is the dirty execution path: it does not mutate or duplicate
    * PlannedTask records, and it preserves task ids from node_cache_plan.
    * Selection never lets old formal cache satisfy dirty work. Explicit
@@ -604,9 +604,11 @@ class DirtySnapshotTaskGraphPruner {
           nullptr) const;
 
   /**
-   * @brief Annotates and clips a node/cache-pruned plan with dirty metadata.
+   * @brief Annotates and clips a request-scoped plan with dirty metadata.
    *
-   * @param node_cache_plan Plan produced by NodeCacheTaskGraphPruner.
+   * @param node_cache_plan Request-scoped plan produced by
+   * NodeCacheTaskGraphPruner. Dirty execution supplies the retained complete
+   * request cone.
    * @param snapshot Graph-scoped dirty facts for the same compute domain.
    * @return ComputePlan copy with dirty ROI/work metadata refreshed.
    * @throws std::bad_alloc if copied vectors or maps cannot grow.

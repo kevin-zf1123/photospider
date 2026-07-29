@@ -769,13 +769,15 @@ class ScopedOperationAdmissionWaitObservation final {
  *
  * @throws std::bad_alloc when copying the observer cannot allocate.
  * @note The hook is thread-local and active only for the lexical synchronous
- * compute call. Destruction clears the test-product seam before captured
+ * compute call. It runs after the planning Graph mutex is released, may mutate
+ * OpRegistry for route-revalidation tests, and must not access or retain the
+ * planned Graph. Destruction clears the test-product seam before captured
  * registry state or counters can retire.
  */
 class ScopedDirtyPostPlanObservation final {
  public:
   /**
-   * @brief Installs one callback at the plan/revalidation boundary.
+   * @brief Installs one callback after planning-lock release.
    * @param observer Registry mutation or observation to perform once notified.
    * @throws std::bad_alloc when callback ownership cannot allocate.
    */
@@ -823,15 +825,18 @@ class ScopedDirtyPostPlanObservation final {
  *
  * @throws std::bad_alloc when copying the observer cannot allocate.
  * @note The callback runs synchronously while the planning Graph mutex remains
- * held, after the complete node/cache plan exists but before current cache
- * validity forms selection-time satisfied boundaries. It must not acquire that
- * mutex or retain the borrowed Graph.
+ * held, after the complete request cone and planning-time cache observations
+ * exist but before dirty selection. Formal cache observations remain diagnostic
+ * merge-base facts and cannot satisfy dirty-selected work; only explicit
+ * current-request external satisfaction can form a selection boundary. The
+ * callback must not acquire that mutex or retain either borrowed argument.
  */
 class ScopedDirtyNodeCachePlanObservation final {
  public:
   /**
-   * @brief Installs one callback at the plan/cache-revalidation boundary.
-   * @param observer Runtime-cache mutation to perform once notified.
+   * @brief Installs one callback at the retained-cone/selection boundary.
+   * @param observer Controlled request-scoped cache mutation to perform once
+   * notified.
    * @throws std::bad_alloc when callback ownership cannot allocate.
    */
   explicit ScopedDirtyNodeCachePlanObservation(
@@ -861,7 +866,7 @@ class ScopedDirtyNodeCachePlanObservation final {
   /**
    * @brief Dispatches the test-product callback through the opaque context.
    * @param context Non-null ScopedDirtyNodeCachePlanObservation instance.
-   * @param node_cache_plan Retained callback-free task shape and cache facts.
+   * @param node_cache_plan Retained request-cone task shape and cache facts.
    * @param graph Borrowed planning Graph whose runtime cache state may change.
    * @return Nothing.
    * @throws Any exception selected by the installed observer.

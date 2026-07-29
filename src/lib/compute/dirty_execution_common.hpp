@@ -96,10 +96,12 @@ class DirtyNodeSynchronization final {
  * @brief Bounded dirty planning result used by HP and RT executors.
  *
  * The prepared state packages the graph-scoped dirty snapshot, the
- * immutable node/cache-pruned compute plan, the generation-local dirty
- * selection overlay, and the materialized source/downstream task groups that
- * will be submitted to the selected physical execution domain. The dirty plan
- * itself owns the per-node HP or RT ROI entries used by node execution.
+ * immutable complete request-cone compute plan, the generation-local dirty
+ * selection overlay with external-boundary demand cuts, and the materialized
+ * source/downstream task groups that will be submitted to the selected physical
+ * execution domain. Planning-time formal cache observations remain diagnostic
+ * merge-base facts; the dirty plan itself owns the per-node HP or RT ROI
+ * entries used by node execution.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
  * @note The struct is request-local. It must not be stored after execution
@@ -110,7 +112,7 @@ struct PreparedDirtyPlan {
   /** @brief Dirty planner output with per-node execution entries. */
   DirtyPlan dirty_plan;
 
-  /** @brief Node/cache-pruned compute plan used as immutable task shape. */
+  /** @brief Complete request-cone compute plan used as immutable task shape. */
   ComputePlan compute_plan;
 
   /** @brief Dirty active task view over compute_plan for this generation. */
@@ -522,7 +524,8 @@ void remember_dirty_snapshot(GraphModel& graph,
  * @brief Stores the latest compute plan and bounded summary history.
  *
  * @param graph Graph whose inspection state receives the compute plan.
- * @param compute_plan Node/cache-pruned plan for the current request.
+ * @param compute_plan Request plan being published. Ordinary full HP plans may
+ * be cache-pruned; dirty plans retain the complete request cone.
  * @param selection Optional dirty overlay used to summarize active work.
  * @throws std::bad_alloc if summary history storage cannot grow.
  * @note Full plans are retained only as the latest inspection entry; repeated
@@ -533,14 +536,16 @@ void remember_compute_plan(
     const DirtyTaskSelectionOverlay* selection = nullptr);
 
 /**
- * @brief Prunes a full task graph to the current request and cache state.
+ * @brief Scopes a full task graph to one request and its cache policy.
  *
  * @param graph Graph that supplies topology, node metadata, and cache state.
  * @param request Intent, target node, and dirty ROI for the request.
  * @param execution_order Topological order selected by dirty planning.
  * @param available_devices Canonical route inventory used for coherent
  * operation selection and task-shape expansion.
- * @return Node/cache-pruned compute plan before dirty snapshot selection.
+ * @return Request-scoped plan. Ordinary full HP may be pruned at reusable-cache
+ * demand boundaries; deferred dirty selection retains the complete request
+ * cone.
  * @throws GraphError from task graph expansion or pruning.
  * @note The returned plan is still domain-specific and contains no mixed HP/RT
  * task pool.
@@ -551,9 +556,10 @@ ComputePlan prune_node_cache_task_graph(
     const std::vector<Device>& available_devices = {Device::CPU});
 
 /**
- * @brief Applies dirty snapshot pruning to a node/cache-pruned plan.
+ * @brief Applies dirty snapshot selection to a request-scoped plan.
  *
- * @param node_cache_plan Plan already scoped to target and cache state.
+ * @param node_cache_plan Plan already scoped to the target. Dirty execution
+ * supplies a retained complete request cone.
  * @param snapshot Dirty snapshot for the same compute domain.
  * @param graph Graph used to derive per-tile input ROI dependencies.
  * @return Dirty-pruned plan with selected tasks annotated.
@@ -711,8 +717,8 @@ void validate_dirty_region_operation_routes(
  * @brief Prepares common dirty execution state after planner output exists.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
- * @param graph Request-local graph used for task shape, cache pruning, and
- * dirty selection. It may be a stabilized shadow graph.
+ * @param graph Request-local graph used for task shape, planning-time cache
+ * observation, and dirty selection. It may be a stabilized shadow graph.
  * @param dirty_plan Dirty planner output for one intent domain.
  * @param request Compute request matching the same dirty domain.
  * @param available_devices Canonical route inventory frozen for planning and
@@ -723,11 +729,11 @@ void validate_dirty_region_operation_routes(
  * @throws GraphError from task graph pruning, exact Region route validation,
  * or materialization. A changed route is reported as
  * `GraphErrc::NoOperation`.
- * @note The helper retains diagnostics without publishing them. It forces
- * node/cache pruning to retain the complete callback-free request cone, then
- * applies dirty-candidate and external-boundary demand selection. Exact cache
- * may seed a dirty write buffer but cannot satisfy a task selected by the
- * snapshot. The installed execution path calls
+ * @note The helper retains diagnostics without publishing them. It defers
+ * reusable-cache demand cutting so the complete callback-free request cone is
+ * retained, then applies dirty-candidate and external-boundary demand
+ * selection. Exact cache may seed a dirty write buffer but cannot satisfy a
+ * task selected by the snapshot. The installed execution path calls
  * publish_prepared_dirty_inspection() only after its first cancellation
  * observation, so candidate rollback leaves authoritative inspection state
  * unchanged. A no-work selection returns successfully from route validation
@@ -913,7 +919,7 @@ class DirtyHandleExecutionTaskExecutor : public ExecutionTaskExecutor {
   }
 
  private:
-  /** @brief Immutable node/cache-pruned compute plan whose tasks run. */
+  /** @brief Immutable request-cone compute plan whose selected tasks run. */
   const ComputePlan& compute_plan_;
 
   /** @brief Task-level dependency counters for this active phase. */
