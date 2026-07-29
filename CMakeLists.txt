@@ -702,12 +702,14 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These five translation units own the Issue #72, Issue #75, and Issue #76
-# deterministic observation seams. The installable archive always receives
-# their production objects; focused tests receive a non-installed variant while
-# reusing every common object. Keeping the split at translation-unit
-# granularity avoids compiling a second copy of the complete embedded product.
+# These six translation units own the Issue #72, Issue #75, Issue #76, and
+# Issue #82 deterministic observation seams. The installable archive always
+# receives their production objects; focused tests receive a non-installed
+# variant while reusing every common object. Keeping the split at
+# translation-unit granularity avoids compiling a second copy of the complete
+# embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
+    src/lib/compute/dirty_update_executor.cpp
     src/lib/compute/execution_service.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
@@ -727,7 +729,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the five-source test object target.
+# the caller only to the six-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -811,6 +813,7 @@ add_library(photospider STATIC
 configure_photospider_product_archive(photospider)
 
 set(PHOTOSPIDER_INTERNAL_PRODUCT_TEST_DEFINITIONS
+    PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING
     PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
     PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
@@ -838,7 +841,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
 endif()
 
 # Fail configuration if a future refactor accidentally restores an Issue #72,
-# Issue #75, or Issue #76 test definition on any production product target.
+# Issue #75, Issue #76, or Issue #82 test definition on any production product
+# target.
 function(assert_target_omits_internal_product_test_definitions TARGET_NAME)
     get_target_property(PHOTOSPIDER_TARGET_DEFINITIONS
         ${TARGET_NAME} COMPILE_DEFINITIONS)
@@ -1800,7 +1804,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
         photospider_cli_common)
     add_ps_test(test_compute_service_split
-        tests/integration/test_compute_service_split.cpp)
+        tests/integration/test_compute_service_split.cpp
+        photospider_internal_test_product)
+    target_compile_definitions(test_compute_service_split PRIVATE
+        PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
     add_ps_test(test_stride_aware_compute_paths
         tests/integration/test_stride_aware_compute_paths.cpp)
     add_ps_test(test_node_editor_layout
@@ -2140,6 +2147,7 @@ if(TARGET photospider_internal_test_product)
         endif()
     endforeach()
     set(PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS
+        test_compute_service_split
         test_kernel_contracts)
     if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         list(APPEND PHOTOSPIDER_EXPECTED_INTERNAL_TEST_PRODUCT_CONSUMERS

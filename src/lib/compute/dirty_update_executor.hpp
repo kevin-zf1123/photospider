@@ -33,7 +33,7 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
     ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
     ComputeRun*, const ComputeRunLease*, const std::string&,
-    const std::vector<Device>*);
+    const std::vector<Device>*, ExecutionService*);
 std::shared_ptr<const StabilizedDirtyParameters>
 execute_prepared_connected_dirty_parameters(
     PreparedConnectedDirtyParameters prepared);
@@ -304,7 +304,7 @@ class StabilizedDirtyParameters {
       GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
       ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
       ComputeRun*, const ComputeRunLease*, const std::string&,
-      const std::vector<Device>*);
+      const std::vector<Device>*, ExecutionService*);
   friend std::shared_ptr<const StabilizedDirtyParameters>
   execute_prepared_connected_dirty_parameters(
       PreparedConnectedDirtyParameters prepared);
@@ -391,7 +391,7 @@ class PreparedConnectedDirtyParameters final {
       GraphModel&, GraphTraversalService&, int, uint64_t, uint64_t,
       ExecutionTaskRuntime*, ExecutionService*, ExecutionHostContext*,
       ComputeRun*, const ComputeRunLease*, const std::string&,
-      const std::vector<Device>*);
+      const std::vector<Device>*, ExecutionService*);
   friend std::shared_ptr<const StabilizedDirtyParameters>
   execute_prepared_connected_dirty_parameters(
       PreparedConnectedDirtyParameters prepared);
@@ -423,6 +423,9 @@ class PreparedConnectedDirtyParameters final {
  * @param run_lease Optional retained HP lifecycle lease.
  * @param execution_type Frozen private service route.
  * @param available_devices_override Optional frozen route inventory.
+ * @param direct_execution_service Optional process authority that acquires the
+ * exact operation gate and resource vector around inline or task-runtime
+ * provider entry. It must be null for process-service worker execution.
  * @return Move-only prepared preflight, including an empty-producer snapshot.
  * @throws GraphError or standard exceptions from topology, operation
  * selection, retained-memory estimation, reservation, and queue staging.
@@ -430,7 +433,9 @@ class PreparedConnectedDirtyParameters final {
  * service, shared Run/result/staging ownership is reserved once across all
  * nodes, each callback root charges only its unique ownership, and provider
  * start remains impossible until the caller installs the matching lifecycle
- * bundle.
+ * bundle. Direct execution waits for gate availability without reserving
+ * resources, admits the operation vector only immediately before provider
+ * entry, and releases both authorities by RAII on return or throw.
  */
 PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
@@ -440,7 +445,8 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     ExecutionHostContext* host = nullptr, ComputeRun* run = nullptr,
     const ComputeRunLease* run_lease = nullptr,
     const std::string& execution_type = "cpu",
-    const std::vector<Device>* available_devices_override = nullptr);
+    const std::vector<Device>* available_devices_override = nullptr,
+    ExecutionService* direct_execution_service = nullptr);
 
 /**
  * @brief Executes one installed connected preflight in frozen topology order.
@@ -592,6 +598,8 @@ class HighPrecisionDirtyExecutor {
    * runtime route. It requires non-null runtime and run.
    * @param run_lease Optional borrowed lifecycle lease observed across dirty
    * planning, provider, tile, downsample, and commit boundaries.
+   * @param direct_execution_service Optional process authority used only when
+   * execution_service is null to gate and admit direct provider callbacks.
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, execution submission, target output validation, or a cooperative
@@ -613,7 +621,8 @@ class HighPrecisionDirtyExecutor {
                       GraphRuntime* runtime, const DirtyUpdateRequest& request,
                       ComputeRun* run = nullptr,
                       ExecutionService* execution_service = nullptr,
-                      const ComputeRunLease* run_lease = nullptr);
+                      const ComputeRunLease* run_lease = nullptr,
+                      ExecutionService* direct_execution_service = nullptr);
 
   /**
    * @brief Prepares a complete HP dirty domain before lifecycle installation.
@@ -624,6 +633,8 @@ class HighPrecisionDirtyExecutor {
    * @param run Optional candidate HP Run owning staging.
    * @param execution_service Optional process service reserving both phases.
    * @param run_lease Candidate lease retained by staging and callbacks.
+   * @param direct_execution_service Optional direct provider admission
+   * authority; mutually exclusive with execution_service.
    * @return Complete unpublished HP dirty preparation.
    * @throws GraphError or standard exceptions from planning, operation
    * resolution, resource reservation, and staging.
@@ -634,7 +645,8 @@ class HighPrecisionDirtyExecutor {
       GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
       const DirtyUpdateRequest& request, ComputeRun* run = nullptr,
       ExecutionService* execution_service = nullptr,
-      const ComputeRunLease* run_lease = nullptr);
+      const ComputeRunLease* run_lease = nullptr,
+      ExecutionService* direct_execution_service = nullptr);
 
   /**
    * @brief Executes and commits an installed HP dirty preparation.
@@ -717,6 +729,8 @@ class RealTimeDirtyExecutor {
    * runtime route.
    * @param run_lease Optional borrowed lifecycle lease observed across dirty
    * planning, provider, tile, and proxy-commit boundaries.
+   * @param direct_execution_service Optional process authority used only when
+   * execution_service is null to gate and admit direct provider callbacks.
    * @return Mutable real-time target output stored in the proxy graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, execution submission, target output validation, or a cooperative
@@ -734,7 +748,8 @@ class RealTimeDirtyExecutor {
                       GraphRuntime* runtime, const DirtyUpdateRequest& request,
                       ComputeRun* run = nullptr,
                       ExecutionService* execution_service = nullptr,
-                      const ComputeRunLease* run_lease = nullptr);
+                      const ComputeRunLease* run_lease = nullptr,
+                      ExecutionService* direct_execution_service = nullptr);
 
   /**
    * @brief Prepares a complete RT dirty domain before lifecycle installation.
@@ -745,6 +760,8 @@ class RealTimeDirtyExecutor {
    * @param run Optional candidate RT Run.
    * @param execution_service Optional process service reserving both phases.
    * @param run_lease Candidate lease retained by staging and callbacks.
+   * @param direct_execution_service Optional direct provider admission
+   * authority; mutually exclusive with execution_service.
    * @return Complete unpublished RT dirty preparation.
    * @throws GraphError or standard exceptions from planning, operation
    * resolution, resource reservation, and staging.
@@ -755,7 +772,8 @@ class RealTimeDirtyExecutor {
       GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
       const DirtyUpdateRequest& request, ComputeRun* run = nullptr,
       ExecutionService* execution_service = nullptr,
-      const ComputeRunLease* run_lease = nullptr);
+      const ComputeRunLease* run_lease = nullptr,
+      ExecutionService* direct_execution_service = nullptr);
 
   /**
    * @brief Executes and commits an installed RT dirty preparation.

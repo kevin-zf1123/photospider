@@ -1294,7 +1294,8 @@ ComputeService::prepare_intent_update(
         topology_generation, nullptr,
         uses_process_service ? &execution_service_ : nullptr,
         uses_process_service ? strategy.runtime : nullptr, hp_run,
-        &state->hp_lease, state->hp_execution_type, preflight_devices_override);
+        &state->hp_lease, state->hp_execution_type, preflight_devices_override,
+        uses_process_service ? nullptr : &execution_service_);
   }
 
   state->proxy_graph = &realtime_proxy_graph_for(graph, strategy, request);
@@ -1390,21 +1391,24 @@ NodeOutput& ComputeService::execute_prepared_intent_update(
         make_dirty_update_request(
             silent_request, true, prepared->sibling_commit_gate,
             prepared->stabilized_parameters, prepared->node_synchronization),
-        prepared->hp_run, physical_service, &prepared->hp_lease);
+        prepared->hp_run, physical_service, &prepared->hp_lease,
+        physical_service == nullptr ? &execution_service_ : nullptr);
     compute::RealTimeDirtyExecutor rt_executor(traversal_, events_);
     prepared->rt_prepared = rt_executor.prepare(
         *prepared->graph, *prepared->proxy_graph, prepared->strategy.runtime,
         make_dirty_update_request(prepared->request, false, nullptr,
                                   prepared->stabilized_parameters,
                                   prepared->node_synchronization),
-        prepared->rt_run, physical_service, &*prepared->rt_lease);
+        prepared->rt_run, physical_service, &*prepared->rt_lease,
+        physical_service == nullptr ? &execution_service_ : nullptr);
   } else {
     compute::HighPrecisionDirtyExecutor hp_executor(traversal_, events_);
     prepared->hp_prepared = hp_executor.prepare(
         *prepared->graph, *prepared->proxy_graph, prepared->strategy.runtime,
         make_dirty_update_request(prepared->request, false, nullptr,
                                   prepared->stabilized_parameters),
-        prepared->hp_run, physical_service, &prepared->hp_lease);
+        prepared->hp_run, physical_service, &prepared->hp_lease,
+        physical_service == nullptr ? &execution_service_ : nullptr);
   }
   if (!prepared->hp_prepared.active() ||
       (intent == ComputeIntent::RealTimeUpdate &&

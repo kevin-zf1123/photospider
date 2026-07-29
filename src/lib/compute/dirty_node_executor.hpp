@@ -21,6 +21,7 @@ class GraphRuntime;
 namespace ps::compute {
 
 class ComputeRunLease;
+class ExecutionService;
 class StabilizedDirtyParameters;
 
 /**
@@ -106,6 +107,14 @@ struct DirtyNodeExecutionContext {
    * through synchronous task settlement; this context never retains it.
    */
   const ComputeRunLease* run_lease = nullptr;
+
+  /**
+   * @brief Optional process authority for direct provider admission.
+   * @note Physical service workers leave this null because their ready-entry
+   * gate and resource grant already own the same authority. Inline and
+   * task-runtime paths supply it together with run_lease.
+   */
+  ExecutionService* direct_execution_service = nullptr;
 };
 
 /**
@@ -226,6 +235,7 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node being computed.
    * @param entry Exact logical Region selected by HP planning.
    * @param mono_fn Monolithic HP operation implementation.
+   * @param operation Exact frozen identity and scheduling metadata.
    * @param image_inputs_ready Resolved HP image inputs.
    * @throws GraphError if the operation produces no output.
    * @note The exact core Region bridge stages selected bytes through the HP
@@ -235,6 +245,7 @@ class HighPrecisionDirtyNodeExecutor {
    */
   void execute_monolithic(
       Node& node, const HpPlanEntry& entry, const MonolithicOpFunc& mono_fn,
+      const DirtyResolvedOperation& operation,
       const std::vector<const NodeOutput*>& image_inputs_ready) const;
 
   /**
@@ -298,6 +309,9 @@ class HighPrecisionDirtyNodeExecutor {
 
   /** @brief Optional borrowed lifecycle lease for cooperative observations. */
   const ComputeRunLease* run_lease_ = nullptr;
+
+  /** @brief Optional process authority for direct provider admission. */
+  ExecutionService* direct_execution_service_ = nullptr;
 };
 
 /**
@@ -514,6 +528,9 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Optional borrowed lifecycle lease for cooperative observations. */
   const ComputeRunLease* run_lease_ = nullptr;
+
+  /** @brief Optional process authority for direct provider admission. */
+  ExecutionService* direct_execution_service_ = nullptr;
 };
 
 }  // namespace ps::compute

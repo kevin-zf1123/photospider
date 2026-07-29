@@ -30,6 +30,7 @@ STATIC_PRODUCT_ARCHIVE_NAMES = {
 }
 INTERNAL_TEST_PRODUCT_STEM = "photospider_internal_test_product"
 INTERNAL_PRODUCT_TEST_DEFINITIONS = (
+    "PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING",
     "PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING",
     "PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING",
     "PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING",
@@ -37,6 +38,9 @@ INTERNAL_PRODUCT_TEST_DEFINITIONS = (
     "PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING",
 )
 FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
+    "g_dirty_post_plan_test_hook",
+    "set_dirty_post_plan_test_hook",
+    "notify_dirty_post_plan_test_hook",
     "reserved_start_probe_state",
     "record_reserved_start_attempt_for_testing",
     "arm_reserved_start_rollback_probe_for_testing",
@@ -60,6 +64,7 @@ FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
     "notify_kernel_compute_commit_test_hook",
 )
 REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS = (
+    "HighPrecisionDirtyExecutor16execute_prepared",
     "ExecutionService17available_devices",
     "GraphCacheService17clear_drive_cache",
     "GraphStateExecutor15close_and_drain",
@@ -2126,7 +2131,7 @@ def inspect_product_archive_symbols(
     @note Darwin tries validated Xcode ``xcrun`` llvm-nm, PATH llvm-nm, then
       PATH nm; other platforms never invoke xcrun. A candidate becomes
       authoritative only after a zero exit, nonempty symbol table, and defined
-      anchors from all five seam objects. Raw lines remain only in this stack
+      anchors from all six seam objects. Raw lines remain only in this stack
       frame: once authoritative, controlled fragment counts are retained and no
       later tool may hide a forbidden symbol.
     """
