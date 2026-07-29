@@ -4590,7 +4590,8 @@ TEST(ComputeContracts, CommitPredicateAndPublicationExcludeMutationToctou) {
  * @note The monolithic provider is non-preemptible. Cancellation becomes
  * terminal while it is blocked, the request remains pending until provider
  * return, and the post-provider sequential observation discards the private
- * staged Graph before product publication.
+ * staged Graph before product publication. Ledger and Run authority must
+ * settle before an uncancelled retry enters the same provider.
  */
 TEST(ComputeContracts,
      SequentialCancellationAfterProviderReturnSuppressesPublication) {
@@ -4604,6 +4605,8 @@ TEST(ComputeContracts,
   write_blocking_source_graph(yaml_path);
 
   Kernel kernel = ps::testing::make_kernel_with_yaml_graph_documents();
+  const auto execution_service =
+      testing::KernelTestAccess::execution_service_owner(kernel);
   ASSERT_TRUE(kernel.load_graph(graph_name, root.string(), yaml_path.string()));
   const auto initial_state =
       testing::KernelTestAccess::submit_graph_state(
@@ -4668,7 +4671,20 @@ TEST(ComputeContracts,
           })
           .get();
   EXPECT_EQ(final_state, initial_state);
+
   reset_blocking_contract_source();
+  request.cancellation_source.reset();
+  EXPECT_TRUE(kernel.compute(request));
+  EXPECT_TRUE(g_blocking_source_started.load(std::memory_order_acquire));
+  const compute::ExecutionLifecyclePage settled =
+      execution_service->lifecycle_snapshot(0U, 64U);
+  EXPECT_EQ(settled.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(settled.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(settled.counters.admitted_run_group_count, 0U);
+  EXPECT_EQ(settled.counters.live_root_reservation_count, 0U);
+  EXPECT_EQ(settled.counters.entered_callback_count, 0U);
+  EXPECT_EQ(execution_service->resource_snapshot().reserved, ResourceVector{});
+
   EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
   std::filesystem::remove(yaml_path);

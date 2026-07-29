@@ -51,6 +51,7 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
+#include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
 #include "support/scoped_execution_graph_lifecycle.hpp"
@@ -467,6 +468,165 @@ class DirectDirtyProviderProbe final {
   int maximum_active_ = 0;
   /** @brief Whether the current blocked interval may complete. */
   bool released_ = true;
+};
+
+/**
+ * @brief Coordinates the sequential-provider and post-provider lease boundary.
+ *
+ * One sequential callback blocks inside provider entry while a second
+ * route-backed callback targets the same exclusive key. After the test releases
+ * the sequential callback, the injected cache encoder blocks and ultimately
+ * throws, providing a deterministic Host post-processing interval.
+ *
+ * @throws std::system_error from mutex and condition-variable operations.
+ * @note The owning test releases both waits before joining asynchronous work
+ * and unregisters both callback slots before this shared probe is destroyed.
+ */
+class SequentialLeaseBoundaryProbe final {
+ public:
+  /**
+   * @brief Enters and blocks the sequential provider interval.
+   * @return Nothing after the owning test releases provider execution.
+   * @throws std::system_error from locking or waiting.
+   * @note The active count remains nonzero for the complete provider callback
+   * interval and excludes later Host normalization or cache persistence.
+   */
+  void enter_sequential_provider() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    sequential_provider_entered_ = true;
+    ++active_providers_;
+    maximum_active_providers_ =
+        std::max(maximum_active_providers_, active_providers_);
+    condition_.notify_all();
+    condition_.wait(lock, [this] { return sequential_provider_released_; });
+    --active_providers_;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Records one route-backed provider interval.
+   * @return Nothing after atomically recording entry and exit.
+   * @throws std::system_error from locking.
+   * @note A maximum active count above one would prove the shared exclusive key
+   * failed to protect provider execution.
+   */
+  void enter_route_provider() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    route_provider_entered_ = true;
+    ++active_providers_;
+    maximum_active_providers_ =
+        std::max(maximum_active_providers_, active_providers_);
+    condition_.notify_all();
+    --active_providers_;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Blocks Host cache persistence and then injects a typed failure.
+   * @return No value because the configured failure is always thrown.
+   * @throws GraphError with GraphErrc::Io after the test releases persistence.
+   * @throws std::system_error from locking or waiting.
+   * @note Entry occurs only after the sequential provider has returned and its
+   * result has been normalized and published into request-local Graph state.
+   */
+  [[noreturn]] void block_post_provider_cache_and_fail() {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      post_provider_cache_entered_ = true;
+      condition_.notify_all();
+      condition_.wait(lock, [this] { return post_provider_cache_released_; });
+    }
+    throw GraphError(GraphErrc::Io,
+                     "injected sequential post-provider cache failure");
+  }
+
+  /**
+   * @brief Waits for sequential provider entry.
+   * @param timeout Maximum bounded wait.
+   * @return True when the sequential provider entered before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_sequential_provider(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return sequential_provider_entered_; });
+  }
+
+  /**
+   * @brief Waits for route-backed provider entry.
+   * @param timeout Maximum bounded wait.
+   * @return True when the route-backed provider entered before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_route_provider(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return route_provider_entered_; });
+  }
+
+  /**
+   * @brief Waits for Host post-provider cache persistence.
+   * @param timeout Maximum bounded wait.
+   * @return True when the injected encoder entered before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_post_provider_cache(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return post_provider_cache_entered_; });
+  }
+
+  /**
+   * @brief Releases the blocked sequential provider.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   */
+  void release_sequential_provider() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sequential_provider_released_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Releases blocked cache persistence so its injected failure settles.
+   * @return Nothing.
+   * @throws std::system_error from locking.
+   */
+  void release_post_provider_cache() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    post_provider_cache_released_ = true;
+    condition_.notify_all();
+  }
+
+  /**
+   * @brief Returns the maximum overlapping provider intervals.
+   * @return High-water mark for sequential plus route provider execution.
+   * @throws std::system_error from locking.
+   */
+  int maximum_active_providers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return maximum_active_providers_;
+  }
+
+ private:
+  /** @brief Serializes every transition and provider overlap counter. */
+  mutable std::mutex mutex_;
+  /** @brief Announces provider, cache, and release transitions. */
+  std::condition_variable condition_;
+  /** @brief True after the sequential provider enters. */
+  bool sequential_provider_entered_ = false;
+  /** @brief True after the owning test releases the sequential provider. */
+  bool sequential_provider_released_ = false;
+  /** @brief True after the route-backed provider enters. */
+  bool route_provider_entered_ = false;
+  /** @brief True while the injected cache encoder is waiting. */
+  bool post_provider_cache_entered_ = false;
+  /** @brief True after the owning test releases cache persistence. */
+  bool post_provider_cache_released_ = false;
+  /** @brief Number of callbacks currently inside provider entry. */
+  int active_providers_ = 0;
+  /** @brief Largest simultaneous provider-entry count. */
+  int maximum_active_providers_ = 0;
 };
 
 /**
@@ -2655,6 +2815,168 @@ TEST(TaskGraphPlanningSplit,
   EXPECT_TRUE(graph.node(1).runtime_parameters.empty());
   EXPECT_TRUE(graph.node(2).runtime_parameters.empty());
   EXPECT_TRUE(graph.node(3).runtime_parameters.empty());
+}
+
+/**
+ * @brief Proves sequential direct authority ends at provider callback return.
+ *
+ * @return Nothing; GoogleTest reports gate ordering, failure typing, or
+ * authority residue.
+ * @throws Setup, graph, registry, service, future, synchronization, cache, or
+ * provider exceptions unchanged when fixture construction itself fails.
+ * @note Two distinct HP implementations share one exclusive key and declare
+ * retained/scratch demand. The route-backed provider must remain excluded
+ * while the sequential provider is active, then enter while the injected
+ * cache encoder is still blocked. The encoder subsequently throws, proving
+ * post-provider failure settlement leaves no operation gate, resource ledger,
+ * or Run lifecycle residue.
+ */
+TEST(ComputeServiceSequentialAdmission,
+     ProviderLeaseEndsBeforeBlockingPostProviderCacheFailure) {
+  constexpr const char* kType = "issue82_sequential_lease";
+  constexpr const char* kSequentialSubtype = "sequential_provider";
+  constexpr const char* kRouteSubtype = "route_provider";
+  constexpr const char* kExclusiveKey =
+      "issue82-sequential-post-provider-boundary";
+  auto probe = std::make_shared<SequentialLeaseBoundaryProbe>();
+
+  OpMetadata metadata;
+  metadata.exclusive_key = kExclusiveKey;
+  metadata.retained_memory_bytes = 64U;
+  metadata.scratch_bytes = 32U;
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kSequentialSubtype,
+      MonolithicOpFunc(
+          [probe](const Node& node,
+                  const std::vector<const NodeOutput*>&) -> NodeOutput {
+            probe->enter_sequential_provider();
+            return make_image_output(
+                as_int_flexible(node.parameters, "width", 8),
+                as_int_flexible(node.parameters, "height", 8), 1, 2.0f);
+          }),
+      metadata);
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kRouteSubtype,
+      MonolithicOpFunc(
+          [probe](const Node& node,
+                  const std::vector<const NodeOutput*>&) -> NodeOutput {
+            probe->enter_route_provider();
+            return make_image_output(
+                as_int_flexible(node.parameters, "width", 8),
+                as_int_flexible(node.parameters, "height", 8), 1, 3.0f);
+          }),
+      metadata);
+
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-sequential-provider-lease-boundary");
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [probe](const std::filesystem::path&, const ImageBuffer&,
+              ImageArtifactPrecision) {
+        probe->block_post_provider_cache_and_fail();
+      });
+  compute::ExecutionService authority(2U);
+
+  GraphModel sequential_graph((root.path() / "sequential-cache").string());
+  Node sequential_node = make_node(1, kType, std::string(kSequentialSubtype));
+  sequential_node.parameters["width"] = 8;
+  sequential_node.parameters["height"] = 8;
+  sequential_node.caches.push_back({"image", "output.png"});
+  sequential_graph.add_node(std::move(sequential_node));
+  sequential_graph.validate_topology();
+  GraphTraversalService sequential_traversal;
+  GraphCacheService sequential_cache(image_codec,
+                                     testing::make_yaml_cache_metadata_codec());
+  GraphEventService sequential_events;
+  ComputeService sequential_service(sequential_traversal, sequential_cache,
+                                    sequential_events, authority);
+  testing::ScopedExecutionGraphLifecycle sequential_lifecycle(authority,
+                                                              sequential_graph);
+
+  GraphRuntime::Info route_info;
+  route_info.name = "issue82-sequential-route-peer";
+  route_info.root = root.path() / "route";
+  route_info.cache_root = root.path() / "route-cache";
+  GraphRuntime route_runtime(route_info);
+  route_runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision,
+                                        "cpu");
+  route_runtime.start();
+  GraphModel& route_graph = route_runtime.model();
+  Node route_node = make_node(1, kType, std::string(kRouteSubtype));
+  route_node.parameters["width"] = 8;
+  route_node.parameters["height"] = 8;
+  route_graph.add_node(std::move(route_node));
+  route_graph.validate_topology();
+  GraphTraversalService route_traversal;
+  GraphCacheService route_cache(
+      providers::make_configured_image_artifact_codec(),
+      testing::make_yaml_cache_metadata_codec());
+  GraphEventService route_events;
+  ComputeService route_service(route_traversal, route_cache, route_events,
+                               authority);
+  testing::ScopedExecutionGraphLifecycle route_lifecycle(authority,
+                                                         route_graph);
+
+  ComputeService::Request sequential_request;
+  sequential_request.node_id = 1;
+  sequential_request.cache.precision = "int8";
+  sequential_request.cache.force_recache = true;
+  sequential_request.graph_identity = "issue82-sequential-provider";
+  ComputeService::Request route_request;
+  route_request.node_id = 1;
+  route_request.cache.precision = "int8";
+  route_request.cache.disable_disk_cache = true;
+  route_request.graph_identity = "issue82-route-provider";
+
+  auto sequential_future = std::async(std::launch::async, [&] {
+    return &sequential_service.compute(sequential_graph, sequential_request);
+  });
+  const bool sequential_provider_entered =
+      probe->wait_for_sequential_provider(std::chrono::seconds(2));
+  auto route_future = std::async(std::launch::async, [&] {
+    return &route_service.compute_parallel(route_graph, route_runtime,
+                                           route_request);
+  });
+  const bool route_entered_during_provider =
+      probe->wait_for_route_provider(std::chrono::milliseconds(200));
+
+  probe->release_sequential_provider();
+  const bool post_provider_cache_entered =
+      probe->wait_for_post_provider_cache(std::chrono::seconds(2));
+  const bool route_entered_during_post_provider_cache =
+      probe->wait_for_route_provider(std::chrono::seconds(2));
+  const bool sequential_waited_for_cache =
+      sequential_future.wait_for(std::chrono::milliseconds(0)) ==
+      std::future_status::timeout;
+  probe->release_post_provider_cache();
+
+  bool sequential_saw_cache_failure = false;
+  try {
+    (void)sequential_future.get();
+  } catch (const GraphError& error) {
+    sequential_saw_cache_failure = true;
+    EXPECT_EQ(error.code(), GraphErrc::Io);
+    EXPECT_NE(std::string(error.what())
+                  .find("injected sequential post-provider cache failure"),
+              std::string::npos);
+  }
+  NodeOutput* route_output = nullptr;
+  EXPECT_NO_THROW(route_output = route_future.get());
+
+  EXPECT_TRUE(sequential_provider_entered);
+  EXPECT_FALSE(route_entered_during_provider);
+  EXPECT_TRUE(post_provider_cache_entered);
+  EXPECT_TRUE(route_entered_during_post_provider_cache);
+  EXPECT_TRUE(sequential_waited_for_cache);
+  EXPECT_TRUE(sequential_saw_cache_failure);
+  EXPECT_NE(route_output, nullptr);
+  EXPECT_EQ(probe->maximum_active_providers(), 1);
+  expect_direct_authority_settled(authority);
+
+  route_runtime.stop();
+  OpRegistry::instance().unregister_key(make_key(kType, kSequentialSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kRouteSubtype));
 }
 
 TEST(TaskGraphPlanningSplit,
