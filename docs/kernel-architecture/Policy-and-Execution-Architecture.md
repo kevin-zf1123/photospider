@@ -216,10 +216,13 @@ admission freeze the complete shared estimate before moving each already
 charged constraint allocation into its unique `ReadyTaskSubmission`;
 connected-preflight callable/submission copies and the direct lease are charged
 independently. The operation gate stores only a borrowed `string_view` erased
-before the stable submission or direct-lease owner retires, so it neither
-duplicates nor undercounts string ownership. Checked terminator overflow and a
-one-byte-short retained limit fail before provider entry without gate or ledger
-residue.
+before the stable owner retires. Queued work borrows its `QueueEntry`-owned
+submission; direct acquisition copies the caller constraints into its lease
+state before querying the gate, and its wait predicate, start, and finish all
+borrow that state-owned copy. The caller input therefore need not outlive the
+returned lease. This neither duplicates nor undercounts string ownership.
+Checked terminator overflow and a one-byte-short retained limit fail before
+provider entry without gate or ledger residue.
 
 ## Private Execution Routes
 

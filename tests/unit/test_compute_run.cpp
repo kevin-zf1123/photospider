@@ -266,6 +266,218 @@ std::atomic_int g_resource_dirty_hp_operation_calls{0};
  */
 std::atomic_int g_resource_dirty_rt_operation_calls{0};
 
+/** @brief Test-product category for one retained operation-string owner. */
+using RetainedOperationStringOwner = testing::RetainedOperationStringOwner;
+
+/**
+ * @brief Immutable copy of one retained operation-string charge observation.
+ *
+ * @throws Nothing for value construction and movement.
+ */
+struct RetainedOperationStringCharge final {
+  /** @brief Exact product ownership boundary that charged the string. */
+  RetainedOperationStringOwner owner =
+      RetainedOperationStringOwner::ComputePlanOperationRoute;
+  /** @brief Actual capacity of the owned `std::string`. */
+  std::uint64_t capacity = 0U;
+  /** @brief Checked estimator total immediately before the charge. */
+  std::uint64_t before_bytes = 0U;
+  /** @brief Checked estimator total immediately after the charge. */
+  std::uint64_t after_bytes = 0U;
+};
+
+/**
+ * @brief Records retained operation-string charges without callback allocation.
+ *
+ * @throws Nothing from construction and callback recording.
+ * @note Product estimators emit synchronously in the owning tests. Atomic slots
+ * nevertheless make accidental cross-thread emission race-free, while the
+ * fixed bound prevents the observer from changing the retained-memory path it
+ * measures.
+ */
+class RetainedOperationStringChargeProbe final {
+ public:
+  /** @brief Maximum observations retained by one focused product path. */
+  static constexpr std::size_t kMaximumObservations = 64U;
+
+  /**
+   * @brief Records one product-owned string and estimator interval.
+   * @param context Non-null probe installed by the scoped observer.
+   * @param owner Exact product ownership category.
+   * @param capacity Actual copied `std::string::capacity()`.
+   * @param before_bytes Estimator total before the charge.
+   * @param after_bytes Estimator total after the charge.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The callback performs only bounded atomic stores and retains no
+   * borrowed string, estimator, service, gate, or resource reference.
+   */
+  static void observe(void* context, RetainedOperationStringOwner owner,
+                      std::uint64_t capacity, std::uint64_t before_bytes,
+                      std::uint64_t after_bytes) noexcept {
+    auto* probe = static_cast<RetainedOperationStringChargeProbe*>(context);
+    const std::size_t index =
+        probe->next_.fetch_add(1U, std::memory_order_acq_rel);
+    if (index >= kMaximumObservations) {
+      return;
+    }
+    Slot& slot = probe->slots_.at(index);
+    slot.owner.store(static_cast<std::uint8_t>(owner),
+                     std::memory_order_relaxed);
+    slot.capacity.store(capacity, std::memory_order_relaxed);
+    slot.before_bytes.store(before_bytes, std::memory_order_relaxed);
+    slot.after_bytes.store(after_bytes, std::memory_order_relaxed);
+    slot.published.store(true, std::memory_order_release);
+  }
+
+  /**
+   * @brief Copies every completely published observation.
+   * @return Ordered charge observations emitted by the synchronous path.
+   * @throws std::logic_error when an observed slot was not fully published.
+   * @throws std::bad_alloc when result storage cannot allocate.
+   */
+  std::vector<RetainedOperationStringCharge> snapshot() const {
+    const std::size_t observed = next_.load(std::memory_order_acquire);
+    if (observed > kMaximumObservations) {
+      throw std::logic_error(
+          "Retained operation-string observation capacity exceeded.");
+    }
+    std::vector<RetainedOperationStringCharge> result;
+    result.reserve(observed);
+    for (std::size_t index = 0U; index < observed; ++index) {
+      const Slot& slot = slots_.at(index);
+      if (!slot.published.load(std::memory_order_acquire)) {
+        throw std::logic_error(
+            "Retained operation-string observation was not published.");
+      }
+      result.push_back(RetainedOperationStringCharge{
+          static_cast<RetainedOperationStringOwner>(
+              slot.owner.load(std::memory_order_relaxed)),
+          slot.capacity.load(std::memory_order_relaxed),
+          slot.before_bytes.load(std::memory_order_relaxed),
+          slot.after_bytes.load(std::memory_order_relaxed),
+      });
+    }
+    return result;
+  }
+
+ private:
+  /**
+   * @brief Allocation-free storage for one test-product observer callback.
+   * @throws Nothing for atomic initialization and access.
+   */
+  struct Slot final {
+    /** @brief True after every remaining field has been stored. */
+    std::atomic_bool published{false};
+    /** @brief Encoded `RetainedOperationStringOwner`. */
+    std::atomic<std::uint8_t> owner{0U};
+    /** @brief Actual copied string capacity. */
+    std::atomic<std::uint64_t> capacity{0U};
+    /** @brief Estimator bytes before the charge. */
+    std::atomic<std::uint64_t> before_bytes{0U};
+    /** @brief Estimator bytes after the charge. */
+    std::atomic<std::uint64_t> after_bytes{0U};
+  };
+
+  /** @brief Monotonic next slot, including any overflowed observations. */
+  std::atomic<std::size_t> next_{0U};
+  /** @brief Fixed observation storage that never allocates in the callback. */
+  std::array<Slot, kMaximumObservations> slots_;
+};
+
+/**
+ * @brief Installs one retained operation-string observer for a focused path.
+ *
+ * @throws Nothing from construction and destruction.
+ * @note The supplied service documents isolated test ownership; observer state
+ * is process-local because several seam translation units emit the events.
+ */
+class ScopedRetainedOperationStringChargeObserver final {
+ public:
+  /**
+   * @brief Installs the allocation-free observer.
+   * @param service Isolated internal test-product service.
+   * @param probe Fixed-capacity destination that outlives this guard.
+   * @throws Nothing.
+   */
+  ScopedRetainedOperationStringChargeObserver(
+      ExecutionService& service,
+      RetainedOperationStringChargeProbe& probe) noexcept
+      : service_(service) {
+    ::ps::testing::ExecutionServiceTestAccess::
+        set_retained_operation_string_charge_observer(
+            service_, &RetainedOperationStringChargeProbe::observe, &probe);
+  }
+
+  /** @brief Clears the process-local observer after synchronous estimation. */
+  ~ScopedRetainedOperationStringChargeObserver() noexcept {
+    ::ps::testing::ExecutionServiceTestAccess::
+        clear_retained_operation_string_charge_observer(service_);
+  }
+
+  /** @brief Prevents duplicate observer-clearing ownership. */
+  ScopedRetainedOperationStringChargeObserver(
+      const ScopedRetainedOperationStringChargeObserver&) = delete;
+
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedRetainedOperationStringChargeObserver& operator=(
+      const ScopedRetainedOperationStringChargeObserver&) = delete;
+
+ private:
+  /** @brief Isolated service documenting the active test-product path. */
+  ExecutionService& service_;
+};
+
+/**
+ * @brief Verifies actual capacity-plus-terminator deltas and owner counts.
+ * @param probe Completed fixed-capacity observation.
+ * @param expected_counts Required exact count for selected owner categories.
+ * @return Nothing; GoogleTest records every mismatch.
+ * @throws std::logic_error for incomplete/overflowed observation state.
+ * @throws std::bad_alloc when snapshot storage cannot allocate.
+ * @note Every event is checked, including categories not listed in
+ * expected_counts. This independently compares the actual owned capacity with
+ * the production estimator delta instead of calibrating from a complete Run
+ * reservation.
+ */
+void expect_retained_operation_string_charges(
+    const RetainedOperationStringChargeProbe& probe,
+    std::initializer_list<std::pair<RetainedOperationStringOwner, std::size_t>>
+        expected_counts) {
+  const std::vector<RetainedOperationStringCharge> observations =
+      probe.snapshot();
+  ASSERT_FALSE(observations.empty());
+  constexpr std::size_t kOwnerCount =
+      static_cast<std::size_t>(RetainedOperationStringOwner::Count);
+  std::array<std::size_t, kOwnerCount> actual_by_owner{};
+  for (std::size_t index = 0U; index < observations.size(); ++index) {
+    const RetainedOperationStringCharge& observation = observations.at(index);
+    const std::size_t owner_index = static_cast<std::size_t>(observation.owner);
+    SCOPED_TRACE("retained operation-string observation " +
+                 std::to_string(index) + ", owner " +
+                 std::to_string(owner_index));
+    ASSERT_LT(owner_index, kOwnerCount);
+    ++actual_by_owner.at(owner_index);
+    EXPECT_GT(observation.capacity, 15U);
+    ASSERT_GE(observation.after_bytes, observation.before_bytes);
+    EXPECT_EQ(observation.after_bytes - observation.before_bytes,
+              observation.capacity + 1U);
+  }
+  std::array<std::size_t, kOwnerCount> expected_by_owner{};
+  for (const auto& expected : expected_counts) {
+    const std::size_t owner_index = static_cast<std::size_t>(expected.first);
+    ASSERT_LT(owner_index, kOwnerCount);
+    ASSERT_EQ(expected_by_owner.at(owner_index), 0U);
+    expected_by_owner.at(owner_index) = expected.second;
+  }
+  for (std::size_t owner_index = 0U; owner_index < kOwnerCount; ++owner_index) {
+    SCOPED_TRACE("retained operation-string owner " +
+                 std::to_string(owner_index));
+    EXPECT_EQ(actual_by_owner.at(owner_index),
+              expected_by_owner.at(owner_index));
+  }
+}
+
 /** @brief Counts Issue #75 CPU implementation entries. */
 std::atomic_int g_issue75_cpu_operation_calls{0};
 
@@ -2094,7 +2306,7 @@ class ScopedInitialSubmissionStorageObserver final {
   ScopedInitialSubmissionStorageObserver(
       ExecutionService& service, InitialSubmissionStorageProbe& probe) noexcept
       : service_(&service) {
-    testing::ExecutionServiceTestAccess::
+    ::ps::testing::ExecutionServiceTestAccess::
         set_initial_submission_storage_observer(
             service, &InitialSubmissionStorageProbe::observe, &probe);
   }
@@ -2104,7 +2316,7 @@ class ScopedInitialSubmissionStorageObserver final {
    * @throws Nothing.
    */
   ~ScopedInitialSubmissionStorageObserver() noexcept {
-    testing::ExecutionServiceTestAccess::
+    ::ps::testing::ExecutionServiceTestAccess::
         clear_initial_submission_storage_observer(*service_);
   }
 
@@ -2242,14 +2454,15 @@ class ScopedWorkerEntryRetirementObserver final {
   ScopedWorkerEntryRetirementObserver(
       ExecutionService& service, WorkerEntryRetirementProbe& probe) noexcept
       : service_(&service) {
-    testing::ExecutionServiceTestAccess::set_worker_entry_retirement_observer(
-        service, &WorkerEntryRetirementProbe::observe, &probe);
+    ::ps::testing::ExecutionServiceTestAccess::
+        set_worker_entry_retirement_observer(
+            service, &WorkerEntryRetirementProbe::observe, &probe);
   }
 
   /** @brief Clears the observer after all observed Runs settle. */
   ~ScopedWorkerEntryRetirementObserver() noexcept {
-    testing::ExecutionServiceTestAccess::clear_worker_entry_retirement_observer(
-        *service_);
+    ::ps::testing::ExecutionServiceTestAccess::
+        clear_worker_entry_retirement_observer(*service_);
   }
 
   /** @brief Prevents duplicating observer-clearing ownership. */
@@ -2472,6 +2685,8 @@ ComputeRunSubmission make_dirty_resource_submission(
  * @param synchronization_node_ids Owner ids; these must include node_id and
  * may add unused ids that do not change the product plan.
  * @param limits Immutable service limits for this endpoint.
+ * @param retained_string_probe Optional fixed-capacity observer for actual
+ * operation-string charge intervals during this endpoint.
  * @return Result containing exact admission, callback-visible output, and
  * post-settlement ledger state.
  * @throws Unexpected allocation, filesystem, graph, or service exceptions
@@ -2483,7 +2698,8 @@ DirtyProductResourceResult execute_dirty_product_resource_case(
     const std::string& directory_label, const std::string& graph_identity,
     int node_id, const std::string& subtype, ComputeIntent intent,
     const std::vector<int>& synchronization_node_ids,
-    ExecutionResourceLimits limits) {
+    ExecutionResourceLimits limits,
+    RetainedOperationStringChargeProbe* retained_string_probe = nullptr) {
   ScopedResourceRuntimeDirectory directory(directory_label);
   GraphRuntime::Info info;
   info.name = graph_identity;
@@ -2509,6 +2725,11 @@ DirtyProductResourceResult execute_dirty_product_resource_case(
   result.synchronization_bytes =
       request.node_synchronization->retained_memory_bytes();
   ExecutionService service(1U, limits);
+  std::optional<ScopedRetainedOperationStringChargeObserver>
+      retained_string_observer;
+  if (retained_string_probe != nullptr) {
+    retained_string_observer.emplace(service, *retained_string_probe);
+  }
   InitialSubmissionStorageProbe observation;
   ScopedInitialSubmissionStorageObserver observer(service, observation);
   ComputeRun run(make_dirty_resource_submission(
@@ -3163,7 +3384,7 @@ TEST(GraphRevision, ConcurrentIdentityMintIssuesMaximumOnceThenExhausts) {
       start_signal.wait();
       try {
         return std::optional<GraphInstanceId>{
-            testing::GraphInstanceIdTestAccess::mint_from(last_issued)};
+            ::ps::testing::GraphInstanceIdTestAccess::mint_from(last_issued)};
       } catch (const std::overflow_error&) {
         return std::optional<GraphInstanceId>{};
       }
@@ -3188,8 +3409,9 @@ TEST(GraphRevision, ConcurrentIdentityMintIssuesMaximumOnceThenExhausts) {
   EXPECT_EQ(maximum_issuances, 1U);
   EXPECT_EQ(exhaustion_count, kWorkerCount - 1U);
   EXPECT_EQ(last_issued.load(std::memory_order_relaxed), maximum);
-  EXPECT_THROW((void)testing::GraphInstanceIdTestAccess::mint_from(last_issued),
-               std::overflow_error);
+  EXPECT_THROW(
+      (void)::ps::testing::GraphInstanceIdTestAccess::mint_from(last_issued),
+      std::overflow_error);
   EXPECT_EQ(last_issued.load(std::memory_order_relaxed), maximum);
 }
 
@@ -3205,7 +3427,7 @@ TEST(GraphRevision, StructuralMutationOverflowPreservesPublishedGraph) {
   GraphModel graph(std::filesystem::path{});
   graph.add_node(make_plan_node(1));
   const uint64_t topology_before = graph.topology_generation();
-  testing::GraphModelTestAccess::set_revision(
+  ::ps::testing::GraphModelTestAccess::set_revision(
       graph, GraphRevision{std::numeric_limits<uint64_t>::max()});
 
   EXPECT_THROW(graph.add_node(make_plan_node(2)), std::overflow_error);
@@ -4200,6 +4422,62 @@ TEST(OperationExecutionGate, DirectLeaseChargesBytesAndRecoversAfterRejection) {
 }
 
 /**
+ * @brief Proves a direct gate borrows only the lease-state constraints copy.
+ *
+ * @return Nothing; assertions report caller-key aliasing or release residue.
+ * @throws Standard Run, service, string, or synchronization exceptions.
+ * @note The caller key is changed in place only after acquisition returns,
+ * while its allocation remains alive and stable. A gate that retained the
+ * caller's view would incorrectly consider the original key startable. The
+ * original characters are restored before lease destruction so even that
+ * incorrect implementation can unwind without corrupting the test process.
+ */
+TEST(OperationExecutionGate,
+     DirectLeaseGateIgnoresCallerConstraintMutationAfterAcquisition) {
+  constexpr std::uint64_t kLeaseIdentity = 208U;
+  constexpr std::uint64_t kContenderIdentity = 209U;
+  const std::string original_key(96U, 'o');
+  const std::string replacement_key(96U, 'r');
+  ASSERT_EQ(original_key.size(), replacement_key.size());
+
+  ExecutionService service(1U);
+  ComputeRun run(make_test_submission("direct-stable-key-owner", 208U, 1));
+  OperationExecutionConstraints caller_constraints{kLeaseIdentity, true, 0U,
+                                                   original_key};
+  ASSERT_GT(caller_constraints.exclusive_key.capacity(), 15U);
+  const OperationExecutionConstraints same_key_contender{
+      kContenderIdentity, true, 0U, original_key};
+  const OperationExecutionConstraints different_key_contender{
+      kContenderIdentity, true, 0U, std::string(96U, 'd')};
+
+  {
+    OperationExecutionLease lease = service.acquire_operation_execution(
+        run.acquire_lease(), caller_constraints, ReadyTaskResourceDemand{});
+    char* const retained_caller_allocation =
+        caller_constraints.exclusive_key.data();
+    std::copy(replacement_key.begin(), replacement_key.end(),
+              caller_constraints.exclusive_key.begin());
+    ASSERT_EQ(caller_constraints.exclusive_key.data(),
+              retained_caller_allocation);
+
+    EXPECT_FALSE(
+        ::ps::testing::ExecutionServiceTestAccess::
+            direct_operation_gate_can_start(service, same_key_contender));
+    EXPECT_TRUE(
+        ::ps::testing::ExecutionServiceTestAccess::
+            direct_operation_gate_can_start(service, different_key_contender));
+
+    std::copy(original_key.begin(), original_key.end(),
+              caller_constraints.exclusive_key.begin());
+  }
+
+  EXPECT_TRUE(::ps::testing::ExecutionServiceTestAccess::
+                  direct_operation_gate_can_start(service, same_key_contender));
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_NO_THROW(service.shutdown());
+}
+
+/**
  * @brief Proves owned string accounting includes the trailing null atomically.
  *
  * @return Nothing; assertions report an incorrect exact byte count or partial
@@ -4503,7 +4781,7 @@ TEST(ExecutionService, ReleaseHelperRetiresInitialSubmissionStorage) {
   ASSERT_FALSE(submissions.empty());
   ASSERT_GE(submissions.capacity(), 8U);
 
-  testing::ExecutionServiceTestAccess::release_initial_submission_storage(
+  ::ps::testing::ExecutionServiceTestAccess::release_initial_submission_storage(
       submissions);
 
   EXPECT_TRUE(submissions.empty());
@@ -4529,8 +4807,9 @@ TEST(ExecutionService,
   ComputeRun run(
       make_test_submission("production-released-initial-staging", 1U, 1));
   InitialSubmissionStorageProbe observation;
-  testing::ExecutionServiceTestAccess::set_initial_submission_storage_observer(
-      service, &InitialSubmissionStorageProbe::observe, &observation);
+  ::ps::testing::ExecutionServiceTestAccess::
+      set_initial_submission_storage_observer(
+          service, &InitialSubmissionStorageProbe::observe, &observation);
 
   std::promise<void> callback_entered;
   std::future<void> callback_entered_future = callback_entered.get_future();
@@ -4587,7 +4866,7 @@ TEST(ExecutionService,
   ASSERT_EQ(run_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_NO_THROW(run_future.get());
-  testing::ExecutionServiceTestAccess::
+  ::ps::testing::ExecutionServiceTestAccess::
       clear_initial_submission_storage_observer(service);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }
@@ -4922,7 +5201,7 @@ TEST(ExecutionServiceProductResources,
   graph.validate_topology();
   GraphTraversalService traversal;
   GraphCacheService cache{providers::make_configured_image_artifact_codec(),
-                          testing::make_yaml_cache_metadata_codec()};
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
   GraphEventService events;
 
   ExecutionService small_service(1U, execution_limits(service_only));
@@ -4954,8 +5233,18 @@ TEST(ExecutionServiceProductResources,
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Queued));
   ASSERT_TRUE(small_run.advance_to(ComputeRunPhase::Running));
   ComputeRunLease small_lease = small_run.acquire_lease();
-  const std::uint64_t adapter_shared_bytes =
-      small_lease.retained_memory_bytes();
+  RetainedOperationStringChargeProbe retained_string_probe;
+  std::uint64_t adapter_shared_bytes = 0U;
+  {
+    ScopedRetainedOperationStringChargeObserver retained_string_observer(
+        small_service, retained_string_probe);
+    adapter_shared_bytes = small_lease.retained_memory_bytes();
+  }
+  ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+      retained_string_probe,
+      {{RetainedOperationStringOwner::ComputePlanOperationRoute, 1U},
+       {RetainedOperationStringOwner::FullPlanResolvedOperation, 1U},
+       {RetainedOperationStringOwner::FullPlanExecutionConstraint, 1U}}));
   ASSERT_GT(adapter_shared_bytes, 0U);
   ASSERT_EQ(small_plan.resolved_ops().size(), 1U);
   ASSERT_TRUE(small_plan.resolved_ops().front().has_value());
@@ -5106,11 +5395,28 @@ TEST(ExecutionServiceProductResources,
                                            node_id + 2000, node_id + 3000};
 
     operation_calls.store(0, std::memory_order_relaxed);
+    RetainedOperationStringChargeProbe retained_string_probe;
     const DirtyProductResourceResult calibration =
         execute_dirty_product_resource_case(
             is_rt ? "dirty-rt-sync-calibration" : "dirty-hp-sync-calibration",
             graph_identity, node_id, subtype, intent, small_owner_ids,
-            ExecutionService::default_resource_limits());
+            ExecutionService::default_resource_limits(),
+            &retained_string_probe);
+    if (is_rt) {
+      ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+          retained_string_probe,
+          {{RetainedOperationStringOwner::ComputePlanOperationRoute, 3U},
+           {RetainedOperationStringOwner::DirtyResolvedOperation, 1U},
+           {RetainedOperationStringOwner::DirtyRealTimeExecutionConstraint,
+            1U}}));
+    } else {
+      ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+          retained_string_probe,
+          {{RetainedOperationStringOwner::ComputePlanOperationRoute, 3U},
+           {RetainedOperationStringOwner::DirtyResolvedOperation, 1U},
+           {RetainedOperationStringOwner::DirtyHighPrecisionExecutionConstraint,
+            1U}}));
+    }
     EXPECT_FALSE(calibration.failure_code.has_value());
     ASSERT_TRUE(calibration.admitted_resources.has_value());
     EXPECT_EQ(calibration.observation_count, 1);
@@ -5448,7 +5754,10 @@ TEST(ExecutionServiceProductResources,
   ResourceVector exact;
   ExecutionService calibration_service(1U);
   ExecutionServiceHost calibration_host;
+  RetainedOperationStringChargeProbe retained_string_probe;
   {
+    ScopedRetainedOperationStringChargeObserver retained_string_observer(
+        calibration_service, retained_string_probe);
     ComputeRun run(make_registered_test_submission(graph, graph_identity, 303));
     ps::testing::ScopedExecutionGraphLifecycle graph_lifecycle(
         calibration_service, graph);
@@ -5469,6 +5778,12 @@ TEST(ExecutionServiceProductResources,
     EXPECT_GT(exact.retained_memory_bytes, 0U);
     EXPECT_GT(exact.ready_entries, 0U);
   }
+  ASSERT_NO_FATAL_FAILURE(expect_retained_operation_string_charges(
+      retained_string_probe,
+      {{RetainedOperationStringOwner::ConnectedPreflightOperationConstraint,
+        2U},
+       {RetainedOperationStringOwner::ConnectedPreflightSubmissionConstraint,
+        2U}}));
   EXPECT_EQ(calibration_service.resource_snapshot().reserved, ResourceVector{});
 
   ResourceVector one_byte_short = exact;
@@ -6695,10 +7010,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   ASSERT_EQ(interactive_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 
   throughput = launch_blocking_policy_run(
       service,
@@ -6708,10 +7022,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   ASSERT_EQ(throughput_entered_future.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   EXPECT_EQ(service.resource_snapshot().reserved, *doubled);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   EXPECT_TRUE(interactive_release_guard.release());
   ASSERT_EQ(interactive.completion.wait_for(std::chrono::seconds(2)),
@@ -6719,10 +7032,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_NO_THROW(interactive.completion.get());
   EXPECT_TRUE(wait_for_resource_reservation(service, required));
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   std::atomic_int rejected_entered{0};
   ComputeRun rejected_run(make_policy_submission(
@@ -6741,10 +7053,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   }
   EXPECT_EQ(rejected_entered.load(std::memory_order_relaxed), 0);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   EXPECT_TRUE(throughput_release_guard.release());
   ASSERT_EQ(throughput.completion.wait_for(std::chrono::seconds(2)),
@@ -6752,10 +7063,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_NO_THROW(throughput.completion.get());
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 
   targets.push_back(launch_ordered_policy_run(
       service,
@@ -6766,10 +7076,9 @@ TEST(ExecutionServicePolicy, ProtectsInteractiveAdmissionHeadroom) {
   EXPECT_EQ(execution_order, (std::vector<int>{5}));
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 }
 
 /**
@@ -6848,10 +7157,9 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_EQ(entered.load(std::memory_order_acquire), 1);
   EXPECT_EQ(settled_while_blocked, 1U);
   EXPECT_EQ(service.resource_snapshot().reserved, required);
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      required);
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            required);
 
   EXPECT_TRUE(callback_release_guard.release());
   int successful = 0;
@@ -6871,10 +7179,9 @@ TEST(ExecutionServicePolicy, SerializesConcurrentThroughputQuotaAdmission) {
   EXPECT_EQ(rejected, 1);
   EXPECT_TRUE(wait_for_resource_reservation(service, ResourceVector{}));
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
-  EXPECT_EQ(
-      testing::ExecutionServiceTestAccess::throughput_reservation_snapshot(
-          service),
-      ResourceVector{});
+  EXPECT_EQ(::ps::testing::ExecutionServiceTestAccess::
+                throughput_reservation_snapshot(service),
+            ResourceVector{});
 }
 
 /**
@@ -8160,7 +8467,7 @@ TEST(ComputeRunCancellation,
 
     GraphTraversalService traversal;
     GraphCacheService cache{providers::make_configured_image_artifact_codec(),
-                            testing::make_yaml_cache_metadata_codec()};
+                            ::ps::testing::make_yaml_cache_metadata_codec()};
     GraphEventService events;
     CompletionTrackingRuntime runtime;
     TimingCollector timings;

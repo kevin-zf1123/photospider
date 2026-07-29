@@ -882,6 +882,19 @@ struct OperationAdmissionWaitProbeState final {
 };
 
 /**
+ * @brief Process-local retained operation-string observer state for tests.
+ * @throws Nothing for atomic initialization and access.
+ * @note The callback only records actual owner capacity and estimator totals.
+ * It owns no string, estimator, gate, resource, Run, or service state.
+ */
+struct RetainedOperationStringChargeProbeState final {
+  /** @brief Borrowed opaque fixture context. */
+  std::atomic<void*> context{nullptr};
+  /** @brief Optional allocation-free observation callback. */
+  std::atomic<testing::RetainedOperationStringChargeObserver> observer{nullptr};
+};
+
+/**
  * @brief Returns the unique test-product probe state.
  * @return Process-lifetime allocation-free storage.
  * @throws Nothing.
@@ -899,6 +912,17 @@ ReservedStartProbeState& reserved_start_probe_state() noexcept {
 OperationAdmissionWaitProbeState&
 operation_admission_wait_probe_state() noexcept {
   static OperationAdmissionWaitProbeState state;
+  return state;
+}
+
+/**
+ * @brief Returns the unique test-product retained-string observer state.
+ * @return Process-lifetime allocation-free observer storage.
+ * @throws Nothing.
+ */
+RetainedOperationStringChargeProbeState&
+retained_operation_string_charge_probe_state() noexcept {
+  static RetainedOperationStringChargeProbeState state;
   return state;
 }
 
@@ -970,7 +994,9 @@ bool record_reserved_start_attempt_for_testing(
  * @note Every method is called with `PoolState::mutex` held. The gate owns no
  * callback, Run, ready entry, resource grant, key string, or synchronization
  * primitive. A nonempty key row borrows the stable constraint string from the
- * active QueueEntry or direct lease and is erased before that owner retires.
+ * active QueueEntry or `OperationExecutionLeaseState` and is erased before
+ * that exact owner retires. Direct acquisition never borrows the caller's
+ * input constraints after the lease-state copy has been constructed.
  */
 class ExecutionService::OperationStartGate final {
  public:
@@ -3512,6 +3538,38 @@ void clear_operation_admission_wait_observer_for_testing() noexcept {
   state.context.store(nullptr, std::memory_order_relaxed);
 }
 
+/** @copydoc set_retained_operation_string_charge_observer_for_testing */
+void set_retained_operation_string_charge_observer_for_testing(
+    RetainedOperationStringChargeObserver observer, void* context) noexcept {
+  RetainedOperationStringChargeProbeState& state =
+      retained_operation_string_charge_probe_state();
+  state.context.store(context, std::memory_order_relaxed);
+  state.observer.store(observer, std::memory_order_release);
+}
+
+/** @copydoc clear_retained_operation_string_charge_observer_for_testing */
+void clear_retained_operation_string_charge_observer_for_testing() noexcept {
+  RetainedOperationStringChargeProbeState& state =
+      retained_operation_string_charge_probe_state();
+  state.observer.store(nullptr, std::memory_order_release);
+  state.context.store(nullptr, std::memory_order_relaxed);
+}
+
+/** @copydoc notify_retained_operation_string_charge_for_testing */
+void notify_retained_operation_string_charge_for_testing(
+    RetainedOperationStringOwner owner, const std::string& value,
+    std::uint64_t before_bytes, std::uint64_t after_bytes) noexcept {
+  RetainedOperationStringChargeProbeState& state =
+      retained_operation_string_charge_probe_state();
+  const RetainedOperationStringChargeObserver observer =
+      state.observer.load(std::memory_order_acquire);
+  if (observer != nullptr) {
+    observer(state.context.load(std::memory_order_relaxed), owner,
+             static_cast<std::uint64_t>(value.capacity()), before_bytes,
+             after_bytes);
+  }
+}
+
 }  // namespace testing
 #endif
 
@@ -4311,20 +4369,23 @@ OperationExecutionLease ExecutionService::acquire_operation_execution(
       *this, std::move(service_lease), constraints);
   const ResourceVector resources =
       direct_operation_execution_resources(state->constraints, demand);
+  OperationExecutionLeaseState* const state_ptr = state.get();
+  const OperationExecutionConstraints& retained_constraints =
+      state->constraints;
 
   {
     std::unique_lock<std::mutex> lock(pool_->mutex);
-    while (!pool_->operation_gate.can_start(constraints)) {
+    while (!pool_->operation_gate.can_start(retained_constraints)) {
       if (pool_->stopping) {
         throw std::logic_error("ExecutionService is stopping.");
       }
       const std::uint64_t observed_epoch = pool_->worker_notification_epoch;
       (void)pool_->ready_cv.wait_for(
           lock, std::chrono::milliseconds(50),
-          [this, &constraints, observed_epoch]() {
+          [this, state_ptr, observed_epoch]() {
             return pool_->stopping ||
                    pool_->worker_notification_epoch != observed_epoch ||
-                   pool_->operation_gate.can_start(constraints);
+                   pool_->operation_gate.can_start(state_ptr->constraints);
           });
       lock.unlock();
       if (state->run_lease.observe_cancellation().has_value()) {
@@ -4337,7 +4398,7 @@ OperationExecutionLease ExecutionService::acquire_operation_execution(
     if (pool_->stopping) {
       throw std::logic_error("ExecutionService is stopping.");
     }
-    if (!pool_->operation_gate.try_start(constraints)) {
+    if (!pool_->operation_gate.try_start(retained_constraints)) {
       throw std::logic_error(
           "Operation startability changed under the service lock.");
     }
@@ -4378,6 +4439,17 @@ OperationExecutionLease ExecutionService::acquire_operation_execution(
   state->run_lease.commit_resource_settlement_observation();
   return OperationExecutionLease(std::move(state));
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+/**
+ * @copydoc ExecutionService::direct_operation_gate_can_start_for_testing
+ */
+bool ExecutionService::direct_operation_gate_can_start_for_testing(
+    const OperationExecutionConstraints& constraints) {
+  std::lock_guard<std::mutex> lock(pool_->mutex);
+  return pool_->operation_gate.can_start(constraints);
+}
+#endif
 
 /** @copydoc ExecutionService::execute_prepared_run */
 void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {

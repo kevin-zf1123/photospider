@@ -160,7 +160,11 @@ connected preflight。零是 provider 的显式声明；缺失或格式错误的
 空字符计费。每个独立 retained operation/constraint key 遵循同一规则。Full-plan 与 dirty
 adapter 会先冻结 shared charge，再把一份已经计费的 key allocation 移入其唯一 submission；
 connected preflight 与 direct lease 对各自独立副本计费，而 operation gate 会借用 stable view，
-不再复制 string。在所有 initial value 与 ready grant 都移动到暂存 queue entry 后，
+不再复制 string。Queued gate view 借用 owning `QueueEntry` 中的值。Direct acquisition 会先把
+caller constraints 复制进返回的 lease state；此后的每一次 gate query、wait predicate、start
+与 finish 都借用该 state-owned 副本，因此 helper-local caller 可以在 acquisition 返回后退出或
+修改自身输入，而不会改变 active gate identity。在所有 initial value 与 ready grant 都移动到
+暂存 queue entry 后，
 `ExecutionService` 会在发布 active Run 和等待 settlement 之前销毁 caller-side submission
 vector 的 backing；此后只有暂存 entry 以及 bounded store 保留这些 submission。在每个 dirty
 或 connected-preflight service segment 之前，adapter 会加入当前 staging/snapshot storage 与

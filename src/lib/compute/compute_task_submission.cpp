@@ -14,6 +14,9 @@
 
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_dispatch_plan_builder.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
 #include "compute/resource_demand_estimator.hpp"
 #include "graph/graph_traversal_service.hpp"
 
@@ -210,14 +213,31 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       static_cast<std::uint64_t>(resolved_ops_.capacity()));
   for (const std::optional<OpImplementation>& implementation : resolved_ops_) {
     if (implementation.has_value()) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      const std::uint64_t before_operation_key = estimate.bytes();
+#endif
       estimate.add_string_payload(implementation->metadata.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+      testing::notify_retained_operation_string_charge_for_testing(
+          testing::RetainedOperationStringOwner::FullPlanResolvedOperation,
+          implementation->metadata.exclusive_key, before_operation_key,
+          estimate.bytes());
+#endif
     }
   }
   estimate.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(operation_constraints_.capacity()));
   for (const OperationExecutionConstraints& constraints :
        operation_constraints_) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_constraint_key = estimate.bytes();
+#endif
     estimate.add_string_payload(constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::FullPlanExecutionConstraint,
+        constraints.exclusive_key, before_constraint_key, estimate.bytes());
+#endif
   }
   return estimate.bytes();
 }

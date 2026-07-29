@@ -106,9 +106,12 @@ void observe_dirty_node_cancellation(const ComputeRunLease* run_lease) {
  * @throws GraphError or standard exceptions from operation gate waiting,
  * cancellation observation, and resource admission.
  * @note Input resolution and output-buffer allocation happen before callers
- * enter this helper. `ExecutionService` waits for gate availability without a
- * resource reservation, then admits the exact vector. Destruction releases
- * the vector and gate during both ordinary return and exception unwinding.
+ * enter this helper. `ExecutionService` first copies the helper-local
+ * constraints into the returned lease state, then waits for gate availability
+ * without a resource reservation and admits the exact vector. The gate borrows
+ * only that state-owned copy, which survives this helper's return. Destruction
+ * releases the vector and gate during both ordinary return and exception
+ * unwinding.
  */
 OperationExecutionLease acquire_direct_dirty_operation(
     ExecutionService* service, const ComputeRunLease* run_lease,

@@ -1272,12 +1272,16 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * policy/ledger cannot admit the direct callback vector.
    * @throws std::bad_alloc or std::system_error from gate/resource staging.
    * @note Waiting for identity/key availability holds no resource reservation.
-   * The copied constraints key is charged by actual retained capacity plus its
-   * null terminator through checked arithmetic before gate acquisition.
-   * Resource admission is attempted only after the gate becomes startable; a
-   * failed reservation releases staged gate ownership before returning. Direct
-   * sequential entry uses ledger capacity without requiring physical workers
-   * to be configured or started.
+   * The method first copies constraints into the returned lease state. Every
+   * gate query, wait predicate, start, and eventual finish uses that stable
+   * state-owned copy; the caller may therefore mutate or destroy its input
+   * after this call returns without changing active gate identity. The copied
+   * key is charged by actual retained capacity plus its null terminator through
+   * checked arithmetic before gate acquisition. Resource admission is
+   * attempted only after the gate becomes startable; a failed reservation
+   * releases staged gate ownership before returning. Direct sequential entry
+   * uses ledger capacity without requiring physical workers to be configured
+   * or started.
    */
   OperationExecutionLease acquire_operation_execution(
       const ComputeRunLease& run_lease,
@@ -1512,6 +1516,18 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   using WorkerEntryRetirementObserver = void (*)(void* context,
                                                  ComputeRunId run_id) noexcept;
+
+  /**
+   * @brief Tests one constraint against the current test-product gate.
+   * @param constraints Candidate identity, cap, and key declaration.
+   * @return True when the operation gate would currently admit the candidate.
+   * @throws std::system_error when service synchronization fails.
+   * @note This source-private diagnostic is defined only by the non-installed
+   * internal test product. It acquires the real pool mutex but commits no gate
+   * or resource authority and adds no object state or installed API.
+   */
+  bool direct_operation_gate_can_start_for_testing(
+      const OperationExecutionConstraints& constraints);
 
   /**
    * @brief Calculates mandatory bytes for one service-owned submission.

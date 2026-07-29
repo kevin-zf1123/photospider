@@ -1097,8 +1097,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
         self.assertEqual(set(observation), ARCHIVE_SYMBOL_OBSERVATION_KEYS)
         self.assertEqual(observation["tool_source"], "xcrun llvm-nm")
         self.assertTrue(observation["covers_product_seams"])
-        self.assertEqual(observation["required_anchor_count"], 7)
-        self.assertEqual(observation["required_anchor_total"], 7)
+        self.assertEqual(observation["required_anchor_count"], 9)
+        self.assertEqual(observation["required_anchor_total"], 9)
         self.assertEqual(observation["prohibited_symbol_count"], 1)
         self.assertEqual(
             observation["prohibited_symbols"], {forbidden_symbol: 1}
@@ -1327,8 +1327,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
                 {
                     "tool_source": "PATH llvm-nm",
                     "reason": "inspection missed required anchors",
-                    "missing_anchor_count": 7,
-                    "required_anchor_total": 7,
+                    "missing_anchor_count": 9,
+                    "required_anchor_total": 9,
                 },
                 {
                     "tool_source": "PATH nm",
@@ -1453,8 +1453,8 @@ class ProductArchiveSymbolInspectionPolicyTest(unittest.TestCase):
                 {
                     "tool_source": "PATH nm",
                     "reason": "inspection missed required anchors",
-                    "missing_anchor_count": 7,
-                    "required_anchor_total": 7,
+                    "missing_anchor_count": 9,
+                    "required_anchor_total": 9,
                 },
             ],
         )

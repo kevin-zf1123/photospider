@@ -12,6 +12,9 @@
 #include <vector>
 
 #include "compute/dirty_region_planner.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
 #include "photospider/data/region.hpp"
 #include "photospider/plugin/node_view.hpp"
 
@@ -171,7 +174,16 @@ void add_planned_work_dynamic(const PlannedNodeWork& work,
   add_vector_capacity(work.dependent_node_ids, estimate);
   add_vector_capacity(work.task_ids, estimate);
   if (work.operation_route.has_value()) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_operation_route = estimate->bytes();
+#endif
     estimate->add_string_payload(work.operation_route->metadata.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::ComputePlanOperationRoute,
+        work.operation_route->metadata.exclusive_key, before_operation_route,
+        estimate->bytes());
+#endif
   }
 }
 

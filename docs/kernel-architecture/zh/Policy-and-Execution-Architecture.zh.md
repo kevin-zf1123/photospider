@@ -182,9 +182,11 @@ cancellation-aware wait，随后只在 provider entry 周围获取同一 gate �
 shared estimate，再把每份已经计费的 constraint allocation 移入其唯一
 `ReadyTaskSubmission`；connected-preflight callable/submission 的副本与 direct lease
 分别独立计费。operation gate 只保存 borrowed `string_view`，并在稳定 submission 或
-direct-lease owner 退出前擦除，因此既不重复也不漏算 string ownership。Checked
-terminator overflow 与少一个 byte 的 retained limit 都会在 provider entry 前失败，不留下
-gate 或 ledger 残留。
+direct-lease owner 退出前擦除。Queued work 借用其 `QueueEntry` 所拥有的 submission；
+direct acquisition 会在查询 gate 前把 caller constraints 复制进自身 lease state，其 wait
+predicate、start 与 finish 都借用该 state-owned 副本。因此 caller 输入不必比返回的 lease
+存活更久。该做法既不重复也不漏算 string ownership。Checked terminator overflow 与少一个
+byte 的 retained limit 都会在 provider entry 前失败，不留下 gate 或 ledger 残留。
 
 ## 私有执行路由
 

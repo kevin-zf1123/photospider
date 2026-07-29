@@ -195,8 +195,13 @@ terminator. Every independently retained operation/constraint key follows the
 same rule. Full-plan and dirty adapters freeze the shared charge before moving
 one already-charged key allocation into its unique submission; connected
 preflight and direct leases charge their independent copies, while the
-operation gate borrows a stable view instead of duplicating the string. After
-every initial value and ready grant has moved into a staged queue entry,
+operation gate borrows a stable view instead of duplicating the string. A
+queued gate view borrows from the owning `QueueEntry`. Direct acquisition first
+copies the caller constraints into the returned lease state; every gate query,
+wait predicate, start, and finish then borrows that state-owned copy, so a
+helper-local caller may retire or mutate its input after acquisition returns
+without changing active gate identity. After every initial value and ready
+grant has moved into a staged queue entry,
 `ExecutionService` destroys the caller-side submission-vector backing before
 active-Run publication and settlement waiting; only the staged entries and then
 the bounded store retain those submissions. Before each dirty or

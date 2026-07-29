@@ -3827,6 +3827,131 @@ TEST(ComputeServiceDirectDirtyAdmission,
 }
 
 /**
+ * @brief Proves HP and RT helper-local constraints do not own active gate keys.
+ *
+ * @return Nothing; GoogleTest reports cross-identity key overlap or residue.
+ * @throws Graph, service, registry, future, or provider exceptions unchanged.
+ * @note Each intent uses two different reentrant implementation identities
+ * with no identity cap and one equal heap-backed exclusive key. The first
+ * direct dirty helper returns its lease after its stack-local constraints have
+ * retired; the key must still serialize the second Graph through the
+ * lease-state owner. The lower-level mutation regression makes that lifetime
+ * distinction deterministic, while this case covers both real product helper
+ * paths.
+ */
+TEST(ComputeServiceDirectDirtyAdmission,
+     HeapBackedExclusiveKeySurvivesHelperLocalConstraintsForHpAndRt) {
+  constexpr const char* kType = "issue82_direct_dirty";
+  const std::string exclusive_key =
+      "issue82-direct-dirty-stable-owner-exclusive-key";
+
+  for (const ComputeIntent intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    const bool is_rt = intent == ComputeIntent::RealTimeUpdate;
+    SCOPED_TRACE(is_rt ? "RT" : "HP");
+    const std::string first_subtype =
+        is_rt ? "rt_stable_key_first" : "hp_stable_key_first";
+    const std::string second_subtype =
+        is_rt ? "rt_stable_key_second" : "hp_stable_key_second";
+    auto probe = std::make_shared<DirectDirtyProviderProbe>();
+    OpMetadata metadata;
+    metadata.exclusive_key = exclusive_key;
+
+    if (is_rt) {
+      register_direct_cached_source_operation();
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, first_subtype,
+          MonolithicOpFunc(
+              [](const Node& node, const std::vector<const NodeOutput*>&) {
+                return make_image_output(
+                    as_int_flexible(node.parameters, "width", 8),
+                    as_int_flexible(node.parameters, "height", 8), 1, 3.0f);
+              }));
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, second_subtype,
+          MonolithicOpFunc(
+              [](const Node& node, const std::vector<const NodeOutput*>&) {
+                return make_image_output(
+                    as_int_flexible(node.parameters, "width", 8),
+                    as_int_flexible(node.parameters, "height", 8), 1, 4.0f);
+              }));
+      metadata.tile_preference = TileSizePreference::MICRO;
+      OpRegistry::instance().register_op_rt_tiled(
+          kType, first_subtype, make_probed_tile_operation(probe, 5.0f),
+          metadata);
+      OpRegistry::instance().register_op_rt_tiled(
+          kType, second_subtype, make_probed_tile_operation(probe, 6.0f),
+          metadata);
+    } else {
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, first_subtype, make_probed_image_operation(probe, 2.0f),
+          metadata);
+      OpRegistry::instance().register_op_hp_monolithic(
+          kType, second_subtype, make_probed_image_operation(probe, 3.0f),
+          metadata);
+    }
+
+    const std::optional<OpImplementation> first_selected =
+        OpRegistry::instance().select_implementation(kType, first_subtype,
+                                                     {Device::CPU}, intent);
+    const std::optional<OpImplementation> second_selected =
+        OpRegistry::instance().select_implementation(kType, second_subtype,
+                                                     {Device::CPU}, intent);
+    ASSERT_TRUE(first_selected.has_value());
+    ASSERT_TRUE(second_selected.has_value());
+    EXPECT_NE(first_selected->implementation_identity,
+              second_selected->implementation_identity);
+    EXPECT_EQ(first_selected->metadata.exclusive_key, exclusive_key);
+    EXPECT_EQ(second_selected->metadata.exclusive_key, exclusive_key);
+    EXPECT_GT(first_selected->metadata.exclusive_key.capacity(), 15U);
+    EXPECT_GT(second_selected->metadata.exclusive_key.capacity(), 15U);
+
+    compute::ExecutionService authority;
+    DirectDirtyComputeHarness first(
+        authority,
+        is_rt ? "issue82-rt-stable-key-first" : "issue82-hp-stable-key-first");
+    DirectDirtyComputeHarness second(authority,
+                                     is_rt ? "issue82-rt-stable-key-second"
+                                           : "issue82-hp-stable-key-second");
+    populate_direct_dirty_graph(first.graph(), first_subtype, false, is_rt);
+    populate_direct_dirty_graph(second.graph(), second_subtype, false, is_rt);
+    ComputeService::Request full =
+        make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
+    full.intent.reset();
+    full.dirty_roi.reset();
+    (void)first.service().compute(first.graph(), full);
+    (void)second.service().compute(second.graph(), full);
+
+    probe->reset_and_block();
+    const ComputeService::Request dirty = make_direct_dirty_request(intent, 1);
+    auto first_future = std::async(std::launch::async, [&] {
+      (void)first.service().compute(first.graph(), dirty);
+    });
+    EXPECT_TRUE(probe->wait_for_entries(1, std::chrono::seconds(2)));
+    auto second_future = std::async(std::launch::async, [&] {
+      (void)second.service().compute(second.graph(), dirty);
+    });
+    const bool second_entered_while_blocked =
+        probe->wait_for_entries(2, std::chrono::milliseconds(200));
+    probe->release();
+
+    EXPECT_FALSE(second_entered_while_blocked);
+    EXPECT_NO_THROW(first_future.get());
+    EXPECT_NO_THROW(second_future.get());
+    EXPECT_EQ(probe->entered(), 2);
+    EXPECT_EQ(probe->maximum_active(), 1);
+    expect_direct_authority_settled(authority);
+
+    OpRegistry::instance().unregister_key(make_key(kType, first_subtype));
+    OpRegistry::instance().unregister_key(make_key(kType, second_subtype));
+    if (is_rt) {
+      OpRegistry::instance().unregister_key(
+          make_key(kType, kDirectCachedSourceSubtype));
+    }
+  }
+}
+
+/**
  * @brief Proves connected-preflight direct callbacks serialize equal keys and
  * overlap different keys across independent identities.
  *

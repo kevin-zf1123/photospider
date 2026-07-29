@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "runtime/resource_ledger.hpp"
 
@@ -96,6 +97,87 @@ void set_operation_admission_wait_observer_for_testing(
  * @note The owning test first settles all potentially notifying work.
  */
 void clear_operation_admission_wait_observer_for_testing() noexcept;
+
+/**
+ * @brief Identifies one owned operation-string charge in product estimation.
+ *
+ * @throws Nothing for value construction and comparison.
+ * @note Values are emitted only by the separately compiled, non-installed
+ * internal test product. They identify ownership boundaries, not public
+ * resource dimensions or operation ABI values.
+ */
+enum class RetainedOperationStringOwner : std::uint8_t {
+  /** @brief Exclusive key retained by one planned operation route. */
+  ComputePlanOperationRoute = 0U,
+  /** @brief Exclusive key retained by a full-plan resolved implementation. */
+  FullPlanResolvedOperation,
+  /** @brief Exclusive key retained by a full-plan execution constraint. */
+  FullPlanExecutionConstraint,
+  /** @brief Exclusive key retained by a dirty resolved implementation map. */
+  DirtyResolvedOperation,
+  /** @brief Exclusive key retained by one HP dirty execution constraint. */
+  DirtyHighPrecisionExecutionConstraint,
+  /** @brief Exclusive key retained by one RT dirty execution constraint. */
+  DirtyRealTimeExecutionConstraint,
+  /** @brief Key retained by a connected-preflight provider callable. */
+  ConnectedPreflightOperationConstraint,
+  /** @brief Key retained by a connected-preflight ready submission. */
+  ConnectedPreflightSubmissionConstraint,
+  /** @brief Sentinel count for fixed-size test observation tables. */
+  Count,
+};
+
+/**
+ * @brief Observes one checked charge against an actual owned operation string.
+ * @param context Opaque fixture state installed before synchronous estimation.
+ * @param owner Exact retained owner category.
+ * @param capacity Actual `std::string::capacity()` of the charged owner.
+ * @param before_bytes Estimator total immediately before the charge.
+ * @param after_bytes Estimator total immediately after the charge.
+ * @return Nothing.
+ * @throws Nothing; callbacks must use allocation-free, nonblocking operations.
+ * @note The callback independently compares the observed capacity with the
+ * checked estimator delta. It receives no string pointer or mutable owner.
+ */
+using RetainedOperationStringChargeObserver = void (*)(
+    void* context, RetainedOperationStringOwner owner, std::uint64_t capacity,
+    std::uint64_t before_bytes, std::uint64_t after_bytes) noexcept;
+
+/**
+ * @brief Installs one process-local retained operation-string observer.
+ * @param observer Allocation-free callback, or null to disable observation.
+ * @param context Opaque callback context, or null when disabling.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Only one isolated synchronous product test may estimate while
+ * installed. Production translation units contain no matching state or calls.
+ */
+void set_retained_operation_string_charge_observer_for_testing(
+    RetainedOperationStringChargeObserver observer, void* context) noexcept;
+
+/**
+ * @brief Clears the process-local retained operation-string observer.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The owning test first settles every potentially estimating path.
+ */
+void clear_retained_operation_string_charge_observer_for_testing() noexcept;
+
+/**
+ * @brief Publishes one actual owned string and its checked charge interval.
+ * @param owner Exact retained owner category.
+ * @param value Actual `std::string` whose allocation was just charged.
+ * @param before_bytes Estimator total immediately before the charge.
+ * @param after_bytes Estimator total immediately after the charge.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note This notification exists only in internal test-product seam objects.
+ * It observes the owner's real capacity after production estimation and does
+ * not participate in the estimate or grant resource authority.
+ */
+void notify_retained_operation_string_charge_for_testing(
+    RetainedOperationStringOwner owner, const std::string& value,
+    std::uint64_t before_bytes, std::uint64_t after_bytes) noexcept;
 
 /**
  * @brief Calculates the production direct-lease resource vector for tests.

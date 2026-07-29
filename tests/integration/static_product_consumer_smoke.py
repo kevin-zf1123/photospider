@@ -50,6 +50,11 @@ FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
     "notify_operation_admission_wait_for_testing",
     "set_operation_admission_wait_observer_for_testing",
     "clear_operation_admission_wait_observer_for_testing",
+    "direct_operation_gate_can_start_for_testing",
+    "retained_operation_string_charge_probe_state",
+    "notify_retained_operation_string_charge_for_testing",
+    "set_retained_operation_string_charge_observer_for_testing",
+    "clear_retained_operation_string_charge_observer_for_testing",
     "estimate_direct_operation_resources_for_testing",
     "direct_operation_fixed_retained_memory_bytes_for_testing",
     "g_graph_cache_service_test_hook",
@@ -70,8 +75,10 @@ FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
     "notify_kernel_compute_commit_test_hook",
 )
 REQUIRED_PRODUCT_SEAM_SYMBOL_FRAGMENTS = (
+    "TaskSubmissionPlan21retained_memory_bytes",
     "HighPrecisionDirtyExecutor16execute_prepared",
     "ExecutionService17available_devices",
+    "compute_plan_dynamic_retained_memory_bytes",
     "GraphCacheService17clear_drive_cache",
     "GraphStateExecutor15close_and_drain",
     "Kernel11close_graph",
@@ -2142,7 +2149,7 @@ def inspect_product_archive_symbols(
     @note Darwin tries validated Xcode ``xcrun`` llvm-nm, PATH llvm-nm, then
       PATH nm; other platforms never invoke xcrun. A candidate becomes
       authoritative only after a zero exit, nonempty symbol table, and defined
-      anchors from all six seam objects. Raw lines remain only in this stack
+      anchors from all eight seam objects. Raw lines remain only in this stack
       frame: once authoritative, controlled fragment counts are retained and no
       later tool may hide a forbidden symbol.
     """

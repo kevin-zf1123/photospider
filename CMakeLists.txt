@@ -706,15 +706,17 @@ if(PHOTOSPIDER_ENABLE_YAML)
         ${PHOTOSPIDER_YAML_ADAPTER_SOURCES})
 endif()
 
-# These six translation units own the Issue #72, Issue #75, Issue #76, and
+# These eight translation units own the Issue #72, Issue #75, Issue #76, and
 # Issue #82 deterministic observation seams. The installable archive always
 # receives their production objects; focused tests receive a non-installed
 # variant while reusing every common object. Keeping the split at
 # translation-unit granularity avoids compiling a second copy of the complete
 # embedded product.
 set(PHOTOSPIDER_PRODUCT_TEST_SEAM_SOURCES
+    src/lib/compute/compute_task_submission.cpp
     src/lib/compute/dirty_update_executor.cpp
     src/lib/compute/execution_service.cpp
+    src/lib/compute/resource_demand_estimator.cpp
     src/lib/graph/graph_cache_service.cpp
     src/lib/graph/graph_state_executor.cpp
     src/lib/runtime/kernel.cpp
@@ -733,7 +735,7 @@ list(REMOVE_ITEM PHOTOSPIDER_PRODUCT_COMMON_SOURCES
 
 # Apply the private compile environment shared by production and test-only
 # product object variants. Test-seam definitions are intentionally added by
-# the caller only to the six-source test object target.
+# the caller only to the eight-source test object target.
 function(configure_photospider_product_objects TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE PHOTOSPIDER_STATIC)
     target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
@@ -1772,7 +1774,10 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>")
     target_link_libraries(test_policy_execution PRIVATE ${CMAKE_DL_LIBS})
     add_dependencies(test_policy_execution test_policy_plugin)
-    add_ps_test(test_compute_run tests/unit/test_compute_run.cpp)
+    add_ps_test(test_compute_run tests/unit/test_compute_run.cpp
+        photospider_internal_test_product)
+    target_compile_definitions(test_compute_run PRIVATE
+        PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
     add_ps_test(test_run_lifecycle_registry
         tests/unit/test_run_lifecycle_registry.cpp)
     add_ps_test(test_execution_lifecycle_telemetry
@@ -2152,6 +2157,7 @@ if(TARGET photospider_internal_test_product)
         endif()
     endforeach()
     set(PHOTOSPIDER_ALLOWED_INTERNAL_TEST_PRODUCT_CONSUMERS
+        test_compute_run
         test_compute_service_split
         test_host_adapter
         test_kernel_contracts

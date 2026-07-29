@@ -120,6 +120,14 @@ class ExecutionServiceTestAccess final {
   using OperationAdmissionWaitObserver =
       compute::testing::OperationAdmissionWaitObserver;
 
+  /** @brief Test-product retained operation-string owner category. */
+  using RetainedOperationStringOwner =
+      compute::testing::RetainedOperationStringOwner;
+
+  /** @brief Test-product callback for one owned string charge interval. */
+  using RetainedOperationStringChargeObserver =
+      compute::testing::RetainedOperationStringChargeObserver;
+
   /**
    * @brief Installs the operation-admission denial observer.
    * @param service Isolated service used only to document test ownership.
@@ -147,6 +155,52 @@ class ExecutionServiceTestAccess final {
       compute::ExecutionService& service) noexcept {
     (void)service;
     compute::testing::clear_operation_admission_wait_observer_for_testing();
+  }
+
+  /**
+   * @brief Installs the retained operation-string charge observer.
+   * @param service Isolated service used only to document test ownership.
+   * @param observer Allocation-free callback, or null to disable observation.
+   * @param context Opaque callback context, or null when disabling.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Estimation is synchronous in owning tests and no callback may retain
+   * a string, estimator, service, gate, or resource reference.
+   */
+  static void set_retained_operation_string_charge_observer(
+      compute::ExecutionService& service,
+      RetainedOperationStringChargeObserver observer, void* context) noexcept {
+    (void)service;
+    compute::testing::set_retained_operation_string_charge_observer_for_testing(
+        observer, context);
+  }
+
+  /**
+   * @brief Clears the retained-string observer after estimation settles.
+   * @param service Isolated service whose test ownership is ending.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void clear_retained_operation_string_charge_observer(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::
+        clear_retained_operation_string_charge_observer_for_testing();
+  }
+
+  /**
+   * @brief Tests current gate startability without committing authority.
+   * @param service Isolated internal test-product service.
+   * @param constraints Candidate identity, cap, and exclusive key.
+   * @return True when the operation gate would currently admit the candidate.
+   * @throws std::system_error when service synchronization fails.
+   * @note The diagnostic acquires the production pool mutex and calls the real
+   * gate predicate, but creates no gate row, reservation, Run, or callback.
+   */
+  static bool direct_operation_gate_can_start(
+      compute::ExecutionService& service,
+      const compute::OperationExecutionConstraints& constraints) {
+    return service.direct_operation_gate_can_start_for_testing(constraints);
   }
 
   /**

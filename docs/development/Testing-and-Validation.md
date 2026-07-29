@@ -67,30 +67,39 @@ after the run; the repository does not retain per-run reports for this test.
 `BUILD_TESTING` controls availability of internal test products, not how the
 installed `photospider` archive compiles the Issue #72/#75/#76/#82 observation
 seams. The product source inventory is divided into common objects, compiled
-once, and production objects for `dirty_update_executor.cpp`,
-`execution_service.cpp`, `graph_cache_service.cpp`,
+once, and production objects for `compute_task_submission.cpp`,
+`dirty_update_executor.cpp`, `execution_service.cpp`,
+`resource_demand_estimator.cpp`, `graph_cache_service.cpp`,
 `graph_state_executor.cpp`, `kernel.cpp`, and `kernel_compute.cpp`. The real
-archive always uses the production form of those six translation units, with
+archive always uses the production form of those eight translation units, with
 no `PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING`,
 `PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, or
 `PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING` or
-`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` close/compute declarations,
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` observer/probe definitions,
 globals, branches, or symbols. Focused tests link a non-installed
 `photospider_internal_test_product` that reuses the same common objects and
-recompiles only those six translation units with the deterministic seams.
+recompiles only those eight translation units with the deterministic seams.
 No target links both complete archives, and the test product is absent from
 install and export sets. The Issue #75 probe declarations are source-tree-
 private free functions, so the macro does not change the production
 `ExecutionService` class definition or object layout. The Issue #82 dirty
 post-plan observer is likewise a source-tree-private free function backed by
 test-product-only thread-local state; it changes no production class
-definition or object layout. The sequential-lease admission observer and exact
-direct-resource estimator follow the same boundary: they are source-private
-free functions backed by test-product-only atomic state or authority-free
-calculation. The production operation gate has no observer branch or state, and
-the estimator mints no resource or gate ownership.
+definition or object layout. The sequential-lease admission observer,
+retained-operation-string charge observer, and exact direct-resource estimator
+follow the same boundary: they are source-private free functions backed by
+test-product-only atomic state or authority-free calculation. The direct gate
+predicate diagnostic is a private test-access method defined only by the test
+product. Its declaration remains token-identical in the source-private class
+definition shared by common and seam objects, but adds no object state or
+installed surface and grants no authority. The production operation gate and
+estimators contain no observer state or notification branch, and no diagnostic
+or estimator mints resource or gate ownership. `test_compute_run`,
+`test_compute_service_split`,
+`test_host_adapter`, `test_kernel_contracts`, and `test_policy_execution` are
+the complete direct-consumer set of this internal archive.
 
 `StaticProductConsumerSmoke` enforces that boundary for both
 `BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
@@ -101,12 +110,12 @@ therefore fails instead of passing on file existence. Darwin then invokes and va
 `xcrun --find llvm-nm`, then falls back to PATH `llvm-nm` and PATH `nm`;
 non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
 that order. Canonically identical executable paths run once. A candidate is
-usable only when it starts, exits successfully, emits symbols, and exposes
-defined anchors from all six production seam objects. Otherwise the smoke
-records a path-free failure reason and tries the next candidate; no candidate
-or all unusable candidates fail closed. The first usable full symbol table is
-authoritative and rejects every hook function/helper/global fragment. The
-raw table is used only in memory for that decision; a forbidden symbol in the
+usable only when it starts, exits successfully, emits symbols, and exposes the
+nine required anchors spanning all eight production seam objects. Otherwise
+the smoke records a path-free failure reason and tries the next candidate; no
+candidate or all unusable candidates fail closed. The first usable full symbol
+table is authoritative and rejects every hook function/helper/global fragment.
+The raw table is used only in memory for that decision; a forbidden symbol in the
 first usable table fails the verdict without trying a later candidate. The
 retained scan observation has a closed, path-free schema: stable `tool_source`,
 ordered structured attempt reasons, status and aggregate line/anchor/prohibited
@@ -769,11 +778,24 @@ implementation for the requested HP or RT diagnostic route.
 `test_compute_run` registers heap-backed exclusive keys for full-plan, dirty HP,
 dirty RT, and connected-preflight product paths. The shared string-payload
 estimator proves actual capacity plus one terminator and strong overflow
-rollback. Product cases then calibrate the complete admitted vector, require an
-identical plan at exact retained capacity, and reject one byte less before
-provider entry with a zero ledger snapshot. These cases cover the allocation
-transfer from a charged plan/context constraint into its unique submission;
-they do not use a migration-residue source scan.
+rollback. The internal test product also reports each actual retained owner,
+that owner's copied `std::string::capacity()`, and the checked estimator total
+immediately before and after its charge. Full-plan, dirty HP, dirty RT, and
+connected-preflight cases require every reported delta to equal that actual
+capacity plus one terminator and require the exact expected owner counts. This
+comparison is independent of the complete admitted vector: the same cases
+separately require an identical plan at exact retained capacity and reject one
+byte less before provider entry with a zero ledger snapshot. They cover the
+allocation transfer from a charged plan/context constraint into its unique
+submission without using a migration-residue source scan.
+
+The direct-lease gate regression acquires one heap-backed key, mutates the
+caller's still-live allocation in place after acquisition returns, and queries
+the real gate predicate through an authority-free test-product diagnostic. The
+original key must remain blocked and a different key startable until the lease
+retires, proving wait/start/finish borrow the lease-state copy rather than the
+caller. The test restores the caller buffer before cleanup so an incorrect
+implementation can still unwind deterministically.
 
 `test_compute_service_split` proves that nonparallel dirty HP, dirty RT, and
 connected-parameter preflight enter the same process-owned operation gate and
@@ -789,6 +811,14 @@ admission, then require that the logical lifecycle settles with no callback,
 grant, root-reservation, gate, or ledger residue and that a retry recovers. An
 externally satisfied sibling is intentionally ignored so inactive registry
 change cannot invalidate an otherwise valid active dirty target.
+
+A separate cross-Graph case gives two reentrant HP implementations and two
+reentrant RT implementations distinct identities, no identity cap, and one
+equal heap-backed key. The first provider blocks after the dirty helper has
+returned its direct lease and retired its helper-local constraints. The second
+provider must remain outside until lease release for both HP and RT, proving
+the real helper paths retain the key in direct-lease state rather than on the
+helper stack.
 
 The same binary owns two orthogonal sequential provider-boundary regressions.
 Both Graphs select one registered callback identity; a node role parameter
@@ -818,10 +848,12 @@ complete root before operation-gate startability, so its root is not a single
 direct-lease vector. Neither regression adds a production or installable test
 hook.
 
-The post-plan observer exists only in the non-installed internal test product.
-`StaticProductConsumerSmoke` requires the production
-`dirty_update_executor.cpp` anchor and rejects its observer state, setter, and
-notification symbols from the installed archive.
+The post-plan, admission-wait, and retained-string observers, the gate
+predicate diagnostic, and the direct-resource diagnostics exist only in the
+non-installed internal test product. `StaticProductConsumerSmoke` requires the
+nine production anchors spanning all eight seam objects and rejects every
+matching state, setter, clearer, notification, helper, and diagnostic symbol
+from the installed archive.
 
 Run the focused boundary with:
 
@@ -831,7 +863,7 @@ cmake --build build --target test_op_registry_m31 test_compute_run \
 ./build/tests/test_op_registry_m31 \
   --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
 ./build/tests/test_compute_run \
-  --gtest_filter='RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
+  --gtest_filter='OperationExecutionGate.DirectLeaseGateIgnoresCallerConstraintMutationAfterAcquisition:RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
 ./build/tests/test_compute_service_split \
   --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
 ```

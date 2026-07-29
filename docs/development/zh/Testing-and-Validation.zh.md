@@ -48,27 +48,35 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 
 `BUILD_TESTING` 只控制内部 test product 是否可用，不控制已安装 `photospider` archive 如何编译
 Issue #72/#75/#76/#82 observation seam。Product source inventory 被拆为只编译一次的 common
-object，以及 `dirty_update_executor.cpp`、`execution_service.cpp`、
+object，以及 `compute_task_submission.cpp`、`dirty_update_executor.cpp`、
+`execution_service.cpp`、`resource_demand_estimator.cpp`、
 `graph_cache_service.cpp`、`graph_state_executor.cpp`、`kernel.cpp` 与
-`kernel_compute.cpp` 的 production object。真实 archive 始终使用这六个 translation unit 的
+`kernel_compute.cpp` 的 production object。真实 archive 始终使用这八个 translation unit 的
 production 形式，其中不存在
 `PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING`、
 `PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`、
 `PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING` 或
-`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` 的 close/compute declaration、global、branch 或
+`PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` 的 observer/probe definition、global、branch 或
 symbol。Focused
 test 会链接不安装的 `photospider_internal_test_product`；它复用同一批 common object，只以
-deterministic seam 重新编译这六个 translation unit。没有 target 同时链接两个完整 archive，test
+deterministic seam 重新编译这八个 translation unit。没有 target 同时链接两个完整 archive，test
 product 也不会进入 install 或 export set。Issue #75 probe declaration 是 source-tree-private 的
 free function，因此该宏不会改变 production `ExecutionService` class definition 或 object layout。
 Issue #82 dirty post-plan observer 同样是 source-tree-private free function，并由仅存在于 test
 product 的 thread-local state 支撑；它不会改变任何 production class definition 或 object layout。
-Sequential lease admission observer 与精确 direct resource estimator 遵守同一边界：它们是
-source-tree-private free function，只依赖 test-product-only atomic state 或不授予 authority 的
-计算。Production operation gate 不含 observer branch 或 state，estimator 也不会授予 resource
+Sequential lease admission observer、retained-operation-string charge observer 与精确
+direct resource estimator 遵守同一边界：它们是 source-tree-private free function，只依赖
+test-product-only atomic state 或不授予 authority 的计算。Direct gate predicate diagnostic
+是只由 test product 定义的 private test-access method。其 declaration 会在 common object 与
+seam object 共用的 source-private class definition 中保持 token-identical，但它不新增 object
+state 或 installed surface，也不授予 authority。Production operation gate 与 estimator
+不含 observer state 或 notification branch，任何 diagnostic 或 estimator 也不会授予 resource
 或 gate ownership。
+`test_compute_run`、`test_compute_service_split`、`test_host_adapter`、
+`test_kernel_contracts` 与 `test_policy_execution` 构成该内部 archive 的完整 direct-consumer
+集合。
 
 `StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
 configuration 强制执行这条边界。真实 product 安装到非系统临时 prefix 后，smoke 会复用
@@ -77,8 +85,9 @@ daemon capability driver，移除 LD/DYLD loader override，并执行 installed
 随后 Darwin 会先调用并验证
 `xcrun --find llvm-nm`，然后依次回退到 PATH `llvm-nm` 与 PATH `nm`；非 Darwin 平台绝不会
 调用 `xcrun`，只按上述顺序使用两个 PATH candidate。Canonical path 相同的 executable 只运行
-一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露六个 production seam object 的
-全部 defined anchor 时才可用；否则 smoke 会记录不含路径的 failure reason 并尝试下一项。没有
+一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露覆盖八个 production seam
+object 的全部九个 required anchor 时才可用；否则 smoke 会记录不含路径的 failure reason
+并尝试下一项。没有
 candidate 或全部 candidate 都不可用时必须 fail closed。第一个可用的完整 symbol table 是权威
 结果，并用于拒绝任何 hook function/helper/global fragment；raw table 只在内存中参与该判定，
 因此第一个可用表只要包含 forbidden symbol 就会直接使 verdict 失败，不能通过尝试后续 candidate
@@ -608,10 +617,19 @@ implementation。
 
 `test_compute_run` 会为 full-plan、dirty HP、dirty RT 与 connected-preflight 产品路径注册
 heap-backed exclusive key。共享 string-payload estimator 证明实际 capacity 加一个终止符，
-并证明 overflow rollback 具有 strong guarantee。产品 case 随后校准完整 admitted vector，
-要求相同 plan 在精确 retained capacity 下成功，并要求少一个 byte 在 provider entry 前拒绝，
-且 ledger snapshot 为零。这些 case 覆盖已经计费的 plan/context constraint allocation 移入
-其唯一 submission 的 ownership transfer；它们不使用 migration-residue source scan。
+并证明 overflow rollback 具有 strong guarantee。Internal test product 还会报告每个实际
+retained owner、该 owner 所复制 `std::string` 的 `capacity()`，以及该次计费前后的 checked
+estimator total。Full-plan、dirty HP、dirty RT 与 connected-preflight case 会要求每个上报
+delta 都等于实际 capacity 加一个终止符，并要求精确的 owner 数量。该比较独立于完整 admitted
+vector；同一批 case 会另外要求相同 plan 在精确 retained capacity 下成功，并要求少一个 byte
+在 provider entry 前拒绝且 ledger snapshot 为零。它们覆盖已计费的 plan/context constraint
+allocation 移入唯一 submission 的 ownership transfer，不使用 migration-residue source scan。
+
+Direct-lease gate 回归会取得一个 heap-backed key，在 acquisition 返回后原地修改 caller
+仍存活的 allocation，并通过不授予 authority 的 test-product diagnostic 查询真实 gate
+predicate。在 lease 退出前，原始 key 必须仍受阻，而不同 key 必须可启动；这证明
+wait/start/finish 借用 lease-state 副本，而不是 caller。测试会在 cleanup 前恢复 caller
+buffer，使错误实现也能确定性地完成 unwind。
 
 `test_compute_service_split` 证明 nonparallel dirty HP、dirty RT 与 connected-parameter
 preflight 会进入 physical worker 所使用的同一个 process-owned operation gate 与 resource
@@ -623,6 +641,12 @@ implementation 或卸载 RT plugin。此时 standalone Run 或 realtime RunGroup
 failure 停止，随后要求逻辑生命周期完成 settlement，不留下 callback、grant、root reservation、
 gate 或 ledger 残留，并证明重试能够恢复。Externally satisfied sibling 会被有意忽略，因此
 inactive registry 变化不能使原本有效的 active dirty target 失效。
+
+另一项 cross-Graph case 会让两种 reentrant HP implementation 与两种 reentrant RT
+implementation 使用不同 identity、无 identity cap 以及同一个 heap-backed key。第一个
+provider 会在 dirty helper 已经返回 direct lease、helper-local constraints 已退出后保持阻塞。
+HP 与 RT 的第二个 provider 都必须等到 lease 释放后才能进入，从而证明真实 helper 路径把 key
+保留在 direct-lease state，而不是 helper stack。
 
 同一个 binary 还负责两项正交的 sequential provider 边界回归。两个 Graph 都选择同一个已注册
 callback identity，并通过 node role 参数区分 sequential 与 peer 行为。Metadata 声明
@@ -644,9 +668,11 @@ direct-lease envelope 计算，并把隔离 `ExecutionService` 的 CPU、retaine
 startability 前预留完整 root，因此该 root 不是一个 direct-lease vector。两项回归都不会新增
 production 或 installable test hook。
 
-Post-plan observer 只存在于不安装的 internal test product 中。
-`StaticProductConsumerSmoke` 要求 production `dirty_update_executor.cpp` anchor，并拒绝 installed
-archive 中出现它的 observer state、setter 与 notification symbol。
+Post-plan、admission-wait 与 retained-string observer、gate predicate diagnostic 以及
+direct-resource diagnostic 只存在于不安装的 internal test product 中。
+`StaticProductConsumerSmoke` 要求覆盖八个 seam object 的九个 production anchor，并拒绝
+installed archive 中出现任何匹配的 state、setter、clearer、notification、helper 或
+diagnostic symbol。
 
 聚焦验证命令为：
 
@@ -656,7 +682,7 @@ cmake --build build --target test_op_registry_m31 test_compute_run \
 ./build/tests/test_op_registry_m31 \
   --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
 ./build/tests/test_compute_run \
-  --gtest_filter='RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
+  --gtest_filter='OperationExecutionGate.DirectLeaseGateIgnoresCallerConstraintMutationAfterAcquisition:RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
 ./build/tests/test_compute_service_split \
   --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
 ```

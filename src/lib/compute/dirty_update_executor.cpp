@@ -24,6 +24,9 @@
 #include "compute/dirty_sibling_commit_gate.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/downsample_executor.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+#include "compute/execution_service_test_probe.hpp"
+#endif
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
 #include "compute/realtime_proxy_graph.hpp"
@@ -401,7 +404,16 @@ std::uint64_t dirty_operation_retained_memory_bytes(
                               2U);
   for (const auto& [node_id, operation] : operations) {
     static_cast<void>(node_id);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_operation_key = estimate.bytes();
+#endif
     estimate.add_string_payload(operation.metadata.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::DirtyResolvedOperation,
+        operation.metadata.exclusive_key, before_operation_key,
+        estimate.bytes());
+#endif
   }
   return estimate.bytes();
 }
@@ -1137,10 +1149,30 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     OperationExecutionConstraints submission_constraints(operation_constraints);
     RetainedMemoryEstimator retained_constraints(
         "connected-parameter operation constraints");
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_operation_constraint =
+        retained_constraints.bytes();
+#endif
     retained_constraints.add_string_payload(
         operation_constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::
+            ConnectedPreflightOperationConstraint,
+        operation_constraints.exclusive_key, before_operation_constraint,
+        retained_constraints.bytes());
+    const std::uint64_t before_submission_constraint =
+        retained_constraints.bytes();
+#endif
     retained_constraints.add_string_payload(
         submission_constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::
+            ConnectedPreflightSubmissionConstraint,
+        submission_constraints.exclusive_key, before_submission_constraint,
+        retained_constraints.bytes());
+#endif
     const std::uint64_t retained_constraint_bytes =
         retained_constraints.bytes();
     const ReadyTaskResourceDemand operation_demand{
@@ -1888,7 +1920,17 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       static_cast<std::uint64_t>(state->task_constraints.capacity()));
   for (const OperationExecutionConstraints& constraints :
        state->task_constraints) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_constraint_key = hp_shared_demand.bytes();
+#endif
     hp_shared_demand.add_string_payload(constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::
+            DirtyHighPrecisionExecutionConstraint,
+        constraints.exclusive_key, before_constraint_key,
+        hp_shared_demand.bytes());
+#endif
   }
   if (request.stabilized_parameters) {
     hp_shared_demand.add_bytes(
@@ -2228,7 +2270,16 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       static_cast<std::uint64_t>(state->task_constraints.capacity()));
   for (const OperationExecutionConstraints& constraints :
        state->task_constraints) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    const std::uint64_t before_constraint_key = rt_shared_demand.bytes();
+#endif
     rt_shared_demand.add_string_payload(constraints.exclusive_key);
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+    testing::notify_retained_operation_string_charge_for_testing(
+        testing::RetainedOperationStringOwner::DirtyRealTimeExecutionConstraint,
+        constraints.exclusive_key, before_constraint_key,
+        rt_shared_demand.bytes());
+#endif
   }
   if (request.stabilized_parameters) {
     rt_shared_demand.add_bytes(
