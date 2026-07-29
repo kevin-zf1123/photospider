@@ -381,7 +381,15 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "TensorTargetPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "TensorDirtyPlanRecomputesMissingAndPartialIntermediateParents"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorUpstreamPlanRejectsPreferredRouteAddedBeforeTaskPopulation"
         ),
         (
             "CpuDenseTensorImageOperation."

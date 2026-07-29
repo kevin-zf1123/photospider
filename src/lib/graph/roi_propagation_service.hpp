@@ -94,6 +94,42 @@ class RoiPropagationService {
       ComputeIntent intent = ComputeIntent::GlobalHighPrecision);
 
   /**
+   * @brief Selects one coherent implementation in this service's route
+   * context.
+   *
+   * @param node Node whose operation key is selected.
+   * @return Owned callback, metadata, identity, and device snapshot, or
+   * nullopt when no implementation can run on the bound inventory.
+   * @throws std::bad_alloc or callback-copy exceptions from registry snapshot
+   * selection.
+   * @note The returned value may retain a plugin DSO lease. Region planning
+   * must immediately copy only its callback-free route fields and release this
+   * temporary before returning a plan.
+   */
+  std::optional<OpImplementation> select_route_implementation(
+      const Node& node) const;
+
+  /**
+   * @brief Returns the route-visible device inventory bound at construction.
+   *
+   * @return Borrowed immutable inventory valid for this service's lifetime.
+   * @throws Nothing.
+   * @note The inventory preserves caller order; consumers comparing route
+   * contexts should canonicalize it as a set.
+   */
+  const std::vector<Device>& available_devices() const noexcept {
+    return available_devices_;
+  }
+
+  /**
+   * @brief Returns the registry selection intent bound at construction.
+   *
+   * @return GlobalHighPrecision or RealTimeUpdate selection policy.
+   * @throws Nothing.
+   */
+  ComputeIntent intent() const noexcept { return intent_; }
+
+  /**
    * @brief Reports whether the route-selected operation has exact tensor work.
    *
    * @param node Node whose current operation implementation is selected.

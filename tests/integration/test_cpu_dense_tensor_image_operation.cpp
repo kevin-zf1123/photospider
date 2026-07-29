@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -23,10 +24,13 @@
 
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_result_committer.hpp"
+#include "compute/compute_run.hpp"
+#include "compute/dirty_execution_common.hpp"
 #include "compute/dirty_node_executor.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/node_executor.hpp"
+#include "compute/resource_demand_estimator.hpp"
 #include "core/cpu_dense_image_operation.hpp"
 #include "core/ops.hpp"
 #include "core/pending_value.hpp"
@@ -173,6 +177,182 @@ Value make_unsigned8_rank4_value(std::size_t width, std::size_t height,
 RegionSet full_rank4_region() {
   return RegionSet::from_tensor_slice(
       {dense_tensor_region_domain(), {{0U, 1U}, {0U, 3U}, {0U, 4U}, {0U, 3U}}});
+}
+
+/**
+ * @brief Captures one stale Tensor route preparation outcome.
+ *
+ * @throws std::bad_alloc when diagnostic storage cannot allocate.
+ * @note Registry restoration is reported separately so each test can prove
+ *       the process-global core route was recovered before asserting.
+ */
+struct TensorRouteMutationPreparationResult {
+  /** @brief Whether preparation rejected with a typed GraphError. */
+  bool rejected = false;
+  /** @brief Stable error code copied from the rejection. */
+  GraphErrc error = GraphErrc::Unknown;
+  /** @brief Owned rejection message used to identify the first stale node. */
+  std::string message;
+  /** @brief Whether the appended fake GPU implementation was retired. */
+  bool restored = false;
+};
+
+/**
+ * @brief Asserts that early route rejection left process execution untouched.
+ *
+ * @param authority Source-private lifecycle and ledger authority observed by
+ * the test request.
+ * @return Nothing; GoogleTest records any lifecycle or ledger residue.
+ * @throws std::bad_alloc or synchronization exceptions from telemetry
+ * snapshotting.
+ * @note The route comparison runs before this authority can receive a
+ * candidate, gate, grant, reservation, ready entry, or provider callback.
+ */
+void expect_tensor_route_authority_untouched(
+    const compute::ExecutionService& authority) {
+  const compute::ExecutionLifecyclePage lifecycle =
+      authority.lifecycle_snapshot(0U, 4096U);
+  EXPECT_EQ(lifecycle.counters.pending_candidate_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_standalone_run_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_run_group_count, 0U);
+  EXPECT_EQ(lifecycle.counters.admitted_child_run_count, 0U);
+  EXPECT_EQ(lifecycle.counters.ready_entry_count, 0U);
+  EXPECT_EQ(lifecycle.counters.entered_callback_count, 0U);
+  EXPECT_EQ(lifecycle.counters.live_root_reservation_count, 0U);
+  EXPECT_EQ(lifecycle.counters.live_child_grant_count, 0U);
+  EXPECT_EQ(authority.resource_snapshot().reserved, ResourceVector{});
+}
+
+/**
+ * @brief Adds a preferred fake GPU route after Tensor planning and prepares.
+ *
+ * The helper appends a same-key non-core GPU implementation after the caller
+ * has already produced one Tensor dirty plan under the same device inventory.
+ * It then enters the production task-population boundary and records whether
+ * the frozen region-planning route rejects the newly selected implementation.
+ *
+ * @param graph Graph whose immutable topology produced dirty_plan.
+ * @param dirty_plan Completed Tensor dirty plan moved into preparation.
+ * @param target_node_id Request target used by task-graph pruning.
+ * @param provider_entries Counter incremented only if the fake provider runs.
+ * @param authority Process execution authority used if stale preparation
+ * incorrectly reaches the direct provider boundary.
+ * @return Rejection diagnostics plus registry restoration status.
+ * @throws Any non-GraphError from registration or preparation, plus any
+ * provider-boundary exception after an incorrect successful preparation,
+ * after retiring the appended implementation.
+ * @throws std::out_of_range when captured ownership is internally incomplete.
+ * @note The retirement owner is preallocated before the no-throw registry
+ * retirement path. The expected rejection cannot reach the supplied
+ * authority. If the guard is removed, the helper deliberately continues
+ * through the real direct provider gate/resource boundary to prove the stale
+ * route is executable, then verifies settlement in the caller.
+ */
+TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
+    GraphModel& graph, compute::HighPrecisionDirtyPlan dirty_plan,
+    int target_node_id, std::atomic_int* provider_entries,
+    compute::ExecutionService& authority) {
+  const Node& target = graph.node(target_node_id);
+  const std::string operation_key = make_key(target.type, target.subtype);
+  auto& registry = OpRegistry::instance();
+  OpRegistry::RegistrationCapture capture;
+  registry.capture_registration(
+      [&] {
+        registry.register_impl(
+            target.type, target.subtype, Device::GPU_METAL,
+            MonolithicOpFunc(
+                [provider_entries](
+                    const Node&,
+                    const std::vector<const NodeOutput*>&) -> NodeOutput {
+                  provider_entries->fetch_add(1, std::memory_order_relaxed);
+                  NodeOutput output;
+                  output.image_value =
+                      make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+                  output.data["provider_entry"] = 1;
+                  return output;
+                }));
+      },
+      capture);
+
+  OpRegistry::RegistryEntrySnapshot retirement;
+  retirement.implementations.emplace();
+  const OpRegistry::RegistryEntryOwnership& owned =
+      capture.owned_entries.at(operation_key);
+  retirement.implementations->device_impl_slots.resize(
+      owned.device_impls.size());
+
+  TensorRouteMutationPreparationResult result;
+  std::exception_ptr unexpected;
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = target_node_id;
+  request.parallel = true;
+  bool preparation_completed = false;
+  try {
+    compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan> prepared =
+        compute::prepare_dirty_execution(graph, std::move(dirty_plan), request,
+                                         {Device::GPU_METAL, Device::CPU});
+    preparation_completed = true;
+
+    const int execution_node_id = prepared.dirty_plan.execution_order.front();
+    const Node& execution_node = graph.node(execution_node_id);
+    const std::optional<OpImplementation> selected =
+        registry.select_implementation(execution_node.type,
+                                       execution_node.subtype,
+                                       {Device::GPU_METAL, Device::CPU},
+                                       ComputeIntent::GlobalHighPrecision);
+    if (!selected.has_value()) {
+      throw std::logic_error("mutated Tensor route did not remain selectable");
+    }
+    const compute::DirtyResolvedOperationMap operations{{
+        execution_node_id,
+        compute::DirtyResolvedOperation{
+            selected->func, selected->metadata.device_preference,
+            selected->implementation_identity, selected->metadata},
+    }};
+    compute::ComputeRun run(compute::ComputeRunSubmission{
+        "tensor-route-mutation", graph.instance_id(), graph.revision(),
+        target_node_id, ComputeIntent::GlobalHighPrecision,
+        compute::ComputeRunQuality::Full,
+        compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
+                               std::nullopt, 1U, 1U},
+        compute::SupersessionIdentity{
+            compute::SupersessionKey(target_node_id,
+                                     ComputeIntent::GlobalHighPrecision),
+            compute::SupersessionGeneration(1U)}});
+    const compute::ComputeRunLease run_lease = run.acquire_lease();
+    GraphEventService events;
+    compute::DirtyNodeSynchronization synchronization(graph.node_ids());
+    compute::HighPrecisionDirtyWriteBuffer staging(false);
+    compute::DirtyNodeExecutionContext context{
+        graph,           nullptr,
+        events,          prepared.dirty_plan.snapshot,
+        operations,      prepared.dirty_plan.snapshot.graph_generation,
+        synchronization, nullptr,
+        &run_lease,      &authority};
+    compute::HighPrecisionDirtyNodeExecutor executor(context, staging);
+    Node node_copy = execution_node;
+    executor.execute(node_copy,
+                     prepared.dirty_plan.entries.at(execution_node_id));
+  } catch (const GraphError& error) {
+    if (preparation_completed) {
+      unexpected = std::current_exception();
+    } else {
+      result.rejected = true;
+      result.error = error.code();
+      result.message = error.what();
+    }
+  } catch (...) {
+    unexpected = std::current_exception();
+  }
+
+  result.restored = registry.retire_owned_entry_noexcept(
+      operation_key, owned, capture.previous_entries.at(operation_key),
+      retirement);
+  if (unexpected) {
+    std::rethrow_exception(unexpected);
+  }
+  return result;
 }
 
 /**
@@ -2139,12 +2319,46 @@ TEST(CpuDenseTensorImageOperation,
   graph.validate_topology();
 
   GraphTraversalService traversal;
-  RoiPropagationService propagation;
+  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+                                    ComputeIntent::GlobalHighPrecision);
   compute::DirtyRegionPlanner planner(traversal, propagation);
   const RegionSet requested = RegionSet::from_tensor_slice(
       {dense_tensor_region_domain(), {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}});
   const compute::HighPrecisionDirtyPlan plan =
       planner.plan_high_precision(graph, 88, requested);
+  ASSERT_EQ(plan.operation_routes.node_routes.size(), 1U);
+  EXPECT_EQ(plan.operation_routes.intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(plan.operation_routes.available_devices,
+            (std::vector<Device>{Device::CPU, Device::GPU_METAL}));
+  const compute::DirtyRegionPlannedOperationRoute& region_route =
+      plan.operation_routes.node_routes.at(88);
+  EXPECT_EQ(region_route.operation_key,
+            make_key("image_process", "invert_dense"));
+  EXPECT_EQ(region_route.route.device, Device::CPU);
+  compute::HighPrecisionDirtyPlan retained_plan = plan;
+  const std::uint64_t retained_bytes =
+      compute::high_precision_dirty_plan_retained_memory_bytes(retained_plan);
+  retained_plan.operation_routes = {};
+  EXPECT_GT(
+      retained_bytes,
+      compute::high_precision_dirty_plan_retained_memory_bytes(retained_plan));
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 88;
+  request.parallel = true;
+  const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan> prepared =
+      compute::prepare_dirty_execution(
+          graph, compute::HighPrecisionDirtyPlan(plan), request,
+          {Device::GPU_METAL, Device::CPU});
+  const auto planned_work = std::find_if(
+      prepared.compute_plan.planned_work.begin(),
+      prepared.compute_plan.planned_work.end(),
+      [](const compute::PlannedNodeWork& work) { return work.node_id == 88; });
+  ASSERT_NE(planned_work, prepared.compute_plan.planned_work.end());
+  ASSERT_TRUE(planned_work->operation_route.has_value());
+  EXPECT_EQ(planned_work->operation_route->device, Device::CPU);
+  EXPECT_TRUE(compute::planned_operation_routes_equal(
+      region_route.route, *planned_work->operation_route));
   const auto resolved = OpRegistry::instance().select_implementation(
       "image_process", "invert_dense", {Device::CPU},
       ComputeIntent::GlobalHighPrecision);
@@ -2195,6 +2409,63 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(graph.node(88).hp_version, 1);
   EXPECT_EQ(graph.dirty_source_hp_commit_generation.at(88),
             plan.snapshot.graph_generation);
+}
+
+/**
+ * @brief Rejects a target route selected after Tensor target planning.
+ *
+ * @return Nothing; GoogleTest reports stale-route typing, node diagnostics,
+ * provider entry, or registry restoration failures.
+ * @throws Graph, registry, allocation, planning, or preparation exceptions
+ * unchanged.
+ * @note The source is a complete external dependency, so node 88 is the only
+ * active operation route and must reject before provider or admission state.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorTargetPlanRejectsPreferredRouteAddedBeforeTaskPopulation) {
+  ops::register_core_operations();
+  GraphModel graph("cache/tensor-route-target-mutation");
+  Node source;
+  source.id = 87;
+  source.name = "tensor_route_source";
+  source.type = "image_generator";
+  source.subtype = "constant";
+  source.cached_output_high_precision = NodeOutput{};
+  source.cached_output_high_precision->image_value =
+      make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+  source.hp_region = full_rank4_region();
+  graph.add_node(std::move(source));
+
+  Node target;
+  target.id = 88;
+  target.name = "tensor_route_target";
+  target.type = "image_process";
+  target.subtype = "invert_dense";
+  target.image_inputs.push_back({87, "image"});
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+                                    ComputeIntent::GlobalHighPrecision);
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const compute::HighPrecisionDirtyPlan plan = planner.plan_high_precision(
+      graph, 88,
+      RegionSet::from_tensor_slice({dense_tensor_region_domain(),
+                                    {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}}));
+  std::atomic_int provider_entries{0};
+  compute::ExecutionService authority;
+
+  const TensorRouteMutationPreparationResult result =
+      prepare_after_tensor_route_mutation(graph, plan, 88, &provider_entries,
+                                          authority);
+
+  EXPECT_TRUE(result.restored);
+  EXPECT_TRUE(result.rejected);
+  EXPECT_EQ(result.error, GraphErrc::NoOperation);
+  EXPECT_NE(result.message.find("88"), std::string::npos);
+  EXPECT_EQ(provider_entries.load(std::memory_order_relaxed), 0);
+  expect_tensor_route_authority_untouched(authority);
 }
 
 /**
@@ -2309,6 +2580,74 @@ TEST(CpuDenseTensorImageOperation,
       }
     }
   }
+}
+
+/**
+ * @brief Rejects an upstream route changed after Tensor chain planning.
+ *
+ * @return Nothing; GoogleTest reports stale-route typing, first-node
+ * diagnostics, provider entry, or registry restoration failures.
+ * @throws Graph, registry, allocation, planning, or preparation exceptions
+ * unchanged.
+ * @note Both nodes 91 and 92 were frozen to the core CPU route. Task
+ * population selects the new GPU route for both, and validation must reject
+ * the first active upstream node before any provider or admission state.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorUpstreamPlanRejectsPreferredRouteAddedBeforeTaskPopulation) {
+  ops::register_core_operations();
+  GraphModel graph("cache/tensor-route-upstream-mutation");
+  Node source;
+  source.id = 90;
+  source.name = "tensor_route_chain_source";
+  source.type = "image_generator";
+  source.subtype = "constant";
+  source.cached_output_high_precision = NodeOutput{};
+  source.cached_output_high_precision->image_value =
+      make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+  source.hp_region = full_rank4_region();
+  graph.add_node(std::move(source));
+
+  Node parent;
+  parent.id = 91;
+  parent.name = "tensor_route_parent";
+  parent.type = "image_process";
+  parent.subtype = "invert_dense";
+  parent.image_inputs.push_back({90, "image"});
+  graph.add_node(std::move(parent));
+
+  Node target;
+  target.id = 92;
+  target.name = "tensor_route_chain_target";
+  target.type = "image_process";
+  target.subtype = "invert_dense";
+  target.image_inputs.push_back({91, "image"});
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+                                    ComputeIntent::GlobalHighPrecision);
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  const compute::HighPrecisionDirtyPlan plan = planner.plan_high_precision(
+      graph, 92,
+      RegionSet::from_tensor_slice({dense_tensor_region_domain(),
+                                    {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}}));
+  ASSERT_EQ(plan.execution_order, (std::vector<int>{91, 92}));
+  ASSERT_EQ(plan.operation_routes.node_routes.size(), 2U);
+  std::atomic_int provider_entries{0};
+  compute::ExecutionService authority;
+
+  const TensorRouteMutationPreparationResult result =
+      prepare_after_tensor_route_mutation(graph, plan, 92, &provider_entries,
+                                          authority);
+
+  EXPECT_TRUE(result.restored);
+  EXPECT_TRUE(result.rejected);
+  EXPECT_EQ(result.error, GraphErrc::NoOperation);
+  EXPECT_NE(result.message.find("91"), std::string::npos);
+  EXPECT_EQ(provider_entries.load(std::memory_order_relaxed), 0);
+  expect_tensor_route_authority_untouched(authority);
 }
 
 /**

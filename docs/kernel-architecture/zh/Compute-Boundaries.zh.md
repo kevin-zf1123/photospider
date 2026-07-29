@@ -257,6 +257,11 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
 - Planned node work 只保留选中的 implementation identity、device、metadata 与 callback shape。
   Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
+- TensorSlice HP Region planning 会为每个 executable target/upstream node 只执行一次 eligibility
+  selection，并保留 callback-free operation key 与完整 identity/device/shape/metadata route。
+  Dirty active-task selection 一完成，preparation 就会把每个 active task-population route 与该
+  Region-plan authority 比较。任一不匹配都会在 ROI mutation、task materialization、callable
+  resolution 或任何 provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败。
 - Dirty HP/RT 会在 planning 与 selection 后，对每个唯一 active task node 执行重新验证。此时
   Graph 或 realtime-bundle 的逻辑生命周期可能已经安装，但重新验证仍发生在 constraint 构造、
   resource estimation、source-first 物理准备、provider entry 以及 operation/resource/physical

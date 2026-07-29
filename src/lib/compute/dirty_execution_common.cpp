@@ -686,6 +686,71 @@ std::pair<int, DataType> infer_output_spec(
   return {1, DataType::FLOAT32};
 }
 
+/** @copydoc validate_dirty_region_operation_routes */
+void validate_dirty_region_operation_routes(
+    const GraphModel& graph,
+    const DirtyRegionOperationRouteSnapshot& route_snapshot,
+    const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay& selection,
+    const ComputeRequest& request) {
+  if (route_snapshot.node_routes.empty()) {
+    return;
+  }
+  if (route_snapshot.intent != request.intent ||
+      route_snapshot.intent != compute_plan.intent) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region operation route intent changed before task population.");
+  }
+  if (route_snapshot.available_devices != compute_plan.available_devices) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "Dirty Region operation device inventory changed before task "
+        "population.");
+  }
+
+  std::vector<int> active_node_ids;
+  active_node_ids.reserve(selection.active_task_ids.size());
+  std::unordered_set<int> active_nodes;
+  active_nodes.reserve(selection.active_task_ids.size());
+  for (int task_id : selection.active_task_ids) {
+    if (task_id < 0 || static_cast<std::size_t>(task_id) >=
+                           compute_plan.task_graph.tasks.size()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Dirty task selection contains an invalid task id.");
+    }
+    const int node_id =
+        compute_plan.task_graph.tasks.at(static_cast<std::size_t>(task_id))
+            .node_id;
+    if (active_nodes.insert(node_id).second) {
+      active_node_ids.push_back(node_id);
+    }
+  }
+
+  for (int node_id : active_node_ids) {
+    const auto frozen = route_snapshot.node_routes.find(node_id);
+    const Node* node = graph.find_node(node_id);
+    const auto planned = std::find_if(compute_plan.planned_work.begin(),
+                                      compute_plan.planned_work.end(),
+                                      [node_id](const PlannedNodeWork& work) {
+                                        return work.node_id == node_id;
+                                      });
+    const bool route_matches =
+        frozen != route_snapshot.node_routes.end() && node != nullptr &&
+        frozen->second.operation_key == make_key(node->type, node->subtype) &&
+        planned != compute_plan.planned_work.end() &&
+        planned->operation_route.has_value() &&
+        planned_operation_routes_equal(frozen->second.route,
+                                       *planned->operation_route);
+    if (!route_matches) {
+      throw GraphError(
+          GraphErrc::NoOperation,
+          "Dirty Region operation route changed before task population at "
+          "node " +
+              std::to_string(node_id) + ".");
+    }
+  }
+}
+
 /**
  * @brief Applies selected HP image work to derived ROI and Region metadata.
  * @param entries HP plan entries retained by the prepared request.

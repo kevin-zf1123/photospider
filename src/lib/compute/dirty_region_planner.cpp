@@ -148,22 +148,79 @@ bool has_image_parent(const GraphModel& graph, int node_id) {
 }
 
 /**
- * @brief Validates and clips one TensorSlice for the bounded core path.
+ * @brief Canonicalizes one route-visible device inventory as a value set.
  *
- * @param propagation Request-bound route selection and Region service.
- * @param graph Graph supplying target operation and concrete tensor shape.
+ * @param available_devices Caller-ordered route inventory.
+ * @return Sorted, duplicate-free device labels.
+ * @throws std::bad_alloc when copied vector storage cannot allocate.
+ * @note Registry selection tests membership rather than caller order, so this
+ * representation is the stable context compared with task population.
+ */
+std::vector<Device> canonicalize_route_devices(
+    const std::vector<Device>& available_devices) {
+  std::vector<Device> result = available_devices;
+  std::sort(result.begin(), result.end(), [](Device lhs, Device rhs) {
+    return static_cast<int>(lhs) < static_cast<int>(rhs);
+  });
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
+}
+
+/**
+ * @brief Selects and freezes one exact core TensorSlice execution route.
+ *
+ * @param propagation Request-bound route selection authority.
+ * @param node Node whose selected implementation is inspected.
+ * @param node_id Stable node id used in diagnostics.
+ * @param target True when this is the request target rather than an upstream
+ * dependency.
+ * @return Canonical operation key and callback-free complete route.
+ * @throws GraphError with `GraphErrc::InvalidParameter` when the selected
+ * implementation is absent, tiled, or not the exact source-private core
+ * dense identity.
+ * @throws std::bad_alloc or callback-copy exceptions from registry selection
+ * and callback-free snapshot construction.
+ * @note The temporary implementation owns any callback/DSO lease only until
+ * this helper copies its scalar route and returns.
+ */
+DirtyRegionPlannedOperationRoute select_tensor_operation_route_or_throw(
+    const RoiPropagationService& propagation, const Node& node, int node_id,
+    bool target) {
+  const std::optional<OpImplementation> selected =
+      propagation.select_route_implementation(node);
+  if (!selected.has_value() || !selected->is_monolithic() ||
+      !ops::find_core_region_monolithic_operation(
+           node.type, node.subtype, std::get<MonolithicOpFunc>(selected->func))
+           .has_value()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        target ? "Target operation has no exact TensorSlice execution contract."
+               : "TensorSlice dependency path requires the exact core identity "
+                 "operation at node " +
+                     std::to_string(node_id) + ".");
+  }
+  return DirtyRegionPlannedOperationRoute{
+      make_key(node.type, node.subtype),
+      make_planned_operation_route(*selected),
+  };
+}
+
+/**
+ * @brief Validates and clips one TensorSlice to a concrete dense shape.
+ *
+ * @param graph Graph supplying the target and concrete tensor shape.
  * @param node_id Target node id.
  * @param tensor_region Exact one-atom TensorSlice candidate.
  * @return Nonempty exact TensorSlice clipped to the concrete shape.
- * @throws GraphError when the node, operation contract, descriptor, rank, or
- * clipped Region is invalid.
+ * @throws GraphError when the node, descriptor, rank, or clipped Region is
+ * invalid.
  * @throws std::bad_alloc when descriptor or Region storage cannot allocate.
- * @note This helper is shared by planning and Region-aware dirty lifecycle
- * entry points so neither can publish an unbounded TensorSlice.
+ * @note Route identity is deliberately checked by the caller so Tensor
+ * planning can select exactly once and retain the same callback-free route.
  */
-RegionSet clip_tensor_region_or_throw(const RoiPropagationService& propagation,
-                                      const GraphModel& graph, int node_id,
-                                      const RegionSet& tensor_region) {
+RegionSet clip_tensor_region_to_shape_or_throw(const GraphModel& graph,
+                                               int node_id,
+                                               const RegionSet& tensor_region) {
   if (tensor_region.atoms().size() != 1U ||
       !std::holds_alternative<TensorSlice>(tensor_region.atoms().front())) {
     throw GraphError(GraphErrc::InvalidParameter,
@@ -179,12 +236,6 @@ RegionSet clip_tensor_region_or_throw(const RoiPropagationService& propagation,
   if (!graph.has_node(node_id)) {
     throw GraphError(GraphErrc::NotFound,
                      "Cannot compute HP tensor update: node not found.");
-  }
-  const Node& node = graph.node(node_id);
-  if (!propagation.supports_tensor_region_execution(node)) {
-    throw GraphError(
-        GraphErrc::InvalidParameter,
-        "Target operation has no exact TensorSlice execution contract.");
   }
   const std::optional<std::vector<std::size_t>> shape =
       dense_shape_for_node(graph, node_id);
@@ -206,6 +257,33 @@ RegionSet clip_tensor_region_or_throw(const RoiPropagationService& propagation,
         "TensorSlice does not intersect the target DenseTensor bounds.");
   }
   return *clipped.region();
+}
+
+/**
+ * @brief Checks current Tensor execution eligibility before shape clipping.
+ *
+ * @param propagation Request-bound route selection authority.
+ * @param graph Graph supplying the target and concrete tensor shape.
+ * @param node_id Target node id.
+ * @param tensor_region Exact one-atom TensorSlice candidate.
+ * @return Nonempty exact TensorSlice clipped to the concrete shape.
+ * @throws GraphError when no exact core route or concrete bounded Region
+ * exists.
+ * @throws std::bad_alloc or callback-copy exceptions from route selection and
+ * Region storage.
+ * @note Dirty lifecycle entry points use this helper without retaining a plan;
+ * request planning instead freezes the selected route explicitly.
+ */
+RegionSet validate_and_clip_tensor_region_or_throw(
+    const RoiPropagationService& propagation, const GraphModel& graph,
+    int node_id, const RegionSet& tensor_region) {
+  if (!graph.has_node(node_id)) {
+    throw GraphError(GraphErrc::NotFound,
+                     "Cannot compute HP tensor update: node not found.");
+  }
+  (void)select_tensor_operation_route_or_throw(propagation, graph.node(node_id),
+                                               node_id, true);
+  return clip_tensor_region_to_shape_or_throw(graph, node_id, tensor_region);
 }
 
 }  // namespace
@@ -485,10 +563,16 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     return plan_high_precision(
         graph, node_id, region_image_adapter::to_pixel_rect(dirty_region));
   }
-  const RegionSet clipped_region = clip_tensor_region_or_throw(
-      roi_propagation_, graph, node_id, dirty_region);
+  const RegionSet clipped_region =
+      clip_tensor_region_to_shape_or_throw(graph, node_id, dirty_region);
+  const DirtyRegionPlannedOperationRoute target_route =
+      select_tensor_operation_route_or_throw(
+          roi_propagation_, graph.node(node_id), node_id, true);
   HighPrecisionDirtyPlan result;
   result.snapshot.graph_generation = select_plan_generation(graph);
+  result.operation_routes.intent = roi_propagation_.intent();
+  result.operation_routes.available_devices =
+      canonicalize_route_devices(roi_propagation_.available_devices());
   std::vector<int> dependency_order =
       traversal_.topo_postorder_from(graph, node_id);
   if (dependency_order.empty()) {
@@ -512,14 +596,6 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     }
 
     const bool image_parent = has_image_parent(graph, current_id);
-    if (image_parent &&
-        !roi_propagation_.supports_tensor_region_execution(current_node)) {
-      throw GraphError(
-          GraphErrc::InvalidParameter,
-          "TensorSlice dependency path requires the exact core identity "
-          "operation at node " +
-              std::to_string(current_id) + ".");
-    }
     if (!image_parent && current_id != node_id) {
       throw GraphError(
           GraphErrc::MissingDependency,
@@ -527,6 +603,11 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
           "node " +
               std::to_string(current_id) + ".");
     }
+    DirtyRegionPlannedOperationRoute current_route =
+        current_id == node_id
+            ? target_route
+            : select_tensor_operation_route_or_throw(
+                  roi_propagation_, current_node, current_id, false);
 
     HpPlanEntry entry;
     entry.region_hp = current_region;
@@ -540,6 +621,8 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
                                 static_cast<int>(view.height())};
     }
     result.entries.emplace(current_id, entry);
+    result.operation_routes.node_routes.emplace(current_id,
+                                                std::move(current_route));
     result.snapshot.per_node_dirty_regions[current_id].push_back(
         entry.region_hp);
     result.snapshot.actual_dirty_regions[current_id].push_back(entry.region_hp);
@@ -630,8 +713,8 @@ DirtyRegionSnapshot DirtyRegionPlanner::begin_dirty_source(
       throw GraphError(GraphErrc::InvalidParameter,
                        "TensorSlice dirty lifecycle is available only in HP.");
     }
-    normalized = clip_tensor_region_or_throw(roi_propagation_, graph, node_id,
-                                             source_region);
+    normalized = validate_and_clip_tensor_region_or_throw(
+        roi_propagation_, graph, node_id, source_region);
   }
   return update_dirty_source_snapshot(graph, node_id, domain, nullptr,
                                       &normalized,
@@ -665,8 +748,8 @@ DirtyRegionSnapshot DirtyRegionPlanner::update_dirty_source(
       throw GraphError(GraphErrc::InvalidParameter,
                        "TensorSlice dirty lifecycle is available only in HP.");
     }
-    normalized = clip_tensor_region_or_throw(roi_propagation_, graph, node_id,
-                                             source_region);
+    normalized = validate_and_clip_tensor_region_or_throw(
+        roi_propagation_, graph, node_id, source_region);
   }
   return update_dirty_source_snapshot(graph, node_id, domain, nullptr,
                                       &normalized,

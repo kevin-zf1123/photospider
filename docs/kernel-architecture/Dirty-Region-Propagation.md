@@ -125,6 +125,15 @@ exact-core dense node remains in the plan before its consumer and receives the
 same logical demand. An uncached leaf source is a categorized missing
 dependency. The planner records direct TensorSlice source Regions; it does not
 infer source provenance from an empty PixelRect compatibility projection.
+For every executable target or upstream node, the same route selection that
+passes the exact-core check is reduced immediately to a callback-free
+operation key and complete identity/device/shape/metadata record. The request
+plan retains these revisioned records, not the callable or DSO lease.
+After cache/external-satisfaction pruning identifies active task nodes, dirty
+preparation compares task-population routes with those records before applying
+ROIs or materializing work. Target or upstream replacement therefore fails
+with `NoOperation` before provider/gate/grant/reservation/ledger ownership;
+ordinary execution still re-resolves the callable afterward.
 
 The planner records `BackwardDemand` edge mappings. Forward affected-region
 projection exists as a separate `RoiPropagationService` inspection behavior; it

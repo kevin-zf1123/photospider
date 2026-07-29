@@ -326,12 +326,7 @@ class DomainTaskShapeStrategy {
     if (!selected) {
       return std::nullopt;
     }
-    return PlannedOperationRoute{
-        selected->implementation_identity,
-        selected->metadata.device_preference,
-        selected->metadata,
-        selected->is_tiled(),
-    };
+    return make_planned_operation_route(*selected);
   }
 
   /**

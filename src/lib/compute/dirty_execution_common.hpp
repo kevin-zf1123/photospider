@@ -673,6 +673,35 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
                              const DirtyTaskSelectionOverlay& selection);
 
 /**
+ * @brief Validates exact Region routes at the task-population boundary.
+ *
+ * @param graph Request-local graph whose current operation keys are checked.
+ * @param route_snapshot Callback-free routes frozen by Region planning.
+ * @param compute_plan Task-population result selected under the current
+ * registry generation and device inventory.
+ * @param selection Active dirty task overlay after cache and external
+ * satisfaction pruning.
+ * @param request Intent and target associated with the same dirty request.
+ * @return Nothing when no route-sensitive Region snapshot exists or every
+ * active node still matches.
+ * @throws GraphError with `GraphErrc::NoOperation` when intent, device
+ * inventory, operation key, route presence, identity, callback shape, or
+ * metadata differs.
+ * @throws GraphError with `GraphErrc::ComputeError` when selection contains an
+ * invalid task id.
+ * @throws std::bad_alloc when temporary active-node or operation-key storage
+ * cannot allocate.
+ * @note Inactive and externally satisfied nodes are ignored. Validation runs
+ * before ROI application, task materialization, callable resolution, resource
+ * estimation, gate/grant construction, reservation, or provider entry.
+ */
+void validate_dirty_region_operation_routes(
+    const GraphModel& graph,
+    const DirtyRegionOperationRouteSnapshot& route_snapshot,
+    const ComputePlan& compute_plan, const DirtyTaskSelectionOverlay& selection,
+    const ComputeRequest& request);
+
+/**
  * @brief Prepares common dirty execution state after planner output exists.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
@@ -685,11 +714,14 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * @param externally_satisfied_node_ids Optional nodes already executed by
  * parameter stabilization and excluded from phase-two task selection.
  * @return Prepared plan with node groups ready for task construction.
- * @throws GraphError from task graph pruning or materialization.
+ * @throws GraphError from task graph pruning, exact Region route validation,
+ * or materialization. A changed route is reported as
+ * `GraphErrc::NoOperation`.
  * @note The helper retains diagnostics without publishing them. The installed
  * execution path calls publish_prepared_dirty_inspection() only after its
  * first cancellation observation, so candidate rollback leaves authoritative
- * inspection state unchanged.
+ * inspection state unchanged. Route validation precedes ROI mutation, work-set
+ * materialization, callable resolution, and every admission/resource boundary.
  */
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
@@ -702,6 +734,8 @@ PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
   DirtyTaskSelectionOverlay selection =
       dirty_snapshot_pruner.select(node_cache_plan, dirty_plan.snapshot, graph,
                                    externally_satisfied_node_ids);
+  validate_dirty_region_operation_routes(graph, dirty_plan.operation_routes,
+                                         node_cache_plan, selection, request);
   apply_planned_work_rois(dirty_plan.entries, selection);
 
   DirtyUpdateWorkSet work_set = dirty_snapshot_pruner.materialize(selection);

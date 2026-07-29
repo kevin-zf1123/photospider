@@ -159,7 +159,7 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_value_identity_across_dsos`
-binary。安装前，它会在该真实 disabled producer 中运行全部 39 个 dense-image case 与一个
+binary。安装前，它会在该真实 disabled producer 中运行全部 41 个 dense-image case 与一个
 双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
@@ -615,6 +615,13 @@ input view 都消费同一个带 revision 的 route，不得退回通用 key-lev
 `test_propagation` 工具同样会为请求的 HP 或 RT diagnostic route 过滤并保留精确 tiled
 implementation。
 
+`test_cpu_dense_tensor_image_operation` 还会为 TensorSlice 的 target-only 与
+target-plus-upstream plan 冻结精确 core CPU route，再在 task population 前追加优先级更高的
+same-key non-core GPU implementation。两个 case 都要求 dirty preparation 返回
+`NoOperation`、provider entry 为零、lifecycle/gate/grant/reservation/ledger 残留为零，并恢复
+core registry route。Guard-bypass 对照会继续通过真实 `HighPrecisionDirtyNodeExecutor` direct
+provider lease 并进入 fake GPU provider，因此该回归不能只因测试停在 planning 而通过。
+
 `test_compute_run` 会为 full-plan、dirty HP、dirty RT 与 connected-preflight 产品路径注册
 heap-backed exclusive key。共享 string-payload estimator 证明实际 capacity 加一个终止符，
 并证明 overflow rollback 具有 strong guarantee。Internal test product 还会报告每个实际
@@ -783,7 +790,7 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor、ImageView、Region 与 ReadyFence 验证
 
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-6 边界的 provider-independent
-integration binary。它的 39 个长期用例验证：
+integration binary。它的 41 个长期用例验证：
 
 - copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
   exactly-once Ready/Failed/ProducerCancelled settlement、typed failure retention 与
@@ -816,8 +823,9 @@ integration binary。它的 39 个长期用例验证：
 - padded multi-channel full 与 ImageRect execution、rank-four TensorSlice、Empty/Whole
   selection、dirty-plan-to-product staging、missing 或 partial intermediate parent
   recomputation、把 selected byte merge 到 existing complete output，以及仅在 Whole commit
-  后提升为 reusable authority；execute 返回 descriptor 与 inference 不一致的合法 Value 时，
-  仍以 `GraphErrc::ComputeError` 拒绝。
+  后提升为 reusable authority、callback-free target/upstream Region-route transfer 与
+  pre-task-population mutation rejection；execute 返回 descriptor 与 inference 不一致的合法
+  Value 时，仍以 `GraphErrc::ComputeError` 拒绝。
 
 `test_region_contracts` 拥有 28 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
 normalization、rank-general TensorSlice、overflow-safe clipping/algebra、可表示的单轴与
@@ -838,12 +846,12 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 39 个 dense
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 41 个 dense
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
 都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
-provider-disabled nested build 也会编译并运行全部 39 个 dense case 与该双 DSO case，因此真实
+provider-disabled nested build 也会编译并运行全部 41 个 dense case 与该双 DSO case，因此真实
 core operation、fence/transfer proof 与 identity authority 都不依赖 optional OpenCV operation
 provider 或 native device SDK。
 
@@ -873,8 +881,8 @@ DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary�
 kernel-lifecycle concurrency binary，以及 provider-independent `test_kernel_contracts`
 internal-seam consumer，再查询机器可读的 CTest inventory。`test_kernel_contracts` 的构建用于
 覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。该
-inventory 必须精确包含 47 项：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 39 个
+inventory 必须精确包含 49 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 41 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case 与

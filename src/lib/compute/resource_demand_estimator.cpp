@@ -267,6 +267,35 @@ void add_dirty_snapshot_dynamic(const DirtyRegionSnapshot& snapshot,
   }
 }
 
+/**
+ * @brief Adds dynamic storage owned by one dirty Region route snapshot.
+ *
+ * @param snapshot Callback-free route authority to inspect.
+ * @param estimate Checked destination estimator.
+ * @return Nothing.
+ * @throws GraphError when checked structural arithmetic overflows.
+ * @note Route objects are already part of unordered-map value storage; only
+ * bucket/linkage storage and nested string payloads are added here.
+ */
+void add_dirty_operation_route_snapshot_dynamic(
+    const DirtyRegionOperationRouteSnapshot& snapshot,
+    RetainedMemoryEstimator* estimate) {
+  add_vector_capacity(snapshot.available_devices, estimate);
+  estimate->add_objects<void*>(
+      static_cast<std::uint64_t>(snapshot.node_routes.bucket_count()));
+  estimate->add_objects<decltype(snapshot.node_routes)::value_type>(
+      static_cast<std::uint64_t>(snapshot.node_routes.size()));
+  const std::uint64_t route_count =
+      static_cast<std::uint64_t>(snapshot.node_routes.size());
+  estimate->add_objects<void*>(route_count);
+  estimate->add_objects<void*>(route_count);
+  for (const auto& [node_id, planned_route] : snapshot.node_routes) {
+    (void)node_id;
+    estimate->add_string_payload(planned_route.operation_key);
+    estimate->add_string_payload(planned_route.route.metadata.exclusive_key);
+  }
+}
+
 }  // namespace
 
 /** @copydoc compute_plan_dynamic_retained_memory_bytes */
@@ -352,6 +381,7 @@ std::uint64_t high_precision_dirty_plan_retained_memory_bytes(
     add_region_dynamic(entry.region_hp, &estimate);
   }
   add_dirty_snapshot_dynamic(plan.snapshot, &estimate);
+  add_dirty_operation_route_snapshot_dynamic(plan.operation_routes, &estimate);
   return estimate.bytes();
 }
 
@@ -372,6 +402,7 @@ std::uint64_t real_time_dirty_plan_retained_memory_bytes(
     add_region_dynamic(entry.region_hp, &estimate);
   }
   add_dirty_snapshot_dynamic(plan.snapshot, &estimate);
+  add_dirty_operation_route_snapshot_dynamic(plan.operation_routes, &estimate);
   return estimate.bytes();
 }
 

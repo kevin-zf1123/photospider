@@ -57,6 +57,50 @@ struct PlannedOperationRoute {
 };
 
 /**
+ * @brief Copies one coherent registry implementation into a callback-free
+ * route.
+ *
+ * @param implementation Selected registry value whose scalar identity,
+ * device, metadata, and callback shape are frozen together.
+ * @return Callback-free planning route.
+ * @throws std::bad_alloc when copied metadata string storage cannot allocate.
+ * @note The returned value never retains `implementation.func` or its plugin
+ * DSO lease. Callers must keep the source implementation alive only for this
+ * call.
+ */
+PlannedOperationRoute make_planned_operation_route(
+    const OpImplementation& implementation);
+
+/**
+ * @brief Compares every execution-relevant field of two planned routes.
+ *
+ * @param lhs First callback-free route.
+ * @param rhs Second callback-free route.
+ * @return True only when identity, device, callback shape, and every
+ * `OpMetadata` field match.
+ * @throws Nothing.
+ * @note Keep this centralized comparison and retained-memory accounting in
+ * sync whenever `OpMetadata` gains a field.
+ */
+bool planned_operation_routes_equal(const PlannedOperationRoute& lhs,
+                                    const PlannedOperationRoute& rhs) noexcept;
+
+/**
+ * @brief Checks one current registry implementation against a frozen route.
+ *
+ * @param route Callback-free planning authority.
+ * @param implementation Newly selected callable snapshot.
+ * @return True only when the current implementation is exactly the same
+ * revision, device, shape, and metadata.
+ * @throws Nothing.
+ * @note The comparison never invokes or copies the callback and therefore
+ * cannot extend a plugin DSO lifetime.
+ */
+bool planned_operation_route_matches(
+    const PlannedOperationRoute& route,
+    const OpImplementation& implementation) noexcept;
+
+/**
  * @brief Node-level dependency edge represented in a ComputeTaskGraph.
  *
  * PlannedDependency records the logical relationship between two planned

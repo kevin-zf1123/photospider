@@ -109,6 +109,13 @@ formal output 处停止。缺失或部分有效的 intermediate exact-core dense
 前继续保留在 plan 中，并接收同一 logical demand。uncached leaf source 是分类明确的
 missing dependency。Planner 会记录 direct TensorSlice source Region，而不会从空
 PixelRect compatibility projection 推断 source provenance。
+对于每个 executable target 或 upstream node，通过 exact-core 检查的同一次 route selection
+会立即缩减成 callback-free operation key 与完整 identity/device/shape/metadata record。
+Request plan 只保留这些带 revision 的 record，不保留 callable 或 DSO lease。在
+cache/external-satisfaction pruning 识别 active task node 后，dirty preparation 会在应用 ROI
+或 materialize work 前，把 task-population route 与这些 record 比较。因此 target 或 upstream
+replacement 会在取得 provider/gate/grant/reservation/ledger ownership 前以 `NoOperation`
+失败；普通 execution 随后仍会重新解析 callable。
 
 Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projection 是独立的
 `RoiPropagationService` inspection behavior，不是当前 dirty execution plan 的物化遍历方式。

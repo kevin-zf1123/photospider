@@ -789,12 +789,18 @@ RoiPropagationService::RoiPropagationService(
     std::vector<Device> available_devices, ComputeIntent intent)
     : available_devices_(std::move(available_devices)), intent_(intent) {}
 
+/** @copydoc RoiPropagationService::select_route_implementation */
+std::optional<OpImplementation>
+RoiPropagationService::select_route_implementation(const Node& node) const {
+  return OpRegistry::instance().select_implementation(
+      node.type, node.subtype, available_devices_, intent_);
+}
+
 /** @copydoc RoiPropagationService::supports_tensor_region_execution */
 bool RoiPropagationService::supports_tensor_region_execution(
     const Node& node) const {
   const std::optional<OpImplementation> selected =
-      OpRegistry::instance().select_implementation(node.type, node.subtype,
-                                                   available_devices_, intent_);
+      select_route_implementation(node);
   if (!selected.has_value() ||
       !std::holds_alternative<MonolithicOpFunc>(selected->func)) {
     return false;

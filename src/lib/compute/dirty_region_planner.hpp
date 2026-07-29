@@ -8,6 +8,7 @@
 
 #include "compute/dirty_region_snapshot.hpp"
 #include "compute/dirty_region_snapshot_builder.hpp"
+#include "compute/task_graph_planning.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -83,10 +84,46 @@ struct RtPlanEntry {
 };
 
 /**
+ * @brief One node's callback-free route frozen by exact Region planning.
+ *
+ * @throws std::bad_alloc when copied operation-key or metadata storage cannot
+ * allocate.
+ * @note `operation_key` protects the node type/subtype boundary while `route`
+ * protects the coherent registry revision, device, shape, and metadata. No
+ * callback or plugin DSO lease is retained.
+ */
+struct DirtyRegionPlannedOperationRoute {
+  /** @brief Canonical `type:subtype` key observed during Region planning. */
+  std::string operation_key;
+  /** @brief Exact callback-free implementation route selected for the node. */
+  PlannedOperationRoute route;
+};
+
+/**
+ * @brief Region-planning route authority transferred into task population.
+ *
+ * @throws std::bad_alloc when owned inventory, map, keys, or route metadata
+ * allocate.
+ * @note An empty `node_routes` map means the dirty plan did not require a
+ * route-sensitive exact Region contract. TensorSlice HP planning fills the
+ * context and every executable node route; current ImageRect and RT plans
+ * leave it empty.
+ */
+struct DirtyRegionOperationRouteSnapshot {
+  /** @brief Intent used for every frozen registry selection. */
+  ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+  /** @brief Canonical route-visible device inventory. */
+  std::vector<Device> available_devices;
+  /** @brief Frozen route records keyed by executable graph node id. */
+  std::unordered_map<int, DirtyRegionPlannedOperationRoute> node_routes;
+};
+
+/**
  * @brief Complete HP dirty planning result for one update request.
  *
- * The plan contains dependency order, per-node HP entries, and the graph-scoped
- * dirty snapshot consumed by dirty execution and debug inspection.
+ * The plan contains dependency order, per-node HP entries, the graph-scoped
+ * dirty snapshot, and any callback-free exact Region operation routes consumed
+ * by task population and dirty execution.
  *
  * @note The result is request-local; callers must not reuse it across graph
  * generations.
@@ -101,6 +138,12 @@ struct HighPrecisionDirtyPlan {
   /** @brief Snapshot describing dirty tiles, sources, ROIs, and edge mappings.
    */
   DirtyRegionSnapshot snapshot;
+
+  /**
+   * @brief Callback-free exact Region route authority for task population.
+   * @note Empty for the rectangular HP planning path.
+   */
+  DirtyRegionOperationRouteSnapshot operation_routes;
 };
 
 /**
@@ -122,6 +165,12 @@ struct RealTimeDirtyPlan {
   /** @brief Snapshot describing RT dirty tiles, sources, ROIs, and edge
    * mappings. */
   DirtyRegionSnapshot snapshot;
+
+  /**
+   * @brief Callback-free exact Region route authority for task population.
+   * @note Current RT planning rejects TensorSlice and leaves this empty.
+   */
+  DirtyRegionOperationRouteSnapshot operation_routes;
 };
 
 /**
@@ -183,13 +232,15 @@ class DirtyRegionPlanner {
    * @param graph Graph whose topology and staged dirty generation are used.
    * @param node_id Target node receiving the dirty selection.
    * @param dirty_region Exact normalized ImageRect or TensorSlice Region.
-   * @return HP plan retaining Region as logical authority.
+   * @return HP plan retaining Region and callback-free selected routes as
+   * logical and execution authorities.
    * @throws GraphError when the Region is empty, unsupported by the target,
    *         cannot be clipped to a concrete descriptor, or yields no work.
    * @throws std::bad_alloc when planning storage cannot allocate.
    * @note ImageRect delegates through the checked current edge adapter.
-   *       TensorSlice is supported only when the request route selects the
-   *       exact core dense identity implementation.
+   * TensorSlice selects each executable target/upstream implementation once,
+   * accepts only the exact core dense identity, and freezes its callback-free
+   * complete route for task-population validation.
    */
   HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
                                              const RegionSet& dirty_region);

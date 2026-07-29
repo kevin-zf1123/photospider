@@ -19,6 +19,64 @@
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
+
+namespace {
+
+/**
+ * @brief Compares complete private operation metadata without allocation.
+ *
+ * @param lhs First metadata snapshot.
+ * @param rhs Second metadata snapshot.
+ * @return True only when every current field matches.
+ * @throws Nothing.
+ * @note Keep this comparison synchronized with `OpMetadata`.
+ */
+bool operation_metadata_equal(const OpMetadata& lhs,
+                              const OpMetadata& rhs) noexcept {
+  return lhs.tile_preference == rhs.tile_preference &&
+         lhs.device_preference == rhs.device_preference &&
+         lhs.cost_score == rhs.cost_score &&
+         lhs.access_pattern == rhs.access_pattern &&
+         lhs.data_dependent == rhs.data_dependent &&
+         lhs.reentrant == rhs.reentrant &&
+         lhs.maximum_parallelism == rhs.maximum_parallelism &&
+         lhs.retained_memory_bytes == rhs.retained_memory_bytes &&
+         lhs.scratch_bytes == rhs.scratch_bytes &&
+         lhs.exclusive_key == rhs.exclusive_key;
+}
+
+}  // namespace
+
+/** @copydoc make_planned_operation_route */
+PlannedOperationRoute make_planned_operation_route(
+    const OpImplementation& implementation) {
+  return PlannedOperationRoute{
+      implementation.implementation_identity,
+      implementation.metadata.device_preference,
+      implementation.metadata,
+      implementation.is_tiled(),
+  };
+}
+
+/** @copydoc planned_operation_routes_equal */
+bool planned_operation_routes_equal(const PlannedOperationRoute& lhs,
+                                    const PlannedOperationRoute& rhs) noexcept {
+  return lhs.implementation_identity == rhs.implementation_identity &&
+         lhs.device == rhs.device && lhs.tiled == rhs.tiled &&
+         operation_metadata_equal(lhs.metadata, rhs.metadata);
+}
+
+/** @copydoc planned_operation_route_matches */
+bool planned_operation_route_matches(
+    const PlannedOperationRoute& route,
+    const OpImplementation& implementation) noexcept {
+  return route.implementation_identity ==
+             implementation.implementation_identity &&
+         route.device == implementation.metadata.device_preference &&
+         route.tiled == implementation.is_tiled() &&
+         operation_metadata_equal(route.metadata, implementation.metadata);
+}
+
 namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */

@@ -325,6 +325,13 @@ pure-C policy ABI v1 and receives no execution resource.
 - Planned node work retains only selected implementation identity, device,
   metadata, and callback shape. Submission must re-resolve the same nonzero
   identity before retaining a callback, so cached plans own no DSO lease.
+- TensorSlice HP Region planning uses its eligibility selection once per
+  executable target/upstream node and retains a callback-free operation key
+  plus complete identity/device/shape/metadata route. Immediately after dirty
+  active-task selection, preparation compares each active task-population route
+  with that Region-plan authority. A mismatch is `NoOperation` before ROI
+  mutation, task materialization, callable resolution, or any
+  provider/gate/grant/reservation/ledger ownership.
 - Dirty HP/RT revalidates every unique active task node after planning and
   selection. The Graph or realtime-bundle logical lifecycle may already be
   installed at that point, but revalidation precedes constraint construction,

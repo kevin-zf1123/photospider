@@ -200,14 +200,16 @@ RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
  * @param intent HP or RT registry priority policy.
  * @param require_tiled Whether the materialized task shape requires a tiled
  * callable.
- * @param planned_route Optional planning-time identity/device/shape contract.
+ * @param planned_route Optional planning-time identity, device, shape, and
+ * complete metadata contract.
  * @return Frozen callable/device pair, or nullopt when no compatible operation
  * exists.
  * @throws std::bad_alloc when registry snapshot storage allocates.
  * @throws Any exception propagated by registry callback copying.
  * @note The unified registry selection freezes callable, metadata, identity,
  * and device under one lock. When planned_route is supplied, any intervening
- * registry mutation rejects the operation instead of silently changing it.
+ * registry or metadata mutation rejects the operation instead of silently
+ * changing it.
  */
 std::optional<DirtyResolvedOperation> select_dirty_operation(
     const Node& node, const std::vector<Device>& available_devices,
@@ -222,10 +224,7 @@ std::optional<DirtyResolvedOperation> select_dirty_operation(
     return std::nullopt;
   }
   if (planned_route != nullptr &&
-      (selected->implementation_identity !=
-           planned_route->implementation_identity ||
-       selected->metadata.device_preference != planned_route->device ||
-       selected->is_tiled() != planned_route->tiled)) {
+      !planned_operation_route_matches(*planned_route, *selected)) {
     return std::nullopt;
   }
   return DirtyResolvedOperation{
@@ -246,7 +245,7 @@ std::optional<DirtyResolvedOperation> select_dirty_operation(
  * allocate.
  * @throws GraphError with `GraphErrc::NoOperation` when any active node lacks
  * its planning-time route or that route no longer resolves to the exact
- * callback identity, device, and shape.
+ * callback identity, device, shape, and metadata.
  * @note Inactive and externally satisfied nodes are deliberately ignored. A
  * node with any active Tile task rejects monolithic candidates. This complete
  * active-node validation runs before constraint construction, retained-memory

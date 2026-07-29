@@ -257,12 +257,18 @@ generation. Region propagation and dirty TensorSlice eligibility use that same
 request inventory and the matching HP/RT intent to select the actual
 revisioned `OpImplementation` before testing source-private core identity. They
 do not use a scalar-only lookup or filter away a selected same-key device
-candidate. Connected-preflight preparation
-also freezes each callable/DSO lease and complete service root without entering
-provider code; only an installed Run may perform reserved start and invoke the
-provider, after which output-dependent dirty planning remains Run-owned. Every
-ready submission carries the frozen device, and `ExecutionService` rejects a
-device outside the configured route/Host inventory before publishing the Run.
+candidate. HP TensorSlice planning immediately converts every accepted
+executable target/upstream selection into a callback-free operation key plus
+the complete identity/device/shape/metadata route, then releases the temporary
+callable/DSO lease. Dirty preparation compares those frozen routes with the
+active task-population routes before ROI mutation, task materialization,
+callable resolution, or admission; a mismatch is `NoOperation`. Final callable
+re-resolution remains mandatory. Connected-preflight preparation also freezes
+each callable/DSO lease and complete service root without entering provider
+code; only an installed Run may perform reserved start and invoke the provider,
+after which output-dependent dirty planning remains Run-owned. Every ready
+submission carries the frozen device, and `ExecutionService` rejects a device
+outside the configured route/Host inventory before publishing the Run.
 CPU submissions enter the
 fixed CPU pool; Metal submissions enter the single GPU lane. Both lanes share
 the common ready store, policy decision, reserved-start transaction, Host
