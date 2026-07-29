@@ -589,7 +589,7 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
 因此不会依赖失败 load 发布状态。每个场景都使用相互隔离的临时 session 与 history
 存储，并在脚本退出时删除。
 
-## Direct dirty operation authority 验证
+## Direct CPU operation authority 验证
 
 Issue #82 将 scalar callback/metadata identity 与 direct dirty admission 保留在长期行为测试中。
 `test_op_registry_m31` 会按两种顺序注册 monolithic HP 与 tiled HP sibling，调用两种 callback，
@@ -613,6 +613,14 @@ failure 停止，随后要求逻辑生命周期完成 settlement，不留下 cal
 gate 或 ledger 残留，并证明重试能够恢复。Externally satisfied sibling 会被有意忽略，因此
 inactive registry 变化不能使原本有效的 active dirty target 失效。
 
+同一个 binary 还负责 sequential provider 边界回归。两个不同 HP implementation 声明同一个
+exclusive key 与非零 retained/scratch demand。Condition-variable probe 要求 route-backed
+provider 在 sequential provider 活跃期间保持被排除。Provider 返回后，注入的
+`FakeImageArtifactCodec` 会阻塞磁盘缓存持久化，随后抛出 `GraphErrc::Io`；route-backed
+provider 必须在这段 Host 后处理仍被阻塞时进入。随后两个请求都必须完成 settlement，不留下
+gate、resource-ledger 或 Run-lifecycle 残留。该测试复用既有 codec injection boundary，不新增
+production 或 installable test hook。
+
 Post-plan observer 只存在于不安装的 internal test product 中。
 `StaticProductConsumerSmoke` 要求 production `dirty_update_executor.cpp` anchor，并拒绝 installed
 archive 中出现它的 observer state、setter 与 notification symbol。
@@ -625,7 +633,7 @@ cmake --build build --target test_op_registry_m31 \
 ./build/tests/test_op_registry_m31 \
   --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
 ./build/tests/test_compute_service_split \
-  --gtest_filter='ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
+  --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
 ```
 
 ## Graph close 与 process shutdown 验证

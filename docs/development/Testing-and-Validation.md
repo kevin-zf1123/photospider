@@ -746,7 +746,7 @@ maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
 
-## Direct Dirty Operation Authority Validation
+## Direct CPU Operation Authority Validation
 
 Issue #82 keeps scalar callback/metadata identity and direct dirty admission in
 maintained behavior tests. `test_op_registry_m31` registers monolithic HP and
@@ -777,6 +777,16 @@ grant, root-reservation, gate, or ledger residue and that a retry recovers. An
 externally satisfied sibling is intentionally ignored so inactive registry
 change cannot invalidate an otherwise valid active dirty target.
 
+The same binary owns the sequential provider-boundary regression. Two distinct
+HP implementations declare the same exclusive key and nonzero retained/scratch
+demand. A condition-variable probe requires the route-backed provider to remain
+excluded while the sequential provider is active. After provider return, an
+injected `FakeImageArtifactCodec` blocks disk-cache persistence and then throws
+`GraphErrc::Io`; the route-backed provider must enter while that Host
+post-processing remains blocked. Both requests then settle with no gate,
+resource-ledger, or Run-lifecycle residue. This test reuses the existing codec
+injection boundary and adds no production or installable test hook.
+
 The post-plan observer exists only in the non-installed internal test product.
 `StaticProductConsumerSmoke` requires the production
 `dirty_update_executor.cpp` anchor and rejects its observer state, setter, and
@@ -790,7 +800,7 @@ cmake --build build --target test_op_registry_m31 \
 ./build/tests/test_op_registry_m31 \
   --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
 ./build/tests/test_compute_service_split \
-  --gtest_filter='ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
+  --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
 ```
 
 ## Graph Close and Process Shutdown Validation
