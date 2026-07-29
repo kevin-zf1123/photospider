@@ -623,11 +623,20 @@ core registry route。Guard-bypass 对照会继续通过真实 `HighPrecisionDir
 provider lease 并进入 fake GPU provider，因此该回归不能只因测试停在 planning 而通过。
 
 相邻的三项 route-context case 会在 TensorSlice planning 后改变 task-population device
-inventory。全部 externally satisfied 与全部 cache-pruned 的 plan 必须作为 zero-work
-完成 preparation，不比较此时已无关的 frozen intent、device inventory 或 node route。
-Partial-active plan 仍必须在 fake GPU provider 或任何 execution authority 之前返回
-`NoOperation`，证明裁掉一个 node 不能掩盖另一个 active node 的 context drift。移除
-no-work return 会让前两项失败，而 partial-active 对照仍保持拒绝。
+inventory。Externally satisfied case 使用 production dirty overlay；formal-cache case
+先安装 exact complete HP output，再依赖真实 `NodeCacheTaskGraphPruner`，测试不会自行删除
+execution-order node。两者都必须作为 zero-work 完成 preparation，不比较此时已无关的
+frozen intent、device inventory 或 node route。Partial-active plan 仍必须在 fake GPU
+provider 或任何 execution authority 之前返回 `NoOperation`，证明裁掉一个 node 不能掩盖
+另一个 active node 的 context drift。
+
+`test_compute_service_split` 会独立验证外层 service boundary。真实 complete target cache
+移除 dirty task cone 后，post-plan registry replacement 不能进入任一 provider。Request 仍会
+按顺序记录 candidate begin、standalone bundle admission、successful terminal、quiescence、
+resource settlement 与 unregister，而全部 ready/callback/root/grant/policy/ledger counter
+保持为零。相邻 planning case 会证明 cache boundary 只裁掉 exclusive upstream demand、
+保留 shared demand、拒绝把 partial cache 当作 satisfaction、遵守 force-recache、保持 RT work
+可执行，并对 external satisfaction 应用相同的 upstream cut。
 
 `test_compute_run` 会为 full-plan、dirty HP、dirty RT 与 connected-preflight 产品路径注册
 heap-backed exclusive key。共享 string-payload estimator 证明实际 capacity 加一个终止符，
@@ -831,9 +840,10 @@ integration binary。它的 44 个长期用例验证：
   selection、dirty-plan-to-product staging、missing 或 partial intermediate parent
   recomputation、把 selected byte merge 到 existing complete output，以及仅在 Whole commit
   后提升为 reusable authority、callback-free target/upstream Region-route transfer 与
-  pre-task-population mutation rejection、device-inventory drift 下 all-external/all-cache
-  no-work acceptance 与 partial-active drift rejection；execute 返回 descriptor 与 inference
-  不一致的合法 Value 时，仍以 `GraphErrc::ComputeError` 拒绝。
+  pre-task-population mutation rejection、device-inventory drift 下由 production pruning
+  得到的 all-external 与 real-cache no-work acceptance，以及 partial-active drift rejection；
+  execute 返回 descriptor 与 inference 不一致的合法 Value 时，仍以
+  `GraphErrc::ComputeError` 拒绝。
 
 `test_region_contracts` 拥有 28 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
 normalization、rank-general TensorSlice、overflow-safe clipping/algebra、可表示的单轴与

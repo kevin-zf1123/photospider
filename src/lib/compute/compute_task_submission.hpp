@@ -53,15 +53,19 @@ class TaskSubmissionPlan {
    * @param available_devices Devices exposed by the active execution runtime.
    * @param publish_plan_inspection Whether planning immediately updates graph
    * diagnostics; admission-aware callers defer it until installation.
+   * @param allow_reusable_cache Whether exact complete formal HP cache may
+   * satisfy nodes before task population.
    * @throws GraphError or standard exceptions from plan construction, graph
    * lookup, allocation, or operation resolution.
    * @note The underlying ComputePlan remains owned by this value regardless of
-   * diagnostic publication timing.
+   * diagnostic publication timing. Force-recache callers disable reusable
+   * cache without mutating Graph output during fallible plan construction.
    */
   TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
                      GraphTraversalService& traversal, int node_id,
                      std::vector<Device> available_devices,
-                     bool publish_plan_inspection = true);
+                     bool publish_plan_inspection = true,
+                     bool allow_reusable_cache = true);
 
   /**
    * @brief Reports whether the pruned plan contains no executable tasks.

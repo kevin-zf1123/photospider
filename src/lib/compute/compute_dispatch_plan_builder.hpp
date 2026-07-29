@@ -44,17 +44,20 @@ class ComputeDispatchPlanBuilder {
    * @param available_devices Route-visible devices used for operation planning.
    * @param publish_inspection Whether to publish the plan to GraphModel
    * inspection fields before returning.
+   * @param allow_reusable_cache Whether exact complete formal HP cache may
+   * satisfy nodes before task population.
    * @return Cache-pruned ComputePlan whose planned_nodes define execution
    * order and whose task_graph defines dependencies.
    * @throws GraphError or standard exceptions from traversal, graph expansion,
    * pruning, graph lookup, or diagnostic history allocation.
-   * @note Admission-aware callers pass false, retain the returned plan, and
-   * call publish_plan_inspection() only after registry installation.
+   * @note Admission-aware callers pass false for publish_inspection, retain the
+   * returned plan, and call publish_plan_inspection() only after registry
+   * installation. Force-recache callers pass false for allow_reusable_cache.
    */
   ComputePlan build_high_precision_plan(
       GraphModel& graph, int node_id,
       const std::vector<Device>& available_devices = {Device::CPU},
-      bool publish_inspection = true) const;
+      bool publish_inspection = true, bool allow_reusable_cache = true) const;
 
   /**
    * @brief Publishes one already-built plan to bounded graph inspection state.

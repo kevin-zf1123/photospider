@@ -643,7 +643,10 @@ class HighPrecisionDirtyExecutor {
    * @note The method executes no provider, advances no Run phase, publishes no
    * ready entry, and commits no Graph/proxy output. Region and dirty capability
    * checks use the same route-visible device inventory and
-   * GlobalHighPrecision intent as subsequent operation selection.
+   * GlobalHighPrecision intent as subsequent operation selection. Exact
+   * complete formal HP cache may satisfy request nodes and cut work needed only
+   * through those boundaries; force-recache disables that reuse without
+   * clearing visible output during fallible preparation.
    */
   PreparedHighPrecisionDirtyRun prepare(
       GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -772,7 +775,9 @@ class RealTimeDirtyExecutor {
    * @note The method executes no provider, advances no Run phase, publishes no
    * ready entry, and commits no proxy output. Region and dirty capability
    * checks use the same route-visible device inventory and RealTimeUpdate
-   * intent as subsequent operation selection.
+   * intent as subsequent operation selection. Formal HP cache never satisfies
+   * RT executable work; externally staged nodes may still form request-local
+   * satisfaction boundaries.
    */
   PreparedRealTimeDirtyRun prepare(
       GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,

@@ -786,13 +786,24 @@ provider, so the regression cannot pass merely because the test stops at
 planning.
 
 Three adjacent route-context cases mutate the task-population device inventory
-after TensorSlice planning. Fully externally satisfied and fully cache-pruned
-plans must prepare as zero-work without comparing the now-irrelevant frozen
-intent, device inventory, or node routes. A partial-active plan must still
-return `NoOperation` before the fake GPU provider or any execution authority,
-proving that pruning one node cannot hide context drift for another active
-node. Removing the no-work return makes the first two cases fail while the
-partial-active control remains rejected.
+after TensorSlice planning. The externally satisfied case uses the production
+dirty overlay, and the formal-cache case installs exact complete HP output then
+relies on the real `NodeCacheTaskGraphPruner`; no test erases an execution-order
+node. Both must prepare as zero-work without comparing the now-irrelevant
+frozen intent, device inventory, or node routes. A partial-active plan must
+still return `NoOperation` before the fake GPU provider or any execution
+authority, proving that pruning one node cannot hide context drift for another
+active node.
+
+`test_compute_service_split` separately proves the outer service boundary. A
+real complete target cache removes the dirty task cone, then a post-plan
+registry replacement cannot enter either provider. The request still records
+candidate begin, standalone bundle admission, successful terminal,
+quiescence, resource settlement, and unregister in order, while every
+ready/callback/root/grant/policy/ledger counter remains zero. Adjacent planning
+cases prove cache boundaries cut only exclusive upstream demand, preserve
+shared demand, reject partial cache as satisfaction, honor force-recache, keep
+RT work executable, and apply the same upstream cut to external satisfaction.
 
 `test_compute_run` registers heap-backed exclusive keys for full-plan, dirty HP,
 dirty RT, and connected-preflight product paths. The shared string-payload
@@ -1040,10 +1051,10 @@ verify:
   missing or partial intermediate parents, selected-byte merge into an
   existing complete output, and promotion to reusable authority only after a
   Whole commit, callback-free target/upstream Region-route transfer and
-  pre-task-population mutation rejection, all-external/all-cache no-work
-  acceptance under device-inventory drift, partial-active drift rejection, plus
-  `GraphErrc::ComputeError` when execute returns a valid Value whose descriptor
-  disagrees with inference.
+  pre-task-population mutation rejection, production-pruned all-external and
+  real-cache no-work acceptance under device-inventory drift, partial-active
+  drift rejection, plus `GraphErrc::ComputeError` when execute returns a valid
+  Value whose descriptor disagrees with inference.
 
 `test_region_contracts` owns 28 durable Region cases for canonical
 Empty/Whole, keys, intervals, normalization, rank-general TensorSlice,

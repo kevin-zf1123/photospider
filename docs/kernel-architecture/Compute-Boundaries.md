@@ -317,9 +317,16 @@ pure-C policy ABI v1 and receives no execution resource.
   canonical route-visible device inventory, operation-registry generation, and
   task-shape configuration.
 - A force-recache request invalidates reusable expansion when current input or
-  parameter state may change output extent without changing topology.
+  parameter state may change output extent without changing topology. It also
+  disables request-time cache satisfaction before task population; fallible
+  preparation does not clear visible Graph output.
 - Request target, cache availability, and dirty state prune existing task
-  shapes; they do not redefine graph topology.
+  shapes; they do not redefine graph topology. For HP only, exact complete
+  formal cache is a read boundary: the node and upstream work demanded solely
+  through that boundary are omitted, while shared upstream work required by
+  another unsatisfied branch remains executable. Partial validity,
+  force-recache, and RT intent never promote formal HP cache into task
+  satisfaction.
 - A `ComputeTaskGraph` is immutable while an execution-visible callback derived
   from it may still execute.
 - Planned node work retains only selected implementation identity, device,
@@ -342,10 +349,15 @@ pure-C policy ABI v1 and receives no execution resource.
   fails with `NoOperation`, and the installed logical lifecycle must then
   finalize without gate, grant, root-reservation, or ledger residue. Inactive
   tasks and nodes already satisfied by connected preflight are deliberately
-  excluded from this check. If pruning removes every task, context drift is
-  irrelevant and preparation remains a successful no-work result; if any task
-  remains active, the complete context and every active route are still
-  required to match.
+  excluded from this check. If production cache or external-satisfaction
+  pruning removes every task, context drift is irrelevant and preparation
+  remains a successful no-work result; if any task remains active, the complete
+  context and every active route are still required to match. The no-work
+  shortcut is inside the already installed outer request lifecycle: the
+  candidate, standalone/RunGroup bundle, successful terminal, quiescence,
+  resource settlement, and unregistration still occur, while ready entries,
+  callbacks, operation gates, policy invocations, root reservations, child
+  grants, provider entry, and ledger demand remain zero.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
 - Logical propagation, dirty planning, source history, per-node state, edge

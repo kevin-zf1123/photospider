@@ -190,7 +190,12 @@ struct PlannedNodeWork {
   PixelRect execution_roi;
   /** @brief Whether the work item must recompute the whole output. */
   bool whole_output = false;
-  /** @brief Whether a formal reusable HP cache was available during pruning. */
+  /**
+   * @brief Whether exact complete formal HP cache satisfied this request node.
+   *
+   * @note This is request-scoped pruning metadata, not a durable cache claim.
+   * Dirty selection revalidates the current Graph state before using it.
+   */
   bool reusable_cache_available = false;
   /** @brief Dirty ROIs associated with this node after snapshot pruning. */
   std::vector<PixelRect> dirty_rois;
@@ -310,13 +315,15 @@ struct DirtyTaskSelectionOverlay {
  * @brief Request attributes used by task graph expansion and pruning.
  *
  * ComputeRequest is the planning-layer description of intent, target node,
- * parallel execution preference, and optional dirty ROI. It is narrower than
- * internal ComputeService request options and contains only data needed to
- * produce a
+ * parallel execution preference, optional dirty ROI, and whether formal HP
+ * cache may satisfy requested work. It is narrower than internal
+ * ComputeService request options and contains only data needed to produce a
  * ComputePlan.
  *
  * @note RealTimeUpdate requests are still planned as a single domain per call;
- * HP/RT sibling coordination happens outside this struct.
+ * HP/RT sibling coordination happens outside this struct. Force-recache
+ * callers disable reusable cache before pruning instead of clearing visible
+ * Graph output during fallible preparation.
  */
 struct ComputeRequest {
   /** @brief Compute intent whose domain controls task expansion. */
@@ -327,6 +334,13 @@ struct ComputeRequest {
   bool parallel = false;
   /** @brief Optional dirty ROI used by dirty update callers. */
   std::optional<PixelRect> dirty_roi;
+  /**
+   * @brief Whether exact complete formal HP cache may satisfy planned work.
+   *
+   * @note This flag never promotes RT proxy or partial Region state. The
+   * pruner still delegates exact completeness to ComputeCachePolicy.
+   */
+  bool allow_reusable_cache = true;
 };
 
 /**
@@ -348,11 +362,20 @@ struct ComputePlan {
   int target_node_id = -1;
   /** @brief Whether the caller intended route-backed execution. */
   bool parallel = false;
-  /** @brief Original traversal order for the request target. */
+  /**
+   * @brief Executable traversal order remaining after request/cache pruning.
+   */
   std::vector<int> execution_order;
   /** @brief Node ids that survived pruning and should be considered planned. */
   std::vector<int> planned_nodes;
-  /** @brief Per-node work summaries aligned with planned_nodes by content. */
+  /**
+   * @brief Request-cone work and cache-boundary summaries.
+   *
+   * Records for executable nodes carry task ids and appear in planned_nodes.
+   * Non-executable request-cone records, including cache boundaries and
+   * upstream work cut only through those boundaries, remain for diagnostics
+   * with no task ids.
+   */
   std::vector<PlannedNodeWork> planned_work;
   /** @brief Executable task graph derived from planned work. */
   ComputeTaskGraph task_graph;
@@ -485,8 +508,9 @@ class FullTaskGraphExpander {
 /**
  * @brief Prunes a FullTaskGraph to a target/cache-aware request plan.
  *
- * @note Cache hits are recorded as metadata; execution still resolves cache
- * reads and writes through dispatcher/NodeTaskRunner semantics.
+ * @note Exact complete formal HP cache forms a request-local read boundary.
+ * The pruner removes that node's tasks and upstream work needed only through
+ * that boundary while retaining a metadata-only work record for inspection.
  */
 class NodeCacheTaskGraphPruner {
  public:
@@ -497,9 +521,14 @@ class NodeCacheTaskGraphPruner {
    * @param request Planning request containing target and intent.
    * @param execution_order Target postorder derived from GraphTraversalService.
    * @param graph GraphModel used to validate nodes and check reusable cache.
-   * @return ComputePlan limited to execution_order and selected dependencies.
+   * @return ComputePlan limited to executable demand before cache boundaries.
    * @throws GraphError when requested nodes are missing from graph or full
    * expansion.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when exact cache validity or result storage cannot be
+   * evaluated.
+   * @note RealTimeUpdate and requests with allow_reusable_cache=false never
+   * treat formal HP cache as executable-task satisfaction.
    */
   ComputePlan prune(const FullTaskGraph& full_graph,
                     const ComputeRequest& request,
@@ -529,11 +558,15 @@ class DirtySnapshotTaskGraphPruner {
    * @param externally_satisfied_node_ids Optional request-local node identities
    * whose outputs are already staged and must not execute in this phase.
    * @return Generation-local active task overlay and source/downstream groups.
-   * @throws std::bad_alloc if overlay vectors or maps cannot grow.
+   * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
+   * std::bad_alloc when exact cache validity, dependency metadata, or overlay
+   * storage cannot be evaluated.
    * @note This is the dirty execution path: it does not mutate or duplicate
    * PlannedTask records, and it preserves task ids from node_cache_plan.
    * Dependencies on explicitly satisfied nodes remain outside the active view
    * and are therefore treated as completed without reusing their task ids.
+   * Upstream tasks needed only through a satisfied boundary are also removed;
+   * shared upstream work remains active when another unsatisfied sink needs it.
    */
   DirtyTaskSelectionOverlay select(
       const ComputePlan& node_cache_plan, const DirtyRegionSnapshot& snapshot,

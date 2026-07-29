@@ -1576,15 +1576,19 @@ class ComputeRun {
    * copied into the Run-owned plan.
    * @param publish_plan_inspection Whether plan construction immediately
    * updates GraphModel diagnostics.
+   * @param allow_reusable_cache Whether exact complete formal HP cache may
+   * satisfy nodes before task population.
    * @return Mutable Run-owned plan retained by the shared control block.
    * @throws std::logic_error when a plan already exists or the Run is terminal.
    * @throws GraphError or standard exceptions from plan construction.
    * @note Full-HP task callbacks reach this plan only through a matching lease.
+   * Force-recache callers disable reusable cache while retaining current Graph
+   * output until installed execution owns visible mutation.
    */
   TaskSubmissionPlan& emplace_submission_plan(
       GraphModel& graph, GraphTraversalService& traversal, int node_id,
       std::vector<Device> available_devices,
-      bool publish_plan_inspection = true);
+      bool publish_plan_inspection = true, bool allow_reusable_cache = true);
 
   /**
    * @brief Returns the Run-owned submission plan when installed.

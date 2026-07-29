@@ -147,14 +147,15 @@ ComputeIntent planning_intent_for_request(
  * execution for this service call.
  * @return Narrow compute::ComputeRequest used by task graph planning.
  * @throws Nothing directly.
- * @note Planning uses only semantic target/domain data and the selected
- * execution mode; cache and telemetry options are consumed later by execution.
+ * @note Planning consumes force-recache only as permission to bypass reusable
+ * cache pruning. Visible cache clearing and all other cache/telemetry options
+ * remain execution-owned.
  */
 compute::ComputeRequest make_planning_request(
     const ComputeService::Request& request, bool use_parallel_executor) {
-  return compute::ComputeRequest{planning_intent_for_request(request),
-                                 request.node_id, use_parallel_executor,
-                                 request.dirty_roi};
+  return compute::ComputeRequest{
+      planning_intent_for_request(request), request.node_id,
+      use_parallel_executor, request.dirty_roi, !request.cache.force_recache};
 }
 
 /**

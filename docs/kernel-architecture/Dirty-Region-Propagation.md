@@ -138,6 +138,15 @@ therefore fails with `NoOperation` before
 provider/gate/grant/reservation/ledger ownership; ordinary execution still
 re-resolves the callable afterward.
 
+The production node/cache pruner, rather than test-owned execution-order
+mutation, establishes formal HP cache satisfaction. It accepts only an exact
+complete `ComputeCachePolicy` result for HP when reusable cache is enabled,
+removes that node and upstream work demanded only through the satisfied
+boundary, and retains shared upstream demand for other unsatisfied branches.
+Partial validity, force-recache, and RT intent preserve executable work. Dirty
+selection revalidates request-scoped cache metadata against current Graph state
+before treating it as satisfied.
+
 The planner records `BackwardDemand` edge mappings. Forward affected-region
 projection exists as a separate `RoiPropagationService` inspection behavior; it
 is not the traversal used to materialize the current dirty execution plan.
@@ -224,6 +233,15 @@ It does not expand nodes, create a new tile shape, or insert a retile task.
 Nonempty nonprojectable Region records select existing non-tile work and
 suppress extent-derived rectangles; they never select a physical tile without
 an exact image projection.
+
+Cache and external-satisfaction boundaries are demand cuts, not isolated task
+filters. Selection walks upstream from each unsatisfied sink, stops at a
+satisfied node, and keeps shared upstream nodes if another unsatisfied sink
+still needs them. If this leaves no active task, the enclosing product request
+still completes candidate admission, logical Run/RunGroup installation,
+successful terminal arbitration, quiescence, resource settlement, and
+unregistration. It creates no ready entry, callback, operation gate, policy
+invocation, physical reservation/grant, provider entry, or ledger demand.
 
 Before a selected tiled `image_mixing` node dispatches its borrowed
 `InputTile`/`OutputTile` views, `NodeExecutor` normalizes required secondary

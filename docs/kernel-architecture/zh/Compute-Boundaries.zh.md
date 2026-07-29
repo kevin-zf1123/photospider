@@ -252,8 +252,13 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 - Full expansion 以 graph topology generation、compute intent、规范化 route-visible device
   inventory、operation-registry generation 与 task-shape configuration 为键。
 - 当当前 input/parameter 可能在拓扑不变时改变 output extent，force-recache 会使可复用 expansion
-  失效。
-- 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。
+  失效。它还会在 task population 前禁用 request-time cache satisfaction；可失败的 preparation
+  不会清除 Graph 的可见 output。
+- 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。只有 HP
+  才能把 exact complete formal cache 作为 read boundary：该 node 以及仅通过该 boundary
+  产生需求的 upstream work 会被省略；若另一条未满足 branch 仍需要 shared upstream work，
+  该 work 会继续执行。Partial validity、force-recache 与 RT intent 都不会把 formal HP cache
+  提升为 task satisfaction。
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
 - Planned node work 只保留选中的 implementation identity、device、metadata 与 callback shape。
   Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
@@ -269,9 +274,13 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
   resource estimation、source-first 物理准备、provider entry 以及 operation/resource/physical
   admission 之前。缺失或变化的 active route 会以 `NoOperation` 失败；随后必须 finalize 已安装的
   逻辑生命周期，不得留下 gate、grant、root reservation 或 ledger 残留。Inactive task 以及已由
-  connected preflight 满足的 node 会被明确排除在该检查之外。如果 pruning 移除了全部 task，
-  context drift 已无关且 preparation 保持成功 no-work；只要仍有任一 active task，完整 context
-  与每条 active route 仍必须匹配。
+  connected preflight 满足的 node 会被明确排除在该检查之外。如果 production cache 或
+  external-satisfaction pruning 移除了全部 task，context drift 已无关且 preparation 保持成功
+  no-work；只要仍有任一 active task，完整 context 与每条 active route 仍必须匹配。No-work
+  shortcut 位于已经安装的外层 request lifecycle 内：candidate、standalone/RunGroup bundle、
+  successful terminal、quiescence、resource settlement 与 unregistration 仍会发生，而 ready
+  entry、callback、operation gate、policy invocation、root reservation、child grant、
+  provider entry 与 ledger demand 均保持为零。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
 - 逻辑 propagation、dirty planning、source history、per-node state、edge mapping、
   staged-write validity 与 Region-aware dense callback 携带规范化 `RegionSet`。

@@ -2693,6 +2693,8 @@ ComputeRunSubmission make_dirty_resource_submission(
  * unchanged. Expected GraphError rejection is captured in the result.
  * @note Every call rebuilds the same one-node graph and request state so a
  * successful endpoint cannot seed cache/proxy state for the next endpoint.
+ * Explicit force-recache keeps the fixture's seeded formal HP output from
+ * satisfying the resource-admission work under measurement.
  */
 DirtyProductResourceResult execute_dirty_product_resource_case(
     const std::string& directory_label, const std::string& graph_identity,
@@ -2718,6 +2720,7 @@ DirtyProductResourceResult execute_dirty_product_resource_case(
   request.disable_disk_cache = true;
   request.dirty_roi = PixelRect{0, 0, 8, 8};
   request.suppress_graph_downsample = intent != ComputeIntent::RealTimeUpdate;
+  request.force_recache = true;
   request.node_synchronization =
       std::make_shared<DirtyNodeSynchronization>(synchronization_node_ids);
 
@@ -3120,7 +3123,9 @@ TEST(OperationMetadataRouting,
  * @throws Filesystem, graph, planning, registry, or service exceptions
  * unchanged.
  * @note Each domain uses a fresh fake-Metal GraphRuntime and real source-first
- * service dispatch, so HP cache state cannot seed RT selection.
+ * service dispatch. Explicit force-recache keeps the seeded dirty product node
+ * executable for the GPU-route assertion; HP cache state cannot seed RT
+ * selection.
  */
 TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
   ensure_issue75_device_operations_registered();
@@ -3154,6 +3159,7 @@ TEST(Issue75DeviceRouting, DirtyHpAndRtUseFrozenGpuLane) {
     request.disable_disk_cache = true;
     request.dirty_roi = PixelRect{0, 0, 8, 8};
     request.suppress_graph_downsample = true;
+    request.force_recache = true;
     GraphTraversalService traversal;
     GraphEventService events;
     ExecutionService service(1U);

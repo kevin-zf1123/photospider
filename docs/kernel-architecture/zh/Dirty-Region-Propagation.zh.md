@@ -119,6 +119,13 @@ record 比较。因此剩余 active work 的 target 或 upstream replacement 会
 provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败；普通 execution
 随后仍会重新解析 callable。
 
+Formal HP cache satisfaction 由 production node/cache pruner 建立，而不是由测试自行修改
+execution order。只有 HP、允许复用 cache 且 `ComputeCachePolicy` 给出 exact complete 结果时，
+pruner 才会接受该 boundary；它会移除该 node 与仅通过这一 satisfied boundary 产生需求的
+upstream work，同时保留其他未满足 branch 仍需要的 shared upstream demand。Partial validity、
+force-recache 与 RT intent 都会保留 executable work。Dirty selection 在把 request-scoped
+cache metadata 视为已满足前，还会针对当前 Graph state 重新验证。
+
 Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projection 是独立的
 `RoiPropagationService` inspection behavior，不是当前 dirty execution plan 的物化遍历方式。
 
@@ -187,6 +194,13 @@ execution ROI、保留 task id、推导 task-level dependency，并分离 source
 task id。它不会展开 node、创建新 tile shape 或插入 retile task。Nonempty nonprojectable Region
 record 会选择既有 non-tile work 并抑制 extent-derived rectangle；没有精确 image projection 时，
 绝不会选择 physical tile。
+
+Cache 与 external-satisfaction boundary 是 demand cut，而不是孤立的 task filter。Selection 会从
+每个 unsatisfied sink 逆向遍历，在 satisfied node 处停止；如果另一个 unsatisfied sink 仍需要
+shared upstream node，该 node 会继续保留。若结果没有 active task，外层产品 request 仍会完成
+candidate admission、逻辑 Run/RunGroup 安装、successful terminal arbitration、quiescence、
+resource settlement 与 unregistration；它不会创建 ready entry、callback、operation gate、
+policy invocation、physical reservation/grant、provider entry 或 ledger demand。
 
 在选中的 tiled `image_mixing` node 分派其借用的 `InputTile`/`OutputTile` view 之前，
 `NodeExecutor` 会为该次 node invocation 一次性规范化所需 secondary input。Crop/pad 使用

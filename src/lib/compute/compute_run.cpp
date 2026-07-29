@@ -1264,6 +1264,8 @@ bool ComputeRun::is_terminal() const {
  * ownership.
  * @param publish_plan_inspection Whether construction immediately updates graph
  * diagnostics.
+ * @param allow_reusable_cache Whether exact complete formal HP cache may
+ * satisfy nodes before task population.
  * @return Mutable Run-owned submission plan.
  * @throws std::logic_error for duplicate storage or terminal Run.
  * @throws GraphError or standard exceptions from TaskSubmissionPlan.
@@ -1271,7 +1273,8 @@ bool ComputeRun::is_terminal() const {
  */
 TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
     GraphModel& graph, GraphTraversalService& traversal, int node_id,
-    std::vector<Device> available_devices, bool publish_plan_inspection) {
+    std::vector<Device> available_devices, bool publish_plan_inspection,
+    bool allow_reusable_cache) {
   std::lock_guard<std::mutex> lock(control_->mutex);
   if (control_->arbiter_state != ComputeRunArbiterState::Open) {
     throw std::logic_error(
@@ -1282,7 +1285,8 @@ TaskSubmissionPlan& ComputeRun::emplace_submission_plan(
   }
   control_->submission_plan = std::make_unique<TaskSubmissionPlan>(
       control_->descriptor.id(), graph, traversal, node_id,
-      std::move(available_devices), publish_plan_inspection);
+      std::move(available_devices), publish_plan_inspection,
+      allow_reusable_cache);
   return *control_->submission_plan;
 }
 

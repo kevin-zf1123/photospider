@@ -1716,10 +1716,12 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * synchronization owner. Concurrent HP/RT siblings therefore reserve the same
  * object conservatively in both Runs so either reservation can settle first
  * without leaving the surviving sibling's retained ownership unaccounted.
- * Cancellation observations bracket planning, node/tile work, sibling gating,
- * write-buffer commit, downsample, and return. A monolithic provider already
- * entered remains non-preemptible, while product publication remains protected
- * by the outer request-owned staging/commit contender.
+ * Exact complete formal HP cache may cut request-local work; force-recache
+ * disables that satisfaction without clearing visible output during fallible
+ * preparation. Cancellation observations bracket planning, node/tile work,
+ * sibling gating, write-buffer commit, downsample, and return. A monolithic
+ * provider already entered remains non-preemptible, while product publication
+ * remains protected by the outer request-owned staging/commit contender.
  */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -1804,7 +1806,7 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
   auto prepared = prepare_dirty_execution(
       *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::GlobalHighPrecision, request.node_id, false,
-                     planning_roi},
+                     planning_roi, !request.force_recache},
       available_devices, externally_satisfied_nodes);
   observe_dirty_run_or_throw(run, run_lease);
   planning_graph_owner.reset();
@@ -2078,11 +2080,11 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(
  * outside that lock. RT output never becomes formal reusable GraphModel cache.
  * Each process-service phase charges the complete per-node synchronization
  * owner; a shared HP/RT sibling object is therefore conservatively present in
- * both independent Run reservations. Cancellation observations bracket
- * planning, node/tile work, proxy write-buffer commit, and return. A
- * monolithic provider already entered remains non-preemptible, while product
- * publication remains protected by the outer request-owned staging/commit
- * contender.
+ * both independent Run reservations. Formal HP cache never satisfies RT task
+ * demand. Cancellation observations bracket planning, node/tile work, proxy
+ * write-buffer commit, and return. A monolithic provider already entered
+ * remains non-preemptible, while product publication remains protected by the
+ * outer request-owned staging/commit contender.
  */
 NodeOutput& RealTimeDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -2169,7 +2171,7 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
   auto prepared = prepare_dirty_execution(
       *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::RealTimeUpdate, request.node_id, false,
-                     request.dirty_roi},
+                     request.dirty_roi, false},
       available_devices, externally_satisfied_nodes);
   observe_dirty_run_or_throw(run, run_lease);
   planning_graph_owner.reset();

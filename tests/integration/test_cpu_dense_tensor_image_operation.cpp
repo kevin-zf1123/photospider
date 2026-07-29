@@ -2626,8 +2626,9 @@ TEST(CpuDenseTensorImageOperation,
  * @throws Graph, registry, Value, allocation, planning, or preparation
  * exceptions unchanged.
  * @note The valid Tensor plan first freezes CPU routes. A complete target cache
- * is then proven reusable with the production policy and removes the sole
- * execution-order node before a fake GPU-only population context is supplied.
+ * is then installed before the production node/cache pruner runs. The resulting
+ * active selection must be empty without test-owned execution-order mutation
+ * before a fake GPU-only population context is supplied.
  */
 TEST(CpuDenseTensorImageOperation,
      TensorAllCachePrunedPlanIgnoresDeviceInventoryMutation) {
@@ -2647,14 +2648,6 @@ TEST(CpuDenseTensorImageOperation,
       });
   ASSERT_TRUE(compute::ComputeCachePolicy::has_reusable_output(
       graph.node(kTensorNoWorkTargetId)));
-  plan.execution_order.erase(
-      std::remove_if(plan.execution_order.begin(), plan.execution_order.end(),
-                     [&graph](int node_id) {
-                       return compute::ComputeCachePolicy::has_reusable_output(
-                           graph.node(node_id));
-                     }),
-      plan.execution_order.end());
-  ASSERT_TRUE(plan.execution_order.empty());
 
   std::atomic_int provider_entries{0};
   compute::ExecutionService authority;

@@ -273,7 +273,8 @@ NodeOutput& ComputeTaskDispatcher::execute(
  * @note Accepted cancellation purges only this Run's queued service entries
  * and waits executing callbacks to drain. Cancellation observed before the
  * corresponding boundaries rejects dependent publication and suppresses final
- * Graph cache commit.
+ * Graph cache commit. Exact complete formal HP cache may leave no physical
+ * submissions; force-recache disables that pruning before preparation.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, ExecutionService& execution_service,
@@ -306,7 +307,8 @@ PreparedComputeDispatch ComputeTaskDispatcher::prepare(
   std::vector<Device> available_devices =
       execution_service.available_devices(host, execution_type);
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal_, node_id, std::move(available_devices), false);
+      graph, traversal_, node_id, std::move(available_devices), false,
+      !request.force_recache);
   state->plan = &plan;
   validate_prepared_operations(graph, plan);
 
@@ -444,7 +446,9 @@ NodeOutput& ComputeTaskDispatcher::execute_prepared(
  * @throws GraphError or standard exceptions from the selected route and shared
  * semantic stages, including missing or partial final target validity.
  * @note Only dispatch selection differs; plan, runner, temporary results, and
- * commit remain shared and Run/dispatcher-owned. Empty-plan validation,
+ * commit remain shared and Run/dispatcher-owned. Exact complete formal HP
+ * cache may cut a node and upstream work needed only through that boundary;
+ * force-recache keeps the request cone executable. Empty-plan validation,
  * upstream dependency reads, tile-cache skips, and final return all share
  * ComputeCachePolicy, so partial persistent Region state cannot satisfy a
  * Whole request. Cancellation observations surround every semantic stage;
@@ -484,7 +488,8 @@ NodeOutput& ComputeTaskDispatcher::execute_impl(
           ? execution_service->available_devices(*host, *execution_type)
           : task_runtime.available_devices();
   TaskSubmissionPlan& plan = run.emplace_submission_plan(
-      graph, traversal_, node_id, std::move(available_devices));
+      graph, traversal_, node_id, std::move(available_devices), true,
+      !request.force_recache);
   if (request.force_recache) {
     clear_planned_high_precision_caches(graph, graph_mutex,
                                         plan.execution_order());
