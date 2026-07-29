@@ -3,9 +3,12 @@
 #include <cstddef>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/core/compute_intent.hpp"
+#include "photospider/core/device.hpp"
 #include "photospider/data/region.hpp"
 
 namespace ps {
@@ -70,10 +73,41 @@ struct UpstreamRoiProjection {
  *
  * @note The service does not own graph topology, dirty snapshots, execution
  * queues, or compute task state. Callers provide graph state and request-local
- * size caches when needed.
+ * size caches when needed. Each instance owns the route-visible device
+ * inventory and compute intent whose implementation selection governs exact
+ * TensorSlice eligibility.
  */
 class RoiPropagationService {
  public:
+  /**
+   * @brief Binds Region propagation to one execution-selection context.
+   *
+   * @param available_devices Route-visible devices in runtime inventory order.
+   * @param intent HP or RT selection policy used by the owning request.
+   * @throws std::bad_alloc when copying the device inventory cannot allocate.
+   * @note Default construction preserves the legacy CPU-only HP context used
+   *       by Kernel control surfaces and standalone propagation tests. Dirty
+   *       executors inject their request's actual route inventory and intent.
+   */
+  explicit RoiPropagationService(
+      std::vector<Device> available_devices = {Device::CPU},
+      ComputeIntent intent = ComputeIntent::GlobalHighPrecision);
+
+  /**
+   * @brief Reports whether the route-selected operation has exact tensor work.
+   *
+   * @param node Node whose current operation implementation is selected.
+   * @return True only when the selected revisioned implementation is the exact
+   *         source-private core dense monolithic callback.
+   * @throws std::bad_alloc or callback-copy exceptions from registry snapshot
+   *         selection.
+   * @note Selection uses this instance's complete device inventory and intent.
+   *       The actual route candidate is selected before core identity testing;
+   *       the identity predicate never filters candidates and thereby falls
+   *       back to a different scalar implementation.
+   */
+  bool supports_tensor_region_execution(const Node& node) const;
+
   /**
    * @brief Projects one logical Region forward through graph image edges.
    *
@@ -210,6 +244,11 @@ class RoiPropagationService {
                                                 int source_node_id) const;
 
  private:
+  /** @brief Owned route-visible devices for implementation selection. */
+  std::vector<Device> available_devices_;
+  /** @brief Request compute intent controlling registry candidate ordering. */
+  ComputeIntent intent_;
+  /** @brief Stateless graph extent resolver for rectangular propagation. */
   GraphExtentResolver extent_resolver_;
 };
 

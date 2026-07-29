@@ -457,10 +457,12 @@ Value 的 DSO 都调用同一个 minting authority；长期 loader regression �
 后使用该 surface：它保留 sealed result Value，再派生 ImageBuffer compatibility snapshot。
 
 V-4 把 installed `RegionSet` 与 bounded algebra 加入 `operation_runtime`。Region 不会进入新的
-public v2 slot。Source-private bridge 只识别当前选中的精确 core dense callback 并调用其
-Region-aware implementation；same-key plugin override 保持普通 complete-output v2 behavior。
-精确 ImageRect 可以适配当前 propagation callback，而 TensorSlice 绝不跨越 rectangular v2
-contract。
+public v2 slot。Source-private bridge 只识别通过 execution 的 route-visible device inventory
+与 request intent 选出的实际 revisioned implementation 中的精确 core dense callback，并调用其
+Region-aware implementation。该 bridge 绝不会执行 scalar-only lookup，也不会通过过滤 candidate
+强制回退到 core；route 选中的 same-key device 或 plugin override 保持普通 complete-output v2
+behavior。精确 ImageRect 可以适配当前 propagation callback，而 TensorSlice 绝不跨越
+rectangular v2 contract。
 
 V-6 把 installed、dependency-neutral 的 `ReadyFence` observer 与同步 Value readiness 加入
 `operation_runtime`。Pending publication authority 与 `ValueTransferTask` 保持 source-private，

@@ -339,6 +339,12 @@ pure-C policy ABI v1 and receives no execution resource.
 - Logical propagation, dirty planning, source history, per-node state, edge
   mappings, staged-write validity, and the Region-aware dense callback carry
   normalized `RegionSet`.
+- Region propagation and dirty planning gate TensorSlice by selecting the
+  actual revisioned implementation with the same canonical route-visible
+  device inventory and compute-domain intent as execution. Only an exact
+  selected core dense monolithic callback has the private tensor contract; a
+  selected same-key device replacement is Unsupported, without scalar
+  fallback.
 - Current image tiling, ImageBuffer processing, Host/IPC v2 inspection, and
   operation ABI v2 carry checked derived `PixelRect`/`PixelSize`, never OpenCV
   geometry. TensorSlice is HP-only monolithic work and never gets a rectangle.

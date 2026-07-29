@@ -266,6 +266,10 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
 - 逻辑 propagation、dirty planning、source history、per-node state、edge mapping、
   staged-write validity 与 Region-aware dense callback 携带规范化 `RegionSet`。
+- Region propagation 与 dirty planning 会使用和 execution 相同的规范 route-visible device
+  inventory 与 compute-domain intent，选择实际的 revisioned implementation 后再判断
+  TensorSlice eligibility。只有选中的精确 core dense monolithic callback 具有 private tensor
+  contract；选中的 same-key device replacement 会返回 Unsupported，不会回退到 scalar。
 - 当前 image tiling、ImageBuffer processing、Host/IPC v2 inspection 与 operation ABI v2
   携带 checked derived `PixelRect`/`PixelSize`，绝不携带 OpenCV geometry。TensorSlice 是
   HP-only monolithic work，绝不会获得 rectangle。

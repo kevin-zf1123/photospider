@@ -599,10 +599,13 @@ result Value and derives an ImageBuffer compatibility snapshot.
 
 V-4 adds installed `RegionSet` and bounded algebra to `operation_runtime`.
 Region does not enter a new public v2 slot. A source-private bridge recognizes
-only the exact currently selected core dense callback and invokes its
-Region-aware implementation; a same-key plugin override keeps ordinary
-complete-output v2 behavior. Exact ImageRect may adapt current propagation
-callbacks, while TensorSlice never crosses the rectangular v2 contract.
+only the exact core dense callback in the actual revisioned implementation
+selected with execution's route-visible device inventory and request intent,
+and invokes its Region-aware implementation. The bridge never performs a
+scalar-only lookup or filters candidates to force core fallback; a same-key
+device or plugin override selected by the route keeps ordinary complete-output
+v2 behavior. Exact ImageRect may adapt current propagation callbacks, while
+TensorSlice never crosses the rectangular v2 contract.
 
 V-6 adds the installed dependency-neutral `ReadyFence` observer and
 synchronous Value readiness to `operation_runtime`. Pending publication

@@ -143,7 +143,8 @@ class DirtyRegionPlanner {
    * @brief Constructs a planner with borrowed traversal and ROI services.
    *
    * @param traversal Topology service used to obtain dependency order.
-   * @param roi_propagation ROI propagation service used for backward demand.
+   * @param roi_propagation ROI propagation service used for backward demand
+   * and route-selected TensorSlice capability checks.
    * @param stabilized_geometry_nodes Optional request-local exact-geometry
    * node identities.
    * @param forced_parameter_producers Optional RT image-producing parameter
@@ -151,7 +152,9 @@ class DirtyRegionPlanner {
    * @param fixed_generation Optional generation already reserved for sibling
    * HP/RT plans.
    * @throws Nothing directly.
-   * @note Both services must outlive the planner instance.
+   * @note Both services must outlive the planner instance. For request
+   * execution, roi_propagation must carry the same device inventory and
+   * compute intent used to select the request's operation implementations.
    */
   DirtyRegionPlanner(
       GraphTraversalService& traversal, RoiPropagationService& roi_propagation,
@@ -185,7 +188,8 @@ class DirtyRegionPlanner {
    *         cannot be clipped to a concrete descriptor, or yields no work.
    * @throws std::bad_alloc when planning storage cannot allocate.
    * @note ImageRect delegates through the checked current edge adapter.
-   *       TensorSlice is supported only by the core dense identity path.
+   *       TensorSlice is supported only when the request route selects the
+   *       exact core dense identity implementation.
    */
   HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
                                              const RegionSet& dirty_region);

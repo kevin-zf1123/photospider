@@ -1023,12 +1023,14 @@ verify:
   Whole commit, plus `GraphErrc::ComputeError` when execute returns a valid
   Value whose descriptor disagrees with inference.
 
-`test_region_contracts` owns 26 durable Region cases for canonical
+`test_region_contracts` owns 28 durable Region cases for canonical
 Empty/Whole, keys, intervals, normalization, rank-general TensorSlice,
 overflow-safe clipping/algebra, representable one-axis and Tensor-axis unions,
 nonrepresentable multi-axis union rejection, explicit budgets, typed failures,
-checked ImageRect/PixelRect conversion, Region propagation, Tensor
-planning/task selection/edge mapping, and Region dirty lifecycle.
+checked ImageRect/PixelRect conversion, Region propagation, route-selected
+same-key device replacement rejection, HP/RT intent-sensitive implementation
+selection, Tensor planning/task selection/edge mapping, and Region dirty
+lifecycle.
 
 Active output bytes must equal `255 - input`; input and output row padding is
 not treated as image elements.
@@ -1040,7 +1042,7 @@ cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
 `DependencyDisabledInstallSmoke` builds and runs all 39 dense cases in an actual

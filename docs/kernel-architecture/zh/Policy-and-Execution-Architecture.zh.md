@@ -212,7 +212,10 @@ byte 的 retained limit 都会在 provider entry 前失败，不留下 gate 或 
 revision。Planning 只保留 callback-free identity/metadata/shape；submission 必须重新解析同一个
 identity，之后才能保留 callable/DSO lease。完整 HP、dirty HP/RT 和连接参数预检都使用同一份
 规范化 route-aware inventory；full-task cache identity 会包含该 inventory 与 registry generation。
-connected-preflight preparation 还会在
+Region propagation 与 dirty TensorSlice eligibility 也会使用该 request inventory 和匹配的
+HP/RT intent，在检查 source-private core identity 前选出实际的 revisioned
+`OpImplementation`。它们不会使用 scalar-only lookup，也不会过滤掉 route 已选中的 same-key
+device candidate。connected-preflight preparation 还会在
 不进入 provider code 的情况下冻结每个 callable/DSO lease 与完整 service root；只有已安装 Run
 才能执行 reserved start 并调用 provider，之后依赖 output 的 dirty planning 仍由 Run 拥有。
 每个 ready submission 都携带冻结的 device；如果 device 不在已配置 route/Host inventory 中，

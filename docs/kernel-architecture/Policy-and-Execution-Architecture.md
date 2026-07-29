@@ -253,7 +253,11 @@ the callback-free identity/metadata/shape, and submission must re-resolve the
 same identity before it may retain the callable/DSO lease. Full HP, dirty HP/RT,
 and connected-parameter preflight all consume the same canonical route-aware
 inventory; full-task cache identity includes that inventory and the registry
-generation. Connected-preflight preparation
+generation. Region propagation and dirty TensorSlice eligibility use that same
+request inventory and the matching HP/RT intent to select the actual
+revisioned `OpImplementation` before testing source-private core identity. They
+do not use a scalar-only lookup or filter away a selected same-key device
+candidate. Connected-preflight preparation
 also freezes each callable/DSO lease and complete service root without entering
 provider code; only an installed Run may perform reserved start and invoke the
 provider, after which output-dependent dirty planning remains Run-owned. Every

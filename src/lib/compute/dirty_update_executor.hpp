@@ -641,7 +641,9 @@ class HighPrecisionDirtyExecutor {
    * @throws GraphError or standard exceptions from planning, operation
    * resolution, resource reservation, and staging.
    * @note The method executes no provider, advances no Run phase, publishes no
-   * ready entry, and commits no Graph/proxy output.
+   * ready entry, and commits no Graph/proxy output. Region and dirty capability
+   * checks use the same route-visible device inventory and
+   * GlobalHighPrecision intent as subsequent operation selection.
    */
   PreparedHighPrecisionDirtyRun prepare(
       GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -768,7 +770,9 @@ class RealTimeDirtyExecutor {
    * @throws GraphError or standard exceptions from planning, operation
    * resolution, resource reservation, and staging.
    * @note The method executes no provider, advances no Run phase, publishes no
-   * ready entry, and commits no proxy output.
+   * ready entry, and commits no proxy output. Region and dirty capability
+   * checks use the same route-visible device inventory and RealTimeUpdate
+   * intent as subsequent operation selection.
    */
   PreparedRealTimeDirtyRun prepare(
       GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,

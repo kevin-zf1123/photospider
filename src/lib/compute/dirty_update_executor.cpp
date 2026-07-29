@@ -1790,7 +1790,8 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
         &request.stabilized_parameters->staged_node_ids();
   }
 
-  RoiPropagationService roi_propagation;
+  RoiPropagationService roi_propagation(available_devices,
+                                        ComputeIntent::GlobalHighPrecision);
   DirtyRegionPlanner dirty_planner(
       traversal_, roi_propagation, stabilized_geometry_nodes, nullptr,
       request.stabilized_parameters
@@ -2155,7 +2156,8 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
         &request.stabilized_parameters->rt_satisfied_parameter_node_ids();
   }
 
-  RoiPropagationService roi_propagation;
+  RoiPropagationService roi_propagation(available_devices,
+                                        ComputeIntent::RealTimeUpdate);
   DirtyRegionPlanner dirty_planner(
       traversal_, roi_propagation, stabilized_geometry_nodes,
       forced_parameter_producers,

@@ -148,29 +148,9 @@ bool has_image_parent(const GraphModel& graph, int node_id) {
 }
 
 /**
- * @brief Reports whether the selected HP callback has the bounded tensor path.
- * @param node Node whose current HP operation snapshot is inspected.
- * @return True only for the exact source-private core dense implementation.
- * @throws std::bad_alloc when registry callback snapshotting allocates.
- * @note Matching the selected callback identity prevents a same-key plugin
- *       override from inheriting a Region contract it did not declare.
- */
-bool supports_tensor_region_execution(const Node& node) {
-  const std::optional<OpRegistry::OpVariant> selected =
-      OpRegistry::instance().resolve_for_intent(
-          node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
-  if (!selected.has_value() ||
-      !std::holds_alternative<MonolithicOpFunc>(*selected)) {
-    return false;
-  }
-  return ops::find_core_region_monolithic_operation(
-             node.type, node.subtype, std::get<MonolithicOpFunc>(*selected))
-      .has_value();
-}
-
-/**
  * @brief Validates and clips one TensorSlice for the bounded core path.
  *
+ * @param propagation Request-bound route selection and Region service.
  * @param graph Graph supplying target operation and concrete tensor shape.
  * @param node_id Target node id.
  * @param tensor_region Exact one-atom TensorSlice candidate.
@@ -181,7 +161,8 @@ bool supports_tensor_region_execution(const Node& node) {
  * @note This helper is shared by planning and Region-aware dirty lifecycle
  * entry points so neither can publish an unbounded TensorSlice.
  */
-RegionSet clip_tensor_region_or_throw(const GraphModel& graph, int node_id,
+RegionSet clip_tensor_region_or_throw(const RoiPropagationService& propagation,
+                                      const GraphModel& graph, int node_id,
                                       const RegionSet& tensor_region) {
   if (tensor_region.atoms().size() != 1U ||
       !std::holds_alternative<TensorSlice>(tensor_region.atoms().front())) {
@@ -200,7 +181,7 @@ RegionSet clip_tensor_region_or_throw(const GraphModel& graph, int node_id,
                      "Cannot compute HP tensor update: node not found.");
   }
   const Node& node = graph.node(node_id);
-  if (!supports_tensor_region_execution(node)) {
+  if (!propagation.supports_tensor_region_execution(node)) {
     throw GraphError(
         GraphErrc::InvalidParameter,
         "Target operation has no exact TensorSlice execution contract.");
@@ -504,8 +485,8 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     return plan_high_precision(
         graph, node_id, region_image_adapter::to_pixel_rect(dirty_region));
   }
-  const RegionSet clipped_region =
-      clip_tensor_region_or_throw(graph, node_id, dirty_region);
+  const RegionSet clipped_region = clip_tensor_region_or_throw(
+      roi_propagation_, graph, node_id, dirty_region);
   HighPrecisionDirtyPlan result;
   result.snapshot.graph_generation = select_plan_generation(graph);
   std::vector<int> dependency_order =
@@ -531,7 +512,8 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     }
 
     const bool image_parent = has_image_parent(graph, current_id);
-    if (image_parent && !supports_tensor_region_execution(current_node)) {
+    if (image_parent &&
+        !roi_propagation_.supports_tensor_region_execution(current_node)) {
       throw GraphError(
           GraphErrc::InvalidParameter,
           "TensorSlice dependency path requires the exact core identity "
@@ -648,7 +630,8 @@ DirtyRegionSnapshot DirtyRegionPlanner::begin_dirty_source(
       throw GraphError(GraphErrc::InvalidParameter,
                        "TensorSlice dirty lifecycle is available only in HP.");
     }
-    normalized = clip_tensor_region_or_throw(graph, node_id, source_region);
+    normalized = clip_tensor_region_or_throw(roi_propagation_, graph, node_id,
+                                             source_region);
   }
   return update_dirty_source_snapshot(graph, node_id, domain, nullptr,
                                       &normalized,
@@ -682,7 +665,8 @@ DirtyRegionSnapshot DirtyRegionPlanner::update_dirty_source(
       throw GraphError(GraphErrc::InvalidParameter,
                        "TensorSlice dirty lifecycle is available only in HP.");
     }
-    normalized = clip_tensor_region_or_throw(graph, node_id, source_region);
+    normalized = clip_tensor_region_or_throw(roi_propagation_, graph, node_id,
+                                             source_region);
   }
   return update_dirty_source_snapshot(graph, node_id, domain, nullptr,
                                       &normalized,

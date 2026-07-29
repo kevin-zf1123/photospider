@@ -20,30 +20,9 @@ namespace ps {
 namespace {
 
 /**
- * @brief Reports the selected source-private rank-general identity transform.
- * @param node Node whose current HP operation snapshot is inspected.
- * @return True only for the exact registered core dense implementation.
- * @throws std::bad_alloc when registry callback snapshotting allocates.
- * @note This bounded V-4 hook does not add operation metadata routing or alter
- *       plugin ABI v2. Selected callback identity prevents a same-key plugin
- *       override from inheriting the core transform contract.
- */
-bool has_core_region_identity_transform(const Node& node) {
-  const std::optional<OpRegistry::OpVariant> selected =
-      OpRegistry::instance().resolve_for_intent(
-          node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
-  if (!selected.has_value() ||
-      !std::holds_alternative<MonolithicOpFunc>(*selected)) {
-    return false;
-  }
-  return ops::find_core_region_monolithic_operation(
-             node.type, node.subtype, std::get<MonolithicOpFunc>(*selected))
-      .has_value();
-}
-
-/**
  * @brief Traverses only edges whose destination applies the core identity.
  *
+ * @param propagation Request-bound selection and Region propagation service.
  * @param graph Graph topology to inspect.
  * @param start_node_id Frontier origin.
  * @param target_node_id Desired destination.
@@ -54,7 +33,8 @@ bool has_core_region_identity_transform(const Node& node) {
  *       entering each upstream edge because that node owns the inverse demand
  *       transform.
  */
-bool has_explicit_region_identity_path(const GraphModel& graph,
+bool has_explicit_region_identity_path(const RoiPropagationService& propagation,
+                                       const GraphModel& graph,
                                        int start_node_id, int target_node_id,
                                        bool forward) {
   std::queue<int> pending;
@@ -67,7 +47,8 @@ bool has_explicit_region_identity_path(const GraphModel& graph,
     if (current == target_node_id) {
       return true;
     }
-    if (!forward && !has_core_region_identity_transform(graph.node(current))) {
+    if (!forward &&
+        !propagation.supports_tensor_region_execution(graph.node(current))) {
       continue;
     }
     const auto& edges = forward ? graph.downstream_edges(current)
@@ -80,7 +61,8 @@ bool has_explicit_region_identity_path(const GraphModel& graph,
       if (next < 0 || !graph.has_node(next)) {
         continue;
       }
-      if (forward && !has_core_region_identity_transform(graph.node(next))) {
+      if (forward &&
+          !propagation.supports_tensor_region_execution(graph.node(next))) {
         continue;
       }
       if (visited.insert(next).second) {
@@ -802,6 +784,27 @@ void enqueue_backward_parent_rois(const GraphModel& graph, int current_id,
 
 }  // namespace
 
+/** @copydoc RoiPropagationService::RoiPropagationService */
+RoiPropagationService::RoiPropagationService(
+    std::vector<Device> available_devices, ComputeIntent intent)
+    : available_devices_(std::move(available_devices)), intent_(intent) {}
+
+/** @copydoc RoiPropagationService::supports_tensor_region_execution */
+bool RoiPropagationService::supports_tensor_region_execution(
+    const Node& node) const {
+  const std::optional<OpImplementation> selected =
+      OpRegistry::instance().select_implementation(node.type, node.subtype,
+                                                   available_devices_, intent_);
+  if (!selected.has_value() ||
+      !std::holds_alternative<MonolithicOpFunc>(selected->func)) {
+    return false;
+  }
+  return ops::find_core_region_monolithic_operation(
+             node.type, node.subtype,
+             std::get<MonolithicOpFunc>(selected->func))
+      .has_value();
+}
+
 /** @copydoc RoiPropagationService::compute_upstream_region */
 RegionOperationResult RoiPropagationService::compute_upstream_region(
     const Node& node, const RegionSet& downstream_region,
@@ -821,7 +824,7 @@ RegionOperationResult RoiPropagationService::compute_upstream_region(
         "Current propagation accepts one exact Region atom.");
   }
   if (std::holds_alternative<TensorSlice>(downstream_region.atoms().front())) {
-    if (!has_core_region_identity_transform(node)) {
+    if (!supports_tensor_region_execution(node)) {
       return RegionOperationResult::failure(
           RegionOperationStatus::Unsupported,
           "Operation has no explicit TensorSlice propagation transform.");
@@ -860,8 +863,8 @@ RegionOperationResult RoiPropagationService::project_region_forward(
   }
   if (!start_region.is_whole() && start_region.atoms().size() == 1U &&
       std::holds_alternative<TensorSlice>(start_region.atoms().front())) {
-    if (has_explicit_region_identity_path(graph, start_node_id, target_node_id,
-                                          true)) {
+    if (has_explicit_region_identity_path(*this, graph, start_node_id,
+                                          target_node_id, true)) {
       return RegionOperationResult::exact(start_region);
     }
     return RegionOperationResult::failure(
@@ -897,8 +900,8 @@ RegionOperationResult RoiPropagationService::project_region_backward(
   }
   if (!target_region.is_whole() && target_region.atoms().size() == 1U &&
       std::holds_alternative<TensorSlice>(target_region.atoms().front())) {
-    if (has_explicit_region_identity_path(graph, target_node_id, source_node_id,
-                                          false)) {
+    if (has_explicit_region_identity_path(*this, graph, target_node_id,
+                                          source_node_id, false)) {
       return RegionOperationResult::exact(target_region);
     }
     return RegionOperationResult::failure(

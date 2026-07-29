@@ -87,6 +87,48 @@ RegionSet full_region_rank_four_tensor() {
       {dense_tensor_region_domain(), {{0U, 1U}, {0U, 3U}, {0U, 4U}, {0U, 3U}}});
 }
 
+/**
+ * @brief Isolates same-key route-selection tests from the process registry.
+ *
+ * Each case starts from the canonical core `invert_dense` callback and restores
+ * that complete key after device candidates have been exercised.
+ *
+ * @throws Registry allocation or callback-copy exceptions from setup/teardown.
+ * @note GTest invokes TearDown after fatal assertions, so later Region tests
+ *       never inherit fake device implementations or a missing core callback.
+ */
+class RegionRouteSelection : public ::testing::Test {
+ protected:
+  /**
+   * @brief Publishes and retains the exact core dense callback for one case.
+   * @return Nothing.
+   * @throws Registry allocation or callback-copy exceptions unchanged.
+   * @note A fatal assertion leaves TearDown responsible for key restoration.
+   */
+  void SetUp() override {
+    ops::register_core_operations();
+    const auto selected = OpRegistry::instance().resolve_for_intent(
+        "image_process", "invert_dense", ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(selected.has_value());
+    ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*selected));
+    core_operation_ = std::get<MonolithicOpFunc>(*selected);
+  }
+
+  /**
+   * @brief Removes fake candidates and republishes the canonical core key.
+   * @return Nothing.
+   * @throws Registry allocation or callback-copy exceptions from restoration.
+   * @note Whole-key removal also retires every device implementation identity.
+   */
+  void TearDown() override {
+    (void)OpRegistry::instance().unregister_key("image_process:invert_dense");
+    ops::register_core_operations();
+  }
+
+  /** @brief Owned exact core callback retained before test registration. */
+  MonolithicOpFunc core_operation_;
+};
+
 TEST(RegionContract, DistinguishesCanonicalWholeAndEmpty) {
   const RegionSet empty = RegionSet::empty();
   const RegionSet whole = RegionSet::whole();
@@ -441,6 +483,131 @@ TEST(RegionPropagation, PreservesTensorSliceThroughExplicitCoreIdentity) {
   EXPECT_TRUE(*forward.region() == slice);
   EXPECT_TRUE(*backward.region() == slice);
   EXPECT_TRUE(*immediate.region() == slice);
+}
+
+TEST_F(RegionRouteSelection,
+       RejectsTensorSliceWhenGpuRouteReplacesCoreIdentity) {
+  OpMetadata gpu_metadata;
+  gpu_metadata.cost_score = 1;
+  OpRegistry::instance().register_impl(
+      "image_process", "invert_dense", Device::GPU_METAL,
+      MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
+        return NodeOutput{};
+      }),
+      gpu_metadata);
+  const std::vector<Device> routed_devices{Device::GPU_METAL, Device::CPU};
+  const auto selected = OpRegistry::instance().select_implementation(
+      "image_process", "invert_dense", routed_devices,
+      ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(selected->func));
+  EXPECT_EQ(selected->metadata.device_preference, Device::GPU_METAL);
+  EXPECT_FALSE(ops::find_core_region_monolithic_operation(
+                   "image_process", "invert_dense",
+                   std::get<MonolithicOpFunc>(selected->func))
+                   .has_value());
+
+  GraphModel graph("");
+  Node source = make_region_source(1);
+  source.cached_output_high_precision = NodeOutput{};
+  source.cached_output_high_precision->image_value =
+      make_region_rank_four_tensor();
+  source.hp_region = full_region_rank_four_tensor();
+  graph.add_node(std::move(source));
+  graph.add_node(make_region_child(2, 1, "invert_dense"));
+  graph.validate_topology();
+  const RegionSet requested = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 2U}, {1U, 4U}, {0U, 2U}}});
+
+  RoiPropagationService routed_propagation(routed_devices,
+                                           ComputeIntent::GlobalHighPrecision);
+  EXPECT_FALSE(
+      routed_propagation.supports_tensor_region_execution(graph.node(2)));
+  const RegionOperationResult forward =
+      routed_propagation.project_region_forward(graph, 1, requested, 2);
+  const RegionOperationResult backward =
+      routed_propagation.project_region_backward(graph, 2, requested, 1);
+  std::unordered_map<int, PixelSize> size_cache;
+  const RegionOperationResult immediate =
+      routed_propagation.compute_upstream_region(graph.node(2), requested,
+                                                 graph, size_cache);
+  EXPECT_EQ(forward.status(), RegionOperationStatus::Unsupported);
+  EXPECT_EQ(backward.status(), RegionOperationStatus::Unsupported);
+  EXPECT_EQ(immediate.status(), RegionOperationStatus::Unsupported);
+
+  GraphTraversalService traversal;
+  compute::DirtyRegionPlanner routed_planner(traversal, routed_propagation);
+  EXPECT_THROW(routed_planner.plan_high_precision(graph, 2, requested),
+               GraphError);
+
+  RoiPropagationService cpu_propagation;
+  EXPECT_TRUE(cpu_propagation.supports_tensor_region_execution(graph.node(2)));
+  const RegionOperationResult cpu_forward =
+      cpu_propagation.project_region_forward(graph, 1, requested, 2);
+  ASSERT_EQ(cpu_forward.status(), RegionOperationStatus::Exact);
+  EXPECT_EQ(cpu_forward.region(), requested);
+  compute::DirtyRegionPlanner cpu_planner(traversal, cpu_propagation);
+  const compute::HighPrecisionDirtyPlan cpu_plan =
+      cpu_planner.plan_high_precision(graph, 2, requested);
+  EXPECT_EQ(cpu_plan.execution_order, (std::vector<int>{2}));
+}
+
+TEST_F(RegionRouteSelection, UsesRequestIntentWhenSelectingTensorIdentity) {
+  OpMetadata cpu_metadata;
+  cpu_metadata.cost_score = 1;
+  OpRegistry::instance().register_impl("image_process", "invert_dense",
+                                       Device::CPU, core_operation_,
+                                       cpu_metadata);
+  OpMetadata accelerator_metadata;
+  accelerator_metadata.cost_score = 100;
+  OpRegistry::instance().register_impl(
+      "image_process", "invert_dense", Device::ASIC_NPU,
+      MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&) {
+        return NodeOutput{};
+      }),
+      accelerator_metadata);
+  const std::vector<Device> routed_devices{Device::CPU, Device::ASIC_NPU};
+  const auto hp_selected = OpRegistry::instance().select_implementation(
+      "image_process", "invert_dense", routed_devices,
+      ComputeIntent::GlobalHighPrecision);
+  const auto rt_selected = OpRegistry::instance().select_implementation(
+      "image_process", "invert_dense", routed_devices,
+      ComputeIntent::RealTimeUpdate);
+  ASSERT_TRUE(hp_selected.has_value());
+  ASSERT_TRUE(rt_selected.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(hp_selected->func));
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(rt_selected->func));
+  EXPECT_EQ(hp_selected->metadata.device_preference, Device::ASIC_NPU);
+  EXPECT_EQ(rt_selected->metadata.device_preference, Device::CPU);
+  EXPECT_FALSE(ops::find_core_region_monolithic_operation(
+                   "image_process", "invert_dense",
+                   std::get<MonolithicOpFunc>(hp_selected->func))
+                   .has_value());
+  EXPECT_TRUE(ops::find_core_region_monolithic_operation(
+                  "image_process", "invert_dense",
+                  std::get<MonolithicOpFunc>(rt_selected->func))
+                  .has_value());
+
+  GraphModel graph("");
+  graph.add_node(make_region_source(1));
+  graph.add_node(make_region_child(2, 1, "invert_dense"));
+  graph.validate_topology();
+  const RegionSet requested = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{0U, 1U}, {0U, 2U}, {1U, 4U}, {0U, 2U}}});
+  RoiPropagationService hp_propagation(routed_devices,
+                                       ComputeIntent::GlobalHighPrecision);
+  RoiPropagationService rt_propagation(routed_devices,
+                                       ComputeIntent::RealTimeUpdate);
+
+  EXPECT_FALSE(hp_propagation.supports_tensor_region_execution(graph.node(2)));
+  EXPECT_TRUE(rt_propagation.supports_tensor_region_execution(graph.node(2)));
+  const RegionOperationResult hp_forward =
+      hp_propagation.project_region_forward(graph, 1, requested, 2);
+  const RegionOperationResult rt_forward =
+      rt_propagation.project_region_forward(graph, 1, requested, 2);
+  EXPECT_EQ(hp_forward.status(), RegionOperationStatus::Unsupported);
+  ASSERT_EQ(rt_forward.status(), RegionOperationStatus::Exact);
+  EXPECT_EQ(rt_forward.region(), requested);
 }
 
 TEST(RegionPropagation, RejectsTensorSliceBeforeRectangularCallback) {

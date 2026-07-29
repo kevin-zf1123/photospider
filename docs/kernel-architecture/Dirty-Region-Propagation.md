@@ -140,12 +140,16 @@ image geometry; data-dependent operations may provide a validated dependency
 LUT. Image demands for the same parent retain current bounded rectangular
 behavior.
 
-TensorSlice never enters a rectangular callback. It is supported only when the
-currently selected HP callback is the exact source-private core dense identity
-implementation; same-key plugin replacement therefore returns Unsupported
-instead of inheriting a contract it did not declare. Missing transforms and
-unrepresentable operations remain typed Unknown, Unsupported, or TooComplex,
-not fake Regions.
+TensorSlice never enters a rectangular callback. The request-bound
+`RoiPropagationService` selects the actual revisioned implementation with the
+same canonical route device inventory and HP/RT intent used by execution, then
+accepts TensorSlice only when that selected callback is the exact
+source-private core dense identity implementation. It does not filter
+candidates to core identity or consult a scalar-only fallback. A same-key
+device or plugin replacement selected by the route therefore returns
+Unsupported instead of inheriting a contract it did not declare. Missing
+transforms and unrepresentable operations remain typed Unknown, Unsupported,
+or TooComplex, not fake Regions.
 
 Connected parameter producers affect geometry. When the request has not first
 stabilized those values, the planner conservatively expands the affected

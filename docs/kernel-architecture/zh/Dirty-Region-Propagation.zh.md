@@ -120,8 +120,11 @@ Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projectio
 formula 继续覆盖 identity、neighborhood、crop、resize 与其他 image geometry；data-dependent
 operation 可以提供经过验证的 dependency LUT。同一 parent 的 image demand 保留当前有界矩形行为。
 
-TensorSlice 绝不进入 rectangular callback。只有当前选中的 HP callback 是精确 source-private
-core dense identity implementation 时才支持它；因此 same-key plugin replacement 会返回
+TensorSlice 绝不进入 rectangular callback。Request-bound `RoiPropagationService` 会使用与
+execution 相同的规范 route device inventory 和 HP/RT intent 选出实际的 revisioned
+implementation；只有该选中 callback 是精确 source-private core dense identity
+implementation 时才接受 TensorSlice。它不会为了 core identity 过滤 candidate，也不会查询
+scalar-only fallback。因此，route 选中的 same-key device 或 plugin replacement 会返回
 Unsupported，而不会继承自己未声明的 contract。缺失 transform 与不可表示 operation 保持为
 typed Unknown、Unsupported 或 TooComplex，而不是伪造 Region。
 

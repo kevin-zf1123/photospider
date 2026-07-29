@@ -819,10 +819,11 @@ integration binary。它的 39 个长期用例验证：
   后提升为 reusable authority；execute 返回 descriptor 与 inference 不一致的合法 Value 时，
   仍以 `GraphErrc::ComputeError` 拒绝。
 
-`test_region_contracts` 拥有 26 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
+`test_region_contracts` 拥有 28 个长期 Region case，覆盖规范 Empty/Whole、key、interval、
 normalization、rank-general TensorSlice、overflow-safe clipping/algebra、可表示的单轴与
 Tensor-axis union、不可表示 multi-axis union rejection、显式 budget、typed failure、
-checked ImageRect/PixelRect conversion、Region propagation、Tensor planning/task
+checked ImageRect/PixelRect conversion、Region propagation、route 选中的 same-key device
+replacement rejection、HP/RT intent-sensitive implementation selection、Tensor planning/task
 selection/edge mapping 与 Region dirty lifecycle。
 
 Active output byte 必须等于 `255 - input`；input/output row padding 不被当作 image element。
@@ -834,7 +835,7 @@ cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
 `DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 39 个 dense
