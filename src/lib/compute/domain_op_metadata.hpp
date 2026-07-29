@@ -11,11 +11,11 @@ namespace ps::compute {
 /**
  * @brief Resolves operation metadata for a single HP or RT compute domain.
  *
- * The resolver inspects the multi-implementation registry first so RT planning
- * can use `meta_rt` when an operator has separate HP and RT metadata. Legacy
- * callers that registered only one metadata record still fall back to
- * OpRegistry::get_metadata(), preserving the existing HP-first compatibility
- * behavior outside domain-aware planning and dirty execution code.
+ * The resolver inspects atomic scalar implementation slots in the same order
+ * used by executable selection. Metadata therefore always belongs to the
+ * callback and identity selected from that slot. Legacy callers that
+ * registered only one metadata record still fall back to
+ * OpRegistry::get_metadata().
  *
  * @param type Operation type, such as `"image_process"`.
  * @param subtype Operation subtype, such as `"gaussian_blur"`.
@@ -33,11 +33,24 @@ inline std::optional<OpMetadata> metadata_for_domain(const std::string& type,
                                                      DirtyDomain domain) {
   const auto impls = OpRegistry::instance().get_implementations(type, subtype);
   if (impls) {
-    if (domain == DirtyDomain::RealTime && impls->meta_rt) {
-      return impls->meta_rt;
+    if (domain == DirtyDomain::RealTime) {
+      if (impls->tiled_rt) {
+        return impls->tiled_rt->metadata;
+      }
+      if (impls->tiled_hp) {
+        return impls->tiled_hp->metadata;
+      }
+      if (impls->monolithic_hp) {
+        return impls->monolithic_hp->metadata;
+      }
     }
-    if (domain == DirtyDomain::HighPrecision && impls->meta_hp) {
-      return impls->meta_hp;
+    if (domain == DirtyDomain::HighPrecision) {
+      if (impls->monolithic_hp) {
+        return impls->monolithic_hp->metadata;
+      }
+      if (impls->tiled_hp) {
+        return impls->tiled_hp->metadata;
+      }
     }
   }
   return OpRegistry::instance().get_metadata(type, subtype);

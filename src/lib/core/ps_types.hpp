@@ -940,10 +940,13 @@ class OpRegistry {
   /**
    * @brief Owns all callable slots and metadata for one canonical operation.
    *
-   * HP/RT slots support intent-specific execution, while the device list
-   * supports registry-owned implementation selection. Propagation and
-   * dependency callbacks remain grouped with the same operation key so unload
-   * can restore one coherent snapshot.
+   * Each scalar HP/RT slot owns its callback, metadata, and nonzero
+   * implementation identity as one `OpImplementation` value. Registration,
+   * capture, restoration, and retirement therefore exchange a complete
+   * schedulable candidate instead of independently mutable callback and
+   * metadata fields. The device list supports registry-owned implementation
+   * selection. Propagation and dependency callbacks remain grouped with the
+   * same operation key so unload can restore one coherent snapshot.
    *
    * @throws std::bad_alloc when copied callback/vector storage cannot allocate.
    * @throws Any exception raised while copying a callback target.
@@ -954,39 +957,31 @@ class OpRegistry {
    */
   struct OpImplementations {
     /**
-     * @brief Optional full-output high-precision callback.
+     * @brief Optional full-output high-precision implementation slot.
      *
-     * @note A plugin wrapper stored here retains its dynamic-library lease.
+     * @note The value always contains a monolithic callback, its exact
+     * scheduling metadata, and the revision minted by the same registration.
+     * A plugin wrapper stored here retains its dynamic-library lease.
      */
-    std::optional<MonolithicOpFunc> monolithic_hp;
+    std::optional<OpImplementation> monolithic_hp;
 
     /**
-     * @brief Optional tiled high-precision callback.
+     * @brief Optional tiled high-precision implementation slot.
      *
-     * @note The callback borrows tile views only for one invocation.
+     * @note The value always contains a tiled callback, its exact scheduling
+     * metadata, and the revision minted by the same registration. The callback
+     * borrows tile views only for one invocation.
      */
-    std::optional<TileOpFunc> tiled_hp;
+    std::optional<OpImplementation> tiled_hp;
 
     /**
-     * @brief Optional tiled real-time callback.
+     * @brief Optional tiled real-time implementation slot.
      *
-     * @note Registry snapshots copy the callback and any attached plugin lease.
+     * @note The value always contains a tiled callback, its exact scheduling
+     * metadata, and the revision minted by the same registration. Registry
+     * snapshots copy the callback and any attached plugin lease.
      */
-    std::optional<TileOpFunc> tiled_rt;
-
-    /**
-     * @brief Metadata paired with the high-precision callable slots.
-     *
-     * @note Absence means no HP-specific metadata was registered.
-     */
-    std::optional<OpMetadata> meta_hp;
-
-    /**
-     * @brief Metadata paired with the real-time callable slot.
-     *
-     * @note Absence means no RT-specific metadata was registered.
-     */
-    std::optional<OpMetadata> meta_rt;
+    std::optional<OpImplementation> tiled_rt;
 
     /**
      * @brief Optional backward dirty-ROI propagation callback.
@@ -1074,10 +1069,6 @@ class OpRegistry {
     std::uint64_t tiled_hp = 0;
     /** @brief Revision owning the RT tiled callback slot. */
     std::uint64_t tiled_rt = 0;
-    /** @brief Revision owning the HP metadata slot. */
-    std::uint64_t meta_hp = 0;
-    /** @brief Revision owning the RT metadata slot. */
-    std::uint64_t meta_rt = 0;
     /** @brief Revision owning the dirty-ROI propagation slot. */
     std::uint64_t dirty_propagator = 0;
     /** @brief Revision owning the forward-ROI propagation slot. */
@@ -1735,10 +1726,6 @@ class OpRegistry {
     TiledHp,
     /** @brief Real-time tiled callback slot. */
     TiledRt,
-    /** @brief High-precision scheduling metadata slot. */
-    MetaHp,
-    /** @brief Real-time scheduling metadata slot. */
-    MetaRt,
     /** @brief Dirty ROI propagator slot. */
     DirtyPropagator,
     /** @brief Forward ROI propagator slot. */

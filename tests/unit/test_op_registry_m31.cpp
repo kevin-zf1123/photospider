@@ -9,10 +9,12 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"     // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace {
@@ -46,6 +48,145 @@ void dummy_tiled_metal_op(const Node&, const OutputTile&,
   // Tiled Metal 实现
 }
 
+/**
+ * @brief Asserts the five execution-authority metadata fields of one candidate.
+ *
+ * @param implementation Coherent scalar implementation selected by registry.
+ * @param reentrant Expected reentrancy policy.
+ * @param maximum_parallelism Expected per-identity concurrency cap.
+ * @param retained_memory_bytes Expected declared retained memory.
+ * @param scratch_bytes Expected declared scratch memory.
+ * @param exclusive_key Expected process-exclusive context key.
+ * @return Nothing; GoogleTest records every mismatch.
+ * @throws Nothing directly.
+ * @note Device, cost, callback shape, and identity are asserted by callers so
+ * this helper remains focused on the fields consumed by ExecutionService.
+ */
+void expect_execution_metadata(const OpImplementation& implementation,
+                               bool reentrant,
+                               std::uint32_t maximum_parallelism,
+                               std::uint64_t retained_memory_bytes,
+                               std::uint64_t scratch_bytes,
+                               const std::string& exclusive_key) {
+  EXPECT_EQ(implementation.metadata.reentrant, reentrant);
+  EXPECT_EQ(implementation.metadata.maximum_parallelism, maximum_parallelism);
+  EXPECT_EQ(implementation.metadata.retained_memory_bytes,
+            retained_memory_bytes);
+  EXPECT_EQ(implementation.metadata.scratch_bytes, scratch_bytes);
+  EXPECT_EQ(implementation.metadata.exclusive_key, exclusive_key);
+}
+
+/**
+ * @brief Verifies scalar callback, metadata, and identity stay atomic across
+ * both HP registration orders.
+ *
+ * @param subtype Unique operation subtype owned by this verification.
+ * @param monolithic_first True to publish monolithic before tiled; false to
+ * reverse the order.
+ * @return Nothing; GoogleTest records selection and invocation failures.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note Ordinary HP selection must choose the monolithic slot after both
+ * registrations, while a tiled-only filter must choose the tiled slot. The
+ * first slot's identity must survive publication of the second slot.
+ */
+void verify_atomic_scalar_slots(const std::string& subtype,
+                                bool monolithic_first) {
+  constexpr const char* kType = "issue82_atomic_scalar";
+  auto& registry = OpRegistry::instance();
+  const std::string key = make_key(kType, subtype);
+  registry.unregister_key(key);
+
+  auto monolithic_invocations = std::make_shared<int>(0);
+  auto tiled_invocations = std::make_shared<int>(0);
+  MonolithicOpFunc monolithic = [monolithic_invocations](
+                                    const Node&,
+                                    const std::vector<const NodeOutput*>&) {
+    ++*monolithic_invocations;
+    NodeOutput output;
+    output.debug.compute_device = "atomic-monolithic";
+    return output;
+  };
+  TileOpFunc tiled = [tiled_invocations](const Node&, const OutputTile&,
+                                         const std::vector<InputTile>&) {
+    ++*tiled_invocations;
+  };
+
+  OpMetadata monolithic_metadata;
+  monolithic_metadata.device_preference = Device::CPU;
+  monolithic_metadata.reentrant = false;
+  monolithic_metadata.maximum_parallelism = 1U;
+  monolithic_metadata.retained_memory_bytes = 101U;
+  monolithic_metadata.scratch_bytes = 202U;
+  monolithic_metadata.exclusive_key = "atomic-monolithic-context";
+  monolithic_metadata.cost_score = 11;
+
+  OpMetadata tiled_metadata;
+  tiled_metadata.device_preference = Device::CPU;
+  tiled_metadata.reentrant = true;
+  tiled_metadata.maximum_parallelism = 4U;
+  tiled_metadata.retained_memory_bytes = 303U;
+  tiled_metadata.scratch_bytes = 404U;
+  tiled_metadata.exclusive_key = "atomic-tiled-context";
+  tiled_metadata.cost_score = 22;
+
+  const auto register_monolithic = [&]() {
+    registry.register_op_hp_monolithic(kType, subtype, monolithic,
+                                       monolithic_metadata);
+  };
+  const auto register_tiled = [&]() {
+    registry.register_op_hp_tiled(kType, subtype, tiled, tiled_metadata);
+  };
+  if (monolithic_first) {
+    register_monolithic();
+  } else {
+    register_tiled();
+  }
+  const auto first = registry.select_implementation(
+      kType, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_NE(first->implementation_identity, 0U);
+  const std::uint64_t first_identity = first->implementation_identity;
+
+  if (monolithic_first) {
+    register_tiled();
+  } else {
+    register_monolithic();
+  }
+
+  const auto selected_monolithic = registry.select_implementation(
+      kType, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  const auto selected_tiled = registry.select_implementation(
+      kType, subtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision,
+      [](const OpImplementation& candidate) { return candidate.is_tiled(); });
+  ASSERT_TRUE(selected_monolithic.has_value());
+  ASSERT_TRUE(selected_tiled.has_value());
+  ASSERT_TRUE(selected_monolithic->is_monolithic());
+  ASSERT_TRUE(selected_tiled->is_tiled());
+  EXPECT_NE(selected_monolithic->implementation_identity,
+            selected_tiled->implementation_identity);
+  EXPECT_EQ(monolithic_first ? selected_monolithic->implementation_identity
+                             : selected_tiled->implementation_identity,
+            first_identity);
+
+  expect_execution_metadata(*selected_monolithic, false, 1U, 101U, 202U,
+                            "atomic-monolithic-context");
+  expect_execution_metadata(*selected_tiled, true, 4U, 303U, 404U,
+                            "atomic-tiled-context");
+  EXPECT_EQ(selected_monolithic->metadata.cost_score, 11);
+  EXPECT_EQ(selected_tiled->metadata.cost_score, 22);
+
+  Node node;
+  const NodeOutput monolithic_output =
+      std::get<MonolithicOpFunc>(selected_monolithic->func)(node, {});
+  const OutputTile output_tile;
+  const std::vector<InputTile> input_tiles;
+  std::get<TileOpFunc>(selected_tiled->func)(node, output_tile, input_tiles);
+  EXPECT_EQ(monolithic_output.debug.compute_device, "atomic-monolithic");
+  EXPECT_EQ(*monolithic_invocations, 1);
+  EXPECT_EQ(*tiled_invocations, 1);
+  registry.unregister_key(key);
+}
+
 class OpRegistryM31Test : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -57,6 +198,30 @@ class OpRegistryM31Test : public ::testing::Test {
     // 清理测试注册的算子
   }
 };
+
+/**
+ * @brief Proves a later tiled registration cannot overwrite monolithic
+ * scheduling metadata or identity.
+ * @return Nothing; GoogleTest records selection, metadata, or invocation
+ * failures.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note The helper unregisters its unique operation key after verification.
+ */
+TEST_F(OpRegistryM31Test, ScalarSlotsStayAtomicWhenMonolithicRegistersFirst) {
+  verify_atomic_scalar_slots("monolithic_then_tiled", true);
+}
+
+/**
+ * @brief Proves a later monolithic registration cannot overwrite tiled
+ * scheduling metadata or identity.
+ * @return Nothing; GoogleTest records selection, metadata, or invocation
+ * failures.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note The helper unregisters its unique operation key after verification.
+ */
+TEST_F(OpRegistryM31Test, ScalarSlotsStayAtomicWhenTiledRegistersFirst) {
+  verify_atomic_scalar_slots("tiled_then_monolithic", false);
+}
 
 // 测试：注册同一算子的 CPU 和 Metal 版本
 TEST_F(OpRegistryM31Test, RegisterMultiDeviceImplementations) {

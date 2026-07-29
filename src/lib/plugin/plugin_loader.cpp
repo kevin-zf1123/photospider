@@ -881,10 +881,9 @@ make_retirement_registry_entries(
     }
     const bool owns_implementation_slot =
         owned.monolithic_hp != 0 || owned.tiled_hp != 0 ||
-        owned.tiled_rt != 0 || owned.meta_hp != 0 || owned.meta_rt != 0 ||
-        owned.dirty_propagator != 0 || owned.forward_propagator != 0 ||
-        owned.dependency_builder != 0 || owned.data_dependent != 0 ||
-        !owned.device_impls.empty();
+        owned.tiled_rt != 0 || owned.dirty_propagator != 0 ||
+        owned.forward_propagator != 0 || owned.dependency_builder != 0 ||
+        owned.data_dependent != 0 || !owned.device_impls.empty();
     if (owns_implementation_slot) {
       retirement.implementations.emplace();
       retirement.implementations->device_impl_slots.resize(

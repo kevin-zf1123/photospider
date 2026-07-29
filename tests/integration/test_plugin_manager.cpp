@@ -994,7 +994,6 @@ void expect_device_ownership_inspection_equal(
   EXPECT_EQ(after.first_device_revision, before.first_device_revision);
   EXPECT_EQ(after.monolithic_hp_revision, before.monolithic_hp_revision);
   EXPECT_EQ(after.tiled_hp_revision, before.tiled_hp_revision);
-  EXPECT_EQ(after.meta_hp_revision, before.meta_hp_revision);
 }
 
 /**
@@ -1858,7 +1857,6 @@ TEST_F(PluginManagerLifecycleTest,
   ASSERT_EQ(ownership.revision_count, 1u);
   ASSERT_NE(ownership.first_device_revision, 0u);
   EXPECT_EQ(ownership.monolithic_hp_revision, ownership.first_device_revision);
-  EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
 
   auto hp_bridge = registry.resolve_for_intent(
       kDirectCpuOwnerType, kDirectCpuMonolithicSubtype,
@@ -2029,7 +2027,6 @@ TEST_F(PluginManagerLifecycleTest,
   ASSERT_EQ(ownership.revision_count, 1u);
   ASSERT_NE(ownership.first_device_revision, 0u);
   EXPECT_EQ(ownership.tiled_hp_revision, ownership.first_device_revision);
-  EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
 
   auto hp_bridge =
       registry.resolve_for_intent(kDirectCpuOwnerType, kDirectCpuTiledSubtype,
@@ -2151,7 +2148,6 @@ TEST_F(PluginManagerLifecycleTest,
   ASSERT_EQ(ownership.revision_count, 1u);
   ASSERT_NE(ownership.first_device_revision, 0u);
   EXPECT_EQ(ownership.monolithic_hp_revision, ownership.first_device_revision);
-  EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
 
   const std::size_t registration_target_copies = count_lifecycle_event(
       read_lifecycle_trace(trace_path), "cpu_device_target_copy");
@@ -2451,7 +2447,6 @@ TEST_F(PluginManagerLifecycleTest,
         EXPECT_EQ(inspection.first_device_revision, 0u);
         EXPECT_EQ(inspection.monolithic_hp_revision, 0u);
         EXPECT_EQ(inspection.tiled_hp_revision, 0u);
-        EXPECT_EQ(inspection.meta_hp_revision, 0u);
         EXPECT_EQ(registry.get_keys(), baseline_raw_keys);
         EXPECT_EQ(registry.get_keys().size(), baseline_raw_keys.size());
         EXPECT_EQ(registry.get_combined_keys(), baseline_combined_keys);
@@ -2510,7 +2505,6 @@ TEST_F(PluginManagerLifecycleTest,
     ASSERT_NE(ownership.first_device_revision, 0u);
     EXPECT_EQ(ownership.monolithic_hp_revision,
               ownership.first_device_revision);
-    EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
 
     auto device =
         registry.get_implementations_by_device(kType, subtype, Device::CPU);
@@ -2586,7 +2580,6 @@ TEST_F(PluginManagerLifecycleTest,
     ASSERT_EQ(ownership.revision_count, 1u);
     ASSERT_NE(ownership.first_device_revision, 0u);
     EXPECT_EQ(ownership.tiled_hp_revision, ownership.first_device_revision);
-    EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
 
     auto device =
         registry.get_implementations_by_device(kType, subtype, Device::CPU);
