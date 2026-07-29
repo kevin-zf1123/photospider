@@ -86,7 +86,11 @@ private free functions, so the macro does not change the production
 `ExecutionService` class definition or object layout. The Issue #82 dirty
 post-plan observer is likewise a source-tree-private free function backed by
 test-product-only thread-local state; it changes no production class
-definition or object layout.
+definition or object layout. The sequential-lease admission observer and exact
+direct-resource estimator follow the same boundary: they are source-private
+free functions backed by test-product-only atomic state or authority-free
+calculation. The production operation gate has no observer branch or state, and
+the estimator mints no resource or gate ownership.
 
 `StaticProductConsumerSmoke` enforces that boundary for both
 `BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
@@ -777,15 +781,31 @@ grant, root-reservation, gate, or ledger residue and that a retry recovers. An
 externally satisfied sibling is intentionally ignored so inactive registry
 change cannot invalidate an otherwise valid active dirty target.
 
-The same binary owns the sequential provider-boundary regression. Two distinct
-HP implementations declare the same exclusive key and nonzero retained/scratch
-demand. A condition-variable probe requires the route-backed provider to remain
-excluded while the sequential provider is active. After provider return, an
-injected `FakeImageArtifactCodec` blocks disk-cache persistence and then throws
-`GraphErrc::Io`; the route-backed provider must enter while that Host
-post-processing remains blocked. Both requests then settle with no gate,
-resource-ledger, or Run-lifecycle residue. This test reuses the existing codec
-injection boundary and adds no production or installable test hook.
+The same binary owns two orthogonal sequential provider-boundary regressions.
+Both Graphs select one registered callback identity; a node role parameter
+distinguishes sequential and peer behavior. The metadata declares
+`maximum_parallelism=1`, one nonempty exclusive key, and nonzero
+retained/scratch demand. In the physical route case, a test-product-only
+observer reports the exact operation-gate denial. The test waits for either
+that admission rendezvous or an erroneous provider entry, then requires the
+rendezvous and excludes provider overlap. After provider return, an injected
+`FakeImageArtifactCodec` blocks disk-cache persistence and then throws
+`GraphErrc::Io`; the route-backed provider must enter, exit, and settle while
+that Host post-processing remains blocked, leaving no sequential grant in the
+resource snapshot.
+
+The resource-capacity case uses the same callback identity, cap, and key but a
+second direct contender. A test-product-only authority-free diagnostic reuses
+the production direct-lease envelope calculation, and the isolated
+`ExecutionService` CPU, retained-memory, and scratch ceilings are set to
+exactly one direct callback vector. The contender first reaches denied
+admission while the provider is active, then enters and exits before the codec
+is released. Any identity/key ownership or CPU/retained/scratch reservation
+retained into the cache interval either prevents that completion or leaves a
+nonzero authoritative resource snapshot. Keeping this capacity check
+orthogonal is intentional: a physical Run reserves its complete root before
+operation-gate startability, so its root is not a single direct-lease vector.
+Neither regression adds a production or installable test hook.
 
 The post-plan observer exists only in the non-installed internal test product.
 `StaticProductConsumerSmoke` requires the production

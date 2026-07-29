@@ -65,6 +65,10 @@ product 也不会进入 install 或 export set。Issue #75 probe declaration 是
 free function，因此该宏不会改变 production `ExecutionService` class definition 或 object layout。
 Issue #82 dirty post-plan observer 同样是 source-tree-private free function，并由仅存在于 test
 product 的 thread-local state 支撑；它不会改变任何 production class definition 或 object layout。
+Sequential lease admission observer 与精确 direct resource estimator 遵守同一边界：它们是
+source-tree-private free function，只依赖 test-product-only atomic state 或不授予 authority 的
+计算。Production operation gate 不含 observer branch 或 state，estimator 也不会授予 resource
+或 gate ownership。
 
 `StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
 configuration 强制执行这条边界。真实 product 安装到非系统临时 prefix 后，smoke 会复用
@@ -613,13 +617,24 @@ failure 停止，随后要求逻辑生命周期完成 settlement，不留下 cal
 gate 或 ledger 残留，并证明重试能够恢复。Externally satisfied sibling 会被有意忽略，因此
 inactive registry 变化不能使原本有效的 active dirty target 失效。
 
-同一个 binary 还负责 sequential provider 边界回归。两个不同 HP implementation 声明同一个
-exclusive key 与非零 retained/scratch demand。Condition-variable probe 要求 route-backed
-provider 在 sequential provider 活跃期间保持被排除。Provider 返回后，注入的
-`FakeImageArtifactCodec` 会阻塞磁盘缓存持久化，随后抛出 `GraphErrc::Io`；route-backed
-provider 必须在这段 Host 后处理仍被阻塞时进入。随后两个请求都必须完成 settlement，不留下
-gate、resource-ledger 或 Run-lifecycle 残留。该测试复用既有 codec injection boundary，不新增
-production 或 installable test hook。
+同一个 binary 还负责两项正交的 sequential provider 边界回归。两个 Graph 都选择同一个已注册
+callback identity，并通过 node role 参数区分 sequential 与 peer 行为。Metadata 声明
+`maximum_parallelism=1`、一个 nonempty exclusive key，以及非零 retained/scratch demand。
+在 physical route case 中，仅存在于 test product 的 observer 会报告精确的 operation-gate
+denial。测试等待 admission rendezvous 或 provider 错误进入二选一事件，随后要求前者发生并排除
+provider overlap。Provider 返回后，注入的 `FakeImageArtifactCodec` 会阻塞磁盘缓存持久化，
+随后抛出 `GraphErrc::Io`；route-backed provider 必须在这段 Host 后处理仍被阻塞时进入、退出并
+完成 settlement，resource snapshot 中不得留下 sequential grant。
+
+Resource-capacity case 使用同一个 callback identity、cap 与 key，但采用第二个 direct
+contender。仅存在于 test product 且不授予 authority 的 diagnostic 会复用 production
+direct-lease envelope 计算，并把隔离 `ExecutionService` 的 CPU、retained-memory 与 scratch
+上限精确设为一个 direct callback vector。Contender 先在 provider 活跃时抵达被拒绝的
+admission，随后必须在 codec 释放前进入并退出。任何延长到 cache 区间的 identity/key ownership
+或 CPU/retained/scratch reservation，要么会阻止该请求完成，要么会在权威 resource snapshot
+中留下非零值。把这项 capacity 检查保持为正交场景是有意设计：physical Run 会在
+operation-gate startability 前预留完整 root，因此该 root 不是一个 direct-lease vector。两项
+回归都不会新增 production 或 installable test hook。
 
 Post-plan observer 只存在于不安装的 internal test product 中。
 `StaticProductConsumerSmoke` 要求 production `dirty_update_executor.cpp` anchor，并拒绝 installed
