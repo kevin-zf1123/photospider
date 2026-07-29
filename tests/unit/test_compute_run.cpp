@@ -2705,10 +2705,10 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
   EXPECT_EQ(gpu_ready.front().metadata().device(), Device::GPU_METAL);
   ASSERT_EQ(gpu_plan.resolved_ops().size(), 1U);
   ASSERT_TRUE(gpu_plan.resolved_ops().front().has_value());
-  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(
-      *gpu_plan.resolved_ops().front()));
+  const OpImplementation& gpu_implementation = *gpu_plan.resolved_ops().front();
+  ASSERT_TRUE(gpu_implementation.is_monolithic());
   const NodeOutput gpu_output = std::get<MonolithicOpFunc>(
-      *gpu_plan.resolved_ops().front())(gpu_graph.node(501), {});
+      gpu_implementation.func)(gpu_graph.node(501), {});
   EXPECT_EQ(gpu_output.data.at("value").as_int64(), 76);
 
   GraphModel cpu_graph("cache/issue75-full-cpu");
@@ -2727,8 +2727,10 @@ TEST(Issue75DeviceRouting, FullPlanSelectsGpuAndFallsBackToCpu) {
   ASSERT_EQ(cpu_ready.size(), 1U);
   EXPECT_EQ(cpu_ready.front().metadata().device(), Device::CPU);
   ASSERT_TRUE(cpu_plan.resolved_ops().front().has_value());
+  const OpImplementation& cpu_implementation = *cpu_plan.resolved_ops().front();
+  ASSERT_TRUE(cpu_implementation.is_monolithic());
   const NodeOutput cpu_output = std::get<MonolithicOpFunc>(
-      *cpu_plan.resolved_ops().front())(cpu_graph.node(502), {});
+      cpu_implementation.func)(cpu_graph.node(502), {});
   EXPECT_EQ(cpu_output.data.at("value").as_int64(), 75);
   EXPECT_EQ(g_issue75_gpu_operation_calls.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(g_issue75_cpu_operation_calls.load(std::memory_order_relaxed), 1);
