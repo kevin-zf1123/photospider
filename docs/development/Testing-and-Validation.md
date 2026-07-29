@@ -65,12 +65,13 @@ All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
 `BUILD_TESTING` controls availability of internal test products, not how the
-installed `photospider` archive compiles the Issue #72/#75/#76 observation
+installed `photospider` archive compiles the Issue #72/#75/#76/#82 observation
 seams. The product source inventory is divided into common objects, compiled
-once, and production objects for `execution_service.cpp`,
-`graph_cache_service.cpp`, `graph_state_executor.cpp`, `kernel.cpp`, and
-`kernel_compute.cpp`. The real archive always uses the production form of those
-five translation units, with no
+once, and production objects for `dirty_update_executor.cpp`,
+`execution_service.cpp`, `graph_cache_service.cpp`,
+`graph_state_executor.cpp`, `kernel.cpp`, and `kernel_compute.cpp`. The real
+archive always uses the production form of those six translation units, with
+no `PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING`,
 `PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`,
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`, or
@@ -78,11 +79,14 @@ five translation units, with no
 `PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` close/compute declarations,
 globals, branches, or symbols. Focused tests link a non-installed
 `photospider_internal_test_product` that reuses the same common objects and
-recompiles only those five translation units with the deterministic seams.
+recompiles only those six translation units with the deterministic seams.
 No target links both complete archives, and the test product is absent from
 install and export sets. The Issue #75 probe declarations are source-tree-
 private free functions, so the macro does not change the production
-`ExecutionService` class definition or object layout.
+`ExecutionService` class definition or object layout. The Issue #82 dirty
+post-plan observer is likewise a source-tree-private free function backed by
+test-product-only thread-local state; it changes no production class
+definition or object layout.
 
 `StaticProductConsumerSmoke` enforces that boundary for both
 `BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
@@ -94,7 +98,7 @@ therefore fails instead of passing on file existence. Darwin then invokes and va
 non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
 that order. Canonically identical executable paths run once. A candidate is
 usable only when it starts, exits successfully, emits symbols, and exposes
-defined anchors from all five production seam objects. Otherwise the smoke
+defined anchors from all six production seam objects. Otherwise the smoke
 records a path-free failure reason and tries the next candidate; no candidate
 or all unusable candidates fail closed. The first usable full symbol table is
 authoritative and rejects every hook function/helper/global fragment. The
@@ -741,6 +745,43 @@ inventory, and no current Graph. Its invalid-target case first loads the
 maintained propagation fixture before requiring target rejection, so it does
 not depend on a failed load publishing state. Each case uses isolated temporary
 session and history storage that is removed when the script exits.
+
+## Direct Dirty Operation Authority Validation
+
+Issue #82 keeps scalar callback/metadata identity and direct dirty admission in
+maintained behavior tests. `test_op_registry_m31` registers monolithic HP and
+tiled HP siblings in both orders, invokes both callbacks, and requires each
+selected implementation to retain its own identity and complete scheduling
+metadata. A later sibling registration therefore cannot silently rewrite the
+metadata used with an earlier callback.
+
+`test_compute_service_split` proves that nonparallel dirty HP, dirty RT, and
+connected-parameter preflight enter the same process-owned operation gate and
+resource ledger used by physical workers. Cross-Graph cases cover
+nonreentrancy, exact implementation caps, same/different exclusive keys,
+retained-memory and scratch rejection before provider entry, cancellation and
+exception cleanup, and successful retry after settlement. Deterministic
+post-plan cases replace an HP implementation or unload an RT plugin before
+active-operation revalidation; they require typed failure before provider,
+lifecycle, gate, or ledger publication and then require recovery. An
+externally satisfied sibling is intentionally ignored so inactive registry
+change cannot invalidate an otherwise valid active dirty target.
+
+The post-plan observer exists only in the non-installed internal test product.
+`StaticProductConsumerSmoke` requires the production
+`dirty_update_executor.cpp` anchor and rejects its observer state, setter, and
+notification symbols from the installed archive.
+
+Run the focused boundary with:
+
+```bash
+cmake --build build --target test_op_registry_m31 \
+  test_compute_service_split -j
+./build/tests/test_op_registry_m31 \
+  --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
+./build/tests/test_compute_service_split \
+  --gtest_filter='ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
+```
 
 ## Graph Close and Process Shutdown Validation
 

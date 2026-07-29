@@ -114,7 +114,9 @@ Compute collaborator 位于 `src/lib/compute/`；ledger 与 Graph route binding 
 V-4 保持 public monolithic registry slot、registrar entry 与 callback signature 不变，同时由
 source-private core lookup bridge 只识别当前选中的精确 core dense callback。V-5 保留这些
 entry/callback 形态，但有意扩展临时 C++ v2 metadata layout；operation DSO 因而必须使用匹配 SDK
-重新构建。Private core runner 会复用有效
+重新构建。每个 scalar HP/RT registry slot 现在把 callback、metadata 与非零 identity 作为一个
+原子的 implementation value 拥有；注册另一种 callback shape 不能覆盖 sibling slot 的调度声明。
+Private core runner 会复用有效
 sealed CPU image Value；不存在 Value 时，
 才 snapshot 旧 ImageBuffer。它把 request-effective ParameterMap 深拷贝到一个不含 Node
 output/cache/topology state 的 configuration，只以该 configuration 与 logical
@@ -235,6 +237,10 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
 - Planned node work 只保留选中的 implementation identity、device、metadata 与 callback shape。
   Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
+- Dirty HP/RT 会在 planning 与 selection 后，对每个唯一 active task node 执行重新验证；该验证发生在
+  constraint 构造、resource estimation、source-first preparation 或 admission 之前。缺失或变化的
+  active route 会在 provider entry 前以 `NoOperation` 失败。Inactive task 以及已由 connected
+  preflight 满足的 node 会被明确排除在该检查之外。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
 - 逻辑 propagation、dirty planning、source history、per-node state、edge mapping、
   staged-write validity 与 Region-aware dense callback 携带规范化 `RegionSet`。
@@ -328,8 +334,13 @@ drainage 会退役精确的公共 ledger/Run state。
 内检查 implementation counter 与非空 key。Reserved start 会把这些 gate 与 resource child
 grant、physical route、ready removal、fairness charge 及 in-flight ownership 一起提交。Worker
 retirement 会在 provider exit 或 callback skip 后释放 resource grant 与两类 operation gate，
-随后唤醒被阻塞的 work。Sequential compute 会在 provider entry 周围获取 move-only direct lease；
-它使用同一 gate 与 ledger，且递归计算 upstream input 时不持有二者。
+随后唤醒被阻塞的 work。不在 physical-service worker 内运行的 provider entry 仍使用同一权威。
+Sequential compute、nonparallel dirty HP/RT 与 connected-parameter preflight 会在精确 provider
+invocation 周围获取 move-only direct lease。它们先解析 dependency 与 image input；dirty tiled
+路径还会在获取 lease 前准备 output storage。该 lease 通过公共 ledger 提交选中
+implementation/key gate，以及单 callback 的 CPU、retained-memory 与 scratch vector，并在普通
+返回、throw 或已接受 cancellation 时释放。Physical worker 已经拥有等价的 ready-entry grant 与
+gate，因此绝不会重复获取 direct lease。
 
 ## OpenCV Operation 并发
 

@@ -191,6 +191,13 @@ state，而不会复制进 restoration state。publication 后的 same-key direc
 取得新 token。Direct 与 plugin-owned slot 共存期间，source inspection 报告 `mixed`，不会继续把完整
 key 归因于 plugin。
 
+可执行 scalar slot 是原子的可调度值，而不是 callback 加一份可变的 intent-wide
+metadata record。Monolithic HP、tiled HP 与 tiled RT 各自在一个 `OpImplementation`
+中拥有自己的精确 callback、`OperationMetadata` 与非零 implementation identity。
+注册 sibling shape 不能改写已有 slot 的调度声明或 identity。Replacement、capture、
+retirement 与 unload 会交换完整 slot，因此 reader 绝不会把一个 scalar callback 与另一次
+registration 的 reentrancy、cap、retained byte、scratch byte 或 exclusive key 组合起来。
+
 Live device implementation element 使用稳定、不可变的 owner，而不是把 `std::function` target 直接存进
 会增长的 registry vector。新的 monolithic 或 tiled device value（包括其 plugin lease wrapper）会在获取
 registry lock 前完整构造。加锁后，registration 只增长并发布 shared owner 及其平行 revision token。

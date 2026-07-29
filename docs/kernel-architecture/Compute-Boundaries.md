@@ -134,7 +134,10 @@ V-4 kept the public monolithic registry slot, registrar entry, and callback
 signatures unchanged while one source-private core lookup bridge recognizes
 only the exact selected core dense callback. V-5 retains those entry/callback
 shapes but intentionally extends the provisional C++ v2 metadata layout; an
-operation DSO therefore requires a matching-SDK rebuild. The private core
+operation DSO therefore requires a matching-SDK rebuild. Each scalar HP/RT
+registry slot now owns callback, metadata, and nonzero identity as one atomic
+implementation value; registering another callback shape cannot overwrite its
+sibling's scheduling declarations. The private core
 runner reuses a
 valid sealed CPU image Value or snapshots the legacy ImageBuffer when no Value
 exists, deep-copies the request-effective ParameterMap into a configuration
@@ -297,6 +300,11 @@ pure-C policy ABI v1 and receives no execution resource.
 - Planned node work retains only selected implementation identity, device,
   metadata, and callback shape. Submission must re-resolve the same nonzero
   identity before retaining a callback, so cached plans own no DSO lease.
+- Dirty HP/RT revalidates every unique active task node after planning and
+  selection, before constraint construction, resource estimation, source-first
+  preparation, or admission. A missing or changed active route fails with
+  `NoOperation` before provider entry. Inactive tasks and nodes already
+  satisfied by connected preflight are deliberately excluded from this check.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
 - Logical propagation, dirty planning, source history, per-node state, edge
@@ -415,9 +423,16 @@ the process execution domain. Reserved start commits those gates with the
 resource child grant, physical route, ready removal, fairness charge, and
 in-flight ownership. Worker retirement releases the resource grant and both
 operation gates after provider exit or callback skip, then wakes blocked work.
-Sequential compute acquires a move-only direct lease around provider entry; it
-uses the same gate and ledger and holds neither while recursively computing
-upstream inputs.
+Provider entry that does not run inside a physical-service worker still uses
+the same authority. Sequential compute, nonparallel dirty HP/RT, and
+connected-parameter preflight acquire a move-only direct lease around the exact
+provider invocation. Dependencies and image inputs are resolved first; dirty
+tiled output storage is also prepared before acquisition. The lease commits
+the selected implementation/key gate and one-callback CPU, retained-memory,
+and scratch vector through the common ledger, then releases them on ordinary
+return, throw, or accepted cancellation. Physical workers already own the
+equivalent ready-entry grant and gates and therefore never double-acquire the
+direct lease.
 
 ## OpenCV Operation Concurrency
 

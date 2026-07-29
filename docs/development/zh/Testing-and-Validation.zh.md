@@ -47,11 +47,12 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 并在运行后丢弃；仓库不会为该测试保留逐次运行报告。
 
 `BUILD_TESTING` 只控制内部 test product 是否可用，不控制已安装 `photospider` archive 如何编译
-Issue #72/#75/#76 observation seam。Product source inventory 被拆为只编译一次的 common
-object，以及 `execution_service.cpp`、`graph_cache_service.cpp`、
-`graph_state_executor.cpp`、`kernel.cpp` 与 `kernel_compute.cpp` 的 production object。真实
-archive 始终使用这五个 translation unit 的
+Issue #72/#75/#76/#82 observation seam。Product source inventory 被拆为只编译一次的 common
+object，以及 `dirty_update_executor.cpp`、`execution_service.cpp`、
+`graph_cache_service.cpp`、`graph_state_executor.cpp`、`kernel.cpp` 与
+`kernel_compute.cpp` 的 production object。真实 archive 始终使用这六个 translation unit 的
 production 形式，其中不存在
+`PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING`、
 `PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING`、
 `PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING`、
@@ -59,9 +60,11 @@ production 形式，其中不存在
 `PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING` 的 close/compute declaration、global、branch 或
 symbol。Focused
 test 会链接不安装的 `photospider_internal_test_product`；它复用同一批 common object，只以
-deterministic seam 重新编译这五个 translation unit。没有 target 同时链接两个完整 archive，test
+deterministic seam 重新编译这六个 translation unit。没有 target 同时链接两个完整 archive，test
 product 也不会进入 install 或 export set。Issue #75 probe declaration 是 source-tree-private 的
 free function，因此该宏不会改变 production `ExecutionService` class definition 或 object layout。
+Issue #82 dirty post-plan observer 同样是 source-tree-private free function，并由仅存在于 test
+product 的 thread-local state 支撑；它不会改变任何 production class definition 或 object layout。
 
 `StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
 configuration 强制执行这条边界。真实 product 安装到非系统临时 prefix 后，smoke 会复用
@@ -70,7 +73,7 @@ daemon capability driver，移除 LD/DYLD loader override，并执行 installed
 随后 Darwin 会先调用并验证
 `xcrun --find llvm-nm`，然后依次回退到 PATH `llvm-nm` 与 PATH `nm`；非 Darwin 平台绝不会
 调用 `xcrun`，只按上述顺序使用两个 PATH candidate。Canonical path 相同的 executable 只运行
-一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露五个 production seam object 的
+一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露六个 production seam object 的
 全部 defined anchor 时才可用；否则 smoke 会记录不含路径的 failure reason 并尝试下一项。没有
 candidate 或全部 candidate 都不可用时必须 fail closed。第一个可用的完整 symbol table 是权威
 结果，并用于拒绝任何 hook function/helper/global fragment；raw table 只在内存中参与该判定，
@@ -585,6 +588,37 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
 它的“无效 target”场景会先加载维护中的 propagation fixture，再要求 target 被拒绝，
 因此不会依赖失败 load 发布状态。每个场景都使用相互隔离的临时 session 与 history
 存储，并在脚本退出时删除。
+
+## Direct dirty operation authority 验证
+
+Issue #82 将 scalar callback/metadata identity 与 direct dirty admission 保留在长期行为测试中。
+`test_op_registry_m31` 会按两种顺序注册 monolithic HP 与 tiled HP sibling，调用两种 callback，
+并要求每个选中 implementation 保留自身 identity 与完整 scheduling metadata。因此，后注册的
+sibling 不能静默改写与先前 callback 配对使用的 metadata。
+
+`test_compute_service_split` 证明 nonparallel dirty HP、dirty RT 与 connected-parameter
+preflight 会进入 physical worker 所使用的同一个 process-owned operation gate 与 resource
+ledger。Cross-Graph case 覆盖 nonreentrancy、精确 implementation cap、相同/不同 exclusive key、
+provider 进入前的 retained-memory 与 scratch rejection、cancellation/exception cleanup，以及
+settlement 后成功重试。确定性 post-plan case 会在 active-operation revalidation 前替换 HP
+implementation 或卸载 RT plugin；它们要求在任何 provider、lifecycle、gate 或 ledger publication
+前以 typed failure 停止，随后还必须能够恢复。Externally satisfied sibling 会被有意忽略，因此
+inactive registry 变化不能使原本有效的 active dirty target 失效。
+
+Post-plan observer 只存在于不安装的 internal test product 中。
+`StaticProductConsumerSmoke` 要求 production `dirty_update_executor.cpp` anchor，并拒绝 installed
+archive 中出现它的 observer state、setter 与 notification symbol。
+
+聚焦验证命令为：
+
+```bash
+cmake --build build --target test_op_registry_m31 \
+  test_compute_service_split -j
+./build/tests/test_op_registry_m31 \
+  --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
+./build/tests/test_compute_service_split \
+  --gtest_filter='ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
+```
 
 ## Graph close 与 process shutdown 验证
 

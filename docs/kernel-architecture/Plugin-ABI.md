@@ -228,6 +228,15 @@ receives new tokens for its changed slots. Source inspection reports `mixed`
 while direct and plugin-owned slots coexist instead of attributing the complete
 key to the plugin.
 
+Executable scalar slots are atomic schedulable values rather than a callback
+plus one mutable intent-wide metadata record. Monolithic HP, tiled HP, and
+tiled RT each own their exact callback, `OperationMetadata`, and nonzero
+implementation identity in one `OpImplementation`. Registering a sibling shape
+cannot rewrite an existing slot's scheduling declarations or identity.
+Replacement, capture, retirement, and unload exchange the complete slot, so a
+reader can never combine one scalar callback with another registration's
+reentrancy, cap, retained bytes, scratch bytes, or exclusive key.
+
 Live device implementation elements use stable immutable owners rather than
 storing `std::function` targets directly in the growing registry vector. A new
 monolithic or tiled device value, including its plugin lease wrapper, is fully
