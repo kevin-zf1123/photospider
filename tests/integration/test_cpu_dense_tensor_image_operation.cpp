@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -12,6 +15,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -287,7 +291,9 @@ class ScopedTestDirectory final {
  *
  * @throws std::bad_alloc when construction cannot reserve the bounded queue.
  * @note This fixture owns no thread, timer, native backend, or device handle.
- *       Tests externally serialize submission and callback execution.
+ *       An internal mutex makes concurrent submission, inspection, and
+ *       callback removal deterministic; callbacks execute after that mutex is
+ *       released and may reentrantly submit later work.
  */
 class FakeDeviceExecutor final : public ReadyFenceExecutor {
  public:
@@ -307,10 +313,14 @@ class FakeDeviceExecutor final : public ReadyFenceExecutor {
    *         process instead of violating the executor contract.
    */
   void submit(Task task) noexcept override {
-    if (!task || tasks_.size() >= tasks_.capacity()) {
+    if (!task) {
       std::terminate();
     }
     try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (tasks_.size() >= tasks_.capacity()) {
+        std::terminate();
+      }
       tasks_.push_back(std::move(task));
       ++submitted_count_;
     } catch (...) {
@@ -322,19 +332,23 @@ class FakeDeviceExecutor final : public ReadyFenceExecutor {
    * @brief Returns the number of callbacks waiting in the FIFO.
    *
    * @return Current unexecuted callback count.
-   * @throws Nothing.
+   * @throws std::system_error when the fixture mutex cannot be locked.
    */
-  std::size_t pending_count() const noexcept {
-    return tasks_.size() - next_task_;
+  std::size_t pending_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_count_locked();
   }
 
   /**
    * @brief Returns total successful callback admissions.
    *
    * @return Monotonic submission count.
-   * @throws Nothing.
+   * @throws std::system_error when the fixture mutex cannot be locked.
    */
-  std::size_t submitted_count() const noexcept { return submitted_count_; }
+  std::size_t submitted_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return submitted_count_;
+  }
 
   /**
    * @brief Executes and removes the oldest queued callback.
@@ -346,17 +360,35 @@ class FakeDeviceExecutor final : public ReadyFenceExecutor {
    *       task.
    */
   void run_next() {
-    if (pending_count() == 0U) {
-      throw std::logic_error("FakeDeviceExecutor has no queued callback.");
+    Task task;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (pending_count_locked() == 0U) {
+        throw std::logic_error("FakeDeviceExecutor has no queued callback.");
+      }
+      task = std::move(tasks_[next_task_]);
+      ++next_task_;
     }
-    Task task = std::move(tasks_[next_task_]);
-    ++next_task_;
     task();
   }
 
  private:
+  /**
+   * @brief Returns unexecuted queue size while the fixture mutex is held.
+   *
+   * @return Number of callbacks at or after `next_task_`.
+   * @throws Nothing.
+   * @note Every caller must hold `mutex_`; this helper performs no locking.
+   */
+  std::size_t pending_count_locked() const noexcept {
+    return tasks_.size() - next_task_;
+  }
+
   /** @brief Bounded admission capacity sufficient for every focused test. */
   static constexpr std::size_t kMaximumTasks = 32U;
+
+  /** @brief Serializes callback admission, removal, and counters. */
+  mutable std::mutex mutex_;
 
   /** @brief FIFO storage whose capacity never changes after construction. */
   std::vector<Task> tasks_;
@@ -366,6 +398,71 @@ class FakeDeviceExecutor final : public ReadyFenceExecutor {
 
   /** @brief Total callbacks admitted over this executor lifetime. */
   std::size_t submitted_count_ = 0U;
+};
+
+/**
+ * @brief One-use C++17 barrier for deterministic concurrent test starts.
+ *
+ * @throws std::invalid_argument when fewer than two participants are requested.
+ * @note This fixture uses only a mutex and condition variable. It has no timer
+ *       or sleep and must be reached exactly once by every participant.
+ */
+class OneShotRendezvous final {
+ public:
+  /**
+   * @brief Creates a barrier for one fixed participant count.
+   *
+   * @param participants Number of threads, including the coordinating thread.
+   * @throws std::invalid_argument when `participants` is less than two.
+   */
+  explicit OneShotRendezvous(std::size_t participants)
+      : participants_(participants) {
+    if (participants_ < 2U) {
+      throw std::invalid_argument(
+          "OneShotRendezvous requires at least two participants.");
+    }
+  }
+
+  /** @brief Copy construction is forbidden for one synchronization point. */
+  OneShotRendezvous(const OneShotRendezvous&) = delete;
+
+  /** @brief Copy assignment is forbidden for one synchronization point. */
+  OneShotRendezvous& operator=(const OneShotRendezvous&) = delete;
+
+  /**
+   * @brief Arrives once and waits until every participant has arrived.
+   *
+   * @return Nothing.
+   * @throws std::system_error when mutex or condition-variable operations fail.
+   * @note The last arrival publishes release while holding `mutex_`; every
+   *       waiter observes it through the condition-variable predicate.
+   */
+  void arrive_and_wait() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++arrived_;
+    if (arrived_ == participants_) {
+      released_ = true;
+      condition_.notify_all();
+      return;
+    }
+    condition_.wait(lock, [this] { return released_; });
+  }
+
+ private:
+  /** @brief Fixed arrivals required to release this one-use barrier. */
+  const std::size_t participants_;
+
+  /** @brief Serializes arrival count and release publication. */
+  std::mutex mutex_;
+
+  /** @brief Wakes participants after the final arrival. */
+  std::condition_variable condition_;
+
+  /** @brief Number of participants that have arrived. */
+  std::size_t arrived_ = 0U;
+
+  /** @brief True after the final participant releases the barrier. */
+  bool released_ = false;
 };
 
 /**
@@ -481,6 +578,310 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(snapshot.failure()->domain(), ReadyFenceFailureDomain::Transfer);
   EXPECT_EQ(snapshot.failure()->code(), 37);
   EXPECT_EQ(snapshot.failure()->message(), "fake transfer rejected");
+}
+
+/**
+ * @brief Proves a pending wait strongly retains its sole executor owner.
+ *
+ * @return Nothing; GoogleTest reports lost admission, callback, or lifetime
+ * failures.
+ * @throws Allocation, fence-registration, or fake-executor exceptions
+ * unchanged.
+ * @note The weak observer is the only drive path after the caller releases its
+ *       strong owner. Callback entry must break the queue self-cycle, while a
+ *       temporary locked owner keeps `run_next()` valid through return.
+ */
+TEST(CpuDenseTensorImageOperation,
+     PendingWaitRetainsSoleExecutorUntilCallbackCompletion) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+  const std::weak_ptr<FakeDeviceExecutor> weak_executor = executor;
+  std::optional<ReadyFenceSnapshot> delivered;
+  ReadyFenceWaitRegistration registration = pending.fence.async_wait(
+      executor, [&delivered](ReadyFenceSnapshot snapshot) {
+        delivered = std::move(snapshot);
+      });
+
+  executor.reset();
+  EXPECT_FALSE(weak_executor.expired());
+  EXPECT_TRUE(pending.completer.complete_ready());
+  EXPECT_FALSE(weak_executor.expired());
+
+  std::shared_ptr<FakeDeviceExecutor> retained_executor = weak_executor.lock();
+  ASSERT_NE(retained_executor, nullptr);
+  ASSERT_EQ(retained_executor->pending_count(), 1U);
+  retained_executor->run_next();
+  ASSERT_TRUE(delivered.has_value());
+  EXPECT_EQ(delivered->state(), ReadyFenceState::Ready);
+  EXPECT_FALSE(registration.active());
+
+  retained_executor.reset();
+  EXPECT_TRUE(weak_executor.expired());
+}
+
+/**
+ * @brief Proves terminal fast-path admission retains its sole executor owner.
+ *
+ * @return Nothing; GoogleTest reports lost callback or retained self-cycle
+ * failures.
+ * @throws Allocation, fence-registration, or fake-executor exceptions
+ * unchanged.
+ * @note The already-terminal path submits before `async_wait()` returns but
+ *       remains non-inline and releases the executor after callback execution.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TerminalWaitRetainsSoleExecutorUntilCallbackCompletion) {
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+  const std::weak_ptr<FakeDeviceExecutor> weak_executor = executor;
+  std::optional<ReadyFenceSnapshot> delivered;
+  ReadyFenceWaitRegistration registration =
+      ReadyFence::already_ready().async_wait(
+          executor, [&delivered](ReadyFenceSnapshot snapshot) {
+            delivered = std::move(snapshot);
+          });
+
+  executor.reset();
+  EXPECT_FALSE(weak_executor.expired());
+  std::shared_ptr<FakeDeviceExecutor> retained_executor = weak_executor.lock();
+  ASSERT_NE(retained_executor, nullptr);
+  ASSERT_EQ(retained_executor->pending_count(), 1U);
+  retained_executor->run_next();
+  ASSERT_TRUE(delivered.has_value());
+  EXPECT_EQ(delivered->state(), ReadyFenceState::Ready);
+  EXPECT_FALSE(registration.active());
+
+  retained_executor.reset();
+  EXPECT_TRUE(weak_executor.expired());
+}
+
+/**
+ * @brief Proves transfer admission retains its sole executor through copying.
+ *
+ * @return Nothing; GoogleTest reports lost execution, permanent Pending state,
+ * byte mismatch, or retained self-cycle failures.
+ * @throws Value, transfer, allocation, or fake-executor exceptions unchanged.
+ * @note The destination must settle before the weak executor expires; no
+ *       external executor owner remains while the queued transfer is pending.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TransferRetainsSoleExecutorUntilDestinationCompletion) {
+  const Value source = make_unsigned8_value(3U, 2U, 1U, 4U);
+  ValueTransferTask transfer = ValueTransferTask::prepare_cpu_copy(source);
+  const Value destination = transfer.destination();
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+  const std::weak_ptr<FakeDeviceExecutor> weak_executor = executor;
+  transfer.enqueue(executor);
+
+  executor.reset();
+  EXPECT_FALSE(weak_executor.expired());
+  std::shared_ptr<FakeDeviceExecutor> retained_executor = weak_executor.lock();
+  ASSERT_NE(retained_executor, nullptr);
+  ASSERT_EQ(retained_executor->pending_count(), 1U);
+  retained_executor->run_next();
+  ASSERT_EQ(destination.ready_fence().poll().state(), ReadyFenceState::Ready);
+  const ReadLease source_read = source.buffer_handle().acquire_read();
+  const ReadLease destination_read = destination.buffer_handle().acquire_read();
+  ASSERT_EQ(destination_read.size(), source_read.size());
+  EXPECT_EQ(std::memcmp(destination_read.data(), source_read.data(),
+                        source_read.size()),
+            0);
+
+  retained_executor.reset();
+  EXPECT_TRUE(weak_executor.expired());
+}
+
+/**
+ * @brief Races wait registration with terminal publication without timing.
+ *
+ * @return Nothing; GoogleTest reports lost admission, duplicate callback, or
+ * nonterminal state failures.
+ * @throws Thread, allocation, fence, or fake-executor exceptions unchanged.
+ * @note A one-shot mutex/CV barrier starts real registration and publication
+ *       threads together. Either lock order is legal, but both must produce one
+ *       queued callback and one Ready outcome.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ConcurrentWaitRegistrationAndPublicationDeliverExactlyOnce) {
+  constexpr std::size_t kIterations = 64U;
+  for (std::size_t iteration = 0U; iteration < kIterations; ++iteration) {
+    PendingReadyFence pending = make_pending_ready_fence();
+    auto executor = std::make_shared<FakeDeviceExecutor>();
+    OneShotRendezvous start(3U);
+    std::optional<ReadyFenceWaitRegistration> registration;
+    std::optional<ReadyFenceSnapshot> delivered;
+    std::exception_ptr registration_error;
+    std::exception_ptr publication_error;
+    bool published = false;
+
+    std::thread registration_thread([&] {
+      start.arrive_and_wait();
+      try {
+        registration.emplace(pending.fence.async_wait(
+            executor, [&delivered](ReadyFenceSnapshot snapshot) {
+              delivered = std::move(snapshot);
+            }));
+      } catch (...) {
+        registration_error = std::current_exception();
+      }
+    });
+    std::thread publication_thread([&] {
+      start.arrive_and_wait();
+      try {
+        published = pending.completer.complete_ready();
+      } catch (...) {
+        publication_error = std::current_exception();
+      }
+    });
+
+    start.arrive_and_wait();
+    registration_thread.join();
+    publication_thread.join();
+
+    ASSERT_FALSE(registration_error) << "iteration " << iteration;
+    ASSERT_FALSE(publication_error) << "iteration " << iteration;
+    ASSERT_TRUE(registration.has_value()) << "iteration " << iteration;
+    EXPECT_TRUE(published) << "iteration " << iteration;
+    EXPECT_FALSE(pending.completer.complete_ready())
+        << "iteration " << iteration;
+    EXPECT_EQ(pending.fence.poll().state(), ReadyFenceState::Ready)
+        << "iteration " << iteration;
+    EXPECT_EQ(executor->submitted_count(), 1U) << "iteration " << iteration;
+    ASSERT_EQ(executor->pending_count(), 1U) << "iteration " << iteration;
+    EXPECT_FALSE(delivered.has_value()) << "iteration " << iteration;
+
+    executor->run_next();
+    ASSERT_TRUE(delivered.has_value()) << "iteration " << iteration;
+    EXPECT_EQ(delivered->state(), ReadyFenceState::Ready)
+        << "iteration " << iteration;
+    EXPECT_FALSE(registration->active()) << "iteration " << iteration;
+    EXPECT_EQ(executor->pending_count(), 0U) << "iteration " << iteration;
+  }
+}
+
+/**
+ * @brief Races observer cancellation with queued callback entry.
+ *
+ * @return Nothing; GoogleTest reports callback duplication or an outcome that
+ * disagrees with the atomic cancellation winner.
+ * @throws Thread, allocation, fence, or fake-executor exceptions unchanged.
+ * @note The callback and canceller start through a mutex/CV barrier. A
+ *       successful cancellation requires zero callbacks; callback-entry victory
+ *       requires exactly one callback and a false cancellation result.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ConcurrentCancellationAndCallbackEntryHaveOneWinner) {
+  constexpr std::size_t kIterations = 64U;
+  for (std::size_t iteration = 0U; iteration < kIterations; ++iteration) {
+    auto executor = std::make_shared<FakeDeviceExecutor>();
+    std::atomic<int> callback_count{0};
+    ReadyFenceWaitRegistration registration =
+        ReadyFence::already_ready().async_wait(
+            executor, [&callback_count](ReadyFenceSnapshot snapshot) {
+              (void)snapshot;
+              callback_count.fetch_add(1, std::memory_order_relaxed);
+            });
+    ASSERT_EQ(executor->pending_count(), 1U);
+    OneShotRendezvous start(3U);
+    std::exception_ptr callback_error;
+    bool cancelled = false;
+
+    std::thread callback_thread([&] {
+      start.arrive_and_wait();
+      try {
+        executor->run_next();
+      } catch (...) {
+        callback_error = std::current_exception();
+      }
+    });
+    std::thread cancellation_thread([&] {
+      start.arrive_and_wait();
+      cancelled = registration.cancel();
+    });
+
+    start.arrive_and_wait();
+    callback_thread.join();
+    cancellation_thread.join();
+
+    ASSERT_FALSE(callback_error) << "iteration " << iteration;
+    EXPECT_FALSE(registration.active()) << "iteration " << iteration;
+    EXPECT_LE(callback_count.load(std::memory_order_relaxed), 1)
+        << "iteration " << iteration;
+    EXPECT_EQ(callback_count.load(std::memory_order_relaxed), cancelled ? 0 : 1)
+        << "iteration " << iteration;
+    EXPECT_EQ(executor->pending_count(), 0U) << "iteration " << iteration;
+  }
+}
+
+/**
+ * @brief Races transfer-owner destruction with queued callback execution.
+ *
+ * @return Nothing; GoogleTest reports a permanent Pending destination,
+ * invalid terminal state, source mutation, or partially readable output.
+ * @throws Thread, Value, transfer, allocation, or fake-executor exceptions
+ * unchanged.
+ * @note Owner destruction and callback entry start through a mutex/CV barrier.
+ *       Callback retention may win and publish Ready, or destruction may win
+ *       and publish ProducerCancelled; both revoke the producer before the
+ *       terminal state becomes observable.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ConcurrentTransferDestructionAndCallbackSettleDestination) {
+  constexpr std::size_t kIterations = 64U;
+  for (std::size_t iteration = 0U; iteration < kIterations; ++iteration) {
+    const Value source = make_unsigned8_value(2U, 2U, 1U, 3U);
+    auto transfer = std::make_unique<ValueTransferTask>(
+        ValueTransferTask::prepare_cpu_copy(source));
+    const Value destination = transfer->destination();
+    auto executor = std::make_shared<FakeDeviceExecutor>();
+    transfer->enqueue(executor);
+    ASSERT_EQ(executor->pending_count(), 1U);
+    OneShotRendezvous start(3U);
+    std::exception_ptr callback_error;
+
+    std::thread callback_thread([&] {
+      start.arrive_and_wait();
+      try {
+        executor->run_next();
+      } catch (...) {
+        callback_error = std::current_exception();
+      }
+    });
+    std::thread destruction_thread([&] {
+      start.arrive_and_wait();
+      transfer.reset();
+    });
+
+    start.arrive_and_wait();
+    callback_thread.join();
+    destruction_thread.join();
+
+    ASSERT_FALSE(callback_error) << "iteration " << iteration;
+    const ReadyFenceSnapshot destination_snapshot =
+        destination.ready_fence().poll();
+    EXPECT_NE(destination_snapshot.state(), ReadyFenceState::Pending)
+        << "iteration " << iteration;
+    EXPECT_EQ(source.ready_fence().poll().state(), ReadyFenceState::Ready)
+        << "iteration " << iteration;
+    EXPECT_EQ(executor->submitted_count(), 1U) << "iteration " << iteration;
+    EXPECT_EQ(executor->pending_count(), 0U) << "iteration " << iteration;
+    if (destination_snapshot.state() == ReadyFenceState::Ready) {
+      const ReadLease source_read = source.buffer_handle().acquire_read();
+      const ReadLease destination_read =
+          destination.buffer_handle().acquire_read();
+      ASSERT_EQ(destination_read.size(), source_read.size())
+          << "iteration " << iteration;
+      EXPECT_EQ(std::memcmp(destination_read.data(), source_read.data(),
+                            source_read.size()),
+                0)
+          << "iteration " << iteration;
+    } else {
+      EXPECT_EQ(destination_snapshot.state(),
+                ReadyFenceState::ProducerCancelled)
+          << "iteration " << iteration;
+      EXPECT_THROW((void)destination.buffer_handle(), ReadyFenceAccessError)
+          << "iteration " << iteration;
+    }
+  }
 }
 
 /**

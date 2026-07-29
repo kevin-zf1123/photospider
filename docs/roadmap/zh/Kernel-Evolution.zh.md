@@ -537,7 +537,9 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 - retaining checked `DenseTensorView`/`ImageView` 持有 `ReadLease` 并暴露只读 address；
 - installed `ReadyFence` 是 Pending、Ready、Failed 或 ProducerCancelled 的 copyable
   nonblocking observer；其 move-only completer 只发布一个 terminal state，丢弃 unresolved
-  completer 会发布 cancellation，wait 则通过借用的 non-inline executor 入队；
+  completer 会发布 cancellation；wait 通过共享的 non-inline executor 入队，该 executor 在
+  pending、queued 及 callback 完成前保持存活，并在 callback 进入时释放 queued
+  self-retention；
 - 同步 Value 初始即为 Ready；source-private pending producer 保留唯一 mutable CPU
   capability，并在每次 terminal state 前撤销它；pending/failed/cancelled Value 保留 immutable
   metadata，但拒绝 BufferHandle 与 checked-view payload access；source-private

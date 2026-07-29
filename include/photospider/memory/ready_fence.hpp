@@ -215,11 +215,19 @@ class ReadyFenceAccessError final : public std::runtime_error {
  *
  * Implementations own their worker, queue, exception transport, and shutdown
  * behavior. A fence retains a shared executor reference only while a wait is
- * pending or its callback is queued.
+ * pending or its callback is queued. The queued continuation transfers that
+ * reference to callback-local retention on entry, breaking any temporary
+ * executor/owned-queue self-cycle while keeping the executor alive through
+ * callback completion or exception unwinding.
  *
  * @throws Nothing from `submit()` and destruction.
  * @note `submit()` must take ownership without running the callback inline.
  *       Value and ReadyFence never create a worker or wait for one.
+ * @note An executor whose queue is owned by the executor object may temporarily
+ *       retain itself through an admitted callback. Its queue-driving or
+ *       shutdown path must remain able to enter or discard admitted work; a
+ *       callback that enters releases the queued self-reference before
+ *       invoking user code.
  */
 class ReadyFenceExecutor {
  public:
@@ -410,7 +418,10 @@ class ReadyFence final {
    * @throws std::bad_alloc when callback or waiter state cannot allocate.
    * @note A terminal fence submits before this method returns but the executor
    *       must not run the callback inline. A pending fence submits exactly
-   *       once after its terminal transition.
+   *       once after its terminal transition. The queued wrapper retains the
+   *       shared executor until callback entry and keeps it alive locally
+   *       through callback completion, including cancellation no-op entry and
+   *       exception unwinding.
    */
   ReadyFenceWaitRegistration async_wait(
       std::shared_ptr<ReadyFenceExecutor> executor, Callback callback) const;
@@ -531,6 +542,8 @@ class FenceCompleter final {
    * @return True only when this call performed the Pending-to-terminal change.
    * @throws Nothing.
    * @note Waiter callbacks are submitted after the state mutex is released.
+   *       Each preconstructed callback already retains its executor, so
+   *       releasing the publication-local waiter cannot abandon queued work.
    */
   static bool publish_terminal(
       const std::shared_ptr<ReadyFence::State>& state, ReadyFenceState terminal,

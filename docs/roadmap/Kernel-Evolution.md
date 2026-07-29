@@ -674,7 +674,9 @@ The implemented V-2 through V-6 subset is deliberately narrower:
 - installed `ReadyFence` is a copyable nonblocking observer of Pending, Ready,
   Failed, or ProducerCancelled; its move-only completer publishes one terminal
   state, dropped completion publishes cancellation, and waits are enqueued
-  through a borrowed non-inline executor;
+  through a shared non-inline executor retained while pending or queued and
+  through callback completion, with queued self-retention released on callback
+  entry;
 - synchronous Values start Ready, while a source-private pending producer
   retains the only mutable CPU capability and revokes it before every terminal
   state; pending/failed/cancelled Values preserve immutable metadata but reject

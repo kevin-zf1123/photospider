@@ -197,7 +197,7 @@ turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
 `test_cpu_dense_tensor_image_operation` and
 `test_value_identity_across_dsos` binaries. Before installation it runs all
-33 dense-image cases plus the dual-DSO identity case in that actual disabled
+39 dense-image cases plus the dual-DSO identity case in that actual disabled
 producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
@@ -936,19 +936,25 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor, ImageView, Region, and ReadyFence Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-6 boundary. Its 33 durable cases
+binary for the implemented V-2 through V-6 boundary. Its 39 durable cases
 verify:
 
 - copyable ReadyFence polling, queued non-inline waits, observer-local waiter
   cancellation, exactly-once Ready/Failed/ProducerCancelled settlement, typed
-  failure retention, and dropped-completer cancellation;
+  failure retention, dropped-completer cancellation, and sole-executor
+  retention for pending and already-terminal waits through callback completion;
+- deterministic C++17 mutex/condition-variable races between wait registration
+  and terminal publication, cancellation and callback entry, and transfer-owner
+  destruction and callback entry, with unique terminal settlement and
+  at-most-once callback delivery without sleeps or timers;
 - pending Value metadata/identity observation, typed rejection of BufferHandle
   and checked-view payload access, and private producer revocation before
   readable Ready publication;
 - explicit fake-executor transfer enqueue, distinct allocation/revision
-  identity, byte-identical completion, chained readiness without worker
-  blocking, unreadable source failure/cancellation propagation, and
-  destination-only cancellation when transfer ownership drops;
+  identity, sole-executor retention through destination completion,
+  byte-identical completion, chained readiness without worker blocking,
+  unreadable source failure/cancellation propagation, and destination-only
+  cancellation when transfer ownership drops;
 - malformed facet, stride, byte-offset, and exact-envelope rejection, including
   checked single-axis/cross-axis writable collision and overflow cases plus
   accepted padded, transposed, and singleton-axis layouts;
@@ -992,14 +998,14 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 33 dense cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all 39 dense cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
 synchronous Ready Value fence without optional dependencies. The
-provider-disabled nested build below also compiles and runs all 33 dense cases
+provider-disabled nested build below also compiles and runs all 39 dense cases
 plus that dual-DSO case, so the real core operation, fence/transfer proof, and
 identity authority do not depend on the optional OpenCV operation provider or
 a native device SDK.
@@ -1038,9 +1044,9 @@ dedicated disk-cache and kernel-lifecycle concurrency binaries, plus the
 provider-independent `test_kernel_contracts` internal-seam consumer, then
 queries the machine-readable CTest inventory. `test_kernel_contracts` is built
 to exercise the focused-only direct-consumer closure but is deliberately not
-discovered in this nested inventory. That inventory must contain exactly 41
+discovered in this nested inventory. That inventory must contain exactly 47
 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 33
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 39
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two

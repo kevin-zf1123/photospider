@@ -257,12 +257,19 @@ dependency-released work all enter the common ready-store, policy,
 reserved-start, private-route, and Run-lease completion path.
 
 V-6 adds no configured execution route and no second ready store.
-`ReadyFence::async_wait` borrows an injected executor that must enqueue rather
-than invoke inline; fence state and the source-private `ValueTransferTask` own
-no worker or queue. The repository fake executor is a deterministic test
-mechanism only. #84 will register process-owned physical device executors, and
-#85 will add general access/residency/visibility transfer planning without
-moving those owners into Value or policy state.
+`ReadyFence::async_wait` accepts a shared injected executor that must enqueue
+rather than invoke inline. Its preconstructed continuation retains the executor
+while pending or queued, then transfers that owner to callback-local retention
+on entry. This keeps temporary executor ownership alive through callback
+completion or exception unwinding while releasing an executor-owned queue
+self-reference. Fence state and the source-private `ValueTransferTask` own no
+worker or queue. The repository fake executor is a deterministic, thread-safe
+test mechanism only; C++17 mutex/condition-variable rendezvous exercises real
+registration/publication, cancellation/callback-entry, and
+transfer-destruction/callback-entry races without sleeps. #84 will register
+process-owned physical device executors, and #85 will add general
+access/residency/visibility transfer planning without moving those owners into
+Value or policy state.
 
 ## Host, CLI, and IPC Surfaces
 

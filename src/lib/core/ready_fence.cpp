@@ -256,7 +256,13 @@ ReadyFenceWaitRegistration ReadyFence::async_wait(
   registration->fence = state_;
   registration->control = control;
   ReadyFenceExecutor::Task task = [state = state_, control,
+                                   executor_keepalive = executor,
                                    callback = std::move(callback)]() mutable {
+    // Break an executor-owned queue self-cycle at callback entry while the
+    // local reference keeps executor state alive through callback exit.
+    std::shared_ptr<ReadyFenceExecutor> callback_executor =
+        std::move(executor_keepalive);
+    (void)callback_executor;
     if (!control->active.exchange(false, std::memory_order_acq_rel)) {
       return;
     }

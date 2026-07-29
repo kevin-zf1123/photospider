@@ -249,6 +249,30 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "PendingWaitRetainsSoleExecutorUntilCallbackCompletion"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TerminalWaitRetainsSoleExecutorUntilCallbackCompletion"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TransferRetainsSoleExecutorUntilDestinationCompletion"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ConcurrentWaitRegistrationAndPublicationDeliverExactlyOnce"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ConcurrentCancellationAndCallbackEntryHaveOneWinner"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ConcurrentTransferDestructionAndCallbackSettleDestination"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "PendingProducerMakesPayloadReadableOnlyAfterReady"
         ),
         (

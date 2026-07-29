@@ -135,12 +135,15 @@ callback-free implementation identity/metadata route，并要求 provider entry 
 identity 相同。
 
 V-6 新增一个有界、source-private 的 physical task，但不会把 transfer node 插入 graph
-planning 或 `ComputeRun`。`ValueTransferTask` 会准备一个独立 pending CPU Value，并向借用的
-executor 注册一次异步 source-ReadyFence wait。只有 queued callback 才会取得 source payload
-access、复制已验证的 envelope、退役 destination producer access 并发布 terminal state。
-Fence 与 task 都不拥有 worker、queue、route、ledger grant 或 device identity。确定性的 fake
-executor 归测试所有；#84 负责真实 physical-device executor registration，#85 负责通用 access
-planning、residency、visibility、bidirectional transfer 与 stale-completion commit
+planning 或 `ComputeRun`。`ValueTransferTask` 会准备一个独立 pending CPU Value，并向共享的
+executor 注册一次异步 source-ReadyFence wait。预先构造的 continuation 会在 pending 或 queued
+时保留该 executor，并在 callback 进入时把 owner 转移到 callback-local retention；因此唯一
+executor owner 能存活到 callback 完成，同时释放 executor-owned queue 的 self-reference。只有
+queued callback 才会取得 source payload access、复制已验证的 envelope、退役 destination
+producer access 并发布 terminal state。Fence 与 task 都不拥有 worker、queue、route、ledger
+grant 或 device identity。确定性且线程安全的 fake executor 与仅用于测试的 C++17 mutex/CV
+竞争 rendezvous 归测试所有；#84 负责真实 physical-device executor registration，#85 负责通用
+access planning、residency、visibility、bidirectional transfer 与 stale-completion commit
 arbitration。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。

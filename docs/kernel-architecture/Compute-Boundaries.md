@@ -162,13 +162,17 @@ identity re-resolution before provider entry.
 V-6 adds a bounded source-private physical task without inserting transfer
 nodes into graph planning or a `ComputeRun`. `ValueTransferTask` prepares a
 distinct pending CPU Value and registers one asynchronous source-ReadyFence
-wait with a borrowed executor. The queued callback alone acquires source
-payload access, copies the validated envelope, retires destination producer
-access, and publishes the terminal state. The fence and task own no worker,
-queue, route, ledger grant, or device identity. The deterministic fake executor
-is test-owned; #84 owns real physical-device executor registration, while #85
-owns general access planning, residency, visibility, bidirectional transfer,
-and stale-completion commit arbitration.
+wait with a shared executor. The preconstructed continuation retains that
+executor while pending or queued and transfers the owner to callback-local
+retention on entry, so a sole executor owner survives through callback
+completion while an executor-owned queue self-reference is released. The queued
+callback alone acquires source payload access, copies the validated envelope,
+retires destination producer access, and publishes the terminal state. The
+fence and task own no worker, queue, route, ledger grant, or device identity.
+The deterministic thread-safe fake executor and test-only C++17 mutex/CV race
+rendezvous are test-owned; #84 owns real physical-device executor registration,
+while #85 owns general access planning, residency, visibility, bidirectional
+transfer, and stale-completion commit arbitration.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context

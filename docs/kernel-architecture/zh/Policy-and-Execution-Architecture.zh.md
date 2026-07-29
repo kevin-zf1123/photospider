@@ -215,11 +215,16 @@ authority 或 per-Graph executor。
 就绪存储、策略、预留后启动、私有路由及 Run 租约完成路径。
 
 V-6 不新增 configured execution route，也不新增第二套 ready store。
-`ReadyFence::async_wait` 会借用一个注入的 executor；该 executor 必须入队，而不能 inline
-调用。Fence state 与 source-private `ValueTransferTask` 都不拥有 worker 或 queue。仓库 fake
-executor 只是确定性的测试机制。#84 将注册 process-owned physical device executor；#85 将新增
-通用 access/residency/visibility transfer planning，同时不会把这些 owner 移入 Value 或 policy
-state。
+`ReadyFence::async_wait` 接收一个共享的注入 executor；该 executor 必须入队，而不能 inline
+调用。预先构造的 continuation 会在 pending 或 queued 时保留 executor，并在 callback 进入时
+把该 owner 转移到 callback-local retention。这既让临时 executor ownership 存活到 callback
+完成或 exception unwinding 结束，也会释放 executor-owned queue 的 self-reference。Fence
+state 与 source-private `ValueTransferTask` 都不拥有 worker 或 queue。仓库 fake executor 只是
+确定性且线程安全的测试机制；C++17 mutex/condition-variable rendezvous 会在不使用 sleep 的
+情况下执行真实的 registration/publication、cancellation/callback-entry 与
+transfer-destruction/callback-entry 竞争。#84 将注册 process-owned physical device executor；
+#85 将新增通用 access/residency/visibility transfer planning，同时不会把这些 owner 移入 Value
+或 policy state。
 
 ## Host、CLI 与 IPC 接口面
 
