@@ -228,7 +228,7 @@ RT proxy commit 之后。
   只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
-### 已实现的 V-3 ownership 与 V-4 Region surface
+### 已实现的 V-3 ownership、V-4 Region 与 V-6 readiness surface
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受完整的通用 Value 替换。V-2 引入了有界 CPU DenseTensor 子集；V-3 现已接通其
@@ -269,9 +269,17 @@ source history、per-node state、monolithic work 与 edge mapping 都保留 Reg
 tile rectangle 从其 source Region 派生并与其并存。Core dense invert path 执行精确
 ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice，operation ABI v2 保持不变。
 
-`DataSpec`、device routing、readiness、transfer、quantization、provider ABI v3 与通用命名
-immutable Value output 仍属于后续 no-shim slice。`ParameterMap` 仍用于 configuration 与
-当前命名 scalar-result storage。
+V-6 为每个 Value 附加 installed、copyable `ReadyFence` observer。同步 publication 初始即为
+Ready。Source-private pending producer 保留唯一 mutable CPU allocation capability，在发布
+Ready、Failed 或 ProducerCancelled 前撤销它，并允许 pending 状态继续检查
+descriptor/layout/size/identity metadata，同时拒绝 payload access。Source-private physical
+`ValueTransferTask` 会分配独立 pending CPU destination，并且只在 source ready 后通过
+executor-queued work 复制已验证的 envelope。
+
+`DataSpec`、真实 device routing 与 identity、通用 `AccessPlan`、residency、bidirectional
+transfer 与 stale-completion arbitration、quantization、provider ABI v3 和通用命名 immutable
+Value output 仍属于后续 no-shim slice。`ParameterMap` 仍用于 configuration 与当前命名
+scalar-result storage。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
@@ -287,6 +295,7 @@ dependency 工作由
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
@@ -299,6 +308,7 @@ dependency 工作由
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -306,6 +316,7 @@ dependency 工作由
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`

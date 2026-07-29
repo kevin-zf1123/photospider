@@ -256,6 +256,14 @@ Full HP, dirty HP/RT, connected preflight, initial ready work, and
 dependency-released work all enter the common ready-store, policy,
 reserved-start, private-route, and Run-lease completion path.
 
+V-6 adds no configured execution route and no second ready store.
+`ReadyFence::async_wait` borrows an injected executor that must enqueue rather
+than invoke inline; fence state and the source-private `ValueTransferTask` own
+no worker or queue. The repository fake executor is a deterministic test
+mechanism only. #84 will register process-owned physical device executors, and
+#85 will add general access/residency/visibility transfer planning without
+moving those owners into Value or policy state.
+
 ## Host, CLI, and IPC Surfaces
 
 The public Host has eight policy operations and six execution operations. Its
@@ -322,6 +330,8 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `include/photospider/memory/ready_fence.hpp`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/runtime/graph_runtime.hpp` and `.mm`
 - `src/lib/runtime/kernel_execution_facade.cpp`
 - `include/photospider/host/host.hpp`

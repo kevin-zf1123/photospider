@@ -38,11 +38,11 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、configured-provider composition、v2 loader、value adapter 与 DSO lifetime owner。 |
 | `photospider_policy_internal` | 仅用于构建的进程 policy registry、纯 C ABI-v1 DSO loader、不可变 binding、sticky fault 与 DSO lease。 |
-| `photospider_execution_internal` | 仅用于构建的私有物理资源计账与 execution-domain 支持。 |
+| `photospider_execution_internal` | 仅用于构建的私有物理资源计账、execution-domain 支持与有界 CPU Value-transfer task。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction、event、固定 worker service、reserved-start 与私有 route 实现；它单向依赖 policy 和 execution internal。 |
 | `photospider_host_internal` | 仅用于构建的 Kernel/Interaction facade 与 embedded Host composition root。它根据 producer capability 选择真实 YAML persistence adapter 或显式 unavailable adapter。 |
 | `photospider_kernel` | 可构建的聚合 target，编译实际选中的 core、graph、operation-plugin、policy、execution、compute、Host 以及可选 provider/adapter 模块；它不是安装 artifact，也不是占位 library。 |
-| `photospider_operation_runtime` | 可安装的 public image-buffer factory 与 immutable CPU DenseTensor Value/ImageView 子集共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Threads、graph、registry 或 embedded product。 |
+| `photospider_operation_runtime` | 可安装的 public image-buffer factory、immutable CPU DenseTensor Value/ImageView 子集、Region algebra 与 ReadyFence 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Threads、graph、registry、native-device SDK 或 embedded product。 |
 | `photospider_operation_sdk` | operation v2 与 dependency-neutral data/memory header 的可安装 interface target；传递链接 `operation_runtime`。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter，只使用 OpenCV `core` component；仅在 `PHOTOSPIDER_ENABLE_OPENCV=ON` 时存在。 |
 | `photospider_policy_sdk` | 携带自包含纯 C policy ABI header 与 C11/C++17 requirement 的可安装、无依赖 interface target。 |
@@ -102,8 +102,10 @@ Package 边界：
   source header，不需要目录 symlink。
 - `Photospider::operation_runtime` 是唯一 installed shared library。
   `Photospider::operation_sdk` 与 static embedded product 都链接该 target，因此独立加载且使用
-  Value 的 operation DSO 会调用同一个确定性 allocation/revision authority。该 runtime 不依赖
-  ELF/Mach-O symbol interposition，也不新增 package component。
+  Value 的 operation DSO 会调用同一个确定性 allocation/revision authority。其 installed
+  `photospider/memory/ready_fence.hpp` surface 与实现只使用 C++ 标准库；source-private pending
+  producer 与 transfer task 不会安装。该 runtime 不依赖 ELF/Mach-O symbol interposition，也不
+  新增 package component。
 - Package component 包括 `embedded`、`ipc_client`、`operation_sdk`、`operation_runtime`、
   `operation_opencv` 与 `policy_sdk`。省略 component 时保留 embedded 默认行为。
   `policy_sdk`、`operation_sdk` 和 `operation_runtime` 不发现外部 package；

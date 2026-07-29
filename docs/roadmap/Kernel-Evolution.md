@@ -609,14 +609,17 @@ operation. V-3 now adds checked BufferHandle ownership, lease-controlled
 construction, process-local allocation/revision identity, bounded signed
 layouts, and formal HP cache identity authority for CPU image Values. V-4 now
 adds the public bounded Region contract, logical dirty/cache validity, and
-ImageRect/TensorSlice execution through the exact core dense path. Their
-exact behavior is documented in
+ImageRect/TensorSlice execution through the exact core dense path. V-5 routes
+CPU implementation metadata and checked resource demand.
+V-6 now adds a dependency-neutral ReadyFence/Value readiness contract and one
+explicit source-private CPU Value-copy task proved with a deterministic fake
+device executor. Their exact behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
 [Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
 [Kernel Cache Model](../kernel-architecture/Cache-Model.md). The complete model
-below is the accepted target; only the explicit V-2/V-3/V-4 subset called out here
-is a current runtime fact.
+below is the accepted target; only the explicit V-2 through V-6 subset called
+out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -651,7 +654,7 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2/V-3/V-4 subset is deliberately narrower:
+The implemented V-2 through V-6 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
@@ -668,6 +671,16 @@ The implemented V-2/V-3/V-4 subset is deliberately narrower:
   or negative signed strides;
 - retaining checked `DenseTensorView`/`ImageView` hold a `ReadLease` and expose
   read-only addresses;
+- installed `ReadyFence` is a copyable nonblocking observer of Pending, Ready,
+  Failed, or ProducerCancelled; its move-only completer publishes one terminal
+  state, dropped completion publishes cancellation, and waits are enqueued
+  through a borrowed non-inline executor;
+- synchronous Values start Ready, while a source-private pending producer
+  retains the only mutable CPU capability and revokes it before every terminal
+  state; pending/failed/cancelled Values preserve immutable metadata but reject
+  BufferHandle and checked-view payload access; a source-private
+  `ValueTransferTask` prepares a fresh pending CPU allocation and copies the
+  validated envelope only as explicit queued work after source readiness;
 - `image_process:invert_dense` separates exact descriptor-only inference from
   stride-aware unsigned-8 execution, reuses a sealed input Value when present,
   and publishes the exact sealed result revision plus an independent
@@ -688,10 +701,12 @@ The implemented V-2/V-3/V-4 subset is deliberately narrower:
   TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
   and same-key plugin replacement cannot inherit that source-private contract.
 
-V-4 still has no DataSpec, device registry, readiness fence, transfer,
-quantization, packed element, provider ABI v3, or general named graph Value
-outputs. ImageBuffer remains the compatibility representation for operation
-ABI v2, tiled writes, codecs, and Host surfaces.
+V-6 still has no DataSpec, real device registry/identity, native executor,
+general AccessPlan, residency or visibility model, bidirectional device
+transfer, stale-completion arbitration, quantization, packed element, provider
+ABI v3, or general named graph Value outputs. ImageBuffer remains the
+compatibility representation for operation ABI v2, tiled writes, codecs, and
+Host surfaces.
 
 `ElementSemantics`, `StorageEncoding`, and `QuantizationSchema` are independent.
 Describable, executable, and convertible support are also independent, and
@@ -700,19 +715,19 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-4 CPU subset, `BufferHandle` is a checked immutable
-byte range. Consumer reads and ordinary builder writes require leases; sealed
-Values never issue `WriteLease`, and consumer writes are always rejected. The
-complete target additionally permits a sealed payload whose fence remains
-Pending to be completed only by the registered producer, or a native owner
-acting as that producer, through its noncopyable producer-scoped capability,
-within the prevalidated binding/Layout/handle envelope. The producer retires
-that capability
-happens-before publishing Ready, Failed, or ProducerCancelled. Pending, Failed,
-and ProducerCancelled expose no consumer-readable payload; Ready still requires
-`AccessPlan` visibility before `ReadLease`. Strided, Blocked, and
-ProviderDefined Layouts retain bounded buffer envelopes. `DeviceBackend`,
-`DeviceId`, and `MemoryDomain` are separate, and access is an explicit
+For the current V-6 CPU subset, `BufferHandle` is a checked immutable byte
+range. Consumer reads and ordinary builder writes require leases; sealed Values
+never issue `WriteLease`, and consumer writes are always rejected. A
+source-private producer may complete one sealed pending CPU payload through its
+noncopyable capability inside the prevalidated binding/Layout/handle envelope.
+It retires that capability happens-before publishing Ready, Failed, or
+ProducerCancelled. Pending, Failed, and ProducerCancelled expose no
+consumer-readable payload. The fixed CPU binding has direct host visibility
+before Ready, so Ready permits the current CPU `ReadLease`; the complete target
+still requires a general `AccessPlan` to discharge visibility for other
+bindings. Strided, Blocked, and ProviderDefined Layouts retain bounded buffer
+envelopes. `DeviceBackend`, `DeviceId`, and `MemoryDomain` are separate, and
+general access remains an explicit
 `Direct | Map | Import | Transfer | Unsupported` plan.
 
 The implemented `RegionSet` is bounded DNF over explicit logical domain keys.

@@ -207,7 +207,7 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
-### 已实现的 V-3/V-4 关系与剩余目标
+### 已实现的 V-3/V-4/V-6 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -236,8 +236,15 @@ v2 rectangle 仍是角色区分明确的 compatibility contract。对于同时�
 image cache entry，有效 sealed Value（而不是 mutable compatibility snapshot）才是
 allocation/revision identity authority。
 
-V-4 仍不实现 quantization、device identity、readiness、transfer、provider ABI v3 或通用命名
-graph Value output。
+V-6 在不修改 `ImageBuffer` 的前提下为 Value 新增 `ReadyFence`。同步 CPU Value 初始即为
+Ready；pending Value 保留 immutable metadata，但 `buffer_handle()` 与 checked view 会在
+Ready 前拒绝 payload access。Source-private producer 会在每次 terminal state 前退役其
+mutable capability，而 source-private transfer task 只通过 executor-queued work 复制一份
+独立 CPU allocation。
+
+V-6 仍不实现 quantization、device identity 或 registry、通用 access/visibility planning、
+residency、bidirectional device transfer、stale completion arbitration、provider ABI v3 或
+通用命名 graph Value output。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
@@ -250,13 +257,16 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 
 - `include/photospider/core/image_buffer.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
+- `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`

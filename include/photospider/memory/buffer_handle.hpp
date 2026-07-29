@@ -12,6 +12,8 @@
 namespace ps {
 
 class ReadLease;
+class PendingValueProducer;
+class PendingValuePublisher;
 class ValueBuilder;
 
 /**
@@ -103,7 +105,8 @@ class AllocationIdentity final {
  * destruction.
  * @note The handle deliberately exposes no raw pointer and no mutable flag.
  * Read access requires a retaining ReadLease; producer write access is issued
- * only by ValueBuilder before seal.
+ * publicly only by ValueBuilder before seal. A source-private pending producer
+ * may retain the same checked envelope until its terminal fence publication.
  */
 class BufferHandle final {
  public:
@@ -207,11 +210,12 @@ class BufferHandle final {
   const std::byte* read_pointer() const noexcept;
 
   /**
-   * @brief Returns the range start for the active producer lease.
+   * @brief Returns the range start for active private producer authority.
    *
    * @return Mutable pointer inside the retained builder allocation.
    * @throws Nothing under active exclusive-authority preconditions.
-   * @note Only WriteLease invokes this after checking its authority state.
+   * @note WriteLease and the source-private PendingValueProducer invoke this
+   *       only after checking their distinct exclusive authority states.
    */
   std::byte* write_pointer() const noexcept;
 
@@ -225,6 +229,8 @@ class BufferHandle final {
   std::size_t length_ = 0U;
 
   friend class ReadLease;
+  friend class PendingValueProducer;
+  friend class PendingValuePublisher;
   friend class ValueBuilder;
   friend class WriteLease;
 };
@@ -391,6 +397,7 @@ class WriteLease final {
   std::shared_ptr<Authority> authority_;
 
   friend class ValueBuilder;
+  friend class PendingValuePublisher;
 };
 
 }  // namespace ps

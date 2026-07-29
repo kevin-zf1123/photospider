@@ -156,6 +156,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     host/graph_session.hpp
     host/host.hpp
     memory/buffer_handle.hpp
+    memory/ready_fence.hpp
     memory/strided_layout.hpp
     plugin/node_view.hpp
     plugin/op_contract.hpp
@@ -174,7 +175,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 22)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 23)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -236,13 +237,15 @@ set(PHOTOSPIDER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
     CACHE STRING "Install directory for Photospider CMake package files")
 
-# Public image-buffer factory and process-wide Value identity implementation.
+# Public image-buffer factory, ReadyFence, and process-wide Value identity
+# implementation.
 # Host products and Value-using operation DSOs dynamically depend on this one
 # runtime image so allocation/revision minting cannot restart per DSO. The
 # target deliberately has no OpenCV, yaml-cpp, Threads, graph, registry, or
 # embedded product dependency.
 add_library(photospider_operation_runtime SHARED
     src/lib/core/image_buffer.cpp
+    src/lib/core/ready_fence.cpp
     src/lib/core/region.cpp
     src/lib/core/value.cpp)
 add_library(Photospider::operation_runtime ALIAS
@@ -557,6 +560,7 @@ target_link_libraries(photospider_policy_internal PRIVATE
 # Module: private physical execution resources and accounting.
 set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
     src/lib/execution/physical_execution_routes.cpp
+    src/lib/execution/value_transfer_task.cpp
     src/lib/runtime/resource_ledger.cpp
 )
 

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "photospider/memory/buffer_handle.hpp"
+#include "photospider/memory/ready_fence.hpp"
 #include "photospider/memory/strided_layout.hpp"
 
 /**
@@ -16,6 +17,8 @@
  */
 
 namespace ps {
+
+class PendingValuePublisher;
 
 /**
  * @brief Identifies the logical interpretation of one tensor element.
@@ -203,6 +206,7 @@ class ValueRevisionId final {
   /** @brief Opaque nonzero token, or zero for the invalid sentinel. */
   std::uint64_t value_ = 0U;
 
+  friend class PendingValuePublisher;
   friend class Value;
   friend class ValueBuilder;
 };
@@ -328,18 +332,22 @@ class ValueBuilder final {
 
   /** @brief Exclusive builder state, or null after move. */
   std::unique_ptr<Impl> impl_;
+
+  friend class PendingValuePublisher;
 };
 
 /**
  * @brief Immutable owning handle for one validated CPU DenseTensor payload.
  *
  * Value uses a shared immutable PImpl. Copies share one descriptor, layout,
- * facet, BufferHandle, allocation identity, and Value revision. Readable
- * pointers are available only through retaining checked views and ReadLease.
+ * facet, BufferHandle, ReadyFence, allocation identity, and Value revision.
+ * Readable pointers are available only after Ready through retaining checked
+ * views and ReadLease.
  *
  * @throws Nothing for default, copy, move, assignment, and destruction.
- * @note V-3 implements CPU ownership and runtime identity only. Replicas,
- * device routing, readiness, transfers, and fences remain later contracts.
+ * @note V-6 implements one bounded CPU readiness and explicit-copy-transfer
+ * subset. General device identity, AccessPlan, visibility work, residency,
+ * native execution, and stale-completion commit remain later contracts.
  */
 class Value final {
  public:
@@ -450,12 +458,26 @@ class Value final {
   std::size_t storage_size() const;
 
   /**
+   * @brief Returns this Value's immutable producer-completion observer.
+   *
+   * @return Copyable ReadyFence sharing the publication state.
+   * @throws std::logic_error when the handle is invalid.
+   * @note Ordinary synchronous CPU publications report Ready. Pending,
+   *       Failed, and ProducerCancelled still permit metadata inspection but
+   *       not payload access.
+   */
+  ReadyFence ready_fence() const;
+
+  /**
    * @brief Returns the immutable checked CPU allocation range.
    *
    * @return Borrowed BufferHandle retained by this Value.
    * @throws std::logic_error when the handle is invalid.
+   * @throws ReadyFenceAccessError when producer completion is Pending, Failed,
+   *         or ProducerCancelled.
    * @note Callers may copy, subrange, or acquire a ReadLease from the handle;
-   * no raw pointer is exposed by Value.
+   * no raw pointer is exposed by Value. The current fixed CPU binding has
+   * already discharged direct host visibility before its Ready publication.
    */
   const BufferHandle& buffer_handle() const;
 
@@ -479,14 +501,17 @@ class Value final {
   ValueRevisionId revision_id() const;
 
  private:
-  /** @brief Immutable implementation containing descriptor, layout, and bytes.
+  /**
+   * @brief Immutable implementation containing descriptor, layout, bytes, and
+   * readiness.
    */
   struct Impl;
 
   /**
    * @brief Creates a handle from already validated immutable state.
    *
-   * @param impl Shared state published by from_cpu_dense_tensor.
+   * @param impl Shared state published by a synchronous builder/factory or the
+   *        source-private pending publisher.
    * @throws Nothing.
    * @note The constructor is private so unvalidated state cannot be published.
    */
@@ -496,6 +521,7 @@ class Value final {
    */
   std::shared_ptr<const Impl> impl_;
 
+  friend class PendingValuePublisher;
   friend class ValueBuilder;
 };
 
@@ -503,6 +529,7 @@ class Value final {
  * @brief Retaining read-only, bounds-checked view of one DenseTensor Value.
  *
  * @throws std::invalid_argument when construction receives an invalid Value.
+ * @throws ReadyFenceAccessError when the retained Value is not Ready.
  * @note Copy and copy-like move operations are noexcept. The view stores a
  *       complete Value, so addresses outlive a caller's separate handle but
  *       never outlive the view.
@@ -514,6 +541,8 @@ class DenseTensorView final {
    *
    * @param value Value copied or moved into the view.
    * @throws std::invalid_argument when value is invalid.
+   * @throws ReadyFenceAccessError when value producer completion is Pending,
+   *         Failed, or ProducerCancelled.
    * @note Construction acquires one ReadLease retained with the Value.
    */
   explicit DenseTensorView(Value value);

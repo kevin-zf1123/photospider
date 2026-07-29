@@ -576,7 +576,7 @@ profiles:
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
-### Implemented V-2/V-3/V-4 SDK subset and future provider ABI
+### Implemented V-2 through V-6 SDK subset and future provider ABI
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts a separately versioned pure-C provider ABI v3 for Schema, Facet,
@@ -604,9 +604,14 @@ Region-aware implementation; a same-key plugin override keeps ordinary
 complete-output v2 behavior. Exact ImageRect may adapt current propagation
 callbacks, while TensorSlice never crosses the rectangular v2 contract.
 
-None of these slices places Value, BufferHandle, leases, Region, or a PImpl in
-a v2 callback record, and none changes the two current boundaries in the
-table. Operation ABI v2 remains the current operation contract until every
+V-6 adds the installed dependency-neutral `ReadyFence` observer and
+synchronous Value readiness to `operation_runtime`. Pending publication
+authority and `ValueTransferTask` remain source-private, so an SDK consumer can
+observe readiness but cannot create a pending producer or transfer task.
+
+None of these slices places Value, BufferHandle, leases, Region, ReadyFence, or
+a PImpl in a v2 callback record, and none changes the two current boundaries in
+the table. Operation ABI v2 remains the current operation contract until every
 repository-owned operation and installed consumer has migrated. The completion
 boundary then deletes v2, its entry point, SDK, fixtures, and package surface
 without a permanent dual loader, wrapper, alias, forwarding header, or
@@ -663,6 +668,7 @@ record the follow-up direction.
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/plugin_api.hpp`
 - `include/photospider/plugin/op_contract.hpp`

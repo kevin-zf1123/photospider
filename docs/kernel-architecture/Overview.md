@@ -45,11 +45,11 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
 | `photospider_policy_internal` | Build-only process policy registry, pure-C ABI-v1 DSO loader, immutable bindings, sticky faults, and DSO leases. |
-| `photospider_execution_internal` | Build-only private physical-resource accounting and execution-domain support. |
+| `photospider_execution_internal` | Build-only private physical-resource accounting, execution-domain support, and bounded CPU Value-transfer task. |
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, event, fixed worker service, reserved-start, and private route implementation; it depends one-way on policy and execution internals. |
 | `photospider_host_internal` | Build-only Kernel/Interaction facades and embedded Host composition root. It selects real YAML persistence adapters or explicit unavailable adapters according to the producer capability. |
 | `photospider_kernel` | Buildable aggregate target that compiles the real selected core, graph, operation-plugin, policy, execution, compute, Host, and optional provider/adapter modules; it is not an install artifact or a placeholder library. |
-| `photospider_operation_runtime` | Installable shared implementation of public image-buffer factories and the immutable CPU DenseTensor Value/ImageView subset. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
+| `photospider_operation_runtime` | Installable shared implementation of public image-buffer factories, the immutable CPU DenseTensor Value/ImageView subset, Region algebra, and ReadyFence. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Threads, graph, registry, native-device SDK, or embedded-product dependency. |
 | `photospider_operation_sdk` | Installable interface target for operation v2 and dependency-neutral data/memory headers; it transitively links `operation_runtime`. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_policy_sdk` | Installable dependency-neutral interface target carrying the self-contained pure-C policy ABI header plus C11/C++17 requirements. |
@@ -122,8 +122,11 @@ Package boundary:
 - `Photospider::operation_runtime` is one installed shared library.
   `Photospider::operation_sdk` and the static embedded product both link that
   target, so independently loaded Value-using operation DSOs call the same
-  deterministic allocation/revision authority. The runtime does not rely on
-  ELF/Mach-O symbol interposition and does not add a package component.
+  deterministic allocation/revision authority. Its installed
+  `photospider/memory/ready_fence.hpp` surface and implementation use only the
+  C++ standard library. The source-private pending producer and transfer task
+  are not installed. The runtime does not rely on ELF/Mach-O symbol
+  interposition and does not add a package component.
 - Package components are `embedded`, `ipc_client`, `operation_sdk`,
   `operation_runtime`, `operation_opencv`, and `policy_sdk`. Omitting
   components preserves the embedded default. `policy_sdk` discovers no

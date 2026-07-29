@@ -2,13 +2,15 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-4
-子集：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
-以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP。
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-6
+切片：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
+以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP；V-5
+operation-metadata routing 与有界 V-6 ReadyFence、pending CPU Value 和显式 fake-device
+Value-copy 证明也已成为当前行为。
 `ImageBuffer`、`DataType`、`Device`、`ParameterMap` 与 operation plugin ABI v2 仍是各自
 角色边缘上的兼容契约；本 ADR 中尚未实现的部分仍是演进目标。
 
-Issue #78 批准了本契约。Issue #79 至 #81 交付了有界的 V-2 至 V-4 实现切片；Issue #82
+Issue #78 批准了本契约。Issue #79 至 #83 交付了有界的 V-2 至 V-6 实现切片；Issue #84
 至 #90 仍是彼此独立的实现切片。合成的
 `VariableSampleField` 证明与可选 OpenEXR Deep provider 仍是彼此独立的后续 change；
 本决策不实现二者。
@@ -255,6 +257,12 @@ ProducerCancelled 允许访问不可变 metadata 与 diagnostic，但不能产�
 payload-visible access。Ready 之后，consumer read 仍必须由选定 `AccessPlan` 完成其 visibility
 obligation，之后才能签发 `ReadLease`。Fence、pending wait、access scope、私有 producer
 capability 与 native owner 都保留定义它们的 provider-generation lease。
+
+已实现的 V-6 子集落实了 fence state machine、executor-enqueued wait、Value read gating 与
+source-private pending CPU producer。其 source-private `ValueTransferTask` 只会在 source
+ready 后复制一个已验证的 CPU envelope，并发布独立 destination。该证明不包含 `DeviceId`、
+device registry、native queue、通用 `AccessPlan`、residency replica 或 stale-completion
+arbitration：#84 负责真实 executor registration，#85 负责这些通用 access 与 transfer 语义。
 
 `ComputeRun` 会保留 request-local 不可变 Value 及其 authoritative binding。Settlement 会核算
 每个 output 的 terminal fence state、provider-generation lease、access obligation 与

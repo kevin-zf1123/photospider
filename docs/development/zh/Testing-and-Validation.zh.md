@@ -150,7 +150,7 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_value_identity_across_dsos`
-binary。安装前，它会在该真实 disabled producer 中运行全部 25 个 dense-image case 与一个
+binary。安装前，它会在该真实 disabled producer 中运行全部 33 个 dense-image case 与一个
 双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
@@ -744,11 +744,19 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor、ImageView 与 Region 验证
+## CPU DenseTensor、ImageView、Region 与 ReadyFence 验证
 
-`test_cpu_dense_tensor_image_operation` 是已实现 V-2/V-3/V-4 边界的 provider-independent
-integration binary。它的 25 个长期用例验证：
+`test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-6 边界的 provider-independent
+integration binary。它的 33 个长期用例验证：
 
+- copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
+  exactly-once Ready/Failed/ProducerCancelled settlement、typed failure retention 与
+  dropped-completer cancellation；
+- pending Value metadata/identity observation、对 BufferHandle 与 checked-view payload
+  access 的 typed rejection，以及 private producer 在 readable Ready publication 前撤权；
+- 显式 fake-executor transfer enqueue、独立 allocation/revision identity、byte-identical
+  completion、无需阻塞 worker 的 chained readiness、保持不可读的 source
+  failure/cancellation propagation，以及 transfer ownership 被丢弃时只取消 destination；
 - malformed facet、stride、byte offset 与 exact-envelope rejection，包括受检的单轴/跨轴
   writable collision 与 overflow case，以及可接受的 padded、transposed 和 singleton-axis
   layout；
@@ -788,13 +796,14 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 25 个 dense
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 33 个 dense
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
-都会在没有 optional dependency 时构造并计算 Region。下述 provider-disabled nested build
-也会编译并运行全部 25 个 dense case 与该双 DSO case，因此真实 core operation 与 identity
-authority 都不依赖 optional OpenCV operation provider。
+都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
+provider-disabled nested build 也会编译并运行全部 33 个 dense case 与该双 DSO case，因此真实
+core operation、fence/transfer proof 与 identity authority 都不依赖 optional OpenCV operation
+provider 或 native device SDK。
 
 ## 可选 OpenCV Operation Provider 验证
 
@@ -822,8 +831,8 @@ DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary�
 kernel-lifecycle concurrency binary，以及 provider-independent `test_kernel_contracts`
 internal-seam consumer，再查询机器可读的 CTest inventory。`test_kernel_contracts` 的构建用于
 覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。该
-inventory 必须精确包含 33 项：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 25 个
+inventory 必须精确包含 41 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 33 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case 与

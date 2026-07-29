@@ -439,7 +439,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
-### 已实现的 V-2/V-3/V-4 SDK 子集与未来 provider ABI
+### 已实现的 V-2 至 V-6 SDK 子集与未来 provider ABI
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受单独版本化的 pure-C provider ABI v3，用于 Schema、Facet、Layout、access、
@@ -462,8 +462,13 @@ Region-aware implementation；same-key plugin override 保持普通 complete-out
 精确 ImageRect 可以适配当前 propagation callback，而 TensorSlice 绝不跨越 rectangular v2
 contract。
 
-这些切片都不会把 Value、BufferHandle、lease、Region 或 PImpl 放进 v2 callback record，也不会
-改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成 migration 前，
+V-6 把 installed、dependency-neutral 的 `ReadyFence` observer 与同步 Value readiness 加入
+`operation_runtime`。Pending publication authority 与 `ValueTransferTask` 保持 source-private，
+因此 SDK consumer 可以观察 readiness，但不能创建 pending producer 或 transfer task。
+
+这些切片都不会把 Value、BufferHandle、lease、Region、ReadyFence 或 PImpl 放进 v2 callback
+record，也不会改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成
+migration 前，
 operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、SDK、
 fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header 或
 v2-to-v3 shim。Policy ABI v1 继续独立版本化，不会被改名为 v3。
@@ -508,6 +513,7 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/plugin_api.hpp`
 - `include/photospider/plugin/op_contract.hpp`

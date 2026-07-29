@@ -483,12 +483,15 @@ V-2 实现了有界、dependency-neutral 的 CPU DenseTensor `Value`/`ImageView`
 operation。V-3 现已新增 checked BufferHandle ownership、由 lease 控制的 construction、
 process-local allocation/revision identity、受界限约束的 signed layout，以及 CPU image Value
 在正式 HP cache 中的 identity authority。V-4 现已新增 public bounded Region contract、
-logical dirty/cache validity，以及由精确 core dense path 执行的 ImageRect/TensorSlice。精确行为记录在
+logical dirty/cache validity，以及由精确 core dense path 执行的 ImageRect/TensorSlice。V-5 会
+路由 CPU implementation metadata 与 checked resource demand。V-6 现已新增
+dependency-neutral ReadyFence/Value readiness contract，以及一条由确定性 fake device executor
+证明的显式 source-private CPU Value-copy task。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2/V-3/V-4 子集是当前 runtime 事实。
+只有这里明确指出的 V-2 至 V-6 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -519,7 +522,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2/V-3/V-4 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-6 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics，以及 8/16/32/64-bit byte-addressed storage encoding；
@@ -532,6 +535,14 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 - final、copyable `Value` 共享 immutable descriptor/layout/handle state；通过 sealed handle
   构造的 Value 可以使用受界限约束的 byte offset 与正、零或负 signed stride；
 - retaining checked `DenseTensorView`/`ImageView` 持有 `ReadLease` 并暴露只读 address；
+- installed `ReadyFence` 是 Pending、Ready、Failed 或 ProducerCancelled 的 copyable
+  nonblocking observer；其 move-only completer 只发布一个 terminal state，丢弃 unresolved
+  completer 会发布 cancellation，wait 则通过借用的 non-inline executor 入队；
+- 同步 Value 初始即为 Ready；source-private pending producer 保留唯一 mutable CPU
+  capability，并在每次 terminal state 前撤销它；pending/failed/cancelled Value 保留 immutable
+  metadata，但拒绝 BufferHandle 与 checked-view payload access；source-private
+  `ValueTransferTask` 会准备全新 pending CPU allocation，并且只在 source ready 后通过显式
+  queued work 复制已验证的 envelope；
 - `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
   unsigned-8 execution 分开，已有 sealed input Value 时直接复用，并发布精确 sealed result
   revision 与独立 ImageBuffer compatibility snapshot；
@@ -549,24 +560,25 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
   source-private contract。
 
-V-4 仍不含 DataSpec、device registry、readiness fence、transfer、quantization、packed
-element、provider ABI v3 或通用 named graph Value output。ImageBuffer 仍是 operation ABI v2、
-tiled write、codec 与 Host surface 的 compatibility representation。
+V-6 仍不含 DataSpec、真实 device registry/identity、native executor、通用 AccessPlan、
+residency 或 visibility model、bidirectional device transfer、stale-completion arbitration、
+quantization、packed element、provider ABI v3 或通用 named graph Value output。ImageBuffer
+仍是 operation ABI v2、tiled write、codec 与 Host surface 的 compatibility representation。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-对于当前 V-4 CPU 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与
-普通 builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被
-拒绝。完整目标还允许 Fence 仍为 Pending 的 sealed payload 只能由已登记的 producer，或代表
-该 producer 执行的 native owner，通过其不可复制的 producer-scoped capability，在预先验证的
-binding/Layout/handle envelope 内完成。Producer capability 退役
+对于当前 V-6 CPU 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
+builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。
+Source-private producer 可以通过其不可复制的 capability，在预先验证的
+binding/Layout/handle envelope 内完成一个 sealed pending CPU payload。该 capability 的退役
 happen-before Ready、Failed 或 ProducerCancelled 发布。Pending、Failed 与
-ProducerCancelled 不暴露 consumer-readable payload；Ready 之后仍须由 `AccessPlan` 完成
-visibility，才能取得 `ReadLease`。Strided、Blocked 与 ProviderDefined Layout 都保留有界
-buffer envelope。`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，access 是显式
+ProducerCancelled 不暴露 consumer-readable payload。固定 CPU binding 会在 Ready 前完成
+direct host visibility，因此 Ready 允许当前 CPU `ReadLease`；对于其他 binding，完整目标仍要求
+通用 `AccessPlan` 完成 visibility。Strided、Blocked 与 ProviderDefined Layout 都保留有界
+buffer envelope。`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，通用 access 仍是显式
 `Direct | Map | Import | Transfer | Unsupported` plan。
 
 已实现的 `RegionSet` 是基于显式逻辑 domain key 的有界析取范式。MVP 支持 Whole、Empty、

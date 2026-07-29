@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/pending_value.hpp"
 #include "photospider/data/image_view.hpp"
 
 namespace ps {
@@ -618,8 +619,9 @@ std::size_t WriteLease::size() const {
  * @brief Immutable implementation for one validated CPU DenseTensor Value.
  *
  * @throws std::bad_alloc when copied descriptor/layout storage cannot allocate.
- * @note Instances are published only through shared_ptr<const Impl>. The
- * BufferHandle control block is already sealed before publication returns.
+ * @note Instances are published only through shared_ptr<const Impl>. Ordinary
+ * synchronous publication uses an already-Ready fence; source-private pending
+ * publication closes ordinary builder authority before the Value escapes.
  */
 struct Value::Impl final {
   /** @brief Validated concrete logical descriptor. */
@@ -634,6 +636,9 @@ struct Value::Impl final {
   /** @brief Immutable checked CPU allocation range. */
   BufferHandle buffer;
 
+  /** @brief Immutable observer of producer completion for this binding. */
+  ReadyFence ready_fence;
+
   /** @brief Stable identity of this immutable logical publication. */
   ValueRevisionId revision;
 
@@ -644,18 +649,24 @@ struct Value::Impl final {
    * @param image_facet_in Optional image facet to retain.
    * @param layout_in Signed checked layout to retain.
    * @param buffer_in Sealed checked allocation range to retain.
+   * @param ready_fence_in Valid producer-completion observer.
    * @param revision_in Fresh nonzero publication revision.
    * @throws std::bad_alloc when descriptor or layout vector moves must
    * allocate.
-   * @note Inputs are already validated and no producer authority remains.
+   * @note Inputs are already validated. Before the Value escapes, the caller
+   *       either retires ordinary builder authority for an already-Ready
+   *       publication or transfers the sole mutable path to the matching
+   *       source-private pending producer.
    */
   Impl(DenseTensorDescriptor descriptor_in,
        std::optional<ImageFacet> image_facet_in, StridedLayout layout_in,
-       BufferHandle buffer_in, ValueRevisionId revision_in)
+       BufferHandle buffer_in, ReadyFence ready_fence_in,
+       ValueRevisionId revision_in)
       : descriptor(std::move(descriptor_in)),
         image_facet(std::move(image_facet_in)),
         layout(std::move(layout_in)),
         buffer(std::move(buffer_in)),
+        ready_fence(std::move(ready_fence_in)),
         revision(revision_in) {}
 };
 
@@ -702,6 +713,33 @@ struct ValueBuilder::Impl final {
         layout(std::move(layout_in)),
         buffer(std::move(buffer_in)),
         authority(std::move(authority_in)) {}
+};
+
+/**
+ * @brief Exclusive source-private producer implementation for a pending Value.
+ *
+ * @note The BufferHandle remains mutable only while access_active is true.
+ *       Terminal publication clears that handle before resolving completer.
+ */
+struct PendingValueProducer::Impl final {
+  /** @brief Private mutable allocation range bound to one pending Value. */
+  BufferHandle buffer;
+
+  /** @brief Unique capability that resolves the matching Value fence. */
+  FenceCompleter completer;
+
+  /** @brief True while producer pointer access remains valid. */
+  bool access_active = true;
+
+  /**
+   * @brief Stores one validated private producer capability.
+   *
+   * @param buffer_in Complete pending Value allocation range.
+   * @param completer_in Matching unique fence completer.
+   * @throws Nothing.
+   */
+  Impl(BufferHandle buffer_in, FenceCompleter completer_in) noexcept
+      : buffer(std::move(buffer_in)), completer(std::move(completer_in)) {}
 };
 
 /** @copydoc ps::dense_tensor_element_bytes */
@@ -793,7 +831,7 @@ Value ValueBuilder::seal() {
       process_identity_authority().mint_value_revision());
   auto published = std::make_shared<const Value::Impl>(
       impl_->descriptor, impl_->image_facet, impl_->layout, impl_->buffer,
-      revision);
+      ReadyFence::already_ready(), revision);
 
   impl_->authority->builder_open.store(false, std::memory_order_release);
   impl_->sealed = true;
@@ -803,6 +841,128 @@ Value ValueBuilder::seal() {
 /** @copydoc ValueBuilder::sealed */
 bool ValueBuilder::sealed() const noexcept {
   return impl_ != nullptr && impl_->sealed;
+}
+
+/** @copydoc PendingValueProducer::PendingValueProducer */
+PendingValueProducer::PendingValueProducer(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+/** @copydoc PendingValueProducer::PendingValueProducer */
+PendingValueProducer::PendingValueProducer(
+    PendingValueProducer&& other) noexcept =
+    default;  // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc PendingValueProducer::operator= */
+PendingValueProducer& PendingValueProducer::operator=(
+    PendingValueProducer&& other) noexcept {
+  if (this != &other) {
+    cancel();
+    impl_ = std::move(other.impl_);
+  }
+  return *this;
+}
+
+/** @copydoc PendingValueProducer::~PendingValueProducer */
+PendingValueProducer::~PendingValueProducer() noexcept {
+  cancel();
+}
+
+/** @copydoc PendingValueProducer::valid */
+bool PendingValueProducer::valid() const noexcept {
+  return impl_ != nullptr && impl_->completer.valid();
+}
+
+/** @copydoc PendingValueProducer::data */
+std::byte* PendingValueProducer::data() const {
+  if (!impl_ || !impl_->access_active || !impl_->buffer.valid()) {
+    throw std::logic_error(
+        "PendingValueProducer has no active write capability.");
+  }
+  return impl_->buffer.write_pointer();
+}
+
+/** @copydoc PendingValueProducer::size */
+std::size_t PendingValueProducer::size() const {
+  if (!impl_ || !impl_->access_active || !impl_->buffer.valid()) {
+    throw std::logic_error(
+        "PendingValueProducer has no active write capability.");
+  }
+  return impl_->buffer.size();
+}
+
+/** @copydoc PendingValueProducer::revoke_access */
+void PendingValueProducer::revoke_access() noexcept {
+  if (impl_) {
+    impl_->access_active = false;
+    impl_->buffer = BufferHandle{};
+  }
+}
+
+/** @copydoc PendingValueProducer::complete_ready */
+bool PendingValueProducer::complete_ready() noexcept {
+  if (!impl_) {
+    return false;
+  }
+  revoke_access();
+  const bool published = impl_->completer.complete_ready();
+  impl_.reset();
+  return published;
+}
+
+/** @copydoc PendingValueProducer::complete_failed */
+bool PendingValueProducer::complete_failed(ReadyFenceFailure failure) {
+  if (!impl_) {
+    return false;
+  }
+  revoke_access();
+  const bool published = impl_->completer.complete_failed(std::move(failure));
+  impl_.reset();
+  return published;
+}
+
+/** @copydoc PendingValueProducer::cancel */
+bool PendingValueProducer::cancel() noexcept {
+  if (!impl_) {
+    return false;
+  }
+  revoke_access();
+  const bool published = impl_->completer.cancel();
+  impl_.reset();
+  return published;
+}
+
+/** @copydoc PendingValuePublisher::allocate_cpu_dense_tensor */
+PendingValuePublication PendingValuePublisher::allocate_cpu_dense_tensor(
+    DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
+    StridedLayout layout, std::size_t storage_size) {
+  ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
+      std::move(descriptor), std::move(image_facet), std::move(layout),
+      storage_size);
+  if (!builder.impl_ || builder.impl_->sealed ||
+      !builder.impl_->authority->builder_open.load(std::memory_order_acquire)) {
+    throw std::logic_error(
+        "Pending Value publication requires an open builder.");
+  }
+  if (builder.impl_->authority->lease_active.load(std::memory_order_acquire)) {
+    throw std::logic_error(
+        "Pending Value publication cannot retain an ordinary WriteLease.");
+  }
+
+  PendingReadyFence pending_fence = make_pending_ready_fence();
+  const ValueRevisionId revision(
+      process_identity_authority().mint_value_revision());
+  auto published = std::make_shared<const Value::Impl>(
+      builder.impl_->descriptor, builder.impl_->image_facet,
+      builder.impl_->layout, builder.impl_->buffer, pending_fence.fence,
+      revision);
+  auto producer = std::make_unique<PendingValueProducer::Impl>(
+      builder.impl_->buffer, std::move(pending_fence.completer));
+
+  builder.impl_->authority->builder_open.store(false,
+                                               std::memory_order_release);
+  builder.impl_->sealed = true;
+  return {Value(std::move(published)),
+          PendingValueProducer(std::move(producer))};
 }
 
 /** @copydoc Value::Value */
@@ -848,7 +1008,8 @@ Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
   StridedLayout isolated_layout = layout;
   return Value(std::make_shared<const Impl>(
       std::move(isolated_descriptor), isolated_image_facet,
-      std::move(isolated_layout), std::move(buffer), revision));
+      std::move(isolated_layout), std::move(buffer),
+      ReadyFence::already_ready(), revision));
 }
 
 /** @copydoc Value::valid */
@@ -888,17 +1049,32 @@ std::size_t Value::storage_size() const {
   return impl_->buffer.size();
 }
 
+/** @copydoc Value::ready_fence */
+ReadyFence Value::ready_fence() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no ReadyFence.");
+  }
+  return impl_->ready_fence;
+}
+
 /** @copydoc Value::buffer_handle */
 const BufferHandle& Value::buffer_handle() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no BufferHandle.");
+  }
+  const ReadyFenceSnapshot snapshot = impl_->ready_fence.poll();
+  if (!snapshot.ready()) {
+    throw ReadyFenceAccessError(snapshot);
   }
   return impl_->buffer;
 }
 
 /** @copydoc Value::allocation_identity */
 AllocationIdentity Value::allocation_identity() const {
-  return buffer_handle().allocation_identity();
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no allocation identity.");
+  }
+  return impl_->buffer.allocation_identity();
 }
 
 /** @copydoc Value::revision_id */

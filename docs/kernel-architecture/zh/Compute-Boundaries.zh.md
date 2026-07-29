@@ -134,6 +134,15 @@ HP compute-service、result-committer、dirty-write 与 disk-load boundary 会�
 callback-free implementation identity/metadata route，并要求 provider entry 前重新解析且精确
 identity 相同。
 
+V-6 新增一个有界、source-private 的 physical task，但不会把 transfer node 插入 graph
+planning 或 `ComputeRun`。`ValueTransferTask` 会准备一个独立 pending CPU Value，并向借用的
+executor 注册一次异步 source-ReadyFence wait。只有 queued callback 才会取得 source payload
+access、复制已验证的 envelope、退役 destination producer access 并发布 terminal state。
+Fence 与 task 都不拥有 worker、queue、route、ledger grant 或 device identity。确定性的 fake
+executor 归测试所有；#84 负责真实 physical-device executor registration，#85 负责通用 access
+planning、residency、visibility、bidirectional transfer 与 stale-completion commit
+arbitration。
+
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
 scratch demand 按最大 callback 并发数相乘；该并发数是固定 worker 数、逻辑 task 数与 Run 可选
@@ -483,7 +492,7 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #82 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #83 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源以及精确 implementation/key gate。
 Sequential provider entry 通过 direct lease 使用同一 ledger 与 gate。Graph 只保留复制的 route
@@ -501,6 +510,7 @@ cancellation entry point 仍是未来行为。
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
@@ -522,6 +532,7 @@ cancellation entry point 仍是未来行为。
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`

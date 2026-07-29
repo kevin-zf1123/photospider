@@ -3,15 +3,17 @@
 ## Status
 
 Accepted as the target contract for Project 4 generic data and heterogeneous
-execution. The source tree now implements the bounded V-2 through V-4 subset:
+execution. The source tree now implements bounded V-2 through V-6 slices:
 CPU DenseTensor/ImageView values, checked BufferHandle ownership and runtime
 identity, and the public Region MVP used by dirty planning, validity, and the
-core dense operation. `ImageBuffer`, `DataType`, `Device`, `ParameterMap`, and
-operation plugin ABI v2 remain compatibility contracts at their role-specific
-edges; the unimplemented portions of this ADR remain evolution targets.
+core dense operation; V-5 operation-metadata routing and the bounded V-6
+ReadyFence, pending CPU Value, and explicit fake-device Value-copy proof are
+also current. `ImageBuffer`, `DataType`, `Device`, `ParameterMap`, and operation
+plugin ABI v2 remain compatibility contracts at their role-specific edges; the
+unimplemented portions of this ADR remain evolution targets.
 
-Issue #78 ratified this contract. Issues #79 through #81 delivered the bounded
-V-2 through V-4 implementation slices; issues #82 through #90 remain separate
+Issue #78 ratified this contract. Issues #79 through #83 delivered the bounded
+V-2 through V-6 implementation slices; issues #84 through #90 remain separate
 implementation slices. A synthetic
 `VariableSampleField` proof and an optional OpenEXR Deep provider remain
 separate later changes; neither is implemented by this decision.
@@ -306,6 +308,14 @@ payload-visible access. After Ready, consumer reads still require the selected
 `AccessPlan` to discharge its visibility obligations before issuing the
 `ReadLease`. Fences, pending waits, access scopes, private producer
 capabilities, and native owners retain the defining provider-generation lease.
+
+The implemented V-6 subset realizes the fence state machine, executor-enqueued
+waits, Value read gating, and a source-private pending CPU producer. Its
+source-private `ValueTransferTask` copies one validated CPU envelope only after
+source readiness and publishes a distinct destination. This proof has no
+`DeviceId`, device registry, native queue, general `AccessPlan`, residency
+replica, or stale-completion arbitration: #84 owns real executor registration,
+and #85 owns those general access and transfer semantics.
 
 A `ComputeRun` retains request-local immutable Values and their authoritative
 bindings. Settlement accounts for every output's terminal fence state,

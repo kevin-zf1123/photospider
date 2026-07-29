@@ -25,7 +25,9 @@
 #include "compute/node_executor.hpp"
 #include "core/cpu_dense_image_operation.hpp"
 #include "core/ops.hpp"
+#include "core/pending_value.hpp"
 #include "core/value_image_adapter.hpp"
+#include "execution/value_transfer_task.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
@@ -58,6 +60,22 @@ static_assert(std::is_nothrow_move_constructible_v<WriteLease>);
 static_assert(std::is_nothrow_move_assignable_v<WriteLease>);
 static_assert(!std::is_copy_constructible_v<ValueBuilder>);
 static_assert(std::is_nothrow_move_constructible_v<ValueBuilder>);
+static_assert(std::is_nothrow_copy_constructible_v<ReadyFence>);
+static_assert(std::is_nothrow_copy_assignable_v<ReadyFence>);
+static_assert(!std::is_copy_constructible_v<FenceCompleter>);
+static_assert(!std::is_copy_assignable_v<FenceCompleter>);
+static_assert(std::is_nothrow_move_constructible_v<FenceCompleter>);
+static_assert(std::is_nothrow_move_assignable_v<FenceCompleter>);
+static_assert(!std::is_copy_constructible_v<ReadyFenceWaitRegistration>);
+static_assert(std::is_nothrow_move_constructible_v<ReadyFenceWaitRegistration>);
+static_assert(std::is_nothrow_move_assignable_v<ReadyFenceWaitRegistration>);
+static_assert(!std::is_copy_constructible_v<PendingValueProducer>);
+static_assert(!std::is_copy_assignable_v<PendingValueProducer>);
+static_assert(std::is_nothrow_move_constructible_v<PendingValueProducer>);
+static_assert(std::is_nothrow_move_assignable_v<PendingValueProducer>);
+static_assert(!std::is_copy_constructible_v<ValueTransferTask>);
+static_assert(std::is_nothrow_move_constructible_v<ValueTransferTask>);
+static_assert(std::is_nothrow_move_assignable_v<ValueTransferTask>);
 
 /**
  * @brief Creates one valid padded unsigned-8 HWC Value for test inspection.
@@ -259,6 +277,449 @@ class ScopedTestDirectory final {
   /** @brief Unique temporary directory removed at destruction. */
   std::filesystem::path path_;
 };
+
+/**
+ * @brief Deterministic dependency-neutral executor that models a fake device.
+ *
+ * Submission appends callbacks to an owned FIFO and never executes inline.
+ * Tests explicitly run one callback at a time, including callbacks enqueued by
+ * a currently running transfer completion.
+ *
+ * @throws std::bad_alloc when construction cannot reserve the bounded queue.
+ * @note This fixture owns no thread, timer, native backend, or device handle.
+ *       Tests externally serialize submission and callback execution.
+ */
+class FakeDeviceExecutor final : public ReadyFenceExecutor {
+ public:
+  /**
+   * @brief Reserves the complete bounded callback queue used by these tests.
+   *
+   * @throws std::bad_alloc when reservation fails.
+   */
+  FakeDeviceExecutor() { tasks_.reserve(kMaximumTasks); }
+
+  /**
+   * @brief Appends one callback without running it inline.
+   *
+   * @param task Nonempty callback transferred from ReadyFence.
+   * @return Nothing.
+   * @throws Nothing; invalid or over-capacity admission terminates the test
+   *         process instead of violating the executor contract.
+   */
+  void submit(Task task) noexcept override {
+    if (!task || tasks_.size() >= tasks_.capacity()) {
+      std::terminate();
+    }
+    try {
+      tasks_.push_back(std::move(task));
+      ++submitted_count_;
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Returns the number of callbacks waiting in the FIFO.
+   *
+   * @return Current unexecuted callback count.
+   * @throws Nothing.
+   */
+  std::size_t pending_count() const noexcept {
+    return tasks_.size() - next_task_;
+  }
+
+  /**
+   * @brief Returns total successful callback admissions.
+   *
+   * @return Monotonic submission count.
+   * @throws Nothing.
+   */
+  std::size_t submitted_count() const noexcept { return submitted_count_; }
+
+  /**
+   * @brief Executes and removes the oldest queued callback.
+   *
+   * @return Nothing.
+   * @throws std::logic_error when no callback is pending.
+   * @throws Any callback exception unchanged for GoogleTest diagnostics.
+   * @note A callback may append later work without invalidating the moved local
+   *       task.
+   */
+  void run_next() {
+    if (pending_count() == 0U) {
+      throw std::logic_error("FakeDeviceExecutor has no queued callback.");
+    }
+    Task task = std::move(tasks_[next_task_]);
+    ++next_task_;
+    task();
+  }
+
+ private:
+  /** @brief Bounded admission capacity sufficient for every focused test. */
+  static constexpr std::size_t kMaximumTasks = 32U;
+
+  /** @brief FIFO storage whose capacity never changes after construction. */
+  std::vector<Task> tasks_;
+
+  /** @brief Index of the next callback to execute. */
+  std::size_t next_task_ = 0U;
+
+  /** @brief Total callbacks admitted over this executor lifetime. */
+  std::size_t submitted_count_ = 0U;
+};
+
+/**
+ * @brief Probes callback-capture destruction by polling the observed fence.
+ *
+ * @throws Nothing during construction and destruction under the retained valid
+ * fence invariant.
+ * @note The destructor is used to prove cancellation releases callback-owned
+ *       objects after the internal fence mutex is unlocked.
+ */
+class FencePollingLifetimeProbe final {
+ public:
+  /**
+   * @brief Retains one valid fence and the destination for its final state.
+   *
+   * @param fence Fence that capture destruction will poll.
+   * @param observed_state Test-owned state slot that outlives this probe.
+   * @throws Nothing.
+   */
+  FencePollingLifetimeProbe(
+      ReadyFence fence, std::optional<ReadyFenceState>* observed_state) noexcept
+      : fence_(std::move(fence)), observed_state_(observed_state) {}
+
+  /**
+   * @brief Polls the fence while releasing callback-owned probe lifetime.
+   *
+   * @throws Nothing under the valid-fence and live-output invariants.
+   */
+  ~FencePollingLifetimeProbe() noexcept {
+    *observed_state_ = fence_.poll().state();
+  }
+
+ private:
+  /** @brief Valid observer retained until callback capture destruction. */
+  ReadyFence fence_;
+
+  /** @brief Test-owned output that outlives this probe. */
+  std::optional<ReadyFenceState>* observed_state_ = nullptr;
+};
+
+/**
+ * @brief Proves fence waits queue asynchronously and cancellation is local.
+ *
+ * @return Nothing; GoogleTest reports state, admission, or callback failures.
+ * @throws Allocation or fence-registration exceptions unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ReadyFenceQueuesWaitsAndCancellationIsObserverLocal) {
+  PendingReadyFence pending = make_pending_ready_fence();
+  const ReadyFence copied_observer = pending.fence;
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+  std::optional<ReadyFenceSnapshot> delivered;
+  std::optional<ReadyFenceState> capture_release_state;
+  int cancelled_callback_count = 0;
+
+  ReadyFenceWaitRegistration delivered_wait = pending.fence.async_wait(
+      executor, [&delivered](ReadyFenceSnapshot snapshot) {
+        delivered = std::move(snapshot);
+      });
+  auto lifetime_probe = std::make_shared<FencePollingLifetimeProbe>(
+      pending.fence, &capture_release_state);
+  ReadyFenceWaitRegistration cancelled_wait = pending.fence.async_wait(
+      executor,
+      [lifetime_probe, &cancelled_callback_count](ReadyFenceSnapshot snapshot) {
+        (void)snapshot;
+        ++cancelled_callback_count;
+      });
+  lifetime_probe.reset();
+  EXPECT_TRUE(delivered_wait.active());
+  EXPECT_TRUE(cancelled_wait.cancel());
+  EXPECT_FALSE(cancelled_wait.active());
+  ASSERT_TRUE(capture_release_state.has_value());
+  EXPECT_EQ(*capture_release_state, ReadyFenceState::Pending);
+  EXPECT_EQ(executor->pending_count(), 0U);
+  EXPECT_EQ(copied_observer.poll().state(), ReadyFenceState::Pending);
+
+  EXPECT_TRUE(pending.completer.complete_ready());
+  EXPECT_FALSE(pending.completer.complete_ready());
+  EXPECT_EQ(copied_observer.poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(executor->pending_count(), 1U);
+  EXPECT_FALSE(delivered.has_value());
+
+  executor->run_next();
+  ASSERT_TRUE(delivered.has_value());
+  EXPECT_EQ(delivered->state(), ReadyFenceState::Ready);
+  EXPECT_FALSE(delivered_wait.active());
+  EXPECT_EQ(cancelled_callback_count, 0);
+}
+
+/**
+ * @brief Proves typed failure and dropped completer terminal semantics.
+ *
+ * @return Nothing; GoogleTest reports state or diagnostic retention failures.
+ * @throws Allocation exceptions from fence/failure construction unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ReadyFenceRetainsFailureAndDroppedCompleterPublishesCancellation) {
+  ReadyFence cancelled_observer;
+  {
+    PendingReadyFence pending = make_pending_ready_fence();
+    cancelled_observer = pending.fence;
+  }
+  EXPECT_EQ(cancelled_observer.poll().state(),
+            ReadyFenceState::ProducerCancelled);
+
+  PendingReadyFence failed = make_pending_ready_fence();
+  const ReadyFence failed_copy = failed.fence;
+  EXPECT_TRUE(failed.completer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Transfer, 37, "fake transfer rejected")));
+  const ReadyFenceSnapshot snapshot = failed_copy.poll();
+  ASSERT_EQ(snapshot.state(), ReadyFenceState::Failed);
+  ASSERT_NE(snapshot.failure(), nullptr);
+  EXPECT_EQ(snapshot.failure()->domain(), ReadyFenceFailureDomain::Transfer);
+  EXPECT_EQ(snapshot.failure()->code(), 37);
+  EXPECT_EQ(snapshot.failure()->message(), "fake transfer rejected");
+}
+
+/**
+ * @brief Proves a private pending producer gates payload and revokes before
+ * Ready.
+ *
+ * @return Nothing; GoogleTest reports metadata, access, or byte ordering
+ * failures.
+ * @throws Value, allocation, or fence exceptions unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     PendingProducerMakesPayloadReadableOnlyAfterReady) {
+  DenseTensorDescriptor descriptor{{4U},
+                                   ElementSemantics::UnsignedInteger,
+                                   StorageEncoding{8U}};
+  PendingValuePublication publication =
+      PendingValuePublisher::allocate_cpu_dense_tensor(descriptor, std::nullopt,
+                                                       StridedLayout{{1}}, 4U);
+  const Value pending_value = publication.value;
+  ASSERT_EQ(pending_value.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(pending_value.dense_tensor_descriptor(), descriptor);
+  EXPECT_EQ(pending_value.storage_size(), 4U);
+  EXPECT_TRUE(pending_value.allocation_identity().valid());
+  EXPECT_TRUE(pending_value.revision_id().valid());
+  EXPECT_THROW((void)pending_value.buffer_handle(), ReadyFenceAccessError);
+  EXPECT_THROW((void)DenseTensorView(pending_value), ReadyFenceAccessError);
+
+  publication.producer.data()[0] = std::byte{11U};
+  publication.producer.data()[1] = std::byte{22U};
+  publication.producer.data()[2] = std::byte{33U};
+  publication.producer.data()[3] = std::byte{44U};
+  EXPECT_TRUE(publication.producer.complete_ready());
+  EXPECT_FALSE(publication.producer.valid());
+  EXPECT_EQ(pending_value.ready_fence().poll().state(), ReadyFenceState::Ready);
+  const DenseTensorView view(pending_value);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.element_data({0U})), 11U);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(*view.element_data({3U})), 44U);
+}
+
+/**
+ * @brief Proves a Failed pending Value retains metadata and denies reads.
+ *
+ * @return Nothing; GoogleTest reports failure propagation or read-gate errors.
+ * @throws Value, allocation, or fence exceptions unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     FailedPendingValueRetainsMetadataAndRejectsPayloadAccess) {
+  PendingValuePublication publication =
+      PendingValuePublisher::allocate_cpu_dense_tensor(
+          DenseTensorDescriptor{{2U},
+                                ElementSemantics::UnsignedInteger,
+                                StorageEncoding{8U}},
+          std::nullopt, StridedLayout{{1}}, 2U);
+  const Value failed_value = publication.value;
+  EXPECT_TRUE(publication.producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Producer, 9, "producer failed")));
+  const ReadyFenceSnapshot snapshot = failed_value.ready_fence().poll();
+  ASSERT_EQ(snapshot.state(), ReadyFenceState::Failed);
+  ASSERT_NE(snapshot.failure(), nullptr);
+  EXPECT_EQ(snapshot.failure()->code(), 9);
+  EXPECT_EQ(failed_value.storage_size(), 2U);
+  EXPECT_TRUE(failed_value.allocation_identity().valid());
+  try {
+    (void)failed_value.buffer_handle();
+    FAIL() << "Failed Value must not expose its BufferHandle";
+  } catch (const ReadyFenceAccessError& error) {
+    EXPECT_EQ(error.snapshot().state(), ReadyFenceState::Failed);
+    ASSERT_NE(error.snapshot().failure(), nullptr);
+    EXPECT_EQ(error.snapshot().failure()->message(), "producer failed");
+  }
+  EXPECT_THROW((void)DenseTensorView(failed_value), ReadyFenceAccessError);
+}
+
+/**
+ * @brief Proves explicit fake-device task execution gates transfer readability.
+ *
+ * @return Nothing; GoogleTest reports implicit copy, identity, fence, or byte
+ * failures.
+ * @throws Value, transfer, allocation, or fake-executor exceptions unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ExplicitTransferRunsOnlyAsQueuedFakeDeviceTask) {
+  const Value source = make_unsigned8_value(3U, 2U, 2U, 8U);
+  ValueTransferTask transfer = ValueTransferTask::prepare_cpu_copy(source);
+  const Value destination = transfer.destination();
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+
+  EXPECT_NE(destination.allocation_identity(), source.allocation_identity());
+  EXPECT_NE(destination.revision_id(), source.revision_id());
+  EXPECT_EQ(destination.dense_tensor_descriptor(),
+            source.dense_tensor_descriptor());
+  EXPECT_EQ(destination.strided_layout().byte_strides,
+            source.strided_layout().byte_strides);
+  EXPECT_EQ(destination.ready_fence().poll().state(), ReadyFenceState::Pending);
+  EXPECT_EQ(executor->submitted_count(), 0U);
+  EXPECT_THROW((void)ImageView(destination), ReadyFenceAccessError);
+
+  transfer.enqueue(executor);
+  EXPECT_TRUE(transfer.enqueued());
+  EXPECT_EQ(executor->submitted_count(), 1U);
+  EXPECT_EQ(executor->pending_count(), 1U);
+  EXPECT_EQ(destination.ready_fence().poll().state(), ReadyFenceState::Pending);
+
+  executor->run_next();
+  EXPECT_EQ(destination.ready_fence().poll().state(), ReadyFenceState::Ready);
+  const ReadLease source_read = source.buffer_handle().acquire_read();
+  const ReadLease destination_read = destination.buffer_handle().acquire_read();
+  ASSERT_EQ(destination_read.size(), source_read.size());
+  EXPECT_EQ(std::memcmp(destination_read.data(), source_read.data(),
+                        source_read.size()),
+            0);
+}
+
+/**
+ * @brief Proves chained source readiness releases distinct later transfer work.
+ *
+ * @return Nothing; GoogleTest reports blocking, inline execution, or ordering
+ * failures.
+ * @throws Value, transfer, allocation, or fake-executor exceptions unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ChainedTransferReadinessQueuesDistinctLaterTaskWithoutBlocking) {
+  const Value source = make_unsigned8_value(2U, 2U, 1U, 3U);
+  ValueTransferTask first = ValueTransferTask::prepare_cpu_copy(source);
+  const Value first_destination = first.destination();
+  ValueTransferTask second =
+      ValueTransferTask::prepare_cpu_copy(first_destination);
+  const Value second_destination = second.destination();
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+
+  second.enqueue(executor);
+  EXPECT_EQ(executor->pending_count(), 0U);
+  first.enqueue(executor);
+  EXPECT_EQ(executor->pending_count(), 1U);
+
+  executor->run_next();
+  EXPECT_EQ(first_destination.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(second_destination.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(executor->pending_count(), 1U);
+  EXPECT_THROW((void)DenseTensorView(second_destination),
+               ReadyFenceAccessError);
+
+  executor->run_next();
+  EXPECT_EQ(second_destination.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  const DenseTensorView source_view(source);
+  const DenseTensorView second_view(second_destination);
+  EXPECT_EQ(std::memcmp(source_view.data(), second_view.data(),
+                        source.storage_size()),
+            0);
+}
+
+/**
+ * @brief Proves destroying queued transfer ownership cancels only destination.
+ *
+ * @return Nothing; GoogleTest reports cancellation scope or queued-callback
+ * failures.
+ * @throws Value, transfer, allocation, or fake-executor exceptions unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     DestroyedTransferCancelsDestinationAndQueuedCallbackBecomesNoOp) {
+  const Value source = make_unsigned8_value(2U, 1U, 1U, 2U);
+  const ReadyFence source_fence = source.ready_fence();
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+  Value abandoned_destination;
+  {
+    ValueTransferTask transfer = ValueTransferTask::prepare_cpu_copy(source);
+    abandoned_destination = transfer.destination();
+    transfer.enqueue(executor);
+    ASSERT_EQ(executor->pending_count(), 1U);
+  }
+
+  EXPECT_EQ(abandoned_destination.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
+  EXPECT_EQ(source_fence.poll().state(), ReadyFenceState::Ready);
+  EXPECT_THROW((void)DenseTensorView(abandoned_destination),
+               ReadyFenceAccessError);
+  executor->run_next();
+  EXPECT_EQ(source_fence.poll().state(), ReadyFenceState::Ready);
+  EXPECT_EQ(executor->pending_count(), 0U);
+}
+
+/**
+ * @brief Proves failed and cancelled sources settle transfers without reads.
+ *
+ * @return Nothing; GoogleTest reports propagation, admission, or read-gate
+ * failures.
+ * @throws Value, transfer, allocation, or fake-executor exceptions unchanged.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TransferPropagatesFailedAndCancelledSourcesWithoutPayloadAccess) {
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+
+  PendingValuePublication failed_source =
+      PendingValuePublisher::allocate_cpu_dense_tensor(
+          DenseTensorDescriptor{{2U},
+                                ElementSemantics::UnsignedInteger,
+                                StorageEncoding{8U}},
+          std::nullopt, StridedLayout{{1}}, 2U);
+  ValueTransferTask failed_transfer =
+      ValueTransferTask::prepare_cpu_copy(failed_source.value);
+  const Value failed_destination = failed_transfer.destination();
+  failed_transfer.enqueue(executor);
+  EXPECT_EQ(executor->pending_count(), 0U);
+  EXPECT_TRUE(failed_source.producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Producer, 73, "source producer failed")));
+  ASSERT_EQ(executor->pending_count(), 1U);
+  executor->run_next();
+  const ReadyFenceSnapshot failed_snapshot =
+      failed_destination.ready_fence().poll();
+  ASSERT_EQ(failed_snapshot.state(), ReadyFenceState::Failed);
+  ASSERT_NE(failed_snapshot.failure(), nullptr);
+  EXPECT_EQ(failed_snapshot.failure()->domain(),
+            ReadyFenceFailureDomain::Producer);
+  EXPECT_EQ(failed_snapshot.failure()->code(), 73);
+  EXPECT_THROW((void)failed_destination.buffer_handle(), ReadyFenceAccessError);
+
+  PendingValuePublication cancelled_source =
+      PendingValuePublisher::allocate_cpu_dense_tensor(
+          DenseTensorDescriptor{{1U},
+                                ElementSemantics::UnsignedInteger,
+                                StorageEncoding{8U}},
+          std::nullopt, StridedLayout{{1}}, 1U);
+  ValueTransferTask cancelled_transfer =
+      ValueTransferTask::prepare_cpu_copy(cancelled_source.value);
+  const Value cancelled_destination = cancelled_transfer.destination();
+  cancelled_transfer.enqueue(executor);
+  EXPECT_EQ(executor->pending_count(), 0U);
+  EXPECT_TRUE(cancelled_source.producer.cancel());
+  ASSERT_EQ(executor->pending_count(), 1U);
+  executor->run_next();
+  EXPECT_EQ(cancelled_destination.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
+  EXPECT_THROW((void)DenseTensorView(cancelled_destination),
+               ReadyFenceAccessError);
+}
 
 TEST(CpuDenseTensorImageOperation,
      ValueRejectsMalformedFacetStrideAndEnvelope) {

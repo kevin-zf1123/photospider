@@ -252,7 +252,7 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
-### Implemented V-3/V-4 relationship and remaining target
+### Implemented V-3/V-4/V-6 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -285,8 +285,16 @@ later slices migrate them. Within a formal CPU image cache entry that carries
 both forms, the valid sealed Value—not the mutable compatibility snapshot—is
 the allocation/revision identity authority.
 
-V-4 still does not implement quantization, device identity, readiness,
-transfer, provider ABI v3, or general named graph Value outputs.
+V-6 adds `ReadyFence` to Value without changing `ImageBuffer`. Synchronous CPU
+Values start Ready; a pending Value retains immutable metadata but
+`buffer_handle()` and checked views reject payload access until Ready. The
+source-private producer retires its mutable capability before every terminal
+state, and the source-private transfer task copies a distinct CPU allocation
+only as executor-queued work.
+
+V-6 still does not implement quantization, device identity or registry, general
+access/visibility planning, residency, bidirectional device transfer, stale
+completion arbitration, provider ABI v3, or general named graph Value outputs.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
@@ -301,13 +309,16 @@ operation ABI.
 
 - `include/photospider/core/image_buffer.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
+- `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`

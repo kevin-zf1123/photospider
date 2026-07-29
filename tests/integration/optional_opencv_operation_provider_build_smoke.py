@@ -241,6 +241,38 @@ def validate_provider_disabled_inventory(
     dense_image_tests = {
         (
             "CpuDenseTensorImageOperation."
+            "ReadyFenceQueuesWaitsAndCancellationIsObserverLocal"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ReadyFenceRetainsFailureAndDroppedCompleterPublishesCancellation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "PendingProducerMakesPayloadReadableOnlyAfterReady"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "FailedPendingValueRetainsMetadataAndRejectsPayloadAccess"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ExplicitTransferRunsOnlyAsQueuedFakeDeviceTask"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ChainedTransferReadinessQueuesDistinctLaterTaskWithoutBlocking"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "DestroyedTransferCancelsDestinationAndQueuedCallbackBecomesNoOp"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TransferPropagatesFailedAndCancelledSourcesWithoutPayloadAccess"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "ValueRejectsMalformedFacetStrideAndEnvelope"
         ),
         (

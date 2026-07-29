@@ -159,6 +159,17 @@ callback slot or general planner inference. It does add a callback-free
 implementation identity/metadata route to planned work and requires exact
 identity re-resolution before provider entry.
 
+V-6 adds a bounded source-private physical task without inserting transfer
+nodes into graph planning or a `ComputeRun`. `ValueTransferTask` prepares a
+distinct pending CPU Value and registers one asynchronous source-ReadyFence
+wait with a borrowed executor. The queued callback alone acquires source
+payload access, copies the validated envelope, retires destination producer
+access, and publishes the terminal state. The fence and task own no worker,
+queue, route, ledger grant, or device identity. The deterministic fake executor
+is test-owned; #84 owns real physical-device executor registration, while #85
+owns general access planning, residency, visibility, bidirectional transfer,
+and stale-completion commit arbitration.
+
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
 retained storage is charged once. Uniform per-task retained and scratch demand
@@ -625,7 +636,7 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #82: all HP/RT ready work enters one Host-owned
+is authoritative through issue #83: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources plus exact implementation/key gates before a closed private
@@ -648,6 +659,7 @@ points remain future behavior.
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
 - `src/lib/compute/compute_supersession.*`
@@ -669,6 +681,7 @@ points remain future behavior.
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`
 - `src/lib/providers/opencv/*`

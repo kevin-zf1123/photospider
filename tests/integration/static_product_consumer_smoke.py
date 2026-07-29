@@ -1856,11 +1856,13 @@ def write_extension_consumer_projects(
             #include <photospider/data/region.hpp>
             #include <photospider/data/value.hpp>
             #include <photospider/memory/buffer_handle.hpp>
+            #include <photospider/memory/ready_fence.hpp>
 
             /**
-             * @brief Calls SDK-transitive image and V-3 memory/Value symbols.
+             * @brief Calls SDK-transitive image and V-6 memory/Value symbols.
              * @return Zero only when builder writes, sealed lease reads,
-             *         runtime identities, and image dimensions are valid.
+             *         runtime identities, readiness, and image dimensions are
+             *         valid.
              * @throws std::bad_alloc or validation exceptions terminate the smoke
              *         process because the executable intentionally has no recovery
              *         path.
@@ -1907,7 +1909,10 @@ def write_extension_consumer_projects(
                   read.valid() && read.size() == storage.size() &&
                   read.allocation_identity() ==
                       value.allocation_identity() &&
-                  value.revision_id().valid() && view.width() == 3U &&
+                  value.revision_id().valid() &&
+                  value.ready_fence().poll().state() ==
+                      ps::ReadyFenceState::Ready &&
+                  view.width() == 3U &&
                   view.height() == 2U &&
                   view.channels() == 1U &&
                   std::to_integer<unsigned int>(
@@ -3079,8 +3084,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
-        "installed public header inventory is exactly 26 files": len(install["headers"])
-        == 26,
+        "installed public header inventory is exactly 27 files": len(install["headers"])
+        == 27,
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],

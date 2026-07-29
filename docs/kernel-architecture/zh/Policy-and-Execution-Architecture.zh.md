@@ -214,6 +214,13 @@ authority 或 per-Graph executor。
 完整 HP、dirty HP/RT、连通性预检、初始就绪工作和依赖释放工作，都会进入同一套
 就绪存储、策略、预留后启动、私有路由及 Run 租约完成路径。
 
+V-6 不新增 configured execution route，也不新增第二套 ready store。
+`ReadyFence::async_wait` 会借用一个注入的 executor；该 executor 必须入队，而不能 inline
+调用。Fence state 与 source-private `ValueTransferTask` 都不拥有 worker 或 queue。仓库 fake
+executor 只是确定性的测试机制。#84 将注册 process-owned physical device executor；#85 将新增
+通用 access/residency/visibility transfer planning，同时不会把这些 owner 移入 Value 或 policy
+state。
+
 ## Host、CLI 与 IPC 接口面
 
 公共 Host 有八个策略操作和六个执行操作。其最终非析构虚函数数量为 58。
@@ -270,6 +277,8 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `src/lib/compute/run_lifecycle_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` 和 `.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `include/photospider/memory/ready_fence.hpp`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/runtime/graph_runtime.hpp` 和 `.mm`
 - `src/lib/runtime/kernel_execution_facade.cpp`
 - `include/photospider/host/host.hpp`

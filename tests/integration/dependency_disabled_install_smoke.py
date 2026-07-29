@@ -258,9 +258,9 @@ def write_consumer(source: Path) -> None:
     @param source Source directory created for the consumer.
     @return None.
     @throws OSError If source files cannot be written.
-    @note The executable verifies neutral allocation, the extended operation
-      metadata layout, empty-session lifecycle, and explicit persistence
-      failure without any parser or image-library API.
+    @note The executable verifies neutral allocation, installed V-6 readiness,
+      the extended operation metadata layout, empty-session lifecycle, and
+      explicit persistence failure without any parser or image-library API.
     """
 
     source.mkdir(parents=True)
@@ -301,8 +301,17 @@ def write_consumer(source: Path) -> None:
                 "#include <photospider/data/value.hpp>",
                 "#include <photospider/host/host.hpp>",
                 "#include <photospider/memory/buffer_handle.hpp>",
+                "#include <photospider/memory/ready_fence.hpp>",
                 "#include <photospider/plugin/op_contract.hpp>",
                 "",
+                "/**",
+                " * @brief Exercises the dependency-disabled installed product.",
+                " * @param argc Process argument count.",
+                " * @param argv Process argument vector containing the work root.",
+                " * @return Zero only when every installed contract is coherent.",
+                " * @throws Nothing; uncaught smoke failures terminate the process.",
+                " * @note A sealed synchronous Value must expose a Ready fence.",
+                " */",
                 "int main(int argc, char** argv) {",
                 "  if (argc != 2) return 10;",
                 "  const std::filesystem::path root(argv[1]);",
@@ -364,7 +373,10 @@ def write_consumer(source: Path) -> None:
                 "  if (!read.valid() || read.size() != storage.size() ||",
                 "      read.allocation_identity() !=",
                 "          value.allocation_identity() ||",
-                "      !value.revision_id().valid() || view.width() != 3U ||",
+                "      !value.revision_id().valid() ||",
+                "      value.ready_fence().poll().state() !=",
+                "          ps::ReadyFenceState::Ready ||",
+                "      view.width() != 3U ||",
                 "      view.height() != 2U ||",
                 "      std::to_integer<unsigned int>(",
                 "          *view.channel_data(2U, 1U, 0U)) != 6U) {",

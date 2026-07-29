@@ -283,7 +283,7 @@ propagation.
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
 
-### Implemented V-3 ownership and V-4 Region surface
+### Implemented V-3 ownership, V-4 Region, and V-6 readiness surfaces
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete generic-value replacement. V-2 introduced the bounded CPU
@@ -332,8 +332,17 @@ tile rectangles are derived beside their source Region. The core dense invert
 path executes exact ImageRect or TensorSlice selections, while RT rejects
 TensorSlice and operation ABI v2 remains unchanged.
 
-`DataSpec`, device routing, readiness, transfer, quantization, provider ABI v3,
-and general named immutable Value outputs remain later no-shim slices.
+V-6 attaches an installed, copyable `ReadyFence` observer to every Value.
+Synchronous publications start Ready. A source-private pending producer keeps
+the only mutable CPU allocation capability, revokes it before Ready, Failed, or
+ProducerCancelled, and leaves descriptor/layout/size/identity metadata
+inspectable while payload access is rejected. The source-private physical
+`ValueTransferTask` allocates a distinct pending CPU destination and copies its
+validated envelope only from executor-queued work after source readiness.
+
+`DataSpec`, real device routing and identity, general `AccessPlan`, residency,
+bidirectional transfer and stale-completion arbitration, quantization, provider
+ABI v3, and general named immutable Value outputs remain later no-shim slices.
 `ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,
@@ -351,6 +360,7 @@ neither document changes the current fields described above.
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
+- `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
@@ -363,6 +373,7 @@ neither document changes the current fields described above.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
@@ -370,6 +381,7 @@ neither document changes the current fields described above.
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`
