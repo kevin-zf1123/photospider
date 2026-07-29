@@ -1807,7 +1807,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         tests/integration/test_compute_service_split.cpp
         photospider_internal_test_product)
     target_compile_definitions(test_compute_service_split PRIVATE
-        PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+        PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING
+        PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
     add_ps_test(test_stride_aware_compute_paths
         tests/integration/test_stride_aware_compute_paths.cpp)
     add_ps_test(test_node_editor_layout

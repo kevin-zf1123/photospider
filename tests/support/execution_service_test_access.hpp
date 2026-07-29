@@ -116,6 +116,53 @@ class ExecutionServiceTestAccess final {
   }
 
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+  /** @brief Test-product callback for one denied operation-gate start. */
+  using OperationAdmissionWaitObserver =
+      compute::testing::OperationAdmissionWaitObserver;
+
+  /**
+   * @brief Installs the operation-admission denial observer.
+   * @param service Isolated service used only to document test ownership.
+   * @param observer Allocation-free callback, or null to disable observation.
+   * @param context Opaque callback context, or null when disabling.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The observer must not call into service while its pool mutex is held.
+   */
+  static void set_operation_admission_wait_observer(
+      compute::ExecutionService& service,
+      OperationAdmissionWaitObserver observer, void* context) noexcept {
+    (void)service;
+    compute::testing::set_operation_admission_wait_observer_for_testing(
+        observer, context);
+  }
+
+  /**
+   * @brief Clears the operation-admission observer after observed work settles.
+   * @param service Isolated service whose test ownership is ending.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void clear_operation_admission_wait_observer(
+      compute::ExecutionService& service) noexcept {
+    (void)service;
+    compute::testing::clear_operation_admission_wait_observer_for_testing();
+  }
+
+  /**
+   * @brief Calculates the exact vector reserved by one direct operation lease.
+   * @param constraints Exact identity, cap, and key declaration.
+   * @param demand Declared retained/scratch demand and positive work units.
+   * @return Production CPU/retained/scratch vector with zero ready dimensions.
+   * @throws GraphError when checked retained-memory arithmetic overflows.
+   */
+  static ResourceVector estimate_direct_operation_resources(
+      const compute::OperationExecutionConstraints& constraints,
+      compute::ReadyTaskResourceDemand demand) {
+    return compute::testing::estimate_direct_operation_resources_for_testing(
+        constraints, demand);
+  }
+
   /**
    * @brief Arms the separate test-product reserved-start rollback probe.
    * @param service Isolated service used only to document test ownership.

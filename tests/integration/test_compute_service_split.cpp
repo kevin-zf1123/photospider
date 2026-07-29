@@ -51,6 +51,7 @@
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
+#include "support/execution_service_test_access.hpp"
 #include "support/fake_image_artifact_codec.hpp"
 #include "support/kernel_test_access.hpp"
 #include "support/kernel_test_dependencies.hpp"
@@ -473,8 +474,8 @@ class DirectDirtyProviderProbe final {
 /**
  * @brief Coordinates the sequential-provider and post-provider lease boundary.
  *
- * One sequential callback blocks inside provider entry while a second
- * route-backed callback targets the same exclusive key. After the test releases
+ * One sequential callback blocks inside provider entry while a second request
+ * reaches the same implementation/key admission gate. After the test releases
  * the sequential callback, the injected cache encoder blocks and ultimately
  * throws, providing a deterministic Host post-processing interval.
  *
@@ -518,7 +519,27 @@ class SequentialLeaseBoundaryProbe final {
         std::max(maximum_active_providers_, active_providers_);
     condition_.notify_all();
     --active_providers_;
+    route_provider_exited_ = true;
     condition_.notify_all();
+  }
+
+  /**
+   * @brief Publishes one test-product operation admission denial.
+   * @param context Non-null SequentialLeaseBoundaryProbe instance.
+   * @param implementation_identity Exact implementation rejected by the gate.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The service pool mutex is held, so this callback uses atomics plus
+   * condition-variable notification and never calls service code or locks the
+   * fixture mutex.
+   */
+  static void observe_operation_admission_wait(
+      void* context, std::uint64_t implementation_identity) noexcept {
+    auto* probe = static_cast<SequentialLeaseBoundaryProbe*>(context);
+    probe->waited_implementation_identity_.store(implementation_identity,
+                                                 std::memory_order_relaxed);
+    probe->operation_admission_waited_.store(true, std::memory_order_release);
+    probe->condition_.notify_all();
   }
 
   /**
@@ -565,6 +586,35 @@ class SequentialLeaseBoundaryProbe final {
   }
 
   /**
+   * @brief Waits until the contender reaches gate denial or enters erroneously.
+   * @param timeout Maximum bounded wait.
+   * @return True when either observable event occurs before the deadline.
+   * @throws std::system_error from locking or waiting.
+   * @note The disjunction makes a gate-disabled mutant fail immediately on
+   * provider entry instead of timing out while still proving correct execution
+   * reached the blocking admission point.
+   */
+  bool wait_for_admission_or_route_provider(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this] {
+      return operation_admission_waited_.load(std::memory_order_acquire) ||
+             route_provider_entered_;
+    });
+  }
+
+  /**
+   * @brief Waits for route-backed provider callback exit.
+   * @param timeout Maximum bounded wait.
+   * @return True after the provider interval ends before the deadline.
+   * @throws std::system_error from locking or waiting.
+   */
+  bool wait_for_route_provider_exit(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout,
+                               [this] { return route_provider_exited_; });
+  }
+
+  /**
    * @brief Waits for Host post-provider cache persistence.
    * @param timeout Maximum bounded wait.
    * @return True when the injected encoder entered before the deadline.
@@ -608,6 +658,34 @@ class SequentialLeaseBoundaryProbe final {
     return maximum_active_providers_;
   }
 
+  /**
+   * @brief Reports whether the test-product gate observer saw denial.
+   * @return True after one operation admission attempt was denied.
+   * @throws Nothing.
+   */
+  bool operation_admission_waited() const noexcept {
+    return operation_admission_waited_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns the exact implementation identity denied by the gate.
+   * @return Nonzero identity after operation_admission_waited() becomes true.
+   * @throws Nothing.
+   */
+  std::uint64_t waited_implementation_identity() const noexcept {
+    return waited_implementation_identity_.load(std::memory_order_relaxed);
+  }
+
+  /**
+   * @brief Reports whether the route-backed provider has entered.
+   * @return True after the route callback begins.
+   * @throws std::system_error from locking.
+   */
+  bool route_provider_entered() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return route_provider_entered_;
+  }
+
  private:
   /** @brief Serializes every transition and provider overlap counter. */
   mutable std::mutex mutex_;
@@ -619,6 +697,8 @@ class SequentialLeaseBoundaryProbe final {
   bool sequential_provider_released_ = false;
   /** @brief True after the route-backed provider enters. */
   bool route_provider_entered_ = false;
+  /** @brief True after the route-backed provider exits. */
+  bool route_provider_exited_ = false;
   /** @brief True while the injected cache encoder is waiting. */
   bool post_provider_cache_entered_ = false;
   /** @brief True after the owning test releases cache persistence. */
@@ -627,6 +707,58 @@ class SequentialLeaseBoundaryProbe final {
   int active_providers_ = 0;
   /** @brief Largest simultaneous provider-entry count. */
   int maximum_active_providers_ = 0;
+  /** @brief Whether a contender reached a denied operation admission check. */
+  std::atomic_bool operation_admission_waited_{false};
+  /** @brief Exact implementation identity observed at the denied gate. */
+  std::atomic<std::uint64_t> waited_implementation_identity_{0U};
+};
+
+/**
+ * @brief Owns one isolated operation-admission observer installation.
+ *
+ * @throws Nothing from destruction.
+ * @note The observed asynchronous work must settle before this guard retires.
+ * The underlying free-function seam exists only in the non-installed internal
+ * test product and changes no production ExecutionService object layout.
+ */
+class ScopedOperationAdmissionWaitObservation final {
+ public:
+  /**
+   * @brief Installs one observer for the supplied isolated service.
+   * @param service Test-product service that will deny the contender.
+   * @param probe Fixture receiving allocation-free notification.
+   * @throws Nothing.
+   */
+  ScopedOperationAdmissionWaitObservation(
+      compute::ExecutionService& service,
+      SequentialLeaseBoundaryProbe& probe) noexcept
+      : service_(service) {
+    testing::ExecutionServiceTestAccess::set_operation_admission_wait_observer(
+        service_,
+        &SequentialLeaseBoundaryProbe::observe_operation_admission_wait,
+        &probe);
+  }
+
+  /**
+   * @brief Clears the process-local observer.
+   * @throws Nothing.
+   */
+  ~ScopedOperationAdmissionWaitObservation() noexcept {
+    testing::ExecutionServiceTestAccess::
+        clear_operation_admission_wait_observer(service_);
+  }
+
+  /** @brief Prevents duplicate observer-clearing ownership. */
+  ScopedOperationAdmissionWaitObservation(
+      const ScopedOperationAdmissionWaitObservation&) = delete;
+
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedOperationAdmissionWaitObservation& operator=(
+      const ScopedOperationAdmissionWaitObservation&) = delete;
+
+ private:
+  /** @brief Isolated service used to document observer ownership. */
+  compute::ExecutionService& service_;
 };
 
 /**
@@ -2824,48 +2956,52 @@ TEST(TaskGraphPlanningSplit,
  * authority residue.
  * @throws Setup, graph, registry, service, future, synchronization, cache, or
  * provider exceptions unchanged when fixture construction itself fails.
- * @note Two distinct HP implementations share one exclusive key and declare
- * retained/scratch demand. The route-backed provider must remain excluded
- * while the sequential provider is active, then enter while the injected
- * cache encoder is still blocked. The encoder subsequently throws, proving
- * post-provider failure settlement leaves no operation gate, resource ledger,
- * or Run lifecycle residue.
+ * @note Both Graphs use the same revisioned HP implementation, cap one, shared
+ * exclusive key, and declared retained/scratch demand. A test-product observer
+ * first proves the route-backed contender reached a denied operation-admission
+ * check. It must then enter and exit while the injected cache encoder remains
+ * blocked. The encoder subsequently throws, proving post-provider failure
+ * settlement leaves no operation gate, resource ledger, or Run residue.
  */
 TEST(ComputeServiceSequentialAdmission,
      ProviderLeaseEndsBeforeBlockingPostProviderCacheFailure) {
   constexpr const char* kType = "issue82_sequential_lease";
-  constexpr const char* kSequentialSubtype = "sequential_provider";
-  constexpr const char* kRouteSubtype = "route_provider";
+  constexpr const char* kSubtype = "shared_provider";
   constexpr const char* kExclusiveKey =
       "issue82-sequential-post-provider-boundary";
+  constexpr int kSequentialRole = 1;
+  constexpr int kRouteRole = 2;
   auto probe = std::make_shared<SequentialLeaseBoundaryProbe>();
 
   OpMetadata metadata;
+  metadata.maximum_parallelism = 1U;
   metadata.exclusive_key = kExclusiveKey;
   metadata.retained_memory_bytes = 64U;
   metadata.scratch_bytes = 32U;
   OpRegistry::instance().register_op_hp_monolithic(
-      kType, kSequentialSubtype,
+      kType, kSubtype,
       MonolithicOpFunc(
           [probe](const Node& node,
                   const std::vector<const NodeOutput*>&) -> NodeOutput {
-            probe->enter_sequential_provider();
+            const int role = as_int_flexible(node.parameters, "role", 0);
+            if (role == kSequentialRole) {
+              probe->enter_sequential_provider();
+            } else if (role == kRouteRole) {
+              probe->enter_route_provider();
+            } else {
+              throw GraphError(GraphErrc::InvalidParameter,
+                               "unknown sequential lease provider role");
+            }
             return make_image_output(
                 as_int_flexible(node.parameters, "width", 8),
-                as_int_flexible(node.parameters, "height", 8), 1, 2.0f);
+                as_int_flexible(node.parameters, "height", 8), 1,
+                role == kSequentialRole ? 2.0f : 3.0f);
           }),
       metadata);
-  OpRegistry::instance().register_op_hp_monolithic(
-      kType, kRouteSubtype,
-      MonolithicOpFunc(
-          [probe](const Node& node,
-                  const std::vector<const NodeOutput*>&) -> NodeOutput {
-            probe->enter_route_provider();
-            return make_image_output(
-                as_int_flexible(node.parameters, "width", 8),
-                as_int_flexible(node.parameters, "height", 8), 1, 3.0f);
-          }),
-      metadata);
+  const auto selected = OpRegistry::instance().select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_NE(selected->implementation_identity, 0U);
 
   const ScopedTestDirectory root(
       std::filesystem::temp_directory_path() /
@@ -2876,12 +3012,15 @@ TEST(ComputeServiceSequentialAdmission,
               ImageArtifactPrecision) {
         probe->block_post_provider_cache_and_fail();
       });
-  compute::ExecutionService authority(2U);
+  compute::ExecutionService authority(1U);
+  ScopedOperationAdmissionWaitObservation admission_observation(authority,
+                                                                *probe);
 
   GraphModel sequential_graph((root.path() / "sequential-cache").string());
-  Node sequential_node = make_node(1, kType, std::string(kSequentialSubtype));
+  Node sequential_node = make_node(1, kType, std::string(kSubtype));
   sequential_node.parameters["width"] = 8;
   sequential_node.parameters["height"] = 8;
+  sequential_node.parameters["role"] = kSequentialRole;
   sequential_node.caches.push_back({"image", "output.png"});
   sequential_graph.add_node(std::move(sequential_node));
   sequential_graph.validate_topology();
@@ -2903,9 +3042,10 @@ TEST(ComputeServiceSequentialAdmission,
                                         "cpu");
   route_runtime.start();
   GraphModel& route_graph = route_runtime.model();
-  Node route_node = make_node(1, kType, std::string(kRouteSubtype));
+  Node route_node = make_node(1, kType, std::string(kSubtype));
   route_node.parameters["width"] = 8;
   route_node.parameters["height"] = 8;
+  route_node.parameters["role"] = kRouteRole;
   route_graph.add_node(std::move(route_node));
   route_graph.validate_topology();
   GraphTraversalService route_traversal;
@@ -2923,11 +3063,14 @@ TEST(ComputeServiceSequentialAdmission,
   sequential_request.cache.precision = "int8";
   sequential_request.cache.force_recache = true;
   sequential_request.graph_identity = "issue82-sequential-provider";
+  auto route_cancellation =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
   ComputeService::Request route_request;
   route_request.node_id = 1;
   route_request.cache.precision = "int8";
   route_request.cache.disable_disk_cache = true;
   route_request.graph_identity = "issue82-route-provider";
+  route_request.cancellation_source = route_cancellation;
 
   auto sequential_future = std::async(std::launch::async, [&] {
     return &sequential_service.compute(sequential_graph, sequential_request);
@@ -2938,14 +3081,32 @@ TEST(ComputeServiceSequentialAdmission,
     return &route_service.compute_parallel(route_graph, route_runtime,
                                            route_request);
   });
-  const bool route_entered_during_provider =
-      probe->wait_for_route_provider(std::chrono::milliseconds(200));
+  const bool contender_became_observable =
+      probe->wait_for_admission_or_route_provider(std::chrono::seconds(2));
+  const bool admission_waited_during_provider =
+      probe->operation_admission_waited();
+  const bool route_entered_during_provider = probe->route_provider_entered();
+  const std::uint64_t waited_implementation_identity =
+      probe->waited_implementation_identity();
 
   probe->release_sequential_provider();
   const bool post_provider_cache_entered =
       probe->wait_for_post_provider_cache(std::chrono::seconds(2));
   const bool route_entered_during_post_provider_cache =
       probe->wait_for_route_provider(std::chrono::seconds(2));
+  const bool route_exited_during_post_provider_cache =
+      probe->wait_for_route_provider_exit(std::chrono::seconds(2));
+  const bool route_settled_during_post_provider_cache =
+      route_future.wait_for(std::chrono::seconds(2)) ==
+      std::future_status::ready;
+  NodeOutput* route_output = nullptr;
+  if (route_settled_during_post_provider_cache) {
+    EXPECT_NO_THROW(route_output = route_future.get());
+  } else {
+    (void)route_cancellation->request_cancellation();
+  }
+  const ResourceVector resources_during_post_provider_cache =
+      authority.resource_snapshot().reserved;
   const bool sequential_waited_for_cache =
       sequential_future.wait_for(std::chrono::milliseconds(0)) ==
       std::future_status::timeout;
@@ -2961,22 +3122,239 @@ TEST(ComputeServiceSequentialAdmission,
                   .find("injected sequential post-provider cache failure"),
               std::string::npos);
   }
-  NodeOutput* route_output = nullptr;
-  EXPECT_NO_THROW(route_output = route_future.get());
+  if (!route_settled_during_post_provider_cache) {
+    EXPECT_THROW((void)route_future.get(), GraphError);
+  }
 
   EXPECT_TRUE(sequential_provider_entered);
+  EXPECT_TRUE(contender_became_observable);
+  EXPECT_TRUE(admission_waited_during_provider);
   EXPECT_FALSE(route_entered_during_provider);
+  EXPECT_EQ(waited_implementation_identity, selected->implementation_identity);
   EXPECT_TRUE(post_provider_cache_entered);
   EXPECT_TRUE(route_entered_during_post_provider_cache);
+  EXPECT_TRUE(route_exited_during_post_provider_cache);
+  EXPECT_TRUE(route_settled_during_post_provider_cache);
   EXPECT_TRUE(sequential_waited_for_cache);
   EXPECT_TRUE(sequential_saw_cache_failure);
   EXPECT_NE(route_output, nullptr);
   EXPECT_EQ(probe->maximum_active_providers(), 1);
+  EXPECT_EQ(resources_during_post_provider_cache, ResourceVector{});
   expect_direct_authority_settled(authority);
 
   route_runtime.stop();
-  OpRegistry::instance().unregister_key(make_key(kType, kSequentialSubtype));
-  OpRegistry::instance().unregister_key(make_key(kType, kRouteSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves every direct resource component releases before Host cache I/O.
+ *
+ * @return Nothing; GoogleTest reports admission, capacity, failure typing, or
+ * authority residue.
+ * @throws Setup, graph, registry, service, future, synchronization, cache, or
+ * provider exceptions unchanged when fixture construction itself fails.
+ * @note Both requests use one callback identity, `maximum_parallelism=1`, and
+ * one exclusive key. The service CPU, retained-memory, and scratch ceilings
+ * equal exactly one production direct-lease vector. The peer first reaches a
+ * denied gate while the sequential provider is active, then must enter and
+ * exit while the sequential codec remains blocked. Retaining any identity,
+ * key, CPU, retained, or scratch component through that interval prevents the
+ * peer from completing or leaves a nonzero authoritative snapshot.
+ */
+TEST(ComputeServiceSequentialAdmission,
+     ExactDirectCapacityReleasesBeforeBlockingPostProviderCacheFailure) {
+  constexpr const char* kType = "issue82_sequential_exact_capacity";
+  constexpr const char* kSubtype = "shared_provider";
+  constexpr const char* kExclusiveKey = "lease-cap";
+  constexpr int kSequentialRole = 1;
+  constexpr int kPeerRole = 2;
+  auto probe = std::make_shared<SequentialLeaseBoundaryProbe>();
+
+  OpMetadata metadata;
+  metadata.maximum_parallelism = 1U;
+  metadata.exclusive_key = kExclusiveKey;
+  metadata.retained_memory_bytes = 64U;
+  metadata.scratch_bytes = 32U;
+  OpRegistry::instance().register_op_hp_monolithic(
+      kType, kSubtype,
+      MonolithicOpFunc(
+          [probe](const Node& node,
+                  const std::vector<const NodeOutput*>&) -> NodeOutput {
+            const int role = as_int_flexible(node.parameters, "role", 0);
+            if (role == kSequentialRole) {
+              probe->enter_sequential_provider();
+            } else if (role == kPeerRole) {
+              probe->enter_route_provider();
+            } else {
+              throw GraphError(GraphErrc::InvalidParameter,
+                               "unknown exact-capacity provider role");
+            }
+            return make_image_output(
+                as_int_flexible(node.parameters, "width", 8),
+                as_int_flexible(node.parameters, "height", 8), 1,
+                role == kSequentialRole ? 4.0f : 5.0f);
+          }),
+      metadata);
+  const auto selected = OpRegistry::instance().select_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(selected.has_value());
+  ASSERT_NE(selected->implementation_identity, 0U);
+  const compute::OperationExecutionConstraints constraints{
+      selected->implementation_identity,
+      selected->metadata.reentrant,
+      selected->metadata.maximum_parallelism,
+      selected->metadata.exclusive_key,
+  };
+  const compute::ReadyTaskResourceDemand demand{
+      selected->metadata.retained_memory_bytes,
+      selected->metadata.scratch_bytes,
+      0U,
+      1U,
+  };
+  const ResourceVector exact_resources =
+      testing::ExecutionServiceTestAccess::estimate_direct_operation_resources(
+          constraints, demand);
+  ASSERT_EQ(exact_resources.cpu_slots, 1U);
+  ASSERT_GT(exact_resources.retained_memory_bytes,
+            metadata.retained_memory_bytes);
+  ASSERT_EQ(exact_resources.scratch_bytes, metadata.scratch_bytes);
+  ASSERT_EQ(exact_resources.ready_entries, 0U);
+  ASSERT_EQ(exact_resources.ready_bytes, 0U);
+
+  compute::ExecutionResourceLimits limits =
+      compute::ExecutionService::default_resource_limits();
+  limits.cpu_slots = exact_resources.cpu_slots;
+  limits.retained_memory_bytes = exact_resources.retained_memory_bytes;
+  limits.scratch_bytes = exact_resources.scratch_bytes;
+  limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService authority(limits);
+  ScopedOperationAdmissionWaitObservation admission_observation(authority,
+                                                                *probe);
+
+  const ScopedTestDirectory root(
+      std::filesystem::temp_directory_path() /
+      "photospider-sequential-exact-direct-capacity");
+  auto image_codec = std::make_shared<testing::FakeImageArtifactCodec>(
+      testing::FakeImageArtifactCodec::DecodeCallback{},
+      [probe](const std::filesystem::path&, const ImageBuffer&,
+              ImageArtifactPrecision) {
+        probe->block_post_provider_cache_and_fail();
+      });
+
+  GraphModel sequential_graph((root.path() / "sequential-cache").string());
+  Node sequential_node = make_node(1, kType, std::string(kSubtype));
+  sequential_node.parameters["width"] = 8;
+  sequential_node.parameters["height"] = 8;
+  sequential_node.parameters["role"] = kSequentialRole;
+  sequential_node.caches.push_back({"image", "output.png"});
+  sequential_graph.add_node(std::move(sequential_node));
+  sequential_graph.validate_topology();
+  GraphTraversalService sequential_traversal;
+  GraphCacheService sequential_cache(image_codec,
+                                     testing::make_yaml_cache_metadata_codec());
+  GraphEventService sequential_events;
+  ComputeService sequential_service(sequential_traversal, sequential_cache,
+                                    sequential_events, authority);
+  testing::ScopedExecutionGraphLifecycle sequential_lifecycle(authority,
+                                                              sequential_graph);
+
+  GraphModel peer_graph((root.path() / "peer-cache").string());
+  Node peer_node = make_node(1, kType, std::string(kSubtype));
+  peer_node.parameters["width"] = 8;
+  peer_node.parameters["height"] = 8;
+  peer_node.parameters["role"] = kPeerRole;
+  peer_graph.add_node(std::move(peer_node));
+  peer_graph.validate_topology();
+  GraphTraversalService peer_traversal;
+  GraphCacheService peer_cache(
+      providers::make_configured_image_artifact_codec(),
+      testing::make_yaml_cache_metadata_codec());
+  GraphEventService peer_events;
+  ComputeService peer_service(peer_traversal, peer_cache, peer_events,
+                              authority);
+  testing::ScopedExecutionGraphLifecycle peer_lifecycle(authority, peer_graph);
+
+  ComputeService::Request sequential_request;
+  sequential_request.node_id = 1;
+  sequential_request.cache.precision = "int8";
+  sequential_request.cache.force_recache = true;
+  sequential_request.graph_identity = "issue82-exact-capacity-sequential";
+  auto peer_cancellation =
+      std::make_shared<compute::ComputeRequestCancellationSource>();
+  ComputeService::Request peer_request;
+  peer_request.node_id = 1;
+  peer_request.cache.precision = "int8";
+  peer_request.cache.disable_disk_cache = true;
+  peer_request.graph_identity = "issue82-exact-capacity-peer";
+  peer_request.cancellation_source = peer_cancellation;
+
+  auto sequential_future = std::async(std::launch::async, [&] {
+    return &sequential_service.compute(sequential_graph, sequential_request);
+  });
+  const bool sequential_provider_entered =
+      probe->wait_for_sequential_provider(std::chrono::seconds(2));
+  auto peer_future = std::async(std::launch::async, [&] {
+    return &peer_service.compute(peer_graph, peer_request);
+  });
+  const bool contender_became_observable =
+      probe->wait_for_admission_or_route_provider(std::chrono::seconds(2));
+  const bool admission_waited_during_provider =
+      probe->operation_admission_waited();
+  const bool peer_entered_during_provider = probe->route_provider_entered();
+  const std::uint64_t waited_implementation_identity =
+      probe->waited_implementation_identity();
+
+  probe->release_sequential_provider();
+  const bool post_provider_cache_entered =
+      probe->wait_for_post_provider_cache(std::chrono::seconds(2));
+  const bool peer_entered_during_post_provider_cache =
+      probe->wait_for_route_provider(std::chrono::seconds(2));
+  const bool peer_exited_during_post_provider_cache =
+      probe->wait_for_route_provider_exit(std::chrono::seconds(2));
+  const bool peer_settled_during_post_provider_cache =
+      peer_future.wait_for(std::chrono::seconds(2)) ==
+      std::future_status::ready;
+  NodeOutput* peer_output = nullptr;
+  if (peer_settled_during_post_provider_cache) {
+    EXPECT_NO_THROW(peer_output = peer_future.get());
+  } else {
+    (void)peer_cancellation->request_cancellation();
+  }
+  const ResourceVector resources_during_post_provider_cache =
+      authority.resource_snapshot().reserved;
+  const bool sequential_waited_for_cache =
+      sequential_future.wait_for(std::chrono::milliseconds(0)) ==
+      std::future_status::timeout;
+  probe->release_post_provider_cache();
+
+  bool sequential_saw_cache_failure = false;
+  try {
+    (void)sequential_future.get();
+  } catch (const GraphError& error) {
+    sequential_saw_cache_failure = true;
+    EXPECT_EQ(error.code(), GraphErrc::Io);
+  }
+  if (!peer_settled_during_post_provider_cache) {
+    EXPECT_THROW((void)peer_future.get(), GraphError);
+  }
+
+  EXPECT_TRUE(sequential_provider_entered);
+  EXPECT_TRUE(contender_became_observable);
+  EXPECT_TRUE(admission_waited_during_provider);
+  EXPECT_FALSE(peer_entered_during_provider);
+  EXPECT_EQ(waited_implementation_identity, selected->implementation_identity);
+  EXPECT_TRUE(post_provider_cache_entered);
+  EXPECT_TRUE(peer_entered_during_post_provider_cache);
+  EXPECT_TRUE(peer_exited_during_post_provider_cache);
+  EXPECT_TRUE(peer_settled_during_post_provider_cache);
+  EXPECT_TRUE(sequential_waited_for_cache);
+  EXPECT_TRUE(sequential_saw_cache_failure);
+  EXPECT_NE(peer_output, nullptr);
+  EXPECT_EQ(probe->maximum_active_providers(), 1);
+  EXPECT_EQ(resources_during_post_provider_cache, ResourceVector{});
+  expect_direct_authority_settled(authority);
+
+  OpRegistry::instance().unregister_key(make_key(kType, kSubtype));
 }
 
 TEST(TaskGraphPlanningSplit,

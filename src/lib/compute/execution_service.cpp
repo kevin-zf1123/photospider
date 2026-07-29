@@ -869,6 +869,19 @@ struct ReservedStartProbeState final {
 };
 
 /**
+ * @brief Process-local operation-admission observer state for test products.
+ * @throws Nothing for atomic initialization and access.
+ * @note The callback publishes fixture state only. It never owns service,
+ * Run, gate, resource, ready-entry, or provider authority.
+ */
+struct OperationAdmissionWaitProbeState final {
+  /** @brief Borrowed opaque fixture context. */
+  std::atomic<void*> context{nullptr};
+  /** @brief Optional allocation-free notification callback. */
+  std::atomic<testing::OperationAdmissionWaitObserver> observer{nullptr};
+};
+
+/**
  * @brief Returns the unique test-product probe state.
  * @return Process-lifetime allocation-free storage.
  * @throws Nothing.
@@ -876,6 +889,37 @@ struct ReservedStartProbeState final {
 ReservedStartProbeState& reserved_start_probe_state() noexcept {
   static ReservedStartProbeState state;
   return state;
+}
+
+/**
+ * @brief Returns the unique test-product admission observer state.
+ * @return Process-lifetime allocation-free observer storage.
+ * @throws Nothing.
+ */
+OperationAdmissionWaitProbeState&
+operation_admission_wait_probe_state() noexcept {
+  static OperationAdmissionWaitProbeState state;
+  return state;
+}
+
+/**
+ * @brief Notifies one denied exact-identity or exclusive-key gate start.
+ * @param constraints Exact operation declaration rejected by can_start().
+ * @return Nothing.
+ * @throws Nothing.
+ * @note The caller holds the pool mutex. The borrowed callback therefore may
+ * only publish atomic fixture state and notify non-service synchronization.
+ */
+void notify_operation_admission_wait_for_testing(
+    const OperationExecutionConstraints& constraints) noexcept {
+  OperationAdmissionWaitProbeState& state =
+      operation_admission_wait_probe_state();
+  const testing::OperationAdmissionWaitObserver observer =
+      state.observer.load(std::memory_order_acquire);
+  if (observer != nullptr) {
+    observer(state.context.load(std::memory_order_relaxed),
+             constraints.implementation_identity);
+  }
 }
 
 /**
@@ -942,6 +986,9 @@ class ExecutionService::OperationStartGate final {
       if (identity != identities_.end()) {
         const std::uint64_t limit = effective_limit(constraints);
         if (limit != 0U && identity->second.active >= limit) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+          notify_operation_admission_wait_for_testing(constraints);
+#endif
           return false;
         }
       }
@@ -949,6 +996,9 @@ class ExecutionService::OperationStartGate final {
     if (!constraints.exclusive_key.empty()) {
       const auto key = exclusive_keys_.find(constraints.exclusive_key);
       if (key != exclusive_keys_.end() && key->second != 0U) {
+#if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
+        notify_operation_admission_wait_for_testing(constraints);
+#endif
         return false;
       }
     }
@@ -3291,6 +3341,31 @@ struct OperationExecutionLeaseState final {
   bool gate_started = false;
 };
 
+namespace {
+
+/**
+ * @brief Calculates the complete ledger vector for one direct operation lease.
+ * @param constraints Exact identity and exclusive-key value copied by caller.
+ * @param demand Additional operation retained/scratch declaration.
+ * @return One CPU slot plus checked mandatory and declared retained/scratch.
+ * @throws GraphError when retained-memory arithmetic overflows.
+ * @note The returned value owns no gate, Run, reservation, or callback.
+ */
+ResourceVector direct_operation_execution_resources(
+    const OperationExecutionConstraints& constraints,
+    ReadyTaskResourceDemand demand) {
+  RetainedMemoryEstimator retained(
+      "ExecutionService direct operation envelope");
+  retained.add_bytes(demand.retained_memory_bytes);
+  retained.add_objects<OperationExecutionLeaseState>();
+  retained.add_objects<char>(
+      static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
+  retained.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
+  return ResourceVector{1U, retained.bytes(), demand.scratch_bytes, 0U, 0U};
+}
+
+}  // namespace
+
 /** @copydoc OperationExecutionLease::OperationExecutionLease */
 OperationExecutionLease::OperationExecutionLease() noexcept = default;
 
@@ -3379,6 +3454,30 @@ reserved_start_rollback_probe_snapshot_for_testing() noexcept {
 /** @copydoc disarm_reserved_start_rollback_probe_for_testing */
 void disarm_reserved_start_rollback_probe_for_testing() noexcept {
   reserved_start_probe_state().armed.store(false, std::memory_order_release);
+}
+
+/** @copydoc estimate_direct_operation_resources_for_testing */
+ResourceVector estimate_direct_operation_resources_for_testing(
+    const OperationExecutionConstraints& constraints,
+    ReadyTaskResourceDemand demand) {
+  return direct_operation_execution_resources(constraints, demand);
+}
+
+/** @copydoc set_operation_admission_wait_observer_for_testing */
+void set_operation_admission_wait_observer_for_testing(
+    OperationAdmissionWaitObserver observer, void* context) noexcept {
+  OperationAdmissionWaitProbeState& state =
+      operation_admission_wait_probe_state();
+  state.context.store(context, std::memory_order_relaxed);
+  state.observer.store(observer, std::memory_order_release);
+}
+
+/** @copydoc clear_operation_admission_wait_observer_for_testing */
+void clear_operation_admission_wait_observer_for_testing() noexcept {
+  OperationAdmissionWaitProbeState& state =
+      operation_admission_wait_probe_state();
+  state.observer.store(nullptr, std::memory_order_release);
+  state.context.store(nullptr, std::memory_order_relaxed);
 }
 
 }  // namespace testing
@@ -4178,15 +4277,8 @@ OperationExecutionLease ExecutionService::acquire_operation_execution(
   ComputeRunLease service_lease(run_lease);
   auto state = std::make_unique<OperationExecutionLeaseState>(
       *this, std::move(service_lease), constraints);
-  RetainedMemoryEstimator retained(
-      "ExecutionService direct operation envelope");
-  retained.add_bytes(demand.retained_memory_bytes);
-  retained.add_objects<OperationExecutionLeaseState>();
-  retained.add_objects<char>(
-      static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
-  retained.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
-  const ResourceVector resources{1U, retained.bytes(), demand.scratch_bytes, 0U,
-                                 0U};
+  const ResourceVector resources =
+      direct_operation_execution_resources(constraints, demand);
 
   {
     std::unique_lock<std::mutex> lock(pool_->mutex);
