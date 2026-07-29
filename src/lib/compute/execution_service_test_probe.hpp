@@ -107,10 +107,23 @@ void clear_operation_admission_wait_observer_for_testing() noexcept;
  * @note This diagnostic mints no authority and exists only in the separately
  * compiled, non-installed execution-service test product. It lets a test
  * inject capacity equal to one direct callback without duplicating private
- * ownership-envelope arithmetic.
+ * ownership-envelope arithmetic. The estimator first copies the supplied
+ * constraints exactly as production lease construction does, then charges the
+ * copied key's actual capacity plus its null terminator.
  */
 ResourceVector estimate_direct_operation_resources_for_testing(
     const OperationExecutionConstraints& constraints,
     ReadyTaskResourceDemand demand);
+
+/**
+ * @brief Returns the key-independent retained bytes in one direct lease.
+ * @return Checked private lease-state and reservation-state structural bytes.
+ * @throws GraphError when checked retained-memory arithmetic overflows.
+ * @note This authority-free value exists only in the separately compiled,
+ * non-installed execution-service test product. It lets exact-capacity tests
+ * independently add the declared bytes and copied string payload without
+ * exposing the private lease-state type or layout.
+ */
+std::uint64_t direct_operation_fixed_retained_memory_bytes_for_testing();
 
 }  // namespace ps::compute::testing

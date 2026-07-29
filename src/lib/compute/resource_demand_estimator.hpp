@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -60,6 +61,35 @@ class RetainedMemoryEstimator final {
           std::string(boundary_) + " retained-memory estimate overflow.");
     }
     bytes_ += bytes;
+  }
+
+  /**
+   * @brief Adds the complete owned payload of one copied `std::string`.
+   * @param value String whose actual capacity and trailing null are retained.
+   * @return Nothing.
+   * @throws GraphError when capacity conversion, the terminator addition, or
+   * checked accumulation cannot be represented by `std::uint64_t`.
+   * @note Small-string payloads may be inline; charging their capacity plus
+   * one remains a deliberate conservative bound. Callers must invoke this
+   * once for each independently retained string value and must not substitute
+   * `size()` for the actual copied capacity.
+   */
+  void add_string_payload(const std::string& value) {
+    if constexpr (sizeof(std::size_t) > sizeof(std::uint64_t)) {
+      if (value.capacity() >
+          static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            std::string(boundary_) + " retained-memory estimate overflow.");
+      }
+    }
+    const std::uint64_t capacity = static_cast<std::uint64_t>(value.capacity());
+    if (capacity == std::numeric_limits<std::uint64_t>::max()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          std::string(boundary_) + " retained-memory estimate overflow.");
+    }
+    add_bytes(capacity + 1U);
   }
 
   /**

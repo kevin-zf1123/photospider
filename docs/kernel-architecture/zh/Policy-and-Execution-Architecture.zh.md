@@ -177,6 +177,15 @@ Implementation cap 或已占用 exclusive key 会把对应 candidate 从 startab
 notification epoch。Direct sequential caller 会在不持有 resource reservation 的情况下进行
 cancellation-aware wait，随后只在 provider entry 周围获取同一 gate 以及一份 CPU/byte/scratch root。
 
+每个由 Host 拥有的 retained operation 或 constraint key 都按实际复制的
+`std::string::capacity()` 加空终止符计费。Full-plan 与 dirty admission 会先冻结完整
+shared estimate，再把每份已经计费的 constraint allocation 移入其唯一
+`ReadyTaskSubmission`；connected-preflight callable/submission 的副本与 direct lease
+分别独立计费。operation gate 只保存 borrowed `string_view`，并在稳定 submission 或
+direct-lease owner 退出前擦除，因此既不重复也不漏算 string ownership。Checked
+terminator overflow 与少一个 byte 的 retained limit 都会在 provider entry 前失败，不留下
+gate 或 ledger 残留。
+
 ## 私有执行路由
 
 路由词汇表是封闭的：

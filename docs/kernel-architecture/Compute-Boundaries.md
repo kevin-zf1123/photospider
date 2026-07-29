@@ -191,11 +191,16 @@ uniform task vector is used for full HP, dirty HP/RT, and connected preflight.
 Zero is an explicit provider declaration; absent or malformed metadata does not
 silently become zero and is rejected before provider entry.
 Copied graph-identity metadata is charged by actual string capacity plus its
-terminator. After every initial value and ready grant has moved into a staged
-queue entry, `ExecutionService` destroys the caller-side submission-vector
-backing before active-Run publication and settlement waiting; only the staged
-entries and then the bounded store retain those submissions. Before each dirty
-or connected-preflight service segment, the adapter adds current
+terminator. Every independently retained operation/constraint key follows the
+same rule. Full-plan and dirty adapters freeze the shared charge before moving
+one already-charged key allocation into its unique submission; connected
+preflight and direct leases charge their independent copies, while the
+operation gate borrows a stable view instead of duplicating the string. After
+every initial value and ready grant has moved into a staged queue entry,
+`ExecutionService` destroys the caller-side submission-vector backing before
+active-Run publication and settlement waiting; only the staged entries and then
+the bounded store retain those submissions. Before each dirty or
+connected-preflight service segment, the adapter adds current
 staging/snapshot storage and deduplicated missing staging-map entries,
 including ordered-map linkage and deterministic empty or seeded visible output
 metadata. HP downstream demand reads the current Run-owned write buffer through

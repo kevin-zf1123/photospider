@@ -94,9 +94,14 @@ class TaskSubmissionPlan {
    * @brief Estimates complete Host-owned submission-plan retained storage.
    * @return Checked plan, dependency, runner, output-slot, and container bytes.
    * @throws GraphError when checked structural arithmetic overflows.
-   * @note Graph/cache/services are borrowed. Image pixels plus opaque
-   * operation/plugin/backend callable allocations are excluded because their
-   * sizes are not available from the host-side planning contract.
+   * @note Every retained operation-snapshot and execution-constraint key is
+   * charged by its actual copied string capacity plus the null terminator.
+   * Service admission freezes this estimate before constraint allocations move
+   * into their one ready submission, so the same storage remains charged
+   * exactly once throughout its ownership transfer. Graph/cache/services are
+   * borrowed. Image pixels plus opaque operation, plugin, backend, and
+   * callable allocations are excluded because their sizes are not available
+   * from the host-side planning contract.
    */
   std::uint64_t retained_memory_bytes() const;
 
@@ -497,8 +502,10 @@ class TaskSubmissionPlan {
    * @throws std::bad_alloc from metadata or executable ownership.
    * @note The executable captures no plan, runner, Graph, or dispatcher stack
    * pointer; it reaches Run-owned state only through the supplied lease. The
-   * submission carries the aligned exact-identity constraints and uniform
-   * conservative operation demand resolved before admission.
+   * submission takes the aligned exact-identity constraints from the plan
+   * without duplicating their already-admitted string allocation, and carries
+   * the uniform conservative operation demand resolved before admission. Each
+   * task may be materialized at most once.
    */
   ReadyTaskSubmission make_ready_submission(
       const ComputeRunLease& lease, const ComputeRunTaskIdentity& identity,
@@ -603,7 +610,11 @@ class TaskSubmissionPlan {
    */
   std::vector<std::optional<OpImplementation>> resolved_ops_;
 
-  /** @brief Exact-identity start constraints aligned with execution_order_. */
+  /**
+   * @brief Exact-identity start constraints aligned with execution_order_.
+   * @note A task's key allocation moves into its one service submission after
+   * the complete Run-owned storage estimate is frozen.
+   */
   std::vector<OperationExecutionConstraints> operation_constraints_;
 
   /** @brief Uniform conservative demand carried by every service task. */

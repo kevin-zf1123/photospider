@@ -51,6 +51,7 @@ FORBIDDEN_PRODUCT_TEST_SYMBOL_FRAGMENTS = (
     "set_operation_admission_wait_observer_for_testing",
     "clear_operation_admission_wait_observer_for_testing",
     "estimate_direct_operation_resources_for_testing",
+    "direct_operation_fixed_retained_memory_bytes_for_testing",
     "g_graph_cache_service_test_hook",
     "set_graph_cache_service_test_hook",
     "notify_graph_cache_service_test_hook",

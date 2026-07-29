@@ -606,6 +606,13 @@ input view 都消费同一个带 revision 的 route，不得退回通用 key-lev
 `test_propagation` 工具同样会为请求的 HP 或 RT diagnostic route 过滤并保留精确 tiled
 implementation。
 
+`test_compute_run` 会为 full-plan、dirty HP、dirty RT 与 connected-preflight 产品路径注册
+heap-backed exclusive key。共享 string-payload estimator 证明实际 capacity 加一个终止符，
+并证明 overflow rollback 具有 strong guarantee。产品 case 随后校准完整 admitted vector，
+要求相同 plan 在精确 retained capacity 下成功，并要求少一个 byte 在 provider entry 前拒绝，
+且 ledger snapshot 为零。这些 case 覆盖已经计费的 plan/context constraint allocation 移入
+其唯一 submission 的 ownership transfer；它们不使用 migration-residue source scan。
+
 `test_compute_service_split` 证明 nonparallel dirty HP、dirty RT 与 connected-parameter
 preflight 会进入 physical worker 所使用的同一个 process-owned operation gate 与 resource
 ledger。Cross-Graph case 覆盖 nonreentrancy、精确 implementation cap、相同/不同 exclusive key、
@@ -629,12 +636,13 @@ provider overlap。Provider 返回后，注入的 `FakeImageArtifactCodec` 会�
 Resource-capacity case 使用同一个 callback identity、cap 与 key，但采用第二个 direct
 contender。仅存在于 test product 且不授予 authority 的 diagnostic 会复用 production
 direct-lease envelope 计算，并把隔离 `ExecutionService` 的 CPU、retained-memory 与 scratch
-上限精确设为一个 direct callback vector。Contender 先在 provider 活跃时抵达被拒绝的
-admission，随后必须在 codec 释放前进入并退出。任何延长到 cache 区间的 identity/key ownership
-或 CPU/retained/scratch reservation，要么会阻止该请求完成，要么会在权威 resource snapshot
-中留下非零值。把这项 capacity 检查保持为正交场景是有意设计：physical Run 会在
-operation-gate startability 前预留完整 root，因此该 root 不是一个 direct-lease vector。两项
-回归都不会新增 production 或 installable test hook。
+上限精确设为一个 direct callback vector。它还会把 heap-backed key 与独立的 fixed-envelope
+加 copied-capacity-plus-terminator 计算比较。精确 capacity 会成功；少一个 byte 的上限，以及
+只容得下 capacity、容不下 terminator 的声明，都会在取得 gate/resource ownership 前拒绝并留下
+零 snapshot。Contender 随后会在 provider 活跃时抵达被拒绝的 admission，并在 codec 释放前进入
+和退出。把这项 capacity 检查保持为正交场景是有意设计：physical Run 会在 operation-gate
+startability 前预留完整 root，因此该 root 不是一个 direct-lease vector。两项回归都不会新增
+production 或 installable test hook。
 
 Post-plan observer 只存在于不安装的 internal test product 中。
 `StaticProductConsumerSmoke` 要求 production `dirty_update_executor.cpp` anchor，并拒绝 installed
@@ -643,10 +651,12 @@ archive 中出现它的 observer state、setter 与 notification symbol。
 聚焦验证命令为：
 
 ```bash
-cmake --build build --target test_op_registry_m31 \
+cmake --build build --target test_op_registry_m31 test_compute_run \
   test_compute_service_split -j
 ./build/tests/test_op_registry_m31 \
   --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
+./build/tests/test_compute_run \
+  --gtest_filter='RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
 ./build/tests/test_compute_service_split \
   --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
 ```

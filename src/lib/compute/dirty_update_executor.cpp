@@ -386,8 +386,9 @@ ReadyTaskResourceDemand dirty_task_operation_resource_demand(
  * @param operations Immutable node operation/device map.
  * @return Checked visible map bucket, value, and linkage bytes.
  * @throws GraphError when checked retained-memory arithmetic overflows.
- * @note Opaque allocations inside provider callable targets remain excluded,
- * matching full-plan callback accounting.
+ * @note Every retained operation-snapshot key is charged by its actual copied
+ * string capacity plus the null terminator. Opaque allocations inside provider
+ * callable targets remain excluded, matching full-plan callback accounting.
  */
 std::uint64_t dirty_operation_retained_memory_bytes(
     const DirtyResolvedOperationMap& operations) {
@@ -400,8 +401,7 @@ std::uint64_t dirty_operation_retained_memory_bytes(
                               2U);
   for (const auto& [node_id, operation] : operations) {
     static_cast<void>(node_id);
-    estimate.add_objects<char>(static_cast<std::uint64_t>(
-        operation.metadata.exclusive_key.capacity()));
+    estimate.add_string_payload(operation.metadata.exclusive_key);
   }
   return estimate.bytes();
 }
@@ -1129,17 +1129,28 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
                            selection_node.type + ":" + selection_node.subtype);
     }
     const Device selected_device = selected_operation->device;
-    const OperationExecutionConstraints operation_constraints{
+    OperationExecutionConstraints operation_constraints{
         selected_operation->implementation_identity,
         selected_operation->metadata.reentrant,
         selected_operation->metadata.maximum_parallelism,
         selected_operation->metadata.exclusive_key};
+    OperationExecutionConstraints submission_constraints(operation_constraints);
+    RetainedMemoryEstimator retained_constraints(
+        "connected-parameter operation constraints");
+    retained_constraints.add_string_payload(
+        operation_constraints.exclusive_key);
+    retained_constraints.add_string_payload(
+        submission_constraints.exclusive_key);
+    const std::uint64_t retained_constraint_bytes =
+        retained_constraints.bytes();
     const ReadyTaskResourceDemand operation_demand{
         selected_operation->metadata.retained_memory_bytes,
         selected_operation->metadata.scratch_bytes, 0U, 1U};
     OpRegistry::OpVariant operation = std::move(selected_operation->operation);
     auto execute_preflight_node = [state_ptr, result, node_id, operation,
-                                   operation_constraints, operation_demand]() {
+                                   operation_constraints =
+                                       std::move(operation_constraints),
+                                   operation_demand]() {
       const ComputeRunLease* active_lease =
           state_ptr->run_lease.has_value() ? &*state_ptr->run_lease : nullptr;
       observe_dirty_run_or_throw(state_ptr->run, active_lease);
@@ -1244,11 +1255,12 @@ PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
       unique_shared_demand.add_shared_control_block();
       unique_shared_demand.add_bytes(owned_callable_retained_memory_bytes(
           static_cast<std::uint64_t>(sizeof(execute_preflight_node))));
+      unique_shared_demand.add_bytes(retained_constraint_bytes);
       std::vector<ReadyTaskSubmission> submissions;
-      submissions.emplace_back(std::move(lease), identity, node_id, true,
-                               std::move(service_callback),
-                               ExecutionTaskPriority::High, task_demand,
-                               selected_device, operation_constraints);
+      submissions.emplace_back(
+          std::move(lease), identity, node_id, true,
+          std::move(service_callback), ExecutionTaskPriority::High, task_demand,
+          selected_device, std::move(submission_constraints));
       step.service_prepared.emplace(execution_service->prepare_run(
           *host, execution_type, std::move(submissions), 1,
           CpuRunResourceDemand{unique_shared_demand.bytes(), task_demand}));
@@ -1876,8 +1888,7 @@ PreparedHighPrecisionDirtyRun HighPrecisionDirtyExecutor::prepare(
       static_cast<std::uint64_t>(state->task_constraints.capacity()));
   for (const OperationExecutionConstraints& constraints :
        state->task_constraints) {
-    hp_shared_demand.add_objects<char>(
-        static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
+    hp_shared_demand.add_string_payload(constraints.exclusive_key);
   }
   if (request.stabilized_parameters) {
     hp_shared_demand.add_bytes(
@@ -2217,8 +2228,7 @@ PreparedRealTimeDirtyRun RealTimeDirtyExecutor::prepare(
       static_cast<std::uint64_t>(state->task_constraints.capacity()));
   for (const OperationExecutionConstraints& constraints :
        state->task_constraints) {
-    rt_shared_demand.add_objects<char>(
-        static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
+    rt_shared_demand.add_string_payload(constraints.exclusive_key);
   }
   if (request.stabilized_parameters) {
     rt_shared_demand.add_bytes(

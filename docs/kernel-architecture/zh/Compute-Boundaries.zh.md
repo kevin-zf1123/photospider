@@ -156,11 +156,15 @@ boundary。对于 mixed-operation physical Run，adapter 会对选中 operation 
 `retained_memory_bytes` 与 `scratch_bytes` 分别取最大值，再以 checked-add 合并既有
 owned-callback envelope。由此得到的保守统一 task vector 同时用于 full HP、dirty HP/RT 与
 connected preflight。零是 provider 的显式声明；缺失或格式错误的 metadata 不会被静默解释成零，
-而是在 provider entry 前被拒绝。复制的 graph-identity metadata 按实际 string capacity 加终止空字符计费。在所有
-initial value 与 ready grant 都移动到暂存 queue entry 后，`ExecutionService` 会在发布
-active Run 和等待 settlement 之前销毁 caller-side submission vector 的 backing；此后只有暂存
-entry 以及 bounded store 保留这些 submission。在每个 dirty 或 connected-preflight service
-segment 之前，adapter 会加入当前 staging/snapshot storage 与去重后的缺失 staging-map entry，
+而是在 provider entry 前被拒绝。复制的 graph-identity metadata 按实际 string capacity 加终止
+空字符计费。每个独立 retained operation/constraint key 遵循同一规则。Full-plan 与 dirty
+adapter 会先冻结 shared charge，再把一份已经计费的 key allocation 移入其唯一 submission；
+connected preflight 与 direct lease 对各自独立副本计费，而 operation gate 会借用 stable view，
+不再复制 string。在所有 initial value 与 ready grant 都移动到暂存 queue entry 后，
+`ExecutionService` 会在发布 active Run 和等待 settlement 之前销毁 caller-side submission
+vector 的 backing；此后只有暂存 entry 以及 bounded store 保留这些 submission。在每个 dirty
+或 connected-preflight service segment 之前，adapter 会加入当前 staging/snapshot storage 与
+去重后的缺失 staging-map entry，
 其中包括有序 map linkage，以及确定性的空 output metadata 或 seeded 可见 output metadata。
 HP downstream demand 会通过仍存活的 `ComputeRunLease` 读取当前 Run-owned write buffer，再由
 phase-local estimator 只加入仍缺失的 entry；这样 source 创建的 entry 会继续被计费，同时不会

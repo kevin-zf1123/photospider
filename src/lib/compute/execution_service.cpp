@@ -16,6 +16,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -554,8 +555,7 @@ std::uint64_t ExecutionService::service_submission_envelope_bytes(
   estimate.add_objects<std::shared_ptr<QueueEntry>>();
   estimate.add_objects<void*>(2U);
   estimate.add_shared_control_block();
-  estimate.add_bytes(static_cast<std::uint64_t>(graph_identity.capacity()));
-  estimate.add_bytes(1U);
+  estimate.add_string_payload(graph_identity);
   return estimate.bytes();
 }
 
@@ -968,7 +968,9 @@ bool record_reserved_start_attempt_for_testing(
  * @throws std::bad_alloc when a first active identity or key allocates map
  * storage.
  * @note Every method is called with `PoolState::mutex` held. The gate owns no
- * callback, Run, ready entry, resource grant, or synchronization primitive.
+ * callback, Run, ready entry, resource grant, key string, or synchronization
+ * primitive. A nonempty key row borrows the stable constraint string from the
+ * active QueueEntry or direct lease and is erased before that owner retires.
  */
 class ExecutionService::OperationStartGate final {
  public:
@@ -994,7 +996,8 @@ class ExecutionService::OperationStartGate final {
       }
     }
     if (!constraints.exclusive_key.empty()) {
-      const auto key = exclusive_keys_.find(constraints.exclusive_key);
+      const auto key =
+          exclusive_keys_.find(std::string_view(constraints.exclusive_key));
       if (key != exclusive_keys_.end() && key->second != 0U) {
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
         notify_operation_admission_wait_for_testing(constraints);
@@ -1042,7 +1045,9 @@ class ExecutionService::OperationStartGate final {
     auto key = exclusive_keys_.end();
     try {
       if (!constraints.exclusive_key.empty()) {
-        key = exclusive_keys_.try_emplace(constraints.exclusive_key, 0U).first;
+        key = exclusive_keys_
+                  .try_emplace(std::string_view(constraints.exclusive_key), 0U)
+                  .first;
       }
     } catch (...) {
       if (identity_inserted) {
@@ -1096,7 +1101,8 @@ class ExecutionService::OperationStartGate final {
       }
     }
     if (!constraints.exclusive_key.empty()) {
-      const auto key = exclusive_keys_.find(constraints.exclusive_key);
+      const auto key =
+          exclusive_keys_.find(std::string_view(constraints.exclusive_key));
       if (key == exclusive_keys_.end() || key->second != 1U) {
         std::terminate();
       }
@@ -1145,8 +1151,12 @@ class ExecutionService::OperationStartGate final {
   /** @brief Active callbacks keyed by exact registry identity. */
   std::map<std::uint64_t, IdentityState> identities_;
 
-  /** @brief Active execution-domain exclusion ownership by provider key. */
-  std::map<std::string, std::uint64_t> exclusive_keys_;
+  /**
+   * @brief Active exclusion ownership indexed by borrowed stable key views.
+   * @note Each view is erased by finish() before its QueueEntry/direct-lease
+   * constraint owner can be destroyed.
+   */
+  std::map<std::string_view, std::uint64_t> exclusive_keys_;
 };
 
 /**
@@ -2967,10 +2977,8 @@ std::uint64_t ExecutionService::service_run_envelope_bytes(
   estimate.add_objects<RunState>();
   estimate.add_shared_control_block();
   estimate.add_bytes(BoundedReadyStore::run_policy_envelope_bytes());
-  estimate.add_bytes(static_cast<std::uint64_t>(graph_identity.capacity()));
-  estimate.add_bytes(1U);
-  estimate.add_bytes(static_cast<std::uint64_t>(graph_key.capacity()));
-  estimate.add_bytes(1U);
+  estimate.add_string_payload(graph_identity);
+  estimate.add_string_payload(graph_key);
   estimate.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
   estimate.add_bytes(
       ComputeRunLease::cancellation_notification_retained_memory_bytes(
@@ -3290,7 +3298,9 @@ class ExecutionService::PoolState final {
  *
  * @throws Nothing from destruction; trusted release failure terminates.
  * @note The service outlives every request lease. Resource capacity returns
- * before the operation gate opens and workers are notified.
+ * before the operation gate opens and workers are notified. The retained
+ * constraints key is charged by its actual copied capacity plus the trailing
+ * null before admission.
  */
 struct OperationExecutionLeaseState final {
   /**
@@ -3344,12 +3354,30 @@ struct OperationExecutionLeaseState final {
 namespace {
 
 /**
+ * @brief Calculates key-independent retained bytes for one direct lease.
+ * @return Checked lease-state and ledger-reservation structural bytes.
+ * @throws GraphError when retained-memory arithmetic overflows.
+ * @note Declared operation bytes and the actual retained key payload are added
+ * separately so tests can verify the exact string boundary without exposing
+ * or duplicating the private lease-state layout.
+ */
+std::uint64_t direct_operation_fixed_retained_memory_bytes() {
+  RetainedMemoryEstimator retained(
+      "ExecutionService direct operation fixed envelope");
+  retained.add_objects<OperationExecutionLeaseState>();
+  retained.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
+  return retained.bytes();
+}
+
+/**
  * @brief Calculates the complete ledger vector for one direct operation lease.
- * @param constraints Exact identity and exclusive-key value copied by caller.
+ * @param constraints Exact identity and exclusive-key value retained by the
+ * already-created lease state.
  * @param demand Additional operation retained/scratch declaration.
  * @return One CPU slot plus checked mandatory and declared retained/scratch.
  * @throws GraphError when retained-memory arithmetic overflows.
- * @note The returned value owns no gate, Run, reservation, or callback.
+ * @note The retained key uses its actual copied capacity plus the trailing
+ * null. The returned value owns no gate, Run, reservation, or callback.
  */
 ResourceVector direct_operation_execution_resources(
     const OperationExecutionConstraints& constraints,
@@ -3357,10 +3385,8 @@ ResourceVector direct_operation_execution_resources(
   RetainedMemoryEstimator retained(
       "ExecutionService direct operation envelope");
   retained.add_bytes(demand.retained_memory_bytes);
-  retained.add_objects<OperationExecutionLeaseState>();
-  retained.add_objects<char>(
-      static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
-  retained.add_bytes(ResourceLedger::reservation_state_retained_memory_bytes());
+  retained.add_bytes(direct_operation_fixed_retained_memory_bytes());
+  retained.add_string_payload(constraints.exclusive_key);
   return ResourceVector{1U, retained.bytes(), demand.scratch_bytes, 0U, 0U};
 }
 
@@ -3460,7 +3486,13 @@ void disarm_reserved_start_rollback_probe_for_testing() noexcept {
 ResourceVector estimate_direct_operation_resources_for_testing(
     const OperationExecutionConstraints& constraints,
     ReadyTaskResourceDemand demand) {
-  return direct_operation_execution_resources(constraints, demand);
+  const OperationExecutionConstraints retained_constraints(constraints);
+  return direct_operation_execution_resources(retained_constraints, demand);
+}
+
+/** @copydoc direct_operation_fixed_retained_memory_bytes_for_testing */
+std::uint64_t direct_operation_fixed_retained_memory_bytes_for_testing() {
+  return direct_operation_fixed_retained_memory_bytes();
 }
 
 /** @copydoc set_operation_admission_wait_observer_for_testing */
@@ -4278,7 +4310,7 @@ OperationExecutionLease ExecutionService::acquire_operation_execution(
   auto state = std::make_unique<OperationExecutionLeaseState>(
       *this, std::move(service_lease), constraints);
   const ResourceVector resources =
-      direct_operation_execution_resources(constraints, demand);
+      direct_operation_execution_resources(state->constraints, demand);
 
   {
     std::unique_lock<std::mutex> lock(pool_->mutex);

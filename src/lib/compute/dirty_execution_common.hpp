@@ -339,7 +339,9 @@ class PreparedDirtySourceFirstRun final {
  * @note For process-service routing both phase reservations remain live
  * together until execution/rollback, so lifecycle installation observes the
  * complete dirty-domain resource ownership rather than a later phase-local
- * admission.
+ * admission. Each phase freezes its complete context estimate before
+ * materialization moves already-charged constraint-key allocations into the
+ * unique ready submissions.
  */
 PreparedDirtySourceFirstRun prepare_dirty_source_first(
     const DirtySourceFirstRunRequest& request,
@@ -400,9 +402,13 @@ class DirtyReadyTaskContext final
    * @brief Estimates complete context-owned structural storage.
    * @return Checked copied plan/selection/dependency/callable/context bytes.
    * @throws GraphError when checked structural arithmetic overflows.
-   * @note The shared Run control is intentionally excluded and added once by
-   * `run_resource_demand()`. Borrowed Graph/cache/staging references and opaque
-   * output payloads are excluded.
+   * @note Every copied task-constraint key is charged by its actual string
+   * capacity plus the null terminator. Phase admission freezes this estimate
+   * before active entries move into their one ready submission, so the same
+   * allocation remains charged exactly once. The shared Run control is
+   * intentionally excluded and added once by `run_resource_demand()`.
+   * Borrowed Graph/cache/staging references and opaque output payloads are
+   * excluded.
    */
   std::uint64_t retained_memory_bytes() const;
 
@@ -427,7 +433,9 @@ class DirtyReadyTaskContext final
    * @throws std::invalid_argument for an inactive or invalid task id.
    * @throws std::bad_alloc when output, executable, or lease storage allocates.
    * @note Readiness is caller-established; this method performs membership and
-   * identity validation only.
+   * identity validation only. Each active task may be materialized once; its
+   * exact-identity constraint storage moves from this already-admitted context
+   * into the submission without creating an unaccounted string copy.
    */
   std::vector<ReadyTaskSubmission> make_submissions(
       const std::vector<int>& task_ids, bool initial_ready);
@@ -464,7 +472,11 @@ class DirtyReadyTaskContext final
   /** @brief Selected devices aligned with dense compute-plan task ids. */
   std::vector<Device> task_devices_;
 
-  /** @brief Operation gates aligned with dense compute-plan task ids. */
+  /**
+   * @brief Operation gates aligned with dense compute-plan task ids.
+   * @note Each active entry moves into its one service submission only after
+   * the context-owned retained-memory estimate is frozen.
+   */
   std::vector<OperationExecutionConstraints> task_constraints_;
 
   /** @brief Uniform operation retained/scratch demand for every task. */

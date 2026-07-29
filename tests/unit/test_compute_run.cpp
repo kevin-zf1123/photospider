@@ -481,13 +481,15 @@ void ensure_issue75_device_operations_registered() {
  *
  * @return Nothing.
  * @throws Registry allocation or callback-copy exceptions unchanged.
- * @note Registration is process-persistent and idempotent. Both callbacks
- * return named data so successful execution cannot be confused with an empty
- * output.
+ * @note Registration is process-persistent and idempotent. Every operation
+ * uses a heap-backed exclusive key, and each callback returns named data so
+ * successful execution cannot be confused with an empty output.
  */
 void ensure_resource_product_operations_registered() {
   static std::once_flag once;
   std::call_once(once, [] {
+    OpMetadata full_metadata;
+    full_metadata.exclusive_key = "resource-accounting-full-plan-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "full_source",
         MonolithicOpFunc(
@@ -497,7 +499,11 @@ void ensure_resource_product_operations_registered() {
               NodeOutput output;
               output.data["value"] = 7;
               return output;
-            }));
+            }),
+        full_metadata);
+    OpMetadata parameter_metadata;
+    parameter_metadata.exclusive_key =
+        "resource-accounting-connected-preflight-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "parameter_source",
         MonolithicOpFunc(
@@ -507,7 +513,8 @@ void ensure_resource_product_operations_registered() {
               NodeOutput output;
               output.data["value"] = 9;
               return output;
-            }));
+            }),
+        parameter_metadata);
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "parameter_source_fail_second",
         MonolithicOpFunc(
@@ -523,7 +530,11 @@ void ensure_resource_product_operations_registered() {
               NodeOutput output;
               output.data["value"] = 9;
               return output;
-            }));
+            }),
+        parameter_metadata);
+    OpMetadata dirty_hp_metadata;
+    dirty_hp_metadata.exclusive_key =
+        "resource-accounting-dirty-hp-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "dirty_hp",
         MonolithicOpFunc(
@@ -531,7 +542,11 @@ void ensure_resource_product_operations_registered() {
               g_resource_dirty_hp_operation_calls.fetch_add(
                   1, std::memory_order_relaxed);
               return make_resource_dirty_output(11);
-            }));
+            }),
+        dirty_hp_metadata);
+    OpMetadata dirty_rt_metadata;
+    dirty_rt_metadata.exclusive_key =
+        "resource-accounting-dirty-rt-exclusive-key";
     OpRegistry::instance().register_op_hp_monolithic(
         "compute_run_resource", "dirty_rt",
         MonolithicOpFunc(
@@ -539,7 +554,8 @@ void ensure_resource_product_operations_registered() {
               g_resource_dirty_rt_operation_calls.fetch_add(
                   1, std::memory_order_relaxed);
               return make_resource_dirty_output(12);
-            }));
+            }),
+        dirty_rt_metadata);
   });
 }
 
@@ -4184,6 +4200,34 @@ TEST(OperationExecutionGate, DirectLeaseChargesBytesAndRecoversAfterRejection) {
 }
 
 /**
+ * @brief Proves owned string accounting includes the trailing null atomically.
+ *
+ * @return Nothing; assertions report an incorrect exact byte count or partial
+ * overflow accumulation.
+ * @throws Standard string allocation exceptions from fixture setup.
+ * @note Explicit reserve forces heap-backed storage whose actual capacity can
+ * differ from logical size. The overflow endpoint has room for capacity but
+ * not its one-byte terminator and must preserve the prior estimate.
+ */
+TEST(RetainedMemoryEstimator,
+     StringPayloadChargesActualCapacityAndTerminatorAtomically) {
+  std::string key(96U, 'k');
+  key.reserve(127U);
+  ASSERT_GE(key.capacity(), 127U);
+
+  RetainedMemoryEstimator exact("string payload exact boundary");
+  exact.add_string_payload(key);
+  EXPECT_EQ(exact.bytes(), static_cast<std::uint64_t>(key.capacity()) + 1U);
+
+  const std::uint64_t prefix = std::numeric_limits<std::uint64_t>::max() -
+                               static_cast<std::uint64_t>(key.capacity());
+  RetainedMemoryEstimator overflow("string payload terminator boundary");
+  overflow.add_bytes(prefix);
+  EXPECT_THROW(overflow.add_string_payload(key), GraphError);
+  EXPECT_EQ(overflow.bytes(), prefix);
+}
+
+/**
  * @brief Verifies every non-CPU Run dimension is admitted all-or-none.
  *
  * @return Nothing.
@@ -4852,19 +4896,19 @@ TEST(ExecutionServiceProductResources,
 }
 
 /**
- * @brief Exercises full-HP product admission below and above its estimate.
+ * @brief Exercises full-HP product admission at exact retained boundaries.
  *
  * @return Nothing.
  * @throws Standard allocation, registry, codec, or graph exceptions from
  * fixture setup.
  * @note The exact service-only envelope is first proved usable, then rejects
  * the real `TaskSubmissionPlan` adapter before operation entry because it
- * omits the Run-owned plan/runner interval. A default-capacity service
- * executes the same production adapter and releases its complete root
- * reservation.
+ * omits the Run-owned plan/runner interval. The complete calibrated vector
+ * includes heap-backed retained operation keys; one byte less rejects, while
+ * exact capacity executes and releases the complete root reservation.
  */
 TEST(ExecutionServiceProductResources,
-     FullPlanRejectsSmallLimitAndExecutesWithDefaultLimit) {
+     FullPlanRejectsOneByteShortAndExecutesAtExactLimit) {
   ensure_resource_product_operations_registered();
   g_resource_product_operation_calls.store(0, std::memory_order_relaxed);
   const std::string graph_identity = "resource-full-product";
@@ -4913,6 +4957,11 @@ TEST(ExecutionServiceProductResources,
   const std::uint64_t adapter_shared_bytes =
       small_lease.retained_memory_bytes();
   ASSERT_GT(adapter_shared_bytes, 0U);
+  ASSERT_EQ(small_plan.resolved_ops().size(), 1U);
+  ASSERT_TRUE(small_plan.resolved_ops().front().has_value());
+  ASSERT_GT(
+      small_plan.resolved_ops().front()->metadata.exclusive_key.capacity(),
+      15U);
   std::atomic_int estimate_entered{0};
   ReadyTaskSubmission adapter_representative =
       make_counted_ready_submission(small_lease, 0U, 101, estimate_entered);
@@ -4937,7 +4986,50 @@ TEST(ExecutionServiceProductResources,
   ASSERT_EQ(small_plan.temp_results().size(), 1U);
   EXPECT_FALSE(small_plan.temp_results().front().has_value());
 
-  ExecutionService large_service(1U);
+  ResourceVector one_short_resources = with_adapter;
+  ASSERT_GT(one_short_resources.retained_memory_bytes, 0U);
+  --one_short_resources.retained_memory_bytes;
+  ExecutionService one_short_service(1U, execution_limits(one_short_resources));
+  ExecutionServiceHost one_short_host;
+  ComputeRun one_short_run(
+      make_test_submission(graph_identity, graph.revision().value(), 101));
+  ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& one_short_plan = one_short_run.emplace_submission_plan(
+      graph, traversal, 101, std::vector<Device>{Device::CPU});
+  TimingCollector one_short_timings;
+  std::mutex one_short_timing_mutex;
+  one_short_plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      one_short_service,
+      one_short_timings,
+      one_short_timing_mutex,
+      one_short_plan.execution_order(),
+      one_short_plan.id_to_idx(),
+      one_short_plan.temp_results(),
+      one_short_plan.resolved_ops(),
+      one_short_plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(one_short_run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease one_short_lease = one_short_run.acquire_lease();
+  EXPECT_THROW(
+      dispatch_planned_tasks(graph, one_short_service, one_short_host, "cpu",
+                             101, one_short_plan, one_short_lease),
+      GraphError);
+  EXPECT_EQ(g_resource_product_operation_calls.load(std::memory_order_relaxed),
+            0);
+  EXPECT_EQ(one_short_host.context_entries(), 0);
+  EXPECT_EQ(one_short_service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_EQ(one_short_plan.temp_results().size(), 1U);
+  EXPECT_FALSE(one_short_plan.temp_results().front().has_value());
+
+  ExecutionService large_service(1U, execution_limits(with_adapter));
   ExecutionServiceHost large_host;
   ComputeRun large_run(
       make_test_submission(graph_identity, graph.revision().value(), 101));
@@ -4979,17 +5071,16 @@ TEST(ExecutionServiceProductResources,
 }
 
 /**
- * @brief Proves HP and RT charge complete dirty synchronization ownership.
+ * @brief Proves HP and RT charge exact dirty retained ownership.
  *
  * @return Nothing.
  * @throws Standard allocation, filesystem, graph, or service exceptions from
  * fixture setup.
  * @note For each real product path, a default-capacity calibration with a
- * small owner captures the complete admitted vector. That exact vector then
- * admits an identical fresh graph/plan with the same small owner. Changing
- * only the owner to add unused ids exceeds the retained cap before callback
- * entry. Removing either production synchronization-demand injection makes
- * the corresponding large-owner endpoint execute and fail this regression.
+ * small owner and heap-backed operation key captures the complete admitted
+ * vector. That exact vector admits an identical fresh graph/plan, one byte
+ * less rejects, and changing only the owner to add unused ids also exceeds the
+ * retained cap before callback entry.
  */
 TEST(ExecutionServiceProductResources,
      DirtyHpAndRtUseExactSmallLargeSynchronizationInterval) {
@@ -5005,6 +5096,11 @@ TEST(ExecutionServiceProductResources,
     std::atomic_int& operation_calls =
         is_rt ? g_resource_dirty_rt_operation_calls
               : g_resource_dirty_hp_operation_calls;
+    const std::optional<OpImplementation> selected_operation =
+        OpRegistry::instance().select_implementation(
+            "compute_run_resource", subtype, {Device::CPU}, intent);
+    ASSERT_TRUE(selected_operation.has_value());
+    ASSERT_GT(selected_operation->metadata.exclusive_key.capacity(), 15U);
     const std::vector<int> small_owner_ids{node_id};
     const std::vector<int> large_owner_ids{node_id, node_id + 1000,
                                            node_id + 2000, node_id + 3000};
@@ -5056,6 +5152,27 @@ TEST(ExecutionServiceProductResources,
     } else {
       EXPECT_FALSE(exact_small.real_time_value.has_value());
     }
+
+    ResourceVector one_short_resources = *calibration.admitted_resources;
+    ASSERT_GT(one_short_resources.retained_memory_bytes, 0U);
+    --one_short_resources.retained_memory_bytes;
+    const ExecutionResourceLimits one_short_limits =
+        execution_limits(one_short_resources);
+    operation_calls.store(0, std::memory_order_relaxed);
+    const DirtyProductResourceResult one_short =
+        execute_dirty_product_resource_case(
+            is_rt ? "dirty-rt-key-one-byte-short"
+                  : "dirty-hp-key-one-byte-short",
+            graph_identity, node_id, subtype, intent, small_owner_ids,
+            one_short_limits);
+    ASSERT_TRUE(one_short.failure_code.has_value());
+    EXPECT_EQ(*one_short.failure_code, GraphErrc::ComputeError);
+    EXPECT_FALSE(one_short.admitted_resources.has_value());
+    EXPECT_EQ(one_short.observation_count, 0);
+    EXPECT_EQ(operation_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(one_short.reserved_after, ResourceVector{});
+    EXPECT_EQ(one_short.high_precision_value, 3);
+    EXPECT_FALSE(one_short.real_time_value.has_value());
 
     operation_calls.store(0, std::memory_order_relaxed);
     const DirtyProductResourceResult rejected_large =

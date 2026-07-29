@@ -1482,9 +1482,7 @@ std::uint64_t ComputeRunLease::retained_memory_bytes() const {
   RetainedMemoryEstimator estimate("ComputeRunControl");
   estimate.add_objects<ComputeRunControl>();
   estimate.add_shared_control_block();
-  estimate.add_bytes(static_cast<std::uint64_t>(
-      control_->descriptor.graph_identity().capacity()));
-  estimate.add_bytes(1U);
+  estimate.add_string_payload(control_->descriptor.graph_identity());
   estimate.add_objects<std::weak_ptr<ComputeRunCancellationSlot>>(
       static_cast<std::uint64_t>(control_->cancellation_slots.capacity()));
   if (control_->submission_plan) {

@@ -47,21 +47,6 @@ void add_bool_vector_capacity(const std::vector<bool>& values,
 }
 
 /**
- * @brief Adds an owned string payload conservatively.
- * @param value String whose reported capacity is charged with its terminator.
- * @param estimate Checked destination estimator.
- * @return Nothing.
- * @throws GraphError when capacity plus terminator overflows.
- * @note Small-string payloads may be inline; charging them again is a
- * deliberate conservative bound, not a claim about library SSO layout.
- */
-void add_string_payload(const std::string& value,
-                        RetainedMemoryEstimator* estimate) {
-  estimate->add_bytes(static_cast<std::uint64_t>(value.capacity()));
-  estimate->add_bytes(1U);
-}
-
-/**
  * @brief Adds node and linkage storage for one ordered map.
  * @tparam Key Map key type.
  * @tparam Value Map mapped type.
@@ -147,7 +132,7 @@ void add_parameter_object_dynamic(const plugin::ParameterValue::Object& object,
                                   RetainedMemoryEstimator* estimate) {
   add_map_nodes(object, estimate);
   for (const auto& [key, value] : object) {
-    add_string_payload(key, estimate);
+    estimate->add_string_payload(key);
     add_parameter_value_dynamic(value, estimate);
   }
 }
@@ -156,7 +141,7 @@ void add_parameter_object_dynamic(const plugin::ParameterValue::Object& object,
 void add_parameter_value_dynamic(const plugin::ParameterValue& value,
                                  RetainedMemoryEstimator* estimate) {
   if (value.is_string()) {
-    add_string_payload(value.as_string(), estimate);
+    estimate->add_string_payload(value.as_string());
     return;
   }
   if (value.is_array()) {
@@ -186,7 +171,7 @@ void add_planned_work_dynamic(const PlannedNodeWork& work,
   add_vector_capacity(work.dependent_node_ids, estimate);
   add_vector_capacity(work.task_ids, estimate);
   if (work.operation_route.has_value()) {
-    add_string_payload(work.operation_route->metadata.exclusive_key, estimate);
+    estimate->add_string_payload(work.operation_route->metadata.exclusive_key);
   }
 }
 
@@ -288,7 +273,7 @@ std::uint64_t compute_plan_dynamic_retained_memory_bytes(
   }
   add_vector_capacity(plan.task_graph.dependencies, &estimate);
   for (const PlannedDependency& dependency : plan.task_graph.dependencies) {
-    add_string_payload(dependency.input_kind, &estimate);
+    estimate.add_string_payload(dependency.input_kind);
   }
   add_vector_capacity(plan.task_graph.initial_task_ids, &estimate);
   add_vector_capacity(plan.available_devices, &estimate);
@@ -326,7 +311,7 @@ std::uint64_t dirty_selection_dynamic_retained_memory_bytes(
 
   add_vector_capacity(selection.dependencies, &estimate);
   for (const PlannedDependency& dependency : selection.dependencies) {
-    add_string_payload(dependency.input_kind, &estimate);
+    estimate.add_string_payload(dependency.input_kind);
   }
   return estimate.bytes();
 }
@@ -383,7 +368,7 @@ std::uint64_t node_output_dynamic_retained_memory_bytes(
     const NodeOutput& output) {
   RetainedMemoryEstimator estimate("NodeOutput");
   add_parameter_object_dynamic(output.data, &estimate);
-  add_string_payload(output.debug.compute_device, &estimate);
+  estimate.add_string_payload(output.debug.compute_device);
   return estimate.bytes();
 }
 

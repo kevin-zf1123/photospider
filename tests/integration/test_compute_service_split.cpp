@@ -25,6 +25,7 @@
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_metrics_recorder.hpp"
+#include "compute/compute_run.hpp"
 #include "compute/compute_service.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_update_executor_test_access.hpp"
@@ -3154,18 +3155,19 @@ TEST(ComputeServiceSequentialAdmission,
  * @throws Setup, graph, registry, service, future, synchronization, cache, or
  * provider exceptions unchanged when fixture construction itself fails.
  * @note Both requests use one callback identity, `maximum_parallelism=1`, and
- * one exclusive key. The service CPU, retained-memory, and scratch ceilings
- * equal exactly one production direct-lease vector. The peer first reaches a
- * denied gate while the sequential provider is active, then must enter and
- * exit while the sequential codec remains blocked. Retaining any identity,
- * key, CPU, retained, or scratch component through that interval prevents the
- * peer from completing or leaves a nonzero authoritative snapshot.
+ * one heap-backed exclusive key. The service CPU, retained-memory, and scratch
+ * ceilings equal exactly one production direct-lease vector after an
+ * independent capacity-plus-terminator check; a one-byte-short limit and a
+ * terminator-only overflow declaration reject without residue. The peer first
+ * reaches a denied gate while the sequential provider is active, then must
+ * enter and exit while the sequential codec remains blocked.
  */
 TEST(ComputeServiceSequentialAdmission,
      ExactDirectCapacityReleasesBeforeBlockingPostProviderCacheFailure) {
   constexpr const char* kType = "issue82_sequential_exact_capacity";
   constexpr const char* kSubtype = "shared_provider";
-  constexpr const char* kExclusiveKey = "lease-cap";
+  constexpr const char* kExclusiveKey =
+      "resource-accounting-sequential-direct-exclusive-key";
   constexpr int kSequentialRole = 1;
   constexpr int kPeerRole = 2;
   auto probe = std::make_shared<SequentialLeaseBoundaryProbe>();
@@ -3205,6 +3207,7 @@ TEST(ComputeServiceSequentialAdmission,
       selected->metadata.maximum_parallelism,
       selected->metadata.exclusive_key,
   };
+  ASSERT_GT(constraints.exclusive_key.capacity(), 15U);
   const compute::ReadyTaskResourceDemand demand{
       selected->metadata.retained_memory_bytes,
       selected->metadata.scratch_bytes,
@@ -3215,11 +3218,78 @@ TEST(ComputeServiceSequentialAdmission,
       testing::ExecutionServiceTestAccess::estimate_direct_operation_resources(
           constraints, demand);
   ASSERT_EQ(exact_resources.cpu_slots, 1U);
-  ASSERT_GT(exact_resources.retained_memory_bytes,
-            metadata.retained_memory_bytes);
+  const compute::OperationExecutionConstraints retained_constraints(
+      constraints);
+  const std::uint64_t fixed_retained_bytes =
+      testing::ExecutionServiceTestAccess::
+          direct_operation_fixed_retained_memory_bytes();
+  ASSERT_EQ(exact_resources.retained_memory_bytes,
+            metadata.retained_memory_bytes + fixed_retained_bytes +
+                static_cast<std::uint64_t>(
+                    retained_constraints.exclusive_key.capacity()) +
+                1U);
   ASSERT_EQ(exact_resources.scratch_bytes, metadata.scratch_bytes);
   ASSERT_EQ(exact_resources.ready_entries, 0U);
   ASSERT_EQ(exact_resources.ready_bytes, 0U);
+
+  ResourceVector one_byte_short = exact_resources;
+  ASSERT_GT(one_byte_short.retained_memory_bytes, 0U);
+  --one_byte_short.retained_memory_bytes;
+  compute::ExecutionResourceLimits short_limits =
+      compute::ExecutionService::default_resource_limits();
+  short_limits.cpu_slots = one_byte_short.cpu_slots;
+  short_limits.retained_memory_bytes = one_byte_short.retained_memory_bytes;
+  short_limits.scratch_bytes = one_byte_short.scratch_bytes;
+  short_limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService short_authority(short_limits);
+  compute::ComputeRun short_run(compute::ComputeRunSubmission{
+      "direct-key-one-byte-short",
+      GraphInstanceId{8201U},
+      GraphRevision{8201U},
+      1,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
+                             std::nullopt, 1U, std::nullopt},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey{1, ComputeIntent::GlobalHighPrecision},
+          compute::SupersessionGeneration{1U}},
+  });
+  EXPECT_THROW((void)short_authority.acquire_operation_execution(
+                   short_run.acquire_lease(), constraints, demand),
+               GraphError);
+  EXPECT_EQ(short_authority.resource_snapshot().reserved, ResourceVector{});
+
+  const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+  const std::uint64_t copied_capacity =
+      static_cast<std::uint64_t>(retained_constraints.exclusive_key.capacity());
+  ASSERT_LT(fixed_retained_bytes + copied_capacity, maximum);
+  const compute::ReadyTaskResourceDemand overflow_demand{
+      maximum - fixed_retained_bytes - copied_capacity, 0U, 0U, 1U};
+  compute::ExecutionResourceLimits overflow_limits =
+      compute::ExecutionService::default_resource_limits();
+  overflow_limits.cpu_slots = 1U;
+  overflow_limits.retained_memory_bytes = maximum;
+  overflow_limits.scratch_bytes = 0U;
+  overflow_limits.interactive_headroom = ResourceVector{};
+  compute::ExecutionService overflow_authority(overflow_limits);
+  compute::ComputeRun overflow_run(compute::ComputeRunSubmission{
+      "direct-key-terminator-overflow",
+      GraphInstanceId{8202U},
+      GraphRevision{8202U},
+      1,
+      ComputeIntent::GlobalHighPrecision,
+      compute::ComputeRunQuality::Full,
+      compute::ComputeRunQos{compute::ComputeRunQosClass::Throughput,
+                             std::nullopt, 1U, std::nullopt},
+      compute::SupersessionIdentity{
+          compute::SupersessionKey{1, ComputeIntent::GlobalHighPrecision},
+          compute::SupersessionGeneration{1U}},
+  });
+  EXPECT_THROW((void)overflow_authority.acquire_operation_execution(
+                   overflow_run.acquire_lease(), constraints, overflow_demand),
+               GraphError);
+  EXPECT_EQ(overflow_authority.resource_snapshot().reserved, ResourceVector{});
 
   compute::ExecutionResourceLimits limits =
       compute::ExecutionService::default_resource_limits();

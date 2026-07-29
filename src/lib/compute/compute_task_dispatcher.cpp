@@ -342,11 +342,11 @@ PreparedComputeDispatch ComputeTaskDispatcher::prepare(
     return PreparedComputeDispatch(std::move(state));
   }
 
-  std::vector<ReadyTaskSubmission> initial_submissions =
-      plan.make_initial_ready_submissions(state->lifecycle_lease);
   const CpuRunResourceDemand resource_demand{
       state->lifecycle_lease.retained_memory_bytes(),
       plan.task_resource_demand()};
+  std::vector<ReadyTaskSubmission> initial_submissions =
+      plan.make_initial_ready_submissions(state->lifecycle_lease);
   state->physical_run = execution_service.prepare_run(
       host, execution_type, std::move(initial_submissions),
       static_cast<int>(plan.size()), resource_demand);

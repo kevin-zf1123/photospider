@@ -259,7 +259,9 @@ class ComputeTaskDispatcher {
    * An empty plan is accepted only for exact complete Region validity and never
    * for partial persistent output. The method does not advance Run phase,
    * publish a ready entry, execute an operation, commit a result, or install
-   * lifecycle admission.
+   * lifecycle admission. The complete shared Run estimate is frozen before
+   * initial submissions move already-charged constraint-key allocations out of
+   * the Run-owned plan.
    */
   PreparedComputeDispatch prepare(GraphModel& graph,
                                   ExecutionService& execution_service,

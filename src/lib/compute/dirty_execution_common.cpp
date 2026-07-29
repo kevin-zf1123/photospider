@@ -176,18 +176,19 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
           state->request.task_operation_resource_demand, owned_run_task,
           run_task_retained_memory_bytes, phase_lease, false,
           ExecutionTaskPriority::High);
-      std::vector<ReadyTaskSubmission> source_submissions =
-          source_context->make_submissions(source_task_ids, true);
       RetainedMemoryEstimator source_phase_retained(
           "dirty source phase retained demand");
       source_phase_retained.add_bytes(
           prepared_dirty_phase_retained_bytes(state->request, source_task_ids));
       source_phase_retained.add_bytes(run_task_retained_memory_bytes);
+      const CpuRunResourceDemand source_resource_demand =
+          source_context->run_resource_demand(source_phase_retained.bytes());
+      std::vector<ReadyTaskSubmission> source_submissions =
+          source_context->make_submissions(source_task_ids, true);
       state->source_run = state->request.execution_service->prepare_run(
           *state->request.host, state->request.execution_type,
           std::move(source_submissions),
-          static_cast<int>(source_task_ids.size()),
-          source_context->run_resource_demand(source_phase_retained.bytes()));
+          static_cast<int>(source_task_ids.size()), source_resource_demand);
     }
 
     if (!downstream_task_ids.empty()) {
@@ -212,15 +213,17 @@ PreparedDirtySourceFirstRun prepare_dirty_source_first(
                     ? ExecutionTaskPriority::High
                     : ExecutionTaskPriority::Normal);
           });
+      const CpuRunResourceDemand downstream_resource_demand =
+          downstream_context->run_resource_demand(
+              prepared_dirty_phase_retained_bytes(state->request,
+                                                  downstream_task_ids));
       std::vector<ReadyTaskSubmission> downstream_submissions =
           downstream_context->make_submissions(initial_downstream_ids, true);
       state->downstream_run = state->request.execution_service->prepare_run(
           *state->request.host, state->request.execution_type,
           std::move(downstream_submissions),
           static_cast<int>(downstream_task_ids.size()),
-          downstream_context->run_resource_demand(
-              prepared_dirty_phase_retained_bytes(state->request,
-                                                  downstream_task_ids)));
+          downstream_resource_demand);
     }
     return PreparedDirtySourceFirstRun(std::move(state));
   }
@@ -400,8 +403,7 @@ std::uint64_t DirtyReadyTaskContext::retained_memory_bytes() const {
   estimate.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(task_constraints_.capacity()));
   for (const OperationExecutionConstraints& constraints : task_constraints_) {
-    estimate.add_objects<char>(
-        static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
+    estimate.add_string_payload(constraints.exclusive_key);
   }
   estimate.add_objects<void*>(
       static_cast<std::uint64_t>(active_task_id_set_.bucket_count()));
@@ -468,7 +470,7 @@ std::vector<ReadyTaskSubmission> DirtyReadyTaskContext::make_submissions(
         },
         priority_, task_demand,
         task_devices_.at(static_cast<std::size_t>(task_id)),
-        task_constraints_.at(static_cast<std::size_t>(task_id)));
+        std::move(task_constraints_.at(static_cast<std::size_t>(task_id))));
   }
   return submissions;
 }

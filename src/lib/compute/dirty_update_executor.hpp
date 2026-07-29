@@ -431,11 +431,13 @@ class PreparedConnectedDirtyParameters final {
  * selection, retained-memory estimation, reservation, and queue staging.
  * @note Candidate preparation invokes no operation provider. With the process
  * service, shared Run/result/staging ownership is reserved once across all
- * nodes, each callback root charges only its unique ownership, and provider
- * start remains impossible until the caller installs the matching lifecycle
- * bundle. Direct execution waits for gate availability without reserving
- * resources, admits the operation vector only immediately before provider
- * entry, and releases both authorities by RAII on return or throw.
+ * nodes, each callback root charges only its unique ownership, including the
+ * actual capacity plus terminator of its independently retained callable and
+ * submission constraint keys, and provider start remains impossible until the
+ * caller installs the matching lifecycle bundle. Direct execution waits for
+ * gate availability without reserving resources, admits the operation vector
+ * only immediately before provider entry, and releases both authorities by
+ * RAII on return or throw.
  */
 PreparedConnectedDirtyParameters prepare_connected_dirty_parameters(
     GraphModel& graph, GraphTraversalService& traversal, int target_node_id,

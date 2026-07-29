@@ -164,6 +164,19 @@ class ExecutionServiceTestAccess final {
   }
 
   /**
+   * @brief Returns direct-lease retained bytes that exclude operation demand
+   * and the retained key payload.
+   * @return Production private lease-state and reservation-state bytes.
+   * @throws GraphError when checked retained-memory arithmetic overflows.
+   * @note The value is authority-free and exists only in the separately
+   * compiled, non-installed execution-service test product.
+   */
+  static std::uint64_t direct_operation_fixed_retained_memory_bytes() {
+    return compute::testing::
+        direct_operation_fixed_retained_memory_bytes_for_testing();
+  }
+
+  /**
    * @brief Arms the separate test-product reserved-start rollback probe.
    * @param service Isolated service used only to document test ownership.
    * @return Nothing.

@@ -766,6 +766,15 @@ same revisioned route rather than a generic key-level metadata lookup. The
 manual `test_propagation` tool likewise filters and retains the exact tiled
 implementation for the requested HP or RT diagnostic route.
 
+`test_compute_run` registers heap-backed exclusive keys for full-plan, dirty HP,
+dirty RT, and connected-preflight product paths. The shared string-payload
+estimator proves actual capacity plus one terminator and strong overflow
+rollback. Product cases then calibrate the complete admitted vector, require an
+identical plan at exact retained capacity, and reject one byte less before
+provider entry with a zero ledger snapshot. These cases cover the allocation
+transfer from a charged plan/context constraint into its unique submission;
+they do not use a migration-residue source scan.
+
 `test_compute_service_split` proves that nonparallel dirty HP, dirty RT, and
 connected-parameter preflight enter the same process-owned operation gate and
 resource ledger used by physical workers. Cross-Graph cases cover
@@ -798,14 +807,16 @@ The resource-capacity case uses the same callback identity, cap, and key but a
 second direct contender. A test-product-only authority-free diagnostic reuses
 the production direct-lease envelope calculation, and the isolated
 `ExecutionService` CPU, retained-memory, and scratch ceilings are set to
-exactly one direct callback vector. The contender first reaches denied
-admission while the provider is active, then enters and exits before the codec
-is released. Any identity/key ownership or CPU/retained/scratch reservation
-retained into the cache interval either prevents that completion or leaves a
-nonzero authoritative resource snapshot. Keeping this capacity check
-orthogonal is intentional: a physical Run reserves its complete root before
-operation-gate startability, so its root is not a single direct-lease vector.
-Neither regression adds a production or installable test hook.
+exactly one direct callback vector. Its heap-backed key is also compared with an
+independent fixed-envelope plus copied-capacity-plus-terminator calculation.
+Exact capacity admits; a one-byte-short limit and a declaration that leaves
+room for capacity but not its terminator reject before gate/resource ownership
+and leave a zero snapshot. The contender then reaches denied admission while
+the provider is active and enters/exits before the codec is released. Keeping
+this capacity check orthogonal is intentional: a physical Run reserves its
+complete root before operation-gate startability, so its root is not a single
+direct-lease vector. Neither regression adds a production or installable test
+hook.
 
 The post-plan observer exists only in the non-installed internal test product.
 `StaticProductConsumerSmoke` requires the production
@@ -815,10 +826,12 @@ notification symbols from the installed archive.
 Run the focused boundary with:
 
 ```bash
-cmake --build build --target test_op_registry_m31 \
+cmake --build build --target test_op_registry_m31 test_compute_run \
   test_compute_service_split -j
 ./build/tests/test_op_registry_m31 \
   --gtest_filter='OpRegistryM31Test.ScalarSlotsStayAtomic*'
+./build/tests/test_compute_run \
+  --gtest_filter='RetainedMemoryEstimator.StringPayloadChargesActualCapacityAndTerminatorAtomically:ExecutionServiceProductResources.FullPlanRejectsOneByteShortAndExecutesAtExactLimit:ExecutionServiceProductResources.DirtyHpAndRtUseExactSmallLargeSynchronizationInterval:ExecutionServiceProductResources.ConnectedPreflightUsesOneSharedUmbrellaAtExactThreshold'
 ./build/tests/test_compute_service_split \
   --gtest_filter='ComputeServiceSequentialAdmission.*:ComputeServiceDirectDirtyAdmission.*:ComputeServiceDirtyIdentity.*:ComputeServiceCancellation.NonparallelConnectedCancellationReleasesDirectAuthorityAndRecovers:ComputeServiceSplit.PreflightFailurePublishesNoHpCacheState'
 ```

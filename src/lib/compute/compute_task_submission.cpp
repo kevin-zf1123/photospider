@@ -210,16 +210,14 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       static_cast<std::uint64_t>(resolved_ops_.capacity()));
   for (const std::optional<OpImplementation>& implementation : resolved_ops_) {
     if (implementation.has_value()) {
-      estimate.add_objects<char>(static_cast<std::uint64_t>(
-          implementation->metadata.exclusive_key.capacity()));
+      estimate.add_string_payload(implementation->metadata.exclusive_key);
     }
   }
   estimate.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(operation_constraints_.capacity()));
   for (const OperationExecutionConstraints& constraints :
        operation_constraints_) {
-    estimate.add_objects<char>(
-        static_cast<std::uint64_t>(constraints.exclusive_key.capacity()));
+    estimate.add_string_payload(constraints.exclusive_key);
   }
   return estimate.bytes();
 }
@@ -285,7 +283,7 @@ ReadyTaskSubmission TaskSubmissionPlan::make_ready_submission(
       },
       ExecutionTaskPriority::Normal, task_resource_demand_,
       execution_devices_.at(execution_index),
-      operation_constraints_.at(execution_index));
+      std::move(operation_constraints_.at(execution_index)));
 }
 
 /**
@@ -795,6 +793,9 @@ void dispatch_planned_tasks(GraphModel& graph,
  * complete target output.
  * @throws Service setup or exact task exceptions unchanged.
  * @note Partial persistent Region state never authorizes the early return.
+ * The complete shared Run estimate is frozen before initial submission
+ * materialization moves already-charged constraint-key allocations out of the
+ * plan.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             ExecutionService& execution_service,
@@ -813,10 +814,10 @@ void dispatch_planned_tasks(GraphModel& graph,
     return;
   }
 
-  std::vector<ReadyTaskSubmission> initial_submissions =
-      plan.make_initial_ready_submissions(dispatcher_lease);
   const CpuRunResourceDemand resource_demand{
       dispatcher_lease.retained_memory_bytes(), plan.task_resource_demand()};
+  std::vector<ReadyTaskSubmission> initial_submissions =
+      plan.make_initial_ready_submissions(dispatcher_lease);
   execution_service.execute_run(host, execution_type,
                                 std::move(initial_submissions),
                                 static_cast<int>(plan.size()), resource_demand);

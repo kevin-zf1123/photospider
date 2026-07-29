@@ -210,6 +210,17 @@ gate. Direct sequential callers wait cancellation-aware without holding a
 resource reservation, then acquire the same gate and one CPU/byte/scratch root
 only around provider entry.
 
+Every Host-owned retained operation or constraint key is charged by the actual
+copied `std::string::capacity()` plus its null terminator. Full-plan and dirty
+admission freeze the complete shared estimate before moving each already
+charged constraint allocation into its unique `ReadyTaskSubmission`;
+connected-preflight callable/submission copies and the direct lease are charged
+independently. The operation gate stores only a borrowed `string_view` erased
+before the stable submission or direct-lease owner retires, so it neither
+duplicates nor undercounts string ownership. Checked terminator overflow and a
+one-byte-short retained limit fail before provider entry without gate or ledger
+residue.
+
 ## Private Execution Routes
 
 The route vocabulary is closed:

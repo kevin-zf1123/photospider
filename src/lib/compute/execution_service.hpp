@@ -382,7 +382,8 @@ class PreparedExecutionSharedReservation final {
  * @note The lease owns one CPU/retained/scratch root reservation plus the same
  * exact-identity/exclusive-key gate used by service workers. Sequential callers
  * keep it alive only across the provider callback and release it on every
- * normal, exceptional, or cancellation unwind.
+ * normal, exceptional, or cancellation unwind. Its retained constraint-key
+ * copy is charged by actual string capacity plus the null terminator.
  */
 class OperationExecutionLease final {
  public:
@@ -1271,10 +1272,12 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * policy/ledger cannot admit the direct callback vector.
    * @throws std::bad_alloc or std::system_error from gate/resource staging.
    * @note Waiting for identity/key availability holds no resource reservation.
+   * The copied constraints key is charged by actual retained capacity plus its
+   * null terminator through checked arithmetic before gate acquisition.
    * Resource admission is attempted only after the gate becomes startable; a
-   * failed reservation releases staged gate ownership before returning.
-   * Direct sequential entry uses ledger capacity without requiring physical
-   * workers to be configured or started.
+   * failed reservation releases staged gate ownership before returning. Direct
+   * sequential entry uses ledger capacity without requiring physical workers
+   * to be configured or started.
    */
   OperationExecutionLease acquire_operation_execution(
       const ComputeRunLease& run_lease,
