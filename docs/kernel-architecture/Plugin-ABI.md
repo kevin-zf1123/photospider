@@ -276,7 +276,11 @@ fresh `std::bad_alloc` and all other `cv::Exception` values to host-owned
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` omits those slots while the
 registry and public v2 registrar remain usable by another provider.
 Provider-local synchronization is still required for actual shared backend
-state: the Metal Perlin DSO mutex protects only its shared Metal lifecycle.
+state that a provider owns. The Metal Perlin DSO owns neither a native
+lifecycle nor a lifecycle mutex: it borrows the command queue,
+invocation-scoped allocator, and pipeline cache from the current process
+executor, while execution metadata gates provide implementation/key
+serialization.
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
 records the decision and its accounting limits.
 

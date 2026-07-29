@@ -107,6 +107,39 @@ def cmake_cache_values(build: Path) -> dict[str, str]:
     return values
 
 
+def validate_dependency_disabled_native_toolchain(build: Path) -> None:
+    """@brief Prove the Darwin-neutral profile did not activate Metal tooling.
+
+    @param build Configured dependency-disabled producer or consumer directory.
+    @return None after the cache and generated toolchain remain Metal-neutral.
+    @throws OSError If cache or generated toolchain paths cannot be inspected.
+    @throws RuntimeError If Objective-C++ or Metal/Foundation discovery leaked.
+    @note Non-Darwin hosts return immediately because the leak is Apple-specific.
+    """
+
+    if sys.platform != "darwin":
+        return
+    cache = cmake_cache_values(build)
+    forbidden_cache_keys = (
+        "CMAKE_OBJCXX_COMPILER",
+        "METAL_FRAMEWORK",
+        "FOUNDATION_FRAMEWORK",
+        "PHOTOSPIDER_METAL_FRAMEWORK",
+        "PHOTOSPIDER_FOUNDATION_FRAMEWORK",
+    )
+    leaked_cache_keys = [
+        key for key in forbidden_cache_keys if key in cache
+    ]
+    compiler_records = list(
+        build.rglob("CMakeOBJCXXCompiler.cmake")
+    )
+    if leaked_cache_keys or compiler_records:
+        raise RuntimeError(
+            "dependency-disabled Darwin profile activated native Metal tooling: "
+            f"cache={leaked_cache_keys}, compiler_records={compiler_records}"
+        )
+
+
 def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
     """@brief Validate an external dependency-disabled producer.
 
@@ -120,6 +153,7 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
     """
 
     cache = cmake_cache_values(build)
+    validate_dependency_disabled_native_toolchain(build)
 
     def require(key: str) -> str:
         """@brief Return one required serialized cache value.
@@ -494,6 +528,7 @@ def main() -> int:
                 ],
                 repo,
             )
+            validate_dependency_disabled_native_toolchain(build)
             run(
                 [
                     args.cmake_executable,
@@ -661,6 +696,7 @@ def main() -> int:
             ],
             repo,
         )
+        validate_dependency_disabled_native_toolchain(consumer_build)
         run(
             [
                 args.cmake_executable,

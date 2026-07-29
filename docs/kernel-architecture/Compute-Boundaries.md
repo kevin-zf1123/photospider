@@ -202,16 +202,18 @@ Zero is an explicit provider declaration; absent or malformed metadata does not
 silently become zero and is rejected before provider entry.
 Copied graph-identity metadata is charged by actual string capacity plus its
 terminator. Every independently retained operation/constraint key follows the
-same rule. Full-plan and dirty adapters freeze the shared charge before moving
-one already-charged key allocation into its unique submission; connected
-preflight and direct leases charge their independent copies, while the
-operation gate borrows a stable view instead of duplicating the string. A
-queued gate view borrows from the owning `QueueEntry`. Direct acquisition first
-copies the caller constraints into the returned lease state; every gate query,
-wait predicate, start, and finish then borrows that state-owned copy, so a
-helper-local caller may retire or mutate its input after acquisition returns
-without changing active gate identity. After every initial value and ready
-grant has moved into a staged queue entry,
+same rule. The full-plan adapter preallocates one independently owned,
+already-charged constraint record per logical task, including every tile, and
+moves each record exactly once into that task's unique submission. The dirty
+adapter applies the same rule to every active task. Both freeze the shared
+charge before moving any record. Connected preflight and direct leases charge
+their independent copies, while the operation gate borrows a stable view
+instead of duplicating the string. A queued gate view borrows from the owning
+`QueueEntry`. Direct acquisition first copies the caller constraints into the
+returned lease state; every gate query, wait predicate, start, and finish then
+borrows that state-owned copy, so a helper-local caller may retire or mutate
+its input after acquisition returns without changing active gate identity.
+After every initial value and ready grant has moved into a staged queue entry,
 `ExecutionService` destroys the caller-side submission-vector backing before
 active-Run publication and settlement waiting; only the staged entries and then
 the bounded store retain those submissions. Before each dirty or
@@ -708,15 +710,18 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #83: all HP/RT ready work enters one Host-owned
+is authoritative through issue #84: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources plus exact implementation/key gates before a closed private
-route starts execution. Sequential provider entry uses the same ledger and
-gates through a direct lease. Graphs retain only copied route ids/generations;
-no worker-owning scheduler SDK, scheduler
-plugin, per-Graph physical owner, or compatibility adapter remains. Separate
-realtime child Runs, request-owned staging, strong identity/revision checks,
+route starts execution. Every `GPU_METAL` start then enters the matching fixed,
+process-owned registry executor and borrows its queue, invocation allocator,
+and pipeline cache through provider return. Sequential provider entry uses the
+same ledger and gates through a direct lease. Graphs retain only copied route
+ids/generations and no native device owner; no worker-owning scheduler SDK,
+scheduler plugin, per-Graph physical owner, or compatibility adapter remains.
+Separate realtime child Runs, request-owned staging, strong identity/revision
+checks,
 latest-wins supersession, cancellation observation, exact-Run queued purge,
 dependent suppression, and Run-owned commit arbitration remain unchanged.
 `RunLifecycleRegistry` now supplies the atomic candidate/close/shutdown fence,

@@ -218,8 +218,12 @@ Implemented adapter behavior:
 
 Plugin, scheduler, and core compute code must not treat the Metal buffer adapter
 as a production runtime boundary. The current production Metal operation path
-owns its backend-specific objects independently. Direct interpretation of
-`context` is backend-specific and is not a portable memory contract.
+does not use that adapter or retain an `ImageBuffer::context` payload. After
+reserved start, the Metal Perlin provider borrows the process executor's
+command queue, invocation-scoped allocator, and validated pipeline cache, then
+returns a CPU-owned `ImageBuffer`; the provider owns no independent native
+lifecycle. Direct interpretation of `context` remains backend-specific and is
+not a portable memory contract.
 
 ## Boundaries and Rationale
 

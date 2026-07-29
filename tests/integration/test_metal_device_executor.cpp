@@ -1,11 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -118,7 +122,7 @@ struct PerlinInvocationState final {
     plugin::ParameterMap parameters;
     parameters.emplace("width", plugin::ParameterValue(8));
     parameters.emplace("height", plugin::ParameterValue(8));
-    parameters.emplace("grid_size", plugin::ParameterValue(2.0));
+    parameters.emplace("grid_size", plugin::ParameterValue(3.0));
     parameters.emplace("seed", plugin::ParameterValue(84));
     return plugin::NodeView(node_id, "perlin_noise_metal", "image_generator",
                             "perlin_noise_metal", std::move(parameters));
@@ -130,6 +134,58 @@ struct PerlinInvocationState final {
   /** @brief Output published by the worker before Run settlement. */
   std::optional<plugin::OperationOutput> output;
 };
+
+/**
+ * @brief One independently calculated sample from the fixed Perlin fixture.
+ *
+ * @throws Nothing for aggregate construction and copying.
+ * @note Expected values were generated from the documented Perlin equations,
+ * fixed seed 84 permutation, 8x8 extent, and scale 3.0 outside the production
+ * shader/runtime path.
+ */
+struct PerlinReferenceSample final {
+  /** @brief Zero-based image column. */
+  int column = 0;
+
+  /** @brief Zero-based image row. */
+  int row = 0;
+
+  /** @brief Expected normalized Perlin value. */
+  float expected = 0.0F;
+};
+
+/** @brief Absolute tolerance for Metal floating-point reference samples. */
+constexpr float kPerlinReferenceTolerance = 1.0e-4F;
+
+/** @brief Minimum required sample range proving nonconstant spatial output. */
+constexpr float kPerlinMinimumDynamicRange = 0.25F;
+
+/** @brief Fixed independent oracle points spanning the generated image. */
+constexpr std::array<PerlinReferenceSample, 5> kPerlinReferenceSamples{{
+    {0, 0, 0.5F},
+    {2, 1, 0.211625934F},
+    {4, 0, 0.75F},
+    {3, 4, 0.745986938F},
+    {6, 7, 0.166391551F},
+}};
+
+/**
+ * @brief Reads one FLOAT32 sample from a validated single-channel image.
+ * @param image CPU image whose row stride may exceed its active width.
+ * @param column Zero-based active sample column.
+ * @param row Zero-based active sample row.
+ * @return Exact stored floating-point value.
+ * @throws std::out_of_range when row or column is outside the active image.
+ * @note The caller validates buffer shape and type before using this helper.
+ */
+float perlin_sample(const ImageBuffer& image, int column, int row) {
+  if (column < 0 || column >= image.width || row < 0 || row >= image.height) {
+    throw std::out_of_range("Perlin reference sample is outside the image.");
+  }
+  const auto* samples =
+      reinterpret_cast<const float*>(image_buffer_row_data(image, row));
+  return samples[column];
+}
 
 /**
  * @brief Builds one deterministic standalone Metal Run descriptor.
@@ -187,10 +243,12 @@ std::shared_ptr<PerlinInvocationState> execute_perlin(
 }
 
 /**
- * @brief Validates one settled CPU Perlin image and every active sample.
+ * @brief Validates one settled CPU Perlin image against an independent oracle.
  * @param state Settled invocation state.
  * @return Nothing.
  * @throws GoogleTest assertion control only.
+ * @note Range, nonconstant spatial variation, and fixed coordinate values
+ * ensure a successful zero-filled or constant-filled texture cannot pass.
  */
 void expect_valid_perlin_output(
     const std::shared_ptr<PerlinInvocationState>& state) {
@@ -203,6 +261,8 @@ void expect_valid_perlin_output(
   EXPECT_EQ(image.channels, 1);
   EXPECT_EQ(image.type, DataType::FLOAT32);
   EXPECT_EQ(image.device, Device::CPU);
+  float minimum = std::numeric_limits<float>::infinity();
+  float maximum = -std::numeric_limits<float>::infinity();
   for (int row = 0; row < image.height; ++row) {
     const auto* samples =
         reinterpret_cast<const float*>(image_buffer_row_data(image, row));
@@ -210,6 +270,46 @@ void expect_valid_perlin_output(
       EXPECT_TRUE(std::isfinite(samples[column]));
       EXPECT_GE(samples[column], 0.0F);
       EXPECT_LE(samples[column], 1.0F);
+      minimum = std::min(minimum, samples[column]);
+      maximum = std::max(maximum, samples[column]);
+    }
+  }
+  EXPECT_GT(maximum - minimum, kPerlinMinimumDynamicRange);
+  for (const PerlinReferenceSample& reference : kPerlinReferenceSamples) {
+    EXPECT_NEAR(perlin_sample(image, reference.column, reference.row),
+                reference.expected, kPerlinReferenceTolerance)
+        << "reference coordinate (" << reference.column << ", " << reference.row
+        << ")";
+  }
+}
+
+/**
+ * @brief Proves two settled Perlin invocations returned bit-identical samples.
+ * @param first First successful invocation state.
+ * @param second Second successful invocation state.
+ * @return Nothing.
+ * @throws GoogleTest assertion control only.
+ * @note Both invocations use the same fixed seed and parameters but distinct
+ * Runs, so exact equality proves executor reuse did not alter output state.
+ */
+void expect_identical_perlin_outputs(
+    const std::shared_ptr<PerlinInvocationState>& first,
+    const std::shared_ptr<PerlinInvocationState>& second) {
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(first->output.has_value());
+  ASSERT_TRUE(second->output.has_value());
+  const ImageBuffer& first_image = first->output->image_buffer;
+  const ImageBuffer& second_image = second->output->image_buffer;
+  ASSERT_EQ(first_image.width, second_image.width);
+  ASSERT_EQ(first_image.height, second_image.height);
+  ASSERT_EQ(first_image.channels, second_image.channels);
+  ASSERT_EQ(first_image.type, second_image.type);
+  for (int row = 0; row < first_image.height; ++row) {
+    for (int column = 0; column < first_image.width; ++column) {
+      EXPECT_FLOAT_EQ(perlin_sample(first_image, column, row),
+                      perlin_sample(second_image, column, row))
+          << "deterministic coordinate (" << column << ", " << row << ")";
     }
   }
 }
@@ -231,6 +331,7 @@ TEST(MetalDeviceExecutorIntegration,
   expect_valid_perlin_output(first);
   const auto second = execute_perlin(service, host, 8402U);
   expect_valid_perlin_output(second);
+  expect_identical_perlin_outputs(first, second);
 
   const execution::DeviceExecutorDiagnostics diagnostics =
       service.device_executor_diagnostics(Device::GPU_METAL);

@@ -11,6 +11,7 @@ set(Photospider_operation_opencv_FOUND @PHOTOSPIDER_ENABLE_OPENCV@)
 set(Photospider_policy_sdk_FOUND TRUE)
 set(Photospider_opencv_enabled @PHOTOSPIDER_ENABLE_OPENCV@)
 set(Photospider_yaml_enabled @PHOTOSPIDER_ENABLE_YAML@)
+set(Photospider_metal_executor_enabled @PHOTOSPIDER_HAS_METAL_EXECUTOR@)
 
 set(_Photospider_need_embedded FALSE)
 set(_Photospider_need_threads FALSE)
@@ -91,7 +92,8 @@ if(_Photospider_need_embedded)
     endif()
   endif()
 
-  if(APPLE AND Photospider_embedded_FOUND)
+  if(APPLE AND Photospider_metal_executor_enabled AND
+     Photospider_embedded_FOUND)
     find_library(PHOTOSPIDER_METAL_FRAMEWORK NAMES Metal)
     find_library(PHOTOSPIDER_FOUNDATION_FRAMEWORK NAMES Foundation)
     if(NOT PHOTOSPIDER_METAL_FRAMEWORK OR NOT PHOTOSPIDER_FOUNDATION_FRAMEWORK)

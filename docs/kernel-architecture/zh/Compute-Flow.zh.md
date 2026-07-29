@@ -21,11 +21,12 @@ CLI / TUI
 
 `Kernel` 拥有多图 API。`GraphRuntime` 拥有一个图模型、每图可见状态
 `GraphStateExecutor`、独立的有界串行 compute-request lane、每个 live Graph 的一个
-`ComputeRequestCoordinator`、事件服务、平台 context，以及每个 intent 的一个 execution
-binding。每个 binding 只包含精确 route ID 与非零 generation。Embedded composition root
-还会在 Kernel 之前创建一个私有固定 `ExecutionService`。该 service 独占 Host 权威
-resource ledger、policy binding、有界 ready store、reserved-start transaction、物理 route
-与 completion callback；Kernel 会把该 owner 注入每个 request-local `ComputeService`。
+`ComputeRequestCoordinator`、事件服务、Graph lifetime anchor，以及每个 intent 的一个
+execution binding。每个 binding 只包含精确 route ID 与非零 generation。`GraphRuntime`
+不拥有 native platform context。Embedded composition root 还会在 Kernel 之前创建一个私有固定
+`ExecutionService`。该 service 独占 Host 权威 resource ledger、policy binding、有界 ready
+store、reserved-start transaction、物理 route 与 completion callback；Kernel 会把该 owner
+注入每个 request-local `ComputeService`。
 
 `ps::Host` 是面向 frontend 的 public interface。embedded Host adapter 会复制 public
 request/result value，并在内部使用 `InteractionService` wrapper 与 `Kernel`；CLI/TUI code
@@ -55,12 +56,14 @@ CLI/REPL 前端是固定的批处理取向界面。它不暴露 RT intent 命令
 
 固定 service thread 属于基础设施，不是 per-Run reservation。Execution 配置会把 `0` 解析
 为 bounded automatic value，或保留显式 `1..8`，随后冻结 CPU service 数量、启动固定 CPU
-pool，并启动一个私有 Metal worker lane。Host 不暴露 Metal 时，该 lane 保持空闲；它不是可
-独立配置的 worker grant。
-之后的零或相同请求保持幂等，冲突的正数请求会被拒绝。发布 work 前，每个 Run 都会从
-service-owned Host ledger 原子预留完整的 CPU、retained-memory、scratch、ready-entry 与
-ready-byte vector。Graph load 只复制 route ID 与 generation，不拥有 worker grant。该契约不
-声称覆盖 compute、operation 或私有 GPU backend 使用的全部 thread。
+pool，并把一个私有 Metal worker lane 作为固定基础设施启动。Device availability 只来自固定
+`DeviceExecutorRegistry`：启用 operation plugin 的 Apple profile 会安装一个 Metal executor，
+unsupported 与 dependency-disabled profile 则让 registry 中没有 Metal executor，并使
+`gpu_pipeline` 只暴露 CPU。Metal lane 不是可独立配置的 worker grant。之后的零或相同请求保持
+幂等，冲突的正数请求会被拒绝。发布 work 前，每个 Run 都会从 service-owned Host ledger
+原子预留完整的 CPU、retained-memory、scratch、ready-entry 与 ready-byte vector。Graph load
+只复制 route ID 与 generation，不拥有 worker grant。该契约不声称覆盖 compute、operation
+或私有 GPU backend 使用的全部 thread。
 
 Benchmark 配置不会重新配置该进程池。对于每次 benchmark Run，`execution.threads` 会解析为
 一个可选正值 `maximum_parallelism`：缺失或 `0` 会在 `[1,8]` 中选择有界自动值，
@@ -186,10 +189,12 @@ parallelism 都不会推断 class、deadline 或 weight。
 并行计算先展开完整 task graph，再从 `topo_postorder_from` 通过 `NodeCacheTaskGraphPruner`
 裁剪得到 `ComputePlan`。`ComputeDispatchPlanBuilder` 会记录这个 cache-pruned plan 供检查使用。
 Request `ComputeRun` 拥有 `TaskSubmissionPlan`；后者把 plan 中的 `ComputeTaskGraph`
-materialize 为 dependency counter、ready value、operation variant、selected device 和临时结果槽。Dispatcher 会创建不可变、由 lease 支撑的 `ReadyTaskSubmission`，并把一个 initial ready
-batch 提交到注入的 `ExecutionService`；dependent completion 会通过同一个 active Run 创建
-后续 submission，并进入同一个有界 store。Tiled 操作可能产生微任务，并减少选中私有 route
-的 logical completion count。
+materialize 为 dependency counter、ready value、operation variant、selected device 和临时结果槽。
+它会为每个逻辑 task（包括每个 tiled micro-task）预先分配一份独立计费的 operation-constraint
+record，并在 materialize 对应 task 的 submission 时恰好移动一次该 record。Dispatcher 会创建
+不可变、由 lease 支撑的 `ReadyTaskSubmission`，并把一个 initial ready batch 提交到注入的
+`ExecutionService`；dependent completion 会通过同一个 active Run 创建后续 submission，并进入
+同一个有界 store。Tiled 操作可能产生微任务，并减少选中私有 route 的 logical completion count。
 
 Run 发布前，service 会原子预留完整且经过检查的 CPU、retained-memory、scratch、ready-entry
 与 ready-byte vector。CPU slot 及 uniform per-task retained/scratch envelope 使用固定 worker 数、

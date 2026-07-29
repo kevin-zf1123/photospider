@@ -23,12 +23,14 @@ CLI / TUI
 `Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, a
 per-graph visible-state `GraphStateExecutor`, a separate bounded serial
 compute-request lane, one per-live-Graph `ComputeRequestCoordinator`, event
-service, platform context, and one copied execution-route binding per intent. Each binding contains only an
-exact route id and nonzero generation. The embedded composition root creates
-one private fixed `ExecutionService` before Kernel. The service exclusively
-owns the Host-authoritative resource ledger, policy bindings, bounded ready
-store, reserved-start transactions, physical routes, and completion callbacks;
-Kernel injects that owner into each request-local `ComputeService`.
+service, a Graph lifetime anchor, and one copied execution-route binding per
+intent. Each binding contains only an exact route id and nonzero generation.
+`GraphRuntime` owns no native platform context. The embedded composition root
+creates one private fixed `ExecutionService` before Kernel. The service
+exclusively owns the Host-authoritative resource ledger, policy bindings,
+bounded ready store, reserved-start transactions, physical routes, and
+completion callbacks; Kernel injects that owner into each request-local
+`ComputeService`.
 
 `ps::Host` is the public frontend-facing interface. The embedded Host adapter
 copies public request/result values and uses the internal `InteractionService`
@@ -69,12 +71,15 @@ a production realtime control surface.
 Fixed service threads are infrastructure rather than per-Run reservations.
 Execution configuration resolves `0` to a bounded automatic value or preserves
 an explicit `1..8`, freezes the CPU service count, starts one fixed CPU pool,
-and starts one private Metal worker lane. The Metal lane is idle when the Host
-does not expose Metal and is not a separately configurable worker grant.
-Later zero/equal requests are idempotent; a conflicting positive request is
-rejected. Before publishing work, each Run atomically reserves its complete
-CPU, retained-memory, scratch, ready-entry, and ready-byte vector from the
-service-owned Host ledger. Graph load copies route ids and generations but
+and starts one private Metal worker lane as fixed infrastructure. Device
+availability comes only from the fixed `DeviceExecutorRegistry`: the enabled
+Apple operation-plugin profile installs one Metal executor, while unsupported
+and dependency-disabled profiles keep the registry Metal-empty and expose only
+CPU through `gpu_pipeline`. The Metal lane is not a separately configurable
+worker grant. Later zero/equal requests are idempotent; a conflicting positive
+request is rejected. Before publishing work, each Run atomically reserves its
+complete CPU, retained-memory, scratch, ready-entry, and ready-byte vector from
+the service-owned Host ledger. Graph load copies route ids and generations but
 owns no worker grant. This contract does not claim all threads used by compute,
 operations, or a private GPU backend.
 
@@ -234,11 +239,15 @@ then pruning it with `NodeCacheTaskGraphPruner` from `topo_postorder_from`.
 `ComputeDispatchPlanBuilder` records that cache-pruned plan for inspection.
 The request `ComputeRun` owns the `TaskSubmissionPlan` that materializes the
 plan's `ComputeTaskGraph` into dependency counters, ready values, operation
-variants, selected devices, and temporary result slots. The dispatcher creates immutable, lease-backed `ReadyTaskSubmission` values
-and submits one initial ready batch to the injected `ExecutionService`;
-dependent completion creates further submissions through the same active Run
-and bounded store. Tiled operations may spawn micro-tasks and retire the
-selected private route's logical completion count.
+variants, selected devices, and temporary result slots. It preallocates one
+independently charged operation-constraint record for every logical task,
+including every tiled micro-task, and moves the matching record exactly once
+when materializing that task's submission. The dispatcher creates immutable,
+lease-backed `ReadyTaskSubmission` values and submits one initial ready batch
+to the injected `ExecutionService`; dependent completion creates further
+submissions through the same active Run and bounded store. Tiled operations
+may spawn micro-tasks and retire the selected private route's logical
+completion count.
 
 Before a Run is published, the service atomically reserves its complete
 checked CPU, retained-memory, scratch, ready-entry, and ready-byte vector.

@@ -179,8 +179,10 @@ compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.m
 - 下载返回新的 CPU `ImageBuffer`。
 
 插件、调度器和核心 compute 代码不得把 Metal buffer adapter 视为生产运行边界。当前生产
-Metal operation 路径独立拥有 backend-specific object。直接解释 `context` 属于后端特定行为，
-不是可移植内存契约。
+Metal operation 路径不使用该 adapter，也不保留 `ImageBuffer::context` payload。Reserved start
+之后，Metal Perlin provider 会借用进程 executor 的 command queue、invocation-scoped allocator
+与经过校验的 pipeline cache，再返回 CPU-owned `ImageBuffer`；provider 不拥有独立 native
+lifecycle。直接解释 `context` 仍属于 backend-specific 行为，不是可移植内存契约。
 
 ## 边界与原理
 

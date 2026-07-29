@@ -212,18 +212,20 @@ resource reservation, then acquire the same gate and one CPU/byte/scratch root
 only around provider entry.
 
 Every Host-owned retained operation or constraint key is charged by the actual
-copied `std::string::capacity()` plus its null terminator. Full-plan and dirty
-admission freeze the complete shared estimate before moving each already
-charged constraint allocation into its unique `ReadyTaskSubmission`;
-connected-preflight callable/submission copies and the direct lease are charged
-independently. The operation gate stores only a borrowed `string_view` erased
-before the stable owner retires. Queued work borrows its `QueueEntry`-owned
-submission; direct acquisition copies the caller constraints into its lease
-state before querying the gate, and its wait predicate, start, and finish all
-borrow that state-owned copy. The caller input therefore need not outlive the
-returned lease. This neither duplicates nor undercounts string ownership.
-Checked terminator overflow and a one-byte-short retained limit fail before
-provider entry without gate or ledger residue.
+copied `std::string::capacity()` plus its null terminator. Full-plan admission
+preallocates one independently owned, already charged constraint record per
+logical task, including every tile, and moves each record exactly once into
+that task's unique `ReadyTaskSubmission`. Dirty admission does the same for
+each active task. Both freeze the complete shared estimate before moving any
+record. Connected-preflight callable/submission copies and the direct lease are
+charged independently. The operation gate stores only a borrowed
+`string_view` erased before the stable owner retires. Queued work borrows its
+`QueueEntry`-owned submission; direct acquisition copies the caller constraints
+into its lease state before querying the gate, and its wait predicate, start,
+and finish all borrow that state-owned copy. The caller input therefore need
+not outlive the returned lease. This neither duplicates nor undercounts string
+ownership. Checked terminator overflow and a one-byte-short retained limit fail
+before provider entry without gate or ledger residue.
 
 ## Private Execution Routes
 
@@ -373,9 +375,11 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/compute/run_lifecycle_registry.hpp` and `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` and `.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/execution/device_executor_registry.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/execution/value_transfer_task.*`
-- `src/lib/runtime/graph_runtime.hpp` and `.mm`
+- `src/lib/runtime/graph_runtime.hpp` and `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
@@ -383,7 +387,9 @@ process-isolated plugin supervision belongs to Issue #91.
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 
 See also [Compute Flow](Compute-Flow.md),

@@ -113,17 +113,19 @@ Package 边界：
   `operation_opencv` discovery 找不到 OpenCV `core`，package 仍保持 found，
   `Photospider_operation_opencv_FOUND` 为 false，不导入其 target，而所请求的无依赖 target 仍然
   可用。若将该 component 设为 required，则 package discovery 失败。
-- Producer capability value 会记录在 package config 中。OpenCV-disabled install 会在不发现
-  OpenCV 的情况下报告 `operation_opencv` unavailable。OpenCV/YAML-disabled product 的 embedded
-  consumer 不会发现这两个 package，并可链接、运行真实 Host product。
+- Producer capability value 会记录在 package config 中，其中包括
+  `Photospider_metal_executor_enabled`。OpenCV-disabled install 会在不发现 OpenCV 的情况下报告
+  `operation_opencv` unavailable。OpenCV/YAML-disabled product 的 embedded consumer 不会发现
+  这两个 package，并可链接、运行真实 Host product。在 Apple 上禁用仓库 operation plugin
+  时，Metal-executor capability 会记录为 false；producer 与 installed-consumer configure
+  都不会启用 Objective-C++，也不会发现或要求 `Metal`/`Foundation`。
 - 启用时的 OpenCV（`core`、`imgproc`、`imgcodecs`、`videoio`）和 `yaml-cpp`，以及始终需要的
-  `Threads`、平台
-  dynamic-loader 库，以及 Apple `Metal`/`Foundation` framework 标志，是静态归档的实现链接依赖。
-  Shared operation runtime 与其他 library dependency 会作为 `$<LINK_ONLY:...>` entry 出现在
-  安装后的 target 上；Apple framework
-  flag 来自 Apple-only 的 private product link block。Public Host/core 头避免暴露 OpenCV 和
-  `yaml-cpp` 类型；Windows consumer 会收到 `PHOTOSPIDER_STATIC`，因此 declaration 不使用 DLL
-  import/export 标注。
+  `Threads` 与平台 dynamic-loader 库，是静态归档的实现链接依赖。只有构建真实 Metal executor
+  时才会加入 Apple `Metal`/`Foundation` framework 标志。Shared operation runtime 与其他
+  library dependency 会作为 `$<LINK_ONLY:...>` entry 出现在安装后的 target 上；有条件的 Apple
+  framework flag 来自 Apple-only 的 private product link block。Public Host/core 头避免暴露
+  OpenCV 和 `yaml-cpp` 类型；Windows consumer 会收到 `PHOTOSPIDER_STATIC`，因此 declaration
+  不使用 DLL import/export 标注。
   `PHOTOSPIDER_ENABLE_OPENCV` 选择 image processing、image codec、public adapter 与派生的
   provider/plugin 默认值；`PHOTOSPIDER_ENABLE_YAML` 选择 graph-document 与 cache-metadata
   persistence。显式 target/capability 组合无效时会在 configure 阶段失败。
@@ -238,7 +240,7 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 | `ps::ipc::Client` | Move-only direct client，为精确排序的 60-method version 2 inventory 提供 owned value；它验证 correlated result shape，且不暴露 raw JSON call。 |
 | `photospiderd` | Foreground local service，拥有一个 embedded Host 并串行化全部 Host call，同时独立服务 metadata 与 job polling。 |
 | daemon registry | 对 opaque session、compute job、stable collection snapshot、protected output 与 delivery lease 的 private bounded ownership；它们都不是 public backend handle。 |
-| `GraphRuntime` | 每图资源容器，包含模型、graph-state lane、精确 64 个总单元的 compute-request lane、一个 latest-wins coordinator、固定容量 execution trace ring、复制的 HP/RT route binding、Graph lifetime anchor 和平台 context。 |
+| `GraphRuntime` | 每图资源容器，包含模型、graph-state lane、精确 64 个总单元的 compute-request lane、一个 latest-wins coordinator、固定容量 execution trace ring、复制的 HP/RT route binding 与 Graph lifetime anchor；它不拥有 native platform state。 |
 | `GraphModel` | 图状态持有者：不复用的强 instance identity、经过检查的权威 revision、私有节点/拓扑存储、缓存根目录、计时数据、quiet/skip-save 标志，以及完整 compute snapshot/publication primitive。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |

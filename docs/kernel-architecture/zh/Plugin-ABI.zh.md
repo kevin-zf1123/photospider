@@ -224,7 +224,9 @@ provider-local fence 会把 OpenCV 资源耗尽转换为新建的 `std::bad_allo
 `cv::Exception` 转换为 host-owned `GraphError`。使用
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 构建会省略这些 slot，同时 registry 与 public
 v2 registrar 仍可由其他 provider 使用。真实共享 backend state 仍要求 provider-local 同步：
-Metal Perlin 的 DSO mutex 只保护其共享 Metal lifecycle。
+但该要求只适用于 provider 真正拥有的 state。Metal Perlin DSO 既不拥有 native lifecycle，
+也不拥有 lifecycle mutex；它会从当前进程 executor 借用 command queue、invocation-scoped
+allocator 与 pipeline cache，而 execution metadata gate 则提供 implementation/key 串行化。
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录了该决策
 及其 accounting 边界。
 

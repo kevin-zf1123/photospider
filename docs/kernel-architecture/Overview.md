@@ -137,20 +137,24 @@ Package boundary:
   false, its target is not imported, and dependency-free requested targets
   remain available. Requiring that component instead makes package discovery
   fail.
-- Producer capability values are recorded in the package config. An
-  OpenCV-disabled install reports `operation_opencv` unavailable without
-  discovering OpenCV. An embedded consumer of the OpenCV/YAML-disabled product
-  discovers neither package and links/runs the real Host product.
+- Producer capability values are recorded in the package config, including
+  `Photospider_metal_executor_enabled`. An OpenCV-disabled install reports
+  `operation_opencv` unavailable without discovering OpenCV. An embedded
+  consumer of the OpenCV/YAML-disabled product discovers neither package and
+  links/runs the real Host product. On Apple, disabling repository operation
+  plugins records the Metal-executor capability as false; producer and
+  installed-consumer configuration neither enables Objective-C++ nor
+  discovers or requires `Metal`/`Foundation`.
 - When enabled, OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`) and
-  `yaml-cpp`, plus always-required `Threads`,
-  platform dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
-  flags are implementation link dependencies of the static archive. The
-  shared operation runtime and other library dependencies appear as
-  `$<LINK_ONLY:...>` entries on the installed target;
-  Apple framework flags are propagated from a private Apple-only product link
-  block. Public Host/core headers avoid OpenCV and `yaml-cpp` types; Windows
-  consumers receive `PHOTOSPIDER_STATIC` so declarations do not use DLL
-  import/export attributes.
+  `yaml-cpp`, plus always-required `Threads` and platform dynamic-loader
+  libraries, are implementation link dependencies of the static archive.
+  Apple `Metal`/`Foundation` framework flags are added only when the real Metal
+  executor is built. The shared operation runtime and other library
+  dependencies appear as `$<LINK_ONLY:...>` entries on the installed target;
+  conditional Apple framework flags are propagated from a private Apple-only
+  product link block. Public Host/core headers avoid OpenCV and `yaml-cpp`
+  types; Windows consumers receive `PHOTOSPIDER_STATIC` so declarations do not
+  use DLL import/export attributes.
   `PHOTOSPIDER_ENABLE_OPENCV` selects image processing, image codec, public
   adapter, and the derived provider/plugin defaults.
   `PHOTOSPIDER_ENABLE_YAML` selects graph-document and cache-metadata
@@ -281,7 +285,7 @@ defined in `../codebase-structure/IPC-Protocol-v2.md`.
 | `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 60-method version 2 inventory; it validates correlated result shapes and exposes no raw JSON call. |
 | `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
 | daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
-| `GraphRuntime` | Per-graph resource container with model, graph-state lane, exact-64-total compute-request lane, one latest-wins coordinator, fixed-capacity execution trace ring, copied HP/RT route bindings, Graph lifetime anchor, and platform context. |
+| `GraphRuntime` | Per-graph resource container with model, graph-state lane, exact-64-total compute-request lane, one latest-wins coordinator, fixed-capacity execution trace ring, copied HP/RT route bindings, and a Graph lifetime anchor; it owns no native platform state. |
 | `GraphModel` | Graph state holder with a non-reused strong instance identity, checked authoritative revision, private node/topology storage, cache root, timing data, quiet/skip-save flags, and complete compute snapshot/publication primitives. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |

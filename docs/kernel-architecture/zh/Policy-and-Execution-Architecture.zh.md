@@ -178,15 +178,17 @@ notification epoch。Direct sequential caller 会在不持有 resource reservati
 cancellation-aware wait，随后只在 provider entry 周围获取同一 gate 以及一份 CPU/byte/scratch root。
 
 每个由 Host 拥有的 retained operation 或 constraint key 都按实际复制的
-`std::string::capacity()` 加空终止符计费。Full-plan 与 dirty admission 会先冻结完整
-shared estimate，再把每份已经计费的 constraint allocation 移入其唯一
-`ReadyTaskSubmission`；connected-preflight callable/submission 的副本与 direct lease
-分别独立计费。operation gate 只保存 borrowed `string_view`，并在稳定 submission 或
-direct-lease owner 退出前擦除。Queued work 借用其 `QueueEntry` 所拥有的 submission；
-direct acquisition 会在查询 gate 前把 caller constraints 复制进自身 lease state，其 wait
-predicate、start 与 finish 都借用该 state-owned 副本。因此 caller 输入不必比返回的 lease
-存活更久。该做法既不重复也不漏算 string ownership。Checked terminator overflow 与少一个
-byte 的 retained limit 都会在 provider entry 前失败，不留下 gate 或 ledger 残留。
+`std::string::capacity()` 加空终止符计费。Full-plan admission 会为每个逻辑 task（包括每个
+tile）预先分配一份独立拥有、已经计费的 constraint record，并把每份 record 恰好一次移入
+对应 task 的唯一 `ReadyTaskSubmission`。Dirty admission 会对每个 active task 采用相同做法。
+二者都在移动任何 record 之前冻结完整 shared estimate。Connected-preflight
+callable/submission 的副本与 direct lease 分别独立计费。operation gate 只保存 borrowed
+`string_view`，并在稳定 submission 或 direct-lease owner 退出前擦除。Queued work 借用其
+`QueueEntry` 所拥有的 submission；direct acquisition 会在查询 gate 前把 caller constraints
+复制进自身 lease state，其 wait predicate、start 与 finish 都借用该 state-owned 副本。因此
+caller 输入不必比返回的 lease 存活更久。该做法既不重复也不漏算 string ownership。Checked
+terminator overflow 与少一个 byte 的 retained limit 都会在 provider entry 前失败，不留下 gate
+或 ledger 残留。
 
 ## 私有执行路由
 
@@ -311,9 +313,11 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `src/lib/compute/run_lifecycle_registry.hpp` 和 `.cpp`
 - `src/lib/compute/execution_lifecycle_telemetry.hpp` 和 `.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/execution/device_executor_registry.*`
+- `src/lib/execution/metal_device_executor.{mm,stub.cpp}`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/execution/value_transfer_task.*`
-- `src/lib/runtime/graph_runtime.hpp` 和 `.mm`
+- `src/lib/runtime/graph_runtime.hpp` 和 `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
@@ -321,7 +325,9 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
+- `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 
 另请参阅[计算流程](Compute-Flow.zh.md)、

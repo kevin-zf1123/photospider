@@ -32,7 +32,7 @@
 #include "photospider/plugin/plugin_api.hpp"
 #include "runtime/graph_event_service.hpp"
 
-#if defined(__APPLE__)
+#if defined(PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
 #include "metal/perlin_noise_metal.hpp"
 #endif
 
@@ -1043,7 +1043,7 @@ TEST(MetalBadAllocBoundary, PortableExceptionSeamContextsStandardFailure) {
   }
 }
 
-#if defined(__APPLE__)
+#if defined(PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
 /**
  * @brief Proves the real Perlin entry preserves injected allocation failure.
  *

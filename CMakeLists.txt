@@ -566,27 +566,24 @@ set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
     src/lib/runtime/resource_ledger.cpp
 )
 set(PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES)
-if(APPLE)
+set(PHOTOSPIDER_HAS_METAL_EXECUTOR OFF)
+if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     enable_language(OBJCXX)
     find_library(METAL_FRAMEWORK NAMES Metal)
     find_library(FOUNDATION_FRAMEWORK NAMES Foundation)
     if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK)
         message(FATAL_ERROR
-            "Photospider requires Metal and Foundation on Apple platforms")
+            "Photospider Metal execution requires Metal and Foundation")
     endif()
-    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-        list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
-            src/lib/execution/metal_device_executor.mm)
-        list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
-            ${METAL_FRAMEWORK}
-            ${FOUNDATION_FRAMEWORK})
-        set_source_files_properties(
-            src/lib/execution/metal_device_executor.mm
-            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    else()
-        list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
-            src/lib/execution/metal_device_executor_stub.cpp)
-    endif()
+    set(PHOTOSPIDER_HAS_METAL_EXECUTOR ON)
+    list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+        src/lib/execution/metal_device_executor.mm)
+    list(APPEND PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK})
+    set_source_files_properties(
+        src/lib/execution/metal_device_executor.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 else()
     list(APPEND PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
         src/lib/execution/metal_device_executor_stub.cpp)
@@ -1320,71 +1317,67 @@ endif()
 # ==============================================================================
 # 7. Metal Support (Apple Only)
 # ==============================================================================
-if(APPLE)
+if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
     set(METAL_ROOT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
     set(METAL_OPS_DIR  ${METAL_ROOT_DIR}/ops)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
-    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-        # The real process executor makes the product depend on native Metal.
-        target_link_libraries(photospider PRIVATE
+    # The real process executor makes the product depend on native Metal.
+    target_link_libraries(photospider PRIVATE
+        "-framework Metal"
+        "-framework Foundation"
+    )
+    if(TARGET photospider_internal_test_product)
+        target_link_libraries(photospider_internal_test_product PRIVATE
             "-framework Metal"
             "-framework Foundation"
         )
-        if(TARGET photospider_internal_test_product)
-            target_link_libraries(photospider_internal_test_product PRIVATE
-                "-framework Metal"
-                "-framework Foundation"
-            )
-        endif()
     endif()
 
-    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
-        # 1. The Implementation Library (the actual op logic)
-        add_library(perlin_noise_metal SHARED
-            plugins/ops/metal/perlin_noise_metal.mm)
-        set_source_files_properties(
-            plugins/ops/metal/perlin_noise_metal.mm
-            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-        set_target_properties(perlin_noise_metal PROPERTIES
-            LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
-            MACOSX_RPATH ON
-        )
-        target_link_libraries(perlin_noise_metal PRIVATE
-            Photospider::operation_opencv
-            ${METAL_FRAMEWORK}
-            ${FOUNDATION_FRAMEWORK}
-        )
-        target_include_directories(perlin_noise_metal PRIVATE
-            "${PROJECT_SOURCE_DIR}/plugins/ops"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-        )
+    # 1. The Implementation Library (the actual op logic)
+    add_library(perlin_noise_metal SHARED
+        plugins/ops/metal/perlin_noise_metal.mm)
+    set_source_files_properties(
+        plugins/ops/metal/perlin_noise_metal.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_target_properties(perlin_noise_metal PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
+        MACOSX_RPATH ON
+    )
+    target_link_libraries(perlin_noise_metal PRIVATE
+        Photospider::operation_opencv
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK}
+    )
+    target_include_directories(perlin_noise_metal PRIVATE
+        "${PROJECT_SOURCE_DIR}/plugins/ops"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+    )
 
-        # 2. The Loader Plugin (registers the op with the Kernel)
-        add_library(metal_ops_loader SHARED
-            plugins/ops/metal/metal_ops_loader.cpp)
-        target_compile_definitions(metal_ops_loader PRIVATE
-            PHOTOSPIDER_PLUGIN_BUILD)
-        set_target_properties(metal_ops_loader PROPERTIES
-            LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
-            # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
-            BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
-            INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
-            MACOSX_RPATH ON
-        )
+    # 2. The Loader Plugin (registers the op with the Kernel)
+    add_library(metal_ops_loader SHARED
+        plugins/ops/metal/metal_ops_loader.cpp)
+    target_compile_definitions(metal_ops_loader PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
+    set_target_properties(metal_ops_loader PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
+        # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
+        BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
+        MACOSX_RPATH ON
+    )
 
-        target_include_directories(metal_ops_loader PRIVATE
-            "${PROJECT_SOURCE_DIR}/plugins/ops"
-        )
+    target_include_directories(metal_ops_loader PRIVATE
+        "${PROJECT_SOURCE_DIR}/plugins/ops"
+    )
 
-        # The loader directly calls implementation symbols and therefore owns
-        # the implementation DSO dependency.
-        target_link_libraries(metal_ops_loader PRIVATE
-            perlin_noise_metal
-            Photospider::operation_sdk
-        )
-    endif()
+    # The loader directly calls implementation symbols and therefore owns
+    # the implementation DSO dependency.
+    target_link_libraries(metal_ops_loader PRIVATE
+        perlin_noise_metal
+        Photospider::operation_sdk
+    )
 
 endif()
 
@@ -1814,9 +1807,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         PHOTOSPIDER_THRESHOLD_BAD_ALLOC_TESTING)
     target_link_libraries(test_bad_alloc_boundaries PRIVATE
         photospider_cli_common)
-    if(APPLE)
+    if(APPLE AND PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS)
         target_sources(test_bad_alloc_boundaries PRIVATE
             plugins/ops/metal/perlin_noise_metal.mm)
+        target_compile_definitions(test_bad_alloc_boundaries PRIVATE
+            PHOTOSPIDER_INTERNAL_METAL_PERLIN_TESTING)
         target_link_libraries(test_bad_alloc_boundaries PRIVATE
             ${METAL_FRAMEWORK}
             ${FOUNDATION_FRAMEWORK})

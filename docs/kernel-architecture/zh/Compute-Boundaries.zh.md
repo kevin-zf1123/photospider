@@ -165,14 +165,15 @@ boundary。对于 mixed-operation physical Run，adapter 会对选中 operation 
 owned-callback envelope。由此得到的保守统一 task vector 同时用于 full HP、dirty HP/RT 与
 connected preflight。零是 provider 的显式声明；缺失或格式错误的 metadata 不会被静默解释成零，
 而是在 provider entry 前被拒绝。复制的 graph-identity metadata 按实际 string capacity 加终止
-空字符计费。每个独立 retained operation/constraint key 遵循同一规则。Full-plan 与 dirty
-adapter 会先冻结 shared charge，再把一份已经计费的 key allocation 移入其唯一 submission；
-connected preflight 与 direct lease 对各自独立副本计费，而 operation gate 会借用 stable view，
-不再复制 string。Queued gate view 借用 owning `QueueEntry` 中的值。Direct acquisition 会先把
-caller constraints 复制进返回的 lease state；此后的每一次 gate query、wait predicate、start
-与 finish 都借用该 state-owned 副本，因此 helper-local caller 可以在 acquisition 返回后退出或
-修改自身输入，而不会改变 active gate identity。在所有 initial value 与 ready grant 都移动到
-暂存 queue entry 后，
+空字符计费。每个独立 retained operation/constraint key 遵循同一规则。Full-plan adapter
+会为每个逻辑 task（包括每个 tile）预先分配一份独立拥有、已经计费的 constraint record，并把
+每份 record 恰好一次移入对应 task 的唯一 submission。Dirty adapter 会对每个 active task
+采用相同规则。二者都在移动任何 record 之前冻结 shared charge。Connected preflight 与 direct
+lease 对各自独立副本计费，而 operation gate 会借用 stable view，不再复制 string。Queued gate
+view 借用 owning `QueueEntry` 中的值。Direct acquisition 会先把 caller constraints 复制进
+返回的 lease state；此后的每一次 gate query、wait predicate、start 与 finish 都借用该
+state-owned 副本，因此 helper-local caller 可以在 acquisition 返回后退出或修改自身输入，而
+不会改变 active gate identity。在所有 initial value 与 ready grant 都移动到暂存 queue entry 后，
 `ExecutionService` 会在发布 active Run 和等待 settlement 之前销毁 caller-side submission
 vector 的 backing；此后只有暂存 entry 以及 bounded store 保留这些 submission。在每个 dirty
 或 connected-preflight service segment 之前，adapter 会加入当前 staging/snapshot storage 与
@@ -548,11 +549,13 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #83 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #84 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源以及精确 implementation/key gate。
-Sequential provider entry 通过 direct lease 使用同一 ledger 与 gate。Graph 只保留复制的 route
-id/generation；不再存在拥有 worker 的 scheduler SDK、scheduler plugin、per-Graph 物理 owner 或
+每次 `GPU_METAL` start 随后都会进入匹配的固定、进程自有 registry executor，并在 provider
+返回前借用其 queue、invocation allocator 与 pipeline cache。Sequential provider entry 通过
+direct lease 使用同一 ledger 与 gate。Graph 只保留复制的 route id/generation，不拥有 native
+device owner；不再存在拥有 worker 的 scheduler SDK、scheduler plugin、per-Graph 物理 owner 或
 compatibility adapter。独立 realtime child Run、request-owned staging、强 identity/revision check、
 latest-wins supersession、cancellation observation、精确 Run queued purge、dependent suppression 与
 Run-owned commit arbitration 保持不变。`RunLifecycleRegistry` 现在提供原子
