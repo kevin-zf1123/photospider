@@ -682,8 +682,8 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * @param selection Active dirty task overlay after cache and external
  * satisfaction pruning.
  * @param request Intent and target associated with the same dirty request.
- * @return Nothing when no route-sensitive Region snapshot exists or every
- * active node still matches.
+ * @return Nothing when no route-sensitive Region snapshot exists, no task is
+ * active after pruning, or every active node still matches.
  * @throws GraphError with `GraphErrc::NoOperation` when intent, device
  * inventory, operation key, route presence, identity, callback shape, or
  * metadata differs.
@@ -691,9 +691,12 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * invalid task id.
  * @throws std::bad_alloc when temporary active-node or operation-key storage
  * cannot allocate.
- * @note Inactive and externally satisfied nodes are ignored. Validation runs
- * before ROI application, task materialization, callable resolution, resource
- * estimation, gate/grant construction, reservation, or provider entry.
+ * @note An empty active selection returns before intent, device-inventory,
+ * task-id, or node-route comparison because no planned operation can execute.
+ * Otherwise inactive and externally satisfied nodes remain ignored while every
+ * active node is checked. Validation runs before ROI application, task
+ * materialization, callable resolution, resource estimation, gate/grant
+ * construction, reservation, or provider entry.
  */
 void validate_dirty_region_operation_routes(
     const GraphModel& graph,
@@ -720,8 +723,11 @@ void validate_dirty_region_operation_routes(
  * @note The helper retains diagnostics without publishing them. The installed
  * execution path calls publish_prepared_dirty_inspection() only after its
  * first cancellation observation, so candidate rollback leaves authoritative
- * inspection state unchanged. Route validation precedes ROI mutation, work-set
- * materialization, callable resolution, and every admission/resource boundary.
+ * inspection state unchanged. A no-work selection returns successfully from
+ * route validation before comparing frozen execution context. Any active work
+ * still requires full context and route validation before ROI mutation,
+ * work-set materialization, callable resolution, and every admission/resource
+ * boundary.
  */
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(

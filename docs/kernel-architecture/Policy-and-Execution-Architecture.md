@@ -262,8 +262,10 @@ executable target/upstream selection into a callback-free operation key plus
 the complete identity/device/shape/metadata route, then releases the temporary
 callable/DSO lease. Dirty preparation compares those frozen routes with the
 active task-population routes before ROI mutation, task materialization,
-callable resolution, or admission; a mismatch is `NoOperation`. Final callable
-re-resolution remains mandatory. Connected-preflight preparation also freezes
+callable resolution, or admission; an empty active view returns before frozen
+context comparison, while any remaining active route or context mismatch is
+`NoOperation`. Final callable re-resolution remains mandatory.
+Connected-preflight preparation also freezes
 each callable/DSO lease and complete service root without entering provider
 code; only an installed Run may perform reserved start and invoke the provider,
 after which output-dependent dirty planning remains Run-owned. Every ready

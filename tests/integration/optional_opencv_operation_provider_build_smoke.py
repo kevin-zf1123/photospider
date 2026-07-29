@@ -385,6 +385,18 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "TensorAllExternallySatisfiedPlanIgnoresDeviceInventoryMutation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorAllCachePrunedPlanIgnoresDeviceInventoryMutation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "TensorPartialActivePlanRejectsDeviceInventoryMutation"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "TensorDirtyPlanRecomputesMissingAndPartialIntermediateParents"
         ),
         (

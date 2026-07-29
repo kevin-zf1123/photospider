@@ -206,7 +206,7 @@ turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
 `test_cpu_dense_tensor_image_operation` and
 `test_value_identity_across_dsos` binaries. Before installation it runs all
-41 dense-image cases plus the dual-DSO identity case in that actual disabled
+44 dense-image cases plus the dual-DSO identity case in that actual disabled
 producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
@@ -785,6 +785,15 @@ registry route. A guard-bypass control continues through the real
 provider, so the regression cannot pass merely because the test stops at
 planning.
 
+Three adjacent route-context cases mutate the task-population device inventory
+after TensorSlice planning. Fully externally satisfied and fully cache-pruned
+plans must prepare as zero-work without comparing the now-irrelevant frozen
+intent, device inventory, or node routes. A partial-active plan must still
+return `NoOperation` before the fake GPU provider or any execution authority,
+proving that pruning one node cannot hide context drift for another active
+node. Removing the no-work return makes the first two cases fail while the
+partial-active control remains rejected.
+
 `test_compute_run` registers heap-backed exclusive keys for full-plan, dirty HP,
 dirty RT, and connected-preflight product paths. The shared string-payload
 estimator proves actual capacity plus one terminator and strong overflow
@@ -991,7 +1000,7 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor, ImageView, Region, and ReadyFence Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-6 boundary. Its 41 durable cases
+binary for the implemented V-2 through V-6 boundary. Its 44 durable cases
 verify:
 
 - copyable ReadyFence polling, queued non-inline waits, observer-local waiter
@@ -1031,8 +1040,10 @@ verify:
   missing or partial intermediate parents, selected-byte merge into an
   existing complete output, and promotion to reusable authority only after a
   Whole commit, callback-free target/upstream Region-route transfer and
-  pre-task-population mutation rejection, plus `GraphErrc::ComputeError` when
-  execute returns a valid Value whose descriptor disagrees with inference.
+  pre-task-population mutation rejection, all-external/all-cache no-work
+  acceptance under device-inventory drift, partial-active drift rejection, plus
+  `GraphErrc::ComputeError` when execute returns a valid Value whose descriptor
+  disagrees with inference.
 
 `test_region_contracts` owns 28 durable Region cases for canonical
 Empty/Whole, keys, intervals, normalization, rank-general TensorSlice,
@@ -1056,14 +1067,14 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 41 dense cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all 44 dense cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
 synchronous Ready Value fence without optional dependencies. The
-provider-disabled nested build below also compiles and runs all 41 dense cases
+provider-disabled nested build below also compiles and runs all 44 dense cases
 plus that dual-DSO case, so the real core operation, fence/transfer proof, and
 identity authority do not depend on the optional OpenCV operation provider or
 a native device SDK.
@@ -1102,9 +1113,9 @@ dedicated disk-cache and kernel-lifecycle concurrency binaries, plus the
 provider-independent `test_kernel_contracts` internal-seam consumer, then
 queries the machine-readable CTest inventory. `test_kernel_contracts` is built
 to exercise the focused-only direct-consumer closure but is deliberately not
-discovered in this nested inventory. That inventory must contain exactly 49
+discovered in this nested inventory. That inventory must contain exactly 52
 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 41
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 44
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two

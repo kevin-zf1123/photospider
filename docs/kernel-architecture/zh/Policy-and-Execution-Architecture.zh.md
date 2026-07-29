@@ -219,7 +219,8 @@ device candidate。HP TensorSlice planning 会立即把每个已接受的 execut
 selection 转换成 callback-free operation key 与完整 identity/device/shape/metadata route，
 随后释放临时 callable/DSO lease。Dirty preparation 会在 ROI mutation、task materialization、
 callable resolution 或 admission 前，把这些冻结 route 与 active task-population route 比较；
-任一不匹配都返回 `NoOperation`。最终 callable re-resolution 仍是强制步骤。
+空 active view 会在 frozen context 比较前返回，而任何剩余 active route 或 context 不匹配都返回
+`NoOperation`。最终 callable re-resolution 仍是强制步骤。
 connected-preflight preparation 还会在不进入 provider code 的情况下冻结每个 callable/DSO
 lease 与完整 service root；只有已安装 Run 才能执行 reserved start 并调用 provider，之后依赖
 output 的 dirty planning 仍由 Run 拥有。

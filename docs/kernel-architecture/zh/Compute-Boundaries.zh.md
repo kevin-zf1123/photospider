@@ -259,15 +259,19 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
   Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
 - TensorSlice HP Region planning 会为每个 executable target/upstream node 只执行一次 eligibility
   selection，并保留 callback-free operation key 与完整 identity/device/shape/metadata route。
-  Dirty active-task selection 一完成，preparation 就会把每个 active task-population route 与该
-  Region-plan authority 比较。任一不匹配都会在 ROI mutation、task materialization、callable
-  resolution 或任何 provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败。
+  Dirty active-task selection 一完成，如果 active view 为空，route validation 会在比较 intent、
+  device inventory、task id 或 node route 前完成，因为不会执行任何 planned operation。否则
+  preparation 会把每个 active task-population route 与该 Region-plan authority 比较。任一不匹配
+  都会在 ROI mutation、task materialization、callable resolution 或任何
+  provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败。
 - Dirty HP/RT 会在 planning 与 selection 后，对每个唯一 active task node 执行重新验证。此时
   Graph 或 realtime-bundle 的逻辑生命周期可能已经安装，但重新验证仍发生在 constraint 构造、
   resource estimation、source-first 物理准备、provider entry 以及 operation/resource/physical
   admission 之前。缺失或变化的 active route 会以 `NoOperation` 失败；随后必须 finalize 已安装的
   逻辑生命周期，不得留下 gate、grant、root reservation 或 ledger 残留。Inactive task 以及已由
-  connected preflight 满足的 node 会被明确排除在该检查之外。
+  connected preflight 满足的 node 会被明确排除在该检查之外。如果 pruning 移除了全部 task，
+  context drift 已无关且 preparation 保持成功 no-work；只要仍有任一 active task，完整 context
+  与每条 active route 仍必须匹配。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
 - 逻辑 propagation、dirty planning、source history、per-node state、edge mapping、
   staged-write validity 与 Region-aware dense callback 携带规范化 `RegionSet`。

@@ -130,10 +130,13 @@ passes the exact-core check is reduced immediately to a callback-free
 operation key and complete identity/device/shape/metadata record. The request
 plan retains these revisioned records, not the callable or DSO lease.
 After cache/external-satisfaction pruning identifies active task nodes, dirty
-preparation compares task-population routes with those records before applying
-ROIs or materializing work. Target or upstream replacement therefore fails
-with `NoOperation` before provider/gate/grant/reservation/ledger ownership;
-ordinary execution still re-resolves the callable afterward.
+preparation treats an empty active view as successful no-work before comparing
+intent, device inventory, task ids, or node routes. Otherwise it compares every
+active task-population route with those records before applying ROIs or
+materializing work. Target or upstream replacement for remaining active work
+therefore fails with `NoOperation` before
+provider/gate/grant/reservation/ledger ownership; ordinary execution still
+re-resolves the callable afterward.
 
 The planner records `BackwardDemand` edge mappings. Forward affected-region
 projection exists as a separate `RoiPropagationService` inspection behavior; it

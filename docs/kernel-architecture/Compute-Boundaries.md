@@ -328,10 +328,12 @@ pure-C policy ABI v1 and receives no execution resource.
 - TensorSlice HP Region planning uses its eligibility selection once per
   executable target/upstream node and retains a callback-free operation key
   plus complete identity/device/shape/metadata route. Immediately after dirty
-  active-task selection, preparation compares each active task-population route
-  with that Region-plan authority. A mismatch is `NoOperation` before ROI
-  mutation, task materialization, callable resolution, or any
-  provider/gate/grant/reservation/ledger ownership.
+  active-task selection, an empty active view completes route validation before
+  comparing intent, device inventory, task ids, or node routes because no
+  planned operation can execute. Otherwise preparation compares each active
+  task-population route with that Region-plan authority. A mismatch is
+  `NoOperation` before ROI mutation, task materialization, callable resolution,
+  or any provider/gate/grant/reservation/ledger ownership.
 - Dirty HP/RT revalidates every unique active task node after planning and
   selection. The Graph or realtime-bundle logical lifecycle may already be
   installed at that point, but revalidation precedes constraint construction,
@@ -340,7 +342,10 @@ pure-C policy ABI v1 and receives no execution resource.
   fails with `NoOperation`, and the installed logical lifecycle must then
   finalize without gate, grant, root-reservation, or ledger residue. Inactive
   tasks and nodes already satisfied by connected preflight are deliberately
-  excluded from this check.
+  excluded from this check. If pruning removes every task, context drift is
+  irrelevant and preparation remains a successful no-work result; if any task
+  remains active, the complete context and every active route are still
+  required to match.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
 - Logical propagation, dirty planning, source history, per-node state, edge

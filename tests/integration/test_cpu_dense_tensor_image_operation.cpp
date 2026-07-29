@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -195,6 +196,12 @@ struct TensorRouteMutationPreparationResult {
   std::string message;
   /** @brief Whether the appended fake GPU implementation was retired. */
   bool restored = false;
+  /** @brief Number of tasks active after dirty and external pruning. */
+  std::size_t active_task_count = 0U;
+  /** @brief Number of active source-boundary tasks after preparation. */
+  std::size_t source_task_count = 0U;
+  /** @brief Number of active downstream tasks after preparation. */
+  std::size_t downstream_task_count = 0U;
 };
 
 /**
@@ -229,7 +236,8 @@ void expect_tensor_route_authority_untouched(
  * The helper appends a same-key non-core GPU implementation after the caller
  * has already produced one Tensor dirty plan under the same device inventory.
  * It then enters the production task-population boundary and records whether
- * the frozen region-planning route rejects the newly selected implementation.
+ * preparation rejects the changed execution context, returns as no-work, or
+ * reaches the newly selected implementation for an active task.
  *
  * @param graph Graph whose immutable topology produced dirty_plan.
  * @param dirty_plan Completed Tensor dirty plan moved into preparation.
@@ -237,7 +245,12 @@ void expect_tensor_route_authority_untouched(
  * @param provider_entries Counter incremented only if the fake provider runs.
  * @param authority Process execution authority used if stale preparation
  * incorrectly reaches the direct provider boundary.
- * @return Rejection diagnostics plus registry restoration status.
+ * @param task_population_devices Current route-visible inventory supplied to
+ * task population after Region planning.
+ * @param externally_satisfied_node_ids Optional nodes excluded from the active
+ * dirty selection because their outputs are already staged.
+ * @return Rejection/no-work diagnostics, active-work counts, and registry
+ * restoration status.
  * @throws Any non-GraphError from registration or preparation, plus any
  * provider-boundary exception after an incorrect successful preparation,
  * after retiring the appended implementation.
@@ -251,7 +264,9 @@ void expect_tensor_route_authority_untouched(
 TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
     GraphModel& graph, compute::HighPrecisionDirtyPlan dirty_plan,
     int target_node_id, std::atomic_int* provider_entries,
-    compute::ExecutionService& authority) {
+    compute::ExecutionService& authority,
+    const std::vector<Device>& task_population_devices,
+    const std::unordered_set<int>* externally_satisfied_node_ids) {
   const Node& target = graph.node(target_node_id);
   const std::string operation_key = make_key(target.type, target.subtype);
   auto& registry = OpRegistry::instance();
@@ -291,16 +306,35 @@ TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
   try {
     compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan> prepared =
         compute::prepare_dirty_execution(graph, std::move(dirty_plan), request,
-                                         {Device::GPU_METAL, Device::CPU});
+                                         task_population_devices,
+                                         externally_satisfied_node_ids);
     preparation_completed = true;
+    result.active_task_count = prepared.selection.active_task_ids.size();
+    result.source_task_count = prepared.work_set.dirty_source_task_ids.size();
+    result.downstream_task_count = prepared.work_set.downstream_task_ids.size();
 
-    const int execution_node_id = prepared.dirty_plan.execution_order.front();
+    if (prepared.selection.active_task_ids.empty()) {
+      result.restored = registry.retire_owned_entry_noexcept(
+          operation_key, owned, capture.previous_entries.at(operation_key),
+          retirement);
+      return result;
+    }
+    const int active_task_id = prepared.selection.active_task_ids.front();
+    if (active_task_id < 0 ||
+        static_cast<std::size_t>(active_task_id) >=
+            prepared.compute_plan.task_graph.tasks.size()) {
+      throw std::logic_error(
+          "prepared Tensor route selected an invalid active task");
+    }
+    const int execution_node_id =
+        prepared.compute_plan.task_graph.tasks
+            .at(static_cast<std::size_t>(active_task_id))
+            .node_id;
     const Node& execution_node = graph.node(execution_node_id);
     const std::optional<OpImplementation> selected =
-        registry.select_implementation(execution_node.type,
-                                       execution_node.subtype,
-                                       {Device::GPU_METAL, Device::CPU},
-                                       ComputeIntent::GlobalHighPrecision);
+        registry.select_implementation(
+            execution_node.type, execution_node.subtype,
+            task_population_devices, ComputeIntent::GlobalHighPrecision);
     if (!selected.has_value()) {
       throw std::logic_error("mutated Tensor route did not remain selectable");
     }
@@ -353,6 +387,83 @@ TensorRouteMutationPreparationResult prepare_after_tensor_route_mutation(
     std::rethrow_exception(unexpected);
   }
   return result;
+}
+
+/** @brief Stable source id used by no-work Tensor route regressions. */
+constexpr int kTensorNoWorkSourceId = 110;
+/** @brief Stable optional parent id used by partial-active route regression. */
+constexpr int kTensorNoWorkParentId = 111;
+/** @brief Stable target id used by no-work Tensor route regressions. */
+constexpr int kTensorNoWorkTargetId = 112;
+
+/**
+ * @brief Populates a cached-source Tensor graph for route-context regressions.
+ *
+ * @param graph Empty GraphModel receiving the source, optional parent, and
+ * target nodes.
+ * @param include_parent Whether to insert one uncached executable parent before
+ * the target.
+ * @return Nothing.
+ * @throws Graph, Value, allocation, or topology validation exceptions
+ * unchanged.
+ * @note The source is a complete external boundary. The target and optional
+ * parent use the same exact-core dense operation so one captured fake GPU
+ * registration can expose an incorrectly widened early return.
+ */
+void populate_tensor_no_work_route_graph(GraphModel& graph,
+                                         bool include_parent) {
+  Node source;
+  source.id = kTensorNoWorkSourceId;
+  source.name = "tensor_no_work_source";
+  source.type = "image_generator";
+  source.subtype = "constant";
+  source.cached_output_high_precision = NodeOutput{};
+  source.cached_output_high_precision->image_value =
+      make_unsigned8_rank4_value(4U, 3U, 3U, 16U);
+  source.hp_region = full_rank4_region();
+  graph.add_node(std::move(source));
+
+  int input_node_id = kTensorNoWorkSourceId;
+  if (include_parent) {
+    Node parent;
+    parent.id = kTensorNoWorkParentId;
+    parent.name = "tensor_no_work_parent";
+    parent.type = "image_process";
+    parent.subtype = "invert_dense";
+    parent.image_inputs.push_back({kTensorNoWorkSourceId, "image"});
+    graph.add_node(std::move(parent));
+    input_node_id = kTensorNoWorkParentId;
+  }
+
+  Node target;
+  target.id = kTensorNoWorkTargetId;
+  target.name = "tensor_no_work_target";
+  target.type = "image_process";
+  target.subtype = "invert_dense";
+  target.image_inputs.push_back({input_node_id, "image"});
+  graph.add_node(std::move(target));
+  graph.validate_topology();
+}
+
+/**
+ * @brief Plans one TensorSlice update with the canonical CPU/GPU inventory.
+ *
+ * @param graph Populated no-work route graph.
+ * @return HP dirty plan with callback-free routes for every executable node.
+ * @throws Graph, registry, Region, traversal, or allocation exceptions
+ * unchanged.
+ * @note No fake GPU implementation is registered until after this helper
+ * returns, so exact-core eligibility freezes the CPU route.
+ */
+compute::HighPrecisionDirtyPlan plan_tensor_no_work_route(GraphModel& graph) {
+  GraphTraversalService traversal;
+  RoiPropagationService propagation({Device::GPU_METAL, Device::CPU},
+                                    ComputeIntent::GlobalHighPrecision);
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  return planner.plan_high_precision(
+      graph, kTensorNoWorkTargetId,
+      RegionSet::from_tensor_slice({dense_tensor_region_domain(),
+                                    {{0U, 1U}, {1U, 3U}, {1U, 4U}, {1U, 3U}}}));
 }
 
 /**
@@ -2457,13 +2568,142 @@ TEST(CpuDenseTensorImageOperation,
   compute::ExecutionService authority;
 
   const TensorRouteMutationPreparationResult result =
-      prepare_after_tensor_route_mutation(graph, plan, 88, &provider_entries,
-                                          authority);
+      prepare_after_tensor_route_mutation(
+          graph, plan, 88, &provider_entries, authority,
+          {Device::GPU_METAL, Device::CPU}, nullptr);
 
   EXPECT_TRUE(result.restored);
   EXPECT_TRUE(result.rejected);
   EXPECT_EQ(result.error, GraphErrc::NoOperation);
   EXPECT_NE(result.message.find("88"), std::string::npos);
+  EXPECT_EQ(provider_entries.load(std::memory_order_relaxed), 0);
+  expect_tensor_route_authority_untouched(authority);
+}
+
+/**
+ * @brief Accepts an inventory change when every Tensor task is external.
+ *
+ * @return Nothing; GoogleTest reports no-work, provider, restoration, or
+ * authority failures.
+ * @throws Graph, registry, allocation, planning, or preparation exceptions
+ * unchanged.
+ * @note Region planning freezes CPU routes under the CPU/GPU inventory. After
+ * planning, every executable node is marked externally satisfied and a fake
+ * GPU route becomes the sole task-population device. Preparation must return a
+ * zero-work selection before comparing that now-irrelevant route context.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorAllExternallySatisfiedPlanIgnoresDeviceInventoryMutation) {
+  ops::register_core_operations();
+  GraphModel graph("cache/tensor-route-all-external");
+  populate_tensor_no_work_route_graph(graph, false);
+  const compute::HighPrecisionDirtyPlan plan = plan_tensor_no_work_route(graph);
+  ASSERT_EQ(plan.execution_order, (std::vector<int>{kTensorNoWorkTargetId}));
+  ASSERT_EQ(plan.operation_routes.node_routes.size(), 1U);
+  const std::unordered_set<int> externally_satisfied{kTensorNoWorkTargetId};
+  std::atomic_int provider_entries{0};
+  compute::ExecutionService authority;
+
+  const TensorRouteMutationPreparationResult result =
+      prepare_after_tensor_route_mutation(
+          graph, plan, kTensorNoWorkTargetId, &provider_entries, authority,
+          {Device::GPU_METAL}, &externally_satisfied);
+
+  EXPECT_TRUE(result.restored);
+  EXPECT_FALSE(result.rejected);
+  EXPECT_EQ(result.active_task_count, 0U);
+  EXPECT_EQ(result.source_task_count, 0U);
+  EXPECT_EQ(result.downstream_task_count, 0U);
+  EXPECT_EQ(provider_entries.load(std::memory_order_relaxed), 0);
+  expect_tensor_route_authority_untouched(authority);
+}
+
+/**
+ * @brief Accepts an inventory change when cache pruning removes every task.
+ *
+ * @return Nothing; GoogleTest reports cache-policy, no-work, provider,
+ * restoration, or authority failures.
+ * @throws Graph, registry, Value, allocation, planning, or preparation
+ * exceptions unchanged.
+ * @note The valid Tensor plan first freezes CPU routes. A complete target cache
+ * is then proven reusable with the production policy and removes the sole
+ * execution-order node before a fake GPU-only population context is supplied.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorAllCachePrunedPlanIgnoresDeviceInventoryMutation) {
+  ops::register_core_operations();
+  GraphModel graph("cache/tensor-route-all-cache-pruned");
+  populate_tensor_no_work_route_graph(graph, false);
+  compute::HighPrecisionDirtyPlan plan = plan_tensor_no_work_route(graph);
+  ASSERT_EQ(plan.execution_order, (std::vector<int>{kTensorNoWorkTargetId}));
+  ASSERT_EQ(plan.operation_routes.node_routes.size(), 1U);
+
+  graph.mutate_node_runtime_state(
+      kTensorNoWorkTargetId, [](GraphModel::NodeRuntimeState& state) {
+        state.cached_output_high_precision = NodeOutput{};
+        state.cached_output_high_precision->image_value =
+            make_unsigned8_rank4_value(4U, 3U, 3U, 16U, 41U);
+        state.hp_region = full_rank4_region();
+      });
+  ASSERT_TRUE(compute::ComputeCachePolicy::has_reusable_output(
+      graph.node(kTensorNoWorkTargetId)));
+  plan.execution_order.erase(
+      std::remove_if(plan.execution_order.begin(), plan.execution_order.end(),
+                     [&graph](int node_id) {
+                       return compute::ComputeCachePolicy::has_reusable_output(
+                           graph.node(node_id));
+                     }),
+      plan.execution_order.end());
+  ASSERT_TRUE(plan.execution_order.empty());
+
+  std::atomic_int provider_entries{0};
+  compute::ExecutionService authority;
+  const TensorRouteMutationPreparationResult result =
+      prepare_after_tensor_route_mutation(
+          graph, std::move(plan), kTensorNoWorkTargetId, &provider_entries,
+          authority, {Device::GPU_METAL}, nullptr);
+
+  EXPECT_TRUE(result.restored);
+  EXPECT_FALSE(result.rejected);
+  EXPECT_EQ(result.active_task_count, 0U);
+  EXPECT_EQ(result.source_task_count, 0U);
+  EXPECT_EQ(result.downstream_task_count, 0U);
+  EXPECT_EQ(provider_entries.load(std::memory_order_relaxed), 0);
+  expect_tensor_route_authority_untouched(authority);
+}
+
+/**
+ * @brief Rejects inventory drift when one Tensor task remains active.
+ *
+ * @return Nothing; GoogleTest reports typed rejection, provider entry,
+ * restoration, or authority failures.
+ * @throws Graph, registry, allocation, planning, or preparation exceptions
+ * unchanged.
+ * @note The parent is externally satisfied but the target remains active. A
+ * fake GPU-only task-population context must still fail with NoOperation,
+ * proving an inactive node cannot widen the all-inactive early return.
+ */
+TEST(CpuDenseTensorImageOperation,
+     TensorPartialActivePlanRejectsDeviceInventoryMutation) {
+  ops::register_core_operations();
+  GraphModel graph("cache/tensor-route-partial-active");
+  populate_tensor_no_work_route_graph(graph, true);
+  const compute::HighPrecisionDirtyPlan plan = plan_tensor_no_work_route(graph);
+  ASSERT_EQ(plan.execution_order,
+            (std::vector<int>{kTensorNoWorkParentId, kTensorNoWorkTargetId}));
+  ASSERT_EQ(plan.operation_routes.node_routes.size(), 2U);
+  const std::unordered_set<int> externally_satisfied{kTensorNoWorkParentId};
+  std::atomic_int provider_entries{0};
+  compute::ExecutionService authority;
+
+  const TensorRouteMutationPreparationResult result =
+      prepare_after_tensor_route_mutation(
+          graph, plan, kTensorNoWorkTargetId, &provider_entries, authority,
+          {Device::GPU_METAL}, &externally_satisfied);
+
+  EXPECT_TRUE(result.restored);
+  EXPECT_TRUE(result.rejected);
+  EXPECT_EQ(result.error, GraphErrc::NoOperation);
   EXPECT_EQ(provider_entries.load(std::memory_order_relaxed), 0);
   expect_tensor_route_authority_untouched(authority);
 }
@@ -2639,8 +2879,9 @@ TEST(CpuDenseTensorImageOperation,
   compute::ExecutionService authority;
 
   const TensorRouteMutationPreparationResult result =
-      prepare_after_tensor_route_mutation(graph, plan, 92, &provider_entries,
-                                          authority);
+      prepare_after_tensor_route_mutation(
+          graph, plan, 92, &provider_entries, authority,
+          {Device::GPU_METAL, Device::CPU}, nullptr);
 
   EXPECT_TRUE(result.restored);
   EXPECT_TRUE(result.rejected);

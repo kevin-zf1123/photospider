@@ -112,10 +112,12 @@ PixelRect compatibility projection 推断 source provenance。
 对于每个 executable target 或 upstream node，通过 exact-core 检查的同一次 route selection
 会立即缩减成 callback-free operation key 与完整 identity/device/shape/metadata record。
 Request plan 只保留这些带 revision 的 record，不保留 callable 或 DSO lease。在
-cache/external-satisfaction pruning 识别 active task node 后，dirty preparation 会在应用 ROI
-或 materialize work 前，把 task-population route 与这些 record 比较。因此 target 或 upstream
-replacement 会在取得 provider/gate/grant/reservation/ledger ownership 前以 `NoOperation`
-失败；普通 execution 随后仍会重新解析 callable。
+cache/external-satisfaction pruning 识别 active task node 后，若 active view 为空，dirty
+preparation 会在比较 intent、device inventory、task id 或 node route 前把它视为成功 no-work。
+否则 preparation 会在应用 ROI 或 materialize work 前，把每条 active task-population route 与这些
+record 比较。因此剩余 active work 的 target 或 upstream replacement 会在取得
+provider/gate/grant/reservation/ledger ownership 前以 `NoOperation` 失败；普通 execution
+随后仍会重新解析 callable。
 
 Planner 记录 `BackwardDemand` edge mapping。Forward affected-region projection 是独立的
 `RoiPropagationService` inspection behavior，不是当前 dirty execution plan 的物化遍历方式。

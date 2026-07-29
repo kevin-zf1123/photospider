@@ -695,6 +695,9 @@ void validate_dirty_region_operation_routes(
   if (route_snapshot.node_routes.empty()) {
     return;
   }
+  if (selection.active_task_ids.empty()) {
+    return;
+  }
   if (route_snapshot.intent != request.intent ||
       route_snapshot.intent != compute_plan.intent) {
     throw GraphError(
