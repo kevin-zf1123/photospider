@@ -786,24 +786,40 @@ provider, so the regression cannot pass merely because the test stops at
 planning.
 
 Three adjacent route-context cases mutate the task-population device inventory
-after TensorSlice planning. The externally satisfied case uses the production
-dirty overlay, and the formal-cache case installs exact complete HP output then
-relies on the real `NodeCacheTaskGraphPruner`; no test erases an execution-order
-node. Both must prepare as zero-work without comparing the now-irrelevant
-frozen intent, device inventory, or node routes. A partial-active plan must
-still return `NoOperation` before the fake GPU provider or any execution
-authority, proving that pruning one node cannot hide context drift for another
-active node.
+after TensorSlice planning. Only the externally satisfied case prepares as
+zero-work without comparing the now-irrelevant frozen intent, device inventory,
+or node routes. The exact-cache case installs complete old HP output through
+the real Graph boundary but remains active because the TensorSlice is
+dirty-selected; like the partial-active control, it must return `NoOperation`
+before fake GPU provider entry or execution authority. No test erases an
+execution-order node.
 
 `test_compute_service_split` separately proves the outer service boundary. A
-real complete target cache removes the dirty task cone, then a post-plan
-registry replacement cannot enter either provider. The request still records
-candidate begin, standalone bundle admission, successful terminal,
-quiescence, resource settlement, and unregister in order, while every
-ready/callback/root/grant/policy/ledger counter remains zero. Adjacent planning
-cases prove cache boundaries cut only exclusive upstream demand, preserve
-shared demand, reject partial cache as satisfaction, honor force-recache, keep
-RT work executable, and apply the same upstream cut to external satisfaction.
+real complete target cache remains exact through selection, yet the explicitly
+dirty target and its provider cone execute. Two adjacent cases begin with the
+same exact planning observation, then remove the output or reduce its formal
+Region through an internal test-product observer; all three states retain and
+execute the same dirty provider cone. A post-plan registry replacement with
+complete old cache must still fail as active route drift before either provider
+enters. A reverse mutant that lets exact cache satisfy dirty candidates makes
+the exact control and Host ROI fixture fail with empty work and unchanged old
+pixels.
+
+Adjacent real-provider cases use a sparse dirty chain
+`A(dirty) -> B(externally satisfied, inactive) -> C(dirty)`. The first requires
+only C to execute; a shared `A -> D(dirty)` control requires A, C, and D while B
+remains inactive. A reverse candidate-only-universe mutant executes A in the
+first case and fails, proving demand traversal must retain inactive connectors
+and satisfied boundaries. Other planning cases continue to apply ordinary
+full-request cache cuts, honor force-recache, and keep RT work executable.
+
+`test_host_adapter` first publishes exact complete HP output, then submits a
+non-forced dirty ROI through the public Host boundary. It must execute 16
+downstream tiles plus one monolithic source task, update the selected pixel from
+3 to 11, preserve an unselected pixel at 3, and expose the local backward
+mapping and native PixelRect/tile geometry through Host snapshots. With the
+incorrect dirty-cache satisfaction restored, this fixture reports zero active
+tasks and leaves the selected pixel unchanged.
 
 `test_compute_run` registers heap-backed exclusive keys for full-plan, dirty HP,
 dirty RT, and connected-preflight product paths. The shared string-payload
@@ -1051,8 +1067,8 @@ verify:
   missing or partial intermediate parents, selected-byte merge into an
   existing complete output, and promotion to reusable authority only after a
   Whole commit, callback-free target/upstream Region-route transfer and
-  pre-task-population mutation rejection, production-pruned all-external and
-  real-cache no-work acceptance under device-inventory drift, partial-active
+  pre-task-population mutation rejection, externally satisfied no-work
+  acceptance under device-inventory drift, exact-cache dirty and partial-active
   drift rejection, plus `GraphErrc::ComputeError` when execute returns a valid
   Value whose descriptor disagrees with inference.
 

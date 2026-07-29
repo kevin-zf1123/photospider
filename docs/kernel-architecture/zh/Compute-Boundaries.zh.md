@@ -91,7 +91,7 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `ComputeCachePolicy` | HP cache eligibility 与缓存路径决定 | 磁盘 I/O 所有权或 operation 执行 |
 | `NodeInputResolver` | runtime parameter 和 ready image input | 图遍历或输出提交 |
 | `FullTaskGraphExpander` | 一个 graph generation/domain 的完整 node/tile task 形态 | 请求目标、cache pruning、dirty pruning |
-| `NodeCacheTaskGraphPruner` | 目标/依赖锥和 cache-aware 请求 plan | 新 node 或 tile task 形态 |
+| `NodeCacheTaskGraphPruner` | 目标/依赖锥、普通 cache cut 与 dirty request-cone 保留 | 新 node 或 tile task 形态 |
 | `ComputeDispatchPlanBuilder` | cache-pruned HP plan 和 inspection record | ready-store 或 route ordering |
 | `DirtyRegionPlanner` | 图级 dirty propagation snapshot | 计算依赖计数 |
 | `DirtySnapshotTaskGraphPruner` | 从既有 plan 选择活动 dirty work | task expansion |
@@ -226,8 +226,12 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
    child；HP-only child cancellation 保持局部。
 4. 在 extent、ROI 或 task-shape 决定使用连接参数之前，parameter producer 会稳定为一个
    request-local HP snapshot。
-5. Planner 展开一个 domain 的完整 task 形态，再裁剪到请求目标和依赖锥。
-6. Dirty request 从该 plan 选择活动 work set；dirty 状态不会创建新的 task 形态。
+5. Planner 展开一个 domain 的完整 task 形态，再限制到请求目标和依赖锥。普通 full HP
+   planning 可以立即消费 exact formal cache；dirty planning 只记录该观察，同时保留完整的
+   callback-free 锥。
+6. Dirty request 会让每个 snapshot-selected task 保持 executable，只把旧 exact cache 当作可能的
+   staging merge base，并在保留的 dependency universe 上应用 current-request external-satisfaction
+   demand cut；dirty 状态不会创建新的 task 形态。
 7. 每个执行阶段都会 materialize 保留 Run lease 与 `(RunId, RunLocalTaskId)` 的 move-only
    `ReadyTaskSubmission`，并且只把 ready work 发送到 Host-owned `ExecutionService`。Full HP 使用
    `TaskSubmissionPlan`；preflight 与 dirty HP/RT 使用 heap-owned phase context。三个封闭的私有
@@ -254,11 +258,17 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 - 当当前 input/parameter 可能在拓扑不变时改变 output extent，force-recache 会使可复用 expansion
   失效。它还会在 task population 前禁用 request-time cache satisfaction；可失败的 preparation
   不会清除 Graph 的可见 output。
-- 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。只有 HP
-  才能把 exact complete formal cache 作为 read boundary：该 node 以及仅通过该 boundary
-  产生需求的 upstream work 会被省略；若另一条未满足 branch 仍需要 shared upstream work，
-  该 work 会继续执行。Partial validity、force-recache 与 RT intent 都不会把 formal HP cache
-  提升为 task satisfaction。
+- 请求目标、cache availability 和 dirty 状态裁剪既有 task 形态，不会重定义图拓扑。普通 HP
+  planning 会立即把 exact complete formal cache 作为 read boundary 消费。Dirty planning 则保留
+  完整的 callback-free target cone，只记录 planning-time observation。Selection 绝不会仅因旧
+  output 仍具有 exact complete validity 就省略 dirty snapshot 明确选择的 node：这些 byte 可以
+  seed staging 并保留未选中的坐标，但选中的 Region 必须执行。Planning 后删除 cache 或把它降为
+  partial，同样会让保留的 dirty provider cone 保持 active。Force-recache 连 staging reuse 也会
+  禁用；RT intent 绝不会把 formal HP cache 提升为 task satisfaction。
+- Dirty demand traversal 使用完整保留的 node/dependency universe，其中包括 inactive connector
+  node 与 external-satisfaction boundary。遍历会在 satisfied boundary 处停止，但最终发出
+  结果只限于 dirty candidate。因此 `A(dirty) -> B(satisfied, inactive) -> C(dirty)` 只执行 C
+  而不执行 A；如果另一个未满足 consumer 仍需要 A，则 A 会作为 shared demand 被保留。
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
 - Planned node work 只保留选中的 implementation identity、device、metadata 与 callback shape。
   Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
@@ -274,9 +284,9 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
   resource estimation、source-first 物理准备、provider entry 以及 operation/resource/physical
   admission 之前。缺失或变化的 active route 会以 `NoOperation` 失败；随后必须 finalize 已安装的
   逻辑生命周期，不得留下 gate、grant、root reservation 或 ledger 残留。Inactive task 以及已由
-  connected preflight 满足的 node 会被明确排除在该检查之外。如果 production cache 或
-  external-satisfaction pruning 移除了全部 task，context drift 已无关且 preparation 保持成功
-  no-work；只要仍有任一 active task，完整 context 与每条 active route 仍必须匹配。No-work
+  connected preflight 满足的 node 会被明确排除在该检查之外。如果 request-local external
+  satisfaction 移除了全部 task，context drift 已无关且 preparation 保持成功 no-work；只要仍有
+  任一 active task，完整 context 与每条 active route 仍必须匹配。No-work
   shortcut 位于已经安装的外层 request lifecycle 内：candidate、standalone/RunGroup bundle、
   successful terminal、quiescence、resource settlement 与 unregistration 仍会发生，而 ready
   entry、callback、operation gate、policy invocation、root reservation、child grant、

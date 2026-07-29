@@ -107,7 +107,7 @@ reserved-start transaction.
 | `ComputeCachePolicy` | HP cache eligibility and cache-path decisions | Disk I/O ownership or operation execution |
 | `NodeInputResolver` | Runtime parameters and ready image inputs | Graph traversal or output commit |
 | `FullTaskGraphExpander` | Complete node/tile task shape for one graph generation and domain | Request target, cache pruning, dirty pruning |
-| `NodeCacheTaskGraphPruner` | Target/dependency cone and cache-aware request plan | New node or tile task shapes |
+| `NodeCacheTaskGraphPruner` | Target/dependency cone, ordinary cache cut, and dirty request-cone retention | New node or tile task shapes |
 | `ComputeDispatchPlanBuilder` | Cache-pruned high-precision plan and inspection record | Ready-store or route ordering |
 | `DirtyRegionPlanner` | Graph-scoped dirty propagation snapshot | Compute dependency counters |
 | `DirtySnapshotTaskGraphPruner` | Active dirty work selected from an existing plan | Task expansion |
@@ -280,10 +280,14 @@ pure-C policy ABI v1 and receives no execution resource.
    cancellation remains local.
 4. Connected parameter producers are stabilized into one request-local HP
    snapshot before extent, ROI, or task-shape decisions use them.
-5. The planner expands the complete task shape for one domain and prunes it to
-   the requested target and dependency cone.
-6. A dirty request selects an active work set from that plan. Dirty state does
-   not create new task shapes.
+5. The planner expands the complete task shape for one domain and limits it to
+   the requested target and dependency cone. Ordinary full HP planning may
+   consume exact formal cache immediately; dirty planning records that
+   observation but retains the complete callback-free cone.
+6. A dirty request keeps every snapshot-selected task executable, treats old
+   exact cache only as a possible staging merge base, and applies
+   current-request external-satisfaction demand cuts across the retained
+   dependency universe. Dirty state does not create new task shapes.
 7. Every execution phase materializes move-only
    `ReadyTaskSubmission` values that retain a Run lease and
    `(RunId, RunLocalTaskId)`, then sends only ready work to the Host-owned
@@ -321,12 +325,22 @@ pure-C policy ABI v1 and receives no execution resource.
   disables request-time cache satisfaction before task population; fallible
   preparation does not clear visible Graph output.
 - Request target, cache availability, and dirty state prune existing task
-  shapes; they do not redefine graph topology. For HP only, exact complete
-  formal cache is a read boundary: the node and upstream work demanded solely
-  through that boundary are omitted, while shared upstream work required by
-  another unsatisfied branch remains executable. Partial validity,
-  force-recache, and RT intent never promote formal HP cache into task
-  satisfaction.
+  shapes; they do not redefine graph topology. For ordinary HP planning, exact
+  complete formal cache is consumed immediately as a read boundary. Dirty
+  planning instead retains the complete callback-free target cone and records
+  only the planning-time observation. Selection never omits a node explicitly
+  selected by the dirty snapshot merely because old output still has exact
+  complete validity: those bytes may seed staging and preserve unselected
+  coordinates, but the selected Region must execute. Removal or partial
+  reduction after planning likewise leaves the retained dirty provider cone
+  active. Force-recache disables even staging reuse, and RT intent never
+  promotes formal HP cache into task satisfaction.
+- Dirty demand traversal uses the complete retained node/dependency universe,
+  including inactive connector nodes and external-satisfaction boundaries.
+  Traversal stops at a satisfied boundary but final emission is
+  restricted to dirty candidates. Thus `A(dirty) -> B(satisfied, inactive) ->
+  C(dirty)` executes C without A, while another unsatisfied consumer of A still
+  preserves A as shared demand.
 - A `ComputeTaskGraph` is immutable while an execution-visible callback derived
   from it may still execute.
 - Planned node work retains only selected implementation identity, device,
@@ -349,10 +363,10 @@ pure-C policy ABI v1 and receives no execution resource.
   fails with `NoOperation`, and the installed logical lifecycle must then
   finalize without gate, grant, root-reservation, or ledger residue. Inactive
   tasks and nodes already satisfied by connected preflight are deliberately
-  excluded from this check. If production cache or external-satisfaction
-  pruning removes every task, context drift is irrelevant and preparation
-  remains a successful no-work result; if any task remains active, the complete
-  context and every active route are still required to match. The no-work
+  excluded from this check. If request-local external satisfaction removes
+  every task, context drift is irrelevant and preparation remains a successful
+  no-work result; if any task remains active, the complete context and every
+  active route are still required to match. The no-work
   shortcut is inside the already installed outer request lifecycle: the
   candidate, standalone/RunGroup bundle, successful terminal, quiescence,
   resource settlement, and unregistration still occur, while ready entries,

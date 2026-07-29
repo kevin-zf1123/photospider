@@ -56,7 +56,7 @@ flowchart TD
   REQUEST["HP or RT dirty compute request"] --> PLAN["DirtyRegionPlanner"]
   PLAN --> SNAPSHOT
   SNAPSHOT --> SELECT["DirtySnapshotTaskGraphPruner"]
-  STATIC["node/cache-pruned ComputePlan"] --> SELECT
+  STATIC["retained request-cone ComputePlan"] --> SELECT
   SELECT --> SOURCE["source task group"]
   SELECT --> DOWNSTREAM["downstream task group"]
   SOURCE --> VALIDATE["source-boundary validation"]
@@ -67,7 +67,8 @@ flowchart TD
 
 Dirty lifecycle calls update graph state; they do not automatically start a
 compute request. Parallel execution always begins from a separately constructed
-node/cache-pruned `ComputePlan`.
+request-cone `ComputePlan`; dirty preparation retains its callback-free shape
+until dirty/external-boundary selection.
 
 ## `DirtyRegionSnapshot`
 
@@ -129,7 +130,7 @@ For every executable target or upstream node, the same route selection that
 passes the exact-core check is reduced immediately to a callback-free
 operation key and complete identity/device/shape/metadata record. The request
 plan retains these revisioned records, not the callable or DSO lease.
-After cache/external-satisfaction pruning identifies active task nodes, dirty
+After dirty/external-satisfaction selection identifies active task nodes, dirty
 preparation treats an empty active view as successful no-work before comparing
 intent, device inventory, task ids, or node routes. Otherwise it compares every
 active task-population route with those records before applying ROIs or
@@ -139,13 +140,15 @@ provider/gate/grant/reservation/ledger ownership; ordinary execution still
 re-resolves the callable afterward.
 
 The production node/cache pruner, rather than test-owned execution-order
-mutation, establishes formal HP cache satisfaction. It accepts only an exact
-complete `ComputeCachePolicy` result for HP when reusable cache is enabled,
-removes that node and upstream work demanded only through the satisfied
-boundary, and retains shared upstream demand for other unsatisfied branches.
-Partial validity, force-recache, and RT intent preserve executable work. Dirty
-selection revalidates request-scoped cache metadata against current Graph state
-before treating it as satisfied.
+mutation, records formal HP cache eligibility. Ordinary full HP planning may
+consume an exact complete `ComputeCachePolicy` result immediately. Dirty
+preparation retains the complete callback-free request cone, but the dirty
+selector excludes every snapshot-selected node from formal-cache satisfaction.
+Old exact output is a staging merge base for preserving unselected coordinates,
+not evidence that the current dirty Region is already current. Exact, removed,
+and partial target-cache states therefore all retain the selected provider cone.
+Force-recache disables cache reuse, and RT intent never consumes formal HP
+cache as task satisfaction.
 
 The planner records `BackwardDemand` edge mappings. Forward affected-region
 projection exists as a separate `RoiPropagationService` inspection behavior; it
@@ -225,23 +228,29 @@ partial intermediate output is planned and staged before downstream execution.
 
 ## Task Selection and Execution
 
-Dirty execution first obtains the immutable node/cache-pruned plan for the
+Dirty execution first obtains the immutable retained request-cone plan for the
 requested domain. `DirtySnapshotTaskGraphPruner::select()` overlays the snapshot
-on already-expanded tasks, clips image execution ROIs, preserves task ids, derives
-task-level dependencies, and separates source-boundary and downstream task ids.
-It does not expand nodes, create a new tile shape, or insert a retile task.
+on already-expanded tasks, keeps dirty candidates executable, clips image
+execution ROIs, preserves task ids, derives task-level dependencies, and
+separates source-boundary and downstream task ids. It does not expand nodes,
+create a new tile shape, or insert a retile task.
 Nonempty nonprojectable Region records select existing non-tile work and
 suppress extent-derived rectangles; they never select a physical tile without
 an exact image projection.
 
-Cache and external-satisfaction boundaries are demand cuts, not isolated task
-filters. Selection walks upstream from each unsatisfied sink, stops at a
-satisfied node, and keeps shared upstream nodes if another unsatisfied sink
-still needs them. If this leaves no active task, the enclosing product request
-still completes candidate admission, logical Run/RunGroup installation,
-successful terminal arbitration, quiescence, resource settlement, and
-unregistration. It creates no ready entry, callback, operation gate, policy
-invocation, physical reservation/grant, provider entry, or ledger demand.
+Current-request external satisfaction is a demand cut, not an isolated task
+filter. Selection walks the complete retained dependency
+universe, including inactive connector and satisfied nodes, upstream from each
+unsatisfied sink. It stops at a satisfied node and keeps shared upstream nodes
+if another unsatisfied sink still needs them; only dirty candidate tasks are
+emitted. A dirty candidate itself is never satisfied by old cache. This
+prevents an inactive satisfied connector from turning its exclusive upstream
+producer into a false sink. If explicit external satisfaction leaves no active
+task, the enclosing product request still completes candidate admission,
+logical Run/RunGroup installation, successful terminal arbitration,
+quiescence, resource settlement, and unregistration. It creates no ready
+entry, callback, operation gate, policy invocation, physical
+reservation/grant, provider entry, or ledger demand.
 
 Before a selected tiled `image_mixing` node dispatches its borrowed
 `InputTile`/`OutputTile` views, `NodeExecutor` normalizes required secondary

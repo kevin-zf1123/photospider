@@ -230,6 +230,16 @@ return. A dependency-complete current-request temporary result may flow
 downstream, but raw presence of partial persistent output never suppresses its
 planned recomputation or exposes its bytes to a whole-output consumer.
 
+Dirty planning never interprets exact old output as proof that a Region named
+by the current dirty snapshot is already current. The callback-free target cone
+is retained after a planning-time cache observation, and every dirty-selected
+node remains executable whether that old cache stays exact, disappears, or
+becomes partial before selection. Existing bytes may seed the request-local
+write buffer and preserve unselected coordinates; they are a merge base, not a
+dirty-work satisfaction boundary. Ordinary full HP planning may still consume
+the same exact cache immediately. Dirty selection itself forms satisfaction
+only from current-request external results, never from old formal cache.
+
 RT proxy state uses HP-space `region_hp` but remains image-only. The checked
 adapter derives current rectangular downsample/inspection metadata only from
 one exact built-in ImageRect. TensorSlice and Whole do not enter the RT or

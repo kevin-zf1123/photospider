@@ -623,20 +623,32 @@ core registry route。Guard-bypass 对照会继续通过真实 `HighPrecisionDir
 provider lease 并进入 fake GPU provider，因此该回归不能只因测试停在 planning 而通过。
 
 相邻的三项 route-context case 会在 TensorSlice planning 后改变 task-population device
-inventory。Externally satisfied case 使用 production dirty overlay；formal-cache case
-先安装 exact complete HP output，再依赖真实 `NodeCacheTaskGraphPruner`，测试不会自行删除
-execution-order node。两者都必须作为 zero-work 完成 preparation，不比较此时已无关的
-frozen intent、device inventory 或 node route。Partial-active plan 仍必须在 fake GPU
-provider 或任何 execution authority 之前返回 `NoOperation`，证明裁掉一个 node 不能掩盖
-另一个 active node 的 context drift。
+inventory。只有 externally satisfied case 会作为 zero-work 完成 preparation，不比较此时已无关
+的 frozen intent、device inventory 或 node route。Exact-cache case 会通过真实 Graph boundary
+安装 complete 旧 HP output，但由于 TensorSlice 已被 dirty-selected，它仍保持 active；与
+partial-active 对照一样，它必须在 fake GPU provider entry 或 execution authority 之前返回
+`NoOperation`。测试不会自行删除 execution-order node。
 
-`test_compute_service_split` 会独立验证外层 service boundary。真实 complete target cache
-移除 dirty task cone 后，post-plan registry replacement 不能进入任一 provider。Request 仍会
-按顺序记录 candidate begin、standalone bundle admission、successful terminal、quiescence、
-resource settlement 与 unregister，而全部 ready/callback/root/grant/policy/ledger counter
-保持为零。相邻 planning case 会证明 cache boundary 只裁掉 exclusive upstream demand、
-保留 shared demand、拒绝把 partial cache 当作 satisfaction、遵守 force-recache、保持 RT work
-可执行，并对 external satisfaction 应用相同的 upstream cut。
+`test_compute_service_split` 会独立验证外层 service boundary。真实 complete target cache 会一直
+保持 exact 到 selection，但明确标脏的 target 与其 provider cone 仍会执行。相邻两项 case 从相同
+exact planning observation 开始，再通过 internal test-product observer 删除 output 或缩减其
+formal Region；三种状态都会保留并执行同一个 dirty provider cone。Complete 旧 cache 下的
+post-plan registry replacement 仍必须作为 active route drift 失败，且两个 provider 均不能进入。
+若用反向 mutant 让 exact cache 满足 dirty candidate，则 exact 对照与 Host ROI fixture 都会因
+work 为空、旧 pixel 不变而失败。
+
+相邻的 real-provider case 使用 sparse dirty chain
+`A(dirty) -> B(externally satisfied, inactive) -> C(dirty)`。第一项要求只执行 C；带 shared
+`A -> D(dirty)` 的对照要求执行 A、C 与 D，而 B 保持 inactive。反向 candidate-only-universe
+mutant 会在第一项中错误执行 A 并失败，从而证明 demand traversal 必须保留 inactive connector 与
+satisfied boundary。其他 planning case 继续应用普通 full-request cache cut、遵守
+force-recache，并保持 RT work 可执行。
+
+`test_host_adapter` 会先发布 exact complete HP output，再通过 public Host boundary 提交非 forced
+dirty ROI。它必须执行 16 个 downstream tile 与一个 monolithic source task，把选中 pixel 从 3
+更新为 11，把未选中的 pixel 保持为 3，并通过 Host snapshot 暴露局部 backward mapping 与
+native PixelRect/tile geometry。恢复错误的 dirty-cache satisfaction 后，该 fixture 会报告零个
+active task，且选中 pixel 保持旧值。
 
 `test_compute_run` 会为 full-plan、dirty HP、dirty RT 与 connected-preflight 产品路径注册
 heap-backed exclusive key。共享 string-payload estimator 证明实际 capacity 加一个终止符，
@@ -841,8 +853,8 @@ integration binary。它的 44 个长期用例验证：
   recomputation、把 selected byte merge 到 existing complete output，以及仅在 Whole commit
   后提升为 reusable authority、callback-free target/upstream Region-route transfer 与
   pre-task-population mutation rejection、device-inventory drift 下由 production pruning
-  得到的 all-external 与 real-cache no-work acceptance，以及 partial-active drift rejection；
-  execute 返回 descriptor 与 inference 不一致的合法 Value 时，仍以
+  得到的 externally satisfied no-work acceptance、exact-cache dirty 与 partial-active
+  drift rejection；execute 返回 descriptor 与 inference 不一致的合法 Value 时，仍以
   `GraphErrc::ComputeError` 拒绝。
 
 `test_region_contracts` 拥有 28 个长期 Region case，覆盖规范 Empty/Whole、key、interval、

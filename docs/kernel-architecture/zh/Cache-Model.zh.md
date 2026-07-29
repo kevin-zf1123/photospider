@@ -172,6 +172,14 @@ dependency resolution，以及 final target return。Dependency 已完成的 cur
 temporary result 可以流向 downstream，但 raw partial persistent output 的存在绝不能抑制
 它已规划的 recomputation，也不能向 whole-output consumer 暴露其 byte。
 
+Dirty planning 绝不会把 exact 旧 output 解释为“当前 dirty snapshot 指定的 Region 已经是最新”的
+证据。Planning-time cache observation 后，callback-free target cone 仍会保留；无论旧 cache
+在 selection 前保持 exact、被删除或变为 partial，每个 dirty-selected node 都保持 executable。
+既有 byte 可以 seed request-local write buffer 并保留未选中的坐标；它们是 merge base，不是
+dirty work satisfaction boundary。普通 full HP planning 仍可立即消费同一个 exact cache。Dirty
+selection 自身只会从 current-request external result 形成 satisfaction，绝不会使用旧 formal
+cache。
+
 RT proxy state 使用 HP-space `region_hp`，但仍只支持 image。Checked adapter 只会从一个精确
 内建 ImageRect 派生当前 rectangular downsample/inspection metadata。TensorSlice 与 Whole
 不会进入 RT 或 downsample rectangle boundary。Region value 与 Tensor axis 会计入

@@ -351,14 +351,15 @@ predicate 失败。
 
 Realtime planning 有意按路径分别执行，而不是通过一次混合 domain 的 planner 调用生成两份任务池。
 `IntentUpdateCoordinator` 会分发 sibling HP 与 RT update callback，并为 Dirty RT request
-记录 RT-first/concurrent 阶段。每条路径都使用一个 single-domain request plan 和同 domain 的
-dirty snapshot：HP callback 使用
-`GlobalHighPrecision` node/cache-pruned plan 与 HP dirty snapshot，RT callback 使用
-`RealTimeUpdate` node/cache-pruned plan 与 RT dirty snapshot。HP dirty node execution 写入
+记录 RT-first/concurrent 阶段。每条路径都使用一个 single-domain retained request-cone plan 和同
+domain 的 dirty snapshot：HP callback 使用
+`GlobalHighPrecision` request-cone plan 与 HP dirty snapshot，RT callback 使用
+`RealTimeUpdate` request-cone plan 与 RT dirty snapshot。HP dirty node execution 写入
 `HighPrecisionDirtyWriteBuffer`；RT dirty node execution 写入 `RealtimeProxyWriteBuffer`，
 并且只提交到 `RealtimeProxyGraph`。Dirty snapshot 会从该路径的 task graph 中裁剪或激活
-update work set。这样会把完整 task expansion、node/cache pruning、dirty snapshot pruning
-和 output commit 保持为每个 compute domain 的独立契约。
+update work set。Exact 旧 HP output 可以 seed 局部 staging，但绝不会抑制该 snapshot 选中的
+work。这样会把完整 task expansion、callback-free cone 保留、dirty/external-boundary
+selection 与 output commit 保持为每个 compute domain 的独立契约。
 
 传入的 dirty ROI 会在当前请求中转换为图级 planner state。Public `ps::Host` 的
 begin/update/end 方法会通过 embedded adapter 转换到内部 `Kernel` / `InteractionService`

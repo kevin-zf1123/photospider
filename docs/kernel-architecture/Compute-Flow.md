@@ -446,15 +446,17 @@ released after both sibling futures have drained, including failure cleanup.
 Realtime planning is intentionally per path, not a single mixed-domain planner
 call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks
 and records RT-first/concurrent stages for Dirty RT requests. Each path uses a
-single-domain request plan and a same-domain dirty snapshot: the HP callback
-uses a `GlobalHighPrecision` node/cache-pruned plan with an HP dirty snapshot,
-and the RT callback uses a `RealTimeUpdate` node/cache-pruned plan with an RT
-dirty snapshot. HP dirty node execution writes into
+single-domain retained request-cone plan and a same-domain dirty snapshot: the
+HP callback uses a `GlobalHighPrecision` request-cone plan with an HP dirty
+snapshot, and the RT callback uses a `RealTimeUpdate` request-cone plan with an
+RT dirty snapshot. HP dirty node execution writes into
 `HighPrecisionDirtyWriteBuffer`; RT dirty node execution writes into
 `RealtimeProxyWriteBuffer` and commits only to `RealtimeProxyGraph`. The dirty
 snapshot clips or activates the update work set from the path's task graph.
-This keeps full task expansion, node/cache pruning, dirty snapshot pruning, and
-output commit as separate contracts for each compute domain.
+Exact old HP output may seed local staging but never suppresses work selected
+by that snapshot. This keeps full task expansion, callback-free cone retention,
+dirty/external-boundary selection, and output commit as separate contracts for
+each compute domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. Public `ps::Host` begin/update/end methods translate through the
