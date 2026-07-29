@@ -208,7 +208,7 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
-        "TensorAllCachePrunedPlanIgnoresDeviceInventoryMutation"
+        "TensorDirtySelectedCompleteCacheRejectsDeviceInventoryMutation"
     ),
     (
         "CpuDenseTensorImageOperation."

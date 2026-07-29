@@ -62,6 +62,16 @@ void set_dirty_post_plan_test_hook(const DirtyPostPlanTestHook* hook) noexcept {
   g_dirty_post_plan_test_hook = hook;
 }
 
+/** @copydoc notify_dirty_node_cache_plan_test_hook */
+void notify_dirty_node_cache_plan_test_hook(const ComputePlan& node_cache_plan,
+                                            GraphModel& graph) {
+  if (g_dirty_post_plan_test_hook != nullptr &&
+      g_dirty_post_plan_test_hook->notify_node_cache_plan != nullptr) {
+    g_dirty_post_plan_test_hook->notify_node_cache_plan(
+        g_dirty_post_plan_test_hook->context, node_cache_plan, graph);
+  }
+}
+
 /**
  * @brief Notifies the current test thread after dirty planning completes.
  * @return Nothing.

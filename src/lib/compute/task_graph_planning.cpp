@@ -1155,50 +1155,49 @@ std::vector<int> initial_ready_task_ids_for_view(
 /**
  * @brief Retains demand reachable before request-satisfied node boundaries.
  *
- * @param candidate_nodes Node identities eligible for the current request
- * view.
+ * @param node_universe Node identities and inactive connectors belonging to the
+ * current request view.
  * @param dependencies Directed upstream-to-downstream dependency records.
- * @param satisfied_nodes Candidate nodes whose outputs already satisfy the
+ * @param satisfied_nodes Universe nodes whose outputs already satisfy the
  * request and therefore need no executable work.
- * @return Candidate nodes required by at least one unsatisfied sink without
+ * @return Universe nodes required by at least one unsatisfied sink without
  * traversing through a satisfied boundary.
  * @throws std::bad_alloc if adjacency, sink, or result storage cannot grow.
- * @note A sink has no downstream dependency inside candidate_nodes. Starting
+ * @note A sink has no downstream dependency inside node_universe. Starting
  * from every sink preserves disconnected request components. If malformed
- * cyclic input has no sink, every candidate is used as a conservative root;
+ * cyclic input has no sink, every universe node is used as a conservative root;
  * validated production GraphModel topology never requires that fallback.
  */
 std::unordered_set<int> required_nodes_before_satisfied_boundaries(
-    const std::unordered_set<int>& candidate_nodes,
+    const std::unordered_set<int>& node_universe,
     const std::vector<PlannedDependency>& dependencies,
     const std::unordered_set<int>& satisfied_nodes) {
   std::unordered_map<int, std::vector<int>> upstream_by_node;
-  std::unordered_set<int> nodes_with_candidate_dependents;
-  upstream_by_node.reserve(candidate_nodes.size());
-  nodes_with_candidate_dependents.reserve(candidate_nodes.size());
+  std::unordered_set<int> nodes_with_universe_dependents;
+  upstream_by_node.reserve(node_universe.size());
+  nodes_with_universe_dependents.reserve(node_universe.size());
   for (const PlannedDependency& dependency : dependencies) {
-    if (!candidate_nodes.count(dependency.from_node_id) ||
-        !candidate_nodes.count(dependency.to_node_id)) {
+    if (!node_universe.count(dependency.from_node_id) ||
+        !node_universe.count(dependency.to_node_id)) {
       continue;
     }
     upstream_by_node[dependency.to_node_id].push_back(dependency.from_node_id);
-    nodes_with_candidate_dependents.insert(dependency.from_node_id);
+    nodes_with_universe_dependents.insert(dependency.from_node_id);
   }
 
   std::vector<int> pending;
-  pending.reserve(candidate_nodes.size());
-  for (int node_id : candidate_nodes) {
-    if (!nodes_with_candidate_dependents.count(node_id)) {
+  pending.reserve(node_universe.size());
+  for (int node_id : node_universe) {
+    if (!nodes_with_universe_dependents.count(node_id)) {
       pending.push_back(node_id);
     }
   }
-  if (pending.empty() && !candidate_nodes.empty()) {
-    pending.insert(pending.end(), candidate_nodes.begin(),
-                   candidate_nodes.end());
+  if (pending.empty() && !node_universe.empty()) {
+    pending.insert(pending.end(), node_universe.begin(), node_universe.end());
   }
 
   std::unordered_set<int> required;
-  required.reserve(candidate_nodes.size());
+  required.reserve(node_universe.size());
   while (!pending.empty()) {
     const int node_id = pending.back();
     pending.pop_back();
@@ -1419,9 +1418,11 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
   }
 
   const std::unordered_set<int> executable_nodes =
-      required_nodes_before_satisfied_boundaries(
-          requested_nodes, full_graph.task_graph.dependencies,
-          cache_satisfied_nodes);
+      request.defer_reusable_cache_pruning
+          ? requested_nodes
+          : required_nodes_before_satisfied_boundaries(
+                requested_nodes, full_graph.task_graph.dependencies,
+                cache_satisfied_nodes);
   result.execution_order.reserve(execution_order.size());
   for (int node_id : execution_order) {
     if (executable_nodes.count(node_id)) {
@@ -1552,18 +1553,22 @@ DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
     satisfied_nodes.insert(externally_satisfied_node_ids->begin(),
                            externally_satisfied_node_ids->end());
   }
-  if (selection.domain == DirtyDomain::HighPrecision) {
-    for (const PlannedNodeWork& work : node_cache_plan.planned_work) {
-      if (!work.reusable_cache_available || !graph.has_node(work.node_id) ||
-          !ComputeCachePolicy::has_reusable_output(graph.node(work.node_id))) {
-        continue;
-      }
-      satisfied_nodes.insert(work.node_id);
-    }
+  std::unordered_set<int> demand_node_universe(
+      node_cache_plan.planned_nodes.begin(),
+      node_cache_plan.planned_nodes.end());
+  demand_node_universe.reserve(node_cache_plan.planned_nodes.size() +
+                               satisfied_nodes.size() +
+                               dirty_candidate_nodes.size());
+  demand_node_universe.insert(satisfied_nodes.begin(), satisfied_nodes.end());
+  demand_node_universe.insert(dirty_candidate_nodes.begin(),
+                              dirty_candidate_nodes.end());
+  for (const PlannedDependency& dependency : selection.dependencies) {
+    demand_node_universe.insert(dependency.from_node_id);
+    demand_node_universe.insert(dependency.to_node_id);
   }
   const std::unordered_set<int> active_nodes =
       required_nodes_before_satisfied_boundaries(
-          dirty_candidate_nodes, selection.dependencies, satisfied_nodes);
+          demand_node_universe, selection.dependencies, satisfied_nodes);
 
   for (const auto& task : node_cache_plan.task_graph.tasks) {
     if (task.task_id < 0 || task.task_id >= static_cast<int>(task_count) ||

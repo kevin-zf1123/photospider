@@ -389,7 +389,7 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
-            "TensorAllCachePrunedPlanIgnoresDeviceInventoryMutation"
+            "TensorDirtySelectedCompleteCacheRejectsDeviceInventoryMutation"
         ),
         (
             "CpuDenseTensorImageOperation."

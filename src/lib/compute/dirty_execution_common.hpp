@@ -18,6 +18,9 @@
 #include "compute/execution_service.hpp"
 #include "compute/resource_demand_estimator.hpp"
 #include "compute/task_graph_planning.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+#include "compute/dirty_update_executor_test_access.hpp"
+#endif
 #include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -720,22 +723,31 @@ void validate_dirty_region_operation_routes(
  * @throws GraphError from task graph pruning, exact Region route validation,
  * or materialization. A changed route is reported as
  * `GraphErrc::NoOperation`.
- * @note The helper retains diagnostics without publishing them. The installed
- * execution path calls publish_prepared_dirty_inspection() only after its
- * first cancellation observation, so candidate rollback leaves authoritative
- * inspection state unchanged. A no-work selection returns successfully from
- * route validation before comparing frozen execution context. Any active work
- * still requires full context and route validation before ROI mutation,
- * work-set materialization, callable resolution, and every admission/resource
- * boundary.
+ * @note The helper retains diagnostics without publishing them. It forces
+ * node/cache pruning to retain the complete callback-free request cone, then
+ * applies dirty-candidate and external-boundary demand selection. Exact cache
+ * may seed a dirty write buffer but cannot satisfy a task selected by the
+ * snapshot. The installed execution path calls
+ * publish_prepared_dirty_inspection() only after its first cancellation
+ * observation, so candidate rollback leaves authoritative inspection state
+ * unchanged. A no-work selection returns successfully from route validation
+ * before comparing frozen execution context. Any active work still requires
+ * full context and route validation before ROI mutation, work-set
+ * materialization, callable resolution, and every admission/resource boundary.
  */
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
     GraphModel& graph, DirtyPlan&& dirty_plan, const ComputeRequest& request,
     const std::vector<Device>& available_devices = {Device::CPU},
     const std::unordered_set<int>* externally_satisfied_node_ids = nullptr) {
+  ComputeRequest dirty_selection_request = request;
+  dirty_selection_request.defer_reusable_cache_pruning = true;
   const ComputePlan node_cache_plan = prune_node_cache_task_graph(
-      graph, request, dirty_plan.execution_order, available_devices);
+      graph, dirty_selection_request, dirty_plan.execution_order,
+      available_devices);
+#if defined(PHOTOSPIDER_INTERNAL_DIRTY_UPDATE_TESTING)
+  testing::notify_dirty_node_cache_plan_test_hook(node_cache_plan, graph);
+#endif
   DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
   DirtyTaskSelectionOverlay selection =
       dirty_snapshot_pruner.select(node_cache_plan, dirty_plan.snapshot, graph,

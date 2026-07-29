@@ -28,6 +28,7 @@
 #include "compute/compute_metrics_recorder.hpp"
 #include "compute/compute_run.hpp"
 #include "compute/compute_service.hpp"
+#include "compute/dirty_node_executor.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_update_executor_test_access.hpp"
 #include "compute/dirty_write_buffers.hpp"
@@ -818,6 +819,66 @@ class ScopedDirtyPostPlanObservation final {
 };
 
 /**
+ * @brief Owns one test-product dirty pre-selection cache observer.
+ *
+ * @throws std::bad_alloc when copying the observer cannot allocate.
+ * @note The callback runs synchronously while the planning Graph mutex remains
+ * held, after the complete node/cache plan exists but before current cache
+ * validity forms selection-time satisfied boundaries. It must not acquire that
+ * mutex or retain the borrowed Graph.
+ */
+class ScopedDirtyNodeCachePlanObservation final {
+ public:
+  /**
+   * @brief Installs one callback at the plan/cache-revalidation boundary.
+   * @param observer Runtime-cache mutation to perform once notified.
+   * @throws std::bad_alloc when callback ownership cannot allocate.
+   */
+  explicit ScopedDirtyNodeCachePlanObservation(
+      std::function<void(const compute::ComputePlan&, GraphModel&)> observer)
+      : observer_(std::move(observer)),
+        hook_{this, nullptr, &ScopedDirtyNodeCachePlanObservation::notify} {
+    compute::testing::set_dirty_post_plan_test_hook(&hook_);
+  }
+
+  /**
+   * @brief Clears the thread-local observer.
+   * @throws Nothing.
+   */
+  ~ScopedDirtyNodeCachePlanObservation() noexcept {
+    compute::testing::set_dirty_post_plan_test_hook(nullptr);
+  }
+
+  /** @brief Prevents duplicate ownership of the thread-local observer. */
+  ScopedDirtyNodeCachePlanObservation(
+      const ScopedDirtyNodeCachePlanObservation&) = delete;
+
+  /** @brief Prevents replacing observer-clearing ownership. */
+  ScopedDirtyNodeCachePlanObservation& operator=(
+      const ScopedDirtyNodeCachePlanObservation&) = delete;
+
+ private:
+  /**
+   * @brief Dispatches the test-product callback through the opaque context.
+   * @param context Non-null ScopedDirtyNodeCachePlanObservation instance.
+   * @param node_cache_plan Retained callback-free task shape and cache facts.
+   * @param graph Borrowed planning Graph whose runtime cache state may change.
+   * @return Nothing.
+   * @throws Any exception selected by the installed observer.
+   */
+  static void notify(void* context, const compute::ComputePlan& node_cache_plan,
+                     GraphModel& graph) {
+    static_cast<ScopedDirtyNodeCachePlanObservation*>(context)->observer_(
+        node_cache_plan, graph);
+  }
+
+  /** @brief Owned synchronous runtime-cache mutation callback. */
+  std::function<void(const compute::ComputePlan&, GraphModel&)> observer_;
+  /** @brief Borrowed test-product hook installed for this lexical scope. */
+  compute::testing::DirtyPostPlanTestHook hook_;
+};
+
+/**
  * @brief Builds a monolithic image callback observed by one blocking probe.
  * @param probe Shared deterministic provider observer.
  * @param value Pixel value emitted after release.
@@ -990,6 +1051,174 @@ void populate_direct_dirty_graph(GraphModel& graph, const std::string& subtype,
   }
   graph.add_node(node);
   graph.validate_topology();
+}
+
+/**
+ * @brief Asserts that one direct process authority retained no failed Run.
+ * @param authority ExecutionService whose lifecycle and ledger must be empty.
+ * @return Nothing.
+ * @throws std::bad_alloc or synchronization exceptions from snapshot copy.
+ */
+void expect_direct_authority_settled(
+    const compute::ExecutionService& authority);
+
+/**
+ * @brief Creates one focused nonparallel dirty request.
+ * @param intent HP or RT dirty domain.
+ * @param target_node_id Graph-local target node.
+ * @return Request with disk cache disabled and a one-pixel dirty ROI.
+ * @throws Nothing.
+ */
+ComputeService::Request make_direct_dirty_request(ComputeIntent intent,
+                                                  int target_node_id);
+
+/**
+ * @brief Target-cache state retained or mutated after dirty planning.
+ *
+ * @note Every variant begins with an exact complete target cache so the
+ * planning-time observation is identical. A dirty-selected target remains
+ * executable whether the old cache stays exact, disappears, or becomes
+ * partial before selection.
+ */
+enum class PlannedCacheState {
+  /** @brief Keeps the exact target cache unchanged through selection. */
+  KeepExact,
+  /** @brief Removes both the target output and its formal validity Region. */
+  RemoveOutput,
+  /** @brief Retains bytes but reduces formal validity to a partial Region. */
+  ReduceCoverage,
+};
+
+/**
+ * @brief Populates an uncached producer feeding one exactly cached target.
+ * @param graph Empty graph receiving source node 1 and target node 2.
+ * @param source_subtype Registered input-free monolithic source subtype.
+ * @param target_subtype Registered monolithic consumer subtype.
+ * @return Nothing.
+ * @throws Graph topology or image allocation exceptions unchanged.
+ * @note The target's complete 8x8 output is reusable during planning while the
+ * producer deliberately has no committed output.
+ */
+void populate_direct_cache_revalidation_graph(
+    GraphModel& graph, const std::string& source_subtype,
+    const std::string& target_subtype) {
+  Node source = make_node(1, "issue82_cache_revalidation", source_subtype);
+  source.parameters["width"] = 8;
+  source.parameters["height"] = 8;
+  Node target = make_node(2, "issue82_cache_revalidation", target_subtype);
+  target.parameters["width"] = 8;
+  target.parameters["height"] = 8;
+  target.image_inputs.push_back({1, "image"});
+  target.cached_output_high_precision = make_image_output(8, 8, 1, 1.0f);
+  target.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  target.hp_version = 1;
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+}
+
+/**
+ * @brief Runs one dirty-selected target-cache boundary regression.
+ * @param cache_state Cache state retained or applied by the planning observer.
+ * @param case_name Unique suffix used for registry and graph ownership.
+ * @return Nothing; GoogleTest records retained-shape and provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by GoogleTest around the synchronous compute boundary.
+ * @note The observer proves planning saw exact target reuse and a full retained
+ * cone. Selection must keep both monolithic providers active because snapshot
+ * dirtiness, not old whole-output cache, governs executable dirty work.
+ */
+void run_direct_dirty_cache_selection_case(PlannedCacheState cache_state,
+                                           const std::string& case_name) {
+  const std::string source_subtype = case_name + "_source";
+  const std::string target_subtype = case_name + "_target";
+  auto source_entries = std::make_shared<std::atomic_int>(0);
+  auto target_entries = std::make_shared<std::atomic_int>(0);
+  auto target_observed_source = std::make_shared<std::atomic_int>(0);
+  auto& registry = OpRegistry::instance();
+  registry.register_op_hp_monolithic(
+      "issue82_cache_revalidation", source_subtype,
+      MonolithicOpFunc([source_entries](const Node& node,
+                                        const std::vector<const NodeOutput*>&) {
+        source_entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, 7.0f);
+      }));
+  registry.register_op_hp_monolithic(
+      "issue82_cache_revalidation", target_subtype,
+      MonolithicOpFunc(
+          [target_entries, target_observed_source](
+              const Node& node,
+              const std::vector<const NodeOutput*>& inputs) -> NodeOutput {
+            target_entries->fetch_add(1, std::memory_order_relaxed);
+            if (inputs.empty() || inputs.front() == nullptr) {
+              throw GraphError(GraphErrc::MissingDependency,
+                               "dirty cache target requires source");
+            }
+            target_observed_source->store(
+                static_cast<int>(
+                    toCvMat(inputs.front()->image_buffer).at<float>(0, 0)),
+                std::memory_order_relaxed);
+            return make_image_output(
+                as_int_flexible(node.parameters, "width", 8),
+                as_int_flexible(node.parameters, "height", 8), 1, 17.0f);
+          }));
+
+  compute::ExecutionService authority;
+  DirectDirtyComputeHarness harness(authority,
+                                    "issue82-cache-revalidate-" + case_name);
+  populate_direct_cache_revalidation_graph(harness.graph(), source_subtype,
+                                           target_subtype);
+  const ComputeService::Request dirty =
+      make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 2);
+  int observer_calls = 0;
+  NodeOutput* output = nullptr;
+  {
+    ScopedDirtyNodeCachePlanObservation observation(
+        [&](const compute::ComputePlan& node_cache_plan,
+            GraphModel& planning_graph) {
+          ++observer_calls;
+          EXPECT_EQ(node_cache_plan.planned_nodes, (std::vector<int>{1, 2}));
+          const auto target_work =
+              std::find_if(node_cache_plan.planned_work.begin(),
+                           node_cache_plan.planned_work.end(),
+                           [](const compute::PlannedNodeWork& work) {
+                             return work.node_id == 2;
+                           });
+          ASSERT_NE(target_work, node_cache_plan.planned_work.end());
+          EXPECT_TRUE(target_work->reusable_cache_available);
+          const Node& target = planning_graph.node(2);
+          EXPECT_TRUE(target.cached_output_high_precision.has_value());
+          EXPECT_TRUE(target.hp_region.has_value());
+          planning_graph.mutate_node_runtime_state(
+              2, [&](GraphModel::NodeRuntimeState& state) {
+                if (cache_state == PlannedCacheState::RemoveOutput) {
+                  state.cached_output_high_precision.reset();
+                  state.hp_region = RegionSet::empty();
+                } else if (cache_state == PlannedCacheState::ReduceCoverage) {
+                  state.hp_region = RegionSet::from_image_rect(
+                      {image_region_domain(), 0, 4, 0, 8});
+                }
+              });
+        });
+    EXPECT_NO_THROW(output =
+                        &harness.service().compute(harness.graph(), dirty));
+  }
+
+  EXPECT_EQ(observer_calls, 1);
+  EXPECT_EQ(source_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(target_observed_source->load(std::memory_order_relaxed), 7);
+  if (output != nullptr) {
+    EXPECT_FLOAT_EQ(toCvMat(output->image_buffer).at<float>(0, 0), 17.0f);
+  }
+  expect_direct_authority_settled(authority);
+  registry.unregister_key(
+      make_key("issue82_cache_revalidation", source_subtype));
+  registry.unregister_key(
+      make_key("issue82_cache_revalidation", target_subtype));
 }
 
 /**
@@ -1784,6 +2013,148 @@ compute::ComputePlan dirty_snapshot_pruned_plan(
     const compute::DirtyRegionSnapshot& snapshot, GraphModel& graph) {
   compute::DirtySnapshotTaskGraphPruner pruner;
   return pruner.prune(node_cache_plan, snapshot, graph);
+}
+
+/**
+ * @brief Registers one counted monolithic image provider.
+ * @param type Shared operation type.
+ * @param subtype Unique operation subtype.
+ * @param entries Counter incremented exactly once per callback entry.
+ * @param value Constant pixel value returned by the provider.
+ * @return Nothing.
+ * @throws Registry allocation or callback-copy exceptions unchanged.
+ * @note Input resolution remains owned by HighPrecisionDirtyNodeExecutor; the
+ * callback itself accepts either source or consumer node shapes.
+ */
+void register_counted_monolithic_operation(
+    const std::string& type, const std::string& subtype,
+    const std::shared_ptr<std::atomic_int>& entries, float value) {
+  OpRegistry::instance().register_op_hp_monolithic(
+      type, subtype,
+      MonolithicOpFunc([entries, value](const Node& node,
+                                        const std::vector<const NodeOutput*>&)
+                           -> NodeOutput {
+        entries->fetch_add(1, std::memory_order_relaxed);
+        return make_image_output(as_int_flexible(node.parameters, "width", 8),
+                                 as_int_flexible(node.parameters, "height", 8),
+                                 1, value);
+      }));
+}
+
+/**
+ * @brief Builds a sparse dirty plan over a complete monolithic node universe.
+ * @param graph Graph whose current topology generation is frozen.
+ * @param execution_order Complete dependency order retained for demand cuts.
+ * @param dirty_node_ids Nodes carrying actual phase-two dirty work.
+ * @return HP plan whose snapshot selects exactly dirty_node_ids.
+ * @throws std::bad_alloc when plan or snapshot storage grows.
+ * @note Nodes omitted from dirty_node_ids remain valid topology boundaries but
+ * have neither an HpPlanEntry nor an active dirty task candidate.
+ */
+compute::HighPrecisionDirtyPlan make_sparse_monolithic_dirty_plan(
+    const GraphModel& graph, const std::vector<int>& execution_order,
+    const std::vector<int>& dirty_node_ids) {
+  compute::HighPrecisionDirtyPlan plan;
+  plan.execution_order = execution_order;
+  plan.snapshot.graph_generation = graph.topology_generation();
+  const PixelRect roi{0, 0, 8, 8};
+  const PixelSize extent{8, 8};
+  const RegionSet region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  for (int node_id : dirty_node_ids) {
+    plan.entries.emplace(node_id, compute::HpPlanEntry{region, roi, extent, 0});
+    plan.snapshot.per_node_dirty_rois[node_id].push_back(roi);
+    plan.snapshot.actual_dirty_rois[node_id].push_back(roi);
+    plan.snapshot.dirty_monolithic_nodes.push_back(
+        compute::DirtyMonolithicRegion{
+            node_id, compute::DirtyDomain::HighPrecision, roi, true, region});
+  }
+  return plan;
+}
+
+/**
+ * @brief Lists selected node ids in retained topological order.
+ * @param prepared Prepared dirty plan whose active task overlay is inspected.
+ * @return Unique active node ids ordered by dirty execution_order.
+ * @throws std::bad_alloc when temporary membership or result storage grows.
+ * @note Monolithic fixtures produce one task per node, but uniqueness keeps the
+ * helper correct if task population later changes shape.
+ */
+std::vector<int> selected_dirty_node_ids(
+    const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan>&
+        prepared) {
+  std::unordered_set<int> active_nodes;
+  for (int task_id : prepared.selection.active_task_ids) {
+    if (task_id < 0 || static_cast<std::size_t>(task_id) >=
+                           prepared.compute_plan.task_graph.tasks.size()) {
+      continue;
+    }
+    active_nodes.insert(
+        prepared.compute_plan.task_graph.tasks[task_id].node_id);
+  }
+  std::vector<int> result;
+  result.reserve(active_nodes.size());
+  for (int node_id : prepared.dirty_plan.execution_order) {
+    if (active_nodes.count(node_id)) {
+      result.push_back(node_id);
+    }
+  }
+  return result;
+}
+
+/**
+ * @brief Executes every selected HP monolithic provider through the real node
+ * executor.
+ * @param graph Graph supplying committed boundary inputs.
+ * @param prepared Prepared selection and per-node HP entries.
+ * @return Nothing after synchronous provider execution and request-local
+ * staging.
+ * @throws Graph, registry, allocation, or provider exceptions unchanged.
+ * @note The helper intentionally supplies no process authority: the regression
+ * validates demand selection and provider entry, while admission contracts are
+ * covered by dedicated ComputeService tests. Upstream staged output remains
+ * visible to later selected consumers through HighPrecisionDirtyWriteBuffer.
+ */
+void execute_selected_dirty_providers(
+    GraphModel& graph,
+    const compute::PreparedDirtyPlan<compute::HighPrecisionDirtyPlan>&
+        prepared) {
+  const std::vector<int> selected_nodes = selected_dirty_node_ids(prepared);
+  compute::DirtyResolvedOperationMap operations;
+  operations.reserve(selected_nodes.size());
+  for (int node_id : selected_nodes) {
+    const Node& node = graph.node(node_id);
+    const auto selected = OpRegistry::instance().select_implementation(
+        node.type, node.subtype, {Device::CPU},
+        ComputeIntent::GlobalHighPrecision);
+    if (!selected.has_value()) {
+      ADD_FAILURE() << "missing selected provider for node " << node_id;
+      return;
+    }
+    if (!selected->is_monolithic()) {
+      ADD_FAILURE() << "expected monolithic provider for node " << node_id;
+      return;
+    }
+    operations.emplace(
+        node_id, compute::DirtyResolvedOperation{
+                     selected->func, selected->metadata.device_preference,
+                     selected->implementation_identity, selected->metadata});
+  }
+
+  GraphEventService events;
+  compute::DirtyNodeSynchronization synchronization(graph.node_ids());
+  compute::HighPrecisionDirtyWriteBuffer staging;
+  compute::DirtyNodeExecutionContext context{
+      graph,           nullptr,
+      events,          prepared.dirty_plan.snapshot,
+      operations,      prepared.dirty_plan.snapshot.graph_generation,
+      synchronization, nullptr,
+      nullptr,         nullptr};
+  compute::HighPrecisionDirtyNodeExecutor executor(context, staging);
+  for (int node_id : selected_nodes) {
+    Node node_copy = graph.node(node_id);
+    executor.execute(node_copy, prepared.dirty_plan.entries.at(node_id));
+  }
 }
 
 /**
@@ -2734,20 +3105,199 @@ TEST(TaskGraphPlanningSplit,
 }
 
 /**
- * @brief Proves a cache-pruned dirty no-work request keeps logical lifecycle.
+ * @brief Proves an inactive external boundary stops its dirty-only upstream.
  *
- * @return Nothing; GoogleTest reports cache reuse, lifecycle ordering,
- * provider entry, physical admission, or authority-residue failures.
+ * @return Nothing; GoogleTest reports selection or real provider counts.
+ * @throws Graph, registry, planning, execution, or allocation exceptions
+ * unchanged.
+ * @note A and C are dirty candidates in A→B→C, while B is externally
+ * satisfied and deliberately absent from dirty candidates. Cache reuse is
+ * disabled for selection so only the external boundary can remove A.
+ */
+TEST(TaskGraphPlanningSplit,
+     InactiveExternalBoundaryCutsDirtyProducerProviderExecution) {
+  constexpr const char* kType = "issue82_demand_universe";
+  constexpr const char* kProducerSubtype = "external_cut_producer";
+  constexpr const char* kBoundarySubtype = "external_cut_boundary";
+  constexpr const char* kTargetSubtype = "external_cut_target";
+  auto producer_entries = std::make_shared<std::atomic_int>(0);
+  auto boundary_entries = std::make_shared<std::atomic_int>(0);
+  auto target_entries = std::make_shared<std::atomic_int>(0);
+  register_counted_monolithic_operation(kType, kProducerSubtype,
+                                        producer_entries, 1.0f);
+  register_counted_monolithic_operation(kType, kBoundarySubtype,
+                                        boundary_entries, 2.0f);
+  register_counted_monolithic_operation(kType, kTargetSubtype, target_entries,
+                                        3.0f);
+
+  GraphModel graph("cache/issue82-inactive-external-cut");
+  Node producer = make_node(1, kType, kProducerSubtype);
+  producer.parameters["width"] = 8;
+  producer.parameters["height"] = 8;
+  Node boundary = make_node(2, kType, kBoundarySubtype);
+  boundary.parameters["width"] = 8;
+  boundary.parameters["height"] = 8;
+  boundary.image_inputs.push_back({1, "image"});
+  boundary.cached_output_high_precision = make_image_output(8, 8, 1, 2.0f);
+  boundary.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  Node target = make_node(3, kType, kTargetSubtype);
+  target.parameters["width"] = 8;
+  target.parameters["height"] = 8;
+  target.image_inputs.push_back({2, "image"});
+  graph.add_node(producer);
+  graph.add_node(boundary);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 3;
+  request.allow_reusable_cache = false;
+  const std::unordered_set<int> externally_satisfied{2};
+  auto prepared = compute::prepare_dirty_execution(
+      graph, make_sparse_monolithic_dirty_plan(graph, {1, 2, 3}, {1, 3}),
+      request, {Device::CPU}, &externally_satisfied);
+  EXPECT_EQ(selected_dirty_node_ids(prepared), (std::vector<int>{3}));
+  execute_selected_dirty_providers(graph, prepared);
+  EXPECT_EQ(producer_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(boundary_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
+
+  OpRegistry::instance().unregister_key(make_key(kType, kProducerSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kBoundarySubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kTargetSubtype));
+}
+
+/**
+ * @brief Proves a shared consumer preserves upstream work across an external
+ * boundary cut.
+ *
+ * @return Nothing; GoogleTest reports selection or real provider counts.
+ * @throws Graph, registry, planning, execution, or allocation exceptions
+ * unchanged.
+ * @note In A→B→C plus A→D, external B still removes the A work needed only by
+ * C, but dirty D independently demands A. The selected providers must therefore
+ * be A, C, and D exactly once, with B inactive.
+ */
+TEST(TaskGraphPlanningSplit,
+     SharedDirtyConsumerPreservesProducerAcrossInactiveExternalBoundary) {
+  constexpr const char* kType = "issue82_demand_universe";
+  constexpr const char* kProducerSubtype = "external_shared_producer";
+  constexpr const char* kBoundarySubtype = "external_shared_boundary";
+  constexpr const char* kTargetSubtype = "external_shared_target";
+  constexpr const char* kSharedSubtype = "external_shared_consumer";
+  auto producer_entries = std::make_shared<std::atomic_int>(0);
+  auto boundary_entries = std::make_shared<std::atomic_int>(0);
+  auto target_entries = std::make_shared<std::atomic_int>(0);
+  auto shared_entries = std::make_shared<std::atomic_int>(0);
+  register_counted_monolithic_operation(kType, kProducerSubtype,
+                                        producer_entries, 1.0f);
+  register_counted_monolithic_operation(kType, kBoundarySubtype,
+                                        boundary_entries, 2.0f);
+  register_counted_monolithic_operation(kType, kTargetSubtype, target_entries,
+                                        3.0f);
+  register_counted_monolithic_operation(kType, kSharedSubtype, shared_entries,
+                                        4.0f);
+
+  GraphModel graph("cache/issue82-inactive-external-shared");
+  Node producer = make_node(1, kType, kProducerSubtype);
+  producer.parameters["width"] = 8;
+  producer.parameters["height"] = 8;
+  Node boundary = make_node(2, kType, kBoundarySubtype);
+  boundary.parameters["width"] = 8;
+  boundary.parameters["height"] = 8;
+  boundary.image_inputs.push_back({1, "image"});
+  boundary.cached_output_high_precision = make_image_output(8, 8, 1, 2.0f);
+  boundary.hp_region =
+      RegionSet::from_image_rect({image_region_domain(), 0, 8, 0, 8});
+  Node target = make_node(3, kType, kTargetSubtype);
+  target.parameters["width"] = 8;
+  target.parameters["height"] = 8;
+  target.image_inputs.push_back({2, "image"});
+  Node shared = make_node(4, kType, kSharedSubtype);
+  shared.parameters["width"] = 8;
+  shared.parameters["height"] = 8;
+  shared.image_inputs.push_back({1, "image"});
+  graph.add_node(producer);
+  graph.add_node(boundary);
+  graph.add_node(target);
+  graph.add_node(shared);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 3;
+  request.allow_reusable_cache = false;
+  const std::unordered_set<int> externally_satisfied{2};
+  auto prepared = compute::prepare_dirty_execution(
+      graph, make_sparse_monolithic_dirty_plan(graph, {1, 2, 3, 4}, {1, 3, 4}),
+      request, {Device::CPU}, &externally_satisfied);
+  EXPECT_EQ(selected_dirty_node_ids(prepared), (std::vector<int>{1, 3, 4}));
+  execute_selected_dirty_providers(graph, prepared);
+  EXPECT_EQ(producer_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(boundary_entries->load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(target_entries->load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(shared_entries->load(std::memory_order_relaxed), 1);
+
+  OpRegistry::instance().unregister_key(make_key(kType, kProducerSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kBoundarySubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kTargetSubtype));
+  OpRegistry::instance().unregister_key(make_key(kType, kSharedSubtype));
+}
+
+/**
+ * @brief Proves an exact old cache cannot satisfy a dirty-selected target.
+ *
+ * @return Nothing; GoogleTest reports task-shape, cache, or provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by the shared synchronous regression helper.
+ */
+TEST(ComputeServiceDirtyCacheSelection,
+     ExactCacheAtSelectionStillExecutesProviderCone) {
+  run_direct_dirty_cache_selection_case(PlannedCacheState::KeepExact, "exact");
+}
+
+/**
+ * @brief Proves cache deletion after planning retains the dirty provider cone.
+ *
+ * @return Nothing; GoogleTest reports task-shape, cache, or provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by the shared synchronous regression helper.
+ */
+TEST(ComputeServiceDirtyCacheSelection,
+     RemovedExactCacheAfterPlanningRetainsProviderCone) {
+  run_direct_dirty_cache_selection_case(PlannedCacheState::RemoveOutput,
+                                        "remove");
+}
+
+/**
+ * @brief Proves partial coverage after planning retains the dirty provider
+ * cone.
+ *
+ * @return Nothing; GoogleTest reports task-shape, cache, or provider failures.
+ * @throws Graph, registry, service, allocation, or provider exceptions are
+ * reported by the shared synchronous regression helper.
+ */
+TEST(ComputeServiceDirtyCacheSelection,
+     PartialCacheAfterPlanningRetainsProviderCone) {
+  run_direct_dirty_cache_selection_case(PlannedCacheState::ReduceCoverage,
+                                        "partial");
+}
+
+/**
+ * @brief Proves an exact old cache cannot hide dirty route replacement.
+ *
+ * @return Nothing; GoogleTest reports cache reuse, route validation, provider
+ * entry, or authority-residue failures.
  * @throws Graph, registry, service, allocation, or provider exceptions
  * unchanged.
- * @note The post-plan hook replaces the planned implementation after a
- * complete target cache has removed all active work. The request must succeed
- * through the installed standalone Run without resolving either provider or
- * creating ready entries, callbacks, reservations, grants, policy ownership,
- * or ledger demand.
+ * @note The post-plan hook replaces the planned implementation after planning
+ * observes complete target cache. Because the target is dirty-selected, the
+ * active request must reject route drift before either provider executes.
  */
-TEST(ComputeServiceDirtyNoWork,
-     CompleteCacheTraversesLogicalLifecycleWithoutPhysicalAdmission) {
+TEST(ComputeServiceDirtyCacheSelection,
+     CompleteCacheKeepsDirtyRouteValidationActive) {
   constexpr const char* kType = "issue82_direct_dirty";
   constexpr const char* kSubtype = "complete_cache_no_work";
   auto old_entries = std::make_shared<std::atomic_int>(0);
@@ -2764,29 +3314,14 @@ TEST(ComputeServiceDirtyNoWork,
       }));
 
   compute::ExecutionService authority;
-  DirectDirtyComputeHarness harness(authority, "issue82-cache-no-work");
+  DirectDirtyComputeHarness harness(authority, "issue82-cache-route-drift");
   populate_direct_dirty_graph(harness.graph(), kSubtype, true);
   const ComputeService::Request dirty =
       make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
-  const compute::ExecutionLifecyclePage lifecycle_before =
-      authority.lifecycle_snapshot(0U, 4096U);
-  const std::uint64_t lifecycle_cursor = lifecycle_before.snapshot_cut;
   int observer_calls = 0;
-  bool saw_installed_logical_run = false;
-  compute::ExecutionLifecycleCounters post_plan_counters;
-  ResourceVector post_plan_reserved;
-  NodeOutput* output = nullptr;
   {
     ScopedDirtyPostPlanObservation observation([&] {
       ++observer_calls;
-      const compute::ExecutionLifecyclePage lifecycle =
-          authority.lifecycle_snapshot(0U, 4096U);
-      saw_installed_logical_run =
-          lifecycle.counters.pending_candidate_count == 0U &&
-          lifecycle.counters.admitted_standalone_run_count == 1U &&
-          lifecycle.counters.admitted_run_group_count == 0U;
-      post_plan_counters = lifecycle.counters;
-      post_plan_reserved = authority.resource_snapshot().reserved;
       registry.register_op_hp_monolithic(
           kType, kSubtype,
           MonolithicOpFunc(
@@ -2799,54 +3334,23 @@ TEST(ComputeServiceDirtyNoWork,
                     as_int_flexible(node.parameters, "height", 8), 1, 11.0f);
               }));
     });
-    EXPECT_NO_THROW(output =
-                        &harness.service().compute(harness.graph(), dirty));
+    try {
+      (void)harness.service().compute(harness.graph(), dirty);
+      FAIL() << "dirty-selected exact cache must not suppress route checks";
+    } catch (const GraphError& error) {
+      EXPECT_EQ(error.code(), GraphErrc::NoOperation);
+    }
   }
 
-  ASSERT_NE(output, nullptr);
-  EXPECT_FLOAT_EQ(toCvMat(output->image_buffer).at<float>(0, 0), 1.0f);
   EXPECT_EQ(observer_calls, 1);
-  EXPECT_TRUE(saw_installed_logical_run);
-  EXPECT_EQ(post_plan_counters.ready_entry_count, 0U);
-  EXPECT_EQ(post_plan_counters.entered_callback_count, 0U);
-  EXPECT_EQ(post_plan_counters.live_root_reservation_count, 0U);
-  EXPECT_EQ(post_plan_counters.live_child_grant_count, 0U);
-  EXPECT_EQ(post_plan_counters.live_policy_invocation_count, 0U);
-  EXPECT_EQ(post_plan_counters.live_policy_binding_count,
-            lifecycle_before.counters.live_policy_binding_count);
-  EXPECT_EQ(post_plan_reserved, ResourceVector{});
   EXPECT_EQ(old_entries->load(std::memory_order_relaxed), 0);
   EXPECT_EQ(replacement_entries->load(std::memory_order_relaxed), 0);
-
-  const compute::ExecutionLifecyclePage lifecycle =
-      authority.lifecycle_snapshot(lifecycle_cursor, 64U);
-  const std::vector<compute::ExecutionLifecycleEventKind> expected_kinds{
-      compute::ExecutionLifecycleEventKind::CandidateBegan,
-      compute::ExecutionLifecycleEventKind::BundleAdmitted,
-      compute::ExecutionLifecycleEventKind::RunTerminal,
-      compute::ExecutionLifecycleEventKind::RunQuiescent,
-      compute::ExecutionLifecycleEventKind::ResourceSettled,
-      compute::ExecutionLifecycleEventKind::RunUnregistered};
-  std::vector<compute::ExecutionLifecycleEventKind> observed_kinds;
-  observed_kinds.reserve(lifecycle.records.size());
-  for (const compute::ExecutionLifecycleEvent& event : lifecycle.records) {
-    observed_kinds.push_back(event.kind);
-    EXPECT_EQ(event.counters.ready_entry_count, 0U);
-    EXPECT_EQ(event.counters.entered_callback_count, 0U);
-    EXPECT_EQ(event.counters.live_root_reservation_count, 0U);
-    EXPECT_EQ(event.counters.live_child_grant_count, 0U);
-    EXPECT_EQ(event.counters.live_policy_invocation_count, 0U);
-    EXPECT_EQ(event.counters.live_policy_binding_count,
-              lifecycle_before.counters.live_policy_binding_count);
-  }
-  EXPECT_EQ(observed_kinds, expected_kinds);
-  const auto terminal = std::find_if(
-      lifecycle.records.begin(), lifecycle.records.end(),
-      [](const compute::ExecutionLifecycleEvent& event) {
-        return event.kind == compute::ExecutionLifecycleEventKind::RunTerminal;
-      });
-  ASSERT_NE(terminal, lifecycle.records.end());
-  EXPECT_EQ(terminal->category, compute::ExecutionLifecycleCategory::Succeeded);
+  ASSERT_TRUE(harness.graph().node(1).cached_output_high_precision.has_value());
+  EXPECT_FLOAT_EQ(
+      toCvMat(
+          harness.graph().node(1).cached_output_high_precision->image_buffer)
+          .at<float>(0, 0),
+      1.0f);
   expect_direct_authority_settled(authority);
   registry.unregister_key(make_key(kType, kSubtype));
 }

@@ -191,10 +191,11 @@ struct PlannedNodeWork {
   /** @brief Whether the work item must recompute the whole output. */
   bool whole_output = false;
   /**
-   * @brief Whether exact complete formal HP cache satisfied this request node.
+   * @brief Whether planning observed exact complete formal HP cache.
    *
-   * @note This is request-scoped pruning metadata, not a durable cache claim.
-   * Dirty selection revalidates the current Graph state before using it.
+   * @note This is request-scoped diagnostic metadata, not a durable cache claim
+   * or dirty execution decision. Snapshot selection never promotes it into
+   * satisfaction.
    */
   bool reusable_cache_available = false;
   /** @brief Dirty ROIs associated with this node after snapshot pruning. */
@@ -337,10 +338,19 @@ struct ComputeRequest {
   /**
    * @brief Whether exact complete formal HP cache may satisfy planned work.
    *
-   * @note This flag never promotes RT proxy or partial Region state. The
-   * pruner still delegates exact completeness to ComputeCachePolicy.
+   * @note This flag never promotes RT proxy or partial Region state. Ordinary
+   * pruning delegates exact completeness to ComputeCachePolicy. Dirty
+   * selection does not apply it to snapshot-selected work.
    */
   bool allow_reusable_cache = true;
+  /**
+   * @brief Whether dirty selection owns final request-cone demand cutting.
+   *
+   * @note Dirty preparation enables this after Region planning so node/cache
+   * pruning retains the complete callback-free request cone. Ordinary full HP
+   * dispatch leaves it disabled and may consume exact cache immediately.
+   */
+  bool defer_reusable_cache_pruning = false;
 };
 
 /**
@@ -363,18 +373,27 @@ struct ComputePlan {
   /** @brief Whether the caller intended route-backed execution. */
   bool parallel = false;
   /**
-   * @brief Executable traversal order remaining after request/cache pruning.
+   * @brief Traversal order retained for this request plan.
+   *
+   * @note Ordinary plans contain the cache-pruned executable order. Dirty plans
+   * retain the complete request cone until snapshot selection.
    */
   std::vector<int> execution_order;
-  /** @brief Node ids that survived pruning and should be considered planned. */
+  /**
+   * @brief Node ids whose callback-free task shapes remain in this plan.
+   *
+   * @note Dirty plans include inactive boundary nodes and exclusive upstream
+   * shape so selection can apply request-local demand cuts without destroying
+   * task identities.
+   */
   std::vector<int> planned_nodes;
   /**
    * @brief Request-cone work and cache-boundary summaries.
    *
-   * Records for executable nodes carry task ids and appear in planned_nodes.
-   * Non-executable request-cone records, including cache boundaries and
-   * upstream work cut only through those boundaries, remain for diagnostics
-   * with no task ids.
+   * Records for retained task-shape nodes carry task ids and appear in
+   * planned_nodes. Ordinary cache-pruned plans may also retain metadata-only
+   * records for boundaries and exclusive upstream work. Dirty plans retain task
+   * ids for the complete request cone until snapshot demand cutting.
    */
   std::vector<PlannedNodeWork> planned_work;
   /** @brief Executable task graph derived from planned work. */
@@ -508,9 +527,11 @@ class FullTaskGraphExpander {
 /**
  * @brief Prunes a FullTaskGraph to a target/cache-aware request plan.
  *
- * @note Exact complete formal HP cache forms a request-local read boundary.
- * The pruner removes that node's tasks and upstream work needed only through
- * that boundary while retaining a metadata-only work record for inspection.
+ * @note Exact complete formal HP cache forms a request-local read boundary for
+ * ordinary requests. Dirty requests retain the complete callback-free request
+ * cone and only record the planning-time observation; a node selected by the
+ * dirty snapshot remains executable because its old bytes are a merge base,
+ * not proof that the requested Region is current.
  */
 class NodeCacheTaskGraphPruner {
  public:
@@ -521,14 +542,17 @@ class NodeCacheTaskGraphPruner {
    * @param request Planning request containing target and intent.
    * @param execution_order Target postorder derived from GraphTraversalService.
    * @param graph GraphModel used to validate nodes and check reusable cache.
-   * @return ComputePlan limited to executable demand before cache boundaries.
+   * @return Ordinary ComputePlan limited to executable demand before cache
+   * boundaries, or a complete request-cone plan when deferred dirty selection
+   * is enabled.
    * @throws GraphError when requested nodes are missing from graph or full
    * expansion.
    * @throws std::logic_error, std::invalid_argument, std::overflow_error, or
    * std::bad_alloc when exact cache validity or result storage cannot be
    * evaluated.
    * @note RealTimeUpdate and requests with allow_reusable_cache=false never
-   * treat formal HP cache as executable-task satisfaction.
+   * treat formal HP cache as executable-task satisfaction. Deferred dirty
+   * plans preserve tasks and dependencies even when planning observes cache.
    */
   ComputePlan prune(const FullTaskGraph& full_graph,
                     const ComputeRequest& request,
@@ -537,22 +561,23 @@ class NodeCacheTaskGraphPruner {
 };
 
 /**
- * @brief Applies a DirtyRegionSnapshot to a node/cache-pruned plan.
+ * @brief Applies a DirtyRegionSnapshot to a request-cone plan.
  *
  * DirtySnapshotTaskGraphPruner annotates already-expanded tasks with dirty
  * metadata and materializes source/downstream task id groups. It does not
  * create new task shapes.
  *
- * @note The input plan must already be single-domain and cache-pruned for the
- * caller's HP or RT path.
+ * @note The input plan must already be single-domain. Dirty preparation retains
+ * the complete request cone and delegates snapshot/external boundary demand
+ * cutting to select().
  */
 class DirtySnapshotTaskGraphPruner {
  public:
   /**
-   * @brief Selects dirty tasks without copying the node/cache-pruned plan.
+   * @brief Selects dirty tasks without copying the request-cone plan.
    *
    * @param node_cache_plan Immutable plan produced by
-   * NodeCacheTaskGraphPruner.
+   * NodeCacheTaskGraphPruner with dirty cache pruning deferred.
    * @param snapshot Graph-scoped dirty facts for the same compute domain.
    * @param graph Graph used for exact task-level ROI dependencies.
    * @param externally_satisfied_node_ids Optional request-local node identities
@@ -563,6 +588,10 @@ class DirtySnapshotTaskGraphPruner {
    * storage cannot be evaluated.
    * @note This is the dirty execution path: it does not mutate or duplicate
    * PlannedTask records, and it preserves task ids from node_cache_plan.
+   * Selection never lets old formal cache satisfy dirty work. Explicit
+   * current-request external satisfaction may suppress a dirty candidate.
+   * Demand traversal includes inactive connector and externally satisfied
+   * boundary nodes, stops at each boundary, and emits only dirty candidates.
    * Dependencies on explicitly satisfied nodes remain outside the active view
    * and are therefore treated as completed without reusing their task ids.
    * Upstream tasks needed only through a satisfied boundary are also removed;

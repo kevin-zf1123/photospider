@@ -2619,19 +2619,19 @@ TEST(CpuDenseTensorImageOperation,
 }
 
 /**
- * @brief Accepts an inventory change when cache pruning removes every task.
+ * @brief Rejects route drift when a dirty target has exact old cache.
  *
- * @return Nothing; GoogleTest reports cache-policy, no-work, provider,
+ * @return Nothing; GoogleTest reports cache-policy, route validation, provider,
  * restoration, or authority failures.
  * @throws Graph, registry, Value, allocation, planning, or preparation
  * exceptions unchanged.
  * @note The valid Tensor plan first freezes CPU routes. A complete target cache
- * is then installed before the production node/cache pruner runs. The resulting
- * active selection must be empty without test-owned execution-order mutation
- * before a fake GPU-only population context is supplied.
+ * is then installed before production dirty selection. Because the planned
+ * TensorSlice remains explicitly dirty, the old cache is only a merge base and
+ * the fake GPU-only population context must still fail as route drift.
  */
 TEST(CpuDenseTensorImageOperation,
-     TensorAllCachePrunedPlanIgnoresDeviceInventoryMutation) {
+     TensorDirtySelectedCompleteCacheRejectsDeviceInventoryMutation) {
   ops::register_core_operations();
   GraphModel graph("cache/tensor-route-all-cache-pruned");
   populate_tensor_no_work_route_graph(graph, false);
@@ -2657,10 +2657,9 @@ TEST(CpuDenseTensorImageOperation,
           authority, {Device::GPU_METAL}, nullptr);
 
   EXPECT_TRUE(result.restored);
-  EXPECT_FALSE(result.rejected);
-  EXPECT_EQ(result.active_task_count, 0U);
-  EXPECT_EQ(result.source_task_count, 0U);
-  EXPECT_EQ(result.downstream_task_count, 0U);
+  EXPECT_TRUE(result.rejected);
+  EXPECT_EQ(result.error, GraphErrc::NoOperation);
+  EXPECT_FALSE(result.message.empty());
   EXPECT_EQ(provider_entries.load(std::memory_order_relaxed), 0);
   expect_tensor_route_authority_untouched(authority);
 }
