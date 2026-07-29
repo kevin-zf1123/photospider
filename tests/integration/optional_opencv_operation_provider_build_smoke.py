@@ -12,6 +12,19 @@ import subprocess
 from cmake_build_smoke_support import remove_work_tree
 
 
+#: @brief Exact focused targets built by the provider-disabled nested profile.
+#: @note `test_kernel_contracts` is the profile's only direct consumer of the
+#:   internal test product when the dependency-gated full suite is unavailable.
+PROVIDER_DISABLED_BUILD_TARGETS = (
+    "test_optional_opencv_operation_provider",
+    "test_cpu_dense_tensor_image_operation",
+    "test_value_identity_across_dsos",
+    "test_disk_cache_diagnostic_concurrency",
+    "test_kernel_lifecycle_concurrency",
+    "test_kernel_contracts",
+)
+
+
 def run(command: list[str], cwd: pathlib.Path) -> None:
     """@brief Run one required nested-build command with inherited output.
 
@@ -495,11 +508,7 @@ def main() -> int:
         "--build",
         str(work),
         "--target",
-        "test_optional_opencv_operation_provider",
-        "test_cpu_dense_tensor_image_operation",
-        "test_value_identity_across_dsos",
-        "test_disk_cache_diagnostic_concurrency",
-        "test_kernel_lifecycle_concurrency",
+        *PROVIDER_DISABLED_BUILD_TARGETS,
         "-j",
         "4",
     ]

@@ -886,6 +886,36 @@ class ProviderDisabledProfileTest(unittest.TestCase):
       real build tree is accessed.
     """
 
+    def test_builds_exact_focused_targets_with_internal_seam_consumer(
+        self,
+    ) -> None:
+        """@brief Pin the provider-disabled nested build target closure.
+
+        @return None after the target tuple contains the sole focused
+          internal-test-product consumer and no full-suite-only target.
+        @throws AssertionError If the long-lived dependency-disabled profile
+          silently loses its kernel contract build or widens into the full
+          suite.
+        @note The CMake configure remains authoritative for the direct-link
+          closure; this test protects the Python smoke's exercised surface.
+        """
+
+        self.assertEqual(
+            subject.PROVIDER_DISABLED_BUILD_TARGETS,
+            (
+                "test_optional_opencv_operation_provider",
+                "test_cpu_dense_tensor_image_operation",
+                "test_value_identity_across_dsos",
+                "test_disk_cache_diagnostic_concurrency",
+                "test_kernel_lifecycle_concurrency",
+                "test_kernel_contracts",
+            ),
+        )
+        self.assertNotIn(
+            "test_compute_service_split",
+            subject.PROVIDER_DISABLED_BUILD_TARGETS,
+        )
+
     def test_accepts_exact_cache_and_rejects_provider_mismatch(self) -> None:
         """@brief Require the intended provider-off capability combination.
 
