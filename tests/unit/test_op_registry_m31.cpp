@@ -119,6 +119,9 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   monolithic_metadata.scratch_bytes = 202U;
   monolithic_metadata.exclusive_key = "atomic-monolithic-context";
   monolithic_metadata.cost_score = 11;
+  monolithic_metadata.tile_preference = TileSizePreference::UNDEFINED;
+  monolithic_metadata.access_pattern =
+      OpMetadata::InputAccessPattern::SpatialAligned;
 
   OpMetadata tiled_metadata;
   tiled_metadata.device_preference = Device::CPU;
@@ -128,6 +131,8 @@ void verify_atomic_scalar_slots(const std::string& subtype,
   tiled_metadata.scratch_bytes = 404U;
   tiled_metadata.exclusive_key = "atomic-tiled-context";
   tiled_metadata.cost_score = 22;
+  tiled_metadata.tile_preference = TileSizePreference::MACRO;
+  tiled_metadata.access_pattern = OpMetadata::InputAccessPattern::RandomAccess;
 
   const auto register_monolithic = [&]() {
     registry.register_op_hp_monolithic(kType, subtype, monolithic,
@@ -174,6 +179,14 @@ void verify_atomic_scalar_slots(const std::string& subtype,
                             "atomic-tiled-context");
   EXPECT_EQ(selected_monolithic->metadata.cost_score, 11);
   EXPECT_EQ(selected_tiled->metadata.cost_score, 22);
+  EXPECT_EQ(selected_monolithic->metadata.tile_preference,
+            TileSizePreference::UNDEFINED);
+  EXPECT_EQ(selected_tiled->metadata.tile_preference,
+            TileSizePreference::MACRO);
+  EXPECT_EQ(selected_monolithic->metadata.access_pattern,
+            OpMetadata::InputAccessPattern::SpatialAligned);
+  EXPECT_EQ(selected_tiled->metadata.access_pattern,
+            OpMetadata::InputAccessPattern::RandomAccess);
 
   Node node;
   const NodeOutput monolithic_output =

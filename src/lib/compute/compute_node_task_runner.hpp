@@ -64,8 +64,12 @@ struct NodeTaskRunnerContext {
   /** @brief Per-node temporary outputs published before serialized commit. */
   std::vector<std::optional<NodeOutput>>& temp_results;
 
-  /** @brief Operation variants resolved once for the planned HP intent. */
-  const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops;
+  /**
+   * @brief Exact implementation snapshots resolved for the planned HP intent.
+   * @note Each present value keeps the callback and scheduling metadata
+   * selected under the same nonzero implementation identity.
+   */
+  const std::vector<std::optional<OpImplementation>>& resolved_ops;
 
   /** @brief Immutable task graph whose PlannedTask entries workers execute. */
   const ComputeTaskGraph& task_graph;
@@ -294,9 +298,10 @@ class NodeTaskRunner {
   /**
    * @brief Builds tile execution configuration for tile-capable operations.
    * @param target_node Node whose metadata and trace identity are captured.
-   * @param op Resolved operation used to decide whether tiling is active.
+   * @param implementation Exact implementation whose callback and scheduling
+   * metadata were selected together.
    * @return Default configuration for monolithic operations, otherwise
-   * metadata-derived tile sizing plus a per-tile observation callback.
+   * exact-metadata-derived tile sizing plus a per-tile observation callback.
    * @throws std::bad_alloc if copied callback or metadata storage allocates.
    * @throws GraphError or execution trace exceptions when the installed
    * callback later observes cancellation or logs tile execution.
@@ -304,8 +309,8 @@ class NodeTaskRunner {
    * provider enters each tile; it borrows this runner through synchronous
    * dispatcher settlement.
    */
-  TiledExecutionConfig tiled_config_for(const Node& target_node,
-                                        const OpRegistry::OpVariant& op) const;
+  TiledExecutionConfig tiled_config_for(
+      const Node& target_node, const OpImplementation& implementation) const;
 
   /** @brief Creates a benchmark event initialized to execution start. */
   BenchmarkEvent start_event(const Node& target_node) const;
@@ -348,9 +353,12 @@ class NodeTaskRunner {
   /** @brief Per-plan output slots produced by worker tasks before commit. */
   std::vector<std::optional<NodeOutput>>& temp_results_;
 
-  /** @brief Resolved high-precision operations aligned with execution_order_.
+  /**
+   * @brief Exact HP implementation snapshots aligned with execution_order_.
+   * @note The runner never re-queries metadata by operation key after route
+   * selection.
    */
-  const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops_;
+  const std::vector<std::optional<OpImplementation>>& resolved_ops_;
 
   /** @brief Immutable task graph containing task ids and ROIs. */
   const ComputeTaskGraph& task_graph_;

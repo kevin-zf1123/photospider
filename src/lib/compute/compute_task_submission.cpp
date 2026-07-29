@@ -206,8 +206,14 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       estimate.add_bytes(node_output_dynamic_retained_memory_bytes(*result));
     }
   }
-  estimate.add_objects<std::optional<OpRegistry::OpVariant>>(
+  estimate.add_objects<std::optional<OpImplementation>>(
       static_cast<std::uint64_t>(resolved_ops_.capacity()));
+  for (const std::optional<OpImplementation>& implementation : resolved_ops_) {
+    if (implementation.has_value()) {
+      estimate.add_objects<char>(static_cast<std::uint64_t>(
+          implementation->metadata.exclusive_key.capacity()));
+    }
+  }
   estimate.add_objects<OperationExecutionConstraints>(
       static_cast<std::uint64_t>(operation_constraints_.capacity()));
   for (const OperationExecutionConstraints& constraints :
@@ -487,19 +493,20 @@ void TaskSubmissionPlan::resolve_operations() {
         implementation->is_tiled() != route.tiled) {
       continue;
     }
-    execution_devices_[i] = route.device;
-    resolved_ops_[i] = std::move(implementation->func);
+    execution_devices_[i] = implementation->metadata.device_preference;
+    resolved_ops_[i] = *implementation;
     operation_constraints_[i] = OperationExecutionConstraints{
-        route.implementation_identity,
-        route.metadata.reentrant,
-        route.metadata.maximum_parallelism,
-        route.metadata.exclusive_key,
+        implementation->implementation_identity,
+        implementation->metadata.reentrant,
+        implementation->metadata.maximum_parallelism,
+        implementation->metadata.exclusive_key,
     };
     task_resource_demand_.retained_memory_bytes =
         std::max(task_resource_demand_.retained_memory_bytes,
-                 route.metadata.retained_memory_bytes);
-    task_resource_demand_.scratch_bytes = std::max(
-        task_resource_demand_.scratch_bytes, route.metadata.scratch_bytes);
+                 implementation->metadata.retained_memory_bytes);
+    task_resource_demand_.scratch_bytes =
+        std::max(task_resource_demand_.scratch_bytes,
+                 implementation->metadata.scratch_bytes);
   }
 }
 

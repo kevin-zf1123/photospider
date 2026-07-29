@@ -92,6 +92,22 @@ std::atomic_int g_partial_cache_consumer_calls{0};
  */
 std::atomic_int g_partial_cache_consumer_observed_value{0};
 
+/** @brief Counts selected tiled sibling callbacks in exact-metadata tests. */
+std::atomic_int g_exact_sibling_tiled_calls{0};
+
+/**
+ * @brief Counts tiled callbacks whose input ROI did not cover the full source.
+ * @note Exact RandomAccess metadata keeps this value zero; a generic
+ * same-key metadata lookup would instead expose spatially aligned tile ROIs.
+ */
+std::atomic_int g_exact_sibling_input_roi_mismatches{0};
+
+/**
+ * @brief Counts monolithic sibling entries that route selection must avoid.
+ * @note The operation shares a key with the selected device-tiled callback.
+ */
+std::atomic_int g_exact_sibling_monolithic_calls{0};
+
 /**
  * @brief Request-visible kernel size emitted by the dynamic blur parameter op.
  * @note Tests update the value only between completed compute requests.
@@ -1050,6 +1066,71 @@ void execute_request_local_parameter_probe_tile(
 }
 
 /**
+ * @brief Executes the device-tiled sibling and validates exact RandomAccess
+ * ROI.
+ *
+ * @param node Target node retained for diagnostic identity.
+ * @param output_tile Writable tile selected from the exact implementation.
+ * @param input_tiles Destination-indexed input views supplied by the executor.
+ * @return Nothing.
+ * @throws std::invalid_argument or std::runtime_error from CPU adaptation.
+ * @throws cv::Exception when output filling fails.
+ * @note The callback records, rather than asserts, ROI mismatch so execution
+ * can settle before the owning test examines every provider invocation.
+ */
+void execute_exact_sibling_metadata_tile(
+    const Node& node, const OutputTile& output_tile,
+    const std::vector<InputTile>& input_tiles) {
+  (void)node;
+  g_exact_sibling_tiled_calls.fetch_add(1, std::memory_order_relaxed);
+  bool full_input =
+      input_tiles.size() == 1U && input_tiles.front().buffer != nullptr;
+  if (full_input) {
+    const ImageBuffer& input = *input_tiles.front().buffer;
+    full_input =
+        input_tiles.front().roi == (PixelRect{0, 0, input.width, input.height});
+  }
+  if (!full_input) {
+    g_exact_sibling_input_roi_mismatches.fetch_add(1,
+                                                   std::memory_order_relaxed);
+  }
+  toCvMat(output_tile).setTo(13.0f);
+}
+
+/**
+ * @brief Maps every output tile to the complete first image-input extent.
+ *
+ * @param node Downstream node retained for the propagator contract.
+ * @param roi Output ROI whose exact shape is intentionally ignored.
+ * @param graph Graph retained for the propagator contract.
+ * @param output_extent Complete downstream output extent.
+ * @param input_extents Destination-indexed upstream image extents.
+ * @param parameters Effective request parameters.
+ * @param available_inputs Optional current input outputs.
+ * @return Full first-input rectangle, or roi when no usable extent exists.
+ * @throws Nothing.
+ * @note The owning sibling implementation marks itself RandomAccess, so both
+ * dependency lowering and provider tile construction must invoke this mapping.
+ */
+PixelRect propagate_exact_sibling_full_input(
+    const Node& node, const PixelRect& roi, const GraphModel& graph,
+    const PixelSize& output_extent, const std::vector<PixelSize>& input_extents,
+    const plugin::ParameterMap& parameters,
+    const std::vector<const NodeOutput*>* available_inputs) {
+  (void)node;
+  (void)graph;
+  (void)output_extent;
+  (void)parameters;
+  (void)available_inputs;
+  if (input_extents.empty() || input_extents.front().width <= 0 ||
+      input_extents.front().height <= 0) {
+    return roi;
+  }
+  return PixelRect{0, 0, input_extents.front().width,
+                   input_extents.front().height};
+}
+
+/**
  * @brief Registers deterministic split-test operations once per process.
  *
  * The registration set supplies HP/RT source, tiled, random-access, cache,
@@ -1271,6 +1352,32 @@ void register_split_ops() {
     ps::OpMetadata random_meta = micro_meta;
     random_meta.access_pattern =
         ps::OpMetadata::InputAccessPattern::RandomAccess;
+    ps::OpMetadata exact_sibling_monolithic_meta;
+    exact_sibling_monolithic_meta.tile_preference =
+        ps::TileSizePreference::UNDEFINED;
+    exact_sibling_monolithic_meta.access_pattern =
+        ps::OpMetadata::InputAccessPattern::SpatialAligned;
+    registry.register_op_hp_monolithic(
+        "split_plan", "exact_sibling_metadata",
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>& inputs) {
+          g_exact_sibling_monolithic_calls.fetch_add(1,
+                                                     std::memory_order_relaxed);
+          const int width = inputs.empty() || !inputs.front()
+                                ? as_int_flexible(node.parameters, "width", 1)
+                                : inputs.front()->image_buffer.width;
+          const int height = inputs.empty() || !inputs.front()
+                                 ? as_int_flexible(node.parameters, "height", 1)
+                                 : inputs.front()->image_buffer.height;
+          return make_image_output(width, height, 1, 17.0f);
+        }),
+        exact_sibling_monolithic_meta);
+    ps::OpMetadata exact_sibling_tiled_meta = micro_meta;
+    exact_sibling_tiled_meta.access_pattern =
+        ps::OpMetadata::InputAccessPattern::RandomAccess;
+    registry.register_impl("split_plan", "exact_sibling_metadata", Device::CPU,
+                           TileOpFunc(execute_exact_sibling_metadata_tile),
+                           exact_sibling_tiled_meta);
     registry.register_op_hp_tiled(
         "split_plan", "random_tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -1322,6 +1429,9 @@ void register_split_ops() {
                                  : static_cast<int>(found->second.as_int64());
           return compute::expand_rect(roi, radius);
         }));
+    registry.register_dirty_propagator(
+        "split_plan", "exact_sibling_metadata",
+        DirtyRoiPropFunc(propagate_exact_sibling_full_input));
     registry.register_dirty_propagator(
         "split_plan", "domain_random_tile",
         DirtyRoiPropFunc([](const Node&, const PixelRect& roi,
@@ -2325,6 +2435,64 @@ TEST(TaskGraphPlanningSplit, TileDependenciesUseRandomAccessInputRoi) {
   }
 }
 
+/**
+ * @brief Proves dependency lowering uses the exact selected sibling metadata.
+ *
+ * @return Nothing; GoogleTest reports route or dependency mismatches.
+ * @throws Graph, registry, extent-resolution, or allocation exceptions when
+ * the production planner cannot build the focused graph.
+ * @note A monolithic SpatialAligned sibling is registered before the selected
+ * device-tiled RandomAccess implementation. Generic key metadata would give
+ * the middle downstream tile only one producer dependency; the exact route
+ * requires all three.
+ */
+TEST(TaskGraphPlanningSplit,
+     ExactSelectedSiblingMetadataShapesTileDependencies) {
+  register_split_ops();
+  GraphModel graph("cache/split-exact-sibling-metadata-dependencies");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 48;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "exact_sibling_metadata");
+  downstream.parameters["width"] = 48;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  const auto work =
+      std::find_if(plan.planned_work.begin(), plan.planned_work.end(),
+                   [](const compute::PlannedNodeWork& candidate) {
+                     return candidate.node_id == 2;
+                   });
+  ASSERT_NE(work, plan.planned_work.end());
+  ASSERT_TRUE(work->operation_route.has_value());
+  EXPECT_TRUE(work->operation_route->tiled);
+  EXPECT_EQ(work->operation_route->metadata.tile_preference,
+            TileSizePreference::MICRO);
+  EXPECT_EQ(work->operation_route->metadata.access_pattern,
+            OpMetadata::InputAccessPattern::RandomAccess);
+
+  const compute::PlannedTask* middle_downstream_task = nullptr;
+  for (const compute::PlannedTask& task : plan.task_graph.tasks) {
+    if (task.node_id == 2 && task.output_roi == (PixelRect{16, 0, 16, 16})) {
+      middle_downstream_task = &task;
+      break;
+    }
+  }
+  ASSERT_NE(middle_downstream_task, nullptr);
+  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3U);
+  for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
+    EXPECT_EQ(plan.task_graph.tasks.at(dependency_task_id).node_id, 1);
+  }
+}
+
 TEST(TaskGraphPlanningSplit,
      ParameterizedRandomAccessAlwaysWaitsForEveryImageTile) {
   register_split_ops();
@@ -3104,16 +3272,17 @@ TEST(ComputeServiceDirectDirtyAdmission,
 }
 
 /**
- * @brief Proves HP dirty preparation rejects a replaced active callback before
- * provider execution or direct admission.
+ * @brief Proves HP stale identity settles an installed logical lifecycle.
  *
  * @return Nothing; GoogleTest reports error typing, entry, residue, or retry
  * failures.
  * @throws Graph, registry, service, allocation, or provider exceptions
  * unchanged.
- * @note The test-product observer replaces the active scalar slot after its
- * route is planned and before exact revalidation. A clean retry executes only
- * the replacement identity, proving stale callable state was not retained.
+ * @note The observer first proves the standalone Run is logically admitted
+ * with no callback, grant, root reservation, or resource ledger ownership,
+ * then replaces the active scalar slot before exact revalidation. Rejection
+ * occurs before provider and operation/resource/physical admission, settles
+ * the logical lifecycle, and a clean retry executes only the replacement.
  */
 TEST(ComputeServiceDirtyIdentity,
      HpReplacementAfterPlanFailsBeforeProviderAndRecovers) {
@@ -3138,10 +3307,24 @@ TEST(ComputeServiceDirtyIdentity,
   const ComputeService::Request dirty =
       make_direct_dirty_request(ComputeIntent::GlobalHighPrecision, 1);
   int observer_calls = 0;
+  bool saw_logical_standalone_admission = false;
+  bool saw_no_physical_admission = false;
   bool saw_no_operation = false;
   {
     ScopedDirtyPostPlanObservation observation([&] {
       ++observer_calls;
+      const compute::ExecutionLifecyclePage lifecycle =
+          authority.lifecycle_snapshot(0U, 4096U);
+      saw_logical_standalone_admission =
+          lifecycle.counters.pending_candidate_count == 0U &&
+          lifecycle.counters.admitted_standalone_run_count == 1U &&
+          lifecycle.counters.admitted_run_group_count == 0U;
+      saw_no_physical_admission =
+          lifecycle.counters.ready_entry_count == 0U &&
+          lifecycle.counters.entered_callback_count == 0U &&
+          lifecycle.counters.live_root_reservation_count == 0U &&
+          lifecycle.counters.live_child_grant_count == 0U &&
+          authority.resource_snapshot().reserved == ResourceVector{};
       registry.register_op_hp_monolithic(
           kType, kSubtype,
           MonolithicOpFunc(
@@ -3163,6 +3346,8 @@ TEST(ComputeServiceDirtyIdentity,
 
   EXPECT_TRUE(saw_no_operation);
   EXPECT_EQ(observer_calls, 1);
+  EXPECT_TRUE(saw_logical_standalone_admission);
+  EXPECT_TRUE(saw_no_physical_admission);
   EXPECT_EQ(old_entries->load(std::memory_order_relaxed), 0);
   EXPECT_EQ(new_entries->load(std::memory_order_relaxed), 0);
   expect_direct_authority_settled(authority);
@@ -3175,16 +3360,18 @@ TEST(ComputeServiceDirtyIdentity,
 }
 
 /**
- * @brief Proves RT dirty preparation rejects a plugin-unloaded active tiled
- * identity before either sibling provider executes.
+ * @brief Proves RT stale identity settles an installed logical RunGroup.
  *
  * @return Nothing; GoogleTest reports restoration, error typing, provider,
  * residue, or retry failures.
  * @throws Graph, registry, service, allocation, or provider exceptions
  * unchanged.
- * @note HP preparation notifies first without mutating. The second notification
- * restores the plugin registration capture after RT planning, so exact active
- * revalidation sees the core identity instead of the planned plugin identity.
+ * @note HP preparation notifies first without mutating. At the second
+ * notification the test proves the two child Runs are logically admitted as
+ * one group with no callback, grant, root reservation, or resource ledger
+ * ownership, then restores the plugin capture. Exact revalidation rejects
+ * before either provider or operation/resource/physical admission and the
+ * group lifecycle settles before retry.
  */
 TEST(ComputeServiceDirtyIdentity,
      RtPluginUnloadAfterPlanFailsBeforeProvidersAndRecovers) {
@@ -3239,11 +3426,26 @@ TEST(ComputeServiceDirtyIdentity,
   retirement.implementations.emplace();
   int observer_calls = 0;
   bool unload_changed_registry = false;
+  bool saw_logical_group_admission = false;
+  bool saw_no_physical_admission = false;
   bool saw_no_operation = false;
   {
     ScopedDirtyPostPlanObservation observation([&] {
       ++observer_calls;
       if (observer_calls == 2) {
+        const compute::ExecutionLifecyclePage lifecycle =
+            authority.lifecycle_snapshot(0U, 4096U);
+        saw_logical_group_admission =
+            lifecycle.counters.pending_candidate_count == 0U &&
+            lifecycle.counters.admitted_standalone_run_count == 0U &&
+            lifecycle.counters.admitted_run_group_count == 1U &&
+            lifecycle.counters.admitted_child_run_count == 2U;
+        saw_no_physical_admission =
+            lifecycle.counters.ready_entry_count == 0U &&
+            lifecycle.counters.entered_callback_count == 0U &&
+            lifecycle.counters.live_root_reservation_count == 0U &&
+            lifecycle.counters.live_child_grant_count == 0U &&
+            authority.resource_snapshot().reserved == ResourceVector{};
         unload_changed_registry = registry.retire_owned_entry_noexcept(
             operation_key, plugin_capture.owned_entries.at(operation_key),
             plugin_capture.previous_entries.at(operation_key), retirement);
@@ -3260,6 +3462,8 @@ TEST(ComputeServiceDirtyIdentity,
   EXPECT_TRUE(saw_no_operation);
   EXPECT_EQ(observer_calls, 2);
   EXPECT_TRUE(unload_changed_registry);
+  EXPECT_TRUE(saw_logical_group_admission);
+  EXPECT_TRUE(saw_no_physical_admission);
   EXPECT_EQ(hp_entries->load(std::memory_order_relaxed), 0);
   EXPECT_EQ(core_rt_entries->load(std::memory_order_relaxed), 0);
   EXPECT_EQ(plugin_rt_entries->load(std::memory_order_relaxed), 0);
@@ -4475,6 +4679,80 @@ TEST(ComputeTaskRunnerSplit,
   EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(3)));
   ASSERT_TRUE(graph.node(2).hp_region.has_value());
   EXPECT_FALSE(*graph.node(2).hp_region == partial_region);
+
+  runtime.stop();
+}
+
+/**
+ * @brief Proves a tiled callback receives its own exact sibling metadata.
+ *
+ * @return Nothing; GoogleTest reports callback choice, tile count, input ROI,
+ * output, or cache publication mismatches.
+ * @throws Graph, runtime, cache, registry, allocation, or image-adaptation
+ * exceptions when the product parallel path cannot execute.
+ * @note The cached source removes producer work from this request. Two MICRO
+ * target tiles must each receive the complete source ROI through the selected
+ * RandomAccess device implementation; a generic same-key lookup would expose
+ * the monolithic SpatialAligned sibling metadata.
+ */
+TEST(ComputeTaskRunnerSplit,
+     SelectedTiledSiblingExecutesWithExactMetadataSnapshot) {
+  register_split_ops();
+  g_exact_sibling_tiled_calls.store(0, std::memory_order_relaxed);
+  g_exact_sibling_input_roi_mismatches.store(0, std::memory_order_relaxed);
+  g_exact_sibling_monolithic_calls.store(0, std::memory_order_relaxed);
+
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-exact-sibling-metadata");
+  GraphRuntime::Info info;
+  info.name = "exact-sibling-metadata";
+  info.root = root.path();
+  info.cache_root = root.path() / "cache";
+  GraphRuntime runtime(info);
+  runtime.replace_execution_route(ComputeIntent::GlobalHighPrecision, "cpu");
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  source.cached_output_high_precision = make_image_output(32, 16, 1, 3.0f);
+  source.hp_region = value_image_adapter::full_node_output_region(
+      *source.cached_output_high_precision);
+  source.hp_version = 1;
+  Node target = make_node(2, "split_plan", "exact_sibling_metadata");
+  target.parameters["width"] = 32;
+  target.parameters["height"] = 16;
+  target.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  compute::ExecutionService execution_service(2U);
+  ComputeService service(traversal, cache, events, execution_service);
+  testing::ScopedExecutionGraphLifecycle graph_lifecycle(execution_service,
+                                                         graph);
+
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  NodeOutput& output = service.compute_parallel(graph, runtime, request);
+
+  EXPECT_EQ(g_exact_sibling_tiled_calls.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(
+      g_exact_sibling_input_roi_mismatches.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(g_exact_sibling_monolithic_calls.load(std::memory_order_relaxed),
+            0);
+  ASSERT_EQ(output.image_buffer.width, 32);
+  ASSERT_EQ(output.image_buffer.height, 16);
+  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 0), 13.0f);
+  EXPECT_FLOAT_EQ(toCvMat(output.image_buffer).at<float>(0, 31), 13.0f);
+  EXPECT_TRUE(compute::ComputeCachePolicy::has_reusable_output(graph.node(2)));
 
   runtime.stop();
 }

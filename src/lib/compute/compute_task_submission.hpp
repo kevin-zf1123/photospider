@@ -29,9 +29,9 @@ namespace ps::compute {
  *
  * TaskSubmissionPlan converts a cache-pruned ComputePlan into dense indexes,
  * dependency counters, dependent adjacency lists, composite Run-local task
- * identity, an owned NodeTaskRunner, resolved operation variants, and
- * temporary result slots. It is the authority for which nodes run during one
- * ComputeTaskDispatcher::execute() call.
+ * identity, an owned NodeTaskRunner, resolved operation implementation
+ * snapshots, and temporary result slots. It is the authority for which nodes
+ * run during one ComputeTaskDispatcher::execute() call.
  *
  * @throws GraphError or standard exceptions through individual construction,
  * execution, and submission operations.
@@ -131,14 +131,15 @@ class TaskSubmissionPlan {
   }
 
   /**
-   * @brief Returns resolved operations for planned high-precision nodes.
+   * @brief Returns exact resolved implementations for planned HP nodes.
    *
-   * @return Optional variants aligned with execution_order_.
+   * @return Optional callback, metadata, and identity snapshots aligned with
+   * execution_order_.
    * @throws Nothing.
-   * @note Missing operations remain empty for worker-time node diagnostics.
+   * @note Missing or identity-drifted operations remain empty for admission
+   * validation. Successful values retain one coherent callback/metadata pair.
    */
-  const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops()
-      const {
+  const std::vector<std::optional<OpImplementation>>& resolved_ops() const {
     return resolved_ops_;
   }
 
@@ -393,10 +394,11 @@ class TaskSubmissionPlan {
    * @throws std::bad_alloc from registry candidates, callback/key copies, or
    * result storage.
    * @note Identity/device/shape mismatches remain empty so admission-aware
-   * production preparation rejects them before installation. Successful
-   * snapshots populate aligned execution devices and operation constraints;
-   * their retained/scratch declarations form one component-wise maximum task
-   * demand for the physical Run.
+   * production preparation rejects them before operation/resource/physical
+   * admission. Successful snapshots preserve the exact selected callback,
+   * metadata, and identity, populate aligned execution devices and operation
+   * constraints, and contribute retained/scratch declarations to one
+   * component-wise maximum task demand for the physical Run.
    */
   void resolve_operations();
 
@@ -594,8 +596,12 @@ class TaskSubmissionPlan {
   /** @brief Temporary worker outputs aligned with execution_order_. */
   std::vector<std::optional<NodeOutput>> temp_results_;
 
-  /** @brief Resolved operations aligned with execution_order_. */
-  std::vector<std::optional<OpRegistry::OpVariant>> resolved_ops_;
+  /**
+   * @brief Exact operation snapshots aligned with execution_order_.
+   * @note Every present value keeps the selected callback, scheduling metadata,
+   * implementation identity, and any plugin lease in one owned snapshot.
+   */
+  std::vector<std::optional<OpImplementation>> resolved_ops_;
 
   /** @brief Exact-identity start constraints aligned with execution_order_. */
   std::vector<OperationExecutionConstraints> operation_constraints_;

@@ -13,7 +13,6 @@
 #include "compute/compute_run.hpp"
 #include "compute/dirty_execution_common.hpp"
 #include "compute/dirty_update_executor.hpp"
-#include "compute/domain_op_metadata.hpp"
 #include "compute/execution_service.hpp"
 #include "compute/node_executor.hpp"
 #include "core/image_buffer_processing.hpp"
