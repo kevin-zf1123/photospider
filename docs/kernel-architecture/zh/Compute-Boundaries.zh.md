@@ -237,10 +237,12 @@ moved-from 表示。一个长期回归会用 move 后仍保留 source target 的
 - 只要仍有由 `ComputeTaskGraph` 派生的 execution-visible callback 可能执行，该图就不可变。
 - Planned node work 只保留选中的 implementation identity、device、metadata 与 callback shape。
   Submission 必须重新解析同一个非零 identity 后才能保留 callback，因此 cached plan 不拥有 DSO lease。
-- Dirty HP/RT 会在 planning 与 selection 后，对每个唯一 active task node 执行重新验证；该验证发生在
-  constraint 构造、resource estimation、source-first preparation 或 admission 之前。缺失或变化的
-  active route 会在 provider entry 前以 `NoOperation` 失败。Inactive task 以及已由 connected
-  preflight 满足的 node 会被明确排除在该检查之外。
+- Dirty HP/RT 会在 planning 与 selection 后，对每个唯一 active task node 执行重新验证。此时
+  Graph 或 realtime-bundle 的逻辑生命周期可能已经安装，但重新验证仍发生在 constraint 构造、
+  resource estimation、source-first 物理准备、provider entry 以及 operation/resource/physical
+  admission 之前。缺失或变化的 active route 会以 `NoOperation` 失败；随后必须 finalize 已安装的
+  逻辑生命周期，不得留下 gate、grant、root reservation 或 ledger 残留。Inactive task 以及已由
+  connected preflight 满足的 node 会被明确排除在该检查之外。
 - HP 与 RT 是独立 compute domain；一个 plan 不创建跨 domain task 依赖。
 - 逻辑 propagation、dirty planning、source history、per-node state、edge mapping、
   staged-write validity 与 Region-aware dense callback 携带规范化 `RegionSet`。

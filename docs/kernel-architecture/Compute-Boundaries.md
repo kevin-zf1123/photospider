@@ -301,10 +301,14 @@ pure-C policy ABI v1 and receives no execution resource.
   metadata, and callback shape. Submission must re-resolve the same nonzero
   identity before retaining a callback, so cached plans own no DSO lease.
 - Dirty HP/RT revalidates every unique active task node after planning and
-  selection, before constraint construction, resource estimation, source-first
-  preparation, or admission. A missing or changed active route fails with
-  `NoOperation` before provider entry. Inactive tasks and nodes already
-  satisfied by connected preflight are deliberately excluded from this check.
+  selection. The Graph or realtime-bundle logical lifecycle may already be
+  installed at that point, but revalidation precedes constraint construction,
+  resource estimation, source-first physical preparation, provider entry, and
+  operation/resource/physical admission. A missing or changed active route
+  fails with `NoOperation`, and the installed logical lifecycle must then
+  finalize without gate, grant, root-reservation, or ledger residue. Inactive
+  tasks and nodes already satisfied by connected preflight are deliberately
+  excluded from this check.
 - HP and RT are separate compute domains. One plan does not create cross-domain
   task dependencies.
 - Logical propagation, dirty planning, source history, per-node state, edge

@@ -596,13 +596,21 @@ Issue #82 将 scalar callback/metadata identity 与 direct dirty admission 保�
 并要求每个选中 implementation 保留自身 identity 与完整 scheduling metadata。因此，后注册的
 sibling 不能静默改写与先前 callback 配对使用的 metadata。
 
+Task planning 与 runner case 会先注册 SpatialAligned monolithic sibling，再注册 device-tiled
+RandomAccess sibling。它们要求 dependency ROI lowering、tile size、选中 callback 与 provider
+input view 都消费同一个带 revision 的 route，不得退回通用 key-level metadata 查询。手工
+`test_propagation` 工具同样会为请求的 HP 或 RT diagnostic route 过滤并保留精确 tiled
+implementation。
+
 `test_compute_service_split` 证明 nonparallel dirty HP、dirty RT 与 connected-parameter
 preflight 会进入 physical worker 所使用的同一个 process-owned operation gate 与 resource
 ledger。Cross-Graph case 覆盖 nonreentrancy、精确 implementation cap、相同/不同 exclusive key、
 provider 进入前的 retained-memory 与 scratch rejection、cancellation/exception cleanup，以及
 settlement 后成功重试。确定性 post-plan case 会在 active-operation revalidation 前替换 HP
-implementation 或卸载 RT plugin；它们要求在任何 provider、lifecycle、gate 或 ledger publication
-前以 typed failure 停止，随后还必须能够恢复。Externally satisfied sibling 会被有意忽略，因此
+implementation 或卸载 RT plugin。此时 standalone Run 或 realtime RunGroup 的逻辑生命周期会被
+有意观测为可见；case 要求在 provider entry 与 operation/resource/physical admission 前以 typed
+failure 停止，随后要求逻辑生命周期完成 settlement，不留下 callback、grant、root reservation、
+gate 或 ledger 残留，并证明重试能够恢复。Externally satisfied sibling 会被有意忽略，因此
 inactive registry 变化不能使原本有效的 active dirty target 失效。
 
 Post-plan observer 只存在于不安装的 internal test product 中。
@@ -787,9 +795,11 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 配置一个临时嵌套 build，同时保留 OpenCV、YAML、graph CLI 与 operation-plugin 的默认启用值。
 因此 provider-aware broad suite gate 为关闭。Driver 会校验精确 CMake cache 画像，构建上述
 provider-independent focused binary 与 stdlib-only fixture，并额外构建 CPU
-DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary 与
-kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须
-精确包含 33 项：`DependencyDisabledInstallSmoke`、
+DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary、
+kernel-lifecycle concurrency binary，以及 provider-independent `test_kernel_contracts`
+internal-seam consumer，再查询机器可读的 CTest inventory。`test_kernel_contracts` 的构建用于
+覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。该
+inventory 必须精确包含 33 项：`DependencyDisabledInstallSmoke`、
 `OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 25 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
@@ -925,7 +935,8 @@ conversion 与 ROI copy。默认 CTest inventory 也包含 `DependencyDisabledIn
 
 若在其他默认 test profile 选项不变时只禁用
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER`，CMake 不会创建或发现 broad suite。它会为注入式
-codec smoke 保留可构建的 provider-independent `test_kernel_contracts` target，并且只注册
+codec smoke 与两个 dependency-disabled nested build 保留可构建的 provider-independent
+`test_kernel_contracts` target，并且只注册
 focused optional-provider GoogleTest、三个专用 disk-cache diagnostic concurrency case 与
 `DependencyDisabledInstallSmoke`。
 

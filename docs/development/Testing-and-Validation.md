@@ -755,6 +755,13 @@ selected implementation to retain its own identity and complete scheduling
 metadata. A later sibling registration therefore cannot silently rewrite the
 metadata used with an earlier callback.
 
+The task-planning and runner cases register a SpatialAligned monolithic sibling
+before a device-tiled RandomAccess sibling. They require dependency ROI
+lowering, tile size, selected callback, and provider input views to consume the
+same revisioned route rather than a generic key-level metadata lookup. The
+manual `test_propagation` tool likewise filters and retains the exact tiled
+implementation for the requested HP or RT diagnostic route.
+
 `test_compute_service_split` proves that nonparallel dirty HP, dirty RT, and
 connected-parameter preflight enter the same process-owned operation gate and
 resource ledger used by physical workers. Cross-Graph cases cover
@@ -762,8 +769,11 @@ nonreentrancy, exact implementation caps, same/different exclusive keys,
 retained-memory and scratch rejection before provider entry, cancellation and
 exception cleanup, and successful retry after settlement. Deterministic
 post-plan cases replace an HP implementation or unload an RT plugin before
-active-operation revalidation; they require typed failure before provider,
-lifecycle, gate, or ledger publication and then require recovery. An
+active-operation revalidation. At that observation point the standalone Run or
+realtime RunGroup logical lifecycle is intentionally visible. The cases require
+typed failure before provider entry and before operation/resource/physical
+admission, then require that the logical lifecycle settles with no callback,
+grant, root-reservation, gate, or ledger residue and that a retry recovers. An
 externally satisfied sibling is intentionally ignored so inactive registry
 change cannot invalidate an otherwise valid active dirty target.
 
@@ -981,8 +991,11 @@ CLI, and operation-plugin defaults remain enabled. The provider-aware broad
 suite gate is therefore off. The driver validates the exact CMake cache
 profile, builds the provider-independent focused provider binary, its
 stdlib-only fixture, the CPU DenseTensor/ImageView integration binary, and the
-dedicated disk-cache and kernel-lifecycle concurrency binaries, then queries
-the machine-readable CTest inventory. That inventory must contain exactly 33
+dedicated disk-cache and kernel-lifecycle concurrency binaries, plus the
+provider-independent `test_kernel_contracts` internal-seam consumer, then
+queries the machine-readable CTest inventory. `test_kernel_contracts` is built
+to exercise the focused-only direct-consumer closure but is deliberately not
+discovered in this nested inventory. That inventory must contain exactly 33
 entries: `DependencyDisabledInstallSmoke`,
 `OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 25
 `CpuDenseTensorImageOperation.*` cases,
@@ -1166,9 +1179,9 @@ also includes `DependencyDisabledInstallSmoke`.
 When only `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER` is disabled from that
 otherwise default test profile, CMake does not create or discover the broad
 suite. It keeps the provider-independent `test_kernel_contracts` target
-buildable for the injected-codec smoke and registers exactly the focused
-optional-provider GoogleTest, the three dedicated disk-cache diagnostic
-concurrency cases, and `DependencyDisabledInstallSmoke`.
+buildable for both dependency-disabled nested builds and registers exactly the
+focused optional-provider GoogleTest, the three dedicated disk-cache
+diagnostic concurrency cases, and `DependencyDisabledInstallSmoke`.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific
