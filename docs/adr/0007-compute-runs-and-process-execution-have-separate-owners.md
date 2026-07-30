@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted and implemented through Issue #84. Issues #70 through #76 and #84 are
-current software behavior for the execution/resource, policy, private-route,
-and first native-device slice: the
+Accepted. The current source tree implements the execution/resource ownership
+from Issues #70 through #76 and the heterogeneous-execution extensions defined
+for Issues #84 through #86:
 embedded composition root injects one fixed `ExecutionService`; built-in CPU
 HP, RT, connected-parameter preflight, and dirty source/downstream work crosses
 a move-only `ReadyTaskSubmission` boundary. Independent Runs from multiple
@@ -12,8 +12,9 @@ Graphs may overlap, with Run-local completion, failure, trace, and Host state.
 Realtime requests create one request-owned `RunGroup` with distinct HP and RT
 child Runs. `GraphRuntime` stores only copied HP/RT route ids and nonzero
 generations; no Graph owns a physical worker, queue, policy context, or plugin
-DSO lifetime. The service exclusively owns one Host-authoritative
-`ResourceLedger`, atomically admits complete Run vectors, and routes
+DSO lifetime. The service exclusively owns one `ResourceLedger` authoritative
+for Host capacity and configured per-device memory/scratch accounts, atomically
+admits complete Run vectors and device allocation plans, and routes
 initial/dependent work through an entry/byte-bounded ready store. One
 Interactive and one Throughput policy binding rank immutable Host-authored
 frontiers with work/byte billing, Graph/Run fairness, deadline preference,
@@ -46,6 +47,12 @@ Issue #84 adds a fixed `DeviceExecutorRegistry` to that same process domain,
 removes native Metal ownership from `GraphRuntime`, and routes one real Metal
 operation through an executor-owned command queue, invocation allocator, and
 persistent pipeline cache after the existing reserved-start transaction.
+Issue #85 adds explicit CPU/Metal binding and access facts, bidirectional
+transfer, process-owned residency, and stale-completion arbitration. Issue #86
+extends the same service-owned ledger with isolated accounts for each
+configured executable non-CPU device, reconciles planned with native actual
+memory/scratch bytes, and binds exact leases to persistent native owners and
+asynchronous completion.
 
 This decision refines and supersedes ADR 0003 as the detailed ownership and
 lifecycle contract. ADR 0003 remains the historical high-level decision to move
@@ -693,8 +700,8 @@ long-lived behavioral tests land.
   cross-talk.
 - Graph count no longer determines the built-in CPU worker count, while Graph
   close remains graph-scoped.
-- One trusted ledger becomes the final authority for every physical-resource
-  dimension; policy and plugin code cannot mint capacity.
+- One trusted ledger becomes the final authority for every currently modeled
+  physical-resource dimension; policy and plugin code cannot mint capacity.
 - Cancellation may publish terminal state before non-preemptible work is
   reclaimed, so tests and telemetry must distinguish terminal from quiescent.
 - Exact revision equality is conservative and may discard reusable work. Any
@@ -797,7 +804,11 @@ static composition object.
   current-generation commit predicate and realtime `RunGroup`, and issue #75's
   pure-C policy ABI, Host-authored frontier/fallback, reserved start, and
   private execution routes, and issue #76's lifecycle registry, exact Graph
-  close/process shutdown, and source-private telemetry, remains
+  close/process shutdown, and source-private telemetry; issue #84's fixed
+  device-executor registry and first Metal route; issue #85's explicit
+  binding/access, transfer, residency, and stale-completion contracts; and
+  issue #86's per-device memory/scratch admission, native plan/actual
+  reconciliation, and exact lease ownership, remains
   authoritative in
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md),
   [Compute Flow](../kernel-architecture/Compute-Flow.md), and

@@ -260,7 +260,7 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
-### Implemented V-3/V-4/V-6/V-8 relationship and remaining target
+### Implemented V-3/V-4/V-6/V-8/V-9 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -316,9 +316,24 @@ pressure. This entry count is not device-byte or scratch admission. The current
 source-private Metal path implements both buffer-to-texture upload and
 texture-to-buffer download.
 
-V-8 still does not implement quantization, general Map/Import providers,
-provider ABI v3, general named graph Value outputs, or authoritative
-device-memory/scratch accounting.
+Issue #86 / V-9 adds source-private device resource accounting without
+changing `ImageBuffer` or the public operation and Host contracts. The sole
+service ledger creates isolated memory/scratch accounts only for configured
+non-CPU `DeviceId` values backed by executors in the fixed registry. Perlin and
+CPU-to-Metal upload reserve complete native size/alignment plans before
+allocation, reconcile `allocatedSize`, and commit exact actual bytes before
+command submission. Persistent memory leases follow the native Value/residency
+owner, while scratch leases follow exact completion; Run settlement does not
+release a still-owned allocation, and the residency entry count remains a
+retention bound rather than byte authority.
+
+V-9 still does not implement quantization, general Map/Import providers,
+provider ABI v3, a public device registry, device queue/in-flight accounting,
+or general named graph Value outputs. Compute-I/O durability and bounded
+cache/codec execution remain Issues #87 and #88; Issue #89 retains the
+multi-channel, FP64, latent, and stride matrix. `ImageBuffer` remains the
+compatibility contract for operation ABI v2, tiled writes, codecs, and Host
+surfaces.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.

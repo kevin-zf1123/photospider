@@ -212,7 +212,7 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
-### 已实现的 V-3/V-4/V-6/V-8 关系与剩余目标
+### 已实现的 V-3/V-4/V-6/V-8/V-9 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -259,8 +259,20 @@ manager 默认的 64-entry 上限会释放 revision 最低的强 native/provider
 数量不是 device-byte 或 scratch admission。当前 source-private Metal 路径同时实现
 buffer-to-texture upload 与 texture-to-buffer download。
 
-V-8 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、通用命名 graph
-Value output 或 authoritative device-memory/scratch 核算。
+Issue #86 / V-9 在不修改 `ImageBuffer` 或公共 operation 与 Host 契约的前提下，新增
+source-private device resource accounting。唯一 service ledger 只为 fixed registry 中具有
+executor 的已配置非 CPU `DeviceId` 创建隔离的 memory/scratch account。Perlin 与
+CPU-to-Metal upload 会在 allocation 前预留完整 native size/alignment plan，根据
+`allocatedSize` 校准，并在 command submission 前提交精确 actual byte。Persistent memory
+lease 随 native Value/residency owner 延续，scratch lease 随精确 completion 延续；Run
+settlement 不释放仍被 owner 持有的 allocation，而 residency entry count 仍只是 retention
+bound，不是 byte authority。
+
+V-9 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、public device
+registry、device queue/in-flight accounting 或通用命名 graph Value output。Compute-I/O
+durability 与有界 cache/codec execution 仍归 Issue #87 与 #88；Issue #89 继续负责
+multi-channel、FP64、latent 与 stride matrix。`ImageBuffer` 仍是 operation ABI v2、tiled
+write、codec 与 Host surface 的 compatibility contract。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。

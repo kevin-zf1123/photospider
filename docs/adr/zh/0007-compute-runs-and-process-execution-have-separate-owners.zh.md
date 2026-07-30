@@ -2,15 +2,16 @@
 
 ## 状态
 
-已接受并实现到 Issue #84。Issue #70 至 #76 与 #84 已成为执行/资源、policy、私有 route 及首条
-native-device 切片的当前软件行为：embedded composition root 会注入一个固定的
+已接受。当前 source tree 实现了 Issue #70 至 #76 的执行/资源所有权，以及为 Issue #84 至 #86
+定义的 heterogeneous-execution 扩展：embedded composition root 会注入一个固定的
 `ExecutionService`；内建 CPU 的 HP、RT、
 connected-parameter preflight 和 dirty source/downstream 工作会跨越 move-only
 `ReadyTaskSubmission` 边界。来自多个 Graph 的独立 Run 可以重叠，同时 completion、failure、trace
 与 Host state 都按 Run 隔离。Realtime 请求会创建一个 request-owned `RunGroup`，其中包含不同的
 HP 与 RT child Run。`GraphRuntime` 只存储复制的 HP/RT route id 与 nonzero generation；任何 Graph
-都不拥有物理 worker、queue、policy context 或 plugin DSO lifetime。Service 独占一个 Host 权威
-`ResourceLedger`，原子准入完整 Run vector，并让 initial/dependent work 通过按 entry/byte 有界的
+都不拥有物理 worker、queue、policy context 或 plugin DSO lifetime。Service 独占一个
+`ResourceLedger`，它对 Host 容量与已配置 per-device memory/scratch account 具有权威，原子准入
+完整 Run vector 与 device allocation plan，并让 initial/dependent work 通过按 entry/byte 有界的
 ready store。恰好一个 Interactive 与一个 Throughput policy binding 会在 immutable Host-authored
 frontier 上执行 work/byte 计费、Graph/Run 公平性、deadline 偏好、aging、headroom 与有界
 Throughput 进展，且不拥有 worker 或资源权威。Product compute 会捕获 request-owned Graph/proxy
@@ -34,6 +35,10 @@ settlement 与 source-private 有界 telemetry。
 Issue #84 在同一个 process domain 中增加固定的 `DeviceExecutorRegistry`，从 `GraphRuntime`
 移除 native Metal ownership，并在既有 reserved-start transaction 之后，让一条真实 Metal
 operation 经过 executor-owned command queue、invocation allocator 与持久 pipeline cache。
+Issue #85 增加显式 CPU/Metal binding 与 access fact、双向 transfer、process-owned residency
+以及 stale-completion arbitration。Issue #86 扩展同一个 service-owned ledger，为每个已配置且
+可执行的非 CPU device 增加隔离 account，校准 planned 与 native actual memory/scratch byte，
+并把精确 lease 绑定到持久 native owner 与 asynchronous completion。
 
 本决策会细化 ADR 0003，并在详细所有权与生命周期契约上取代它。ADR 0003 仍作为“把物理执行
 资源移出每个 Graph”的历史高层决策保留。ADR 0001 继续完全有效。
@@ -550,7 +555,7 @@ Non-goal 列记录各切片交付时的历史边界，不描述仓库当前状�
 - 请求局部状态可以安全超过 caller stack 生命周期，而不需要把任务图正确性转交给执行 service。
 - 不同 Run 可以复用 local task id，不会产生 completion 或 exception 串扰。
 - 内建 CPU worker 数量不再由 Graph 数量决定，同时 Graph close 仍保持 graph-scoped。
-- 一个可信 ledger 成为每种物理资源维度的最终权威；policy 与 plugin code 无法铸造容量。
+- 一个可信 ledger 成为每种当前已建模物理资源维度的最终权威；policy 与 plugin code 无法铸造容量。
 - 取消可能在不可抢占工作被回收之前发布终态，因此测试和 telemetry 必须区分 terminal 与
   quiescent。
 - 精确 revision equality 很保守，可能丢弃可复用工作；任何放宽都需要新的显式决策与证据。
@@ -636,7 +641,10 @@ composition object。
   arbitration、issue #74 的 latest-wins generation、有界 ticket-backed coalescing、
   current-generation commit predicate 与 realtime `RunGroup`，issue #75 的纯 C policy ABI、
   Host 编写的 frontier/fallback、reserved start 与私有 execution route，以及 issue #76 的
-  lifecycle registry、精确 Graph close/process shutdown 与 source-private telemetry）继续以
+  lifecycle registry、精确 Graph close/process shutdown 与 source-private telemetry；
+  Issue #84 的固定 device-executor registry 与首条 Metal route；Issue #85 的显式
+  binding/access、transfer、residency 与 stale-completion 契约；以及 Issue #86 的 per-device
+  memory/scratch admission、native plan/actual 校准与精确 lease ownership）继续以
   [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)、
   [计算流程](../../kernel-architecture/zh/Compute-Flow.zh.md) 和
   [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md) 为权威。
