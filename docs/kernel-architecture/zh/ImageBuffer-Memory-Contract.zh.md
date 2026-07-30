@@ -254,7 +254,9 @@ host-visible 或 device-local；metadata observation 不授予 pointer，host ac
 current generation 的 completion 会原子发布 Ready 与进程 residency；stale completion 会在
 dependant 能看到 Ready 前发布 typed failure。Lineage row 会在 coordinator submission 前被
 预跟踪，并且只由 accepted current publication 推进，因此在较新 publication 后才启动的旧
-Run 仍为 stale。当前 source-private Metal 路径同时实现
+Run 仍为 stale。Run settlement 本身不会使合格 replica 失效；publication pressure 下，
+manager 默认的 64-entry 上限会释放 revision 最低的强 native/provider owner。这个 entry
+数量不是 device-byte 或 scratch admission。当前 source-private Metal 路径同时实现
 buffer-to-texture upload 与 texture-to-buffer download。
 
 V-8 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、通用命名 graph

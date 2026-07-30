@@ -309,8 +309,12 @@ logical revision. Exact current-generation completion publishes Ready and
 process residency atomically; stale completion publishes typed failure before
 dependants can observe Ready. The lineage row is pretracked before coordinator
 submission and advanced only by accepted current publication, so an older Run
-that starts after a newer publication remains stale. The current source-private Metal path implements
-both buffer-to-texture upload and texture-to-buffer download.
+that starts after a newer publication remains stale. Run settlement does not
+itself invalidate an eligible replica, while the manager's 64-entry default
+releases the lowest-revision strong native/provider owner under publication
+pressure. This entry count is not device-byte or scratch admission. The current
+source-private Metal path implements both buffer-to-texture upload and
+texture-to-buffer download.
 
 V-8 still does not implement quantization, general Map/Import providers,
 provider ABI v3, general named graph Value outputs, or authoritative

@@ -271,7 +271,10 @@ source/destination terminal publication 和 resident insertion 构成一个由 m
 residency 或恢复旧 commit right；如果它仍拥有对应 producer，就以 typed failure 结算受影响的
 destination。Run settlement 会保留 executor 与 continuation，直至每个 pending fence callback
 都退役。V-8 不新增第二套 ready store、Graph authority、persistence path 或 device-memory
-capacity authority。权威 device-memory 与 scratch admission 仍属于 #86。
+capacity authority。已结算 replica 可在 Run 释放后继续复用，但 manager 默认的 64-entry
+上限会在 publication pressure 下释放 revision 最低的 entry，从而限制强
+native/provider retention；generation 推进本身不会批量清除它们。这个 entry 数量既不
+测量也不准入 bytes。权威 device-memory 与 scratch admission 仍属于 #86。
 
 Freshness publication 分为两个阶段。Kernel 先要求 `ExecutionService` 预跟踪 lineage，
 但不改变其 current generation；该可失败 allocation 会在 coordinator submission 前完成。

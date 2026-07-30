@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -24,7 +25,10 @@ namespace ps::execution {
  * @throws Nothing for ordinary value operations.
  */
 enum class ResidencyCompletionDisposition : std::uint32_t {
-  /** @brief Exact current completion published a reusable Ready replica. */
+  /**
+   * @brief Exact current completion published Ready and applied residency
+   * retention.
+   */
   Published = 0U,
   /** @brief A newer canonical request generation made this completion stale. */
   Stale = 1U,
@@ -39,12 +43,15 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
  * transfer identities before native submission, and publishes a destination
  * only after its Ready fence and complete immutable facts match. It does not
  * own native queues, allocations, scratch, cache policy, or visible Graph
- * commit authority.
+ * commit authority. Completed replicas are retained up to a fixed entry-count
+ * capacity; publication beyond that bound evicts the oldest logical revision
+ * and releases its strong native/provider owners.
  *
  * @throws std::system_error when synchronization fails and std::bad_alloc when
  * map ownership cannot allocate.
  * @note This issue-85 manager is intentionally not the authoritative device
- * memory or scratch ledger assigned to issue #86.
+ * memory or scratch ledger assigned to issue #86. Its count bound neither
+ * measures bytes nor performs resource admission.
  */
 class ResidencyManager final {
  public:
@@ -53,6 +60,15 @@ class ResidencyManager final {
    * @throws Nothing.
    */
   ResidencyManager() noexcept = default;
+
+  /**
+   * @brief Creates an empty manager with a testable replica-entry bound.
+   * @param resident_capacity Positive maximum retained replica count.
+   * @throws std::invalid_argument when `resident_capacity` is zero.
+   * @note The bound controls process-lifetime strong owner retention only. It
+   * is not a device-byte, scratch, quota, or cache budget.
+   */
+  explicit ResidencyManager(std::size_t resident_capacity);
 
   /**
    * @brief Records the newest observed generation for one canonical lineage.
@@ -127,7 +143,9 @@ class ResidencyManager final {
    * destination Ready, or follows a completed current publication. Stale
    * consumes its obsolete admission without touching either producer;
    * Rejected leaves a different rightful admission untouched. Callers must
-   * publish typed failure or cancellation for a Stale destination.
+   * publish typed failure or cancellation for a Stale destination. A new
+   * exact replica that exceeds the fixed resident-entry capacity causes the
+   * oldest logical revision entry to be released in the same interval.
    */
   ResidencyCompletionDisposition publish_ready_transfer(
       const DeviceCompletionIdentity& identity, const Value& source,
@@ -151,7 +169,9 @@ class ResidencyManager final {
    * @param memory_domain Required target allocation domain.
    * @return Copy of the resident Value, or nullopt when absent.
    * @throws std::system_error when synchronization fails.
-   * @note Lookup does not refresh, map, import, transfer, or alter eviction.
+   * @note Lookup does not refresh recency, map, import, transfer, or alter
+   * eviction. Generation advance alone does not invalidate retained entries;
+   * bounded publication pressure can evict an older revision.
    */
   std::optional<Value> find(ValueRevisionId revision, DeviceId device,
                             MemoryDomain memory_domain) const;
@@ -219,6 +239,14 @@ class ResidencyManager final {
                                 int target_node_id,
                                 ComputeIntent request_intent) noexcept;
 
+  /**
+   * @brief Default number of process-owned replica entries retained.
+   * @note This is an ownership-lifetime bound, not byte accounting.
+   */
+  static constexpr std::size_t kDefaultResidentCapacity = 64U;
+
+  /** @brief Positive maximum retained replica-entry count. */
+  std::size_t resident_capacity_ = kDefaultResidentCapacity;
   /** @brief Protects generations, admissions, and resident replicas. */
   mutable std::mutex mutex_;
   /**
@@ -227,7 +255,11 @@ class ResidencyManager final {
   std::map<LineageKey, std::uint64_t> current_generations_;
   /** @brief Exact admitted identity indexed by destination producer scalar. */
   std::map<std::uint64_t, DeviceCompletionIdentity> pending_transfers_;
-  /** @brief Ready reusable replicas indexed by revision and exact binding. */
+  /**
+   * @brief Bounded Ready replicas indexed oldest revision first.
+   * @note Values retain native/provider owners until replacement, eviction, or
+   * manager destruction.
+   */
   std::map<ReplicaKey, Value> resident_values_;
 };
 

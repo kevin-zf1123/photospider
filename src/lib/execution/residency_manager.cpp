@@ -9,6 +9,15 @@
 
 namespace ps::execution {
 
+/** @copydoc ResidencyManager::ResidencyManager */
+ResidencyManager::ResidencyManager(std::size_t resident_capacity)
+    : resident_capacity_(resident_capacity) {
+  if (resident_capacity_ == 0U) {
+    throw std::invalid_argument(
+        "Residency replica-entry capacity must be positive.");
+  }
+}
+
 /** @copydoc ResidencyManager::LineageKey::operator< */
 bool ResidencyManager::LineageKey::operator<(
     const LineageKey& other) const noexcept {
@@ -175,6 +184,9 @@ ResidencyCompletionDisposition ResidencyManager::publish_ready_transfer(
   const auto resident = resident_values_.find(replica_key);
   if (resident == resident_values_.end()) {
     resident_values_.merge(staged_replica);
+    if (resident_values_.size() > resident_capacity_) {
+      resident_values_.erase(resident_values_.begin());
+    }
   } else {
     resident->second = destination;
   }

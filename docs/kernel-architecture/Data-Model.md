@@ -356,7 +356,11 @@ only exact Ready replicas and atomically gates destination readiness on complete
 completion identity plus current supersession generation. A fallible
 prepublication step creates the lineage row without advancing it; accepted
 coordinator publication then advances that row before exposing currentness, so
-a late older Run observation cannot regress freshness.
+a late older Run observation cannot regress freshness. Settled replicas may
+outlive their producing Run, but strong native/provider ownership is bounded by
+the manager's 64-entry default: publication pressure releases the
+lowest-revision entry. Generation advance alone does not clear residency, and
+the entry count is not device-byte or scratch admission.
 
 `DataSpec`, quantization, general Map/Import providers, provider ABI v3, and
 general named immutable Value outputs remain later no-shim slices. V-8 does

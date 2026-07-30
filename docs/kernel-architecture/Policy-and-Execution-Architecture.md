@@ -327,8 +327,11 @@ older commit right; it settles the affected destination with a typed failure
 when it still owns that producer. Run settlement retains the executor and
 continuation until every pending fence callback has retired. V-8 adds no
 second ready store, Graph authority, persistence path, or device-memory
-capacity authority. Authoritative device-memory and scratch admission remains
-#86.
+capacity authority. Settled replicas may remain reusable after Run release,
+but the manager's 64-entry default bounds strong native/provider retention by
+releasing the lowest-revision entry under publication pressure; generation
+advance alone does not bulk-clear them. This entry count neither measures nor
+admits bytes. Authoritative device-memory and scratch admission remains #86.
 
 Freshness publication uses two phases. Kernel first asks `ExecutionService` to
 pretrack the lineage without changing its current generation; this fallible

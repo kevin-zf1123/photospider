@@ -46,6 +46,10 @@ struct PendingReplicaPair final {
   PendingDeviceValuePublication source;
   /** @brief Host-visible destination publication and terminal capability. */
   PendingDeviceValuePublication destination;
+  /**
+   * @brief Non-owning probe for the destination's retained native allocation.
+   */
+  std::weak_ptr<FakeAllocation> destination_owner;
 };
 
 /**
@@ -81,7 +85,7 @@ PendingReplicaPair make_pending_replica_pair() {
           destination_owner.get(), destination_owner->bytes.data(),
           kStorageSize, DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned,
           source.value.revision_id());
-  return {std::move(source), std::move(destination)};
+  return {std::move(source), std::move(destination), destination_owner};
 }
 
 /**
@@ -166,6 +170,66 @@ TEST(DeviceResidency, PublishesOnlyExactReadyReplica) {
             pair.destination.value.producer_identity());
   EXPECT_EQ(resident->storage_binding(),
             pair.destination.value.storage_binding());
+}
+
+/**
+ * @brief Proves bounded residency releases the oldest replica's native owner.
+ * @return Nothing; GoogleTest reports retention, eviction, or lookup failures.
+ * @throws Fake publication, identity, and synchronized manager exceptions.
+ * @note Run-local Value release does not clear the first replica. Publishing a
+ * newer distinct revision at capacity one evicts it, while the newer replica
+ * remains reusable. The injected entry count is not a byte-accounting policy.
+ */
+TEST(DeviceResidency, CapacityEvictsOldestRevisionAndReleasesNativeOwner) {
+  ResidencyManager manager(1U);
+  PendingReplicaPair first = make_pending_replica_pair();
+  const DeviceCompletionIdentity first_identity(
+      make_seed(1U, 13U), first.source.value, first.destination.value);
+  const ValueRevisionId first_revision = first.destination.value.revision_id();
+  const std::weak_ptr<FakeAllocation> first_owner = first.destination_owner;
+  manager.observe_generation(first_identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(first_identity));
+  ASSERT_EQ(manager.publish_ready_transfer(
+                first_identity, first.source.value, first.destination.value,
+                &first.source.producer, first.destination.producer),
+            ResidencyCompletionDisposition::Published);
+
+  std::optional<Value> first_resident = manager.find(
+      first_revision, DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned);
+  ASSERT_TRUE(first_resident.has_value());
+  first_resident.reset();
+  first.destination.value = Value();
+  EXPECT_FALSE(first_owner.expired());
+
+  PendingReplicaPair second = make_pending_replica_pair();
+  const DeviceCompletionIdentity second_identity(
+      make_seed(1U, 14U), second.source.value, second.destination.value);
+  ASSERT_LT(first_revision.value(),
+            second.destination.value.revision_id().value());
+  ASSERT_NO_THROW(manager.register_transfer(second_identity));
+  ASSERT_EQ(manager.publish_ready_transfer(
+                second_identity, second.source.value, second.destination.value,
+                &second.source.producer, second.destination.producer),
+            ResidencyCompletionDisposition::Published);
+
+  EXPECT_FALSE(manager
+                   .find(first_revision, DeviceId(DeviceBackend::CPU),
+                         MemoryDomain::HostPinned)
+                   .has_value());
+  EXPECT_TRUE(first_owner.expired());
+  EXPECT_TRUE(manager
+                  .find(second.destination.value.revision_id(),
+                        DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned)
+                  .has_value());
+}
+
+/**
+ * @brief Proves zero cannot disable the resident-entry ownership bound.
+ * @return Nothing; GoogleTest reports constructor validation failures.
+ * @throws Nothing after GoogleTest handles the expected invalid argument.
+ */
+TEST(DeviceResidency, RejectsZeroResidentCapacity) {
+  EXPECT_THROW((void)ResidencyManager(0U), std::invalid_argument);
 }
 
 /**

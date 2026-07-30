@@ -289,7 +289,10 @@ map、import、transfer 或 readback。显式 CPU/Metal transfer 会发布独立
 completion identity 加 current supersession generation 原子门控 destination readiness。
 一个可失败的 prepublication 步骤会创建 lineage row 而不推进它；accepted coordinator
 publication 随后会在暴露 currentness 前推进该行，因此晚启动的较旧 Run observation
-不能让 freshness 倒退。
+不能让 freshness 倒退。已结算 replica 可以比 producing Run 活得更久，但 manager 默认
+最多保留 64 个 entry，从而限制强 native/provider ownership；publication pressure 会释放
+revision 最低的 entry。Generation 推进本身不会清除 residency，而且这个 entry 数量不是
+device-byte 或 scratch admission。
 
 `DataSpec`、quantization、通用 Map/Import provider、provider ABI v3 与通用命名 immutable
 Value output 仍属于后续 no-shim slice。V-8 不新增 authoritative device-memory 或 scratch
