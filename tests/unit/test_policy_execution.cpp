@@ -696,6 +696,79 @@ TEST(PhysicalExecutionIntegration, PublishesRouteAwareDeviceInventory) {
 }
 
 /**
+ * @brief Verifies an explicitly empty registry creates no phantom account.
+ *
+ * @throws ExecutionService construction or diagnostic failures unchanged.
+ * @note Default candidate limits include Metal, so this regression fails if
+ * ledger construction ignores the fixed empty registry.
+ */
+TEST(PhysicalExecutionIntegration, EmptyRegistryCreatesNoMetalAccount) {
+  execution::DeviceExecutorRegistry empty_registry;
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           std::move(empty_registry));
+
+  EXPECT_FALSE(service.has_device_executor(Device::GPU_METAL));
+  EXPECT_FALSE(service.device_resource_snapshot(DeviceId(DeviceBackend::Metal))
+                   .has_value());
+  EXPECT_EQ(service.available_devices("gpu_pipeline"),
+            (std::vector<Device>{Device::CPU}));
+}
+
+/**
+ * @brief Verifies default composition publishes exactly its Metal capability.
+ *
+ * @throws Platform registry discovery, construction, or diagnostic failures
+ * unchanged.
+ * @note On non-Apple builds the factory is a null stub, so this directly proves
+ * CPU-only default service construction has no fake Metal account.
+ */
+TEST(PhysicalExecutionIntegration,
+     DefaultServiceMatchesMetalAccountToPlatformRegistry) {
+  ExecutionService service;
+  const bool has_metal_executor =
+      service.has_device_executor(Device::GPU_METAL);
+  const bool has_metal_account =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal))
+          .has_value();
+
+  EXPECT_EQ(has_metal_account, has_metal_executor);
+#if !defined(__APPLE__)
+  EXPECT_FALSE(has_metal_executor);
+  EXPECT_FALSE(has_metal_account);
+#endif
+}
+
+/**
+ * @brief Verifies a fixed Metal executor retains its exact configured budget.
+ *
+ * @throws ExecutionService construction or diagnostic failures unchanged.
+ * @note The additional unexecutable CUDA candidate proves construction keeps
+ * only the frozen registry intersection without changing Metal byte limits.
+ */
+TEST(PhysicalExecutionIntegration,
+     RegisteredMetalExecutorRetainsConfiguredBudget) {
+  ExecutionResourceLimits limits = ExecutionService::default_resource_limits();
+  const DeviceResourceVector metal_budget{12345U, 6789U};
+  limits.device_limits = {
+      DeviceResourceLimit{DeviceId(DeviceBackend::Metal), metal_budget},
+      DeviceResourceLimit{DeviceId(DeviceBackend::CUDA),
+                          DeviceResourceVector{111U, 222U}},
+  };
+  ExecutionService service(std::move(limits),
+                           ::ps::testing::make_fake_metal_executor_registry());
+
+  ASSERT_TRUE(service.has_device_executor(Device::GPU_METAL));
+  const std::optional<ResourceLedger::DeviceSnapshot> metal =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
+  ASSERT_TRUE(metal.has_value());
+  EXPECT_EQ(metal->limits, metal_budget);
+  EXPECT_EQ(metal->reserved, DeviceResourceVector{});
+  EXPECT_EQ(metal->available, metal_budget);
+  EXPECT_FALSE(service.device_resource_snapshot(DeviceId(DeviceBackend::CUDA))
+                   .has_value());
+}
+
+/**
  * @brief Verifies unavailable submission devices fail before Run publication.
  */
 TEST(PhysicalExecutionIntegration, RejectsDeviceOutsideRouteInventory) {

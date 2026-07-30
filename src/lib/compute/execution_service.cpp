@@ -3335,6 +3335,83 @@ class ThroughputReservationAccount final
   ResourceVector reserved_;
 };
 
+/**
+ * @brief Tests whether a fixed registry executes one complete device identity.
+ *
+ * The current registry exposes one provisional device label per backend.
+ * Therefore each populated slot represents ordinal zero; later ordinals and
+ * Vulkan have no executable registry representation in this service.
+ *
+ * @param device_executors Frozen process-owned registry to inspect.
+ * @param device Complete candidate ledger identity.
+ * @return True only for a registered matching ordinal-zero executor.
+ * @throws Nothing.
+ * @note This observation neither mutates the registry nor creates an account.
+ */
+bool registry_executes_device_id(
+    const execution::DeviceExecutorRegistry& device_executors,
+    DeviceId device) noexcept {
+  if (device.ordinal() != 0U) {
+    return false;
+  }
+  switch (device.backend()) {
+    case DeviceBackend::CPU:
+      return false;
+    case DeviceBackend::Metal:
+      return device_executors.contains(Device::GPU_METAL);
+    case DeviceBackend::CUDA:
+      return device_executors.contains(Device::GPU_CUDA);
+    case DeviceBackend::Vulkan:
+      return false;
+    case DeviceBackend::NPU:
+      return device_executors.contains(Device::ASIC_NPU);
+  }
+  return false;
+}
+
+/**
+ * @brief Validates device-limit candidates and removes non-executable accounts.
+ *
+ * First, the complete caller-supplied list is checked for CPU identities and
+ * duplicates so filtering cannot hide invalid composition. Second, limits
+ * whose complete `DeviceId` has no matching executor in the already frozen
+ * registry are erased before `ResourceLedger` construction.
+ *
+ * @param resource_limits Mutable composition limits owned by construction.
+ * @param device_executors Frozen registry defining executable device identity.
+ * @return Nothing.
+ * @throws std::invalid_argument for CPU or duplicate device candidates.
+ * @note The operation allocates no storage, registers no executor, and leaves
+ * an executor without a configured limit unable to reserve device capacity.
+ */
+void retain_executable_device_limits(
+    ExecutionResourceLimits& resource_limits,
+    const execution::DeviceExecutorRegistry& device_executors) {
+  for (std::size_t index = 0U; index < resource_limits.device_limits.size();
+       ++index) {
+    const DeviceId device = resource_limits.device_limits[index].device;
+    if (device.backend() == DeviceBackend::CPU) {
+      throw std::invalid_argument(
+          "ResourceLedger device limits must not contain CPU.");
+    }
+    for (std::size_t previous = 0U; previous < index; ++previous) {
+      if (resource_limits.device_limits[previous].device == device) {
+        throw std::invalid_argument(
+            "ResourceLedger device limits contain a duplicate DeviceId.");
+      }
+    }
+  }
+
+  const auto first_unavailable = std::remove_if(
+      resource_limits.device_limits.begin(),
+      resource_limits.device_limits.end(),
+      [&device_executors](const DeviceResourceLimit& limit) noexcept {
+        return !registry_executes_device_id(device_executors, limit.device);
+      });
+  resource_limits.device_limits.erase(first_unavailable,
+                                      resource_limits.device_limits.end());
+}
+
 }  // namespace
 
 /**
@@ -3348,7 +3425,8 @@ class ExecutionService::PoolState final {
  public:
   /**
    * @brief Creates one unconfigured execution domain with immutable limits.
-   * @param resource_limits Complete ledger and ready-store limits.
+   * @param resource_limits Complete ledger and ready-store limits whose device
+   * accounts already match the fixed registry.
    * @param device_executors Complete fixed device registry.
    * @param telemetry Stable physical counter owner.
    * @param policy_observer Stable non-owning service callback/binding observer.
@@ -3796,10 +3874,11 @@ ExecutionService::ExecutionService(
     execution::DeviceExecutorRegistry device_executors)
     : lifecycle_telemetry_(std::make_unique<ExecutionLifecycleTelemetry>()),
       lifecycle_registry_(
-          std::make_unique<RunLifecycleRegistry>(*lifecycle_telemetry_)),
-      pool_(std::make_unique<PoolState>(
-          resource_limits, std::move(device_executors), *lifecycle_telemetry_,
-          policy_lifecycle_observer())) {
+          std::make_unique<RunLifecycleRegistry>(*lifecycle_telemetry_)) {
+  retain_executable_device_limits(resource_limits, device_executors);
+  pool_ = std::make_unique<PoolState>(
+      std::move(resource_limits), std::move(device_executors),
+      *lifecycle_telemetry_, policy_lifecycle_observer());
   const ExecutionLifecycleCounters counters = lifecycle_registry_->counters();
   lifecycle_telemetry_->publish(ExecutionLifecycleEventKind::ServiceStarted,
                                 ExecutionLifecycleCategory::None, 0U, 0U, 0U,

@@ -118,10 +118,12 @@ struct ExecutionResourceLimits final {
   ResourceVector interactive_headroom;
 
   /**
-   * @brief Immutable memory/scratch limits for each configured non-CPU device.
+   * @brief Candidate memory/scratch limits for fixed non-CPU executors.
    *
-   * @note Each complete `DeviceId` may occur once. These byte accounts neither
-   * consume nor borrow Host ledger capacity.
+   * @note Each complete `DeviceId` may occur once. Service construction
+   * validates the complete list, then retains accounts only for executable
+   * devices in the injected fixed registry. These byte accounts neither
+   * consume nor borrow Host ledger capacity, and no account is added lazily.
    */
   std::vector<DeviceResourceLimit> device_limits;
 
@@ -857,9 +859,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
   /**
    * @brief Returns bounded product defaults supplied by the composition root.
-   * @return Host and Metal ledger limits plus interactive admission headroom.
+   * @return Host limits, candidate Metal limits, and interactive headroom.
    * @throws std::bad_alloc when default device-limit storage cannot allocate.
-   * @note Tests and alternate products may inject smaller isolated limits.
+   * @note Service construction retains the Metal account only when the frozen
+   * registry owns an executable Metal device. Tests and alternate products
+   * may inject smaller isolated limits.
    */
   static ExecutionResourceLimits default_resource_limits();
 
@@ -873,23 +877,29 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Creates an unconfigured domain with explicit immutable limits.
-   * @param resource_limits Complete private Host/device-composed limits.
+   * @param resource_limits Complete Host limits and device-account candidates.
    * @throws std::invalid_argument if interactive headroom exceeds a limit.
+   * @throws std::invalid_argument for CPU or duplicate device candidates.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
-   * @note The composition root must freeze workers before first Run admission.
+   * @note The default fixed registry determines which validated device
+   * candidates become ledger accounts. The composition root must freeze
+   * workers before first Run admission.
    */
   explicit ExecutionService(ExecutionResourceLimits resource_limits);
 
   /**
    * @brief Creates an unconfigured domain with an injected fixed device
    * registry.
-   * @param resource_limits Complete private Host/device-composed limits.
+   * @param resource_limits Complete Host limits and device-account candidates.
    * @param device_executors Complete registry moved into process ownership.
    * @throws std::invalid_argument if interactive headroom exceeds a limit.
+   * @throws std::invalid_argument for CPU or duplicate device candidates.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
    * @note Tests and alternate composition roots finish registration before
-   * construction. The service exposes no runtime mutation surface and must be
-   * configured before first Run admission.
+   * construction. Only candidates matching executable ordinal-zero registry
+   * devices become accounts; an executor without a candidate budget remains
+   * unable to admit native allocation. The service exposes no runtime mutation
+   * surface and must be configured before first Run admission.
    */
   ExecutionService(ExecutionResourceLimits resource_limits,
                    execution::DeviceExecutorRegistry device_executors);
