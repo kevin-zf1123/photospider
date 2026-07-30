@@ -26,8 +26,10 @@ client polling 和映射图像生命周期，不拥有 daemon session 或后端�
 **`GraphRuntime`**
 每图资源容器。它拥有一个 `GraphModel`、一个有界 graph-state lane、一条有界私有
 compute-request lane、一个私有 supersession coordinator、复制的 HP/RT execution-route binding、
-event、execution trace、一个稳定 Graph lifetime anchor 与平台运行时资源，但不拥有计算依赖规划、
-policy context 或物理 route worker。
+event、execution trace 与一个稳定 Graph lifetime anchor。它拥有图拓扑和 session 级状态，不拥有
+native platform state。固定 `DeviceExecutorRegistry` 及其 native device、command queue、
+invocation allocator 和 pipeline cache 由进程 `ExecutionService` 拥有。`GraphRuntime` 不拥有
+计算依赖规划、policy context 或物理 route worker。
 
 **`GraphModel`**
 内存中的图状态：节点、拓扑邻接、参数、输出、缓存元数据、计时数据和图级运行时元数据。

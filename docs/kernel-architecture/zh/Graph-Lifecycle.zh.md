@@ -9,8 +9,10 @@ unavailable persistence adapter 都是当前行为。
 `Kernel` 拥有一张由 mutex 保护的 map，从 graph name 指向共享的 `GraphRuntime` lifetime
 root。每个 runtime 拥有一个 `GraphModel`、一个 graph-state executor、一条私有
 compute-request executor、一个 latest-wins request coordinator、复制的 HP/RT
-execution-route binding、event/execution-trace state 与 platform runtime resource。Map
-lookup 会在短临界区内复制一个 shared runtime owner；释放 map lock 后才执行 graph-state、
+execution-route binding、event/execution-trace state 与一个稳定 Graph lifetime anchor。
+Native platform device、command queue、allocator、pipeline cache 与 executor resource
+改由进程 `ExecutionService` 中的固定 `DeviceExecutorRegistry` 持有，不属于 Graph lifetime。
+Map lookup 会在短临界区内复制一个 shared runtime owner；释放 map lock 后才执行 graph-state、
 compute、IO、inspection 与 lane work。因此，并发 close 可以移除 name，但不会销毁已由准入内部
 调用保留的 runtime。
 
@@ -200,8 +202,8 @@ fallback。
 这些依赖不是 graph state：reload、clear 与 close 不会替换它们。`Kernel::~Kernel()` 会在普通
 member teardown 到达 cache、traversal、diagnostic、IO 或 ROI collaborator 前显式清空自有 runtime
 map。每个 `GraphRuntime` 因此会在 graph-state 可用时停止并排空 compute-request
-work，再在释放 Graph-local route value 与 platform state 前排空 graph-state；整个过程中，这些借用的 Kernel
-service 与全部注入 owner 仍然存活，只有之后的 service destruction 才会释放它们。
+work，再在释放 Graph-local route value 与其他 session 级状态前排空 graph-state；整个过程中，
+这些借用的 Kernel service 与全部注入 owner 仍然存活，只有之后的 service destruction 才会释放它们。
 Owning Host 必须在 Kernel destruction 前停止外部 Kernel-call admission，因为 private
 graph map 不是 concurrent-destruction API。Codec/document `GraphError` 保留各自文档化的
 category，`std::bad_alloc` 原样传播。

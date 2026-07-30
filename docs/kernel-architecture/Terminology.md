@@ -31,8 +31,11 @@ cache, traversal, inspection, and persistence services.
 The per-graph resource container. It owns one `GraphModel`, one bounded
 graph-state lane, one bounded private compute-request lane, one private
 supersession coordinator, copied HP/RT execution-route bindings, events,
-execution traces, one stable Graph lifetime anchor, and platform runtime
-resources. It is not the owner of compute dependency planning, policy
+execution traces, and one stable Graph lifetime anchor. It owns graph topology
+and session-scoped state, not native platform state. The process
+`ExecutionService` owns the fixed `DeviceExecutorRegistry` and its native
+device, command queue, invocation allocator, and pipeline cache.
+`GraphRuntime` is not the owner of compute dependency planning, policy
 contexts, or physical route workers.
 
 **`GraphModel`**

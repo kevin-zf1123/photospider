@@ -12,9 +12,12 @@ adapters are current behavior.
 lifetime roots. Each runtime owns one `GraphModel`, one graph-state executor,
 one private compute-request executor, one latest-wins request coordinator,
 copied HP/RT execution-route bindings, event/execution-trace state, and
-platform runtime resources. Map lookup copies one shared runtime owner inside a
-short critical section; graph-state, compute, IO, inspection, and lane work run
-after releasing the map lock. A concurrent close may therefore remove the name
+one stable Graph lifetime anchor. Native platform device, command-queue,
+allocator, pipeline-cache, and executor resources instead belong to the fixed
+`DeviceExecutorRegistry` in the process `ExecutionService`; they are not Graph
+lifetime resources. Map lookup copies one shared runtime owner inside a short
+critical section; graph-state, compute, IO, inspection, and lane work run after
+releasing the map lock. A concurrent close may therefore remove the name
 without destroying a runtime already retained by an admitted internal call.
 
 ```text
@@ -257,9 +260,9 @@ them. `Kernel::~Kernel()` explicitly clears the owned runtime map before
 ordinary member teardown reaches cache, traversal, diagnostic, IO, or ROI
 collaborators. Each `GraphRuntime` therefore stops and drains compute-request
 work while graph-state is available, then drains graph-state before releasing
-Graph-local route values and platform state, all while those borrowed Kernel
-services and injected owners remain alive; only later service destruction
-releases them. The owning Host must stop
+Graph-local route values and other session-scoped state, all while those
+borrowed Kernel services and injected owners remain alive; only later service
+destruction releases them. The owning Host must stop
 external Kernel-call admission before Kernel destruction, because the private
 graph map is not a concurrent-destruction API. Codec/document `GraphError`
 values retain their documented categories, and `std::bad_alloc` propagates
