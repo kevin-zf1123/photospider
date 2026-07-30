@@ -155,6 +155,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     host/event_stream.hpp
     host/graph_session.hpp
     host/host.hpp
+    memory/access_plan.hpp
     memory/buffer_handle.hpp
     memory/ready_fence.hpp
     memory/strided_layout.hpp
@@ -175,7 +176,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 23)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 24)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")

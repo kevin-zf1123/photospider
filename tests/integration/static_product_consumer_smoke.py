@@ -3092,8 +3092,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
-        "installed public header inventory is exactly 27 files": len(install["headers"])
-        == 27,
+        "installed public header inventory is exactly 28 files": len(install["headers"])
+        == 28,
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],

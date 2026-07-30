@@ -16,17 +16,17 @@ namespace ps {
 namespace {
 
 /**
- * @brief Owns both process-wide runtime identity sequences.
+ * @brief Owns process-wide allocation, revision, and producer sequences.
  *
  * This authority is instantiated exactly once inside the shared
  * `Photospider::operation_runtime`. The static Host product and every
  * Value-using operation DSO dynamically depend on that same runtime image, so
- * allocation and revision tokens cannot restart at a DSO boundary.
+ * allocation, revision, and producer tokens cannot restart at a DSO boundary.
  *
  * @throws Nothing during construction and destruction.
- * @note The two sequences remain distinct identity domains. The shared-runtime
- *       ownership, rather than symbol interposition or a probabilistic token,
- *       establishes their process-wide uniqueness.
+ * @note The three sequences remain distinct identity domains. The
+ * shared-runtime ownership, rather than symbol interposition or a probabilistic
+ * token, establishes their process-wide uniqueness.
  */
 class ProcessIdentityAuthority final {
  public:
@@ -52,6 +52,17 @@ class ProcessIdentityAuthority final {
   std::uint64_t mint_value_revision() {
     return mint_from(&next_value_revision_,
                      "Value revision identity space is exhausted.");
+  }
+
+  /**
+   * @brief Mints one producer identity for this process runtime.
+   * @return Unique nonzero producer token.
+   * @throws std::overflow_error when producer identity space is exhausted.
+   * @note Calls are thread-safe and never reuse a previously returned token.
+   */
+  std::uint64_t mint_producer_identity() {
+    return mint_from(&next_producer_identity_,
+                     "Producer identity space is exhausted.");
   }
 
  private:
@@ -86,6 +97,9 @@ class ProcessIdentityAuthority final {
 
   /** @brief Next Value revision token; zero is permanently invalid. */
   std::atomic<std::uint64_t> next_value_revision_{1U};
+
+  /** @brief Next producer token; zero is permanently invalid. */
+  std::atomic<std::uint64_t> next_producer_identity_{1U};
 };
 
 /**
@@ -403,18 +417,38 @@ std::size_t resolve_coordinate_offset(const StridedLayout& layout,
 }  // namespace
 
 /**
- * @brief Private CPU allocation control block retained by BufferHandle copies.
+ * @brief Private explicit-binding control block retained by BufferHandle
+ * copies.
  *
- * @throws std::bad_alloc when allocating CPU byte storage.
- * @note The immutable identity is minted before construction. Only an active
- * pre-seal WriteLease may mutate `storage`.
+ * @throws std::bad_alloc when allocating CPU bytes or retained ownership.
+ * @note Exactly one of owned CPU storage or external ownership establishes the
+ * allocation lifetime. Host visibility is independent from device/domain.
  */
 struct BufferHandle::ControlBlock final {
   /** @brief Stable nonzero process-local physical allocation identity. */
   AllocationIdentity identity;
 
-  /** @brief CPU allocation bytes, immutable after ValueBuilder seal. */
+  /** @brief Complete concrete device identity. */
+  DeviceId device{DeviceBackend::CPU};
+
+  /** @brief Explicit allocation memory domain. */
+  MemoryDomain memory_domain = MemoryDomain::Host;
+
+  /** @brief Owned CPU bytes, empty for external/native bindings. */
   std::vector<std::byte> storage;
+
+  /** @brief Shared external/native allocation owner, or null for CPU storage.
+   */
+  std::shared_ptr<void> external_owner;
+
+  /** @brief Opaque native handle, or null for ordinary CPU storage. */
+  void* native = nullptr;
+
+  /** @brief Host-visible allocation start, or null when inaccessible. */
+  std::byte* host_data = nullptr;
+
+  /** @brief Positive complete allocation byte size. */
+  std::size_t byte_size = 0U;
 
   /**
    * @brief Allocates one zero-initialized CPU byte range.
@@ -424,7 +458,32 @@ struct BufferHandle::ControlBlock final {
    * @throws std::bad_alloc when byte allocation fails.
    */
   ControlBlock(AllocationIdentity identity_in, std::size_t size)
-      : identity(identity_in), storage(size, std::byte{0}) {}
+      : identity(identity_in),
+        storage(size, std::byte{0}),
+        host_data(storage.data()),
+        byte_size(size) {}
+
+  /**
+   * @brief Retains one external/native allocation and optional host pointer.
+   * @param identity_in Fresh nonzero allocation identity.
+   * @param owner_in Shared complete allocation owner.
+   * @param native_in Non-null opaque native handle.
+   * @param host_data_in Optional host-visible allocation start.
+   * @param size Positive complete allocation byte size.
+   * @param device_in Concrete device binding.
+   * @param memory_domain_in Explicit allocation domain.
+   * @throws Nothing under shared ownership movement.
+   */
+  ControlBlock(AllocationIdentity identity_in, std::shared_ptr<void> owner_in,
+               void* native_in, std::byte* host_data_in, std::size_t size,
+               DeviceId device_in, MemoryDomain memory_domain_in) noexcept
+      : identity(identity_in),
+        device(device_in),
+        memory_domain(memory_domain_in),
+        external_owner(std::move(owner_in)),
+        native(native_in),
+        host_data(host_data_in),
+        byte_size(size) {}
 };
 
 /** @copydoc BufferHandle::BufferHandle */
@@ -441,6 +500,28 @@ BufferHandle BufferHandle::allocate_for_builder(std::size_t size) {
   const AllocationIdentity identity(
       process_identity_authority().mint_allocation_identity());
   return BufferHandle(std::make_shared<ControlBlock>(identity, size), 0U, size);
+}
+
+/** @copydoc BufferHandle::retain_external_binding */
+BufferHandle BufferHandle::retain_external_binding(
+    std::shared_ptr<void> owner, void* native_handle, std::byte* host_pointer,
+    std::size_t size, DeviceId device, MemoryDomain memory_domain) {
+  if (!owner || native_handle == nullptr || size == 0U) {
+    throw std::invalid_argument(
+        "External BufferHandle requires owner, native handle, and bytes.");
+  }
+  if ((memory_domain == MemoryDomain::Host ||
+       memory_domain == MemoryDomain::HostPinned) &&
+      host_pointer == nullptr) {
+    throw std::invalid_argument(
+        "Host-domain external BufferHandle requires a host pointer.");
+  }
+  const AllocationIdentity identity(
+      process_identity_authority().mint_allocation_identity());
+  return BufferHandle(
+      std::make_shared<ControlBlock>(identity, std::move(owner), native_handle,
+                                     host_pointer, size, device, memory_domain),
+      0U, size);
 }
 
 /** @copydoc BufferHandle::valid */
@@ -472,6 +553,21 @@ std::size_t BufferHandle::size() const {
   return length_;
 }
 
+/** @copydoc BufferHandle::storage_binding */
+StorageBinding BufferHandle::storage_binding() const {
+  if (!valid()) {
+    throw std::logic_error("Invalid BufferHandle has no storage binding.");
+  }
+  return StorageBinding{control_->identity, control_->device,
+                        control_->memory_domain, control_->byte_size,
+                        control_->host_data != nullptr};
+}
+
+/** @copydoc BufferHandle::host_visible */
+bool BufferHandle::host_visible() const noexcept {
+  return valid() && control_->host_data != nullptr;
+}
+
 /** @copydoc BufferHandle::subrange */
 BufferHandle BufferHandle::subrange(std::size_t offset,
                                     std::size_t length) const {
@@ -494,17 +590,25 @@ ReadLease BufferHandle::acquire_read() const {
   if (!valid()) {
     throw std::logic_error("Cannot read an invalid BufferHandle.");
   }
+  if (!host_visible()) {
+    throw BufferAccessError();
+  }
   return ReadLease(*this);
 }
 
 /** @copydoc BufferHandle::read_pointer */
 const std::byte* BufferHandle::read_pointer() const noexcept {
-  return control_->storage.data() + offset_;
+  return control_->host_data + offset_;
 }
 
 /** @copydoc BufferHandle::write_pointer */
 std::byte* BufferHandle::write_pointer() const noexcept {
-  return control_->storage.data() + offset_;
+  return control_->host_data + offset_;
+}
+
+/** @copydoc BufferHandle::native_handle */
+void* BufferHandle::native_handle() const noexcept {
+  return valid() ? control_->native : nullptr;
 }
 
 /** @copydoc ReadLease::ReadLease */
@@ -616,7 +720,7 @@ std::size_t WriteLease::size() const {
 }
 
 /**
- * @brief Immutable implementation for one validated CPU DenseTensor Value.
+ * @brief Immutable implementation for one validated DenseTensor Value.
  *
  * @throws std::bad_alloc when copied descriptor/layout storage cannot allocate.
  * @note Instances are published only through shared_ptr<const Impl>. Ordinary
@@ -633,7 +737,7 @@ struct Value::Impl final {
   /** @brief Validated signed physical layout and logical-origin offset. */
   StridedLayout layout;
 
-  /** @brief Immutable checked CPU allocation range. */
+  /** @brief Immutable checked explicit storage-binding range. */
   BufferHandle buffer;
 
   /** @brief Immutable observer of producer completion for this binding. */
@@ -641,6 +745,9 @@ struct Value::Impl final {
 
   /** @brief Stable identity of this immutable logical publication. */
   ValueRevisionId revision;
+
+  /** @brief Nonreused identity of the producer or transfer publication. */
+  ProducerIdentity producer;
 
   /**
    * @brief Stores one completely validated immutable publication.
@@ -651,6 +758,7 @@ struct Value::Impl final {
    * @param buffer_in Sealed checked allocation range to retain.
    * @param ready_fence_in Valid producer-completion observer.
    * @param revision_in Fresh nonzero publication revision.
+   * @param producer_in Fresh nonzero producer identity.
    * @throws std::bad_alloc when descriptor or layout vector moves must
    * allocate.
    * @note Inputs are already validated. Before the Value escapes, the caller
@@ -661,13 +769,14 @@ struct Value::Impl final {
   Impl(DenseTensorDescriptor descriptor_in,
        std::optional<ImageFacet> image_facet_in, StridedLayout layout_in,
        BufferHandle buffer_in, ReadyFence ready_fence_in,
-       ValueRevisionId revision_in)
+       ValueRevisionId revision_in, ProducerIdentity producer_in)
       : descriptor(std::move(descriptor_in)),
         image_facet(std::move(image_facet_in)),
         layout(std::move(layout_in)),
         buffer(std::move(buffer_in)),
         ready_fence(std::move(ready_fence_in)),
-        revision(revision_in) {}
+        revision(revision_in),
+        producer(producer_in) {}
 };
 
 /**
@@ -829,9 +938,11 @@ Value ValueBuilder::seal() {
 
   const ValueRevisionId revision(
       process_identity_authority().mint_value_revision());
+  const ProducerIdentity producer(
+      process_identity_authority().mint_producer_identity());
   auto published = std::make_shared<const Value::Impl>(
       impl_->descriptor, impl_->image_facet, impl_->layout, impl_->buffer,
-      ReadyFence::already_ready(), revision);
+      ReadyFence::already_ready(), revision, producer);
 
   impl_->authority->builder_open.store(false, std::memory_order_release);
   impl_->sealed = true;
@@ -934,7 +1045,12 @@ bool PendingValueProducer::cancel() noexcept {
 /** @copydoc PendingValuePublisher::allocate_cpu_dense_tensor */
 PendingValuePublication PendingValuePublisher::allocate_cpu_dense_tensor(
     DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
-    StridedLayout layout, std::size_t storage_size) {
+    StridedLayout layout, std::size_t storage_size,
+    std::optional<ValueRevisionId> replica_revision) {
+  if (replica_revision.has_value() && !replica_revision->valid()) {
+    throw std::invalid_argument(
+        "Pending CPU Value replica revision must be valid.");
+  }
   ValueBuilder builder = ValueBuilder::allocate_cpu_dense_tensor(
       std::move(descriptor), std::move(image_facet), std::move(layout),
       storage_size);
@@ -949,12 +1065,16 @@ PendingValuePublication PendingValuePublisher::allocate_cpu_dense_tensor(
   }
 
   PendingReadyFence pending_fence = make_pending_ready_fence();
-  const ValueRevisionId revision(
-      process_identity_authority().mint_value_revision());
+  const ValueRevisionId revision =
+      replica_revision.has_value()
+          ? *replica_revision
+          : ValueRevisionId(process_identity_authority().mint_value_revision());
+  const ProducerIdentity producer_identity(
+      process_identity_authority().mint_producer_identity());
   auto published = std::make_shared<const Value::Impl>(
       builder.impl_->descriptor, builder.impl_->image_facet,
       builder.impl_->layout, builder.impl_->buffer, pending_fence.fence,
-      revision);
+      revision, producer_identity);
   auto producer = std::make_unique<PendingValueProducer::Impl>(
       builder.impl_->buffer, std::move(pending_fence.completer));
 
@@ -963,6 +1083,81 @@ PendingValuePublication PendingValuePublisher::allocate_cpu_dense_tensor(
   builder.impl_->sealed = true;
   return {Value(std::move(published)),
           PendingValueProducer(std::move(producer))};
+}
+
+/** @copydoc PendingDeviceValueProducer::operator= */
+PendingDeviceValueProducer& PendingDeviceValueProducer::operator=(
+    PendingDeviceValueProducer&& other) noexcept {
+  if (this != &other) {
+    (void)cancel();
+    completer_ = std::move(other.completer_);
+  }
+  return *this;
+}
+
+/** @copydoc PendingDeviceValueProducer::~PendingDeviceValueProducer */
+PendingDeviceValueProducer::~PendingDeviceValueProducer() noexcept {
+  (void)cancel();
+}
+
+/** @copydoc PendingDeviceValueProducer::valid */
+bool PendingDeviceValueProducer::valid() const noexcept {
+  return completer_.valid();
+}
+
+/** @copydoc PendingDeviceValueProducer::complete_ready */
+bool PendingDeviceValueProducer::complete_ready() noexcept {
+  return completer_.complete_ready();
+}
+
+/** @copydoc PendingDeviceValueProducer::complete_failed */
+bool PendingDeviceValueProducer::complete_failed(ReadyFenceFailure failure) {
+  return completer_.complete_failed(std::move(failure));
+}
+
+/** @copydoc PendingDeviceValueProducer::cancel */
+bool PendingDeviceValueProducer::cancel() noexcept {
+  return completer_.cancel();
+}
+
+/** @copydoc PendingDeviceValuePublisher::publish_dense_tensor */
+PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
+    DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
+    StridedLayout layout, std::shared_ptr<void> owner, void* native_handle,
+    std::byte* host_pointer, std::size_t storage_size, DeviceId device,
+    MemoryDomain memory_domain,
+    std::optional<ValueRevisionId> replica_revision) {
+  const std::size_t element_bytes =
+      validate_descriptor_and_facet(descriptor, image_facet);
+  const AddressEnvelope envelope =
+      compute_address_envelope(descriptor, layout, element_bytes);
+  if (storage_size == 0U || envelope.upper_end > storage_size) {
+    throw std::out_of_range(
+        "Pending device Value layout exceeds its storage binding.");
+  }
+  if (replica_revision.has_value() && !replica_revision->valid()) {
+    throw std::invalid_argument(
+        "Pending device Value replica revision must be valid.");
+  }
+
+  BufferHandle buffer = BufferHandle::retain_external_binding(
+      std::move(owner), native_handle, host_pointer, storage_size, device,
+      memory_domain);
+  PendingReadyFence pending_fence = make_pending_ready_fence();
+  ValueRevisionId revision;
+  if (replica_revision.has_value()) {
+    revision = *replica_revision;
+  } else {
+    revision =
+        ValueRevisionId(process_identity_authority().mint_value_revision());
+  }
+  const ProducerIdentity producer(
+      process_identity_authority().mint_producer_identity());
+  auto published = std::make_shared<const Value::Impl>(
+      std::move(descriptor), std::move(image_facet), std::move(layout),
+      std::move(buffer), pending_fence.fence, revision, producer);
+  return {Value(std::move(published)),
+          PendingDeviceValueProducer(std::move(pending_fence.completer))};
 }
 
 /** @copydoc Value::Value */
@@ -1003,13 +1198,15 @@ Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
 
   const ValueRevisionId revision(
       process_identity_authority().mint_value_revision());
+  const ProducerIdentity producer(
+      process_identity_authority().mint_producer_identity());
   DenseTensorDescriptor isolated_descriptor = descriptor;
   const std::optional<ImageFacet> isolated_image_facet = image_facet;
   StridedLayout isolated_layout = layout;
   return Value(std::make_shared<const Impl>(
       std::move(isolated_descriptor), isolated_image_facet,
       std::move(isolated_layout), std::move(buffer),
-      ReadyFence::already_ready(), revision));
+      ReadyFence::already_ready(), revision, producer));
 }
 
 /** @copydoc Value::valid */
@@ -1057,6 +1254,27 @@ ReadyFence Value::ready_fence() const {
   return impl_->ready_fence;
 }
 
+/** @copydoc Value::storage_binding */
+StorageBinding Value::storage_binding() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no storage binding.");
+  }
+  return impl_->buffer.storage_binding();
+}
+
+/** @copydoc Value::producer_identity */
+ProducerIdentity Value::producer_identity() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no producer identity.");
+  }
+  return impl_->producer;
+}
+
+/** @copydoc Value::plan_access */
+AccessPlan Value::plan_access(AccessTarget target) const {
+  return plan_value_access(*this, target);
+}
+
 /** @copydoc Value::buffer_handle */
 const BufferHandle& Value::buffer_handle() const {
   if (!impl_) {
@@ -1083,6 +1301,51 @@ ValueRevisionId Value::revision_id() const {
     throw std::logic_error("Invalid Value has no revision.");
   }
   return impl_->revision;
+}
+
+/** @copydoc ps::plan_value_access */
+AccessPlan plan_value_access(const Value& value, AccessTarget target) {
+  if (!value.valid()) {
+    throw std::invalid_argument("Access planning requires a valid Value.");
+  }
+  const StorageBinding binding = value.storage_binding();
+  const ReadyFenceState fence_state = value.ready_fence().poll().state();
+  const bool same_binding = binding.device == target.device &&
+                            binding.memory_domain == target.memory_domain;
+  const bool direct_host_access = !target.host_read || binding.host_visible;
+  if (same_binding && direct_host_access && !target.require_distinct_binding) {
+    return AccessPlan(
+        AccessPlanKind::Direct, value.revision_id().value(), binding, target,
+        VisibilityObligations{fence_state == ReadyFenceState::Pending, false,
+                              false},
+        0U);
+  }
+
+  const DeviceBackend source_backend = binding.device.backend();
+  const DeviceBackend target_backend = target.device.backend();
+  const bool supported_direction = (source_backend == DeviceBackend::CPU &&
+                                    (target_backend == DeviceBackend::CPU ||
+                                     target_backend == DeviceBackend::Metal)) ||
+                                   (source_backend == DeviceBackend::Metal &&
+                                    (target_backend == DeviceBackend::CPU ||
+                                     target_backend == DeviceBackend::Metal));
+  if (!supported_direction) {
+    return AccessPlan(
+        AccessPlanKind::Unsupported, value.revision_id().value(), binding,
+        target,
+        VisibilityObligations{fence_state == ReadyFenceState::Pending, false,
+                              false},
+        0U);
+  }
+
+  const bool crosses_device = binding.device != target.device;
+  const bool involves_metal = source_backend == DeviceBackend::Metal ||
+                              target_backend == DeviceBackend::Metal;
+  return AccessPlan(
+      AccessPlanKind::Transfer, value.revision_id().value(), binding, target,
+      VisibilityObligations{fence_state == ReadyFenceState::Pending,
+                            involves_metal, crosses_device},
+      value.storage_size());
 }
 
 /** @copydoc DenseTensorView::DenseTensorView */

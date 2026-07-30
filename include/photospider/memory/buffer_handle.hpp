@@ -3,10 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
+
+#include "photospider/core/device.hpp"
 
 /**
  * @file buffer_handle.hpp
- * @brief Dependency-neutral checked CPU allocation and scoped-access handles.
+ * @brief Checked explicit storage bindings and scoped host-access handles.
  */
 
 namespace ps {
@@ -14,6 +17,7 @@ namespace ps {
 class ReadLease;
 class PendingValueProducer;
 class PendingValuePublisher;
+class PendingDeviceValuePublisher;
 class ValueBuilder;
 
 /**
@@ -95,18 +99,78 @@ class AllocationIdentity final {
 };
 
 /**
- * @brief Immutable checked byte range retaining one CPU allocation.
+ * @brief Immutable observation of one physical storage binding.
+ *
+ * @throws Nothing for ordinary value operations.
+ * @note Binding facts grant no payload access, native handle, mapping,
+ *       transfer, cache authority, or persistence identity.
+ */
+struct StorageBinding final {
+  /** @brief Stable identity of the physical allocation. */
+  AllocationIdentity allocation;
+  /** @brief Concrete process-local device owning the binding. */
+  DeviceId device{DeviceBackend::CPU};
+  /** @brief Version-one allocation memory domain. */
+  MemoryDomain memory_domain = MemoryDomain::Host;
+  /** @brief Positive checked byte envelope. */
+  std::size_t byte_size = 0U;
+  /** @brief Whether a discharged plan may issue a host read lease. */
+  bool host_visible = false;
+
+  /**
+   * @brief Compares every immutable binding fact.
+   * @param other Binding to compare.
+   * @return True only when all fields match.
+   * @throws Nothing.
+   */
+  constexpr bool operator==(const StorageBinding& other) const noexcept {
+    return allocation == other.allocation && device == other.device &&
+           memory_domain == other.memory_domain &&
+           byte_size == other.byte_size && host_visible == other.host_visible;
+  }
+
+  /**
+   * @brief Compares immutable binding facts for inequality.
+   * @param other Binding to compare.
+   * @return True when any field differs.
+   * @throws Nothing.
+   */
+  constexpr bool operator!=(const StorageBinding& other) const noexcept {
+    return !(*this == other);
+  }
+};
+
+/**
+ * @brief Typed rejection of payload access to a non-host-visible binding.
+ *
+ * @throws std::bad_alloc when diagnostic storage construction allocates.
+ * @note Construction performs no map, import, transfer, wait, or visibility
+ *       work. Callers must request and execute an explicit AccessPlan.
+ */
+class BufferAccessError final : public std::runtime_error {
+ public:
+  /**
+   * @brief Creates the stable nonblocking-access diagnostic.
+   * @throws std::bad_alloc when runtime_error storage cannot allocate.
+   */
+  BufferAccessError()
+      : std::runtime_error(
+            "Buffer binding is not host-readable; execute an explicit "
+            "AccessPlan.") {}
+};
+
+/**
+ * @brief Immutable checked byte range retaining one explicit storage binding.
  *
  * BufferHandle copies share one allocation control block. A handle stores an
  * absolute allocation offset and nonempty length, while checked subranges
- * preserve the original allocation identity and lifetime.
+ * preserve the original allocation identity, binding facts, and lifetime.
  *
  * @throws Nothing for default construction, copying, moving, assignment, and
  * destruction.
- * @note The handle deliberately exposes no raw pointer and no mutable flag.
- * Read access requires a retaining ReadLease; producer write access is issued
- * publicly only by ValueBuilder before seal. A source-private pending producer
- * may retain the same checked envelope until its terminal fence publication.
+ * @note The handle deliberately exposes no public raw or native pointer.
+ * Read access requires a host-visible binding and retaining ReadLease;
+ * producer write access is issued publicly only by ValueBuilder before seal.
  */
 class BufferHandle final {
  public:
@@ -151,6 +215,23 @@ class BufferHandle final {
   std::size_t size() const;
 
   /**
+   * @brief Returns immutable facts for the complete physical binding.
+   * @return Allocation, device, domain, allocation size, and host visibility.
+   * @throws std::logic_error when the handle is invalid.
+   * @note The returned byte size covers the complete allocation, while
+   *       `size()` covers this checked range.
+   */
+  StorageBinding storage_binding() const;
+
+  /**
+   * @brief Reports whether this binding can issue a host ReadLease.
+   * @return True only when a non-null host pointer backs the allocation.
+   * @throws Nothing.
+   * @note True does not bypass a Value's ReadyFence; Value gates access first.
+   */
+  bool host_visible() const noexcept;
+
+  /**
    * @brief Creates a checked immutable subrange.
    *
    * @param offset Byte offset relative to this handle's range start.
@@ -169,12 +250,13 @@ class BufferHandle final {
    *
    * @return Copyable lease whose const pointer is valid for the lease lifetime.
    * @throws std::logic_error when this handle is invalid.
+   * @throws BufferAccessError when this binding is not host-visible.
    * @note The lease retains the allocation independently of this handle.
    */
   ReadLease acquire_read() const;
 
  private:
-  /** @brief Private CPU allocation control block and immutable identity. */
+  /** @brief Private allocation owner, binding facts, and immutable identity. */
   struct ControlBlock;
 
   /**
@@ -201,6 +283,29 @@ class BufferHandle final {
   static BufferHandle allocate_for_builder(std::size_t size);
 
   /**
+   * @brief Retains one source-private native or external host allocation.
+   *
+   * @param owner Non-null shared owner for the complete native allocation.
+   * @param native_handle Non-null opaque native allocation identity.
+   * @param host_pointer Optional host-visible allocation start.
+   * @param size Positive complete allocation size.
+   * @param device Concrete device binding.
+   * @param memory_domain Explicit allocation domain.
+   * @return Complete checked handle with a fresh allocation identity.
+   * @throws std::invalid_argument for missing owner/native handle, zero size,
+   * or a host domain without a host pointer.
+   * @throws std::overflow_error when allocation identity is exhausted.
+   * @throws std::bad_alloc when control-block allocation fails.
+   * @note Only the source-private pending-device publisher can construct this
+   *       binding. The public handle exposes neither native_handle nor owner.
+   */
+  static BufferHandle retain_external_binding(std::shared_ptr<void> owner,
+                                              void* native_handle,
+                                              std::byte* host_pointer,
+                                              std::size_t size, DeviceId device,
+                                              MemoryDomain memory_domain);
+
+  /**
    * @brief Returns the range start for a retaining friend access object.
    *
    * @return Const pointer inside the retained allocation.
@@ -219,6 +324,16 @@ class BufferHandle final {
    */
   std::byte* write_pointer() const noexcept;
 
+  /**
+   * @brief Returns the opaque native handle to a trusted transfer
+   * implementation.
+   * @return Non-null native handle for an external binding, otherwise null.
+   * @throws Nothing.
+   * @note The returned pointer borrows `control_` and never leaves
+   *       source-private device execution code.
+   */
+  void* native_handle() const noexcept;
+
   /** @brief Shared allocation control block, or null for an invalid handle. */
   std::shared_ptr<ControlBlock> control_;
 
@@ -231,6 +346,7 @@ class BufferHandle final {
   friend class ReadLease;
   friend class PendingValueProducer;
   friend class PendingValuePublisher;
+  friend class PendingDeviceValuePublisher;
   friend class ValueBuilder;
   friend class WriteLease;
 };

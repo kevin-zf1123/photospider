@@ -10,7 +10,7 @@
 
 /**
  * @file pending_value.hpp
- * @brief Source-private pending CPU Value producer authority.
+ * @brief Source-private pending CPU and native Value publication authority.
  */
 
 namespace ps {
@@ -176,6 +176,8 @@ class PendingValuePublisher final {
    * @param image_facet Optional explicit image-axis mapping.
    * @param layout Positive exact producer layout.
    * @param storage_size Exact positive allocation byte length.
+   * @param replica_revision Optional existing logical revision preserved by an
+   * explicit CPU replica transfer; absence mints a new logical revision.
    * @return Pending Value and its unique private producer capability.
    * @throws std::invalid_argument for malformed descriptor, facet, layout, or
    *         storage envelope.
@@ -186,7 +188,151 @@ class PendingValuePublisher final {
    */
   static PendingValuePublication allocate_cpu_dense_tensor(
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
-      StridedLayout layout, std::size_t storage_size);
+      StridedLayout layout, std::size_t storage_size,
+      std::optional<ValueRevisionId> replica_revision = std::nullopt);
+};
+
+/**
+ * @brief Move-only terminal capability for one pending native Value binding.
+ *
+ * @throws Nothing for movement and destruction.
+ * @note This source-private producer exposes no payload pointer or native
+ * handle. The device/transfer implementation must retire its own mutable
+ * native command capability before invoking a terminal method.
+ */
+class PendingDeviceValueProducer final {
+ public:
+  /**
+   * @brief Prevents duplicating terminal publication authority.
+   * @param other Unused source because copying is forbidden.
+   * @throws Nothing because this operation is deleted.
+   */
+  PendingDeviceValueProducer(const PendingDeviceValueProducer&) = delete;
+  /**
+   * @brief Prevents assigning duplicate terminal authority.
+   * @param other Unused source because copying is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing because this operation is deleted.
+   */
+  PendingDeviceValueProducer& operator=(const PendingDeviceValueProducer&) =
+      delete;
+
+  /**
+   * @brief Transfers the complete unresolved capability.
+   * @param other Producer made inactive.
+   * @throws Nothing.
+   */
+  PendingDeviceValueProducer(PendingDeviceValueProducer&& other) noexcept =
+      default;
+
+  /**
+   * @brief Replaces this capability after cancelling prior unresolved state.
+   * @param other Producer made inactive.
+   * @return This producer after transfer.
+   * @throws Nothing.
+   */
+  PendingDeviceValueProducer& operator=(
+      PendingDeviceValueProducer&& other) noexcept;
+
+  /**
+   * @brief Publishes ProducerCancelled for unresolved state.
+   * @throws Nothing.
+   */
+  ~PendingDeviceValueProducer() noexcept;
+
+  /**
+   * @brief Reports whether terminal authority remains.
+   * @return True before movement or terminal publication.
+   * @throws Nothing.
+   */
+  bool valid() const noexcept;
+
+  /**
+   * @brief Publishes Ready after caller-side producer/visibility retirement.
+   * @return True only for the unique terminal transition.
+   * @throws Nothing.
+   */
+  bool complete_ready() noexcept;
+
+  /**
+   * @brief Publishes a typed native production or transfer failure.
+   * @param failure Complete failure diagnostic.
+   * @return True only for the unique terminal transition.
+   * @throws std::bad_alloc when retained diagnostic storage cannot allocate.
+   */
+  bool complete_failed(ReadyFenceFailure failure);
+
+  /**
+   * @brief Publishes ProducerCancelled.
+   * @return True only for the unique terminal transition.
+   * @throws Nothing.
+   */
+  bool cancel() noexcept;
+
+ private:
+  /**
+   * @brief Binds one unique fence completer.
+   * @param completer Matching terminal publication capability.
+   * @throws Nothing.
+   */
+  explicit PendingDeviceValueProducer(FenceCompleter completer) noexcept
+      : completer_(std::move(completer)) {}
+
+  /** @brief Unique terminal capability, or invalid after settlement. */
+  FenceCompleter completer_;
+
+  friend class PendingDeviceValuePublisher;
+};
+
+/**
+ * @brief One pending native/replica Value and its private terminal capability.
+ *
+ * @throws Nothing for movement and destruction.
+ * @note Copying is disabled transitively by PendingDeviceValueProducer.
+ */
+struct PendingDeviceValuePublication final {
+  /** @brief Immutable Value whose producer fence initially reports Pending. */
+  Value value;
+  /** @brief Unique source-private terminal capability. */
+  PendingDeviceValueProducer producer;
+};
+
+/**
+ * @brief Source-private factory for retained native and external bindings.
+ *
+ * @throws Nothing for construction and destruction.
+ * @note The class is not installed and does not change operation ABI v2.
+ */
+class PendingDeviceValuePublisher final {
+ public:
+  /**
+   * @brief Publishes a validated pending DenseTensor over external storage.
+   *
+   * @param descriptor Logical descriptor copied into immutable state.
+   * @param image_facet Optional explicit image-axis mapping.
+   * @param layout Signed validated physical layout.
+   * @param owner Non-null owner retaining the complete native allocation.
+   * @param native_handle Non-null opaque native allocation handle.
+   * @param host_pointer Optional host-visible allocation start.
+   * @param storage_size Positive checked allocation envelope.
+   * @param device Concrete process-local device binding.
+   * @param memory_domain Explicit allocation domain.
+   * @param replica_revision Optional existing logical revision preserved by an
+   *        explicit residency transfer; absence mints a new source revision.
+   * @return Pending Value plus unique terminal capability.
+   * @throws std::invalid_argument for malformed logical, binding, or envelope
+   * state.
+   * @throws std::out_of_range when the layout escapes the allocation.
+   * @throws std::overflow_error when identity or envelope arithmetic overflows.
+   * @throws std::bad_alloc when immutable/control state cannot allocate.
+   * @note Publication performs no payload access and submits no native work.
+   */
+  static PendingDeviceValuePublication publish_dense_tensor(
+      DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
+      StridedLayout layout, std::shared_ptr<void> owner, void* native_handle,
+      std::byte* host_pointer, std::size_t storage_size, DeviceId device,
+      MemoryDomain memory_domain,
+      std::optional<ValueRevisionId> replica_revision = std::nullopt);
 };
 
 }  // namespace ps

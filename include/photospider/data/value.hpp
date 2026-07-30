@@ -7,18 +7,20 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/memory/access_plan.hpp"
 #include "photospider/memory/buffer_handle.hpp"
 #include "photospider/memory/ready_fence.hpp"
 #include "photospider/memory/strided_layout.hpp"
 
 /**
  * @file value.hpp
- * @brief Immutable CPU DenseTensor Value and checked tensor-view contracts.
+ * @brief Immutable explicit-binding DenseTensor and host-view contracts.
  */
 
 namespace ps {
 
 class PendingValuePublisher;
+class PendingDeviceValuePublisher;
 
 /**
  * @brief Identifies the logical interpretation of one tensor element.
@@ -61,7 +63,7 @@ struct StorageEncoding {
 };
 
 /**
- * @brief Concrete logical descriptor for one CPU DenseTensor.
+ * @brief Concrete logical descriptor for one DenseTensor Value.
  *
  * @throws std::bad_alloc when copying the shape vector allocates and fails.
  * @note Shape and logical element facts do not describe physical strides,
@@ -207,6 +209,77 @@ class ValueRevisionId final {
   std::uint64_t value_ = 0U;
 
   friend class PendingValuePublisher;
+  friend class PendingDeviceValuePublisher;
+  friend class Value;
+  friend class ValueBuilder;
+};
+
+/**
+ * @brief Opaque process-local identity of one Value producer or transfer.
+ *
+ * @throws Nothing for default construction, copying, comparison, and
+ * destruction.
+ * @note A producer token is distinct from Run, task, allocation, Value
+ * revision, backend, cache, and persistence identities. Issued tokens are
+ * never reused by the shared operation runtime.
+ */
+class ProducerIdentity final {
+ public:
+  /**
+   * @brief Creates an invalid producer sentinel.
+   * @throws Nothing.
+   */
+  constexpr ProducerIdentity() noexcept = default;
+
+  /**
+   * @brief Reports whether this token was issued.
+   * @return True when the process-local scalar is nonzero.
+   * @throws Nothing.
+   */
+  constexpr bool valid() const noexcept { return value_ != 0U; }
+
+  /**
+   * @brief Returns the diagnostic process-local scalar.
+   * @return Zero for invalid, otherwise a nonzero issued token.
+   * @throws Nothing.
+   * @note Callers must not serialize or persist this value.
+   */
+  constexpr std::uint64_t value() const noexcept { return value_; }
+
+  /**
+   * @brief Compares complete producer identity.
+   * @param other Identity to compare.
+   * @return True when both scalar values match.
+   * @throws Nothing.
+   */
+  constexpr bool operator==(const ProducerIdentity& other) const noexcept {
+    return value_ == other.value_;
+  }
+
+  /**
+   * @brief Compares producer identity for inequality.
+   * @param other Identity to compare.
+   * @return True when scalar values differ.
+   * @throws Nothing.
+   */
+  constexpr bool operator!=(const ProducerIdentity& other) const noexcept {
+    return !(*this == other);
+  }
+
+ private:
+  /**
+   * @brief Constructs one issued producer token.
+   * @param value Nonzero shared-runtime scalar.
+   * @throws Nothing.
+   */
+  explicit constexpr ProducerIdentity(std::uint64_t value) noexcept
+      : value_(value) {}
+
+  /** @brief Nonzero process-local scalar, or zero sentinel. */
+  std::uint64_t value_ = 0U;
+
+  friend class PendingDeviceValuePublisher;
+  friend class PendingValuePublisher;
   friend class Value;
   friend class ValueBuilder;
 };
@@ -337,17 +410,17 @@ class ValueBuilder final {
 };
 
 /**
- * @brief Immutable owning handle for one validated CPU DenseTensor payload.
+ * @brief Immutable owning handle for one validated DenseTensor publication.
  *
  * Value uses a shared immutable PImpl. Copies share one descriptor, layout,
- * facet, BufferHandle, ReadyFence, allocation identity, and Value revision.
- * Readable pointers are available only after Ready through retaining checked
- * views and ReadLease.
+ * facet, BufferHandle, ReadyFence, binding, producer, allocation identity, and
+ * Value revision. Host-readable pointers are available only after Ready,
+ * explicit access-plan visibility discharge, and a retaining ReadLease.
  *
  * @throws Nothing for default, copy, move, assignment, and destruction.
- * @note V-6 implements one bounded CPU readiness and explicit-copy-transfer
- * subset. General device identity, AccessPlan, visibility work, residency,
- * native execution, and stale-completion commit remain later contracts.
+ * @note V-8 implements explicit CPU/Metal binding and access observations.
+ * Native creation and replica publication remain source-private; public
+ * payload access never waits, maps, imports, or transfers implicitly.
  */
 class Value final {
  public:
@@ -391,7 +464,7 @@ class Value final {
                                      std::vector<std::byte> storage);
 
   /**
-   * @brief Publishes an immutable logical view over a sealed CPU buffer.
+   * @brief Publishes an immutable logical view over a sealed buffer binding.
    *
    * Validation checks the descriptor and facet, then computes the complete
    * lower/upper signed-stride envelope from `layout.byte_offset`. Positive,
@@ -401,7 +474,7 @@ class Value final {
    * @param descriptor Concrete logical descriptor copied into immutable state.
    * @param image_facet Optional explicit image-axis mapping.
    * @param layout Signed byte strides and logical-origin byte offset.
-   * @param buffer Sealed immutable range retained by the new Value.
+   * @param buffer Sealed immutable range and binding retained by the new Value.
    * @return Valid Value with a fresh revision and buffer allocation identity.
    * @throws std::invalid_argument for malformed descriptor, facet, layout rank,
    * or an invalid buffer.
@@ -469,15 +542,42 @@ class Value final {
   ReadyFence ready_fence() const;
 
   /**
-   * @brief Returns the immutable checked CPU allocation range.
+   * @brief Returns immutable facts for this Value's current storage binding.
+   * @return Allocation, concrete device, memory domain, size, and visibility.
+   * @throws std::logic_error when the handle is invalid.
+   * @note Binding observation grants no pointer, mapping, transfer, cache, or
+   *       persistence authority.
+   */
+  StorageBinding storage_binding() const;
+
+  /**
+   * @brief Returns the producer or transfer identity of this publication.
+   * @return Nonzero process-local producer token.
+   * @throws std::logic_error when the handle is invalid.
+   */
+  ProducerIdentity producer_identity() const;
+
+  /**
+   * @brief Classifies access to this Value without touching payload bytes.
+   * @param target Explicit consumer capability.
+   * @return Current V-8 Direct, Transfer, or Unsupported plan.
+   * @throws std::invalid_argument when the handle is invalid.
+   * @throws std::logic_error for inconsistent retained binding facts.
+   * @note The operation polls the ReadyFence without waiting, touches no
+   * payload, and queues no work.
+   */
+  AccessPlan plan_access(AccessTarget target) const;
+
+  /**
+   * @brief Returns the immutable checked allocation range after producer Ready.
    *
    * @return Borrowed BufferHandle retained by this Value.
    * @throws std::logic_error when the handle is invalid.
    * @throws ReadyFenceAccessError when producer completion is Pending, Failed,
    *         or ProducerCancelled.
-   * @note Callers may copy, subrange, or acquire a ReadLease from the handle;
-   * no raw pointer is exposed by Value. The current fixed CPU binding has
-   * already discharged direct host visibility before its Ready publication.
+   * @note Callers may copy or subrange any binding. Acquiring a ReadLease also
+   * requires host visibility and otherwise throws BufferAccessError; no raw or
+   * native pointer is exposed by Value.
    */
   const BufferHandle& buffer_handle() const;
 
@@ -522,6 +622,7 @@ class Value final {
   std::shared_ptr<const Impl> impl_;
 
   friend class PendingValuePublisher;
+  friend class PendingDeviceValuePublisher;
   friend class ValueBuilder;
 };
 
@@ -530,6 +631,7 @@ class Value final {
  *
  * @throws std::invalid_argument when construction receives an invalid Value.
  * @throws ReadyFenceAccessError when the retained Value is not Ready.
+ * @throws BufferAccessError when the retained binding is not host-visible.
  * @note Copy and copy-like move operations are noexcept. The view stores a
  *       complete Value, so addresses outlive a caller's separate handle but
  *       never outlive the view.
@@ -537,12 +639,13 @@ class Value final {
 class DenseTensorView final {
  public:
   /**
-   * @brief Retains a valid CPU DenseTensor Value.
+   * @brief Retains a valid Ready host-visible DenseTensor Value.
    *
    * @param value Value copied or moved into the view.
    * @throws std::invalid_argument when value is invalid.
    * @throws ReadyFenceAccessError when value producer completion is Pending,
    *         Failed, or ProducerCancelled.
+   * @throws BufferAccessError when value has no host-visible binding.
    * @note Construction acquires one ReadLease retained with the Value.
    */
   explicit DenseTensorView(Value value);
