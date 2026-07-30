@@ -8,10 +8,14 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace ps {
 namespace {
@@ -70,6 +74,22 @@ ResourceVector subtract_resources(const ResourceVector& lhs,
   };
 }
 
+/**
+ * @brief Subtracts one known-fitting device resource vector.
+ * @param lhs Vector containing at least every `rhs` dimension.
+ * @param rhs Vector removed exactly.
+ * @return Component-wise difference.
+ * @throws Nothing.
+ * @note Callers validate `device_resources_fit(rhs, lhs)` first.
+ */
+DeviceResourceVector subtract_device_resources(
+    const DeviceResourceVector& lhs, const DeviceResourceVector& rhs) noexcept {
+  return DeviceResourceVector{
+      lhs.device_memory_bytes - rhs.device_memory_bytes,
+      lhs.device_scratch_bytes - rhs.device_scratch_bytes,
+  };
+}
+
 }  // namespace
 
 /**
@@ -81,12 +101,44 @@ ResourceVector subtract_resources(const ResourceVector& lhs,
  */
 struct ResourceLedgerRootState final {
   /**
+   * @brief Mutable accounting state for one immutable configured device.
+   *
+   * @throws Nothing for value operations.
+   * @note Access is serialized by the enclosing root mutex.
+   */
+  struct DeviceAccount final {
+    /** @brief Immutable-by-convention composition limit. */
+    DeviceResourceVector limits;
+
+    /** @brief Current planned or actual byte commitment. */
+    DeviceResourceVector reserved;
+  };
+
+  /**
    * @brief Stores immutable composition-root limits.
    * @param configured_limits Exact maximum vector.
-   * @throws Nothing.
+   * @param configured_device_limits Per-device non-CPU limits.
+   * @throws std::invalid_argument for CPU or duplicate device identities.
+   * @throws std::bad_alloc when the deterministic account index cannot grow.
    */
-  explicit ResourceLedgerRootState(ResourceVector configured_limits) noexcept
-      : limits(configured_limits) {}
+  ResourceLedgerRootState(
+      ResourceVector configured_limits,
+      const std::vector<DeviceResourceLimit>& configured_device_limits)
+      : limits(configured_limits) {
+    for (const DeviceResourceLimit& configured : configured_device_limits) {
+      if (configured.device.backend() == DeviceBackend::CPU) {
+        throw std::invalid_argument(
+            "ResourceLedger device limits must not contain CPU.");
+      }
+      const auto [unused, inserted] = devices.emplace(
+          configured.device, DeviceAccount{configured.resources, {}});
+      static_cast<void>(unused);
+      if (!inserted) {
+        throw std::invalid_argument(
+            "ResourceLedger device limits contain a duplicate DeviceId.");
+      }
+    }
+  }
 
   /** @brief Serializes every root commit and release. */
   mutable std::mutex mutex;
@@ -96,6 +148,9 @@ struct ResourceLedgerRootState final {
 
   /** @brief Current vector committed by root reservations. */
   ResourceVector reserved;
+
+  /** @brief Deterministically ordered configured device accounts. */
+  std::map<DeviceId, DeviceAccount> devices;
 };
 
 /**
@@ -272,6 +327,251 @@ bool resources_fit(const ResourceVector& requested,
          requested.scratch_bytes <= available.scratch_bytes &&
          requested.ready_entries <= available.ready_entries &&
          requested.ready_bytes <= available.ready_bytes;
+}
+
+/** @copydoc operator==(const DeviceResourceVector&, const
+ * DeviceResourceVector&) */
+bool operator==(const DeviceResourceVector& lhs,
+                const DeviceResourceVector& rhs) noexcept {
+  return lhs.device_memory_bytes == rhs.device_memory_bytes &&
+         lhs.device_scratch_bytes == rhs.device_scratch_bytes;
+}
+
+/** @copydoc operator!=(const DeviceResourceVector&, const
+ * DeviceResourceVector&) */
+bool operator!=(const DeviceResourceVector& lhs,
+                const DeviceResourceVector& rhs) noexcept {
+  return !(lhs == rhs);
+}
+
+/** @copydoc checked_add_device_resources */
+std::optional<DeviceResourceVector> checked_add_device_resources(
+    const DeviceResourceVector& lhs, const DeviceResourceVector& rhs) noexcept {
+  DeviceResourceVector sum;
+  if (!checked_add_dimension(lhs.device_memory_bytes, rhs.device_memory_bytes,
+                             &sum.device_memory_bytes) ||
+      !checked_add_dimension(lhs.device_scratch_bytes, rhs.device_scratch_bytes,
+                             &sum.device_scratch_bytes)) {
+    return std::nullopt;
+  }
+  return sum;
+}
+
+/** @copydoc device_resources_fit */
+bool device_resources_fit(const DeviceResourceVector& requested,
+                          const DeviceResourceVector& available) noexcept {
+  return requested.device_memory_bytes <= available.device_memory_bytes &&
+         requested.device_scratch_bytes <= available.device_scratch_bytes;
+}
+
+/** @copydoc DeviceResourceError::DeviceResourceError */
+DeviceResourceError::DeviceResourceError(DeviceResourceErrorCode code,
+                                         DeviceId device,
+                                         DeviceResourceVector planned,
+                                         DeviceResourceVector actual,
+                                         std::string message)
+    : std::runtime_error(std::move(message)),
+      code_(code),
+      device_(device),
+      planned_(planned),
+      actual_(actual) {}  // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc ResourceLedger::DeviceReservation::DeviceReservation */
+ResourceLedger::DeviceReservation::DeviceReservation(
+    std::shared_ptr<ResourceLedgerRootState> root, DeviceId device,
+    DeviceResourceVector planned) noexcept
+    : root_(std::move(root)),  // NOLINT(whitespace/indent_namespace)
+      device_(device),         // NOLINT(whitespace/indent_namespace)
+      planned_(planned) {}     // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc ResourceLedger::DeviceReservation::DeviceReservation */
+ResourceLedger::DeviceReservation::DeviceReservation(
+    DeviceReservation&& other) noexcept
+    : root_(std::move(other.root_)),  // NOLINT(whitespace/indent_namespace)
+      device_(other.device_),         // NOLINT(whitespace/indent_namespace)
+      planned_(other.planned_) {      // NOLINT(whitespace/indent_namespace)
+  other.device_ = DeviceId(DeviceBackend::CPU);
+  other.planned_ = {};
+}
+
+/** @copydoc ResourceLedger::DeviceReservation::operator= */
+ResourceLedger::DeviceReservation& ResourceLedger::DeviceReservation::operator=(
+    DeviceReservation&& other) noexcept {
+  if (this != &other) {
+    reset();
+    root_ = std::move(other.root_);
+    device_ = other.device_;
+    planned_ = other.planned_;
+    other.device_ = DeviceId(DeviceBackend::CPU);
+    other.planned_ = {};
+  }
+  return *this;
+}
+
+/** @copydoc ResourceLedger::DeviceReservation::~DeviceReservation */
+ResourceLedger::DeviceReservation::~DeviceReservation() noexcept {
+  reset();
+}
+
+/** @copydoc ResourceLedger::DeviceReservation::active */
+bool ResourceLedger::DeviceReservation::active() const noexcept {
+  return root_ != nullptr;
+}
+
+/** @copydoc ResourceLedger::DeviceReservation::device */
+DeviceId ResourceLedger::DeviceReservation::device() const noexcept {
+  return device_;
+}
+
+/** @copydoc ResourceLedger::DeviceReservation::planned_resources */
+DeviceResourceVector ResourceLedger::DeviceReservation::planned_resources()
+    const noexcept {
+  return planned_;
+}
+
+/** @copydoc ResourceLedger::DeviceReservation::commit_actual */
+ResourceLedger::DeviceLeasePair
+ResourceLedger::DeviceReservation::commit_actual(DeviceResourceVector actual) {
+  if (!root_) {
+    throw std::logic_error(
+        "Cannot commit actual bytes through an inactive device reservation.");
+  }
+  if (!device_resources_fit(actual, planned_)) {
+    throw DeviceResourceError(
+        DeviceResourceErrorCode::ActualExceedsReservation, device_, planned_,
+        actual, "Native actual device bytes exceed the admitted plan.");
+  }
+
+  const DeviceResourceVector persistent_resources{actual.device_memory_bytes,
+                                                  0U};
+  const DeviceResourceVector scratch_resources{0U, actual.device_scratch_bytes};
+
+  {
+    std::lock_guard<std::mutex> lock(root_->mutex);
+    const auto account = root_->devices.find(device_);
+    if (account == root_->devices.end() ||
+        !device_resources_fit(planned_, account->second.reserved)) {
+      throw std::logic_error(
+          "Device reservation no longer matches its ledger account.");
+    }
+    const DeviceResourceVector unused =
+        subtract_device_resources(planned_, actual);
+    account->second.reserved =
+        subtract_device_resources(account->second.reserved, unused);
+  }
+
+  DeviceLease persistent =
+      persistent_resources == DeviceResourceVector{}
+          ? DeviceLease()
+          : DeviceLease(root_, device_, persistent_resources);
+  DeviceLease scratch = scratch_resources == DeviceResourceVector{}
+                            ? DeviceLease()
+                            : DeviceLease(root_, device_, scratch_resources);
+  root_.reset();
+  device_ = DeviceId(DeviceBackend::CPU);
+  planned_ = {};
+  return DeviceLeasePair{std::move(persistent), std::move(scratch)};
+}
+
+/** @copydoc ResourceLedger::DeviceReservation::reset */
+void ResourceLedger::DeviceReservation::reset() noexcept {
+  if (!root_) {
+    return;
+  }
+
+  std::shared_ptr<ResourceLedgerRootState> root = std::move(root_);
+  const DeviceId device = device_;
+  const DeviceResourceVector planned = planned_;
+  device_ = DeviceId(DeviceBackend::CPU);
+  planned_ = {};
+  try {
+    std::lock_guard<std::mutex> lock(root->mutex);
+    const auto account = root->devices.find(device);
+    if (account == root->devices.end() ||
+        !device_resources_fit(planned, account->second.reserved)) {
+      std::terminate();
+    }
+    account->second.reserved =
+        subtract_device_resources(account->second.reserved, planned);
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/** @copydoc ResourceLedger::DeviceLease::DeviceLease */
+ResourceLedger::DeviceLease::DeviceLease(
+    std::shared_ptr<ResourceLedgerRootState> root, DeviceId device,
+    DeviceResourceVector resources) noexcept
+    : root_(std::move(root)),   // NOLINT(whitespace/indent_namespace)
+      device_(device),          // NOLINT(whitespace/indent_namespace)
+      resources_(resources) {}  // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc ResourceLedger::DeviceLease::DeviceLease */
+ResourceLedger::DeviceLease::DeviceLease(DeviceLease&& other) noexcept
+    : root_(std::move(other.root_)),  // NOLINT(whitespace/indent_namespace)
+      device_(other.device_),         // NOLINT(whitespace/indent_namespace)
+      resources_(other.resources_) {  // NOLINT(whitespace/indent_namespace)
+  other.device_ = DeviceId(DeviceBackend::CPU);
+  other.resources_ = {};
+}
+
+/** @copydoc ResourceLedger::DeviceLease::operator= */
+ResourceLedger::DeviceLease& ResourceLedger::DeviceLease::operator=(
+    DeviceLease&& other) noexcept {
+  if (this != &other) {
+    reset();
+    root_ = std::move(other.root_);
+    device_ = other.device_;
+    resources_ = other.resources_;
+    other.device_ = DeviceId(DeviceBackend::CPU);
+    other.resources_ = {};
+  }
+  return *this;
+}
+
+/** @copydoc ResourceLedger::DeviceLease::~DeviceLease */
+ResourceLedger::DeviceLease::~DeviceLease() noexcept {
+  reset();
+}
+
+/** @copydoc ResourceLedger::DeviceLease::active */
+bool ResourceLedger::DeviceLease::active() const noexcept {
+  return root_ != nullptr;
+}
+
+/** @copydoc ResourceLedger::DeviceLease::device */
+DeviceId ResourceLedger::DeviceLease::device() const noexcept {
+  return device_;
+}
+
+/** @copydoc ResourceLedger::DeviceLease::resources */
+DeviceResourceVector ResourceLedger::DeviceLease::resources() const noexcept {
+  return resources_;
+}
+
+/** @copydoc ResourceLedger::DeviceLease::reset */
+void ResourceLedger::DeviceLease::reset() noexcept {
+  if (!root_) {
+    return;
+  }
+
+  std::shared_ptr<ResourceLedgerRootState> root = std::move(root_);
+  const DeviceId device = device_;
+  const DeviceResourceVector resources = resources_;
+  device_ = DeviceId(DeviceBackend::CPU);
+  resources_ = {};
+  try {
+    std::lock_guard<std::mutex> lock(root->mutex);
+    const auto account = root->devices.find(device);
+    if (account == root->devices.end() ||
+        !device_resources_fit(resources, account->second.reserved)) {
+      std::terminate();
+    }
+    account->second.reserved =
+        subtract_device_resources(account->second.reserved, resources);
+  } catch (...) {
+    std::terminate();
+  }
 }
 
 /** @copydoc ResourceLedger::Reservation::Reservation */
@@ -473,8 +773,10 @@ void ResourceLedger::Grant::reset() noexcept {
 }
 
 /** @copydoc ResourceLedger::ResourceLedger */
-ResourceLedger::ResourceLedger(ResourceVector limits)
-    : state_(std::make_shared<ResourceLedgerRootState>(limits)) {}
+ResourceLedger::ResourceLedger(ResourceVector limits,
+                               std::vector<DeviceResourceLimit> device_limits)
+    : state_(std::make_shared<ResourceLedgerRootState>(limits, device_limits)) {
+}
 
 /** @copydoc ResourceLedger::~ResourceLedger */
 ResourceLedger::~ResourceLedger() noexcept = default;
@@ -521,10 +823,63 @@ std::optional<ResourceLedger::ReservationPair> ResourceLedger::try_reserve_pair(
                          Reservation(std::move(second_state))};
 }
 
+/** @copydoc ResourceLedger::try_reserve_device */
+std::optional<ResourceLedger::DeviceReservation>
+ResourceLedger::try_reserve_device(DeviceId device,
+                                   const DeviceResourceVector& planned) {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  const auto account = state_->devices.find(device);
+  if (account == state_->devices.end()) {
+    return std::nullopt;
+  }
+  const std::optional<DeviceResourceVector> next_reserved =
+      checked_add_device_resources(account->second.reserved, planned);
+  if (!next_reserved.has_value() ||
+      !device_resources_fit(*next_reserved, account->second.limits)) {
+    return std::nullopt;
+  }
+  account->second.reserved = *next_reserved;
+  return DeviceReservation(state_, device, planned);
+}
+
 /** @copydoc ResourceLedger::snapshot */
 ResourceLedger::Snapshot ResourceLedger::snapshot() const {
   std::lock_guard<std::mutex> lock(state_->mutex);
   return Snapshot{state_->limits, state_->reserved};
+}
+
+/** @copydoc ResourceLedger::device_snapshot */
+std::optional<ResourceLedger::DeviceSnapshot> ResourceLedger::device_snapshot(
+    DeviceId device) const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  const auto account = state_->devices.find(device);
+  if (account == state_->devices.end()) {
+    return std::nullopt;
+  }
+  return DeviceSnapshot{
+      device,
+      account->second.limits,
+      account->second.reserved,
+      subtract_device_resources(account->second.limits,
+                                account->second.reserved),
+  };
+}
+
+/** @copydoc ResourceLedger::device_snapshots */
+std::vector<ResourceLedger::DeviceSnapshot> ResourceLedger::device_snapshots()
+    const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  std::vector<DeviceSnapshot> snapshots;
+  snapshots.reserve(state_->devices.size());
+  for (const auto& [device, account] : state_->devices) {
+    snapshots.push_back(DeviceSnapshot{
+        device,
+        account.limits,
+        account.reserved,
+        subtract_device_resources(account.limits, account.reserved),
+    });
+  }
+  return snapshots;
 }
 
 }  // namespace ps

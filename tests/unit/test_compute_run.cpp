@@ -2181,9 +2181,13 @@ void expect_policy_runs_settle(std::vector<AsyncPolicyRun>& runs) {
  */
 ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
   return ExecutionResourceLimits{
-      resources.cpu_slots,     resources.retained_memory_bytes,
-      resources.scratch_bytes, resources.ready_entries,
-      resources.ready_bytes,   ResourceVector{},
+      resources.cpu_slots,
+      resources.retained_memory_bytes,
+      resources.scratch_bytes,
+      resources.ready_entries,
+      resources.ready_bytes,
+      ResourceVector{},
+      {},
   };
 }
 
@@ -4847,8 +4851,8 @@ TEST(ExecutionService, RejectsEveryNonCpuRunDimensionAndRecoversExactly) {
  */
 TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
   constexpr std::uint64_t kMaximum = std::numeric_limits<std::uint64_t>::max();
-  const ExecutionResourceLimits limits{1U,       kMaximum, kMaximum,
-                                       kMaximum, kMaximum, ResourceVector{}};
+  const ExecutionResourceLimits limits{
+      1U, kMaximum, kMaximum, kMaximum, kMaximum, ResourceVector{}, {}};
   constexpr ReadyTaskResourceDemand kOverflowDemand{1U, 1U, kMaximum};
   ExecutionService service(1U, limits);
   ExecutionServiceHost host;

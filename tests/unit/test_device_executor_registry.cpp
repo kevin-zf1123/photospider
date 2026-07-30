@@ -31,14 +31,24 @@ class TestMetalExecutionContext final : public MetalExecutionContext {
     return const_cast<std::uint8_t*>(&queue_token_);
   }
 
-  /** @copydoc MetalExecutionContext::allocate_float32_texture_2d */
-  NativeHandle allocate_float32_texture_2d(std::uint32_t,
-                                           std::uint32_t) override {
+  /** @copydoc
+   * MetalExecutionContext::prepare_float32_texture_to_host_resources */
+  void prepare_float32_texture_to_host_resources(
+      std::uint32_t, std::uint32_t, const std::vector<std::size_t>&) override {
+    throw std::logic_error("native resource planning is outside this test");
+  }
+
+  /** @copydoc
+   * MetalExecutionContext::allocate_persistent_float32_texture_2d */
+  NativeHandle allocate_persistent_float32_texture_2d(std::uint32_t,
+                                                      std::uint32_t) override {
     throw std::logic_error("native texture allocation is outside this test");
   }
 
-  /** @copydoc MetalExecutionContext::allocate_shared_buffer_copy */
-  NativeHandle allocate_shared_buffer_copy(const void*, std::size_t) override {
+  /** @copydoc
+   * MetalExecutionContext::allocate_device_scratch_buffer_copy */
+  NativeHandle allocate_device_scratch_buffer_copy(const void*,
+                                                   std::size_t) override {
     throw std::logic_error("native buffer allocation is outside this test");
   }
 
@@ -194,11 +204,20 @@ class ContextRecordingInvocation final : public DeviceExecutorInvocation {
     observed_context = current_metal_execution_context();
   }
 
+  /** @copydoc DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
+
   /** @brief Number of callback entries. */
   int runs = 0;
 
   /** @brief Context observed during the most recent entry. */
   MetalExecutionContext* observed_context = nullptr;
+
+ private:
+  /** @brief Empty test ledger unused by the recording executor. */
+  ResourceLedger resource_ledger_{ResourceVector{}};
 };
 
 /**
@@ -210,6 +229,15 @@ class ThrowingInvocation final : public DeviceExecutorInvocation {
  public:
   /** @copydoc DeviceExecutorInvocation::run */
   void run() override { throw std::runtime_error("exact provider failure"); }
+
+  /** @copydoc DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
+
+ private:
+  /** @brief Empty test ledger unused by the throwing executor. */
+  ResourceLedger resource_ledger_{ResourceVector{}};
 };
 
 /** @brief Exact product diagnostic for same-executor callback re-entry. */
@@ -242,9 +270,17 @@ class CallbackInvocation final : public DeviceExecutorInvocation {
   /** @copydoc DeviceExecutorInvocation::run */
   void run() override { callback_(); }
 
+  /** @copydoc DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
+
  private:
   /** @brief Callback owned for this invocation's complete lifetime. */
   Callback callback_;
+
+  /** @brief Empty test ledger unused by the callback executor. */
+  ResourceLedger resource_ledger_{ResourceVector{}};
 };
 
 /**

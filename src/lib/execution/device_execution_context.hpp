@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 #include "photospider/data/value.hpp"
 
@@ -51,28 +52,52 @@ class MetalExecutionContext {
   virtual NativeHandle command_queue_handle() const noexcept = 0;
 
   /**
-   * @brief Allocates one invocation-owned writable R32Float 2D texture.
+   * @brief Atomically reserves one texture-to-host invocation resource plan.
+   * @param width Positive persistent R32Float texture width.
+   * @param height Positive persistent R32Float texture height.
+   * @param auxiliary_scratch_lengths Positive scratch-buffer byte lengths that
+   * later `allocate_device_scratch_buffer_copy()` calls will consume in order.
+   * @return Nothing after the complete persistent texture, auxiliary buffers,
+   * and host-readback buffer plan is admitted for the exact Metal device.
+   * @throws std::invalid_argument for zero dimensions or scratch lengths.
+   * @throws std::overflow_error when exact native-size accumulation overflows.
+   * @throws DeviceResourceError when native planning is invalid or the device
+   * account cannot admit both dimensions atomically.
+   * @throws std::logic_error when a plan or publication already exists.
+   * @note This method allocates no native texture or buffer. Call it after
+   * pipeline resolution and before the first invocation allocation.
+   */
+  virtual void prepare_float32_texture_to_host_resources(
+      std::uint32_t width, std::uint32_t height,
+      const std::vector<std::size_t>& auxiliary_scratch_lengths) = 0;
+
+  /**
+   * @brief Allocates the planned persistent writable R32Float 2D texture.
    * @param width Positive texture width in pixels.
    * @param height Positive texture height in pixels.
    * @return Non-null opaque `id<MTLTexture>` retained through callback exit.
    * @throws std::invalid_argument for a zero dimension.
+   * @throws std::logic_error without a matching unconsumed resource plan.
    * @throws std::runtime_error when native allocation fails.
-   * @note The invocation allocator releases the texture after callback exit.
+   * @note Native ownership and its exact device-memory lease transfer to the
+   * pending resident Value when publication succeeds.
    */
-  virtual NativeHandle allocate_float32_texture_2d(std::uint32_t width,
-                                                   std::uint32_t height) = 0;
+  virtual NativeHandle allocate_persistent_float32_texture_2d(
+      std::uint32_t width, std::uint32_t height) = 0;
 
   /**
-   * @brief Allocates one invocation-owned shared buffer initialized by copy.
+   * @brief Allocates one planned device scratch buffer initialized by copy.
    * @param bytes Non-null source bytes borrowed for this call.
    * @param size Positive byte count.
    * @return Non-null opaque `id<MTLBuffer>` retained through callback exit.
    * @throws std::invalid_argument for null bytes or zero size.
+   * @throws std::logic_error without the next matching planned scratch length.
    * @throws std::runtime_error when native allocation fails.
-   * @note The source may retire immediately after this method returns.
+   * @note The source may retire immediately. Native ownership and the combined
+   * scratch lease transfer to the exact command-buffer completion owner.
    */
-  virtual NativeHandle allocate_shared_buffer_copy(const void* bytes,
-                                                   std::size_t size) = 0;
+  virtual NativeHandle allocate_device_scratch_buffer_copy(
+      const void* bytes, std::size_t size) = 0;
 
   /**
    * @brief Resolves one executor-lifetime compute pipeline.

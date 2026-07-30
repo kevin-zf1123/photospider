@@ -5,6 +5,8 @@
 #include <string>
 #include <utility>
 
+#include "runtime/resource_ledger.hpp"
+
 namespace ps::ops::detail {
 
 /**
@@ -17,9 +19,9 @@ namespace ps::ops::detail {
  * may update it while body executes.
  * @param body Operation body invoked exactly once.
  * @return The value returned by body.
- * @throws std::bad_alloc unchanged when body throws it; also propagates
- * std::bad_alloc raised while constructing a contextual diagnostic after a
- * non-allocation exception.
+ * @throws std::bad_alloc and DeviceResourceError unchanged when body throws
+ * either typed resource failure; also propagates std::bad_alloc raised while
+ * constructing a contextual diagnostic after another exception.
  * @throws std::runtime_error with operation/stage context for other standard or
  * unknown exceptions.
  * @note This portable helper is the executable contract seam used by the
@@ -33,6 +35,8 @@ decltype(auto) run_metal_exception_boundary(const char* operation,
   try {
     return std::forward<Fn>(body)();
   } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const DeviceResourceError&) {
     throw;
   } catch (const std::exception& error) {
     throw std::runtime_error(std::string(operation) + "[" + stage +

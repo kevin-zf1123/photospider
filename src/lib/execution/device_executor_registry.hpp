@@ -10,6 +10,7 @@
 #include "execution/device_completion.hpp"
 #include "execution/residency_manager.hpp"
 #include "photospider/core/device.hpp"
+#include "runtime/resource_ledger.hpp"
 
 /**
  * @file device_executor_registry.hpp
@@ -84,6 +85,15 @@ class DeviceExecutorInvocation {
   virtual void run() = 0;
 
   /**
+   * @brief Returns the service-owned device resource authority.
+   * @return Stable ledger borrowed through synchronous executor entry.
+   * @throws Nothing.
+   * @note Executors may mint plan reservations and transfer exact leases to
+   * native/completion owners. The invocation itself owns no ledger capacity.
+   */
+  virtual ResourceLedger& resource_ledger() noexcept = 0;
+
+  /**
    * @brief Returns exact asynchronous completion lineage when available.
    * @return Run/task seed for repository-owned native publication, or nullopt
    * for diagnostics and direct executor tests without a ComputeRun.
@@ -102,8 +112,9 @@ class DeviceExecutorInvocation {
  * @throws Concrete execution and diagnostics operations document native,
  * allocation, and synchronization failures.
  * @note Implementations are process-domain resources and own no Run, Graph,
- * ready queue, completion route, or `ResourceLedger` grant. Synchronous
- * callback entry is non-reentrant for the same concrete executor object.
+ * ready queue, or completion route. They borrow the invocation ledger and may
+ * transfer exact device leases only to native/completion lifetime owners.
+ * Synchronous callback entry is non-reentrant for the same executor object.
  */
 class DeviceExecutor {
  public:
@@ -278,7 +289,7 @@ class DeviceExecutorRegistry final {
    * @brief Returns the shared process-domain residency manager.
    * @return Non-null owner shared with repository native executors.
    * @throws Nothing.
-   * @note The manager owns replica identity/publication only, never issue-86
+   * @note The manager owns replica identity/publication only, never
    * device-memory or scratch ledger authority.
    */
   std::shared_ptr<ResidencyManager> residency_manager() const noexcept {

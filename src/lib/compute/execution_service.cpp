@@ -257,14 +257,23 @@ class ReadySubmissionDeviceInvocation final
    * @brief Binds one worker-owned submission and its existing runtime.
    * @param submission Started submission retained by the worker QueueEntry.
    * @param runtime Matching execution service completion boundary.
+   * @param resource_ledger Service-owned device accounting authority.
    * @throws Nothing.
    */
   ReadySubmissionDeviceInvocation(ReadyTaskSubmission& submission,
-                                  ExecutionTaskRuntime& runtime) noexcept
-      : submission_(submission), runtime_(runtime) {}
+                                  ExecutionTaskRuntime& runtime,
+                                  ResourceLedger& resource_ledger) noexcept
+      : submission_(submission),
+        runtime_(runtime),
+        resource_ledger_(resource_ledger) {}
 
   /** @copydoc execution::DeviceExecutorInvocation::run */
   void run() override { submission_.execute(runtime_); }
+
+  /** @copydoc execution::DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
 
   /** @copydoc execution::DeviceExecutorInvocation::completion_seed */
   std::optional<execution::DeviceCompletionSeed> completion_seed()
@@ -284,6 +293,10 @@ class ReadySubmissionDeviceInvocation final
 
   /** @brief Existing Run-scoped task runtime used by provider execution. */
   ExecutionTaskRuntime& runtime_;
+
+  /** @brief Service-owned ledger borrowed through synchronous executor entry.
+   */
+  ResourceLedger& resource_ledger_;
 };
 
 /**
@@ -3355,7 +3368,8 @@ class ExecutionService::PoolState final {
         throughput_reservations(std::make_shared<ThroughputReservationAccount>(
             calculate_general_capacity(resource_limits.resource_vector(),
                                        resource_limits.interactive_headroom))),
-        ledger(resource_limits.resource_vector()),
+        ledger(resource_limits.resource_vector(),
+               std::move(resource_limits.device_limits)),
         ready_store(resource_limits.ready_entries, resource_limits.ready_bytes,
                     telemetry, operation_gate) {
     interactive_binding->mark_service_published();
@@ -3752,7 +3766,7 @@ void notify_retained_operation_string_charge_for_testing(
 #endif
 
 /** @copydoc ExecutionService::default_resource_limits */
-ExecutionResourceLimits ExecutionService::default_resource_limits() noexcept {
+ExecutionResourceLimits ExecutionService::default_resource_limits() {
   constexpr std::uint64_t kOneMebibyte = 1024U * 1024U;
   return ExecutionResourceLimits{
       32U,
@@ -3762,6 +3776,9 @@ ExecutionResourceLimits ExecutionService::default_resource_limits() noexcept {
       256U * kOneMebibyte,
       ResourceVector{1U, 64U * kOneMebibyte, 32U * kOneMebibyte, 1024U,
                      16U * kOneMebibyte},
+      std::vector<DeviceResourceLimit>{DeviceResourceLimit{
+          DeviceId(DeviceBackend::Metal),
+          DeviceResourceVector{512U * kOneMebibyte, 256U * kOneMebibyte}}},
   };
 }
 
@@ -4133,6 +4150,12 @@ bool ExecutionService::is_execution_type(
 /** @copydoc ExecutionService::resource_snapshot */
 ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
   return pool_->ledger.snapshot();
+}
+
+/** @copydoc ExecutionService::device_resource_snapshot */
+std::optional<ResourceLedger::DeviceSnapshot>
+ExecutionService::device_resource_snapshot(DeviceId device) const {
+  return pool_->ledger.device_snapshot(device);
 }
 
 /** @copydoc ExecutionService::register_graph_lifecycle */
@@ -5521,7 +5544,8 @@ void ExecutionService::worker_loop(
       if (entry->submission.metadata().device() == Device::CPU) {
         entry->submission.execute(*this);
       } else {
-        ReadySubmissionDeviceInvocation invocation(entry->submission, *this);
+        ReadySubmissionDeviceInvocation invocation(entry->submission, *this,
+                                                   pool_->ledger);
         pool_->device_executors.execute(entry->submission.metadata().device(),
                                         invocation);
       }

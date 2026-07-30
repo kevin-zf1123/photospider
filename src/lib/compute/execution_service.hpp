@@ -79,13 +79,13 @@ struct OperationExecutionConstraints final {
 };
 
 /**
- * @brief Private composition-root limits for one CPU execution domain.
+ * @brief Private composition-root limits for one execution domain.
  *
- * This source-tree type carries every ledger dimension explicitly and converts
- * to the authority-neutral `ResourceVector` only when constructing the private
- * service.
+ * This source-tree type carries every Host ledger dimension explicitly plus
+ * independent concrete-device byte accounts. `resource_vector()` converts
+ * only the Host dimensions when constructing the private service.
  *
- * @throws Nothing for aggregate construction and conversion.
+ * @throws std::bad_alloc when copied device-limit storage cannot allocate.
  * @note This is not an installed policy API or execution extension surface.
  */
 struct ExecutionResourceLimits final {
@@ -116,6 +116,14 @@ struct ExecutionResourceLimits final {
    * Zero preserves the full ledger limit for every service class.
    */
   ResourceVector interactive_headroom;
+
+  /**
+   * @brief Immutable memory/scratch limits for each configured non-CPU device.
+   *
+   * @note Each complete `DeviceId` may occur once. These byte accounts neither
+   * consume nor borrow Host ledger capacity.
+   */
+  std::vector<DeviceResourceLimit> device_limits;
 
   /**
    * @brief Converts the complete private limit set to ledger dimensions.
@@ -849,11 +857,11 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
   /**
    * @brief Returns bounded product defaults supplied by the composition root.
-   * @return Ledger limits plus protected interactive admission headroom.
-   * @throws Nothing.
+   * @return Host and Metal ledger limits plus interactive admission headroom.
+   * @throws std::bad_alloc when default device-limit storage cannot allocate.
    * @note Tests and alternate products may inject smaller isolated limits.
    */
-  static ExecutionResourceLimits default_resource_limits() noexcept;
+  static ExecutionResourceLimits default_resource_limits();
 
   /**
    * @brief Creates an unconfigured execution domain with no worker threads.
@@ -865,7 +873,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Creates an unconfigured domain with explicit immutable limits.
-   * @param resource_limits Complete private Host-composed limits.
+   * @param resource_limits Complete private Host/device-composed limits.
    * @throws std::invalid_argument if interactive headroom exceeds a limit.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
    * @note The composition root must freeze workers before first Run admission.
@@ -875,7 +883,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Creates an unconfigured domain with an injected fixed device
    * registry.
-   * @param resource_limits Complete private Host-composed limits.
+   * @param resource_limits Complete private Host/device-composed limits.
    * @param device_executors Complete registry moved into process ownership.
    * @throws std::invalid_argument if interactive headroom exceeds a limit.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
@@ -899,7 +907,7 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Creates a configured domain with explicit immutable limits.
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
-   * @param resource_limits Complete private Host-composed limits.
+   * @param resource_limits Complete private Host/device-composed limits.
    * @throws std::invalid_argument if the worker request exceeds eight, the
    * configured CPU limit cannot permit the resolved fixed pool, or interactive
    * headroom exceeds a ledger limit.
@@ -1067,6 +1075,17 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::system_error from ledger snapshot locking.
    */
   ResourceLedger::Snapshot resource_snapshot() const;
+
+  /**
+   * @brief Copies one configured concrete-device resource account.
+   * @param device Exact process-local non-CPU device identity.
+   * @return Immutable limits/reserved/available snapshot, or nullopt when the
+   * service has no matching device account.
+   * @throws std::system_error from ledger snapshot locking.
+   * @note This diagnostic carries no native handle or release authority.
+   */
+  std::optional<ResourceLedger::DeviceSnapshot> device_resource_snapshot(
+      DeviceId device) const;
 
   /**
    * @brief Tests whether the fixed process registry owns one device executor.

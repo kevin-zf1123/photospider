@@ -205,19 +205,28 @@ plugin::OperationOutput op_perlin_noise_metal(
                       kPerlinPipelineCacheKey, kPerlinShaderSource,
                       kPerlinFunctionName);
 
+          dbg_stage = "resource_plan";
+          context.prepare_float32_texture_to_host_resources(
+              static_cast<std::uint32_t>(width),
+              static_cast<std::uint32_t>(height),
+              std::vector<std::size_t>{p_vec.size() * sizeof(int),
+                                       sizeof(scale)});
+
           dbg_stage = "create_texture";
           id<MTLTexture> out_texture =
-              (__bridge id<MTLTexture>)context.allocate_float32_texture_2d(
-                  static_cast<std::uint32_t>(width),
-                  static_cast<std::uint32_t>(height));
+              (__bridge id<MTLTexture>)
+                  context.allocate_persistent_float32_texture_2d(
+                      static_cast<std::uint32_t>(width),
+                      static_cast<std::uint32_t>(height));
 
           dbg_stage = "create_buffers";
           id<MTLBuffer> p_buffer =
-              (__bridge id<MTLBuffer>)context.allocate_shared_buffer_copy(
-                  p_vec.data(), p_vec.size() * sizeof(int));
+              (__bridge id<MTLBuffer>)
+                  context.allocate_device_scratch_buffer_copy(
+                      p_vec.data(), p_vec.size() * sizeof(int));
           id<MTLBuffer> scale_buffer =
-              (__bridge id<MTLBuffer>)context.allocate_shared_buffer_copy(
-                  &scale, sizeof(scale));
+              (__bridge id<MTLBuffer>)context
+                  .allocate_device_scratch_buffer_copy(&scale, sizeof(scale));
 
           dbg_stage = "encode";
           id<MTLCommandBuffer> command_buffer = [command_queue commandBuffer];

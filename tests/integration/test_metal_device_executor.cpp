@@ -29,6 +29,7 @@
 #include "execution/device_execution_context.hpp"
 #include "execution/device_executor_registry.hpp"
 #include "execution/execution_task_runtime.hpp"
+#include "execution/metal_device_executor.hpp"
 #include "metal/perlin_noise_metal.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "photospider/plugin/op_contract.hpp"
@@ -134,7 +135,13 @@ class CallbackDeviceExecutorInvocation final
       std::optional<execution::DeviceCompletionSeed> completion_seed =
           std::nullopt)
       : callback_(std::move(callback)),
-        completion_seed_(std::move(completion_seed)) {
+        completion_seed_(std::move(completion_seed)),
+        resource_ledger_(ResourceVector{},
+                         std::vector<DeviceResourceLimit>{DeviceResourceLimit{
+                             DeviceId(DeviceBackend::Metal),
+                             DeviceResourceVector{
+                                 std::numeric_limits<std::uint64_t>::max(),
+                                 std::numeric_limits<std::uint64_t>::max()}}}) {
     if (!callback_) {
       throw std::invalid_argument(
           "CallbackDeviceExecutorInvocation requires a callback.");
@@ -144,10 +151,25 @@ class CallbackDeviceExecutorInvocation final
   /** @copydoc execution::DeviceExecutorInvocation::run */
   void run() override { callback_(); }
 
+  /** @copydoc execution::DeviceExecutorInvocation::resource_ledger */
+  ResourceLedger& resource_ledger() noexcept override {
+    return resource_ledger_;
+  }
+
   /** @copydoc execution::DeviceExecutorInvocation::completion_seed */
   std::optional<execution::DeviceCompletionSeed> completion_seed()
       const override {
     return completion_seed_;
+  }
+
+  /**
+   * @brief Copies this direct invocation's Metal accounting state.
+   * @return Configured immutable snapshot, always present in these tests.
+   * @throws std::system_error when ledger snapshot locking fails.
+   */
+  std::optional<ResourceLedger::DeviceSnapshot> device_resource_snapshot()
+      const {
+    return resource_ledger_.device_snapshot(DeviceId(DeviceBackend::Metal));
   }
 
  private:
@@ -156,7 +178,38 @@ class CallbackDeviceExecutorInvocation final
 
   /** @brief Optional exact lineage copied into the invocation context. */
   std::optional<execution::DeviceCompletionSeed> completion_seed_;
+
+  /** @brief Isolated device-account authority for one direct native probe. */
+  ResourceLedger resource_ledger_;
 };
+
+/**
+ * @brief Waits for a direct invocation's terminal scratch-owner destruction.
+ * @param invocation Completed native invocation with a configured Metal ledger.
+ * @return First snapshot whose scratch commitment is zero.
+ * @throws std::runtime_error when the bounded completion-owner wait expires.
+ * @throws std::system_error when ledger snapshot locking fails.
+ * @note A Ready fence may become observable inside `settle()` immediately
+ * before the completion block releases its final scratch lease.
+ */
+ResourceLedger::DeviceSnapshot wait_for_scratch_release(
+    const CallbackDeviceExecutorInvocation& invocation) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  do {
+    const auto snapshot = invocation.device_resource_snapshot();
+    if (!snapshot.has_value()) {
+      throw std::runtime_error(
+          "Direct Metal invocation lost its configured device account.");
+    }
+    if (snapshot->reserved.device_scratch_bytes == 0U) {
+      return *snapshot;
+    }
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  throw std::runtime_error(
+      "Timed out waiting for Metal completion scratch release.");
+}
 
 /** @brief Exact exception text used by the native-allocation unwind probe. */
 constexpr char kExpectedFailure[] = "expected post-allocation Metal failure";
@@ -166,6 +219,32 @@ constexpr char kReentryError[] = "Same-executor callback re-entry denied.";
 
 /** @brief Process watchdog bound for the deliberate old-implementation hang. */
 constexpr unsigned int kExecutorReentryWatchdogSeconds = 5U;
+
+/**
+ * @brief Builds one fixed-size Ready FLOAT32 source for real upload tests.
+ * @param base First sample value; later values advance deterministically.
+ * @return Host-visible two-by-two tensor with unique revision identity.
+ * @throws std::bad_alloc or Value validation exceptions.
+ */
+Value make_upload_source(float base) {
+  constexpr std::size_t kWidth = 2U;
+  constexpr std::size_t kHeight = 2U;
+  const std::array<float, kWidth * kHeight> samples{
+      base, base + 0.125F, base + 0.25F, base + 0.375F};
+  std::vector<std::byte> bytes(sizeof(samples));
+  std::memcpy(bytes.data(), samples.data(), sizeof(samples));
+  return Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{
+          {kHeight, kWidth},
+          ElementSemantics::FloatingPoint,
+          StorageEncoding{32U},
+      },
+      ImageFacet{1U, 0U, std::nullopt},
+      StridedLayout{{static_cast<std::ptrdiff_t>(kWidth * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))},
+                    0U},
+      std::move(bytes));
+}
 
 /**
  * @brief Distinct provider exception thrown after real native allocation.
@@ -951,12 +1030,14 @@ TEST(MetalDeviceExecutorIntegration,
     throwing_context_was_current =
         execution::current_metal_execution_context() == &context;
     throwing_queue_was_ready = context.command_queue_handle() != nullptr;
-    throwing_texture_was_allocated =
-        context.allocate_float32_texture_2d(2U, 2U) != nullptr;
     const std::array<std::uint32_t, 4> payload{{84U, 1U, 2U, 3U}};
+    context.prepare_float32_texture_to_host_resources(
+        2U, 2U, std::vector<std::size_t>{sizeof(payload)});
+    throwing_texture_was_allocated =
+        context.allocate_persistent_float32_texture_2d(2U, 2U) != nullptr;
     throwing_buffer_was_allocated =
-        context.allocate_shared_buffer_copy(payload.data(), sizeof(payload)) !=
-        nullptr;
+        context.allocate_device_scratch_buffer_copy(payload.data(),
+                                                    sizeof(payload)) != nullptr;
     throw NativeAllocationProbeError{};
   });
 
@@ -988,6 +1069,10 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(after_throw.total_allocations, before.total_allocations + 2U);
   EXPECT_EQ(after_throw.live_allocations, 0U);
   EXPECT_EQ(after_throw.pipeline_cache_entries, before.pipeline_cache_entries);
+  const auto after_throw_resources =
+      throwing_invocation.device_resource_snapshot();
+  ASSERT_TRUE(after_throw_resources.has_value());
+  EXPECT_EQ(after_throw_resources->reserved, DeviceResourceVector{});
 
   bool recovery_context_was_current = false;
   bool recovery_queue_was_ready = false;
@@ -999,9 +1084,11 @@ TEST(MetalDeviceExecutorIntegration,
         execution::current_metal_execution_context() == &context;
     recovery_queue_was_ready = context.command_queue_handle() != nullptr;
     const std::array<std::uint32_t, 2> payload{{84U, 85U}};
+    context.prepare_float32_texture_to_host_resources(
+        1U, 1U, std::vector<std::size_t>{sizeof(payload)});
     recovery_buffer_was_allocated =
-        context.allocate_shared_buffer_copy(payload.data(), sizeof(payload)) !=
-        nullptr;
+        context.allocate_device_scratch_buffer_copy(payload.data(),
+                                                    sizeof(payload)) != nullptr;
   });
 
   EXPECT_NO_THROW(registry.execute(Device::GPU_METAL, recovery_invocation));
@@ -1020,6 +1107,10 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(after_recovery.live_allocations, 0U);
   EXPECT_EQ(after_recovery.pipeline_cache_entries,
             before.pipeline_cache_entries);
+  const auto after_recovery_resources =
+      recovery_invocation.device_resource_snapshot();
+  ASSERT_TRUE(after_recovery_resources.has_value());
+  EXPECT_EQ(after_recovery_resources->reserved, DeviceResourceVector{});
 }
 
 /**
@@ -1096,6 +1187,10 @@ TEST(MetalDeviceExecutorIntegration,
   ASSERT_TRUE(resident.has_value());
   EXPECT_EQ(resident->producer_identity(), destination.producer_identity());
   EXPECT_EQ(resident->storage_binding(), destination.storage_binding());
+  const ResourceLedger::DeviceSnapshot resources =
+      wait_for_scratch_release(upload);
+  EXPECT_GT(resources.reserved.device_memory_bytes, 0U);
+  EXPECT_EQ(resources.reserved.device_scratch_bytes, 0U);
 
   const execution::DeviceExecutorDiagnostics diagnostics =
       registry.diagnostics(Device::GPU_METAL);
@@ -1104,6 +1199,131 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_EQ(diagnostics.total_allocations, 2U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
   EXPECT_EQ(diagnostics.pipeline_cache_entries, 0U);
+}
+
+/**
+ * @brief Proves a real upload lease survives callback return and releases only
+ * after bounded residency eviction or final manager destruction.
+ *
+ * @return Nothing; GoogleTest reports native, fence, eviction, or byte errors.
+ * @throws Native executor, publication, allocation, and synchronization
+ * exceptions unchanged.
+ * @note Two direct invocations own isolated ledgers while one capacity-one
+ * residency manager owns the actual persistent Metal Values.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     UploadMemoryPersistsThroughResidencyAndReleasesAfterEviction) {
+  auto residency_manager = std::make_shared<execution::ResidencyManager>(1U);
+  std::unique_ptr<execution::DeviceExecutor> metal_executor =
+      execution::make_default_metal_device_executor(residency_manager);
+  if (!metal_executor) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  Value first_source = make_upload_source(0.0F);
+  Value second_source = make_upload_source(1.0F);
+  Value first_destination;
+  Value second_destination;
+  std::unique_ptr<CallbackDeviceExecutorInvocation> first_invocation;
+  std::unique_ptr<CallbackDeviceExecutorInvocation> second_invocation;
+  {
+    execution::DeviceExecutorRegistry registry;
+    registry.register_executor(std::move(metal_executor));
+    first_invocation = std::make_unique<CallbackDeviceExecutorInvocation>(
+        [&first_source, &first_destination] {
+          execution::MetalExecutionContext& context =
+              execution::require_current_metal_execution_context();
+          context.publish_float32_host_to_texture(first_source, 2U, 2U);
+          first_destination = context.take_published_value();
+        },
+        execution::DeviceCompletionSeed(
+            8601U, 8601, ComputeIntent::GlobalHighPrecision, 1U, 8601U, 0U));
+    ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, *first_invocation));
+    ASSERT_TRUE(first_destination.valid());
+    ASSERT_EQ(wait_for_terminal_value(first_destination).state(),
+              ReadyFenceState::Ready);
+    ResourceLedger::DeviceSnapshot first_resources =
+        wait_for_scratch_release(*first_invocation);
+    EXPECT_GT(first_resources.reserved.device_memory_bytes, 0U);
+    EXPECT_EQ(first_resources.reserved.device_scratch_bytes, 0U);
+    first_destination = Value();
+
+    second_invocation = std::make_unique<CallbackDeviceExecutorInvocation>(
+        [&second_source, &second_destination] {
+          execution::MetalExecutionContext& context =
+              execution::require_current_metal_execution_context();
+          context.publish_float32_host_to_texture(second_source, 2U, 2U);
+          second_destination = context.take_published_value();
+        },
+        execution::DeviceCompletionSeed(
+            8602U, 8602, ComputeIntent::GlobalHighPrecision, 1U, 8602U, 0U));
+    ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, *second_invocation));
+    ASSERT_TRUE(second_destination.valid());
+    ASSERT_EQ(wait_for_terminal_value(second_destination).state(),
+              ReadyFenceState::Ready);
+
+    const ResourceLedger::DeviceSnapshot second_resources =
+        wait_for_scratch_release(*second_invocation);
+    const auto first_after_eviction =
+        first_invocation->device_resource_snapshot();
+    ASSERT_TRUE(first_after_eviction.has_value());
+    first_resources = *first_after_eviction;
+    EXPECT_EQ(first_resources.reserved, DeviceResourceVector{});
+    EXPECT_GT(second_resources.reserved.device_memory_bytes, 0U);
+    EXPECT_EQ(second_resources.reserved.device_scratch_bytes, 0U);
+    second_destination = Value();
+  }
+
+  auto retained = second_invocation->device_resource_snapshot();
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_GT(retained->reserved.device_memory_bytes, 0U);
+  residency_manager.reset();
+  retained = second_invocation->device_resource_snapshot();
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(retained->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Rejects a complete Perlin plan before its first native allocation.
+ *
+ * @return Nothing; GoogleTest reports typed admission or snapshot failures.
+ * @throws Unexpected service, provider, or synchronization failures unchanged.
+ * @note Pipeline compilation is fixed executor infrastructure and may occur
+ * before planning; texture/buffer allocation counters must remain zero.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     PerlinBudgetRejectsAtomicallyBeforeNativeAllocation) {
+  ExecutionResourceLimits limits = ExecutionService::default_resource_limits();
+  limits.device_limits = std::vector<DeviceResourceLimit>{DeviceResourceLimit{
+      DeviceId(DeviceBackend::Metal), DeviceResourceVector{1U, 1U}}};
+  ExecutionService service(std::move(limits));
+  if (!service.has_device_executor(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+  service.configure_worker_count(1U);
+  MetalIntegrationHost host;
+
+  bool caught_typed_rejection = false;
+  try {
+    static_cast<void>(execute_perlin(service, host, 8399U));
+  } catch (const DeviceResourceError& error) {
+    caught_typed_rejection = true;
+    EXPECT_EQ(error.code(), DeviceResourceErrorCode::AdmissionRejected);
+    EXPECT_EQ(error.device(), DeviceId(DeviceBackend::Metal));
+    EXPECT_GT(error.planned().device_memory_bytes, 1U);
+    EXPECT_GT(error.planned().device_scratch_bytes, 1U);
+    EXPECT_EQ(error.actual(), DeviceResourceVector{});
+  }
+  EXPECT_TRUE(caught_typed_rejection);
+
+  const execution::DeviceExecutorDiagnostics diagnostics =
+      service.device_executor_diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(diagnostics.total_allocations, 0U);
+  EXPECT_EQ(diagnostics.live_allocations, 0U);
+  const auto resources =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
+  ASSERT_TRUE(resources.has_value());
+  EXPECT_EQ(resources->reserved, DeviceResourceVector{});
 }
 
 /**
@@ -1125,9 +1345,17 @@ TEST(MetalDeviceExecutorIntegration,
 
   const auto first = execute_perlin(service, host, 8401U);
   expect_valid_perlin_output(first);
+  const auto after_first =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
+  ASSERT_TRUE(after_first.has_value());
+  EXPECT_EQ(after_first->reserved, DeviceResourceVector{});
   const auto second = execute_perlin(service, host, 8402U);
   expect_valid_perlin_output(second);
   expect_identical_perlin_outputs(first, second);
+  const auto after_second =
+      service.device_resource_snapshot(DeviceId(DeviceBackend::Metal));
+  ASSERT_TRUE(after_second.has_value());
+  EXPECT_EQ(after_second->reserved, DeviceResourceVector{});
 
   const execution::DeviceExecutorDiagnostics diagnostics =
       service.device_executor_diagnostics(Device::GPU_METAL);

@@ -14,6 +14,7 @@
 #include "execution/device_completion.hpp"
 #include "execution/residency_manager.hpp"
 #include "photospider/data/value.hpp"
+#include "runtime/resource_ledger.hpp"
 
 namespace ps::execution {
 namespace {
@@ -37,6 +38,49 @@ struct FakeAllocation final {
 };
 
 /**
+ * @brief Couples one fake native allocation to a unique device-memory lease.
+ *
+ * @throws Nothing after ownership transfer.
+ * @note `allocation_` is destroyed before `memory_lease_`, matching the real
+ * Metal owner rule that native storage retires before capacity is returned.
+ */
+class FakeLeasedDeviceAllocation final {
+ public:
+  /**
+   * @brief Takes one fake allocation and its exact persistent lease.
+   * @param allocation Non-null fake native allocation.
+   * @param memory_lease Active memory-only device lease.
+   * @throws std::invalid_argument for incomplete or mixed ownership.
+   */
+  FakeLeasedDeviceAllocation(std::shared_ptr<FakeAllocation> allocation,
+                             ResourceLedger::DeviceLease memory_lease)
+      : memory_lease_(std::move(memory_lease)),
+        allocation_(std::move(allocation)) {
+    const DeviceResourceVector resources = memory_lease_.resources();
+    if (!allocation_ || !memory_lease_.active() ||
+        resources.device_memory_bytes == 0U ||
+        resources.device_scratch_bytes != 0U) {
+      throw std::invalid_argument(
+          "Fake device allocation requires native and memory ownership.");
+    }
+  }
+
+  /**
+   * @brief Returns the non-null fake native handle.
+   * @return Stable allocation address retained by this owner.
+   * @throws Nothing.
+   */
+  void* native_handle() const noexcept { return allocation_.get(); }
+
+ private:
+  /** @brief Capacity returned after fake native allocation destruction. */
+  ResourceLedger::DeviceLease memory_lease_;
+
+  /** @brief Fake native allocation destroyed before the lease. */
+  std::shared_ptr<FakeAllocation> allocation_;
+};
+
+/**
  * @brief Owns one source/destination revision-preserving pending replica pair.
  *
  * @throws Nothing after both publications are constructed.
@@ -50,6 +94,22 @@ struct PendingReplicaPair final {
    * @brief Non-owning probe for the destination's retained native allocation.
    */
   std::weak_ptr<FakeAllocation> destination_owner;
+};
+
+/**
+ * @brief Ready CPU source plus pending device replica with leased ownership.
+ *
+ * @throws Nothing after publications are constructed.
+ */
+struct PendingLeasedUpload final {
+  /** @brief Ready host-visible source revision. */
+  Value source;
+
+  /** @brief Pending device-local revision-preserving destination. */
+  PendingDeviceValuePublication destination;
+
+  /** @brief Probe for the shared native-and-lease owner lifetime. */
+  std::weak_ptr<FakeLeasedDeviceAllocation> destination_owner;
 };
 
 /**
@@ -86,6 +146,43 @@ PendingReplicaPair make_pending_replica_pair() {
           kStorageSize, DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned,
           source.value.revision_id());
   return {std::move(source), std::move(destination), destination_owner};
+}
+
+/**
+ * @brief Publishes one pending fake upload with real ledger memory ownership.
+ * @param ledger Ledger containing a Metal account with at least 16 free bytes.
+ * @return Ready CPU source and pending device destination sharing one revision.
+ * @throws Ledger admission, publication, allocation, or identity exceptions.
+ * @note The creator commits actual bytes before the pending Value is returned;
+ * no Run-scoped owner remains.
+ */
+PendingLeasedUpload make_pending_leased_upload(ResourceLedger& ledger) {
+  constexpr std::size_t kStorageSize = 4U * sizeof(float);
+  constexpr DeviceResourceVector kResources{kStorageSize, 0U};
+  std::vector<std::byte> source_bytes(kStorageSize);
+  Value source = Value::from_cpu_dense_tensor(
+      make_descriptor(), std::nullopt,
+      StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(float))}, 0U},
+      std::move(source_bytes));
+
+  std::optional<ResourceLedger::DeviceReservation> reservation =
+      ledger.try_reserve_device(DeviceId(DeviceBackend::Metal), kResources);
+  if (!reservation.has_value()) {
+    throw std::runtime_error("Fake leased upload could not reserve capacity.");
+  }
+  ResourceLedger::DeviceLeasePair leases =
+      reservation->commit_actual(kResources);
+  auto allocation = std::make_shared<FakeAllocation>(kStorageSize);
+  auto owner = std::make_shared<FakeLeasedDeviceAllocation>(
+      allocation, std::move(leases.persistent_memory));
+  PendingDeviceValuePublication destination =
+      PendingDeviceValuePublisher::publish_dense_tensor(
+          make_descriptor(), std::nullopt,
+          StridedLayout{{static_cast<std::ptrdiff_t>(sizeof(float))}, 0U},
+          owner, owner->native_handle(), nullptr, kStorageSize,
+          DeviceId(DeviceBackend::Metal), MemoryDomain::DeviceLocal,
+          source.revision_id());
+  return {std::move(source), std::move(destination), owner};
 }
 
 /**
@@ -221,6 +318,143 @@ TEST(DeviceResidency, CapacityEvictsOldestRevisionAndReleasesNativeOwner) {
                   .find(second.destination.value.revision_id(),
                         DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned)
                   .has_value());
+}
+
+/**
+ * @brief Proves residency and external Values retain one unique memory lease.
+ * @return Nothing; GoogleTest reports byte snapshots or eviction mismatches.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ * @note Capacity-one eviction releases only the manager's strong owner. An
+ * external Value copy delays exact byte return until its final release.
+ */
+TEST(DeviceResidency,
+     LeasedDeviceOwnerSurvivesCreatorAndReleasesAfterFinalRetention) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {4U * kAllocationBytes, 0U}}});
+  {
+    ResidencyManager manager(1U);
+    PendingLeasedUpload first = make_pending_leased_upload(ledger);
+    const DeviceCompletionIdentity first_identity(
+        make_seed(10U, 101U), first.source, first.destination.value);
+    const std::weak_ptr<FakeLeasedDeviceAllocation> first_owner =
+        first.destination_owner;
+    manager.observe_generation(first_identity.seed());
+    ASSERT_NO_THROW(manager.register_transfer(first_identity));
+    ASSERT_EQ(manager.publish_ready_transfer(first_identity, first.source,
+                                             first.destination.value, nullptr,
+                                             first.destination.producer),
+              ResidencyCompletionDisposition::Published);
+    first.destination.value = Value();
+    EXPECT_FALSE(first_owner.expired());
+    auto snapshot = ledger.device_snapshot(metal);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{kAllocationBytes, 0U}));
+
+    PendingLeasedUpload second = make_pending_leased_upload(ledger);
+    const DeviceCompletionIdentity second_identity(
+        make_seed(10U, 102U), second.source, second.destination.value);
+    const ValueRevisionId second_revision =
+        second.destination.value.revision_id();
+    const std::weak_ptr<FakeLeasedDeviceAllocation> second_owner =
+        second.destination_owner;
+    ASSERT_NO_THROW(manager.register_transfer(second_identity));
+    ASSERT_EQ(manager.publish_ready_transfer(second_identity, second.source,
+                                             second.destination.value, nullptr,
+                                             second.destination.producer),
+              ResidencyCompletionDisposition::Published);
+    EXPECT_TRUE(first_owner.expired());
+    snapshot = ledger.device_snapshot(metal);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{kAllocationBytes, 0U}));
+
+    std::optional<Value> external =
+        manager.find(second_revision, metal, MemoryDomain::DeviceLocal);
+    ASSERT_TRUE(external.has_value());
+    second.destination.value = Value();
+    PendingLeasedUpload third = make_pending_leased_upload(ledger);
+    const DeviceCompletionIdentity third_identity(
+        make_seed(10U, 103U), third.source, third.destination.value);
+    ASSERT_NO_THROW(manager.register_transfer(third_identity));
+    ASSERT_EQ(manager.publish_ready_transfer(third_identity, third.source,
+                                             third.destination.value, nullptr,
+                                             third.destination.producer),
+              ResidencyCompletionDisposition::Published);
+    EXPECT_FALSE(second_owner.expired());
+    snapshot = ledger.device_snapshot(metal);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->reserved,
+              (DeviceResourceVector{2U * kAllocationBytes, 0U}));
+
+    external.reset();
+    EXPECT_TRUE(second_owner.expired());
+    snapshot = ledger.device_snapshot(metal);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->reserved, (DeviceResourceVector{kAllocationBytes, 0U}));
+    third.destination.value = Value();
+  }
+  const auto released = ledger.device_snapshot(metal);
+  ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->reserved, DeviceResourceVector{});
+}
+
+/**
+ * @brief Proves stale, rejected, cancelled, and reused identities cannot
+ * release or duplicate another fake allocation's unique memory lease.
+ * @return Nothing; GoogleTest reports disposition or exact-release mismatch.
+ * @throws Fake publication, ledger, identity, and manager exceptions.
+ */
+TEST(DeviceResidency,
+     LeasedOwnerUnwindsExactlyAcrossStaleRejectedAndCancelledPaths) {
+  constexpr std::uint64_t kAllocationBytes = 4U * sizeof(float);
+  const DeviceId metal(DeviceBackend::Metal);
+  ResourceLedger ledger(
+      ResourceVector{},
+      std::vector<DeviceResourceLimit>{
+          DeviceResourceLimit{metal, {2U * kAllocationBytes, 0U}}});
+  ResidencyManager manager;
+
+  PendingLeasedUpload stale = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity stale_identity(
+      make_seed(11U, 111U), stale.source, stale.destination.value);
+  manager.observe_generation(stale_identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(stale_identity));
+  manager.publish_current_generation(stale_identity.seed().graph_instance_id(),
+                                     stale_identity.seed().target_node_id(),
+                                     stale_identity.seed().request_intent(),
+                                     12U);
+  EXPECT_EQ(manager.publish_ready_transfer(stale_identity, stale.source,
+                                           stale.destination.value, nullptr,
+                                           stale.destination.producer),
+            ResidencyCompletionDisposition::Stale);
+  EXPECT_TRUE(stale.destination.producer.cancel());
+  stale.destination.value = Value();
+  auto snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, DeviceResourceVector{});
+
+  PendingLeasedUpload rejected = make_pending_leased_upload(ledger);
+  const DeviceCompletionIdentity admitted(make_seed(12U, 121U), rejected.source,
+                                          rejected.destination.value);
+  const DeviceCompletionIdentity mismatched(
+      make_seed(12U, 122U), rejected.source, rejected.destination.value);
+  manager.observe_generation(admitted.seed());
+  ASSERT_NO_THROW(manager.register_transfer(admitted));
+  ASSERT_NO_THROW(manager.register_transfer(admitted));
+  EXPECT_EQ(manager.publish_ready_transfer(mismatched, rejected.source,
+                                           rejected.destination.value, nullptr,
+                                           rejected.destination.producer),
+            ResidencyCompletionDisposition::Rejected);
+  EXPECT_TRUE(manager.discard_transfer(admitted));
+  EXPECT_FALSE(manager.discard_transfer(admitted));
+  EXPECT_TRUE(rejected.destination.producer.cancel());
+  rejected.destination.value = Value();
+  snapshot = ledger.device_snapshot(metal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->reserved, DeviceResourceVector{});
 }
 
 /**

@@ -49,9 +49,9 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
  *
  * @throws std::system_error when synchronization fails and std::bad_alloc when
  * map ownership cannot allocate.
- * @note This issue-85 manager is intentionally not the authoritative device
- * memory or scratch ledger assigned to issue #86. Its count bound neither
- * measures bytes nor performs resource admission.
+ * @note This manager is intentionally not the authoritative device memory or
+ * scratch ledger. Its count bound neither measures bytes nor performs
+ * resource admission.
  */
 class ResidencyManager final {
  public:

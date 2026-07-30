@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "execution/device_execution_context.hpp"
 #include "execution/device_executor_registry.hpp"
@@ -73,15 +74,28 @@ class FakeMetalExecutionContext final
     return const_cast<std::uint8_t*>(&queue_token_);
   }
 
-  /** @copydoc execution::MetalExecutionContext::allocate_float32_texture_2d */
-  NativeHandle allocate_float32_texture_2d(std::uint32_t,
-                                           std::uint32_t) override {
+  /** @copydoc
+   * execution::MetalExecutionContext::prepare_float32_texture_to_host_resources
+   */
+  void prepare_float32_texture_to_host_resources(
+      std::uint32_t, std::uint32_t, const std::vector<std::size_t>&) override {
+    throw std::logic_error(
+        "FakeMetalExecutionContext does not plan native resources.");
+  }
+
+  /** @copydoc
+   * execution::MetalExecutionContext::allocate_persistent_float32_texture_2d
+   */
+  NativeHandle allocate_persistent_float32_texture_2d(std::uint32_t,
+                                                      std::uint32_t) override {
     throw std::logic_error(
         "FakeMetalExecutionContext does not allocate native textures.");
   }
 
-  /** @copydoc execution::MetalExecutionContext::allocate_shared_buffer_copy */
-  NativeHandle allocate_shared_buffer_copy(const void*, std::size_t) override {
+  /** @copydoc
+   * execution::MetalExecutionContext::allocate_device_scratch_buffer_copy */
+  NativeHandle allocate_device_scratch_buffer_copy(const void*,
+                                                   std::size_t) override {
     throw std::logic_error(
         "FakeMetalExecutionContext does not allocate native buffers.");
   }
