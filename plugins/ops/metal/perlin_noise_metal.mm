@@ -4,24 +4,19 @@
 
 #import <Metal/Metal.h>
 
-#include "execution/device_execution_context.hpp"
-#include "metal/metal_exception_boundary.hpp"
-#include "photospider/plugin/opencv_adapter.hpp"
-
-// This specific OpenCV header is required for the interop function
-#include <opencv2/core/core_c.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <numeric>
-#include <opencv2/videoio/registry.hpp>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "execution/device_execution_context.hpp"
+#include "metal/metal_exception_boundary.hpp"
 
 /**
  * @brief Metal Shading Language source for the Perlin compute kernel.
@@ -151,15 +146,16 @@ double parameter_double(const plugin::NodeView& node, std::string_view key,
  * @param node Public effective parameters controlling width, height, grid size,
  * and random seed.
  * @param inputs Unused borrowed source-operation input list.
- * @return Public output owning a CPU copy of the generated image.
+ * @return Canonical empty public output; the source-private Host adapter takes
+ * the pending revision-preserving host Value from MetalExecutionContext.
  * @throws std::bad_alloc unchanged from parameter parsing, working buffers, or
  * output conversion; also propagates diagnostic-construction exhaustion.
  * @throws std::runtime_error with the current stage for other standard or
  * unknown failures.
  * @note The process Metal executor serializes entry and supplies a borrowed
- * queue, invocation allocator, and pipeline cache. This operation uses an
- * autorelease pool, does not mutate OpenCV thread-local OpenCL policy, and
- * returns storage that retains no Metal resource.
+ * queue, invocation allocator, pipeline cache, and explicit transfer
+ * publication boundary. The operation commits without waiting; the command
+ * buffer completion handler settles the Value fence and stale-safe residency.
  */
 plugin::OperationOutput op_perlin_noise_metal(
     const plugin::NodeView& node,
@@ -250,36 +246,12 @@ plugin::OperationOutput op_perlin_noise_metal(
               threadsPerThreadgroup:threadsPerThreadgroup];
           [encoder endEncoding];
 
-          dbg_stage = "submit_wait";
-          [command_buffer commit];
-          [command_buffer waitUntilCompleted];
-          if (command_buffer.status == MTLCommandBufferStatusError) {
-            const char* description =
-                [[command_buffer.error localizedDescription] UTF8String];
-            throw std::runtime_error(
-                description != nullptr
-                    ? std::string("Metal command buffer failed: ") + description
-                    : "Metal command buffer failed.");
-          }
-
-          dbg_stage = "readback_texture";
-          MTLRegion region = MTLRegionMake2D(0, 0, width, height);
-          const size_t bytesPerRow = sizeof(float) * static_cast<size_t>(width);
-          std::vector<float> host_buffer(static_cast<size_t>(width) *
-                                         static_cast<size_t>(height));
-          [out_texture getBytes:host_buffer.data()
-                    bytesPerRow:bytesPerRow
-                     fromRegion:region
-                    mipmapLevel:0];
-
-          cv::Mat mat_view(height, width, CV_32FC1, host_buffer.data(),
-                           bytesPerRow);
-          cv::Mat mat_copy = mat_view.clone();
-
-          dbg_stage = "wrap_result";
-          plugin::OperationOutput result;
-          result.image_buffer = plugin::opencv::from_mat(mat_copy);
-          return result;
+          dbg_stage = "explicit_transfer";
+          context.publish_float32_texture_to_host(
+              (__bridge void*)command_buffer, (__bridge void*)out_texture,
+              static_cast<std::uint32_t>(width),
+              static_cast<std::uint32_t>(height));
+          return {};
         });
   }
 }

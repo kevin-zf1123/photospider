@@ -25,6 +25,7 @@
 
 #include "compute/compute_run.hpp"
 #include "compute/execution_service.hpp"
+#include "core/value_image_adapter.hpp"
 #include "execution/device_execution_context.hpp"
 #include "execution/device_executor_registry.hpp"
 #include "execution/execution_task_runtime.hpp"
@@ -124,11 +125,16 @@ class CallbackDeviceExecutorInvocation final
   /**
    * @brief Takes ownership of one required callback.
    * @param callback Nonempty callback to enter inside the executor context.
+   * @param completion_seed Optional exact native completion lineage.
    * @throws std::invalid_argument when callback is empty.
    * @throws std::bad_alloc when callback ownership cannot allocate.
    */
-  explicit CallbackDeviceExecutorInvocation(Callback callback)
-      : callback_(std::move(callback)) {
+  explicit CallbackDeviceExecutorInvocation(
+      Callback callback,
+      std::optional<execution::DeviceCompletionSeed> completion_seed =
+          std::nullopt)
+      : callback_(std::move(callback)),
+        completion_seed_(std::move(completion_seed)) {
     if (!callback_) {
       throw std::invalid_argument(
           "CallbackDeviceExecutorInvocation requires a callback.");
@@ -138,9 +144,18 @@ class CallbackDeviceExecutorInvocation final
   /** @copydoc execution::DeviceExecutorInvocation::run */
   void run() override { callback_(); }
 
+  /** @copydoc execution::DeviceExecutorInvocation::completion_seed */
+  std::optional<execution::DeviceCompletionSeed> completion_seed()
+      const override {
+    return completion_seed_;
+  }
+
  private:
   /** @brief Callback borrowed by the executor only for the current call. */
   Callback callback_;
+
+  /** @brief Optional exact lineage copied into the invocation context. */
+  std::optional<execution::DeviceCompletionSeed> completion_seed_;
 };
 
 /** @brief Exact exception text used by the native-allocation unwind probe. */
@@ -456,8 +471,26 @@ std::optional<execution::DeviceExecutorDiagnostics> wait_for_submission_count(
 }
 
 /**
- * @brief Run-owned Perlin input and callback output retained through service
- * settlement.
+ * @brief Polls one real native Value until its fence becomes terminal.
+ * @param value Valid pending or terminal Value retained by the caller.
+ * @return First terminal snapshot, or the final Pending snapshot after timeout.
+ * @throws Value or fence observation exceptions unchanged.
+ * @note The bounded test-only loop yields the calling thread; production code
+ * uses ReadyFence continuations and never performs this polling wait.
+ */
+ReadyFenceSnapshot wait_for_terminal_value(const Value& value) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + kExecutorProbeTimeout;
+  ReadyFenceSnapshot snapshot = value.ready_fence().poll();
+  while (!snapshot.terminal() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+    snapshot = value.ready_fence().poll();
+  }
+  return snapshot;
+}
+
+/**
+ * @brief Run-owned Perlin input, pending Value, wait, and settled output.
  *
  * @throws std::bad_alloc when parameter or node ownership cannot allocate.
  * @note The worker is the only writer and the test reads after execute_run()
@@ -492,6 +525,12 @@ struct PerlinInvocationState final {
 
   /** @brief Output published by the worker before Run settlement. */
   std::optional<plugin::OperationOutput> output;
+
+  /** @brief Pending host replica retained through native completion. */
+  Value pending_value;
+
+  /** @brief Cancellation owner for the native completion wait. */
+  std::optional<ReadyFenceWaitRegistration> wait;
 };
 
 /**
@@ -573,7 +612,7 @@ ComputeRunSubmission make_metal_run_submission(std::string label,
  * @param service Configured service with a real Metal executor.
  * @param host Stable observation target.
  * @param identity Unique Run and node identity.
- * @return Shared state containing the settled CPU output.
+ * @return Shared state containing the Ready Value and settled CPU snapshot.
  * @throws Provider, service, allocation, or Run failures unchanged.
  * @note The submission callback and all native handles retire before return.
  */
@@ -593,6 +632,30 @@ std::shared_ptr<PerlinInvocationState> execute_perlin(
               ExecutionTaskRuntime& runtime) {
         state->output = ops::op_perlin_noise_metal(
             state->node, plugin::ArrayView<plugin::OperationInputView>{});
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        state->pending_value = context.take_published_value();
+        if (!state->pending_value.valid()) {
+          throw std::logic_error(
+              "Metal Perlin did not publish its pending host Value.");
+        }
+        std::shared_ptr<ReadyFenceExecutor> executor =
+            runtime.make_ready_fence_executor();
+        runtime.inc_tasks_to_complete(1);
+        ReadyFenceWaitRegistration wait =
+            state->pending_value.ready_fence().async_wait(
+                std::move(executor),
+                [state, runtime = &runtime](ReadyFenceSnapshot snapshot) {
+                  if (snapshot.state() != ReadyFenceState::Ready) {
+                    throw ReadyFenceAccessError(std::move(snapshot));
+                  }
+                  state->output.emplace();
+                  state->output->image_buffer =
+                      value_image_adapter::snapshot_cpu_image_buffer(
+                          state->pending_value);
+                  runtime->dec_tasks_to_complete();
+                });
+        state->wait.emplace(std::move(wait));
         runtime.dec_tasks_to_complete();
       },
       ExecutionTaskPriority::Normal,
@@ -612,6 +675,13 @@ std::shared_ptr<PerlinInvocationState> execute_perlin(
 void expect_valid_perlin_output(
     const std::shared_ptr<PerlinInvocationState>& state) {
   ASSERT_TRUE(state);
+  ASSERT_TRUE(state->pending_value.valid());
+  EXPECT_EQ(state->pending_value.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  const StorageBinding binding = state->pending_value.storage_binding();
+  EXPECT_EQ(binding.device, DeviceId(DeviceBackend::CPU));
+  EXPECT_EQ(binding.memory_domain, MemoryDomain::HostPinned);
+  EXPECT_TRUE(binding.host_visible);
   ASSERT_TRUE(state->output.has_value());
   const ImageBuffer& image = state->output->image_buffer;
   ASSERT_NO_THROW(validate_image_buffer(image));
@@ -953,8 +1023,92 @@ TEST(MetalDeviceExecutorIntegration,
 }
 
 /**
+ * @brief Proves the real CPU-to-Metal path performs an explicit asynchronous
+ * upload and publishes an exact revision-preserving device replica.
+ *
+ * @return Nothing; GoogleTest reports native transfer, binding, or residency
+ * failures.
+ * @throws Native executor, Value publication, and synchronization exceptions
+ * unchanged.
+ * @note Runtime absence of a usable Metal device reports a platform skip. The
+ * bounded terminal polling is test-only; the executor callback itself returns
+ * immediately after commit and performs no native completion wait.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     HostToTexturePublishesRevisionPreservingDeviceReplica) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  constexpr std::size_t kWidth = 3U;
+  constexpr std::size_t kHeight = 2U;
+  const std::array<float, kWidth * kHeight> samples{0.125F, 0.25F,  0.5F,
+                                                    0.75F,  0.875F, 1.0F};
+  std::vector<std::byte> bytes(sizeof(samples));
+  std::memcpy(bytes.data(), samples.data(), sizeof(samples));
+  Value source = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{
+          {kHeight, kWidth},
+          ElementSemantics::FloatingPoint,
+          StorageEncoding{32U},
+      },
+      ImageFacet{1U, 0U, std::nullopt},
+      StridedLayout{{static_cast<std::ptrdiff_t>(kWidth * sizeof(float)),
+                     static_cast<std::ptrdiff_t>(sizeof(float))},
+                    0U},
+      std::move(bytes));
+  Value destination;
+  const execution::DeviceCompletionSeed seed(
+      8501U, 8501, ComputeIntent::GlobalHighPrecision, 1U, 8501U, 0U);
+  CallbackDeviceExecutorInvocation upload(
+      [&source, &destination] {
+        execution::MetalExecutionContext& context =
+            execution::require_current_metal_execution_context();
+        context.publish_float32_host_to_texture(
+            source, static_cast<std::uint32_t>(kWidth),
+            static_cast<std::uint32_t>(kHeight));
+        destination = context.take_published_value();
+      },
+      seed);
+
+  ASSERT_NO_THROW(registry.execute(Device::GPU_METAL, upload));
+  ASSERT_TRUE(destination.valid());
+  EXPECT_EQ(destination.revision_id(), source.revision_id());
+  EXPECT_NE(destination.allocation_identity(), source.allocation_identity());
+  EXPECT_NE(destination.producer_identity(), source.producer_identity());
+  const StorageBinding binding = destination.storage_binding();
+  EXPECT_EQ(binding.device, DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(binding.memory_domain, MemoryDomain::DeviceLocal);
+  EXPECT_FALSE(binding.host_visible);
+  const AccessPlan host_plan = destination.plan_access(AccessTarget{
+      DeviceId(DeviceBackend::CPU), MemoryDomain::HostPinned, true});
+  EXPECT_EQ(host_plan.kind(), AccessPlanKind::Transfer);
+  EXPECT_EQ(host_plan.source_revision(), source.revision_id().value());
+
+  const ReadyFenceSnapshot terminal = wait_for_terminal_value(destination);
+  ASSERT_EQ(terminal.state(), ReadyFenceState::Ready);
+  EXPECT_THROW(destination.buffer_handle().acquire_read(), BufferAccessError);
+  const std::optional<Value> resident = registry.residency_manager()->find(
+      source.revision_id(), DeviceId(DeviceBackend::Metal),
+      MemoryDomain::DeviceLocal);
+  ASSERT_TRUE(resident.has_value());
+  EXPECT_EQ(resident->producer_identity(), destination.producer_identity());
+  EXPECT_EQ(resident->storage_binding(), destination.storage_binding());
+
+  const execution::DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(diagnostics.submission_count, 1U);
+  EXPECT_EQ(diagnostics.invocation_count, 1U);
+  EXPECT_EQ(diagnostics.total_allocations, 2U);
+  EXPECT_EQ(diagnostics.live_allocations, 0U);
+  EXPECT_EQ(diagnostics.pipeline_cache_entries, 0U);
+}
+
+/**
  * @brief Runs the real repository Metal operation twice through one process
- * executor and proves resource ownership/reuse.
+ * executor and proves explicit transfer, continuation, ownership, and reuse.
  *
  * @throws GoogleTest assertion control and unexpected service/provider
  * failures.
@@ -981,12 +1135,12 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_TRUE(diagnostics.queue_ready);
   EXPECT_EQ(diagnostics.submission_count, 2U);
   EXPECT_EQ(diagnostics.invocation_count, 2U);
-  EXPECT_EQ(diagnostics.total_allocations, 6U);
+  EXPECT_EQ(diagnostics.total_allocations, 8U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
   EXPECT_EQ(diagnostics.pipeline_cache_entries, 1U);
-  EXPECT_EQ(host.entries(), 2);
-  EXPECT_EQ(host.exits(), 2);
-  EXPECT_EQ(host.last_worker_id(), 1);
+  EXPECT_EQ(host.entries(), 4);
+  EXPECT_EQ(host.exits(), 4);
+  EXPECT_EQ(host.last_worker_id(), 0);
   EXPECT_NE(host.last_epoch(), 0U);
   EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
 }

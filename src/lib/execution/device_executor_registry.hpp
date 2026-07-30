@@ -4,8 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "execution/device_completion.hpp"
+#include "execution/residency_manager.hpp"
 #include "photospider/core/device.hpp"
 
 /**
@@ -79,6 +82,18 @@ class DeviceExecutorInvocation {
    * @throws Any provider exception unchanged.
    */
   virtual void run() = 0;
+
+  /**
+   * @brief Returns exact asynchronous completion lineage when available.
+   * @return Run/task seed for repository-owned native publication, or nullopt
+   * for diagnostics and direct executor tests without a ComputeRun.
+   * @throws Standard validation exceptions from concrete seed construction.
+   * @note The default preserves source-private direct invocations. A missing
+   * seed forbids publishing a reusable asynchronous Value replica.
+   */
+  virtual std::optional<DeviceCompletionSeed> completion_seed() const {
+    return std::nullopt;
+  }
 };
 
 /**
@@ -160,9 +175,9 @@ class DeviceExecutorRegistry final {
  public:
   /**
    * @brief Creates an empty platform-neutral registry.
-   * @throws Nothing.
+   * @throws std::bad_alloc when shared residency ownership cannot allocate.
    */
-  DeviceExecutorRegistry() noexcept = default;
+  DeviceExecutorRegistry();
 
   /**
    * @brief Releases all registered executors.
@@ -259,6 +274,54 @@ class DeviceExecutorRegistry final {
    */
   DeviceExecutorDiagnostics diagnostics(Device device) const;
 
+  /**
+   * @brief Returns the shared process-domain residency manager.
+   * @return Non-null owner shared with repository native executors.
+   * @throws Nothing.
+   * @note The manager owns replica identity/publication only, never issue-86
+   * device-memory or scratch ledger authority.
+   */
+  std::shared_ptr<ResidencyManager> residency_manager() const noexcept {
+    return residency_manager_;
+  }
+
+  /**
+   * @brief Observes one admitted Run generation before ready publication.
+   * @param seed Representative Run/task seed for its canonical lineage.
+   * @return Nothing.
+   * @throws ResidencyManager synchronization or allocation errors unchanged.
+   */
+  void observe_generation(const DeviceCompletionSeed& seed);
+
+  /**
+   * @brief Preallocates one residency lineage before Graph publication.
+   * @param graph_instance_id Nonzero live Graph identity scalar.
+   * @param target_node_id Canonical nonnegative request target.
+   * @param request_intent Canonical request intent.
+   * @return Nothing.
+   * @throws ResidencyManager validation, allocation, or synchronization errors.
+   * @note This fallible step runs before the coordinator publication is
+   * submitted and advances no generation.
+   */
+  void track_lineage(std::uint64_t graph_instance_id, int target_node_id,
+                     ComputeIntent request_intent);
+
+  /**
+   * @brief Publishes one pretracked residency lineage's current generation.
+   * @param graph_instance_id Nonzero live Graph identity scalar.
+   * @param target_node_id Canonical nonnegative request target.
+   * @param request_intent Canonical request intent.
+   * @param supersession_generation Nonzero newly current generation.
+   * @return Nothing.
+   * @throws Nothing; invariant or synchronization failure terminates.
+   * @note This no-allocation path is called while the Graph request
+   * coordinator still excludes currentness observation.
+   */
+  void publish_current_generation(
+      std::uint64_t graph_instance_id, int target_node_id,
+      ComputeIntent request_intent,
+      std::uint64_t supersession_generation) noexcept;
+
  private:
   /** @brief Number of public Device enum slots currently recognized. */
   static constexpr std::size_t kDeviceSlotCount = 4U;
@@ -273,6 +336,9 @@ class DeviceExecutorRegistry final {
 
   /** @brief Unique executor owners indexed by stable Device value. */
   std::array<std::unique_ptr<DeviceExecutor>, kDeviceSlotCount> executors_{};
+
+  /** @brief Replica publication authority shared by concrete executors. */
+  std::shared_ptr<ResidencyManager> residency_manager_;
 };
 
 /**

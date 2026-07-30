@@ -18,6 +18,7 @@
 #include "compute/execution_service_test_probe.hpp"
 #endif
 #include "compute/resource_demand_estimator.hpp"
+#include "core/value_image_adapter.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps::compute {
@@ -120,6 +121,7 @@ TaskSubmissionPlan::TaskSubmissionPlan(ComputeRunId run_id, GraphModel& graph,
   resolve_operations();
   temp_results_.resize(execution_order_.size());
   task_execution_states_ = std::vector<std::atomic<std::uint8_t>>(size());
+  deferred_value_waits_.resize(size());
   for (auto& state : task_execution_states_) {
     state.store(static_cast<std::uint8_t>(TaskExecutionState::Pending),
                 std::memory_order_relaxed);
@@ -195,6 +197,8 @@ std::uint64_t TaskSubmissionPlan::retained_memory_bytes() const {
       static_cast<std::uint64_t>(submitted_initial_task_ids_.size()));
   estimate.add_objects<std::atomic<std::uint8_t>>(
       static_cast<std::uint64_t>(task_execution_states_.capacity()));
+  estimate.add_objects<std::optional<ReadyFenceWaitRegistration>>(
+      static_cast<std::uint64_t>(deferred_value_waits_.capacity()));
   estimate.add_objects<std::shared_ptr<RuntimeCompletionRecord>>(
       static_cast<std::uint64_t>(runtime_completion_records_.capacity()));
   estimate.add_objects<RuntimeCompletionRecord>(
@@ -465,6 +469,9 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
   task_runtime.log_event(execute_action, task.node_id);
   try {
     task_runner_->run_task(task_id);
+    if (defer_pending_value(task, identity, lease, task_runtime)) {
+      return;
+    }
     (void)lease.observe_cancellation();
     if (!lease.terminal_outcome().has_value()) {
       release_dependents(task.task_id, task.node_id, lease, task_runtime);
@@ -477,6 +484,135 @@ void TaskSubmissionPlan::execute_task(const ComputeRunTaskIdentity& identity,
     task_execution_states_.at(task_id).store(
         static_cast<std::uint8_t>(TaskExecutionState::Failed),
         std::memory_order_release);
+    try {
+      task_runtime.log_event(ExecutionTraceAction::RethrowException,
+                             task.node_id);
+    } catch (...) {
+    }
+    std::rethrow_exception(failure);
+  }
+}
+
+/** @copydoc TaskSubmissionPlan::defer_pending_value */
+bool TaskSubmissionPlan::defer_pending_value(
+    const PlannedTask& task, const ComputeRunTaskIdentity& identity,
+    const ComputeRunLease& lease, ExecutionTaskRuntime& task_runtime) {
+  const auto index = dependency_state_.id_to_idx().find(task.node_id);
+  if (index == dependency_state_.id_to_idx().end()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Completed task has no temporary result index.");
+  }
+  std::optional<NodeOutput>& result =
+      temp_results_.at(static_cast<std::size_t>(index->second));
+  if (!result.has_value() || !result->image_value.valid()) {
+    return false;
+  }
+
+  const ReadyFenceSnapshot observed = result->image_value.ready_fence().poll();
+  if (observed.state() == ReadyFenceState::Ready) {
+    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
+        result->image_buffer.channels == 0) {
+      result->image_buffer =
+          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
+    }
+    return false;
+  }
+  if (observed.state() != ReadyFenceState::Pending) {
+    throw ReadyFenceAccessError(observed);
+  }
+
+  std::lock_guard<std::recursive_mutex> publication_lock(publication_mutex_);
+  if (publication_closed_ || lease.terminal_outcome().has_value()) {
+    return false;
+  }
+  const int task_id = task.task_id;
+  std::shared_ptr<ReadyFenceExecutor> executor =
+      task_runtime.make_ready_fence_executor();
+  ComputeRunLease continuation_lease = lease;
+  ReadyFence::Callback callback =
+      [lease = std::move(continuation_lease), identity,
+       runtime = &task_runtime](ReadyFenceSnapshot snapshot) mutable {
+        lease.complete_deferred_value(identity, *runtime, std::move(snapshot));
+      };
+
+  task_execution_states_.at(static_cast<std::size_t>(task_id))
+      .store(static_cast<std::uint8_t>(TaskExecutionState::AwaitingValue),
+             std::memory_order_release);
+  bool completion_counted = false;
+  try {
+    task_runtime.inc_tasks_to_complete(1);
+    completion_counted = true;
+    ReadyFenceWaitRegistration registration =
+        result->image_value.ready_fence().async_wait(std::move(executor),
+                                                     std::move(callback));
+    deferred_value_waits_.at(static_cast<std::size_t>(task_id))
+        .emplace(std::move(registration));
+  } catch (...) {
+    task_execution_states_.at(static_cast<std::size_t>(task_id))
+        .store(static_cast<std::uint8_t>(TaskExecutionState::Failed),
+               std::memory_order_release);
+    if (completion_counted) {
+      task_runtime.dec_tasks_to_complete();
+    }
+    throw;
+  }
+  return true;
+}
+
+/** @copydoc TaskSubmissionPlan::complete_deferred_value */
+void TaskSubmissionPlan::complete_deferred_value(
+    const ComputeRunTaskIdentity& identity, const ComputeRunLease& lease,
+    ExecutionTaskRuntime& task_runtime, ReadyFenceSnapshot snapshot) {
+  if (!contains_task_identity(identity)) {
+    throw std::invalid_argument(
+        "Deferred Value identity does not belong to this submission plan.");
+  }
+  const int task_id = static_cast<int>(identity.local_task_id().value());
+  std::uint8_t expected =
+      static_cast<std::uint8_t>(TaskExecutionState::AwaitingValue);
+  if (!task_execution_states_.at(static_cast<std::size_t>(task_id))
+           .compare_exchange_strong(
+               expected,
+               static_cast<std::uint8_t>(TaskExecutionState::CompletingValue),
+               std::memory_order_acq_rel, std::memory_order_acquire)) {
+    throw std::logic_error(
+        "Deferred Value continuation entered more than once.");
+  }
+
+  const PlannedTask& task =
+      compute_plan_.task_graph.tasks.at(static_cast<std::size_t>(task_id));
+  try {
+    if (snapshot.state() != ReadyFenceState::Ready) {
+      throw ReadyFenceAccessError(std::move(snapshot));
+    }
+    const auto index = dependency_state_.id_to_idx().find(task.node_id);
+    if (index == dependency_state_.id_to_idx().end()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Deferred task has no temporary result index.");
+    }
+    std::optional<NodeOutput>& result =
+        temp_results_.at(static_cast<std::size_t>(index->second));
+    if (!result.has_value() || !result->image_value.valid()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Deferred task lost its pending Value result.");
+    }
+    if (result->image_buffer.width == 0 && result->image_buffer.height == 0 &&
+        result->image_buffer.channels == 0) {
+      result->image_buffer =
+          value_image_adapter::snapshot_cpu_image_buffer(result->image_value);
+    }
+    (void)lease.observe_cancellation();
+    if (!lease.terminal_outcome().has_value()) {
+      release_dependents(task.task_id, task.node_id, lease, task_runtime);
+    }
+    task_execution_states_.at(static_cast<std::size_t>(task_id))
+        .store(static_cast<std::uint8_t>(TaskExecutionState::Completed),
+               std::memory_order_release);
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    task_execution_states_.at(static_cast<std::size_t>(task_id))
+        .store(static_cast<std::uint8_t>(TaskExecutionState::Failed),
+               std::memory_order_release);
     try {
       task_runtime.log_event(ExecutionTraceAction::RethrowException,
                              task.node_id);
@@ -671,14 +807,23 @@ bool TaskSubmissionPlan::publish_service_submission(
 
 /** @copydoc TaskSubmissionPlan::close_publication */
 void TaskSubmissionPlan::close_publication() noexcept {
+  std::vector<std::optional<ReadyFenceWaitRegistration>> retired_waits;
   try {
-    std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
-    if (publication_closed_) {
-      return;
+    {
+      std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
+      if (publication_closed_) {
+        return;
+      }
+      publication_closed_ = true;
+      for (const auto& record : runtime_completion_records_) {
+        record->retire_plan_owned();
+      }
+      retired_waits.swap(deferred_value_waits_);
     }
-    publication_closed_ = true;
-    for (const auto& record : runtime_completion_records_) {
-      record->retire_plan_owned();
+    for (auto& wait : retired_waits) {
+      if (wait.has_value()) {
+        (void)wait->cancel();
+      }
     }
   } catch (...) {
     std::terminate();

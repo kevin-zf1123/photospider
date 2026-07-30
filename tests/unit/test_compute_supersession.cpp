@@ -600,6 +600,109 @@ TEST(ComputeRequestCoordinator,
 }
 
 /**
+ * @brief Verifies external freshness advances at accepted current publication.
+ * @return Nothing; GoogleTest reports timing or born-stale notification errors.
+ * @throws Allocation and synchronization failures unchanged to GoogleTest.
+ * @note Generation three becomes externally visible while generation one
+ * still blocks the physical lane. The later publication of prepared generation
+ * two is born stale and must not invoke the observer.
+ */
+TEST(ComputeRequestCoordinator,
+     CurrentObserverRunsBeforeExecutionAndSkipsBornStalePublication) {
+  GraphModel model(std::filesystem::path{});
+  GraphStateExecutor graph_state(model);
+  GraphStateExecutor compute_lane(
+      model, 1, GraphStateExecutor::CapacityMode::TotalAdmission);
+  ComputeRequestCoordinator coordinator(graph_state, compute_lane);
+  const SupersessionKey key(3, ComputeIntent::GlobalHighPrecision);
+  std::atomic<std::uint64_t> externally_current{0U};
+  std::atomic<std::size_t> observer_calls{0U};
+  std::atomic<std::size_t> materialized{0U};
+  std::atomic<std::size_t> born_stale{0U};
+  std::atomic<std::size_t> unexpected_materialized{0U};
+  std::atomic<std::size_t> unexpected_failed{0U};
+  std::atomic<bool> observer_preceded_execution{true};
+  std::promise<void> first_entered;
+  auto first_entered_future = first_entered.get_future();
+  std::promise<void> release_first;
+  const std::shared_future<void> first_release =
+      release_first.get_future().share();
+
+  auto first = coordinator.prepare(key);
+  const SupersessionIdentity first_identity = first.identity();
+  coordinator.publish(
+      std::move(first), std::make_shared<ComputeRequestCancellationSource>(),
+      [&] {
+        materialized.fetch_add(1U, std::memory_order_relaxed);
+        if (externally_current.load(std::memory_order_acquire) !=
+            first_identity.generation.value()) {
+          observer_preceded_execution.store(false, std::memory_order_release);
+        }
+        first_entered.set_value();
+        first_release.wait();
+      },
+      [] {}, [](std::exception_ptr) {},
+      [&](const SupersessionIdentity& identity) noexcept {
+        externally_current.store(identity.generation.value(),
+                                 std::memory_order_release);
+        observer_calls.fetch_add(1U, std::memory_order_relaxed);
+      });
+  graph_state.submit([](GraphModel&) {}).get();
+  ASSERT_EQ(first_entered_future.wait_for(kTestTimeout),
+            std::future_status::ready);
+
+  auto stale = coordinator.prepare(key);
+  const SupersessionIdentity stale_identity = stale.identity();
+  auto latest = coordinator.prepare(key);
+  const SupersessionIdentity latest_identity = latest.identity();
+  coordinator.publish(
+      std::move(latest), std::make_shared<ComputeRequestCancellationSource>(),
+      [&] {
+        materialized.fetch_add(1U, std::memory_order_relaxed);
+        if (externally_current.load(std::memory_order_acquire) !=
+            latest_identity.generation.value()) {
+          observer_preceded_execution.store(false, std::memory_order_release);
+        }
+      },
+      [] {}, [](std::exception_ptr) {},
+      [&](const SupersessionIdentity& identity) noexcept {
+        externally_current.store(identity.generation.value(),
+                                 std::memory_order_release);
+        observer_calls.fetch_add(1U, std::memory_order_relaxed);
+      });
+  coordinator.publish(
+      std::move(stale), std::make_shared<ComputeRequestCancellationSource>(),
+      [&] { unexpected_materialized.fetch_add(1U, std::memory_order_relaxed); },
+      [&] { born_stale.fetch_add(1U, std::memory_order_relaxed); },
+      [&](std::exception_ptr) {
+        unexpected_failed.fetch_add(1U, std::memory_order_relaxed);
+      },
+      [&](const SupersessionIdentity&) noexcept {
+        observer_calls.fetch_add(1U, std::memory_order_relaxed);
+      });
+  graph_state.submit([](GraphModel&) {}).get();
+
+  EXPECT_EQ(stale_identity.generation.value() + 1U,
+            latest_identity.generation.value());
+  EXPECT_EQ(externally_current.load(std::memory_order_acquire),
+            latest_identity.generation.value());
+  EXPECT_EQ(observer_calls.load(std::memory_order_acquire), 2U);
+  EXPECT_EQ(born_stale.load(std::memory_order_acquire), 1U);
+  EXPECT_EQ(materialized.load(std::memory_order_acquire), 1U);
+  EXPECT_EQ(unexpected_materialized.load(std::memory_order_acquire), 0U);
+  EXPECT_EQ(unexpected_failed.load(std::memory_order_acquire), 0U);
+
+  release_first.set_value();
+  ASSERT_TRUE(wait_for_predicate(
+      [&] { return coordinator.snapshot().lineage_rows == 0U; }));
+  EXPECT_EQ(materialized.load(std::memory_order_acquire), 2U);
+  EXPECT_TRUE(observer_preceded_execution.load(std::memory_order_acquire));
+  coordinator.stop_admission();
+  compute_lane.close_and_drain();
+  graph_state.close_and_drain();
+}
+
+/**
  * @brief Verifies equal labels on distinct live Graphs have separate domains.
  * @return Nothing; GoogleTest assertions report cross-instance cancellation.
  * @throws Runtime, filesystem, or synchronization failures to GoogleTest.

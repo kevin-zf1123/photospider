@@ -561,8 +561,11 @@ target_link_libraries(photospider_policy_internal PRIVATE
 
 # Module: private physical execution resources and accounting.
 set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+    src/lib/execution/device_completion.cpp
     src/lib/execution/device_executor_registry.cpp
+    src/lib/execution/execution_task_runtime.cpp
     src/lib/execution/physical_execution_routes.cpp
+    src/lib/execution/residency_manager.cpp
     src/lib/execution/value_transfer_task.cpp
     src/lib/runtime/resource_ledger.cpp
 )
@@ -1769,6 +1772,9 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     add_ps_test(test_device_executor_registry
         tests/unit/test_device_executor_registry.cpp
         photospider_execution_internal)
+    add_ps_test(test_device_residency
+        tests/unit/test_device_residency.cpp
+        photospider_execution_internal)
     add_ps_test(test_policy_registry tests/unit/test_policy_registry.cpp
         photospider_policy_internal)
     target_compile_definitions(test_policy_registry PRIVATE
@@ -2125,6 +2131,11 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_device_executor_registry
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS execution
+            TIMEOUT 30)
+    gtest_discover_tests(test_device_residency
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES
             LABELS execution

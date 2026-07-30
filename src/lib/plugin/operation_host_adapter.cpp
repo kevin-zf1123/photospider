@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "execution/device_execution_context.hpp"
 #include "graph/graph_model.hpp"
 #include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
@@ -239,6 +240,8 @@ OperationInputStorage make_operation_inputs(
  * @return Complete private output without a library lease.
  * @throws std::invalid_argument for an invalid image descriptor or spatial
  * snapshot.
+ * @throws std::logic_error when one provider returns both a public image and a
+ * source-private pending device Value.
  * @throws std::bad_alloc unchanged from recursive map moves/copies.
  * @note The caller attaches its private DSO lease only after this conversion
  *       succeeds; during conversion the callback wrapper still retains it.
@@ -257,6 +260,19 @@ NodeOutput operation_output_to_private(plugin::OperationOutput output) {
   result.debug.max_val = output.debug.max_value;
   result.debug.has_nan = output.debug.has_nan;
   result.debug.compute_device = std::move(output.debug.compute_device);
+  if (execution::MetalExecutionContext* context =
+          execution::current_metal_execution_context()) {
+    Value published = context->take_published_value();
+    if (published.valid()) {
+      if (result.image_buffer.width != 0 || result.image_buffer.height != 0 ||
+          result.image_buffer.channels != 0 || result.image_buffer.data ||
+          result.image_buffer.context) {
+        throw std::logic_error(
+            "Operation returned both ImageBuffer and pending device Value.");
+      }
+      result.image_value = std::move(published);
+    }
+  }
   return result;
 }
 

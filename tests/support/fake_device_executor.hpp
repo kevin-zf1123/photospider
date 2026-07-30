@@ -95,6 +95,25 @@ class FakeMetalExecutionContext final
         "FakeMetalExecutionContext does not compile native pipelines.");
   }
 
+  /** @copydoc
+   * execution::MetalExecutionContext::publish_float32_texture_to_host */
+  void publish_float32_texture_to_host(NativeHandle, NativeHandle,
+                                       std::uint32_t, std::uint32_t) override {
+    throw std::logic_error(
+        "FakeMetalExecutionContext does not submit native transfers.");
+  }
+
+  /** @copydoc
+   * execution::MetalExecutionContext::publish_float32_host_to_texture */
+  void publish_float32_host_to_texture(Value, std::uint32_t,
+                                       std::uint32_t) override {
+    throw std::logic_error(
+        "FakeMetalExecutionContext does not submit native transfers.");
+  }
+
+  /** @copydoc execution::MetalExecutionContext::take_published_value */
+  Value take_published_value() noexcept override { return {}; }
+
  private:
   /** @brief Stable non-native token borrowed only for the fake scope. */
   const std::uint8_t queue_token_ = 1U;

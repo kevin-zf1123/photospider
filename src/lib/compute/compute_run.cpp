@@ -1741,6 +1741,46 @@ void ComputeRunLease::execute_task(const ComputeRunTaskIdentity& identity,
   }
 }
 
+/** @copydoc ComputeRunLease::complete_deferred_value */
+void ComputeRunLease::complete_deferred_value(
+    const ComputeRunTaskIdentity& identity, ExecutionTaskRuntime& task_runtime,
+    ReadyFenceSnapshot snapshot) {
+  (void)observe_cancellation();
+  TaskSubmissionPlan* plan = nullptr;
+  bool skip_terminal_run = false;
+  {
+    std::lock_guard<std::mutex> lock(control_->mutex);
+    if (control_->submission_plan == nullptr ||
+        !control_->submission_plan->contains_task_identity(identity)) {
+      throw std::invalid_argument(
+          "Deferred Value task identity does not match its retaining lease.");
+    }
+    if (control_->terminal_outcome.has_value()) {
+      skip_terminal_run = true;
+    } else {
+      plan = control_->submission_plan.get();
+    }
+  }
+  if (skip_terminal_run) {
+    task_runtime.dec_tasks_to_complete();
+    return;
+  }
+
+  try {
+    plan->complete_deferred_value(identity, *this, task_runtime,
+                                  std::move(snapshot));
+    task_runtime.dec_tasks_to_complete();
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    try {
+      task_runtime.dec_tasks_to_complete();
+    } catch (...) {
+    }
+    (void)publish_task_failure(identity, failure);
+    std::rethrow_exception(failure);
+  }
+}
+
 /**
  * @brief Executes initial-ready discovery and submission under this lease.
  *

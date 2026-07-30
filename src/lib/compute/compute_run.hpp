@@ -15,6 +15,7 @@
 #include "graph/graph_revision.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/device.hpp"
+#include "photospider/memory/ready_fence.hpp"
 #include "runtime/resource_ledger.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
@@ -1245,6 +1246,23 @@ class ComputeRunLease {
   void execute_task(const ComputeRunTaskIdentity& identity,
                     ExecutionTaskRuntime& task_runtime,
                     bool callback_owns_completion = false);
+
+  /**
+   * @brief Routes one terminal pending-Value continuation to its exact task.
+   * @param identity Composite identity previously left AwaitingValue.
+   * @param task_runtime Active runtime owning the added completion unit.
+   * @param snapshot Terminal producer-completion observation.
+   * @return Nothing.
+   * @throws std::invalid_argument for a mismatched task or lease.
+   * @throws ReadyFenceAccessError, GraphError, or runtime exceptions from
+   * terminal materialization, dependency release, or completion retirement.
+   * @note This route retires the dynamically added completion unit on every
+   * normal, terminal-skip, and exceptional path. Active failures are published
+   * to the exact ComputeRun before unchanged rethrow.
+   */
+  void complete_deferred_value(const ComputeRunTaskIdentity& identity,
+                               ExecutionTaskRuntime& task_runtime,
+                               ReadyFenceSnapshot snapshot);
 
   /**
    * @brief Runs the full-HP execution bootstrap through this lease.

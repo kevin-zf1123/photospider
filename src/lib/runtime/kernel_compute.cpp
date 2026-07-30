@@ -705,8 +705,10 @@ bool Kernel::compute(const ComputeRequest& request) {
  *         construction exhausts memory.
  * @note The private compute-request lane retains same-Graph and route-binding
  *       serialization. Snapshot capture and commit use graph-state, while
- *       operation work does not hold that lane. Other compute exceptions map
- *       to false and LastError.
+ *       operation work does not hold that lane. Before publication, the
+ *       native-completion lineage is pretracked; accepted current publication
+ *       advances its process freshness before execution. Other compute
+ *       exceptions map to false and LastError.
  */
 bool Kernel::compute_request(const ComputeRequest& request) {
   auto runtime = acquire_runtime(request.name);
@@ -719,6 +721,9 @@ bool Kernel::compute_request(const ComputeRequest& request) {
     auto completion = std::make_shared<CandidateCompletion<void>>();
     std::future<void> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
+    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
+    execution_service_->prepare_supersession_lineage(
+        graph_instance_id, product.prepared.identity());
     runtime->publish_compute_request(
         std::move(product.prepared), std::move(product.cancellation),
         [this, runtime, request = std::move(candidate_request), completion] {
@@ -734,6 +739,11 @@ bool Kernel::compute_request(const ComputeRequest& request) {
         },
         [completion](std::exception_ptr failure) {
           completion->set_exception(std::move(failure));
+        },
+        [execution_service = execution_service_, graph_instance_id](
+            const compute::SupersessionIdentity& identity) noexcept {
+          execution_service->observe_current_supersession(graph_instance_id,
+                                                          identity);
         });
     settled.get();
 
@@ -781,7 +791,9 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image(
  * @note The same private compute-request lane covers staged execution and the
  * following committed output copy. Other compute, selected image-processing,
  * and clone exceptions become nullopt; successful empty output clears stale
- * LastError state.
+ * LastError state. Native-completion lineage pretracking precedes publication,
+ * and accepted current publication advances process freshness before physical
+ * execution.
  */
 std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     const ComputeRequest& request) {
@@ -795,6 +807,9 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
     auto completion = std::make_shared<CandidateCompletion<NodeOutput>>();
     std::future<NodeOutput> settled = completion->take_future();
     ComputeRequest candidate_request = std::move(product.request);
+    const GraphInstanceId graph_instance_id = runtime->model().instance_id();
+    execution_service_->prepare_supersession_lineage(
+        graph_instance_id, product.prepared.identity());
     runtime->publish_compute_request(
         std::move(product.prepared), std::move(product.cancellation),
         [this, runtime, request = std::move(candidate_request), completion] {
@@ -812,6 +827,11 @@ std::optional<ImageBuffer> Kernel::compute_and_get_image_request(
         },
         [completion](std::exception_ptr failure) {
           completion->set_exception(std::move(failure));
+        },
+        [execution_service = execution_service_, graph_instance_id](
+            const compute::SupersessionIdentity& identity) noexcept {
+          execution_service->observe_current_supersession(graph_instance_id,
+                                                          identity);
         });
     NodeOutput output = settled.get();
 
@@ -869,7 +889,9 @@ std::optional<std::future<Kernel::AsyncComputeResult>> Kernel::compute_async(
  * @note The lane owns the accepted callback independently of the returned
  * future. It invokes graph-state only for snapshot capture and final predicate
  * publication. Recoverable exceptions are captured in the exact result and
- * mirrored into LastError; future get() rethrows std::bad_alloc.
+ * mirrored into LastError; future get() rethrows std::bad_alloc. Fallible
+ * native-lineage pretracking precedes coordinator publication, whose accepted
+ * current callback advances process freshness before physical execution.
  */
 std::optional<std::future<Kernel::AsyncComputeResult>>
 Kernel::compute_async_request(ComputeRequest request) {
@@ -883,6 +905,9 @@ Kernel::compute_async_request(ComputeRequest request) {
   auto completion = std::make_shared<CandidateCompletion<AsyncComputeResult>>();
   std::future<AsyncComputeResult> settled = completion->take_future();
   ComputeRequest candidate_request = std::move(product.request);
+  const GraphInstanceId graph_instance_id = runtime->model().instance_id();
+  execution_service_->prepare_supersession_lineage(graph_instance_id,
+                                                   product.prepared.identity());
   runtime->publish_compute_request(
       std::move(product.prepared), std::move(product.cancellation),
       [this, runtime, request = std::move(candidate_request), completion] {
@@ -934,6 +959,11 @@ Kernel::compute_async_request(ComputeRequest request) {
       },
       [completion](std::exception_ptr failure) {
         completion->set_exception(std::move(failure));
+      },
+      [execution_service = execution_service_, graph_instance_id](
+          const compute::SupersessionIdentity& identity) noexcept {
+        execution_service->observe_current_supersession(graph_instance_id,
+                                                        identity);
       });
   return std::optional<std::future<AsyncComputeResult>>{std::move(settled)};
 }

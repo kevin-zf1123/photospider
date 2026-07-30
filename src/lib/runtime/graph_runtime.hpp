@@ -421,6 +421,7 @@ class GraphRuntime : public ExecutionHostContext {
    * @param execute Existing synchronous Kernel compute path.
    * @param settle_superseded Exact-once completion for an unmaterialized loser.
    * @param settle_failure Fallback completion for an escaping callback.
+   * @param publish_current Optional no-throw process freshness observer.
    * @return Nothing after graph-state publication work is admitted.
    * @throws The validation, allocation, admission, and synchronization errors
    * documented by compute::ComputeRequestCoordinator::publish.
@@ -433,10 +434,13 @@ class GraphRuntime : public ExecutionHostContext {
       std::shared_ptr<compute::ComputeRequestCancellationSource> cancellation,
       compute::ComputeRequestCoordinator::ExecuteCallback execute,
       compute::ComputeRequestCoordinator::SupersededCallback settle_superseded,
-      compute::ComputeRequestCoordinator::FailureCallback settle_failure) {
+      compute::ComputeRequestCoordinator::FailureCallback settle_failure,
+      compute::ComputeRequestCoordinator::CurrentGenerationCallback
+          publish_current = {}) {
     compute_request_coordinator_.publish(
         std::move(prepared), std::move(cancellation), std::move(execute),
-        std::move(settle_superseded), std::move(settle_failure));
+        std::move(settle_superseded), std::move(settle_failure),
+        std::move(publish_current));
   }
 
   /**

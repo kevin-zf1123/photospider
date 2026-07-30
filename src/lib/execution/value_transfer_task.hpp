@@ -1,34 +1,129 @@
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 
+#include "core/pending_value.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/memory/ready_fence.hpp"
 
 /**
  * @file value_transfer_task.hpp
- * @brief Source-private explicit asynchronous CPU Value-copy transfer task.
+ * @brief Source-private explicit asynchronous Value replica transfer tasks.
  */
 
 namespace ps {
 
 /**
- * @brief Move-owned explicit transfer from one CPU Value to a pending copy.
+ * @brief Thread-safe terminal authority for one external transfer destination.
+ *
+ * @throws Nothing for destruction; typed failure publication can allocate.
+ * @note A physical provider may retain a shared owner through native callback
+ * completion. Exactly one Ready, Failed, or ProducerCancelled transition wins;
+ * destroying the last unresolved owner publishes ProducerCancelled.
+ */
+class DeviceTransferCompletion final {
+ public:
+  /**
+   * @brief Prevents copying one concrete terminal authority object.
+   * @param other Unused source because copying is forbidden.
+   * @throws Nothing because this operation is deleted.
+   */
+  DeviceTransferCompletion(const DeviceTransferCompletion&) = delete;
+  /**
+   * @brief Prevents replacing one concrete terminal authority object.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing because this operation is deleted.
+   */
+  DeviceTransferCompletion& operator=(const DeviceTransferCompletion&) = delete;
+
+  /**
+   * @brief Cancels an unresolved destination on final owner destruction.
+   * @throws Nothing.
+   */
+  ~DeviceTransferCompletion() noexcept;
+
+  /**
+   * @brief Reports whether terminal authority remains unresolved.
+   * @return True before the unique terminal transition.
+   * @throws std::system_error when synchronization fails.
+   */
+  bool valid() const;
+
+  /**
+   * @brief Publishes Ready after provider visibility work is complete.
+   * @return True only for the unique terminal transition.
+   * @throws Nothing; synchronization failure terminates.
+   */
+  bool complete_ready() noexcept;
+
+  /**
+   * @brief Publishes a typed physical transfer failure.
+   * @param failure Complete immutable failure diagnostic.
+   * @return True only for the unique terminal transition.
+   * @throws std::bad_alloc when retained diagnostic storage cannot allocate.
+   * @throws std::system_error when synchronization fails.
+   */
+  bool complete_failed(ReadyFenceFailure failure);
+
+  /**
+   * @brief Publishes ProducerCancelled for unresolved physical work.
+   * @return True only for the unique terminal transition.
+   * @throws Nothing; synchronization failure terminates.
+   */
+  bool cancel() noexcept;
+
+ private:
+  /**
+   * @brief Takes one unique pending-device producer capability.
+   * @param producer Destination terminal capability.
+   * @throws Nothing after argument evaluation.
+   */
+  explicit DeviceTransferCompletion(
+      PendingDeviceValueProducer producer) noexcept;
+
+  /** @brief Serializes provider callbacks and fallback failure settlement. */
+  mutable std::mutex mutex_;
+  /** @brief Unique unresolved producer, reset after terminal publication. */
+  std::optional<PendingDeviceValueProducer> producer_;
+
+  friend class ValueTransferTask;
+};
+
+/**
+ * @brief Move-owned explicit transfer from one Value to a pending replica.
  *
  * Preparation allocates a distinct pending destination but copies no payload.
  * `enqueue()` registers source readiness with the injected physical execution
- * mechanism. The queued callback performs the complete checked-envelope copy,
- * revokes destination producer access, and only then publishes Ready.
+ * mechanism. The queued callback performs a built-in CPU envelope copy or
+ * hands a retained terminal authority to an injected external provider.
  *
  * @throws Nothing for movement and destruction.
- * @note This V-6 source-private task proves asynchronous transfer mechanics. It
- *       is not a general AccessPlan, device binding, residency replica, native
- *       command, or ComputeRun submission.
+ * @note This source-private task executes one prepared AccessPlan. Residency,
+ * exact Run completion identity, and stale commit remain owned by the caller's
+ * physical provider/ResidencyManager.
  * @note One task object is externally serialized. Its queued callback retains
  *       shared state independently and may race only with owner destruction.
  */
 class ValueTransferTask final {
  public:
+  /**
+   * @brief External provider entry after source readiness.
+   * @param source Ready immutable source Value.
+   * @param completion Shared destination terminal authority that the provider
+   * may retain through native completion.
+   * @return Nothing after settling or retaining completion ownership.
+   * @throws Provider validation, allocation, or native submission failures.
+   * @note Returning without settling or retaining completion cancels the
+   * destination. The operation must never wait synchronously for a device.
+   */
+  using ExternalTransferOperation = std::function<void(
+      const Value& source,
+      const std::shared_ptr<DeviceTransferCompletion>& completion)>;
+
   /** @brief Copy construction is forbidden for one transfer ownership path. */
   ValueTransferTask(const ValueTransferTask&) = delete;
 
@@ -65,14 +160,40 @@ class ValueTransferTask final {
    * @brief Prepares one explicit positive-layout CPU envelope copy.
    *
    * @param source Valid CPU DenseTensor Value retained by the task.
-   * @return Move-only task with a distinct sealed Pending destination.
-   * @throws std::invalid_argument when source is invalid or its current layout
-   *         cannot be used as a positive exact producer layout.
+   * @return Move-only task with a distinct revision-preserving Pending
+   * destination.
+   * @throws std::invalid_argument when source is invalid, not a host-visible
+   * CPU binding, or its current layout cannot be used as a positive exact
+   * producer layout.
    * @throws std::overflow_error for address or identity overflow.
    * @throws std::bad_alloc when destination or task state cannot allocate.
    * @note Preparation performs no source payload access and enqueues no work.
+   * The plan explicitly requires a distinct CPU Host binding.
    */
   static ValueTransferTask prepare_cpu_copy(Value source);
+
+  /**
+   * @brief Prepares one explicit external/device destination transfer.
+   * @param source Valid immutable source Value retained by the task.
+   * @param target Target device/domain/capability requiring Transfer.
+   * @param owner Non-null complete destination allocation owner.
+   * @param native_handle Non-null opaque destination native handle.
+   * @param host_pointer Optional host-visible destination allocation start.
+   * @param operation Nonempty provider invoked only after source Ready.
+   * @return Move-only task with a distinct revision-preserving destination.
+   * @throws std::invalid_argument when source/binding/provider is invalid,
+   * requested host access lacks a host pointer, or access planning does not
+   * select Transfer.
+   * @throws std::out_of_range when source layout escapes destination bytes.
+   * @throws std::overflow_error for envelope or identity exhaustion.
+   * @throws std::bad_alloc when destination/task ownership cannot allocate.
+   * @note The destination envelope equals source.storage_size(). Preparation
+   * performs no payload read and submits no native work.
+   */
+  static ValueTransferTask prepare_external_transfer(
+      Value source, AccessTarget target, std::shared_ptr<void> owner,
+      void* native_handle, std::byte* host_pointer,
+      ExternalTransferOperation operation);
 
   /**
    * @brief Reports whether this object retains transfer state.
@@ -91,6 +212,13 @@ class ValueTransferTask final {
    *       remains fence-gated.
    */
   Value destination() const;
+
+  /**
+   * @brief Returns the immutable access plan executed by this task.
+   * @return Directly borrowed prepared Transfer plan.
+   * @throws std::logic_error when this task is moved-from.
+   */
+  const AccessPlan& access_plan() const;
 
   /**
    * @brief Enqueues this transfer through source-fence readiness.

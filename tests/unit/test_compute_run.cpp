@@ -32,6 +32,7 @@
 #include "compute/resource_demand_estimator.hpp"
 #include "compute/run_group.hpp"
 #include "core/image_buffer_processing.hpp"
+#include "core/pending_value.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -8424,6 +8425,610 @@ TEST(ExecutionService,
     EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
     EXPECT_TRUE(run.publish_succeeded());
   }
+}
+
+/**
+ * @brief Proves an early fence callback waits for original grant retirement.
+ *
+ * @return Nothing; GoogleTest reports ordering, admission, or ledger failures.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and execution.
+ * @note The provider submits its continuation before returning. The production
+ * retirement seam blocks after the original QueueEntry and grant are gone;
+ * while blocked, the continuation must remain unentered. Releasing the seam
+ * admits the continuation through the ordinary bounded ready store and settles
+ * the extra completion unit exactly once.
+ */
+TEST(ExecutionService, EarlyFenceContinuationWaitsForOriginalGrantRetirement) {
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  WorkerEntryRetirementProbe probe;
+  ScopedWorkerEntryRetirementObserver observer(service, probe);
+  ComputeRun run(make_test_submission("early-fence-continuation", 1100U, 73));
+  ComputeRunLease lease = run.acquire_lease();
+  const ComputeRunTaskIdentity identity = lease.task_identity(0U);
+  std::shared_ptr<void> callable_token = std::make_shared<int>(85);
+  const std::weak_ptr<void> weak_callable = callable_token;
+  std::atomic_int continuation_entries{0};
+
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(
+      std::move(lease), identity, 73, true,
+      [owner = std::move(callable_token), &continuation_entries](
+          ComputeRunLease&, const ComputeRunTaskIdentity&,
+          ExecutionTaskRuntime& runtime) {
+        (void)owner;
+        std::shared_ptr<ReadyFenceExecutor> executor =
+            runtime.make_ready_fence_executor();
+        runtime.inc_tasks_to_complete(1);
+        executor->submit([task_runtime = &runtime, &continuation_entries]() {
+          continuation_entries.fetch_add(1, std::memory_order_release);
+          task_runtime->dec_tasks_to_complete();
+        });
+        runtime.dec_tasks_to_complete();
+      });
+  probe.arm(weak_callable);
+
+  auto completion =
+      std::async(std::launch::async,
+                 [&service, &host, submissions = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(submissions), 1);
+                 });
+  const bool observed = probe.wait_until_observed();
+  if (!observed) {
+    probe.release();
+  }
+  ASSERT_TRUE(observed);
+  {
+    std::lock_guard<std::mutex> lock(probe.mutex);
+    EXPECT_TRUE(probe.callable_retired);
+    EXPECT_EQ(probe.run_id, run.descriptor().id().value());
+  }
+  EXPECT_EQ(continuation_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(5)),
+            std::future_status::timeout);
+  EXPECT_NE(service.resource_snapshot().reserved, ResourceVector{});
+
+  probe.release();
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(continuation_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(host.context_entries(), 2);
+  EXPECT_EQ(host.context_exits(), 2);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(run.publish_succeeded());
+}
+
+/**
+ * @brief Proves a retained fence executor prevents premature Run settlement.
+ *
+ * @return Nothing; GoogleTest reports lifetime, settlement, or ledger failures.
+ * @throws Allocation, future, service, or synchronization exceptions from
+ * setup and execution.
+ * @note The provider creates a Run-scoped executor but publishes no callback.
+ * Logical task count reaches zero after provider return, yet execute_run must
+ * remain blocked until the last executor owner retires. This protects the
+ * service/runtime borrowed by a genuinely pending ReadyFence callback.
+ */
+TEST(ExecutionService, RetainedFenceExecutorExtendsRunSettlementLifetime) {
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("retained-fence-executor", 1101U, 74));
+  std::shared_ptr<ReadyFenceExecutor> retained_executor;
+  std::promise<void> executor_retained;
+  std::future<void> executor_retained_future = executor_retained.get_future();
+  ComputeRunLease lease = run.acquire_lease();
+  const ComputeRunTaskIdentity identity = lease.task_identity(0U);
+  std::vector<ReadyTaskSubmission> ready;
+  ready.emplace_back(std::move(lease), identity, 74, true,
+                     [&retained_executor, &executor_retained](
+                         ComputeRunLease&, const ComputeRunTaskIdentity&,
+                         ExecutionTaskRuntime& runtime) {
+                       retained_executor = runtime.make_ready_fence_executor();
+                       executor_retained.set_value();
+                       runtime.dec_tasks_to_complete();
+                     });
+
+  auto completion =
+      std::async(std::launch::async,
+                 [&service, &host, submissions = std::move(ready)]() mutable {
+                   service.execute_run(host, "cpu", std::move(submissions), 1);
+                 });
+  ASSERT_EQ(executor_retained_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_NE(retained_executor, nullptr);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_NE(service.resource_snapshot().reserved, ResourceVector{});
+
+  retained_executor.reset();
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(host.context_entries(), 1);
+  EXPECT_EQ(host.context_exits(), 1);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(run.publish_succeeded());
+}
+
+/**
+ * @brief Proves a real TaskSubmissionPlan defers dependent release for Value.
+ *
+ * @return Nothing; GoogleTest reports provider, continuation, or output
+ * failures.
+ * @throws Registry, Graph, Value, future, service, and synchronization
+ * exceptions from complete product-path setup and execution.
+ * @note A fake CPU provider publishes a pending image Value and returns. The
+ * dependent must remain unentered until the test settles the producer fence;
+ * then the Run-scoped continuation materializes ImageBuffer, releases the
+ * dependency, and settles every logical/dynamic completion unit.
+ */
+TEST(TaskSubmissionPlan,
+     PendingValueDefersDependentUntilRunScopedContinuation) {
+  /**
+   * @brief Shared fake-provider state retained by registered callbacks.
+   * @throws Standard synchronization and allocation exceptions from members.
+   */
+  struct PendingPlanProbe final {
+    /** @brief Protects the unique pending producer handoff. */
+    std::mutex mutex;
+    /** @brief Wakes the test after source publication returns its Value. */
+    std::promise<void> source_published;
+    /** @brief Unique producer moved to the test for terminal publication. */
+    std::optional<PendingValueProducer> producer;
+    /** @brief Number of source provider entries. */
+    std::atomic_int source_entries{0};
+    /** @brief Number of dependent provider entries. */
+    std::atomic_int dependent_entries{0};
+  };
+
+  constexpr const char* kType = "issue85_pending_value_plan";
+  constexpr const char* kSourceSubtype = "source";
+  constexpr const char* kDependentSubtype = "dependent";
+  constexpr int kSourceNodeId = 685;
+  constexpr int kDependentNodeId = 686;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto probe = std::make_shared<PendingPlanProbe>();
+  std::future<void> source_published = probe->source_published.get_future();
+
+  registry.register_impl(
+      kType, kSourceSubtype, Device::CPU,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingValuePublication publication =
+            PendingValuePublisher::allocate_cpu_dense_tensor(
+                DenseTensorDescriptor{
+                    {1U, 4U},
+                    ElementSemantics::FloatingPoint,
+                    StorageEncoding{32U},
+                },
+                ImageFacet{1U, 0U, std::nullopt},
+                StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
+                               static_cast<std::ptrdiff_t>(sizeof(float))},
+                              0U},
+                4U * sizeof(float));
+        NodeOutput output;
+        output.image_value = publication.value;
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->producer.emplace(std::move(publication.producer));
+        }
+        probe->source_entries.fetch_add(1, std::memory_order_release);
+        probe->source_published.set_value();
+        return output;
+      }));
+  registry.register_impl(
+      kType, kDependentSubtype, Device::CPU,
+      MonolithicOpFunc(
+          [probe](const Node&, const std::vector<const NodeOutput*>& inputs) {
+            if (inputs.size() != 1U || inputs.front() == nullptr ||
+                inputs.front()->image_buffer.width != 4 ||
+                inputs.front()->image_buffer.height != 1 ||
+                inputs.front()->image_buffer.channels != 1) {
+              throw std::logic_error(
+                  "Pending Value dependent received no materialized image.");
+            }
+            probe->dependent_entries.fetch_add(1, std::memory_order_release);
+            NodeOutput output;
+            output.data["value"] = 85;
+            return output;
+          }));
+
+  GraphModel graph("cache/issue85-pending-value-plan");
+  Node source = make_plan_node(kSourceNodeId);
+  source.type = kType;
+  source.subtype = kSourceSubtype;
+  Node dependent = make_plan_node(kDependentNodeId);
+  dependent.type = kType;
+  dependent.subtype = kDependentSubtype;
+  dependent.image_inputs.push_back(ImageInput{kSourceNodeId, "image"});
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(dependent));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("issue85-pending-value-plan",
+                                      graph.revision().value(),
+                                      kDependentNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kDependentNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 2U);
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease lease = run.acquire_lease();
+  auto completion = std::async(std::launch::async, [&] {
+    dispatch_planned_tasks(graph, service, host, "cpu", kDependentNodeId, plan,
+                           lease);
+  });
+
+  ASSERT_EQ(source_published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->source_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  PendingValueProducer producer = [&probe]() {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    if (!probe->producer.has_value()) {
+      throw std::logic_error("Fake pending provider lost its producer.");
+    }
+    PendingValueProducer result = std::move(*probe->producer);
+    probe->producer.reset();
+    return result;
+  }();
+  ASSERT_TRUE(producer.complete_ready());
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 1);
+  const std::size_t source_index =
+      static_cast<std::size_t>(plan.id_to_idx().at(kSourceNodeId));
+  ASSERT_TRUE(plan.temp_results().at(source_index).has_value());
+  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.width, 4);
+  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.height, 1);
+  EXPECT_EQ(plan.temp_results().at(source_index)->image_buffer.channels, 1);
+  EXPECT_EQ(host.context_entries(), 3);
+  EXPECT_EQ(host.context_exits(), 3);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  EXPECT_TRUE(run.publish_succeeded());
+
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+}
+
+/**
+ * @brief Proves Run cancellation retires a pending Value wait without waiting
+ * for its physical producer.
+ *
+ * @return Nothing; GoogleTest reports cancellation, settlement, or resource
+ * leaks.
+ * @throws Registry, Graph, Value, future, service, and synchronization
+ * exceptions from complete product-path setup and execution.
+ * @note Cancellation closes the plan, removes the unentered fence callback,
+ * and releases its Run-scoped executor. The producer remains independently
+ * Pending until the test explicitly cancels it after execute_run returns.
+ */
+TEST(TaskSubmissionPlan,
+     CancellationRetiresPendingValueContinuationWithoutProducerCompletion) {
+  /**
+   * @brief Shared pending publication handed from the fake provider to test.
+   * @throws Standard synchronization and allocation exceptions from members.
+   */
+  struct CancellationProbe final {
+    /** @brief Protects producer and Value publication handoff. */
+    std::mutex mutex;
+    /** @brief Wakes the test after the provider publishes pending state. */
+    std::promise<void> source_published;
+    /** @brief Pending Value retained for fence-state observation. */
+    Value value;
+    /** @brief Unique physical producer retained past Run cancellation. */
+    std::optional<PendingValueProducer> producer;
+    /** @brief Number of fake provider entries. */
+    std::atomic_int source_entries{0};
+  };
+
+  constexpr const char* kType = "issue85_pending_value_cancel";
+  constexpr const char* kSubtype = "source";
+  constexpr int kNodeId = 687;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+  auto probe = std::make_shared<CancellationProbe>();
+  std::future<void> source_published = probe->source_published.get_future();
+  registry.register_impl(
+      kType, kSubtype, Device::CPU,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingValuePublication publication =
+            PendingValuePublisher::allocate_cpu_dense_tensor(
+                DenseTensorDescriptor{
+                    {1U, 4U},
+                    ElementSemantics::FloatingPoint,
+                    StorageEncoding{32U},
+                },
+                ImageFacet{1U, 0U, std::nullopt},
+                StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
+                               static_cast<std::ptrdiff_t>(sizeof(float))},
+                              0U},
+                4U * sizeof(float));
+        NodeOutput output;
+        output.image_value = publication.value;
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->value = publication.value;
+          probe->producer.emplace(std::move(publication.producer));
+        }
+        probe->source_entries.fetch_add(1, std::memory_order_release);
+        probe->source_published.set_value();
+        return output;
+      }));
+
+  GraphModel graph("cache/issue85-pending-value-cancel");
+  Node source = make_plan_node(kNodeId);
+  source.type = kType;
+  source.subtype = kSubtype;
+  graph.add_node(std::move(source));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("issue85-pending-value-cancel",
+                                      graph.revision().value(), kNodeId));
+  const ComputeRunCancellationSource cancellation = run.cancellation_source();
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 1U);
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease lease = run.acquire_lease();
+  auto completion = std::async(std::launch::async, [&] {
+    dispatch_planned_tasks(graph, service, host, "cpu", kNodeId, plan, lease);
+  });
+
+  ASSERT_EQ(source_published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->source_entries.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  ASSERT_TRUE(cancellation.request_cancellation(
+      ComputeRunCancellationReason::ExplicitRequest));
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(completion.get());
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Cancelled);
+
+  PendingValueProducer producer = [&probe]() {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    if (!probe->producer.has_value() || !probe->value.valid()) {
+      throw std::logic_error("Cancelled pending provider lost its state.");
+    }
+    EXPECT_EQ(probe->value.ready_fence().poll().state(),
+              ReadyFenceState::Pending);
+    PendingValueProducer result = std::move(*probe->producer);
+    probe->producer.reset();
+    return result;
+  }();
+  ASSERT_TRUE(producer.cancel());
+  EXPECT_EQ(probe->value.ready_fence().poll().state(),
+            ReadyFenceState::ProducerCancelled);
+
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Proves a stale-typed pending Value fails its exact Run without
+ * releasing dependent work.
+ *
+ * @return Nothing; GoogleTest reports failure identity, settlement, or
+ * resource leaks.
+ * @throws Registry, Graph, Value, future, service, and synchronization
+ * exceptions from complete product-path setup and execution.
+ * @note The terminal fence continuation runs through the service ready store,
+ * preserves the typed stale-completion failure in ReadyFenceAccessError,
+ * publishes the matching Run failure, never enters the dependent provider,
+ * and retires dynamic completion exactly once.
+ */
+TEST(TaskSubmissionPlan, FailedPendingValueFailsMatchingRunAndSettles) {
+  /**
+   * @brief Shared failed-publication handoff for the fake provider.
+   * @throws Standard synchronization and allocation exceptions from members.
+   */
+  struct FailureProbe final {
+    /** @brief Protects producer and Value publication handoff. */
+    std::mutex mutex;
+    /** @brief Wakes the test after the provider publishes pending state. */
+    std::promise<void> source_published;
+    /** @brief Value retained for typed terminal-state observation. */
+    Value value;
+    /** @brief Unique producer settled by the test with typed failure. */
+    std::optional<PendingValueProducer> producer;
+    /** @brief Dependent entries, which must remain zero after source failure.
+     */
+    std::atomic_int dependent_entries{0};
+  };
+
+  constexpr const char* kType = "issue85_pending_value_failure";
+  constexpr const char* kSourceSubtype = "source";
+  constexpr const char* kDependentSubtype = "dependent";
+  constexpr int kSourceNodeId = 688;
+  constexpr int kDependentNodeId = 689;
+  OpRegistry& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
+  auto probe = std::make_shared<FailureProbe>();
+  std::future<void> source_published = probe->source_published.get_future();
+  registry.register_impl(
+      kType, kSourceSubtype, Device::CPU,
+      MonolithicOpFunc([probe](const Node&,
+                               const std::vector<const NodeOutput*>&) {
+        PendingValuePublication publication =
+            PendingValuePublisher::allocate_cpu_dense_tensor(
+                DenseTensorDescriptor{
+                    {1U, 4U},
+                    ElementSemantics::FloatingPoint,
+                    StorageEncoding{32U},
+                },
+                ImageFacet{1U, 0U, std::nullopt},
+                StridedLayout{{static_cast<std::ptrdiff_t>(4U * sizeof(float)),
+                               static_cast<std::ptrdiff_t>(sizeof(float))},
+                              0U},
+                4U * sizeof(float));
+        NodeOutput output;
+        output.image_value = publication.value;
+        {
+          std::lock_guard<std::mutex> lock(probe->mutex);
+          probe->value = publication.value;
+          probe->producer.emplace(std::move(publication.producer));
+        }
+        probe->source_published.set_value();
+        return output;
+      }));
+  registry.register_impl(
+      kType, kDependentSubtype, Device::CPU,
+      MonolithicOpFunc(
+          [probe](const Node&, const std::vector<const NodeOutput*>&) {
+            probe->dependent_entries.fetch_add(1, std::memory_order_release);
+            return NodeOutput{};
+          }));
+
+  GraphModel graph("cache/issue85-pending-value-failure");
+  Node source = make_plan_node(kSourceNodeId);
+  source.type = kType;
+  source.subtype = kSourceSubtype;
+  Node dependent = make_plan_node(kDependentNodeId);
+  dependent.type = kType;
+  dependent.subtype = kDependentSubtype;
+  dependent.image_inputs.push_back(ImageInput{kSourceNodeId, "image"});
+  graph.add_node(std::move(source));
+  graph.add_node(std::move(dependent));
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache{providers::make_configured_image_artifact_codec(),
+                          ::ps::testing::make_yaml_cache_metadata_codec()};
+  GraphEventService events;
+  ExecutionService service(1U);
+  ExecutionServiceHost host;
+  ComputeRun run(make_test_submission("issue85-pending-value-failure",
+                                      graph.revision().value(),
+                                      kDependentNodeId));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Admitted));
+  TaskSubmissionPlan& plan = run.emplace_submission_plan(
+      graph, traversal, kDependentNodeId, std::vector<Device>{Device::CPU});
+  ASSERT_EQ(plan.size(), 2U);
+  TimingCollector timings;
+  std::mutex timing_mutex;
+  plan.emplace_task_runner(NodeTaskRunnerContext{
+      graph,
+      cache,
+      events,
+      service,
+      timings,
+      timing_mutex,
+      plan.execution_order(),
+      plan.id_to_idx(),
+      plan.temp_results(),
+      plan.resolved_ops(),
+      plan.compute_plan().task_graph,
+      false,
+      false,
+      true,
+      nullptr,
+  });
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Queued));
+  ASSERT_TRUE(run.advance_to(ComputeRunPhase::Running));
+  ComputeRunLease lease = run.acquire_lease();
+  auto completion = std::async(std::launch::async, [&] {
+    dispatch_planned_tasks(graph, service, host, "cpu", kDependentNodeId, plan,
+                           lease);
+  });
+
+  ASSERT_EQ(source_published.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  PendingValueProducer producer = [&probe]() {
+    std::lock_guard<std::mutex> lock(probe->mutex);
+    if (!probe->producer.has_value()) {
+      throw std::logic_error("Failed pending provider lost its producer.");
+    }
+    PendingValueProducer result = std::move(*probe->producer);
+    probe->producer.reset();
+    return result;
+  }();
+  ASSERT_TRUE(producer.complete_failed(ReadyFenceFailure(
+      ReadyFenceFailureDomain::Execution, 85,
+      "completion was superseded before destination publication")));
+
+  ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_THROW(completion.get(), ReadyFenceAccessError);
+  EXPECT_EQ(service.resource_snapshot().reserved, ResourceVector{});
+  ASSERT_TRUE(run.terminal_outcome().has_value());
+  EXPECT_EQ(run.terminal_outcome()->kind, ComputeRunTerminalKind::Failed);
+  const ReadyFenceSnapshot terminal = probe->value.ready_fence().poll();
+  ASSERT_EQ(terminal.state(), ReadyFenceState::Failed);
+  ASSERT_NE(terminal.failure(), nullptr);
+  EXPECT_EQ(terminal.failure()->domain(), ReadyFenceFailureDomain::Execution);
+  EXPECT_EQ(terminal.failure()->code(), 85);
+  EXPECT_EQ(probe->dependent_entries.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(host.context_entries(), 2);
+  EXPECT_EQ(host.context_exits(), 2);
+
+  registry.unregister_key(make_key(kType, kSourceSubtype));
+  registry.unregister_key(make_key(kType, kDependentSubtype));
 }
 
 /**

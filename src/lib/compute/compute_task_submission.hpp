@@ -265,6 +265,8 @@ class TaskSubmissionPlan {
    * @note The operation is idempotent and may race callback execution,
    * dependency release, inline runtime submission, failure, and cancellation.
    * Callback-owned units remain owned by their exact-once retirement tokens.
+   * Pending Value registrations are cancelled outside the publication gate;
+   * a callback that already entered keeps its executor alive through exit.
    */
   void close_publication() noexcept;
 
@@ -279,11 +281,51 @@ class TaskSubmissionPlan {
     Pending = 0U,
     /** @brief One matching callback owns execution. */
     Executing = 1U,
+    /** @brief Provider returned a Value whose producer is still pending. */
+    AwaitingValue = 2U,
+    /** @brief One fence continuation owns terminal value processing. */
+    CompletingValue = 3U,
     /** @brief Execution and dependent release succeeded. */
-    Completed = 2U,
+    Completed = 4U,
     /** @brief Execution or completion routing threw. */
-    Failed = 3U,
+    Failed = 5U,
   };
+
+  /**
+   * @brief Defers dependency release when a task published a pending Value.
+   * @param task Registered task whose provider just returned.
+   * @param identity Exact Run/local task identity.
+   * @param lease Matching Run lease retained by the fence callback.
+   * @param task_runtime Runtime whose completion count and executor are used.
+   * @return True when a pending fence continuation was registered.
+   * @throws std::bad_alloc, runtime, fence-registration, or access errors.
+   * @note The method increments completion before registering the wait. A
+   * Ready value is materialized synchronously and returns false; Failed or
+   * ProducerCancelled values throw without releasing dependents. Terminal
+   * publication observed under the publication gate installs no wait.
+   */
+  bool defer_pending_value(const PlannedTask& task,
+                           const ComputeRunTaskIdentity& identity,
+                           const ComputeRunLease& lease,
+                           ExecutionTaskRuntime& task_runtime);
+
+  /**
+   * @brief Completes one exact task after its pending Value becomes terminal.
+   * @param identity Exact task identity previously moved to AwaitingValue.
+   * @param lease Matching Run lease used for cancellation and dependent
+   * release.
+   * @param task_runtime Runtime used for trace and dependent submission.
+   * @param snapshot Terminal ReadyFence snapshot delivered asynchronously.
+   * @return Nothing.
+   * @throws ReadyFenceAccessError for failed/cancelled producer completion.
+   * @throws GraphError or runtime exceptions from materialization and release.
+   * @note ComputeRunLease owns the extra completion-unit retirement and failure
+   * publication around this method.
+   */
+  void complete_deferred_value(const ComputeRunTaskIdentity& identity,
+                               const ComputeRunLease& lease,
+                               ExecutionTaskRuntime& task_runtime,
+                               ReadyFenceSnapshot snapshot);
 
   /**
    * @brief Exact completion ownership for one runtime pre-counted plan task.
@@ -585,6 +627,16 @@ class TaskSubmissionPlan {
   std::vector<std::atomic<std::uint8_t>> task_execution_states_;
 
   /**
+   * @brief Move-only cancellation owners aligned with local task identities.
+   *
+   * @note The vector is sized before execution. Publication-gate locking
+   * serializes registration with terminal close, which swaps all remaining
+   * waits into lock-free cancellation. The retaining ComputeRunLease prevents
+   * plan destruction until a callback that already entered exits.
+   */
+  std::vector<std::optional<ReadyFenceWaitRegistration>> deferred_value_waits_;
+
+  /**
    * @brief Linearizes plan-owned/callback-owned transfer with terminal closure.
    * @note Recursive locking is required for an inline runtime, which may run
    * a callback and publish its dependent before the submission call returns.
@@ -626,6 +678,8 @@ class TaskSubmissionPlan {
 
   /** @brief Uniform conservative demand carried by every service task. */
   ReadyTaskResourceDemand task_resource_demand_;
+
+  friend class ComputeRunLease;
 };
 
 /**

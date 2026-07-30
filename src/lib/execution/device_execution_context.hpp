@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string_view>
 
+#include "photospider/data/value.hpp"
+
 /**
  * @file device_execution_context.hpp
  * @brief Private borrowed native-resource context for device operations.
@@ -87,6 +89,65 @@ class MetalExecutionContext {
   virtual NativeHandle find_or_create_compute_pipeline(
       std::string_view cache_key, std::string_view source,
       std::string_view function_name) = 0;
+
+  /**
+   * @brief Encodes and submits an explicit R32Float texture-to-host transfer.
+   * @param command_buffer_handle Non-null uncommitted id<MTLCommandBuffer>
+   * whose earlier encoders produced texture_handle.
+   * @param texture_handle Non-null R32Float id<MTLTexture>.
+   * @param width Positive texture width matching its logical output.
+   * @param height Positive texture height matching its logical output.
+   * @return Nothing after pending source/destination Values, exact completion
+   * identity, transfer blit, native completion handler, and commit are
+   * installed.
+   * @throws std::invalid_argument for missing handles or dimensions.
+   * @throws std::logic_error without ComputeRun completion lineage or after a
+   * prior output publication in the same operation callback.
+   * @throws std::overflow_error for byte arithmetic or identity exhaustion.
+   * @throws std::runtime_error for native allocation/encoder failures.
+   * @throws std::bad_alloc for retained publication/completion ownership.
+   * @note The method never waits and never calls texture getBytes. The
+   * destination is a host-visible revision-preserving replica whose ReadyFence
+   * settles from the command-buffer completion handler.
+   */
+  virtual void publish_float32_texture_to_host(
+      NativeHandle command_buffer_handle, NativeHandle texture_handle,
+      std::uint32_t width, std::uint32_t height) = 0;
+
+  /**
+   * @brief Submits an explicit host-to-R32Float-texture transfer.
+   * @param source Ready host-visible rank-two FLOAT32 Value to copy.
+   * @param width Positive texture width matching the source descriptor.
+   * @param height Positive texture height matching the source descriptor.
+   * @return Nothing after a distinct pending Metal Value, exact completion
+   * identity, buffer-to-texture blit, native callback, and commit are
+   * installed.
+   * @throws std::invalid_argument for invalid shape, encoding, layout, or
+   * dimensions.
+   * @throws ReadyFenceAccessError when the source producer is not Ready.
+   * @throws BufferAccessError when the source binding is not host-readable.
+   * @throws std::logic_error without ComputeRun completion lineage or after a
+   * prior output publication in the same operation callback.
+   * @throws std::overflow_error for byte arithmetic or identity exhaustion.
+   * @throws std::runtime_error for native allocation/encoder failures.
+   * @throws std::bad_alloc for retained publication/completion ownership.
+   * @note The method performs only explicitly requested source access and
+   * never waits for Metal. The pending device-local destination preserves the
+   * source logical revision and settles from the command-buffer callback.
+   */
+  virtual void publish_float32_host_to_texture(Value source,
+                                               std::uint32_t width,
+                                               std::uint32_t height) = 0;
+
+  /**
+   * @brief Takes the pending replica published by this operation.
+   * @return Pending host or device Value, or an invalid sentinel when no
+   * transfer was published.
+   * @throws Nothing.
+   * @note The host adapter calls this before the invocation context retires.
+   * Repeated calls return an invalid sentinel after the first transfer.
+   */
+  virtual Value take_published_value() noexcept = 0;
 };
 
 /**

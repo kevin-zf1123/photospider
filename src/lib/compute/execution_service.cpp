@@ -71,6 +71,7 @@ ReadyTaskMetadata::ReadyTaskMetadata(const ComputeRunDescriptor& descriptor,
       intent_(descriptor.intent()),
       quality_(descriptor.quality()),
       qos_(descriptor.qos()),
+      supersession_(descriptor.supersession()),
       trace_node_id_(trace_node_id),
       device_(device),
       is_initial_ready_(is_initial_ready) {
@@ -265,12 +266,81 @@ class ReadySubmissionDeviceInvocation final
   /** @copydoc execution::DeviceExecutorInvocation::run */
   void run() override { submission_.execute(runtime_); }
 
+  /** @copydoc execution::DeviceExecutorInvocation::completion_seed */
+  std::optional<execution::DeviceCompletionSeed> completion_seed()
+      const override {
+    const ReadyTaskMetadata& metadata = submission_.metadata();
+    return execution::DeviceCompletionSeed(
+        metadata.graph_instance_id().value(), metadata.target_node_id(),
+        metadata.supersession().key.request_intent(),
+        metadata.supersession().generation.value(),
+        submission_.identity().run_id().value(),
+        submission_.identity().local_task_id().value());
+  }
+
  private:
   /** @brief Worker-owned submission borrowed through executor return. */
   ReadyTaskSubmission& submission_;
 
   /** @brief Existing Run-scoped task runtime used by provider execution. */
   ExecutionTaskRuntime& runtime_;
+};
+
+/**
+ * @brief Type-erased non-inline fence continuation admission.
+ *
+ * @throws std::bad_alloc while copying the admission callable at construction.
+ * @note submit() contains all admission failures and delegates exact Run
+ * failure publication to the captured service operation.
+ */
+class ServiceReadyFenceExecutor final : public ReadyFenceExecutor {
+ public:
+  /** @brief Nonthrowing service admission callable. */
+  using Submitter = std::function<void(Task)>;
+  /** @brief Nonthrowing pending-continuation retirement callable. */
+  using Releaser = std::function<void()>;
+
+  /**
+   * @brief Owns one exact Run-scoped admission callable.
+   * @param submitter Nonempty callable that never propagates.
+   * @param releaser Nonempty callable that retires one pending continuation.
+   * @throws std::invalid_argument for an empty callable.
+   * @throws std::bad_alloc when callable ownership cannot allocate.
+   */
+  ServiceReadyFenceExecutor(Submitter submitter, Releaser releaser)
+      : submitter_(std::move(submitter)), releaser_(std::move(releaser)) {
+    if (!submitter_ || !releaser_) {
+      throw std::invalid_argument(
+          "Service fence executor requires admission and release callables.");
+    }
+  }
+
+  /**
+   * @brief Retires the Run's pending continuation ownership.
+   * @throws Nothing; the supplied releaser contains synchronization failure.
+   * @note ReadyFence retains this executor through callback exit, so
+   * destruction cannot precede admitted callback completion.
+   */
+  ~ServiceReadyFenceExecutor() noexcept override {
+    try {
+      releaser_();
+    } catch (...) {
+    }
+  }
+
+  /** @copydoc ReadyFenceExecutor::submit */
+  void submit(Task task) noexcept override {
+    try {
+      submitter_(std::move(task));
+    } catch (...) {
+    }
+  }
+
+ private:
+  /** @brief Exact Run-scoped service admission operation. */
+  Submitter submitter_;
+  /** @brief Exact-once Run pending-continuation retirement operation. */
+  Releaser releaser_;
 };
 
 /**
@@ -364,7 +434,7 @@ struct ExecutionService::RunState final
    * the synchronous waiter while a callback is still executing.
    */
   bool settled() const noexcept {
-    return in_flight == 0 &&
+    return in_flight == 0 && pending_fence_continuations == 0 &&
            (cancelled || first_exception != nullptr || tasks_to_complete == 0);
   }
 
@@ -426,6 +496,13 @@ struct ExecutionService::RunState final
   /** @brief Worker callbacks that have left the service queue but not exited.
    */
   int in_flight = 0;
+
+  /**
+   * @brief Fence executors that may still deliver or execute a continuation.
+   * @note Settlement waits for zero even after failure or cancellation, keeping
+   * the borrowed service/runtime alive through every asynchronous callback.
+   */
+  int pending_fence_continuations = 0;
 
   /** @brief Successful starts committed for this Run. */
   std::uint64_t committed_starts = 0U;
@@ -532,6 +609,51 @@ struct ExecutionService::QueueEntry final {
 
   /** @brief True while `store_position` and intrusive lane links are valid. */
   bool store_owned = false;
+};
+
+/**
+ * @brief Exact-once rendezvous between provider return and fence readiness.
+ *
+ * @throws std::system_error when synchronization fails and std::bad_alloc when
+ * a callback is parked.
+ * @note The gate retains the Run and lease until either no continuation was
+ * registered or the continuation reaches ordinary ready-store ownership. It
+ * owns no resource grant, native allocation, or worker.
+ */
+struct ExecutionService::FenceContinuationGate final {
+  /**
+   * @brief Captures exact continuation routing before fence registration.
+   * @param active_run Matching service Run.
+   * @param active_lease Matching non-forgeable Run lease.
+   * @param active_identity Exact Run/local task identity.
+   * @param active_trace_node_id Planned node for diagnostics.
+   * @throws Nothing after argument evaluation.
+   */
+  FenceContinuationGate(std::shared_ptr<RunState> active_run,
+                        ComputeRunLease active_lease,
+                        ComputeRunTaskIdentity active_identity,
+                        int active_trace_node_id) noexcept
+      : run(std::move(active_run)),
+        lease(std::move(active_lease)),
+        identity(active_identity),
+        trace_node_id(active_trace_node_id) {}
+
+  /** @brief Protects retirement, submission, and parked callback state. */
+  std::mutex mutex;
+  /** @brief Matching active Run retained through continuation admission. */
+  std::shared_ptr<RunState> run;
+  /** @brief Matching Run lease copied into the eventual ready submission. */
+  ComputeRunLease lease;
+  /** @brief Exact Run/local task identity resumed by the callback. */
+  ComputeRunTaskIdentity identity;
+  /** @brief Planned node used for continuation trace metadata. */
+  int trace_node_id = -1;
+  /** @brief True after the original QueueEntry fully retired. */
+  bool original_retired = false;
+  /** @brief True after ReadyFence delivered its callback exactly once. */
+  bool callback_delivered = false;
+  /** @brief Callback parked until original_retired becomes true. */
+  std::optional<ReadyFenceExecutor::Task> parked_task;
 };
 
 /**
@@ -1698,10 +1820,19 @@ class ExecutionService::BoundedReadyStore final {
   /**
    * @brief Purges every queued entry belonging to one Run.
    * @param run Matching retained Run state.
+   * @param retired_entries Empty caller-owned list receiving removed nodes.
    * @return Number of removed entries; the empty policy row remains active.
    * @throws Nothing; an accounting invariant violation terminates.
+   * @note Nodes are spliced without allocation and MUST be destroyed only
+   * after the caller releases the pool and Run locks. Their callbacks may
+   * retire asynchronous fence-executor ownership that reacquires the Run.
    */
-  std::size_t erase_run(const std::shared_ptr<RunState>& run) noexcept {
+  std::size_t erase_run(
+      const std::shared_ptr<RunState>& run,
+      std::list<std::shared_ptr<QueueEntry>>& retired_entries) noexcept {
+    if (!retired_entries.empty()) {
+      std::terminate();
+    }
     const auto found = run_states_.find(run->id.value());
     if (found == run_states_.end()) {
       return 0U;
@@ -1712,11 +1843,11 @@ class ExecutionService::BoundedReadyStore final {
     }
     std::size_t removed = 0U;
     while (state.high.head != nullptr) {
-      remove_entry(*state.high.head, state);
+      remove_entry(*state.high.head, state, &retired_entries);
       ++removed;
     }
     while (state.normal.head != nullptr) {
-      remove_entry(*state.normal.head, state);
+      remove_entry(*state.normal.head, state, &retired_entries);
       ++removed;
     }
     return removed;
@@ -2806,10 +2937,16 @@ class ExecutionService::BoundedReadyStore final {
    * @brief Unlinks and destroys one store list node with exact accounting.
    * @param entry Store-owned entry selected or purged.
    * @param state Matching Run policy row retained after removal.
+   * @param retired_entries Optional list receiving the unlinked node without
+   * destruction while the caller owns service locks.
    * @return Nothing.
    * @throws Nothing; invalid linkage/accounting terminates.
+   * @note A non-null destination uses allocation-free list splicing. The
+   * caller destroys those nodes only after releasing pool and Run locks.
    */
-  void remove_entry(QueueEntry& entry, PolicyRunState& state) noexcept {
+  void remove_entry(QueueEntry& entry, PolicyRunState& state,
+                    std::list<std::shared_ptr<QueueEntry>>* retired_entries =
+                        nullptr) noexcept {
     if (!entry.store_owned || entry.run.get() != state.run ||
         !entry.ready_grant.has_value() || !entry.ready_grant->active()) {
       std::terminate();
@@ -2840,7 +2977,12 @@ class ExecutionService::BoundedReadyStore final {
     entry.store_owned = false;
     entry.run_previous = nullptr;
     entry.run_next = nullptr;
-    entries_.erase(entry.store_position);
+    if (retired_entries == nullptr) {
+      entries_.erase(entry.store_position);
+    } else {
+      retired_entries->splice(retired_entries->end(), entries_,
+                              entry.store_position);
+    }
     telemetry_.decrement_physical_counter(
         ExecutionLifecyclePhysicalCounter::ReadyEntry);
   }
@@ -2921,6 +3063,9 @@ struct PreparedExecutionRunState final {
   std::shared_ptr<ExecutionService::RunState> run;
   /** @brief Fully detached ready-store map/list publication nodes. */
   ExecutionService::BoundedReadyStore::PreparedBatch batch;
+  /** @brief Representative exact lineage observed immediately before publish.
+   */
+  std::optional<execution::DeviceCompletionSeed> completion_seed;
   /** @brief Cancellation cleanup active through publication and settlement. */
   ComputeRunCancellationRegistration cancellation_registration;
 };
@@ -3474,6 +3619,14 @@ OperationExecutionLease::~OperationExecutionLease() noexcept = default;
 thread_local ExecutionService::RunState* ExecutionService::tls_run_state_ =
     nullptr;
 
+/** @brief Current worker-owned started QueueEntry, or null outside callback. */
+thread_local ExecutionService::QueueEntry* ExecutionService::tls_queue_entry_ =
+    nullptr;
+
+/** @brief Lazy fence/original-retirement rendezvous for current callback. */
+thread_local std::shared_ptr<ExecutionService::FenceContinuationGate>
+    ExecutionService::tls_fence_continuation_gate_;
+
 /** @brief Exact service owning the entered callback, or null outside one. */
 thread_local ExecutionService* ExecutionService::tls_service_ = nullptr;
 
@@ -3657,6 +3810,23 @@ ExecutionService::~ExecutionService() noexcept {
   } catch (...) {
     std::terminate();
   }
+}
+
+/** @copydoc ExecutionService::prepare_supersession_lineage */
+void ExecutionService::prepare_supersession_lineage(
+    GraphInstanceId graph_instance_id, const SupersessionIdentity& identity) {
+  pool_->device_executors.track_lineage(graph_instance_id.value(),
+                                        identity.key.target_node_id(),
+                                        identity.key.request_intent());
+}
+
+/** @copydoc ExecutionService::observe_current_supersession */
+void ExecutionService::observe_current_supersession(
+    GraphInstanceId graph_instance_id,
+    const SupersessionIdentity& identity) noexcept {
+  pool_->device_executors.publish_current_generation(
+      graph_instance_id.value(), identity.key.target_node_id(),
+      identity.key.request_intent(), identity.generation.value());
 }
 
 /** @copydoc ExecutionService::policy_lifecycle_observer */
@@ -4203,6 +4373,14 @@ PreparedExecutionRun ExecutionService::prepare_run(
       execution_type == "gpu_pipeline" &&
       pool_->device_executors.contains(Device::GPU_METAL);
   const ComputeRunId run_id = initial_submissions.front().metadata().run_id();
+  const ReadyTaskSubmission& representative = initial_submissions.front();
+  const execution::DeviceCompletionSeed completion_seed(
+      representative.metadata().graph_instance_id().value(),
+      representative.metadata().target_node_id(),
+      representative.metadata().supersession().key.request_intent(),
+      representative.metadata().supersession().generation.value(),
+      representative.identity().run_id().value(),
+      representative.identity().local_task_id().value());
   ComputeRunLease service_lease = initial_submissions.front().lease_;
   for (const ReadyTaskSubmission& submission : initial_submissions) {
     if (submission.metadata().run_id() != run_id) {
@@ -4315,6 +4493,7 @@ PreparedExecutionRun ExecutionService::prepare_run(
   state->owner = this;
   state->run = std::move(run);
   state->batch = std::move(batch);
+  state->completion_seed = completion_seed;
   state->cancellation_registration = std::move(cancellation_registration);
   return PreparedExecutionRun(std::move(state));
 }
@@ -4492,6 +4671,11 @@ void ExecutionService::execute_prepared_run(PreparedExecutionRun prepared) {
   }
   std::unique_ptr<PreparedExecutionRunState> state = std::move(prepared.state_);
   const std::shared_ptr<RunState> run = state->run;
+  if (!state->completion_seed.has_value()) {
+    throw std::logic_error(
+        "Prepared execution Run has no completion-lineage seed.");
+  }
+  pool_->device_executors.observe_generation(*state->completion_seed);
 
   {
     std::lock_guard<std::mutex> pool_lock(pool_->mutex);
@@ -4659,6 +4843,174 @@ void ExecutionService::submit_ready_submission(ReadyTaskSubmission submission) {
   enqueue_submission(run, std::move(submission));
 }
 
+/** @copydoc ExecutionService::make_ready_fence_executor */
+std::shared_ptr<ReadyFenceExecutor>
+ExecutionService::make_ready_fence_executor() {
+  if (tls_service_ != this || tls_run_state_ == nullptr ||
+      tls_queue_entry_ == nullptr ||
+      tls_queue_entry_->run.get() != tls_run_state_) {
+    throw std::logic_error(
+        "Fence continuation executor requires the matching service worker.");
+  }
+  if (!tls_fence_continuation_gate_) {
+    tls_fence_continuation_gate_ = std::make_shared<FenceContinuationGate>(
+        tls_queue_entry_->run, tls_queue_entry_->submission.lease_,
+        tls_queue_entry_->submission.identity(),
+        tls_queue_entry_->submission.metadata().trace_node_id());
+  }
+  const std::shared_ptr<FenceContinuationGate> gate =
+      tls_fence_continuation_gate_;
+  const std::shared_ptr<RunState> run = gate->run;
+  ComputeRunLease lease = gate->lease;
+  const ComputeRunTaskIdentity identity = gate->identity;
+  const int trace_node_id = gate->trace_node_id;
+  ServiceReadyFenceExecutor::Submitter submitter =
+      [this, gate, run, lease = std::move(lease), identity,
+       trace_node_id](ReadyFenceExecutor::Task task) mutable {
+        deliver_fence_continuation(gate, run, std::move(lease), identity,
+                                   trace_node_id, std::move(task));
+      };
+  ServiceReadyFenceExecutor::Releaser releaser = [this, run]() noexcept {
+    retire_fence_continuation(run);
+  };
+  retain_fence_continuation(run);
+  try {
+    return std::make_shared<ServiceReadyFenceExecutor>(std::move(submitter),
+                                                       std::move(releaser));
+  } catch (...) {
+    retire_fence_continuation(run);
+    throw;
+  }
+}
+
+/** @copydoc ExecutionService::retain_fence_continuation */
+void ExecutionService::retain_fence_continuation(
+    const std::shared_ptr<RunState>& run) {
+  if (!run) {
+    throw std::invalid_argument(
+        "Fence continuation retention requires an active Run.");
+  }
+  std::lock_guard<std::mutex> lock(run->mutex);
+  if (run->pending_fence_continuations == std::numeric_limits<int>::max()) {
+    throw std::overflow_error("Pending fence continuation count is exhausted.");
+  }
+  ++run->pending_fence_continuations;
+}
+
+/** @copydoc ExecutionService::retire_fence_continuation */
+void ExecutionService::retire_fence_continuation(
+    const std::shared_ptr<RunState>& run) noexcept {
+  if (!run) {
+    return;
+  }
+  try {
+    bool settled = false;
+    {
+      std::lock_guard<std::mutex> lock(run->mutex);
+      if (run->pending_fence_continuations <= 0) {
+        std::terminate();
+      }
+      --run->pending_fence_continuations;
+      settled = run->settled();
+    }
+    if (settled) {
+      run->settled_cv.notify_all();
+    }
+  } catch (...) {
+    std::terminate();
+  }
+}
+
+/** @copydoc ExecutionService::deliver_fence_continuation */
+void ExecutionService::deliver_fence_continuation(
+    const std::shared_ptr<FenceContinuationGate>& gate,
+    const std::shared_ptr<RunState>& run, ComputeRunLease lease,
+    ComputeRunTaskIdentity identity, int trace_node_id,
+    ReadyFenceExecutor::Task task) noexcept {
+  try {
+    if (!run) {
+      return;
+    }
+    if (!gate || !task || gate->run != run || gate->identity != identity ||
+        gate->trace_node_id != trace_node_id ||
+        lease.descriptor().id() != identity.run_id()) {
+      fail_run(run, std::make_exception_ptr(std::invalid_argument(
+                        "Fence continuation identity is inconsistent.")));
+      return;
+    }
+    bool enqueue_now = false;
+    {
+      std::lock_guard<std::mutex> lock(gate->mutex);
+      if (gate->callback_delivered) {
+        fail_run(run, std::make_exception_ptr(std::logic_error(
+                          "Fence continuation was delivered more than once.")));
+        return;
+      }
+      gate->callback_delivered = true;
+      if (gate->original_retired) {
+        enqueue_now = true;
+      } else {
+        gate->parked_task.emplace(std::move(task));
+      }
+    }
+    if (enqueue_now) {
+      enqueue_fence_continuation(gate, std::move(task));
+    }
+  } catch (...) {
+    fail_run(run, std::current_exception());
+  }
+}
+
+/** @copydoc ExecutionService::release_fence_continuation */
+void ExecutionService::release_fence_continuation(
+    const std::shared_ptr<FenceContinuationGate>& gate) noexcept {
+  if (!gate) {
+    return;
+  }
+  try {
+    std::optional<ReadyFenceExecutor::Task> parked;
+    {
+      std::lock_guard<std::mutex> lock(gate->mutex);
+      if (gate->original_retired) {
+        fail_run(gate->run,
+                 std::make_exception_ptr(std::logic_error(
+                     "Fence continuation original task retired twice.")));
+        return;
+      }
+      gate->original_retired = true;
+      parked = std::move(gate->parked_task);
+    }
+    if (parked.has_value()) {
+      enqueue_fence_continuation(gate, std::move(*parked));
+    }
+  } catch (...) {
+    fail_run(gate->run, std::current_exception());
+  }
+}
+
+/** @copydoc ExecutionService::enqueue_fence_continuation */
+void ExecutionService::enqueue_fence_continuation(
+    const std::shared_ptr<FenceContinuationGate>& gate,
+    ReadyFenceExecutor::Task task) noexcept {
+  try {
+    if (!gate || !gate->run || !task) {
+      throw std::invalid_argument(
+          "Fence continuation requires complete routed ownership.");
+    }
+    ReadyTaskSubmission submission(
+        gate->lease, gate->identity, gate->trace_node_id, false,
+        [task = std::move(task)](ComputeRunLease&,
+                                 const ComputeRunTaskIdentity&,
+                                 ExecutionTaskRuntime&) mutable { task(); },
+        ExecutionTaskPriority::High, gate->run->resource_demand, Device::CPU);
+    enqueue_submission(gate->run, std::move(submission));
+  } catch (...) {
+    if (gate && gate->run) {
+      fail_run(gate->run, std::current_exception());
+    }
+  }
+}
+
 /** @copydoc ExecutionService::available_devices */
 std::vector<Device> ExecutionService::available_devices() const {
   return {Device::CPU};
@@ -4791,6 +5143,7 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
   if (!failure) {
     return;
   }
+  std::list<std::shared_ptr<QueueEntry>> retired_entries;
   try {
     {
       std::lock_guard<std::mutex> pool_lock(pool_->mutex);
@@ -4802,10 +5155,11 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
         run->accepting = false;
       }
       if (run->published) {
-        (void)pool_->ready_store.erase_run(run);
+        (void)pool_->ready_store.erase_run(run, retired_entries);
       }
       pool_->advance_worker_notification_epoch();
     }
+    retired_entries.clear();
     pool_->ready_cv.notify_all();
     run->settled_cv.notify_all();
   } catch (...) {
@@ -4816,6 +5170,7 @@ void ExecutionService::fail_run(const std::shared_ptr<RunState>& run,
 void ExecutionService::cancel_run(
     const std::shared_ptr<RunState>& run,
     ComputeRunCancellationReason reason) noexcept {
+  std::list<std::shared_ptr<QueueEntry>> retired_entries;
   try {
     {
       std::lock_guard<std::mutex> pool_lock(pool_->mutex);
@@ -4827,10 +5182,11 @@ void ExecutionService::cancel_run(
       run->first_exception = nullptr;
       run->accepting = false;
       if (run->published) {
-        (void)pool_->ready_store.erase_run(run);
+        (void)pool_->ready_store.erase_run(run, retired_entries);
       }
       pool_->advance_worker_notification_epoch();
     }
+    retired_entries.clear();
     pool_->ready_cv.notify_all();
     run->settled_cv.notify_all();
   } catch (...) {
@@ -5151,6 +5507,8 @@ void ExecutionService::worker_loop(
 
     tls_service_ = this;
     tls_run_state_ = run.get();
+    tls_queue_entry_ = entry.get();
+    tls_fence_continuation_gate_.reset();
     tls_worker_id_ = worker_id;
     run->host->set_task_context(worker_id, run->id.value());
     lifecycle_telemetry_->increment_physical_counter(
@@ -5178,10 +5536,14 @@ void ExecutionService::worker_loop(
     lifecycle_telemetry_->decrement_physical_counter(
         ExecutionLifecyclePhysicalCounter::EnteredCallback);
     run->host->clear_task_context();
+    std::shared_ptr<FenceContinuationGate> fence_gate =
+        std::move(tls_fence_continuation_gate_);
+    tls_queue_entry_ = nullptr;
     tls_worker_id_ = -1;
     tls_run_state_ = nullptr;
     tls_service_ = nullptr;
     retire_worker_entry(entry, run);
+    release_fence_continuation(fence_gate);
   }
 }
 

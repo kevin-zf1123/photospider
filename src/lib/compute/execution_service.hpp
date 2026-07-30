@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "compute/compute_run.hpp"
+#include "compute/compute_supersession.hpp"
 #include "compute/execution_lifecycle_telemetry.hpp"
 #include "compute/run_lifecycle_registry.hpp"
 #include "execution/device_executor_registry.hpp"
@@ -512,6 +513,17 @@ class ReadyTaskMetadata final {
   const ComputeRunQos& qos() const noexcept { return qos_; }
 
   /**
+   * @brief Returns the canonical request lineage captured by the Run.
+   * @return Borrowed target/request-intent key and graph-wide generation.
+   * @throws Nothing.
+   * @note Realtime sibling Runs retain the same value even though their child
+   * execution intents differ.
+   */
+  const SupersessionIdentity& supersession() const noexcept {
+    return supersession_;
+  }
+
+  /**
    * @brief Returns the planned node used for execution trace attribution.
    * @return Graph-local planned node id.
    * @throws Nothing.
@@ -577,6 +589,9 @@ class ReadyTaskMetadata final {
 
   /** @brief Copied policy inputs that mint no resource authority. */
   ComputeRunQos qos_;
+
+  /** @brief Canonical request lineage used for stale-completion rejection. */
+  SupersessionIdentity supersession_;
 
   /** @brief Planned node id used only for execution-trace publication. */
   int trace_node_id_ = -1;
@@ -1077,6 +1092,35 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       Device device) const;
 
   /**
+   * @brief Preallocates native freshness state before Graph publication.
+   * @param graph_instance_id Exact live Graph identity.
+   * @param identity Prepared canonical request lineage; its generation is not
+   * made current by this method.
+   * @return Nothing.
+   * @throws ResidencyManager validation, allocation, or synchronization errors.
+   * @note Kernel calls this before submitting the coordinator publication.
+   * Rollback or born-stale settlement may leave a zero-generation placeholder
+   * but cannot stale current work.
+   */
+  void prepare_supersession_lineage(GraphInstanceId graph_instance_id,
+                                    const SupersessionIdentity& identity);
+
+  /**
+   * @brief Invalidates tracked older native completions before current publish.
+   * @param graph_instance_id Exact live Graph identity.
+   * @param identity Newly accepted canonical request lineage and generation.
+   * @return Nothing.
+   * @throws Nothing; synchronization or invariant failure terminates because
+   * Graph and residency currentness must not split.
+   * @note Kernel invokes this from the request coordinator's locked
+   * current-publication callback. The path performs no allocation and must not
+   * re-enter Graph/coordinator state.
+   */
+  void observe_current_supersession(
+      GraphInstanceId graph_instance_id,
+      const SupersessionIdentity& identity) noexcept;
+
+  /**
    * @brief Registers one fully initialized GraphRuntime lifecycle anchor.
    * @param anchor Exact runtime identity/lifetime/close record.
    * @return Nothing after GraphRegistered publication.
@@ -1383,6 +1427,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /** @copydoc ReadyTaskSubmissionRuntime::submit_ready_submission */
   void submit_ready_submission(ReadyTaskSubmission submission) override;
 
+  /** @copydoc ExecutionTaskRuntime::make_ready_fence_executor */
+  std::shared_ptr<ReadyFenceExecutor> make_ready_fence_executor() override;
+
   /**
    * @brief Reports the route-less compatibility capability.
    * @return One-element CPU device list; route-aware callers use the overload.
@@ -1498,6 +1545,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /** @brief One owned ready queue entry paired with matching Run state. */
   struct QueueEntry;
+
+  /** @brief Synchronizes original callback retirement with fence readiness. */
+  struct FenceContinuationGate;
 
   /** @brief Execution-domain exact-identity and exclusive-key start gate. */
   class OperationStartGate;
@@ -1671,6 +1721,73 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    */
   void enqueue_submission(const std::shared_ptr<RunState>& run,
                           ReadyTaskSubmission submission);
+
+  /**
+   * @brief Delivers one fence callback before or after original-task
+   * retirement.
+   * @param gate Shared exact-once retirement/readiness rendezvous.
+   * @param run Matching active Run retained through delivery.
+   * @param lease Matching lease moved into the continuation submission.
+   * @param identity Exact Run/local task identity being resumed.
+   * @param trace_node_id Planned node used for continuation diagnostics.
+   * @param task Fence callback moved into eventual ready-store ownership.
+   * @return Nothing.
+   * @throws Nothing; duplicate, allocation, admission, or shutdown failure is
+   * published to the matching Run.
+   * @note A callback arriving before the original worker retires is parked in
+   * the gate. It enters the ordinary bounded ready store only after the
+   * original execution grant is released, so one logical task never requires
+   * two simultaneous per-task grants.
+   */
+  void deliver_fence_continuation(
+      const std::shared_ptr<FenceContinuationGate>& gate,
+      const std::shared_ptr<RunState>& run, ComputeRunLease lease,
+      ComputeRunTaskIdentity identity, int trace_node_id,
+      ReadyFenceExecutor::Task task) noexcept;
+
+  /**
+   * @brief Releases the original callback side of one fence rendezvous.
+   * @param gate Optional gate created during the just-retired callback.
+   * @return Nothing.
+   * @throws Nothing; delayed admission failure is published to the exact Run.
+   * @note Called only after ready/execution grants, operation gate, physical
+   * route, QueueEntry, and in-flight ownership have retired.
+   */
+  void release_fence_continuation(
+      const std::shared_ptr<FenceContinuationGate>& gate) noexcept;
+
+  /**
+   * @brief Moves one released fence callback into ordinary ready ownership.
+   * @param gate Gate retaining exact Run, lease, task, and trace identity.
+   * @param task Nonempty callback released by the gate.
+   * @return Nothing.
+   * @throws Nothing; construction/admission failures fail the exact Run.
+   * @note The caller holds no gate, pool, Run, ledger, or ready-store lock.
+   */
+  void enqueue_fence_continuation(
+      const std::shared_ptr<FenceContinuationGate>& gate,
+      ReadyFenceExecutor::Task task) noexcept;
+
+  /**
+   * @brief Adds one asynchronous fence-executor settlement obligation.
+   * @param run Matching active Run retained by the executor.
+   * @return Nothing.
+   * @throws std::invalid_argument for a null Run.
+   * @throws std::overflow_error when the exact counter is exhausted.
+   * @throws std::system_error when Run synchronization fails.
+   * @note Registration occurs before ReadyFence can retain the executor.
+   */
+  void retain_fence_continuation(const std::shared_ptr<RunState>& run);
+
+  /**
+   * @brief Retires one asynchronous fence-executor settlement obligation.
+   * @param run Matching Run retained through executor destruction.
+   * @return Nothing.
+   * @throws Nothing; synchronization failure or underflow terminates.
+   * @note ReadyFence keeps the executor alive through queued callback exit, so
+   * zero proves no late callback can borrow this service/runtime.
+   */
+  void retire_fence_continuation(const std::shared_ptr<RunState>& run) noexcept;
 
   /**
    * @brief Grants and owns one uniformly estimated ready queue entry.
@@ -1855,6 +1972,13 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /** @brief Current service-worker Run context, null outside callbacks. */
   static thread_local RunState* tls_run_state_;
+
+  /** @brief Current started QueueEntry, null outside its provider callback. */
+  static thread_local QueueEntry* tls_queue_entry_;
+
+  /** @brief Lazy rendezvous shared with this callback's fence executor. */
+  static thread_local std::shared_ptr<FenceContinuationGate>
+      tls_fence_continuation_gate_;
 
   /** @brief Exact service whose worker callback entered this thread. */
   static thread_local ExecutionService* tls_service_;

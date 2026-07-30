@@ -103,6 +103,10 @@ class ScopedExecutorCallbackIdentity final {
 
 }  // namespace
 
+/** @copydoc DeviceExecutorRegistry::DeviceExecutorRegistry */
+DeviceExecutorRegistry::DeviceExecutorRegistry()
+    : residency_manager_(std::make_shared<ResidencyManager>()) {}
+
 /** @copydoc DeviceExecutor::execute */
 void DeviceExecutor::execute(DeviceExecutorInvocation& invocation) {
   ScopedExecutorCallbackIdentity callback_identity(*this);
@@ -197,10 +201,44 @@ DeviceExecutorDiagnostics DeviceExecutorRegistry::diagnostics(
   return executors_[slot]->diagnostics();
 }
 
+/** @copydoc DeviceExecutorRegistry::observe_generation */
+void DeviceExecutorRegistry::observe_generation(
+    const DeviceCompletionSeed& seed) {
+  if (!residency_manager_) {
+    throw std::logic_error("DeviceExecutorRegistry has no residency manager.");
+  }
+  residency_manager_->observe_generation(seed);
+}
+
+/** @copydoc DeviceExecutorRegistry::track_lineage */
+void DeviceExecutorRegistry::track_lineage(std::uint64_t graph_instance_id,
+                                           int target_node_id,
+                                           ComputeIntent request_intent) {
+  if (!residency_manager_) {
+    throw std::logic_error("DeviceExecutorRegistry has no residency manager.");
+  }
+  residency_manager_->track_lineage(graph_instance_id, target_node_id,
+                                    request_intent);
+}
+
+/** @copydoc DeviceExecutorRegistry::publish_current_generation */
+void DeviceExecutorRegistry::publish_current_generation(
+    std::uint64_t graph_instance_id, int target_node_id,
+    ComputeIntent request_intent,
+    std::uint64_t supersession_generation) noexcept {
+  if (!residency_manager_) {
+    std::terminate();
+  }
+  residency_manager_->publish_current_generation(graph_instance_id,
+                                                 target_node_id, request_intent,
+                                                 supersession_generation);
+}
+
 /** @copydoc make_default_device_executor_registry */
 DeviceExecutorRegistry make_default_device_executor_registry() {
   DeviceExecutorRegistry registry;
-  std::unique_ptr<DeviceExecutor> metal = make_default_metal_device_executor();
+  std::unique_ptr<DeviceExecutor> metal =
+      make_default_metal_device_executor(registry.residency_manager());
   if (metal) {
     registry.register_executor(std::move(metal));
   }

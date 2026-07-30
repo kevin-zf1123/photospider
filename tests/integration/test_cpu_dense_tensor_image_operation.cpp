@@ -1262,7 +1262,12 @@ TEST(CpuDenseTensorImageOperation,
   auto executor = std::make_shared<FakeDeviceExecutor>();
 
   EXPECT_NE(destination.allocation_identity(), source.allocation_identity());
-  EXPECT_NE(destination.revision_id(), source.revision_id());
+  EXPECT_EQ(destination.revision_id(), source.revision_id());
+  EXPECT_EQ(transfer.access_plan().kind(), AccessPlanKind::Transfer);
+  EXPECT_EQ(transfer.access_plan().lease_kind(),
+            AccessLeaseKind::DestinationValue);
+  EXPECT_EQ(transfer.access_plan().source_binding(), source.storage_binding());
+  EXPECT_TRUE(transfer.access_plan().target().require_distinct_binding);
   EXPECT_EQ(destination.dense_tensor_descriptor(),
             source.dense_tensor_descriptor());
   EXPECT_EQ(destination.strided_layout().byte_strides,
@@ -1285,6 +1290,157 @@ TEST(CpuDenseTensorImageOperation,
   EXPECT_EQ(std::memcmp(destination_read.data(), source_read.data(),
                         source_read.size()),
             0);
+}
+
+/**
+ * @brief Proves fake CPU-to-Metal transfer is explicit and revision preserving.
+ *
+ * @return Nothing; GoogleTest reports planning, binding, fence, or byte-copy
+ * failures.
+ * @throws Value, transfer, allocation, or fake-executor exceptions unchanged.
+ * @note The fake provider owns destination bytes outside BufferHandle and
+ * settles through DeviceTransferCompletion. Public destination access remains
+ * non-host-visible after Ready and never starts implicit readback work. A host
+ * capability without a host pointer is rejected before publication.
+ */
+TEST(CpuDenseTensorImageOperation,
+     CpuToMetalTransferUsesInjectedProviderAndRejectsHostRead) {
+  /**
+   * @brief Test-owned bytes representing one native Metal allocation.
+   * @throws std::bad_alloc when byte storage cannot allocate.
+   */
+  struct FakeMetalAllocation final {
+    /**
+     * @brief Allocates one fixed fake native envelope.
+     * @param size Positive byte count.
+     * @throws std::bad_alloc when byte storage cannot allocate.
+     */
+    explicit FakeMetalAllocation(std::size_t size) : bytes(size) {}
+    /** @brief Complete fake device-local bytes. */
+    std::vector<std::byte> bytes;
+  };
+
+  const Value source = make_unsigned8_value(3U, 2U, 2U, 8U);
+  auto allocation =
+      std::make_shared<FakeMetalAllocation>(source.storage_size());
+  const AccessTarget target{DeviceId(DeviceBackend::Metal),
+                            MemoryDomain::DeviceLocal, false, true};
+  const AccessTarget invalid_host_target{DeviceId(DeviceBackend::Metal),
+                                         MemoryDomain::DeviceLocal, true, true};
+  EXPECT_THROW(
+      (void)ValueTransferTask::prepare_external_transfer(
+          source, invalid_host_target, allocation, allocation.get(), nullptr,
+          [](const Value&,
+             const std::shared_ptr<DeviceTransferCompletion>& completion) {
+            (void)completion;
+          }),
+      std::invalid_argument);
+  ValueTransferTask transfer = ValueTransferTask::prepare_external_transfer(
+      source, target, allocation, allocation.get(), nullptr,
+      [allocation](
+          const Value& ready_source,
+          const std::shared_ptr<DeviceTransferCompletion>& completion) {
+        const ReadLease read = ready_source.buffer_handle().acquire_read();
+        if (read.size() != allocation->bytes.size()) {
+          throw std::logic_error(
+              "Fake Metal transfer received a mismatched envelope.");
+        }
+        std::memcpy(allocation->bytes.data(), read.data(), read.size());
+        if (!completion->complete_ready()) {
+          throw std::logic_error(
+              "Fake Metal transfer lost terminal authority.");
+        }
+      });
+  const Value destination = transfer.destination();
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+
+  EXPECT_EQ(transfer.access_plan().kind(), AccessPlanKind::Transfer);
+  EXPECT_EQ(transfer.access_plan().source_revision(),
+            source.revision_id().value());
+  EXPECT_EQ(destination.revision_id(), source.revision_id());
+  EXPECT_NE(destination.allocation_identity(), source.allocation_identity());
+  const StorageBinding pending_binding = destination.storage_binding();
+  EXPECT_EQ(pending_binding.device, DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(pending_binding.memory_domain, MemoryDomain::DeviceLocal);
+  EXPECT_FALSE(pending_binding.host_visible);
+  EXPECT_EQ(destination.ready_fence().poll().state(), ReadyFenceState::Pending);
+
+  transfer.enqueue(executor);
+  ASSERT_EQ(executor->pending_count(), 1U);
+  executor->run_next();
+  EXPECT_EQ(destination.ready_fence().poll().state(), ReadyFenceState::Ready);
+  const ReadLease source_read = source.buffer_handle().acquire_read();
+  ASSERT_EQ(source_read.size(), allocation->bytes.size());
+  EXPECT_EQ(std::memcmp(source_read.data(), allocation->bytes.data(),
+                        source_read.size()),
+            0);
+  EXPECT_THROW(destination.buffer_handle().acquire_read(), BufferAccessError);
+  EXPECT_THROW((void)ValueTransferTask::prepare_cpu_copy(destination),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Proves an external provider failure is typed and later work recovers.
+ *
+ * @return Nothing; GoogleTest reports failure-domain, queue, or recovery
+ * mismatches.
+ * @throws Value, transfer, allocation, or fake-executor exceptions unchanged.
+ * @note The first provider throws after source readiness and the task converts
+ * it to a Transfer failure. A second transfer on the same executor then
+ * completes Ready, proving no queue or terminal authority leaked.
+ */
+TEST(CpuDenseTensorImageOperation,
+     ExternalTransferFailureIsTypedAndLaterTransferRecovers) {
+  /**
+   * @brief Minimal owner representing one external native allocation.
+   * @throws Nothing for construction and destruction.
+   * @note Object identity supplies the required non-null fake native handle.
+   */
+  struct FakeExternalAllocation final {
+    /** @brief One non-null fake native allocation byte. */
+    std::byte byte{0};
+  };
+
+  const Value source = make_unsigned8_value(1U, 1U, 1U, 1U);
+  auto executor = std::make_shared<FakeDeviceExecutor>();
+  const AccessTarget target{DeviceId(DeviceBackend::Metal),
+                            MemoryDomain::DeviceLocal, false, true};
+  auto failed_owner = std::make_shared<FakeExternalAllocation>();
+  ValueTransferTask failed = ValueTransferTask::prepare_external_transfer(
+      source, target, failed_owner, failed_owner.get(), nullptr,
+      [](const Value&, const std::shared_ptr<DeviceTransferCompletion>&) {
+        throw std::runtime_error("injected fake Metal submission failure");
+      });
+  const Value failed_destination = failed.destination();
+  failed.enqueue(executor);
+  ASSERT_EQ(executor->pending_count(), 1U);
+  executor->run_next();
+  const ReadyFenceSnapshot failed_snapshot =
+      failed_destination.ready_fence().poll();
+  ASSERT_EQ(failed_snapshot.state(), ReadyFenceState::Failed);
+  ASSERT_NE(failed_snapshot.failure(), nullptr);
+  EXPECT_EQ(failed_snapshot.failure()->domain(),
+            ReadyFenceFailureDomain::Transfer);
+  EXPECT_NE(failed_snapshot.failure()->message().find(
+                "injected fake Metal submission failure"),
+            std::string::npos);
+
+  auto recovered_owner = std::make_shared<FakeExternalAllocation>();
+  ValueTransferTask recovered = ValueTransferTask::prepare_external_transfer(
+      source, target, recovered_owner, recovered_owner.get(), nullptr,
+      [](const Value&,
+         const std::shared_ptr<DeviceTransferCompletion>& completion) {
+        if (!completion->complete_ready()) {
+          throw std::logic_error("Recovery transfer lost terminal authority.");
+        }
+      });
+  const Value recovered_destination = recovered.destination();
+  recovered.enqueue(executor);
+  ASSERT_EQ(executor->pending_count(), 1U);
+  executor->run_next();
+  EXPECT_EQ(recovered_destination.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(executor->pending_count(), 0U);
 }
 
 /**
