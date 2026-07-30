@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
@@ -25,9 +26,35 @@ namespace ps::testing {
  * @note Counters are test evidence only and mint no product authority.
  */
 struct FakeDeviceExecutorState final {
+  /** @brief Number of fake calls that reached executor admission. */
+  std::atomic_uint64_t submission_count{0U};
+
   /** @brief Number of fake executor invocation entries. */
   std::atomic_uint64_t invocation_count{0U};
 };
+
+/**
+ * @brief Advances one fake monotonic diagnostic counter without wrapping.
+ * @param counter Counter advanced exactly once.
+ * @param message Stable overflow diagnostic.
+ * @return Nothing.
+ * @throws std::overflow_error when the counter is already saturated.
+ * @note The compare/exchange loop preserves concurrent fake-executor calls.
+ */
+inline void increment_fake_executor_counter(std::atomic_uint64_t& counter,
+                                            const char* message) {
+  std::uint64_t current = counter.load(std::memory_order_relaxed);
+  while (true) {
+    if (current == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error(message);
+    }
+    if (counter.compare_exchange_weak(current, current + 1U,
+                                      std::memory_order_release,
+                                      std::memory_order_relaxed)) {
+      return;
+    }
+  }
+}
 
 /**
  * @brief Minimal borrowed Metal context for callbacks that do not use SDK
@@ -76,6 +103,8 @@ class FakeMetalExecutionContext final
 /**
  * @brief Synchronous fake executor that publishes a matching borrowed context.
  *
+ * @throws std::overflow_error when a monotonic diagnostic counter is
+ * saturated.
  * @throws Provider exceptions unchanged.
  * @note This fixture has no callback queue, native resource, or worker owner.
  */
@@ -100,7 +129,12 @@ class FakeMetalDeviceExecutor final : public execution::DeviceExecutor {
 
   /** @copydoc execution::DeviceExecutor::execute */
   void execute(execution::DeviceExecutorInvocation& invocation) override {
-    state_->invocation_count.fetch_add(1U, std::memory_order_relaxed);
+    increment_fake_executor_counter(
+        state_->submission_count,
+        "Fake Metal executor submission counter exhausted.");
+    increment_fake_executor_counter(
+        state_->invocation_count,
+        "Fake Metal executor invocation counter exhausted.");
     FakeMetalExecutionContext context;
     execution::ScopedMetalExecutionContext scope(context);
     invocation.run();
@@ -108,13 +142,12 @@ class FakeMetalDeviceExecutor final : public execution::DeviceExecutor {
 
   /** @copydoc execution::DeviceExecutor::diagnostics */
   execution::DeviceExecutorDiagnostics diagnostics() const override {
+    const std::uint64_t invocation_count =
+        state_->invocation_count.load(std::memory_order_acquire);
+    const std::uint64_t submission_count =
+        state_->submission_count.load(std::memory_order_acquire);
     return execution::DeviceExecutorDiagnostics{
-        Device::GPU_METAL,
-        true,
-        state_->invocation_count.load(std::memory_order_relaxed),
-        0U,
-        0U,
-        0U,
+        Device::GPU_METAL, true, submission_count, invocation_count, 0U, 0U, 0U,
     };
   }
 
@@ -143,7 +176,8 @@ inline execution::DeviceExecutorRegistry make_fake_metal_executor_registry(
  * @return Move-only registry ready for service injection.
  * @throws std::bad_alloc when shared state or executor ownership cannot
  * allocate.
- * @note Use the state-taking overload when a test needs invocation counts.
+ * @note Use the state-taking overload when a test needs submission or
+ * invocation-entry counts.
  */
 inline execution::DeviceExecutorRegistry make_fake_metal_executor_registry() {
   return make_fake_metal_executor_registry(

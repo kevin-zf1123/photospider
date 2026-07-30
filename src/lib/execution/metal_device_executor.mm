@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -66,10 +67,11 @@ std::string metal_failure_message(const char* prefix, NSError* error) {
  * @brief Real process-owned Metal device executor.
  *
  * One executor retains its device, command queue, and validated pipeline cache
- * until service destruction. The execution mutex serializes direct registry
- * calls in addition to the service's single Metal lane.
+ * until service destruction. An admission monitor serializes direct registry
+ * calls in addition to the service's single Metal lane while leaving waiting
+ * submissions observable through diagnostics.
  *
- * @throws std::system_error from mutex operations.
+ * @throws std::system_error from mutex or condition-variable operations.
  * @note The class owns no Run, Graph, ready-store, or resource-ledger state.
  */
 class MetalDeviceExecutor final : public DeviceExecutor {
@@ -104,12 +106,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   /** @copydoc DeviceExecutor::execute */
   void execute(DeviceExecutorInvocation& invocation) override {
     @autoreleasepool {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (invocation_count_ == std::numeric_limits<std::uint64_t>::max()) {
-        throw std::overflow_error(
-            "Metal executor invocation counter exhausted.");
-      }
-      ++invocation_count_;
+      InvocationAdmission admission(*this);
       InvocationContext context(*this);
       ScopedMetalExecutionContext scope(context);
       invocation.run();
@@ -118,26 +115,115 @@ class MetalDeviceExecutor final : public DeviceExecutor {
 
   /** @copydoc DeviceExecutor::diagnostics */
   DeviceExecutorDiagnostics diagnostics() const override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(state_mutex_);
     return DeviceExecutorDiagnostics{
-        Device::GPU_METAL, command_queue_ != nil,
-        invocation_count_, total_allocations_,
-        live_allocations_, static_cast<std::uint64_t>([pipelines_ count]),
+        Device::GPU_METAL,       command_queue_ != nil, submission_count_,
+        invocation_count_,       total_allocations_,    live_allocations_,
+        pipeline_cache_entries_,
     };
   }
 
  private:
   /**
+   * @brief Owns one serialized callback-admission obligation.
+   *
+   * Construction records the submission while holding `state_mutex_`. If a
+   * callback is already active, condition-variable waiting atomically releases
+   * that mutex, making `submission_count_ > invocation_count_` observable.
+   * Once admitted, construction marks one active callback and advances the
+   * serialized entry count. Destruction clears that activity only after the
+   * invocation context and TLS scope have retired.
+   *
+   * @throws std::overflow_error before waiting when either monotonic counter
+   * is exhausted.
+   * @throws std::system_error from mutex or condition-variable operations.
+   * @note One admission is thread-affine and cannot outlive its executor.
+   */
+  class InvocationAdmission final {
+   public:
+    /**
+     * @brief Submits and waits for one exclusive callback entry.
+     * @param executor Live executor whose admission monitor is entered.
+     * @throws std::overflow_error before waiting when a diagnostic counter is
+     * exhausted.
+     * @throws std::system_error from mutex or condition-variable operations.
+     */
+    explicit InvocationAdmission(MetalDeviceExecutor& executor)
+        : executor_(executor) {
+      std::unique_lock<std::mutex> lock(executor_.state_mutex_);
+      if (executor_.submission_count_ ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          executor_.invocation_count_ ==
+              std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error(
+            "Metal executor invocation counters exhausted.");
+      }
+      ++executor_.submission_count_;
+      executor_.callback_available_.wait(
+          lock, [this] { return !executor_.callback_active_; });
+      executor_.callback_active_ = true;
+      ++executor_.invocation_count_;
+      active_ = true;
+    }
+
+    /**
+     * @brief Releases callback admission and wakes one queued submission.
+     * @throws Nothing; synchronization failure terminates because an active
+     * callback must never leave the executor permanently admitted.
+     */
+    ~InvocationAdmission() noexcept {
+      try {
+        {
+          std::lock_guard<std::mutex> lock(executor_.state_mutex_);
+          if (!active_ || !executor_.callback_active_) {
+            std::terminate();
+          }
+          executor_.callback_active_ = false;
+          active_ = false;
+        }
+        executor_.callback_available_.notify_one();
+      } catch (...) {
+        std::terminate();
+      }
+    }
+
+    /**
+     * @brief Prevents duplicating one callback-admission obligation.
+     * @param other Unused source because copying is forbidden.
+     * @throws Nothing because this operation is deleted.
+     */
+    InvocationAdmission(const InvocationAdmission& other) = delete;
+
+    /**
+     * @brief Prevents replacing one callback-admission obligation.
+     * @param other Unused source because assignment is forbidden.
+     * @return No value because this operation is deleted.
+     * @throws Nothing because this operation is deleted.
+     */
+    InvocationAdmission& operator=(const InvocationAdmission& other) = delete;
+
+   private:
+    /** @brief Executor whose active-callback state this value must release. */
+    MetalDeviceExecutor& executor_;
+
+    /** @brief Whether construction acquired one callback admission. */
+    bool active_ = false;
+  };
+
+  /**
    * @brief Invocation-bounded allocator and pipeline-cache facade.
    *
    * @throws Native allocation, validation, and pipeline errors from methods.
-   * @note The enclosing executor mutex remains held for this entire lifetime.
+   * @note The enclosing `InvocationAdmission` guarantees that no competing
+   * callback mutates native resources. Diagnostics briefly share
+   * `state_mutex_` but never wait for this context to retire.
    */
   class InvocationContext final : public MetalExecutionContext {
    public:
     /**
      * @brief Starts one empty native allocation scope.
-     * @param executor Locked executor whose resources are borrowed.
+     * @param executor Exclusively admitted executor whose resources are
+     * borrowed.
      * @throws std::bad_alloc when the retention array cannot be created.
      */
     explicit InvocationContext(MetalDeviceExecutor& executor)
@@ -149,15 +235,21 @@ class MetalDeviceExecutor final : public DeviceExecutor {
 
     /**
      * @brief Releases every invocation allocation and updates diagnostics.
-     * @throws Nothing.
-     * @note The executor mutex remains held and retained_count_ cannot exceed
+     * @throws Nothing; synchronization failure or a counter invariant breach
+     * terminates because the executor cannot expose leaked live allocations.
+     * @note Callback admission remains active and retained_count_ cannot exceed
      * the executor's live allocation count.
      */
     ~InvocationContext() noexcept override {
-      if (executor_.live_allocations_ < retained_count_) {
+      try {
+        std::lock_guard<std::mutex> lock(executor_.state_mutex_);
+        if (executor_.live_allocations_ < retained_count_) {
+          std::terminate();
+        }
+        executor_.live_allocations_ -= retained_count_;
+      } catch (...) {
         std::terminate();
       }
-      executor_.live_allocations_ -= retained_count_;
     }
 
     /** @copydoc MetalExecutionContext::command_queue_handle */
@@ -250,9 +342,18 @@ class MetalDeviceExecutor final : public DeviceExecutor {
         throw std::runtime_error(
             metal_failure_message("Metal pipeline creation failed", error));
       }
-      executor_.pipelines_[key] = pipeline;
-      executor_.pipeline_sources_[key] = source_string;
-      executor_.pipeline_functions_[key] = function_string;
+      {
+        std::lock_guard<std::mutex> lock(executor_.state_mutex_);
+        if (executor_.pipeline_cache_entries_ ==
+            std::numeric_limits<std::uint64_t>::max()) {
+          throw std::overflow_error(
+              "Metal executor pipeline-cache counter exhausted.");
+        }
+        executor_.pipelines_[key] = pipeline;
+        executor_.pipeline_sources_[key] = source_string;
+        executor_.pipeline_functions_[key] = function_string;
+        ++executor_.pipeline_cache_entries_;
+      }
       return (__bridge void*)pipeline;
     }
 
@@ -262,9 +363,12 @@ class MetalDeviceExecutor final : public DeviceExecutor {
      * @param resource Non-null texture or buffer to retain.
      * @return Nothing.
      * @throws std::overflow_error when diagnostic counters are exhausted.
-     * @note Counters advance only after the retention array accepts ownership.
+     * @throws std::system_error when diagnostic-state locking fails.
+     * @note The diagnostic state lock makes retention and all three counter
+     * advances one snapshot-visible transition.
      */
     void retain_resource(id<MTLResource> resource) {
+      std::lock_guard<std::mutex> lock(executor_.state_mutex_);
       if (executor_.total_allocations_ ==
               std::numeric_limits<std::uint64_t>::max() ||
           executor_.live_allocations_ ==
@@ -279,7 +383,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       ++retained_count_;
     }
 
-    /** @brief Locked executor whose queue/cache/counters are borrowed. */
+    /** @brief Exclusively admitted executor whose resources are borrowed. */
     MetalDeviceExecutor& executor_;
 
     /** @brief Strong owners for all invocation-created textures and buffers. */
@@ -295,8 +399,21 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   /** @brief Process-owned command queue retained until executor destruction. */
   id<MTLCommandQueue> __strong command_queue_;
 
-  /** @brief Serializes invocation resources, cache mutation, and snapshots. */
-  mutable std::mutex mutex_;
+  /**
+   * @brief Protects callback admission and every copied diagnostic field.
+   *
+   * @note The mutex is never held while provider code runs. A queued caller
+   * releases it through `callback_available_`, so diagnostics can observe that
+   * caller while another callback remains active.
+   */
+  mutable std::mutex state_mutex_;
+
+  /** @brief Wakes queued submissions after the active callback retires. */
+  std::condition_variable callback_available_;
+
+  /** @brief Whether exactly one invocation currently owns callback admission.
+   */
+  bool callback_active_ = false;
 
   /** @brief Stable cache-key to executor-owned pipeline mapping. */
   NSMutableDictionary<NSString*, id<MTLComputePipelineState>>* __strong
@@ -308,7 +425,18 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   /** @brief Function identity paired with every pipeline cache key. */
   NSMutableDictionary<NSString*, NSString*>* __strong pipeline_functions_;
 
-  /** @brief Accepted invocation entries, including throwing providers. */
+  /**
+   * @brief Calls that reached executor admission before serialized waiting.
+   *
+   * @note Protected by `state_mutex_`; monotonic and checked before increment.
+   */
+  std::uint64_t submission_count_ = 0U;
+
+  /**
+   * @brief Serialized invocation entries, including throwing providers.
+   *
+   * @note Protected by `state_mutex_`; never exceeds `submission_count_`.
+   */
   std::uint64_t invocation_count_ = 0U;
 
   /** @brief Cumulative textures and buffers retained by invocation allocators.
@@ -317,6 +445,9 @@ class MetalDeviceExecutor final : public DeviceExecutor {
 
   /** @brief Native allocations retained by the active invocation. */
   std::uint64_t live_allocations_ = 0U;
+
+  /** @brief Persistent pipeline entries mirrored for lock-safe diagnostics. */
+  std::uint64_t pipeline_cache_entries_ = 0U;
 };
 
 }  // namespace

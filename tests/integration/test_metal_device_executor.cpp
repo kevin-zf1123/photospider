@@ -160,9 +160,9 @@ class NativeAllocationProbeError final : public std::exception {
  * @brief Shared state for deterministic direct-registry serialization.
  *
  * Every field except the condition variable and mutex is protected by
- * `mutex`. The first callback waits while retaining the real executor lock;
- * the test thread releases it after the second callback has had a bounded,
- * explicitly signalled opportunity to enter.
+ * `mutex`. The first callback waits while retaining real executor callback
+ * admission; the test thread releases it only after executor diagnostics prove
+ * the second call has reached the serialized admission wait.
  *
  * @throws Nothing for construction and destruction.
  */
@@ -178,12 +178,6 @@ struct ExecutorSerializationProbe final {
 
   /** @brief Whether the first callback completed its guarded region. */
   bool first_exited = false;
-
-  /** @brief Whether the second caller is waiting at the test start gate. */
-  bool second_ready = false;
-
-  /** @brief Opens the second caller's direct registry entry gate. */
-  bool start_second = false;
 
   /** @brief Releases the first callback from its controlled wait. */
   bool release_first = false;
@@ -211,14 +205,129 @@ struct ExecutorSerializationProbe final {
 constexpr auto kExecutorProbeTimeout = std::chrono::seconds(5);
 
 /**
- * @brief Bounded overlap opportunity after the second caller is released.
+ * @brief Releases and joins all direct-registry caller threads on every exit.
  *
- * The second thread has already reached a condition-variable start gate before
- * this interval begins. A missing executor mutex therefore lets its callback
- * enter and signal immediately, while a correct mutex keeps it blocked until
- * the first callback is explicitly released.
+ * @throws `release_and_join()` propagates synchronization failures.
+ * @note Destruction terminates on synchronization failure because a joinable
+ * thread cannot escape the test scope.
  */
-constexpr auto kOverlapObservationWindow = std::chrono::milliseconds(500);
+class ExecutorSerializationThreadGuard final {
+ public:
+  /**
+   * @brief Binds the shared callback-release state.
+   * @param probe Live probe outliving all tracked threads.
+   * @throws Nothing.
+   */
+  explicit ExecutorSerializationThreadGuard(
+      ExecutorSerializationProbe& probe) noexcept
+      : probe_(probe) {}
+
+  /**
+   * @brief Releases callbacks and joins every tracked caller.
+   * @return Nothing.
+   * @throws std::system_error from probe locking or thread joining.
+   * @note The method is idempotent and joins the second caller before the
+   * first when both remain active.
+   */
+  void release_and_join() {
+    {
+      std::lock_guard<std::mutex> lock(probe_.mutex);
+      probe_.release_first = true;
+    }
+    probe_.condition.notify_all();
+    if (second_thread_ != nullptr && second_thread_->joinable()) {
+      second_thread_->join();
+    }
+    if (first_thread_ != nullptr && first_thread_->joinable()) {
+      first_thread_->join();
+    }
+  }
+
+  /**
+   * @brief Tracks the first direct-registry caller.
+   * @param thread Joinable or not-yet-started caller owned by the test scope.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void track_first(std::thread& thread) noexcept { first_thread_ = &thread; }
+
+  /**
+   * @brief Tracks the second direct-registry caller.
+   * @param thread Joinable or not-yet-started caller owned by the test scope.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void track_second(std::thread& thread) noexcept { second_thread_ = &thread; }
+
+  /**
+   * @brief Performs mandatory release and join during every scope exit.
+   * @throws Nothing; synchronization failure terminates.
+   */
+  ~ExecutorSerializationThreadGuard() noexcept {
+    try {
+      release_and_join();
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+  /**
+   * @brief Prevents duplicating one thread-join obligation.
+   * @param other Unused source because copying is forbidden.
+   * @throws Nothing because this operation is deleted.
+   */
+  ExecutorSerializationThreadGuard(
+      const ExecutorSerializationThreadGuard& other) = delete;
+
+  /**
+   * @brief Prevents replacing one thread-join obligation.
+   * @param other Unused source because assignment is forbidden.
+   * @return No value because this operation is deleted.
+   * @throws Nothing because this operation is deleted.
+   */
+  ExecutorSerializationThreadGuard& operator=(
+      const ExecutorSerializationThreadGuard& other) = delete;
+
+ private:
+  /** @brief Shared callback-release state retained by the test scope. */
+  ExecutorSerializationProbe& probe_;
+
+  /** @brief First caller joined during cleanup when tracked. */
+  std::thread* first_thread_ = nullptr;
+
+  /** @brief Second caller joined during cleanup when tracked. */
+  std::thread* second_thread_ = nullptr;
+};
+
+/**
+ * @brief Waits for a real executor submission count without negative timing.
+ * @param registry Factory-created registry under observation.
+ * @param expected Exact minimum submission count required for success.
+ * @return First snapshot at or above `expected`, or empty on safety timeout.
+ * @throws Registry diagnostic validation or synchronization failures
+ * unchanged.
+ * @note The timeout can only fail the test. It never releases the active
+ * callback or converts an unscheduled contender into a passing observation.
+ */
+std::optional<execution::DeviceExecutorDiagnostics> wait_for_submission_count(
+    const execution::DeviceExecutorRegistry& registry, std::uint64_t expected) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + kExecutorProbeTimeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    execution::DeviceExecutorDiagnostics diagnostics =
+        registry.diagnostics(Device::GPU_METAL);
+    if (diagnostics.submission_count >= expected) {
+      return diagnostics;
+    }
+    std::this_thread::yield();
+  }
+  execution::DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(Device::GPU_METAL);
+  if (diagnostics.submission_count >= expected) {
+    return diagnostics;
+  }
+  return std::nullopt;
+}
 
 /**
  * @brief Run-owned Perlin input and callback output retained through service
@@ -442,10 +551,11 @@ void expect_identical_perlin_outputs(
  * @brief Proves direct concurrent registry calls are serialized by the real
  * executor rather than by the service Metal lane.
  *
- * @throws GoogleTest assertion control only; thread failures are captured and
- * reported after both callers have joined.
- * @note Positive handshakes use five-second safety bounds, while the second
- * caller receives a separately signalled overlap opportunity before release.
+ * @throws Unexpected registry diagnostic synchronization failures unchanged;
+ * thread callback failures are captured and reported after both callers have
+ * joined.
+ * @note The first callback is released only after a copied diagnostic proves
+ * the second submission is queued outside serialized callback admission.
  */
 TEST(MetalDeviceExecutorIntegration,
      DirectRegistryCallsAreSerializedInsideRealExecutor) {
@@ -460,6 +570,10 @@ TEST(MetalDeviceExecutorIntegration,
   std::exception_ptr second_failure;
   bool first_tls_cleared = false;
   bool second_tls_cleared = false;
+  const execution::DeviceExecutorDiagnostics before =
+      registry.diagnostics(Device::GPU_METAL);
+  ASSERT_EQ(before.submission_count, 0U);
+  ASSERT_EQ(before.invocation_count, 0U);
 
   CallbackDeviceExecutorInvocation first_invocation([&probe] {
     execution::MetalExecutionContext* context =
@@ -505,7 +619,13 @@ TEST(MetalDeviceExecutorIntegration,
     probe.condition.notify_all();
   });
 
-  std::thread first_thread([&] {
+  std::thread first_thread;
+  std::thread second_thread;
+  ExecutorSerializationThreadGuard thread_guard(probe);
+  thread_guard.track_first(first_thread);
+  thread_guard.track_second(second_thread);
+
+  first_thread = std::thread([&] {
     try {
       registry.execute(Device::GPU_METAL, first_invocation);
     } catch (...) {
@@ -521,23 +641,14 @@ TEST(MetalDeviceExecutorIntegration,
         lock, kExecutorProbeTimeout, [&probe] { return probe.first_entered; });
   }
   if (!first_entered) {
-    {
-      std::lock_guard<std::mutex> lock(probe.mutex);
-      probe.release_first = true;
-    }
-    probe.condition.notify_all();
-    first_thread.join();
     FAIL() << "The first real Metal callback did not enter before timeout";
   }
 
-  std::thread second_thread([&] {
+  const execution::DeviceExecutorDiagnostics first_active =
+      registry.diagnostics(Device::GPU_METAL);
+
+  second_thread = std::thread([&] {
     try {
-      {
-        std::unique_lock<std::mutex> lock(probe.mutex);
-        probe.second_ready = true;
-        probe.condition.notify_all();
-        probe.condition.wait(lock, [&probe] { return probe.start_second; });
-      }
       registry.execute(Device::GPU_METAL, second_invocation);
     } catch (...) {
       second_failure = std::current_exception();
@@ -546,37 +657,12 @@ TEST(MetalDeviceExecutorIntegration,
         execution::current_metal_execution_context() == nullptr;
   });
 
-  bool second_ready = false;
-  {
-    std::unique_lock<std::mutex> lock(probe.mutex);
-    second_ready = probe.condition.wait_for(
-        lock, kExecutorProbeTimeout, [&probe] { return probe.second_ready; });
+  const std::optional<execution::DeviceExecutorDiagnostics> queued =
+      wait_for_submission_count(registry, before.submission_count + 2U);
+  if (!queued.has_value()) {
+    FAIL() << "The second registry caller did not reach executor admission";
   }
-  if (!second_ready) {
-    {
-      std::lock_guard<std::mutex> lock(probe.mutex);
-      probe.start_second = true;
-      probe.release_first = true;
-    }
-    probe.condition.notify_all();
-    second_thread.join();
-    first_thread.join();
-    FAIL() << "The second registry caller did not reach its start gate";
-  }
-
-  bool second_entered_while_first_was_blocked = false;
-  {
-    std::unique_lock<std::mutex> lock(probe.mutex);
-    probe.start_second = true;
-    probe.condition.notify_all();
-    second_entered_while_first_was_blocked = probe.condition.wait_for(
-        lock, kOverlapObservationWindow,
-        [&probe] { return probe.second_entered_before_first_exit; });
-    probe.release_first = true;
-  }
-  probe.condition.notify_all();
-  second_thread.join();
-  first_thread.join();
+  thread_guard.release_and_join();
 
   EXPECT_FALSE(first_failure);
   EXPECT_FALSE(second_failure);
@@ -585,17 +671,22 @@ TEST(MetalDeviceExecutorIntegration,
   EXPECT_FALSE(probe.first_wait_timed_out);
   EXPECT_TRUE(probe.first_entered);
   EXPECT_TRUE(probe.first_exited);
-  EXPECT_FALSE(second_entered_while_first_was_blocked);
   EXPECT_FALSE(probe.second_entered_before_first_exit);
   EXPECT_EQ(probe.callback_entries, 2U);
   EXPECT_EQ(probe.valid_context_entries, 2U);
   EXPECT_EQ(probe.maximum_active_callbacks, 1U);
   EXPECT_EQ(probe.active_callbacks, 0U);
+  EXPECT_EQ(first_active.submission_count, before.submission_count + 1U);
+  EXPECT_EQ(first_active.invocation_count, before.invocation_count + 1U);
+  EXPECT_EQ(queued->submission_count, before.submission_count + 2U);
+  EXPECT_EQ(queued->invocation_count, before.invocation_count + 1U);
+  EXPECT_EQ(queued->submission_count - queued->invocation_count, 1U);
 
   const execution::DeviceExecutorDiagnostics diagnostics =
       registry.diagnostics(Device::GPU_METAL);
   EXPECT_EQ(diagnostics.device, Device::GPU_METAL);
   EXPECT_TRUE(diagnostics.queue_ready);
+  EXPECT_EQ(diagnostics.submission_count, 2U);
   EXPECT_EQ(diagnostics.invocation_count, 2U);
   EXPECT_EQ(diagnostics.total_allocations, 0U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
@@ -624,6 +715,7 @@ TEST(MetalDeviceExecutorIntegration,
       registry.diagnostics(Device::GPU_METAL);
   ASSERT_EQ(before.device, Device::GPU_METAL);
   ASSERT_TRUE(before.queue_ready);
+  ASSERT_EQ(before.submission_count, 0U);
   ASSERT_EQ(before.invocation_count, 0U);
   ASSERT_EQ(before.total_allocations, 0U);
   ASSERT_EQ(before.live_allocations, 0U);
@@ -671,6 +763,7 @@ TEST(MetalDeviceExecutorIntegration,
       registry.diagnostics(Device::GPU_METAL);
   EXPECT_EQ(after_throw.device, Device::GPU_METAL);
   EXPECT_TRUE(after_throw.queue_ready);
+  EXPECT_EQ(after_throw.submission_count, before.submission_count + 1U);
   EXPECT_EQ(after_throw.invocation_count, before.invocation_count + 1U);
   EXPECT_EQ(after_throw.total_allocations, before.total_allocations + 2U);
   EXPECT_EQ(after_throw.live_allocations, 0U);
@@ -701,6 +794,7 @@ TEST(MetalDeviceExecutorIntegration,
       registry.diagnostics(Device::GPU_METAL);
   EXPECT_EQ(after_recovery.device, Device::GPU_METAL);
   EXPECT_TRUE(after_recovery.queue_ready);
+  EXPECT_EQ(after_recovery.submission_count, before.submission_count + 2U);
   EXPECT_EQ(after_recovery.invocation_count, before.invocation_count + 2U);
   EXPECT_EQ(after_recovery.total_allocations, before.total_allocations + 3U);
   EXPECT_EQ(after_recovery.live_allocations, 0U);
@@ -735,6 +829,7 @@ TEST(MetalDeviceExecutorIntegration,
       service.device_executor_diagnostics(Device::GPU_METAL);
   EXPECT_EQ(diagnostics.device, Device::GPU_METAL);
   EXPECT_TRUE(diagnostics.queue_ready);
+  EXPECT_EQ(diagnostics.submission_count, 2U);
   EXPECT_EQ(diagnostics.invocation_count, 2U);
   EXPECT_EQ(diagnostics.total_allocations, 6U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);

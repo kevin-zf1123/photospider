@@ -1070,7 +1070,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::invalid_argument when the device has no registered executor.
    * @throws std::system_error from concrete executor synchronization.
    * @note Counters are observational and do not mint `ResourceLedger`
-   * capacity.
+   * capacity. Submitted calls waiting for serialized callback admission remain
+   * visible while another invocation is active.
    */
   execution::DeviceExecutorDiagnostics device_executor_diagnostics(
       Device device) const;

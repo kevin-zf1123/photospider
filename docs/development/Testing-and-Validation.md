@@ -650,18 +650,23 @@ proves that full HP, dirty HP/RT, and connected preflight freeze the chosen
 Metal implementation/device and use CPU fallback when Metal is absent.
 `test_device_executor_registry` owns fixed-slot validation, exact dispatch,
 borrowed TLS context restoration, provider-exception identity, and copied
-diagnostics without a platform SDK. On Apple with the repository operation
-plugin enabled,
+diagnostics without a platform SDK. Its multi-call case proves submission and
+serialized-entry counters advance monotonically across successful and throwing
+callbacks. On Apple with the repository operation plugin enabled,
 `test_metal_device_executor` directly drives the factory-created real registry
-from two controlled threads and proves the executor itself prevents callback
-overlap. It also allocates a real texture and shared buffer before throwing,
-then proves exact provider-exception identity, same-thread TLS restoration,
-zero live allocations, stable queue/pipeline diagnostics, and successful
-re-entry through the same executor. Finally, it runs the real repository
-Perlin operation twice through one `ExecutionService` and proves queue
-availability, two executor entries, six retired invocation allocations, one
-reused pipeline, CPU-owned outputs, the dedicated Metal worker id, and an
-empty settled ledger.
+from two controlled threads. While the first callback remains active, a copied
+diagnostic must expose two submissions but only one serialized entry; the test
+releases the first callback only after observing that stable queued state. A
+bypassed admission wait instead exposes two entries and fails deterministically
+without a sleep, overlap window, or scheduler-timing assumption. The test also
+allocates a real texture and shared buffer before throwing, then proves exact
+provider-exception identity, same-thread TLS restoration, zero live
+allocations, stable queue/pipeline diagnostics, monotonic counters, and
+successful re-entry through the same executor. Finally, it runs the real
+repository Perlin operation twice through one `ExecutionService` and proves
+queue availability, two submissions and executor entries, six retired
+invocation allocations, one reused pipeline, CPU-owned outputs, the dedicated
+Metal worker id, and an empty settled ledger.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
 parsing and exact Host application. `test_host_adapter` loads real operation

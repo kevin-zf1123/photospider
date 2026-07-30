@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
@@ -58,13 +59,41 @@ class TestMetalExecutionContext final : public MetalExecutionContext {
  * @throws Nothing for construction and atomic access.
  */
 struct RecordingExecutorState final {
+  /** @brief Number of calls that reached executor admission. */
+  std::atomic_uint64_t submission_count{0U};
+
   /** @brief Number of executor entries. */
   std::atomic_uint64_t invocation_count{0U};
 };
 
 /**
+ * @brief Advances one recording-executor counter without wrapping.
+ * @param counter Counter advanced exactly once.
+ * @param message Stable overflow diagnostic.
+ * @return Nothing.
+ * @throws std::overflow_error when the counter is already saturated.
+ * @note Concurrent test callers retain monotonic counter semantics.
+ */
+void increment_recording_counter(std::atomic_uint64_t& counter,
+                                 const char* message) {
+  std::uint64_t current = counter.load(std::memory_order_relaxed);
+  while (true) {
+    if (current == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error(message);
+    }
+    if (counter.compare_exchange_weak(current, current + 1U,
+                                      std::memory_order_release,
+                                      std::memory_order_relaxed)) {
+      return;
+    }
+  }
+}
+
+/**
  * @brief Configurable synchronous executor used to validate registry behavior.
  *
+ * @throws std::overflow_error when a monotonic diagnostic counter is
+ * saturated.
  * @throws Provider exceptions unchanged.
  * @note A matching test Metal context is installed only for `GPU_METAL`.
  */
@@ -89,7 +118,12 @@ class RecordingExecutor final : public DeviceExecutor {
 
   /** @copydoc DeviceExecutor::execute */
   void execute(DeviceExecutorInvocation& invocation) override {
-    state_->invocation_count.fetch_add(1U, std::memory_order_relaxed);
+    increment_recording_counter(
+        state_->submission_count,
+        "Recording executor submission counter exhausted.");
+    increment_recording_counter(
+        state_->invocation_count,
+        "Recording executor invocation counter exhausted.");
     if (device_ == Device::GPU_METAL) {
       TestMetalExecutionContext context;
       ScopedMetalExecutionContext scope(context);
@@ -101,10 +135,15 @@ class RecordingExecutor final : public DeviceExecutor {
 
   /** @copydoc DeviceExecutor::diagnostics */
   DeviceExecutorDiagnostics diagnostics() const override {
+    const std::uint64_t invocation_count =
+        state_->invocation_count.load(std::memory_order_acquire);
+    const std::uint64_t submission_count =
+        state_->submission_count.load(std::memory_order_acquire);
     return DeviceExecutorDiagnostics{
         device_,
         device_ == Device::GPU_METAL,
-        state_->invocation_count.load(std::memory_order_relaxed),
+        submission_count,
+        invocation_count,
         7U,
         0U,
         2U,
@@ -229,6 +268,7 @@ TEST(DeviceExecutorRegistry, DispatchesExactlyOnceAndCopiesDiagnostics) {
       registry.diagnostics(Device::GPU_METAL);
   EXPECT_EQ(diagnostics.device, Device::GPU_METAL);
   EXPECT_TRUE(diagnostics.queue_ready);
+  EXPECT_EQ(diagnostics.submission_count, 1U);
   EXPECT_EQ(diagnostics.invocation_count, 1U);
   EXPECT_EQ(diagnostics.total_allocations, 7U);
   EXPECT_EQ(diagnostics.live_allocations, 0U);
@@ -251,7 +291,58 @@ TEST(DeviceExecutorRegistry, PropagatesProviderFailureAndRestoresContext) {
   } catch (const std::runtime_error& error) {
     EXPECT_STREQ(error.what(), "exact provider failure");
   }
+  const DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(diagnostics.submission_count, 1U);
+  EXPECT_EQ(diagnostics.invocation_count, 1U);
   EXPECT_EQ(state->invocation_count.load(std::memory_order_relaxed), 1U);
+  EXPECT_EQ(current_metal_execution_context(), nullptr);
+}
+
+/**
+ * @brief Proves copied submission and serialized-entry counters are monotonic
+ * across multiple successful and throwing calls.
+ */
+TEST(DeviceExecutorRegistry,
+     DiagnosticsAdvanceMonotonicallyAcrossSuccessAndFailure) {
+  DeviceExecutorRegistry registry;
+  auto state = std::make_shared<RecordingExecutorState>();
+  registry.register_executor(
+      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state));
+
+  const DeviceExecutorDiagnostics before =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(before.submission_count, 0U);
+  EXPECT_EQ(before.invocation_count, 0U);
+
+  ContextRecordingInvocation first;
+  registry.execute(Device::GPU_METAL, first);
+  const DeviceExecutorDiagnostics after_success =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(after_success.submission_count, before.submission_count + 1U);
+  EXPECT_EQ(after_success.invocation_count, before.invocation_count + 1U);
+
+  ThrowingInvocation throwing;
+  EXPECT_THROW(registry.execute(Device::GPU_METAL, throwing),
+               std::runtime_error);
+  const DeviceExecutorDiagnostics after_failure =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(after_failure.submission_count,
+            after_success.submission_count + 1U);
+  EXPECT_EQ(after_failure.invocation_count,
+            after_success.invocation_count + 1U);
+
+  ContextRecordingInvocation recovery;
+  registry.execute(Device::GPU_METAL, recovery);
+  const DeviceExecutorDiagnostics after_recovery =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(after_recovery.submission_count,
+            after_failure.submission_count + 1U);
+  EXPECT_EQ(after_recovery.invocation_count,
+            after_failure.invocation_count + 1U);
+  EXPECT_EQ(after_recovery.submission_count, after_recovery.invocation_count);
+  EXPECT_EQ(first.runs, 1);
+  EXPECT_EQ(recovery.runs, 1);
   EXPECT_EQ(current_metal_execution_context(), nullptr);
 }
 

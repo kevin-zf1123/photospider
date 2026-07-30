@@ -28,7 +28,23 @@ struct DeviceExecutorDiagnostics final {
   /** @brief Whether the executor owns a usable native command queue. */
   bool queue_ready = false;
 
-  /** @brief Number of invocation entries accepted by this executor. */
+  /**
+   * @brief Calls that reached the concrete executor admission boundary.
+   *
+   * The counter advances before a call waits for serialized callback entry,
+   * includes calls whose callback later throws, never decreases, and never
+   * wraps. A saturated executor rejects the next submission explicitly.
+   */
+  std::uint64_t submission_count = 0U;
+
+  /**
+   * @brief Calls that crossed serialized callback admission.
+   *
+   * The counter includes callbacks that later return or throw.
+   * `submission_count - invocation_count` is the number of submitted calls
+   * that have not yet crossed callback admission; a serialized executor
+   * exposes those calls as queued waiters while another callback is active.
+   */
   std::uint64_t invocation_count = 0U;
 
   /** @brief Cumulative invocation-owned native allocations. */
@@ -90,9 +106,12 @@ class DeviceExecutor {
    * @brief Runs one borrowed invocation inside the native executor scope.
    * @param invocation Stack-bounded callback borrowed until return.
    * @return Nothing.
-   * @throws Provider or native executor failures unchanged.
+   * @throws std::overflow_error before callback entry when a monotonic
+   * diagnostic counter is exhausted.
+   * @throws Provider, synchronization, or native executor failures unchanged.
    * @note Implementations invoke `run()` exactly once and create no second
-   * ready/completion queue.
+   * ready/completion queue. Submission diagnostics advance before waiting for
+   * serialized callback admission.
    */
   virtual void execute(DeviceExecutorInvocation& invocation) = 0;
 
@@ -100,6 +119,9 @@ class DeviceExecutor {
    * @brief Copies thread-safe observational executor diagnostics.
    * @return Value snapshot containing no native handles.
    * @throws std::system_error when synchronization fails.
+   * @note A waiting submission remains observable while another callback is
+   * active; implementations MUST NOT require that callback to return before
+   * copying the snapshot. Observation is not synchronized with destruction.
    */
   virtual DeviceExecutorDiagnostics diagnostics() const = 0;
 };
@@ -208,6 +230,8 @@ class DeviceExecutorRegistry final {
    * @return Thread-safe observational snapshot.
    * @throws std::invalid_argument when no matching executor exists.
    * @throws std::system_error from concrete synchronization.
+   * @note A submitted call waiting for serialized callback admission is
+   * visible without waiting for the active callback to return.
    */
   DeviceExecutorDiagnostics diagnostics(Device device) const;
 
