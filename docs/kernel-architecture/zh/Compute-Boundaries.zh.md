@@ -416,9 +416,10 @@ ready admission、只清除其 queued entry，并等待已经运行的 callback 
 两个 intent binding 在 `GraphRuntime` 中都不拥有 owner：每个 binding 只存储复制的 route id 与
 非零 generation。Host-owned `ExecutionService` 拥有封闭的 `cpu`、`serial_debug` 与
 `gpu_pipeline` 实现，并对三者应用相同的 ledger/reserved-start 边界。Route replacement 会验证
-并发布新的 generation，不构造 per-Graph executor 或 reservation。Ledger 不会虚构笼统的
-device、I/O 或 plugin-specific utilization dimension：它只为已配置的非 CPU `DeviceId` 账户增加
-显式原生 memory/scratch 字节，I/O/plugin dimension 仍不属于该权威。
+并发布新的 generation，不构造 per-Graph executor 或 reservation。Service composition 会校验
+候选 device limit，并且只为 frozen executor registry 所表示的设备创建原生 memory/scratch
+account。它不会虚构未注册设备、I/O 或 plugin utilization dimension，I/O/plugin dimension
+仍不属于 ledger 权威。
 
 规范 inventory 同时感知 route 与 registry：`cpu` 和 `serial_debug` 只暴露 CPU；注册了 Metal
 executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与
@@ -587,15 +588,17 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #85 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #86 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源以及精确 implementation/key gate。
 每次 `GPU_METAL` start 随后都会进入匹配的固定、进程自有 registry executor，并在 provider
-返回前借用其 queue、invocation allocator 与 pipeline cache。Sequential provider entry 通过
-direct lease 使用同一 ledger 与 gate。Pending device work 会返回 Value，其 Run-scoped
-continuation 会重新进入同一个 ready store；精确 freshness 会在 dependency release 前门控
-destination Ready 与进程 residency，而 graph-state transaction 仍是最终 publication
-authority。Graph 只保留复制的 route id/generation，不拥有 native
+返回前借用其 queue、invocation allocator 与 pipeline cache。原生分配前，其完整
+memory/scratch plan 必须匹配同一可执行设备的 account；CPU fallback 或空 registry 不会创建
+Metal account，而缺少已配置 account 的 registered executor 不能绕过 admission。Sequential
+provider entry 通过 direct lease 使用同一 ledger 与 gate。Pending device work 会返回 Value，
+其 Run-scoped continuation 会重新进入同一个 ready store；精确 freshness 会在 dependency
+release 前门控 destination Ready 与进程 residency，而 graph-state transaction 仍是最终
+publication authority。Graph 只保留复制的 route id/generation，不拥有 native
 device owner；不再存在拥有 worker 的 scheduler SDK、scheduler plugin、per-Graph 物理 owner 或
 compatibility adapter。独立 realtime child Run、request-owned staging、强 identity/revision check、
 latest-wins supersession、cancellation observation、精确 Run queued purge、dependent suppression 与

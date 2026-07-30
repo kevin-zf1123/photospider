@@ -270,14 +270,17 @@ Zero declares no amount in that dimension; it never means an unknown amount
 that the ledger may invent.
 
 **`ResourceLedger`**
-The private Host-authoritative mint exclusively owned by one
-`ExecutionService`. It atomically admits complete vectors, mints only bounded
-child grants, and releases exact capacity after parent and child ownership
-ends. A private release observer may update non-authoritative companion
-accounting at that exact root-release point, but it cannot mint or enlarge
-capacity. Default limits belong to the Host composition, not a static process
-singleton. The ledger owns no worker, ready ordering, dependency, lifecycle
-registry, device/I/O/plugin estimate, or fairness authority.
+The private Host/device-authoritative mint exclusively owned by one
+`ExecutionService`. It atomically admits complete Host vectors and isolated
+per-`DeviceId` memory/scratch plans, mints only bounded child grants or exact
+device leases, and releases capacity after the true owner ends. A private
+release observer may update non-authoritative companion accounting at the exact
+Host root-release point, but it cannot mint or enlarge capacity. Default
+candidate limits belong to Host composition, not a static process singleton;
+service construction creates accounts only for matching executors in the
+frozen registry and never inserts one lazily. The ledger owns no worker, ready
+ordering, dependency, lifecycle registry, unregistered-device/I/O/plugin
+estimate, residency eviction, or fairness authority.
 
 **`ExecutionLifecycleTelemetry`**
 The source-private schema-v1 process lifecycle proof store owned by one

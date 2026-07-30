@@ -533,10 +533,11 @@ route id and nonzero generation. The Host-owned `ExecutionService` owns the
 closed `cpu`, `serial_debug`, and `gpu_pipeline` implementations and applies the
 same ledger/reserved-start boundary to all of them. Route replacement validates
 and publishes a fresh generation without constructing a per-Graph executor or
-reservation. The ledger does not invent device, I/O, or plugin-specific
-utilization dimensions: it adds only explicit native memory/scratch bytes for
-configured non-CPU `DeviceId` accounts and keeps I/O/plugin dimensions outside
-this authority.
+reservation. Service composition validates candidate device limits and creates
+native memory/scratch accounts only for devices represented by the frozen
+executor registry. It invents no unregistered-device, I/O, or plugin
+utilization dimension, and keeps I/O/plugin dimensions outside ledger
+authority.
 
 The canonical inventory is route and registry aware: `cpu` and `serial_debug`
 expose CPU only; `gpu_pipeline` exposes Metal then CPU when a Metal executor is
@@ -763,18 +764,21 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #85: all HP/RT ready work enters one Host-owned
+is authoritative through issue #86: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources plus exact implementation/key gates before a closed private
 route starts execution. Every `GPU_METAL` start then enters the matching fixed,
 process-owned registry executor and borrows its queue, invocation allocator,
-and pipeline cache through provider return. Sequential provider entry uses the
-same ledger and gates through a direct lease. Pending device work returns a
-Value whose Run-scoped continuation re-enters this same ready store; exact
-freshness gates destination Ready and process residency before dependency
-release, while the graph-state transaction remains final publication
-authority. Graphs retain only copied route
+and pipeline cache through provider return. Before native allocation, its
+complete memory/scratch plan must fit the account for that same executable
+device; a CPU fallback or empty registry creates no Metal account, and a
+registered executor without a configured account cannot bypass admission.
+Sequential provider entry uses the same ledger and gates through a direct
+lease. Pending device work returns a Value whose Run-scoped continuation
+re-enters this same ready store; exact freshness gates destination Ready and
+process residency before dependency release, while the graph-state transaction
+remains final publication authority. Graphs retain only copied route
 ids/generations and no native device owner; no worker-owning scheduler SDK,
 scheduler plugin, per-Graph physical owner, or compatibility adapter remains.
 Separate realtime child Runs, request-owned staging, strong identity/revision

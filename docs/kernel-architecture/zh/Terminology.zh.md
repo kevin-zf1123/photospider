@@ -213,11 +213,13 @@ scratch-byte、ready-entry 与 ready-byte 维度。零表示该维度声明的�
 可以自行虚构未知数量。
 
 **`ResourceLedger`**
-由一个 `ExecutionService` 独占的私有 Host 权威 mint。它原子准入完整 vector，只签发有界 child
-grant，并在 parent 与 child ownership 结束后精确释放容量。私有 release observer 可以在这个精确
-root-release 点更新不具权威的 companion accounting，但不能铸造或扩大容量。默认上限属于 Host
-composition，而不是静态 process singleton。Ledger 不拥有 worker、ready ordering、dependency、
-lifecycle registry、device/I/O/plugin 估算或 fairness authority。
+由一个 `ExecutionService` 独占的私有 Host/device 权威 mint。它原子准入完整 Host vector 与隔离的
+逐 `DeviceId` memory/scratch plan，只签发有界 child grant 或精确 device lease，并在真实 owner
+结束后释放容量。私有 release observer 可以在精确 Host root-release 点更新不具权威的 companion
+accounting，但不能铸造或扩大容量。默认候选 limit 属于 Host composition，而不是静态 process
+singleton；service construction 只为 frozen registry 中匹配的 executor 创建 account，且绝不惰性
+插入。Ledger 不拥有 worker、ready ordering、dependency、lifecycle registry、未注册设备/I/O/plugin
+估算、residency eviction 或 fairness authority。
 
 **`ExecutionLifecycleTelemetry`**
 由一个 `ExecutionService` 拥有的 source-private schema-v1 process lifecycle proof store。它会

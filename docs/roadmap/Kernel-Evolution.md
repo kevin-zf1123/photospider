@@ -624,7 +624,10 @@ invocation-scoped allocator, and persistent pipeline cache. V-8 now adds
 checked CPU/Metal binding facts, pure explicit access planning,
 revision-preserving bidirectional transfer, process-owned residency, exact
 stale-completion arbitration, pending-Value continuation, and asynchronous
-Perlin readback. Their exact
+Perlin readback. V-9 now adds isolated memory/scratch accounts only for
+executable devices in the fixed registry, admits native plans before
+allocation, reconciles allocator-reported actual bytes, and binds exact leases
+to persistent Values and asynchronous completion. Their exact
 behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
@@ -633,8 +636,8 @@ behavior is documented in
 ownership in
 [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
 and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
-complete model below is the accepted target; only the explicit V-2 through V-8 subset called
-out here is a current runtime fact.
+complete model below is the accepted target; only the explicit V-2 through V-9
+subset called out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -669,7 +672,7 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-8 subset is deliberately narrower:
+The implemented V-2 through V-9 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
@@ -720,6 +723,11 @@ The implemented V-2 through V-8 subset is deliberately narrower:
   handles through Graph, policy, metadata, or public Host state. Perlin
   publishes a pending native Value and encodes asynchronous texture-to-shared-
   buffer readback without command-buffer waits or synchronous `getBytes`;
+- service composition validates all candidate per-`DeviceId` limits, then
+  creates device memory/scratch accounts only for matching executors in the
+  frozen registry. Empty or non-Apple default registries expose no Metal
+  account, while a registered executor without a candidate budget remains
+  unable to admit native allocation;
 - `image_process:invert_dense` separates exact descriptor-only inference from
   stride-aware unsigned-8 execution, reuses a sealed input Value when present,
   and publishes the exact sealed result revision plus an independent
@@ -755,7 +763,7 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-8 subset, `BufferHandle` is a checked immutable byte range.
+For the current V-9 subset, `BufferHandle` is a checked immutable byte range.
 Consumer reads and ordinary builder writes require leases; sealed Values never
 issue `WriteLease`, and consumer writes are always rejected. A source-private
 producer may complete one sealed pending CPU or native payload through its
