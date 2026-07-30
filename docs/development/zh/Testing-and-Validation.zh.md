@@ -509,17 +509,24 @@ symbol。该声明只限定于这项 probe；既有 initial-submission storage o
 implementation/device，并在 Metal 不存在时使用 CPU fallback。
 `test_device_executor_registry` 不依赖 platform SDK，负责 fixed-slot validation、精确 dispatch、
 借用 TLS context restoration、provider-exception identity 与复制的 diagnostics；其中多调用
-case 证明 submission 与 serialized-entry 计数在成功及抛异常 callback 后都会单调推进。在 Apple
-上且仓库 operation plugin 已启用时，`test_metal_device_executor` 会由两个受控线程直接驱动工厂
-创建的真实 registry。第一个 callback 保持活跃时，复制出的 diagnostics 必须稳定显示两次
+case 证明 submission 与 serialized-entry 计数在成功及抛异常 callback 后都会单调推进。可移植
+callback tests 证明：直接同 executor 递归会在 nested provider 或任一 diagnostics counter 推进
+之前以稳定的 `std::logic_error` 被拒绝；外层 context 保持 current；后续 invocation 可以恢复；
+不同 executor 则可以嵌套并恢复外层 context。在 Apple 上且仓库 operation plugin 已启用时，
+`test_metal_device_executor` 会由两个受控线程直接驱动工厂创建的真实 registry。第一个 callback
+保持活跃时，复制出的 diagnostics 必须稳定显示两次
 submission、但只有一次 serialized entry；测试只在观察到该排队状态后才释放第一个 callback。
 若 admission wait 被旁路，diagnostics 会直接显示两次 entry，测试无需 sleep、重叠观察窗口或
 scheduler timing 假设即可确定失败。该测试还会先分配真实 texture 与 shared buffer 再抛出异常，
 然后证明精确 provider exception identity、同线程 TLS 恢复、存活 allocation 为零、
-queue/pipeline diagnostics 稳定、计数单调推进，并且同一个 executor 可以成功再次进入。最后，
-它会让真实仓库 Perlin operation 通过同一个 `ExecutionService` 连续运行两次，并证明 queue
-可用、两次 submission 与 executor entry、六个 invocation allocation 已退役、一条 pipeline
-被复用、output 归 CPU 所有、使用专用 Metal worker id，并且已结算 ledger 为空。
+queue/pipeline diagnostics 稳定、计数单调推进，并且同一个 executor 可以在后续非嵌套调用中
+成功进入。另一个 threadsafe death-test child 会安装五秒 alarm，通过真实 registry 尝试同步的
+同 executor callback 递归，并且只有在证明精确错误文本、nested counter/resource diagnostics
+不变、外层 TLS context 保持、返回后 TLS 清空以及后续 invocation 成功后才退出。alarm 会把
+此前的自死锁转化为有界测试失败，而不使用 detached thread 或制造生命周期竞态。最后，该测试
+会让真实仓库 Perlin operation 通过同一个 `ExecutionService` 连续运行两次，并证明 queue 可用、
+两次 submission 与 executor entry、六个 invocation allocation 已退役、一条 pipeline 被复用、
+output 归 CPU 所有、使用专用 Metal worker id，并且已结算 ledger 为空。
 
 `test_cli_policy_execution_config` 固定事务型 policy/execution config parsing 与精确 Host
 application。`test_host_adapter` 会加载真实 operation ABI-v2 与纯 C policy ABI-v1 fixture，配置两种

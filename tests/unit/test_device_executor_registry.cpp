@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -116,8 +117,8 @@ class RecordingExecutor final : public DeviceExecutor {
   /** @copydoc DeviceExecutor::device */
   Device device() const noexcept override { return device_; }
 
-  /** @copydoc DeviceExecutor::execute */
-  void execute(DeviceExecutorInvocation& invocation) override {
+  /** @copydoc DeviceExecutor::execute_impl */
+  void execute_impl(DeviceExecutorInvocation& invocation) override {
     increment_recording_counter(
         state_->submission_count,
         "Recording executor submission counter exhausted.");
@@ -194,6 +195,41 @@ class ThrowingInvocation final : public DeviceExecutorInvocation {
  public:
   /** @copydoc DeviceExecutorInvocation::run */
   void run() override { throw std::runtime_error("exact provider failure"); }
+};
+
+/** @brief Exact product diagnostic for same-executor callback re-entry. */
+constexpr char kReentryError[] = "Same-executor callback re-entry denied.";
+
+/**
+ * @brief Adapts one owned test callback to the device invocation contract.
+ *
+ * @throws std::bad_alloc when callback ownership cannot allocate.
+ * @note The executor borrows this object only for synchronous `execute()`.
+ */
+class CallbackInvocation final : public DeviceExecutorInvocation {
+ public:
+  /** @brief Owned callback entered exactly once by `run()`. */
+  using Callback = std::function<void()>;
+
+  /**
+   * @brief Takes ownership of one required callback.
+   * @param callback Nonempty callback to execute.
+   * @throws std::invalid_argument when callback is empty.
+   * @throws std::bad_alloc when callback ownership cannot allocate.
+   */
+  explicit CallbackInvocation(Callback callback)
+      : callback_(std::move(callback)) {
+    if (!callback_) {
+      throw std::invalid_argument("CallbackInvocation requires a callback.");
+    }
+  }
+
+  /** @copydoc DeviceExecutorInvocation::run */
+  void run() override { callback_(); }
+
+ private:
+  /** @brief Callback owned for this invocation's complete lifetime. */
+  Callback callback_;
 };
 
 /**
@@ -297,6 +333,180 @@ TEST(DeviceExecutorRegistry, PropagatesProviderFailureAndRestoresContext) {
   EXPECT_EQ(diagnostics.invocation_count, 1U);
   EXPECT_EQ(state->invocation_count.load(std::memory_order_relaxed), 1U);
   EXPECT_EQ(current_metal_execution_context(), nullptr);
+}
+
+/**
+ * @brief Proves same-executor callback re-entry fails before concrete counters.
+ * @return Nothing; GoogleTest records every contract mismatch.
+ * @throws Nothing expected from the completed test path.
+ * @note The recovery call also proves callback-identity TLS restoration.
+ */
+TEST(DeviceExecutorRegistry,
+     RejectsSameExecutorCallbackReentryBeforeConcreteAdmission) {
+  DeviceExecutorRegistry registry;
+  auto state = std::make_shared<RecordingExecutorState>();
+  registry.register_executor(
+      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state));
+
+  bool outer_context_was_current = false;
+  bool outer_context_survived_rejection = false;
+  bool caught_exact_reentry = false;
+  int nested_runs = 0;
+  DeviceExecutorDiagnostics after_nested_rejection;
+  CallbackInvocation nested([&nested_runs] { ++nested_runs; });
+  CallbackInvocation outer([&] {
+    MetalExecutionContext* outer_context = current_metal_execution_context();
+    outer_context_was_current = outer_context != nullptr;
+    try {
+      registry.execute(Device::GPU_METAL, nested);
+    } catch (const std::logic_error& error) {
+      caught_exact_reentry = true;
+      EXPECT_STREQ(error.what(), kReentryError);
+    } catch (...) {
+      ADD_FAILURE() << "Same-executor re-entry threw an unexpected type";
+    }
+    outer_context_survived_rejection =
+        current_metal_execution_context() == outer_context;
+    after_nested_rejection = registry.diagnostics(Device::GPU_METAL);
+  });
+
+  EXPECT_NO_THROW(registry.execute(Device::GPU_METAL, outer));
+  EXPECT_TRUE(outer_context_was_current);
+  EXPECT_TRUE(outer_context_survived_rejection);
+  EXPECT_TRUE(caught_exact_reentry);
+  EXPECT_EQ(nested_runs, 0);
+  EXPECT_EQ(after_nested_rejection.submission_count, 1U);
+  EXPECT_EQ(after_nested_rejection.invocation_count, 1U);
+  EXPECT_EQ(current_metal_execution_context(), nullptr);
+
+  ContextRecordingInvocation recovery;
+  EXPECT_NO_THROW(registry.execute(Device::GPU_METAL, recovery));
+  const DeviceExecutorDiagnostics after_recovery =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(recovery.runs, 1);
+  EXPECT_EQ(after_recovery.submission_count, 2U);
+  EXPECT_EQ(after_recovery.invocation_count, 2U);
+  EXPECT_EQ(current_metal_execution_context(), nullptr);
+}
+
+/**
+ * @brief Proves the identity guard permits nested calls to another executor.
+ * @return Nothing; GoogleTest records every contract mismatch.
+ * @throws Nothing expected from the completed test path.
+ * @note The two executors intentionally advertise the same backend device so
+ * exact object identity, rather than device kind, controls admission.
+ */
+TEST(DeviceExecutorRegistry, AllowsNestedCallbacksThroughDifferentExecutors) {
+  DeviceExecutorRegistry outer_registry;
+  auto outer_state = std::make_shared<RecordingExecutorState>();
+  outer_registry.register_executor(
+      std::make_unique<RecordingExecutor>(Device::GPU_METAL, outer_state));
+  DeviceExecutorRegistry inner_registry;
+  auto inner_state = std::make_shared<RecordingExecutorState>();
+  inner_registry.register_executor(
+      std::make_unique<RecordingExecutor>(Device::GPU_METAL, inner_state));
+
+  MetalExecutionContext* outer_context = nullptr;
+  bool inner_context_was_distinct = false;
+  bool outer_context_was_restored = false;
+  int inner_runs = 0;
+  CallbackInvocation inner([&] {
+    ++inner_runs;
+    MetalExecutionContext* inner_context = current_metal_execution_context();
+    inner_context_was_distinct =
+        inner_context != nullptr && inner_context != outer_context;
+  });
+  CallbackInvocation outer([&] {
+    outer_context = current_metal_execution_context();
+    ASSERT_NE(outer_context, nullptr);
+    inner_registry.execute(Device::GPU_METAL, inner);
+    outer_context_was_restored =
+        current_metal_execution_context() == outer_context;
+  });
+
+  EXPECT_NO_THROW(outer_registry.execute(Device::GPU_METAL, outer));
+  EXPECT_EQ(inner_runs, 1);
+  EXPECT_TRUE(inner_context_was_distinct);
+  EXPECT_TRUE(outer_context_was_restored);
+  EXPECT_EQ(current_metal_execution_context(), nullptr);
+  const DeviceExecutorDiagnostics outer_diagnostics =
+      outer_registry.diagnostics(Device::GPU_METAL);
+  const DeviceExecutorDiagnostics inner_diagnostics =
+      inner_registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(outer_diagnostics.submission_count, 1U);
+  EXPECT_EQ(outer_diagnostics.invocation_count, 1U);
+  EXPECT_EQ(inner_diagnostics.submission_count, 1U);
+  EXPECT_EQ(inner_diagnostics.invocation_count, 1U);
+}
+
+/**
+ * @brief Proves an indirect executor cycle cannot re-enter its first executor.
+ * @return Nothing; GoogleTest records every contract mismatch.
+ * @throws Nothing expected from the completed test path.
+ * @note The accepted `A -> B` prefix advances each executor once; rejected
+ * `A -> B -> A` entry advances neither counter on the repeated executor.
+ */
+TEST(DeviceExecutorRegistry,
+     RejectsIndirectSameExecutorCycleBeforeRepeatedAdmission) {
+  DeviceExecutorRegistry registry_a;
+  auto state_a = std::make_shared<RecordingExecutorState>();
+  registry_a.register_executor(
+      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state_a));
+  DeviceExecutorRegistry registry_b;
+  auto state_b = std::make_shared<RecordingExecutorState>();
+  registry_b.register_executor(
+      std::make_unique<RecordingExecutor>(Device::GPU_METAL, state_b));
+
+  MetalExecutionContext* context_a = nullptr;
+  bool context_b_was_current_after_rejection = false;
+  bool context_a_was_restored = false;
+  bool caught_exact_reentry = false;
+  int repeated_a_runs = 0;
+  CallbackInvocation repeated_a([&repeated_a_runs] { ++repeated_a_runs; });
+  CallbackInvocation callback_b([&] {
+    MetalExecutionContext* context_b = current_metal_execution_context();
+    EXPECT_NE(context_b, nullptr);
+    EXPECT_NE(context_b, context_a);
+    try {
+      registry_a.execute(Device::GPU_METAL, repeated_a);
+    } catch (const std::logic_error& error) {
+      caught_exact_reentry = true;
+      EXPECT_STREQ(error.what(), kReentryError);
+    } catch (...) {
+      ADD_FAILURE() << "Executor cycle threw an unexpected type";
+    }
+    context_b_was_current_after_rejection =
+        current_metal_execution_context() == context_b;
+  });
+  CallbackInvocation callback_a([&] {
+    context_a = current_metal_execution_context();
+    ASSERT_NE(context_a, nullptr);
+    registry_b.execute(Device::GPU_METAL, callback_b);
+    context_a_was_restored = current_metal_execution_context() == context_a;
+  });
+
+  EXPECT_NO_THROW(registry_a.execute(Device::GPU_METAL, callback_a));
+  EXPECT_TRUE(caught_exact_reentry);
+  EXPECT_EQ(repeated_a_runs, 0);
+  EXPECT_TRUE(context_b_was_current_after_rejection);
+  EXPECT_TRUE(context_a_was_restored);
+  EXPECT_EQ(current_metal_execution_context(), nullptr);
+  const DeviceExecutorDiagnostics diagnostics_a =
+      registry_a.diagnostics(Device::GPU_METAL);
+  const DeviceExecutorDiagnostics diagnostics_b =
+      registry_b.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(diagnostics_a.submission_count, 1U);
+  EXPECT_EQ(diagnostics_a.invocation_count, 1U);
+  EXPECT_EQ(diagnostics_b.submission_count, 1U);
+  EXPECT_EQ(diagnostics_b.invocation_count, 1U);
+
+  ContextRecordingInvocation recovery;
+  EXPECT_NO_THROW(registry_a.execute(Device::GPU_METAL, recovery));
+  const DeviceExecutorDiagnostics recovered_a =
+      registry_a.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(recovery.runs, 1);
+  EXPECT_EQ(recovered_a.submission_count, 2U);
+  EXPECT_EQ(recovered_a.invocation_count, 2U);
 }
 
 /**

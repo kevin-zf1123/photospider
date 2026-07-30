@@ -652,21 +652,31 @@ Metal implementation/device and use CPU fallback when Metal is absent.
 borrowed TLS context restoration, provider-exception identity, and copied
 diagnostics without a platform SDK. Its multi-call case proves submission and
 serialized-entry counters advance monotonically across successful and throwing
-callbacks. On Apple with the repository operation plugin enabled,
-`test_metal_device_executor` directly drives the factory-created real registry
-from two controlled threads. While the first callback remains active, a copied
-diagnostic must expose two submissions but only one serialized entry; the test
-releases the first callback only after observing that stable queued state. A
+callbacks. Portable callback tests prove that direct same-executor recursion is
+rejected with the stable `std::logic_error` before the nested provider or
+either diagnostic counter advances, that the outer context remains current,
+that a later invocation recovers, and that a distinct executor may nest while
+restoring the outer context. On Apple with the repository operation plugin
+enabled, `test_metal_device_executor` directly drives the factory-created real
+registry from two controlled threads. While the first callback remains active,
+a copied diagnostic must expose two submissions but only one serialized entry;
+it releases the first callback only after observing that stable queued state. A
 bypassed admission wait instead exposes two entries and fails deterministically
 without a sleep, overlap window, or scheduler-timing assumption. The test also
 allocates a real texture and shared buffer before throwing, then proves exact
 provider-exception identity, same-thread TLS restoration, zero live
 allocations, stable queue/pipeline diagnostics, monotonic counters, and
-successful re-entry through the same executor. Finally, it runs the real
-repository Perlin operation twice through one `ExecutionService` and proves
-queue availability, two submissions and executor entries, six retired
-invocation allocations, one reused pipeline, CPU-owned outputs, the dedicated
-Metal worker id, and an empty settled ledger.
+successful later non-nested entry through the same executor. A separate
+threadsafe death-test child installs a five-second alarm, attempts synchronous
+same-executor callback recursion through the real registry, and exits only
+after proving the exact error text, unchanged nested counters/resource
+diagnostics, preserved outer TLS context, cleared post-return TLS, and a
+successful later invocation. The alarm turns the former self-deadlock into a
+bounded test failure without detached threads or lifetime races. Finally, the
+test runs the real repository Perlin operation twice through one
+`ExecutionService` and proves queue availability, two submissions and executor
+entries, six retired invocation allocations, one reused pipeline, CPU-owned
+outputs, the dedicated Metal worker id, and an empty settled ledger.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
 parsing and exact Host application. `test_host_adapter` loads real operation

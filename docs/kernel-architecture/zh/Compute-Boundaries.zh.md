@@ -149,10 +149,14 @@ plugin 启用时，Apple executor 拥有并复用 device、command queue 与经�
 compute-pipeline cache；一个
 callback-scoped allocator 会保留 texture 与 buffer，直到 provider 返回。经过 reserved start 的
 Metal submission 会同步进入匹配 executor，并使用同一条 Run completion/exception/retirement
-path。Perlin provider 会借用这些 resource，并返回 CPU-owned compatibility image；
+path。一个 non-virtual、source-private 的 executor 入口会在 concrete admission 前安装按确切
+身份识别的 callback frame。直接递归与 `A -> B -> A` 之类的间接环会在
+submission/entry counter、context 安装或 provider 入口之前以稳定的 `std::logic_error` 失败，
+而不同 executor 可以同步嵌套。作用域化 frame 恢复会保留外层 context，并原样传播 provider
+异常。Perlin provider 会借用 executor resource，并返回 CPU-owned compatibility image；
 `GraphRuntime` 不再拥有 native Metal state。本切片不增加通用 `AccessPlan`、residency、
-visibility、bidirectional transfer、stale-completion arbitration，也不增加 device-memory/scratch
-ledger dimension；这些分别仍属于 #85 与 #86。
+visibility、bidirectional transfer、stale-completion arbitration，也不增加
+device-memory/scratch ledger dimension；这些分别仍属于 #85 与 #86。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
@@ -436,11 +440,13 @@ core operation 仍保持注册。Registry 与 v2 registrar 不依赖 OpenCV：�
 退役 replacement，并恢复已捕获的 predecessor。
 
 围绕真实 backend state 的同步仍由 backend owner 负责。进程 Metal executor 会串行化对 command
-queue、invocation allocator counter 与 pipeline cache 的访问。Metal Perlin provider 不保留
-static native state 或 DSO-private executor mutex；它只在 callback scope 内借用 executor
-resource。该 executor lock 既不是 OpenCV operation lock，也不是 scheduler exclusivity
-contract。仓库自有 provider 之外的 OpenCV 使用、第三方内部 thread 与 platform runtime worker
-仍不计入 Host execution accounting。
+queue、invocation allocator counter 与 pipeline cache 的访问。初次取得 admission mutex 可以
+在 submission 发布前传播 `std::system_error`。C++17 非定时 condition-variable wait 使用不
+抛异常的 predicate；它不是传播异常的同步边界，若无法重新锁住 mutex 并满足后置条件则会终止
+进程。Metal Perlin provider 不保留 static native state 或 DSO-private executor mutex；它只在
+callback scope 内借用 executor resource。该 executor lock 既不是 OpenCV operation lock，也
+不是 scheduler exclusivity contract。仓库自有 provider 之外的 OpenCV 使用、第三方内部
+thread 与 platform runtime worker 仍不计入 Host execution accounting。
 
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录本项决策。
 长期 integration coverage 会证明同一个固定 pool 上 `1/2/4/8` Run cap 对应精确 callback

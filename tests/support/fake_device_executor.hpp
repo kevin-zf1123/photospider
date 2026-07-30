@@ -127,8 +127,8 @@ class FakeMetalDeviceExecutor final : public execution::DeviceExecutor {
   /** @copydoc execution::DeviceExecutor::device */
   Device device() const noexcept override { return Device::GPU_METAL; }
 
-  /** @copydoc execution::DeviceExecutor::execute */
-  void execute(execution::DeviceExecutorInvocation& invocation) override {
+  /** @copydoc execution::DeviceExecutor::execute_impl */
+  void execute_impl(execution::DeviceExecutorInvocation& invocation) override {
     increment_fake_executor_counter(
         state_->submission_count,
         "Fake Metal executor submission counter exhausted.");

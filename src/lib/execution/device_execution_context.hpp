@@ -108,7 +108,10 @@ MetalExecutionContext& require_current_metal_execution_context();
 /**
  * @brief Installs one borrowed Metal context for a lexical executor scope.
  *
- * Nested scopes are supported and restore the previous pointer. Construction
+ * Nested scopes from distinct executor objects or direct context tests are
+ * supported and restore the previous pointer. This TLS capability does not
+ * permit recursive callback entry through the same `DeviceExecutor`; that
+ * entry is rejected before a new context scope is constructed. Construction
  * and destruction allocate no storage.
  *
  * @throws Nothing.

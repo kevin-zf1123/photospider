@@ -31,9 +31,11 @@ struct DeviceExecutorDiagnostics final {
   /**
    * @brief Calls that reached the concrete executor admission boundary.
    *
-   * The counter advances before a call waits for serialized callback entry,
-   * includes calls whose callback later throws, never decreases, and never
-   * wraps. A saturated executor rejects the next submission explicitly.
+   * The counter advances after the thread-local executor-identity guard and
+   * before a call waits for serialized callback entry. It includes calls whose
+   * callback later throws, never decreases, and never wraps. Same-executor
+   * callback re-entry is rejected before this counter advances. A saturated
+   * executor rejects the next submission explicitly.
    */
   std::uint64_t submission_count = 0U;
 
@@ -85,7 +87,8 @@ class DeviceExecutorInvocation {
  * @throws Concrete execution and diagnostics operations document native,
  * allocation, and synchronization failures.
  * @note Implementations are process-domain resources and own no Run, Graph,
- * ready queue, completion route, or `ResourceLedger` grant.
+ * ready queue, completion route, or `ResourceLedger` grant. Synchronous
+ * callback entry is non-reentrant for the same concrete executor object.
  */
 class DeviceExecutor {
  public:
@@ -106,14 +109,19 @@ class DeviceExecutor {
    * @brief Runs one borrowed invocation inside the native executor scope.
    * @param invocation Stack-bounded callback borrowed until return.
    * @return Nothing.
+   * @throws std::logic_error before concrete admission or diagnostic-counter
+   * mutation when a callback synchronously re-enters this exact executor on
+   * the current thread.
    * @throws std::overflow_error before callback entry when a monotonic
    * diagnostic counter is exhausted.
    * @throws Provider, synchronization, or native executor failures unchanged.
-   * @note Implementations invoke `run()` exactly once and create no second
-   * ready/completion queue. Submission diagnostics advance before waiting for
-   * serialized callback admission.
+   * @note Calls through a different executor object remain permitted. The
+   * thread-local identity guard is restored after normal return or any
+   * exception. Implementations invoke `run()` exactly once and create no
+   * second ready/completion queue. Submission diagnostics advance before
+   * waiting for serialized callback admission.
    */
-  virtual void execute(DeviceExecutorInvocation& invocation) = 0;
+  void execute(DeviceExecutorInvocation& invocation);
 
   /**
    * @brief Copies thread-safe observational executor diagnostics.
@@ -124,6 +132,18 @@ class DeviceExecutor {
    * copying the snapshot. Observation is not synchronized with destruction.
    */
   virtual DeviceExecutorDiagnostics diagnostics() const = 0;
+
+ protected:
+  /**
+   * @brief Runs one invocation after exact-executor re-entry validation.
+   * @param invocation Stack-bounded callback borrowed until return.
+   * @return Nothing.
+   * @throws Concrete admission, provider, synchronization, allocation, or
+   * native executor failures unchanged.
+   * @note Only `execute()` calls this hook. Same-executor callback re-entry has
+   * already been rejected, so concrete submission counters may advance here.
+   */
+  virtual void execute_impl(DeviceExecutorInvocation& invocation) = 0;
 };
 
 /**
@@ -220,7 +240,11 @@ class DeviceExecutorRegistry final {
    * @param invocation Stack-bounded callback borrowed until return.
    * @return Nothing.
    * @throws std::invalid_argument when no matching executor exists.
+   * @throws std::logic_error before concrete executor admission when the
+   * current callback synchronously re-enters the same registered executor.
    * @throws Provider or concrete executor failures unchanged.
+   * @note Nested dispatch through a different executor object is permitted;
+   * the identity guard is restored after return or exception.
    */
   void execute(Device device, DeviceExecutorInvocation& invocation);
 

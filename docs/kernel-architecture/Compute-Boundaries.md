@@ -178,11 +178,17 @@ executor owns and reuses its device, command queue, and validated
 compute-pipeline cache; one callback-scoped
 allocator retains textures and buffers until provider return. A reserved-start
 Metal submission enters the matching executor synchronously and uses the same
-Run completion/exception/retirement path. The Perlin provider borrows those
-resources and returns a CPU-owned compatibility image, while `GraphRuntime`
-owns no native Metal state. This slice adds no general `AccessPlan`, residency,
-visibility, bidirectional transfer, stale-completion arbitration, or
-device-memory/scratch ledger dimensions; those remain #85 and #86.
+Run completion/exception/retirement path. A non-virtual source-private executor
+entry installs an exact-identity callback frame before concrete admission.
+Direct recursion and indirect cycles such as `A -> B -> A` fail with a stable
+`std::logic_error` before submission/entry counters, context installation, or
+provider entry, while a distinct executor may nest synchronously. Scoped frame
+restoration preserves the outer context and propagates provider exceptions
+unchanged. The Perlin provider borrows executor resources and returns a
+CPU-owned compatibility image, while `GraphRuntime` owns no native Metal state.
+This slice adds no general `AccessPlan`, residency, visibility, bidirectional
+transfer, stale-completion arbitration, or device-memory/scratch ledger
+dimensions; those remain #85 and #86.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
@@ -559,12 +565,16 @@ predecessor.
 
 Synchronization around genuine backend state remains backend-owned. The
 process Metal executor serializes access to its command queue, invocation
-allocator counters, and pipeline cache. The Metal Perlin provider retains no
-static native state or DSO-private executor mutex; it borrows executor resources
-only for the callback scope. This executor lock is neither an OpenCV operation
-lock nor a scheduler exclusivity contract. OpenCV use outside repository-owned
-providers, third-party internal threads, and platform runtime workers remain
-outside Host execution accounting.
+allocator counters, and pipeline cache. Initial acquisition of its admission
+mutex may propagate `std::system_error` before a submission is published. The
+C++17 non-timed condition-variable wait uses a non-throwing predicate; it is
+not an exception-propagating synchronization boundary, and failure to re-lock
+and satisfy its postcondition terminates the process. The Metal Perlin provider
+retains no static native state or DSO-private executor mutex; it borrows
+executor resources only for the callback scope. This executor lock is neither
+an OpenCV operation lock nor a scheduler exclusivity contract. OpenCV use
+outside repository-owned providers, third-party internal threads, and platform
+runtime workers remain outside Host execution accounting.
 
 [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
 records this decision. Durable integration coverage proves exact callback

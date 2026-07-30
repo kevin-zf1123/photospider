@@ -71,8 +71,12 @@ std::string metal_failure_message(const char* prefix, NSError* error) {
  * calls in addition to the service's single Metal lane while leaving waiting
  * submissions observable through diagnostics.
  *
- * @throws std::system_error from mutex or condition-variable operations.
- * @note The class owns no Run, Graph, ready-store, or resource-ledger state.
+ * @throws std::system_error when admission-monitor construction or an
+ * operation's initial state-mutex acquisition fails.
+ * @note `DeviceExecutor::execute()` rejects synchronous same-executor callback
+ * re-entry before this implementation reaches admission or diagnostic
+ * counters. The class owns no Run, Graph, ready-store, or resource-ledger
+ * state.
  */
 class MetalDeviceExecutor final : public DeviceExecutor {
  public:
@@ -82,6 +86,8 @@ class MetalDeviceExecutor final : public DeviceExecutor {
    * @param command_queue Non-null process-owned command queue.
    * @throws std::invalid_argument if either native object is null.
    * @throws std::bad_alloc when cache dictionaries cannot be created.
+   * @throws std::system_error when the callback-admission condition variable
+   * cannot be initialized.
    * @note ARC retains both native objects for the complete executor lifetime.
    */
   MetalDeviceExecutor(id<MTLDevice> device, id<MTLCommandQueue> command_queue)
@@ -103,8 +109,8 @@ class MetalDeviceExecutor final : public DeviceExecutor {
   /** @copydoc DeviceExecutor::device */
   Device device() const noexcept override { return Device::GPU_METAL; }
 
-  /** @copydoc DeviceExecutor::execute */
-  void execute(DeviceExecutorInvocation& invocation) override {
+  /** @copydoc DeviceExecutor::execute_impl */
+  void execute_impl(DeviceExecutorInvocation& invocation) override {
     @autoreleasepool {
       InvocationAdmission admission(*this);
       InvocationContext context(*this);
@@ -136,8 +142,12 @@ class MetalDeviceExecutor final : public DeviceExecutor {
    *
    * @throws std::overflow_error before waiting when either monotonic counter
    * is exhausted.
-   * @throws std::system_error from mutex or condition-variable operations.
-   * @note One admission is thread-affine and cannot outlive its executor.
+   * @throws std::system_error when initial acquisition of `state_mutex_`
+   * fails.
+   * @note C++17 non-timed predicate waiting does not propagate synchronization
+   * exceptions. The predicate is non-throwing; failure to re-lock and satisfy
+   * the wait postcondition terminates the process. One admission is
+   * thread-affine and cannot outlive its executor.
    */
   class InvocationAdmission final {
    public:
@@ -146,7 +156,11 @@ class MetalDeviceExecutor final : public DeviceExecutor {
      * @param executor Live executor whose admission monitor is entered.
      * @throws std::overflow_error before waiting when a diagnostic counter is
      * exhausted.
-     * @throws std::system_error from mutex or condition-variable operations.
+     * @throws std::system_error when initial acquisition of `state_mutex_`
+     * fails.
+     * @note The C++17 non-timed wait itself propagates no synchronization
+     * exception. Its predicate is non-throwing; a failed re-lock that cannot
+     * satisfy the wait postcondition terminates the process.
      */
     explicit InvocationAdmission(MetalDeviceExecutor& executor)
         : executor_(executor) {
@@ -160,7 +174,7 @@ class MetalDeviceExecutor final : public DeviceExecutor {
       }
       ++executor_.submission_count_;
       executor_.callback_available_.wait(
-          lock, [this] { return !executor_.callback_active_; });
+          lock, [this]() noexcept { return !executor_.callback_active_; });
       executor_.callback_active_ = true;
       ++executor_.invocation_count_;
       active_ = true;

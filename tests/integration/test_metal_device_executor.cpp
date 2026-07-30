@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -143,6 +146,12 @@ class CallbackDeviceExecutorInvocation final
 /** @brief Exact exception text used by the native-allocation unwind probe. */
 constexpr char kExpectedFailure[] = "expected post-allocation Metal failure";
 
+/** @brief Exact product diagnostic for same-executor callback re-entry. */
+constexpr char kReentryError[] = "Same-executor callback re-entry denied.";
+
+/** @brief Process watchdog bound for the deliberate old-implementation hang. */
+constexpr unsigned int kExecutorReentryWatchdogSeconds = 5U;
+
 /**
  * @brief Distinct provider exception thrown after real native allocation.
  *
@@ -155,6 +164,123 @@ class NativeAllocationProbeError final : public std::exception {
   /** @copydoc std::exception::what */
   const char* what() const noexcept override { return kExpectedFailure; }
 };
+
+/**
+ * @brief Exercises same-executor callback re-entry in a watchdog child.
+ *
+ * @return Never returns; exits zero only after exact rejection, diagnostic
+ * preservation, TLS restoration, and subsequent executor recovery.
+ * @throws Nothing to the parent because every unexpected path exits with a
+ * distinct nonzero code.
+ * @note The child creates all native state after GoogleTest re-executes it.
+ * The alarm terminates the old self-deadlocking implementation without a
+ * detached thread, dangling reference, or probabilistic scheduling window.
+ */
+[[noreturn]] void run_same_executor_reentry_watchdog() {
+  (void)::alarm(kExecutorReentryWatchdogSeconds);
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(Device::GPU_METAL)) {
+    std::_Exit(2);
+  }
+
+  const execution::DeviceExecutorDiagnostics before =
+      registry.diagnostics(Device::GPU_METAL);
+  if (before.device != Device::GPU_METAL || !before.queue_ready ||
+      before.submission_count != 0U || before.invocation_count != 0U ||
+      before.total_allocations != 0U || before.live_allocations != 0U ||
+      before.pipeline_cache_entries != 0U) {
+    std::_Exit(3);
+  }
+
+  bool nested_ran = false;
+  CallbackDeviceExecutorInvocation nested([&nested_ran] { nested_ran = true; });
+  CallbackDeviceExecutorInvocation outer([&] {
+    execution::MetalExecutionContext* outer_context =
+        execution::current_metal_execution_context();
+    if (outer_context == nullptr ||
+        outer_context->command_queue_handle() == nullptr) {
+      std::_Exit(4);
+    }
+
+    bool caught_exact_reentry = false;
+    try {
+      registry.execute(Device::GPU_METAL, nested);
+    } catch (const std::logic_error& error) {
+      if (std::strcmp(error.what(), kReentryError) != 0) {
+        std::_Exit(5);
+      }
+      caught_exact_reentry = true;
+    } catch (...) {
+      std::_Exit(6);
+    }
+    if (!caught_exact_reentry || nested_ran) {
+      std::_Exit(7);
+    }
+    if (execution::current_metal_execution_context() != outer_context) {
+      std::_Exit(8);
+    }
+
+    const execution::DeviceExecutorDiagnostics after_rejection =
+        registry.diagnostics(Device::GPU_METAL);
+    if (after_rejection.submission_count != 1U ||
+        after_rejection.invocation_count != 1U ||
+        after_rejection.total_allocations != 0U ||
+        after_rejection.live_allocations != 0U ||
+        after_rejection.pipeline_cache_entries != 0U) {
+      std::_Exit(9);
+    }
+  });
+
+  try {
+    registry.execute(Device::GPU_METAL, outer);
+  } catch (...) {
+    std::_Exit(10);
+  }
+  if (execution::current_metal_execution_context() != nullptr) {
+    std::_Exit(11);
+  }
+  const execution::DeviceExecutorDiagnostics after_outer =
+      registry.diagnostics(Device::GPU_METAL);
+  if (after_outer.submission_count != 1U ||
+      after_outer.invocation_count != 1U ||
+      after_outer.total_allocations != 0U ||
+      after_outer.live_allocations != 0U ||
+      after_outer.pipeline_cache_entries != 0U) {
+    std::_Exit(12);
+  }
+
+  bool recovery_ran = false;
+  CallbackDeviceExecutorInvocation recovery([&recovery_ran] {
+    execution::MetalExecutionContext* context =
+        execution::current_metal_execution_context();
+    if (context == nullptr || context->command_queue_handle() == nullptr) {
+      std::_Exit(13);
+    }
+    recovery_ran = true;
+  });
+  try {
+    registry.execute(Device::GPU_METAL, recovery);
+  } catch (...) {
+    std::_Exit(14);
+  }
+  if (!recovery_ran ||
+      execution::current_metal_execution_context() != nullptr) {
+    std::_Exit(15);
+  }
+  const execution::DeviceExecutorDiagnostics after_recovery =
+      registry.diagnostics(Device::GPU_METAL);
+  if (after_recovery.submission_count != 2U ||
+      after_recovery.invocation_count != 2U ||
+      after_recovery.total_allocations != 0U ||
+      after_recovery.live_allocations != 0U ||
+      after_recovery.pipeline_cache_entries != 0U) {
+    std::_Exit(16);
+  }
+
+  (void)::alarm(0U);
+  std::_Exit(0);
+}
 
 /**
  * @brief Shared state for deterministic direct-registry serialization.
@@ -545,6 +671,30 @@ void expect_identical_perlin_outputs(
           << "deterministic coordinate (" << column << ", " << row << ")";
     }
   }
+}
+
+/**
+ * @brief Proves real same-executor callback re-entry fails before admission.
+ *
+ * @return Nothing; the child must exit zero before its watchdog alarm.
+ * @throws Nothing to the parent process.
+ * @note Thread-safe death-test mode re-executes the child before native Metal
+ * construction. Runtime absence remains a normal platform skip.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     SameExecutorCallbackReentryFailsBeforeAdmissionAndRecovers) {
+  {
+    execution::DeviceExecutorRegistry availability =
+        execution::make_default_device_executor_registry();
+    if (!availability.contains(Device::GPU_METAL)) {
+      GTEST_SKIP() << "No usable Metal device and command queue on this host";
+    }
+  }
+
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  ASSERT_EXIT(
+      { run_same_executor_reentry_watchdog(); }, ::testing::ExitedWithCode(0),
+      "");
 }
 
 /**
