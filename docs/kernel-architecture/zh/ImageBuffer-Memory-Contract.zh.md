@@ -212,6 +212,24 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
+### Readiness、交付与持久化彼此独立
+
+对于已安装 Value bridge，`ReadyFence::Ready` 表示 producer access 已停止，payload 可以
+进入 checked access plan。它不表示包围它的 `ComputeRun` 已提交 Graph state，也不表示
+缓存文件已写入或用户可见输出已经 durable。
+
+当前 IPC image-result 路径会在私有 daemon `OutputStore` 中物化 tight-row CPU artifact，
+调用文件 `fsync`、执行禁止覆盖的原子 rename、重新校验文件系统 identity，并返回受进程级
+delivery lease 保护的 metadata。该 store 不同步包含目录，也不持久化 record/index；
+lease/TTL cleanup 可以 unlink artifact。由此得到的 `ImageBuffer` mapping 是有效的自有
+delivery state，不是 crash-durable output receipt。
+
+旧 `io/save` 操作会在 provider 执行期间独立调用 `cv::imwrite`。成功返回只报告该 codec
+调用；副作用可能先于 Run commit，且没有 OutputStore transaction。上述当前限制与独立目标
+输出权威由
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+固定。
+
 ### 已实现的 V-3/V-4/V-6/V-8/V-9 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
@@ -307,6 +325,7 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `src/lib/compute/image_buffer.hpp`
 - `src/lib/adapters/opencv/buffer_adapter_opencv.*`
 - `src/lib/ipc/output_store.*`
+- `plugins/ops/save_op.cpp`
 - `tests/unit/test_image_buffer_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_region_contracts.cpp`

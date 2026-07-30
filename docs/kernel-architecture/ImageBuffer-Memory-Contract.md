@@ -260,6 +260,27 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
+### Readiness, delivery, and persistence are separate
+
+For the installed Value bridge, `ReadyFence::Ready` means that producer access
+has stopped and the payload can proceed to a checked access plan. It does not
+mean that the enclosing `ComputeRun` committed Graph state, that a cache file
+was written, or that a user-visible output is durable.
+
+The current IPC image-result path materializes a tight-row CPU artifact in the
+private daemon `OutputStore`, calls file `fsync`, atomically renames without
+replacement, revalidates filesystem identity, and returns metadata protected by
+a process-scoped delivery lease. The store does not synchronize the containing
+directory or persist its record/index, and lease/TTL cleanup can unlink the
+artifact. The resulting `ImageBuffer` mapping is valid owned delivery state,
+not a crash-durable output receipt.
+
+The legacy `io/save` operation independently calls `cv::imwrite` during
+provider execution. Its successful return reports that codec call only; the
+side effect can precede Run commit and has no OutputStore transaction. These
+current limits and the separate target output authority are fixed by
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
+
 ### Implemented V-3/V-4/V-6/V-8/V-9 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
@@ -370,6 +391,7 @@ operation ABI.
 - `src/lib/compute/image_buffer.hpp`
 - `src/lib/adapters/opencv/buffer_adapter_opencv.*`
 - `src/lib/ipc/output_store.*`
+- `plugins/ops/save_op.cpp`
 - `tests/unit/test_image_buffer_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/unit/test_region_contracts.cpp`

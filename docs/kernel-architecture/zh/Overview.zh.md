@@ -424,7 +424,15 @@ snapshot 注册；public callback 不会获得可变 `Node`、`GraphModel`、`Op
 - HP version/ROI 字段位于 `Node`；RT version/ROI 字段位于 proxy node state。
 - 配置缓存根目录下的磁盘缓存文件。
 
-`GraphCacheService` 将缓存命令集中化。HP 代码应使用 `cached_output_high_precision`；RT 代码只能将 `RealtimeProxyGraph` 用作交互式状态。Dirty RT worker 写入会先通过 `RealtimeProxyWriteBuffer` stage，再提交到 proxy；dirty HP worker 写入会先通过 `HighPrecisionDirtyWriteBuffer` stage，再提交到 graph。正式缓存保存、加载和同步行为、后续 HP 计算以及长期存储应使用 HP 输出。该 service 要求非空的 `ImageArtifactCodec` 与 `CacheMetadataCodec` owner，绝不构造或声明 YAML value。已配置的 `YamlCacheMetadataCodec` 负责 YAML syntax、filesystem metadata IO，并把 parser/emitter failure 翻译为现有 graph error taxonomy。
+`GraphCacheService` 将缓存命令集中化。HP 代码应使用
+`cached_output_high_precision`；RT 代码只能将 `RealtimeProxyGraph` 用作交互式状态。Dirty RT
+worker 写入会先通过 `RealtimeProxyWriteBuffer` stage，再提交到 proxy；dirty HP worker 写入会
+先通过 `HighPrecisionDirtyWriteBuffer` stage，再提交到 graph。正式缓存保存、加载和同步行为、
+后续 HP 计算及另行请求的 output operation 都使用 HP 输出；正式 HP cache 与 disk cache 本身
+都不是 durable user-output authority。该 service 要求非空的 `ImageArtifactCodec` 与
+`CacheMetadataCodec` owner，绝不构造或声明 YAML value。已配置的 `YamlCacheMetadataCodec`
+负责 YAML syntax、filesystem metadata IO，并把 parser/emitter failure 翻译为现有 graph error
+taxonomy。
 
 ### ImageBuffer 契约
 
@@ -514,7 +522,7 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   dispatch aging 只在仲裁已选定的 class 内生效，不能替换该决策。受保护 headroom 只限制 active Throughput root reservation；Interactive work 不会扣减该 class
   quota，而 ledger 仍是共享物理容量的最终权威。Throughput charge 会一直保留到所有 child grant
   结束后的精确 root release。Policy 不拥有容量，私有 route 不能绕过 reserved start。
-  ADR 0003 与 ADR 0007 记录已接受的所有权/生命周期契约。ADR 0003 与 ADR 0007 记录已接受的所有权/生命周期契约。
+  ADR 0003 与 ADR 0007 记录已接受的所有权/生命周期契约。
 
 - [ADR 0001](../../adr/zh/0001-graph-state-access-is-not-scheduler-dispatch.zh.md)
   分开 graph-state access 与 scheduler dispatch。
@@ -547,6 +555,10 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   rejection 与 pending-Value continuation，且不改变 operation ABI v2。V-9 在唯一的 service
   `ResourceLedger` 内新增原子 per-device memory/scratch plan、native actual-byte 校准，以及
   persistent/completion 生命周期 lease。其余通用 provider migration 仍是未来工作。
+- [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+  把当前 Run、readiness、cache、Graph 文档、daemon delivery 与 output publication observation
+  同已接受 durability target 分离。它只把有界 cache/asset/codec mechanism 分配给未来
+  `ComputeIoExecutor`；当前代码不存在该 executor 或 crash-durable output commit。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

@@ -13,9 +13,11 @@ document defines the current cache semantics.
 
 Only high-precision output is formal reusable cache. That means only HP output
 may be used as the authoritative source for subsequent HP compute, disk cache,
-long-term storage, and other reusable cache behavior. RT proxy output is
-transient interactive state and must not be treated as authoritative cache, as a
-disk-cache synchronization source, or as long-term storage input.
+other reusable cache behavior, or a separately requested output transaction.
+RT proxy output is transient interactive state and must not be treated as
+authoritative cache, as a disk-cache synchronization source, or as direct
+output-commit input. Neither formal HP cache nor disk cache is itself the
+durable user-output authority.
 
 ## HP Cache
 
@@ -126,6 +128,29 @@ read/parse errors. Bad image files, invalid YAML metadata, and filesystem
 failures are recorded as errors with an error code and message instead of being
 indistinguishable from a normal cache miss.
 
+## Current Durability and Failure Boundary
+
+Current cache save is not an atomic cache-entry transaction.
+`GraphCacheService` creates directories and invokes the configured image and
+metadata codecs against their final sibling paths. The image payload and YAML
+metadata can therefore succeed or fail independently. The service provides no
+entry-level staging rename, rollback, manifest-last publication, file or
+directory synchronization receipt, retry protocol, or crash recovery.
+
+`cache_all_nodes` counts nodes with present HP output for which the save path
+was attempted; the count is not proof that each node had a configured artifact
+or that a durable cache entry exists. Cache load diagnostics are process-memory
+observations of the latest attempt, not durable audit records.
+
+The current product compute commit policy performs eligible changed-HP cache
+writes after exact revision/generation validation but before the no-throw live
+Graph swap. A cache codec, filesystem, or allocation failure can therefore
+fail that `ComputeRun` and leave live Graph/RT state unchanged. This ordering
+is current behavior, not a statement that cache is part of user-output commit.
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a different target ordering in which cache persistence has an
+independent typed outcome after Run publication.
+
 ## Cache Commands
 
 | Operation | Effect |
@@ -146,9 +171,9 @@ disk cache state.
 - HP paths write `cached_output_high_precision`.
 - RT paths write `RealtimeProxyGraph` as transient interactive state, using
   `RealtimeProxyWriteBuffer` for dirty worker writes before proxy commit.
-- Formal cache save/load/sync behavior, subsequent HP compute, and long-term
-  storage must use HP output and must not promote RT output to authoritative
-  cache.
+- Formal cache save/load/sync behavior, subsequent HP compute, and separately
+  requested output creation must use HP output and must not promote RT output
+  to authoritative cache or durable-output authority.
 - Long-lived tests verify HP graph cache and RT proxy graph state
   independently.
 
@@ -264,6 +289,16 @@ remains transient, and the current injected artifact/metadata codecs remain
 the implementation boundary until later slices migrate cache manifests and
 payloads. No future residency replica becomes a second cache authority.
 
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+additionally separates discardable cache persistence from durable user-output
+commit. Its accepted Issue #88 `ComputeIoExecutor` may own bounded cache,
+asset, and codec I/O mechanism work, with both operation-count and
+retained-byte admission; CPU-heavy codec phases return to the existing CPU
+domain. It never owns output commit policy, Graph-document transactions,
+daemon state, paths, retry, or durability. The future `OutputStore` commit
+authority and its typed receipt remain separate from cache and from this
+executor.
+
 ## Implementation and Validation Entry Points
 
 - `src/lib/core/image_artifact_codec.hpp`
@@ -279,6 +314,8 @@ payloads. No future residency replica becomes a second cache authority.
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
+- `src/lib/runtime/kernel_compute.cpp`
+- `src/lib/ipc/output_store.*`
 - `src/lib/compute/compute_cache_policy.*`
 - `src/lib/compute/compute_node_task_runner.*`
 - `src/lib/compute/compute_task_dispatcher.*`

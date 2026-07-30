@@ -351,6 +351,34 @@ That callback advances the manager under the manager mutex. Failed,
 close-rejected, and born-stale candidates never invoke it, and an older Run
 that starts afterward cannot regress the monotonic manager generation.
 
+## Compute I/O Execution Boundary
+
+There is no `ComputeIoExecutor` in the current product. `GraphCacheService`
+performs cache codec/filesystem work under the graph-owned cache path,
+Graph-document save remains a graph-state operation, the daemon owns job
+transport state, and its private `OutputStore` owns protected process-scoped
+artifact publication. None of these mechanisms is an execution policy route,
+and no current component provides a crash-durable user-output commit.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts the following target boundary for Issue #88:
+
+- one process-owned `ComputeIoExecutor` may run bounded cache, asset, and codec
+  I/O mechanism work;
+- admission is bounded by both operation count and estimated retained bytes;
+- CPU-heavy codec phases return to the existing CPU execution domain rather
+  than occupying I/O workers;
+- the executor does not own Graph-document transactions, daemon job state,
+  `OutputStore` commit policy, user paths, retry policy, or durability claims;
+  and
+- cache persistence and durable output commit publish independent typed
+  outcomes and cannot rewrite a successful `ComputeRun`.
+
+This is a mechanism boundary, not a fourth scheduler or a persistence
+authority. It adds no execution route, ready store, Graph owner, policy
+decision surface, or device-capacity authority. The target is accepted
+architecture only; current interfaces and counts below are unchanged.
+
 ## Host, CLI, and IPC Surfaces
 
 The public Host has eight policy operations and six execution operations. Its
@@ -423,6 +451,8 @@ process-isolated plugin supervision belongs to Issue #91.
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/runtime/graph_runtime.hpp` and `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`

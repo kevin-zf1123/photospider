@@ -290,6 +290,29 @@ Candidate 被接受为 current 时，coordinator 会在持有自身 mutex 且发
 manager。失败、被 close 拒绝或 born-stale 的 candidate 绝不调用它；之后才启动的较旧 Run
 也不能让单调 manager generation 倒退。
 
+## Compute I/O 执行边界
+
+当前产品不存在 `ComputeIoExecutor`。`GraphCacheService` 在 graph-owned cache path 下执行
+cache codec/filesystem work，Graph 文档保存仍是 graph-state operation，daemon 拥有 job
+transport state，其私有 `OutputStore` 拥有受保护的进程级 artifact publication。这些机制都不是
+execution policy route，当前也没有任何组件提供 crash-durable user-output commit。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+为 Issue #88 接受以下目标边界：
+
+- 唯一 process-owned `ComputeIoExecutor` 可以运行有界 cache、asset 与 codec I/O mechanism
+  work；
+- admission 同时受 operation count 与 estimated retained bytes 限制；
+- CPU-heavy codec phase 会返回既有 CPU execution domain，而不是占用 I/O worker；
+- executor 不拥有 Graph 文档 transaction、daemon job state、`OutputStore` commit policy、
+  用户 path、retry policy 或 durability claim；以及
+- cache persistence 与 durable output commit 发布彼此独立的 typed outcome，且不能改写成功的
+  `ComputeRun`。
+
+这是机制边界，不是第四种 scheduler 或 persistence authority。它不新增 execution route、
+ready store、Graph owner、policy decision surface 或 device-capacity authority。该目标只是已接受
+架构；下述当前接口与数量保持不变。
+
 ## Host、CLI 与 IPC 接口面
 
 公共 Host 有八个策略操作和六个执行操作。其最终非析构虚函数数量为 58。
@@ -352,6 +375,8 @@ failure 就会 fail-stop，因为该 gate 无法重开。通用数据异构执�
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/runtime/graph_runtime.hpp` 和 `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/ipc/{codec,client,host,request_router}.cpp`

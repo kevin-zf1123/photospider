@@ -156,7 +156,10 @@ conversion 继续保留为局部 OpenCV algorithm call。Normalization context �
 | `hp_version` | 正式缓存 metadata | 可复用 HP output 的单调 revision。 |
 | `hp_region` | 正式缓存 metadata | 该 HP output 中已知有效的规范化逻辑 Region。 |
 
-只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为。RT 输出不存放在 `Node` 上，而是位于 `RealtimeProxyGraph`，后者镜像 node id，并保存低分辨率 proxy output、HP-space Region、version 和 RT dirty-source generation。
+只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、已配置 disk-cache
+持久化或单独请求的 output operation；cache entry 本身不是长期用户输出权威。RT 输出不存放在
+`Node` 上，而是位于 `RealtimeProxyGraph`，后者镜像 node id，并保存低分辨率 proxy output、
+HP-space Region、version 和 RT dirty-source generation。
 
 Dirty RT worker task 会先通过 `RealtimeProxyWriteBuffer` stage proxy output，再提交到
 `RealtimeProxyGraph`。Dirty HP worker task 会先通过 `HighPrecisionDirtyWriteBuffer`
@@ -227,6 +230,27 @@ RT proxy commit 之后。
   inspection 与 operation ABI v2 使用 checked derived `PixelSize` 和 `PixelRect` value。
   只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
+
+### 当前持久化 identity 与完成边界
+
+当前 Graph 文档只序列化用户编写的 node topology/configuration。它排除
+`NodeOutput`、正式 HP cache byte、RT proxy state、allocation/value identity、
+producer fence、daemon job id、delivery lease 与 output-store record。成功的
+`GraphIOService::save()` 会 capture detached definition，并完成已配置 YAML adapter 的
+直接 open/write/flush/close 序列；文档没有持久 version，调用也不返回
+atomic-replacement 或 durability receipt。
+
+已配置 disk-cache location 仍是 backend cache identity，不是 Graph document id 或
+user-output commit id。`ImageArtifactCodec` 与 `CacheMetadataCodec` 转换 image/metadata
+表示，但不拥有 transaction、retry、visibility 或 durability policy。私有 IPC
+`OutputStore` 保留独立进程级 delivery record 与 artifact identity；这些 value 都不是
+`GraphModel`、`NodeOutput` 或 Graph 文档字段。
+
+因此，`ReadyFence::Ready`、正式 HP publication、disk-cache save、Graph 文档保存、
+daemon result availability 与受保护 artifact publication 是不同的当前事实。已接受的目标
+权威与完成语义分类记录在
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)；
+它们不是新增的当前字段。
 
 ### 已实现的 V-3 ownership、V-4 Region、V-6 readiness 与 V-8 device surface
 
@@ -336,6 +360,7 @@ dependency 工作由
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`

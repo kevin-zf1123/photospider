@@ -180,6 +180,19 @@ bytes. Once open succeeds, a write, flush, close, or later resource failure may
 leave a created, truncated, or partially written destination. Destination
 rollback is therefore not part of the graph-owner transaction.
 
+Current save success means only that detached capture, YAML emission, and the
+direct open/write/flush/close sequence returned successfully. The format has no
+document version or expected-version predicate; the call returns no save
+receipt or achieved-durability level, does not call file or directory `fsync`,
+and does not claim atomic replacement or crash durability. Graph-document save
+is independent from `ComputeRun`, disk cache, daemon job state, and protected
+IPC output delivery.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a future versioned same-directory staging/atomic-replacement contract
+with explicit durability capability. That target does not strengthen the
+current behavior above.
+
 ## Node Replacement and Structural Edits
 
 `Host::set_node_yaml()` admits the session against concurrent close. Required
@@ -466,6 +479,12 @@ YAML-neutral. Issue #63 completes the dependency-disabled product profile:
 empty and in-memory sessions remain available without yaml-cpp discovery,
 while an explicit graph-document or cache-metadata representation operation
 uses an unavailable adapter and returns `GraphErrc::Io`.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+keeps this current direct-writer limitation visible while assigning the target
+Graph-document transaction its own version, atomic publication, and durability
+receipt. Neither the current save nor that target becomes a phase of
+`ComputeRun`.
 
 The accepted
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md)

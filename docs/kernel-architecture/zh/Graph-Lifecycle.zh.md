@@ -140,6 +140,16 @@ atomic replacement。Destination 成功 open 前发生的失败会保留 existin
 write、flush、close 或之后的资源失败可能留下已创建、已截断或只写入部分内容的 destination。
 因此，destination rollback 不属于 graph-owner transaction。
 
+当前 save 成功只表示 detached capture、YAML emission 与直接 open/write/flush/close 序列
+成功返回。当前格式没有 document version 或 expected-version predicate；调用不会返回
+save receipt 或实际 durability level，不调用 file/directory `fsync`，也不声称 atomic
+replacement 或 crash durability。Graph 文档保存与 `ComputeRun`、disk cache、daemon job
+state 和受保护 IPC 输出交付彼此独立。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受未来带版本的同目录 staging/atomic-replacement 契约和显式 durability capability。
+该目标不会强化上文当前行为。
+
 ## Node Replacement 与结构编辑
 
 `Host::set_node_yaml()` 会让 session 进入防并发 close 的 admission。Required node lookup、
@@ -372,6 +382,10 @@ adapter-owned contract 后方，因此 runtime、graph、compute、inspection �
 保持 YAML 中立。Issue #63 已完成 dependency-disabled product profile：不发现 yaml-cpp 时，
 empty 与 in-memory session 仍可使用；显式 graph-document 或 cache-metadata representation
 operation 会使用 unavailable adapter，并返回 `GraphErrc::Io`。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+在保持当前 direct-writer 限制可见的同时，为目标 Graph 文档事务分配独立 version、
+原子 publication 与 durability receipt。当前 save 与该目标都不会成为 `ComputeRun` 阶段。
 
 已接受的
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)

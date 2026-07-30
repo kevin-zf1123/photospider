@@ -243,3 +243,17 @@ ADR 0007 remains authoritative for Run identity, execution admission,
 ready-work release, resource grants, cancellation, commit arbitration, Graph
 close, and process shutdown. Implementing generic values must not restore
 Graph-owned physical executors or create a second execution-resource authority.
+
+## Relationship to ADR 0009
+
+[ADR 0009](0009-compute-io-durability-and-completion-semantics.md) fixes the
+boundary for the I/O continuation anticipated by this decision. A future
+process-owned `ComputeIoExecutor` owns bounded cache, asset, and codec
+mechanism, with admission limited by operation count and bytes. It does not own
+Graph-document transactions, daemon transport, cache authority, output commit
+identity, retry/overwrite policy, or durability.
+
+`ComputeRun` success, cache persistence, Graph-document save, daemon result
+availability, and durable output commit remain distinct outcomes. Adding I/O
+workers must not broaden the process execution service into a persistence
+authority or create a second visible-commit owner.

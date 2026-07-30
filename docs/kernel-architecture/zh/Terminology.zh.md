@@ -56,6 +56,32 @@ ready dispatch 分离；其 worker 是不计费的基础设施，不是 Run exec
 用于创建或更新图状态的持久化表示。YAML 是当前具体格式；“图文档”描述其行为，而不会把
 序列化库当作图状态。
 
+**图文档保存完成（Graph-document save completion）**
+当前表示 graph serialization 已打开、写入、flush 并关闭 destination，且没有报告错误的观察。
+它与 `ComputeRun` 分离，当前不承诺 expected-version transaction、atomic replacement、
+directory synchronization 或 crash-durability receipt。
+
+**磁盘缓存制品（Disk-cache artifact）**
+由 graph cache path 拥有、可丢弃的 acceleration state。当前 image payload 与 metadata 会作为
+两个独立文件直接写入，因此各自 save success 既不是 atomic cache-entry commit，也不是 durable
+user output。
+
+**`OutputStore` 发布（`OutputStore` publication）**
+当前 image-daemon 的观察：受保护进程级 artifact 通过 identity check，并在 file
+synchronization 后通过 no-replace rename 发布。其 index 位于内存，retention 基于 lease/TTL；
+不声称支持 directory synchronization 或 crash-recoverable index。
+
+**Daemon 计算作业终态（Daemon compute-job terminal）**
+进程内 job registry 在 queued/running work 失败，或完成 Host compute 以及 image result 的
+`OutputStore` publication 后到达的状态。它不是 durable acknowledgement，并会随进程丢失。
+
+**耐久输出提交（Durable output commit，仅为已接受目标）**
+未来 user-output transaction：由稳定 `OutputCommitId` 标识，在 payload/metadata
+synchronization 与请求且受支持的 directory synchronization 后，以 manifest-last publication
+完成。它会返回 typed receipt、以幂等方式恢复有歧义的 retry，并支持 at-least-once delivery；
+不声称 exactly-once delivery。参见
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)。
+
 **每图独占访问（Per-graph exclusive access）**
 当前 visible Graph capture、mutation、commit validation 与 publication 由唯一 graph-state lane
 串行化。长时间 compute 会在该 lane 之外操作 request-owned snapshot；另一条 compute-request
@@ -111,6 +137,24 @@ plan/temporary result 或 dirty HP staging。Run 会 mint 一个私有弱生命�
 普通 `ComputeRunLease` 只能观察 explicit cancellation 或过期 deadline，并保留 cleanup/
 commit-contender lifetime。Full、dirty 与 preflight task 会通过 Host-owned `ExecutionService`
 与封闭的私有 route 执行 owned callback，并且只通过匹配的 `(RunId, RunLocalTaskId)` 发布失败。
+
+**Operation 返回（Operation return）**
+表示某个 operation provider callback 已返回的观察。Callback 可以返回 pending `Value`；因此
+operation return 不表示 value readiness、Run terminal state、result availability 或
+persistence。
+
+**Value 就绪（Value ready）**
+表示 `Value` producer 已发布 terminal readiness、dependent execution 可以消费该 value 的观察。
+对 pending producer 而言，它晚于 operation return；若仍需 commit，则早于 Run success。
+
+**Run 终态（Run terminal）**
+由 `ComputeRun` terminal arbiter 发布的 outcome。`Succeeded` 表示已验证 Graph/RT
+publication，或已准入的合法 no-op path；它不包含 cache save、Graph 文档保存、daemon terminal
+state、result delivery 或 durable output commit。
+
+**结果可用（Result available）**
+表示 Host/daemon result 在 public translation 与任何 transport-owned publication 后可以返回或
+获取的观察。它本身不是 durability guarantee。
 
 **`RunGroup`**
 当前用于一对 realtime HP/RT child 的私有 request owner。它捕获一个 realtime supersession
@@ -341,6 +385,11 @@ cache、policy 或物理 execution 语义的所有者。
 - HP cache 不是 RT proxy state。
 - `AllocationIdentity` 不是 `ValueRevisionId`；二者都不是持久 content/cache identity。
 - `ImageBuffer` 不是[目标通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
+- Operation return 不是 `Value` readiness，二者也都不是 Run terminal publication。
+- Run success 不是 cache persistence、Graph 文档保存、durable output commit、daemon terminal
+  state 或 result delivery。
+- 当前 `OutputStore` publication 不是 crash-durable output commit。
+- Daemon job terminal state 或 acknowledgement 不是 durable receipt。
 - `RegionSet` 不是 `PixelRect`；后者是 checked image-edge projection，绝不是 TensorSlice
   authority。
 - Execution worker request 不是 Run reservation 或 child grant。
@@ -367,6 +416,11 @@ cache、policy 或物理 execution 语义的所有者。
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`
 - `src/lib/graph/graph_state_executor.hpp`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
+- `src/lib/ipc/request_router.cpp`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution_service.hpp`

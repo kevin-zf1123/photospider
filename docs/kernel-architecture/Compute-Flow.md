@@ -402,6 +402,39 @@ Host/CLI/IPC cancellation are not claimed.
 Commit policy remains conceptually separate from `ComputeIntent`, because
 HP/RT intent semantics define neither visibility nor cancellation authority.
 
+## Current Completion and Result Layers
+
+Current compute I/O has several separately observable completion layers:
+
+1. an operation provider can return before a pending `Value` becomes ready;
+2. a `ComputeRun` becomes terminal only after dependency completion, staged
+   output validation, and its applicable Graph/RT publication gate;
+3. a synchronous Host call returns or an asynchronous Host future resolves
+   only after public result translation;
+4. protocol-v2 `compute.submit` reports request acceptance, while daemon job
+   terminal state is a later, process-local observation;
+5. an image daemon job reports success only after Host compute and protected
+   `OutputStore` publication, but that store is process-scoped and lease/TTL
+   retained rather than crash durable;
+6. configured disk-cache writes, Graph-document save, and operation-owned
+   external side effects are separate persistence observations.
+
+A successful `ComputeRun` therefore means that the validated Graph/RT result
+was published, or that an admitted no-op reached its valid terminal path. It
+does not promise disk-cache persistence, Graph-document save, daemon
+acknowledgement, result delivery, or durable user-output commit. The legacy
+`io/save` operation can expose a file side effect before its enclosing staged
+Run commits; that callback-owned behavior is not a Run commit protocol.
+
+The current product transaction still performs eligible deferred HP cache
+writes before the no-throw live Graph swap. A cache codec or filesystem failure
+can therefore fail the current Run with no visible Graph publication.
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a target that moves optional cache persistence behind an independent
+outcome and introduces a separate, receipt-bearing durable output commit. The
+target ordering and `ComputeIoExecutor` are not implemented by this document's
+current baseline.
+
 ## GlobalHighPrecision
 
 `GlobalHighPrecision` is the full-quality path. Without a dirty ROI it performs
@@ -568,6 +601,14 @@ exhaustion likewise returns `ComputeError` before any initial ready entry is
 published. A present zero public `maximum_parallelism` is invalid and is
 rejected at Host or IPC decoding before graph execution.
 
+Current deferred disk-cache persistence is part of the product commit-policy
+work item before live Graph publication, so a codec/filesystem error can fail
+the Run without publishing staged Graph output. If protected artifact
+publication fails, an image daemon job fails even though its underlying Host
+compute may already have returned successfully. Graph-document save remains a
+separate graph-state operation with its own status and never rewrites a Run
+terminal state.
+
 ## Boundaries and Rationale
 
 - One request plan supplies both sequential and parallel execution semantics;
@@ -609,6 +650,9 @@ revision/generation-safe staging, RT-first independent commit gate,
 cooperative Run cancellation, deterministic `RunGroup` settlement, and
 latest-wins supersession, admitted-Run registry, Graph lifetime leases, and
 close/shutdown lifecycle ownership. The
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+separates current completion observations from the accepted persistence target.
+The
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 retains the durable ownership direction without changing these current facts.
 
@@ -618,6 +662,9 @@ retains the durable ownership direction without changing these current facts.
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
 - `src/lib/ipc/request_router.cpp`
+- `src/lib/ipc/output_store.*`
+- `src/lib/graph/graph_cache_service.*`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`

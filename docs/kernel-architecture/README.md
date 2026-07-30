@@ -14,7 +14,7 @@ have distinct authorities and time meanings:
 | Layer | Authoritative location | Time meaning |
 | --- | --- | --- |
 | Current facts | `docs/kernel-architecture/` | Behavior and ownership in the current source tree. |
-| Architectural decisions | `docs/adr/` | Durable decisions and their decision-time context. |
+| Architectural decisions | [`docs/adr/`](../adr/README.md) | Durable decisions and their decision-time context. |
 | Evolution targets | `docs/roadmap/` | Stable accepted direction, not a claim about current behavior. |
 | Implementation status | Linked GitHub Projects and Issues | Live state, dependencies, and verification of one delivery slice. |
 
@@ -60,6 +60,7 @@ may support more than one lens, but each fact has one primary home:
 | Behavior | What can a caller observe during graph lifecycle, compute, cache, and dirty-region work? | [Graph Lifecycle](Graph-Lifecycle.md), [Compute Flow](Compute-Flow.md), [Cache Model](Cache-Model.md), and [Dirty Region Propagation](Dirty-Region-Propagation.md) |
 | Implementation | Which current modules own the behavior, and what is the call or dispatch path? | [Overview](Overview.md), [Compute Boundaries](Compute-Boundaries.md), and [Policy and Execution Architecture](Policy-and-Execution-Architecture.md) |
 | Boundaries | Which values, ownership rules, invariants, limitations, and failure surfaces may consumers rely on? | [ImageBuffer Memory Contract](ImageBuffer-Memory-Contract.md), [Plugin ABI](Plugin-ABI.md), and [Compute Boundaries](Compute-Boundaries.md) |
+| Persistence and completion | Which current “ready”, “succeeded”, “saved”, and delivery states are independent, and what durability is not implemented? | [Graph Lifecycle](Graph-Lifecycle.md), [Compute Flow](Compute-Flow.md), [Cache Model](Cache-Model.md), and [Terminology](Terminology.md) |
 | Rationale | Why is the current mechanism separated this way, and which durable decisions constrain it? | Rationale sections in the current documents and the governing [ADRs](../adr/) |
 
 A first-time reader should start with [Terminology](Terminology.md), then read

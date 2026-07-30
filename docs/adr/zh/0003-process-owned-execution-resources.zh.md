@@ -182,3 +182,14 @@ ADR 0008 是通用 Value 与 provider-generation 契约的权威来源。ADR 000
 identity、execution admission、ready-work release、resource grant、cancellation、commit
 arbitration、Graph close 与 process shutdown 的权威来源。实现通用 Value 时不得恢复 Graph
 拥有的物理 executor，也不得创建第二个 execution-resource authority。
+
+## 与 ADR 0009 的关系
+
+[ADR 0009](0009-compute-io-durability-and-completion-semantics.zh.md)冻结本决策所预期
+I/O continuation 的边界。未来进程级 `ComputeIoExecutor` 拥有有界 cache、asset 与
+codec 机制，准入同时受操作数与 byte 限制。它不拥有 Graph 文档事务、daemon transport、
+cache authority、output commit identity、重试/覆盖策略或 durability。
+
+`ComputeRun` 成功、cache 持久化、Graph 文档保存、daemon 结果可用与 durable 输出
+提交保持为不同结果。增加 I/O worker 不得把进程 execution service 扩展成持久化权威，
+也不得创建第二个 visible-commit owner。

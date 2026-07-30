@@ -288,7 +288,7 @@ binding 比 Graph 存活更久；复制的 route binding 没有需要停止的�
 Execution information 会在 compute-request lane 内复制 route/statistics，不会暴露物理 owner
 或 queue capability。
 
-每条产品 compute path 现在都使用 staged output。每条产品 compute path 现在都使用 staged output。Kernel 在同一 identity/revision 捕获完整 Graph
+每条产品 compute path 现在都使用 staged output。Kernel 在同一 identity/revision 捕获完整 Graph
 与可选 RT proxy，关闭 snapshot 磁盘写入，并且只针对这些 snapshot 执行 sequential、policy-selected、dirty HP 与 RT work。本地 output validation 后，ComputeService 会把匹配 Run
 推进到 `CommitPending`。私有产品 commit policy 会验证精确 Run/staged/live identity、权威
 revision 与 current supersession key/generation，执行符合条件的延迟 HP cache persistence，并在
@@ -311,6 +311,31 @@ unregistration 前等待精确 physical/resource settlement。worker-local queue
 cooperative 而非 preemptive execution；不声称支持 provider preemption 或 public Host/CLI/IPC
 cancellation。Commit policy 在概念上仍与 `ComputeIntent` 分离，因为 HP/RT intent 语义既不定义
 可见性，也不定义 cancellation authority。
+
+## 当前完成与结果层级
+
+当前 compute I/O 存在若干可分别观察的完成层级：
+
+1. operation provider 可以在 pending `Value` ready 前返回；
+2. `ComputeRun` 只有在 dependency completion、staged output validation 与适用的 Graph/RT
+   publication gate 后才进入终态；
+3. 同步 Host call 返回或异步 Host future resolve 发生在 public result translation 完成后；
+4. protocol-v2 `compute.submit` 报告 request acceptance，而 daemon job terminal state 是稍后的
+   process-local observation；
+5. image daemon job 只有在 Host compute 与受保护 `OutputStore` publication 后才报告成功，但该
+   store 由进程级 lease/TTL 保留，而不是 crash durable；以及
+6. 已配置 disk-cache write、Graph 文档保存与 operation 自有外部副作用是不同的持久化观察。
+
+因此，`ComputeRun` 成功表示已验证 Graph/RT result 已发布，或一个已准入 no-op 到达其合法终态。
+它不承诺 disk-cache persistence、Graph 文档保存、daemon acknowledgement、result delivery 或
+durable user-output commit。旧 `io/save` operation 可以在包围它的 staged Run 提交前暴露文件
+副作用；这种 callback-owned 行为不是 Run commit protocol。
+
+当前 product transaction 仍会在 no-throw live Graph swap 前执行符合条件的延迟 HP cache write。
+因此 cache codec 或 filesystem failure 可能让当前 Run 失败，且不发布可见 Graph。
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受一个目标：把可选 cache persistence 移到独立结果之后，并引入带 receipt 的独立 durable
+output commit。本文当前基线并未实现该目标顺序与 `ComputeIoExecutor`。
 
 ## GlobalHighPrecision
 
@@ -445,6 +470,12 @@ ledger 耗尽时，`GraphErrc::ComputeError` 会通过 embedded Host 与 IPC sta
 `ComputeError`。Public `maximum_parallelism` 显式为零是非法值，会在图执行前由 Host 或
 IPC decoding 拒绝。
 
+当前 deferred disk-cache persistence 是 live Graph publication 前 product commit-policy work
+item 的一部分，因此 codec/filesystem error 可能让 Run 失败且不发布 staged Graph output。若受
+保护 artifact publication 失败，image daemon job 会失败，即使其底层 Host compute 可能已经
+成功返回。Graph 文档保存仍是拥有自身 status 的独立 graph-state operation，绝不会改写 Run
+terminal state。
+
 ## 边界与原理
 
 - 同一份 request plan 同时提供顺序与并行执行语义；execution strategy 只改变机制，不改变
@@ -478,6 +509,8 @@ graph-state/dispatch 区分。已接受的
 lease/completion isolation、权威 revision/generation-safe staging、RT-first 独立 commit gate、
 cooperative Run cancellation、确定性 `RunGroup` settlement、latest-wins supersession、
 admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有权。
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+把当前 completion observation 与已接受 persistence target 分离。
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)保留长期所有权方向，但不改变
 这些当前事实。
 
@@ -487,6 +520,9 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
 - `src/lib/ipc/request_router.cpp`
+- `src/lib/ipc/output_store.*`
+- `src/lib/graph/graph_cache_service.*`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/run_lifecycle_registry.*`
 - `src/lib/compute/execution_lifecycle_telemetry.*`

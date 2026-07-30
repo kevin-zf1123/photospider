@@ -516,10 +516,12 @@ proxy graph:
 interactive state. Dirty RT worker writes are staged through
 `RealtimeProxyWriteBuffer` before proxy commit; dirty HP worker writes are
 staged through `HighPrecisionDirtyWriteBuffer` before graph commit. Formal
-cache save, load, synchronization behavior, subsequent HP compute, and
-long-term storage use HP output. The service requires non-null
-`ImageArtifactCodec` and `CacheMetadataCodec` owners and never constructs or
-declares a YAML value. The configured `YamlCacheMetadataCodec` is responsible
+cache save, load, synchronization behavior, subsequent HP compute, and a
+separately requested output operation use HP output. Neither formal HP cache
+nor disk cache is itself durable user-output authority. The service requires
+non-null `ImageArtifactCodec` and `CacheMetadataCodec` owners and never
+constructs or declares a YAML value. The configured
+`YamlCacheMetadataCodec` is responsible
 for YAML syntax, filesystem metadata IO, and translating parser/emitter
 failures into the existing graph error taxonomy.
 
@@ -685,6 +687,11 @@ Important current behavior:
   reconciliation, and persistent/completion lifetime leases inside the sole
   service `ResourceLedger`. The remaining generic provider migration stays
   future work.
+- [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+  separates current Run, readiness, cache, Graph-document, daemon-delivery,
+  and output-publication observations from the accepted durability target. It
+  assigns future `ComputeIoExecutor` only bounded cache/asset/codec mechanism;
+  current code has no such executor or crash-durable output commit.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

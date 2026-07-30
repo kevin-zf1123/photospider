@@ -10,7 +10,10 @@
 | `Node::cached_output_high_precision` | 正式缓存 | 完整质量 HP output owner；whole-output reuse 还要求 complete `hp_region`。 |
 | `RealtimeProxyGraph` node state | 临时 RT proxy | 低分辨率交互式预览/更新输出。 |
 
-只有高精度输出是正式可复用缓存。这意味着只有 HP 输出可以作为后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为的权威来源。RT proxy 输出是临时交互式状态，不能被视为权威缓存，不能作为磁盘缓存同步来源，也不能作为长期存储输入。
+只有高精度输出是正式可复用缓存。这意味着只有 HP 输出可以作为后续 HP 计算、磁盘缓存、其他
+可复用缓存行为或另行请求的 output transaction 的权威来源。RT proxy 输出是临时交互式状态，
+不能被视为权威缓存，不能作为磁盘缓存同步来源，也不能直接作为 output-commit input。正式 HP
+cache 与 disk cache 本身都不是 durable user-output authority。
 
 ## HP 缓存
 
@@ -89,6 +92,24 @@ worker，都必须在所属 model 销毁前排空并 join；任何访问都不�
 解析错误。损坏的图像文件、无效的 YAML 元数据和文件系统失败会被记录为带错误码和消息的错误，而不
 是与普通 cache miss 混在一起。
 
+## 当前耐久性与失败边界
+
+当前 cache save 不是 atomic cache-entry transaction。`GraphCacheService` 会创建目录，并针对
+最终的两个同级 path 调用已配置 image 与 metadata codec。因此 image payload 与 YAML metadata
+可以分别成功或失败。该 service 不提供 entry-level staging rename、rollback、manifest-last
+publication、file 或 directory synchronization receipt、retry protocol 或 crash recovery。
+
+`cache_all_nodes` 统计存在 HP output、因而尝试过 save path 的 node；该计数并不证明每个 node
+都配置了 artifact，也不证明存在 durable cache entry。Cache load diagnostic 是进程内关于最近
+一次尝试的 observation，不是 durable audit record。
+
+当前 product compute commit policy 会在精确 revision/generation validation 后、no-throw live
+Graph swap 前，执行符合条件的 changed-HP cache write。因此 cache codec、filesystem 或
+allocation failure 可能让该 `ComputeRun` 失败，并保持 live Graph/RT state 不变。这种顺序是
+当前行为，不表示 cache 属于 user-output commit。
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受不同的目标顺序：cache persistence 在 Run publication 后拥有独立 typed outcome。
+
 ## 缓存命令
 
 | 操作 | 效果 |
@@ -107,7 +128,8 @@ worker，都必须在所属 model 销毁前排空并 join；任何访问都不�
 - HP 路径写入 `cached_output_high_precision`。
 - RT 路径将 `RealtimeProxyGraph` 写为临时交互式状态；dirty worker 写入必须先经过
   `RealtimeProxyWriteBuffer`，再提交到 proxy。
-- 正式缓存的保存、加载、同步行为、后续 HP 计算和长期存储必须使用 HP 输出，不能将 RT 输出提升为权威缓存。
+- 正式缓存的保存、加载、同步行为、后续 HP 计算与另行请求的 output creation 必须使用 HP
+  输出，不能把 RT 输出提升为权威缓存或 durable-output authority。
 - 长期测试分别验证 HP graph cache 和 RT proxy graph state。
 
 `GraphInspectService` 只从 HP cache 选择 node-local 显示 metadata。当前 Host inspection surface
@@ -201,6 +223,14 @@ RT proxy output 继续保持 transient，当前注入的 artifact/metadata codec
 直到后续切片迁移 cache manifest 与 payload。未来 residency replica 也不会成为第二个 cache
 authority。
 
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+还会把可丢弃 cache persistence 与 durable user-output commit 分离。其已接受的 Issue #88
+`ComputeIoExecutor` 可以拥有有界 cache、asset 与 codec I/O mechanism work，并同时采用
+operation-count 与 retained-byte admission；CPU-heavy codec phase 会返回既有 CPU domain。它
+绝不拥有 output commit policy、Graph 文档 transaction、daemon state、path、retry 或
+durability。未来 `OutputStore` commit authority 及其 typed receipt 与 cache 和该 executor
+保持分离。
+
 ## 实现与验证入口
 
 - `src/lib/core/image_artifact_codec.hpp`
@@ -216,6 +246,8 @@ authority。
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
+- `src/lib/runtime/kernel_compute.cpp`
+- `src/lib/ipc/output_store.*`
 - `src/lib/compute/compute_cache_policy.*`
 - `src/lib/compute/compute_node_task_runner.*`
 - `src/lib/compute/compute_task_dispatcher.*`

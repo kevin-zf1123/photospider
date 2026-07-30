@@ -70,6 +70,37 @@ The persisted representation used to create or update graph state. YAML is the
 current concrete format; the term graph document describes the behavior
 without treating a serialization library as graph state.
 
+**Graph-document save completion**
+The current observation that graph serialization opened, wrote, flushed, and
+closed its destination without a reported error. It is separate from a
+`ComputeRun` and currently promises no expected-version transaction, atomic
+replacement, directory synchronization, or crash-durability receipt.
+
+**Disk-cache artifact**
+Discardable acceleration state owned by the graph cache path. The current
+image payload and metadata are written as separate direct files, so their
+individual save success is neither an atomic cache-entry commit nor durable
+user output.
+
+**`OutputStore` publication**
+The current image-daemon observation that a protected process-scoped artifact
+passed identity checks and was published by no-replace rename after file
+synchronization. Its index is in memory and retention is lease/TTL based; no
+directory synchronization or crash-recoverable index is claimed.
+
+**Daemon compute-job terminal**
+The process-local job-registry state reached after queued/running work either
+fails or completes Host compute and, for image results, `OutputStore`
+publication. It is not a durable acknowledgement and is lost with the process.
+
+**Durable output commit (accepted target only)**
+A future user-output transaction identified by a stable `OutputCommitId` and
+completed by manifest-last publication after payload/metadata synchronization
+and any requested supported directory synchronization. It returns a typed
+receipt, recovers ambiguous retries idempotently, and supports at-least-once
+delivery; it does not claim exactly-once delivery. See
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
+
 **Per-graph exclusive access**
 The current behavior in which visible Graph capture, mutation, commit
 validation, and publication are serialized by one graph-state lane. Long-running
@@ -138,6 +169,28 @@ deadline and retain cleanup/commit-contender lifetime. Full, dirty, and
 preflight tasks execute owned callbacks through the Host-owned
 `ExecutionService` and a closed private route, and publish failure only through
 a matching `(RunId, RunLocalTaskId)`.
+
+**Operation return**
+The observation that one operation provider callback returned. A callback may
+return a pending `Value`; therefore operation return does not imply value
+readiness, Run terminal state, result availability, or persistence.
+
+**Value ready**
+The observation that a `Value` producer published terminal readiness and that
+dependent execution may consume the value. It is later than operation return
+for pending producers and earlier than Run success when commit is still
+required.
+
+**Run terminal**
+The outcome published by the `ComputeRun` terminal arbiter. `Succeeded` means
+validated Graph/RT publication, or the admitted valid no-op path; it does not
+include cache save, Graph-document save, daemon terminal state, result
+delivery, or durable output commit.
+
+**Result available**
+The observation that a Host/daemon result can be returned or fetched after
+public translation and any transport-owned publication. It is not itself a
+durability guarantee.
 
 **`RunGroup`**
 The current private request owner for one realtime HP/RT pair. It captures one
@@ -435,6 +488,12 @@ planning, cache, policy, or physical-execution semantics.
   content/cache identity.
 - `ImageBuffer` is not the
   [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
+- Operation return is not `Value` readiness, and neither is Run terminal
+  publication.
+- Run success is not cache persistence, Graph-document save, durable output
+  commit, daemon terminal state, or result delivery.
+- Current `OutputStore` publication is not crash-durable output commit.
+- Daemon job terminal state or acknowledgement is not a durable receipt.
 - `RegionSet` is not `PixelRect`; the latter is a checked image-edge
   projection and never TensorSlice authority.
 - An execution worker request is not a Run reservation or child grant.
@@ -463,6 +522,11 @@ planning, cache, policy, or physical-execution semantics.
 - `src/lib/runtime/graph_runtime.hpp`
 - `src/lib/graph/graph_model.hpp`
 - `src/lib/graph/graph_state_executor.hpp`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
+- `src/lib/ipc/request_router.cpp`
+- `plugins/ops/save_op.cpp`
 - `src/lib/compute/task_graph_planning.hpp`
 - `src/lib/compute/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution_service.hpp`

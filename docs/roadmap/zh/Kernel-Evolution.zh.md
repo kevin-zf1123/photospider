@@ -660,8 +660,8 @@ forwarding header、dual loader 或 v2-to-v3 shim。Policy ABI v1 保持独立�
 | [#84 / V-7](https://github.com/kevin-zf1123/photospider/issues/84) | 通过 DeviceExecutorRegistry 跑通一条 Metal operation | #83 |
 | [#85 / V-8](https://github.com/kevin-zf1123/photospider/issues/85) | 实现显式 CPU/GPU transfer、residency 与 stale completion | #84、#74 |
 | [#86 / V-9](https://github.com/kevin-zf1123/photospider/issues/86) | 在 ResourceLedger 中核算 device memory 与 scratch | #84、#70 |
-| [#87 / V-10](https://github.com/kevin-zf1123/photospider/issues/87) | 裁定 compute IO durability 与 completion semantics | #65 |
-| [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | 让 cache 与 codec path 经过 bounded ComputeIoExecutor | #87、#70 |
+| [#87 / V-10](https://github.com/kevin-zf1123/photospider/issues/87) | 批准 typed compute-I/O completion，并分离 cache、Graph 文档、daemon 与 durable-output authority；只修改文档 | #65 |
+| [#88 / V-11](https://github.com/kevin-zf1123/photospider/issues/88) | 让有界 cache/asset/codec I/O mechanism 经过 `ComputeIoExecutor`，但不迁移 commit policy | #87、#70 |
 | [#89 / V-12](https://github.com/kevin-zf1123/photospider/issues/89) | 验证 multi-channel、FP64、latent 与 stride matrix | #81、#85 |
 | [#90 / V-13](https://github.com/kevin-zf1123/photospider/issues/90) | 跑通一个 packed FP4/quantized DenseTensor slice | #89 |
 
@@ -690,9 +690,55 @@ allocator、in-flight limit、memory/scratch reservation、pipeline cache、tran
 fence。CPU worker 不阻塞等待 GPU completion；stale device completion 会释放资源，但不能提交到
 更新的 graph revision。
 
-Compute I/O executor 处理有界 cache/asset read/write 以及 codec 周边数据移动，同时按 operation
-数量和 byte 预算。它不拥有 daemon framing、graph document persistence 或 `OutputStore` identity/
-lease 语义；CPU-heavy codec work 返回 CPU executor。
+已接受的 compute I/O executor 处理有界 cache/asset read/write 与 codec 周边数据移动，同时按
+operation 数量和 estimated retained bytes 预算。它不拥有 daemon framing、Graph 文档
+persistence、`OutputStore` commit policy、用户 path、retry 或 durability claim；CPU-heavy
+codec work 返回既有 CPU executor。
+
+### Compute I/O 耐久性与完成目标
+
+当前基线不存在 `ComputeIoExecutor` 或 crash-durable output store。当前 deferred HP cache
+write 发生在 live Graph publication 前，并可能使 Run 失败；Graph 文档保存会直接写入
+destination；daemon job state 与 acknowledgement 都是 process-local；私有 IPC `OutputStore`
+使用内存 lease/TTL index，提供受保护、no-replace 的进程级 delivery。旧 `io/save` callback
+也可以在包围它的 staged Run 提交前暴露文件。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受以下 typed partial order 目标：
+
+```text
+OperationReturned -> ValueReady -> RunTerminal
+RunTerminal       -> ResultAvailable        （保留结果时）
+
+compute-and-persist success =
+  RunTerminal(Succeeded) AND OutputCommitted
+
+RequestAccepted、GraphDocumentSaved 与 ResponseObserved 由拥有相应操作的 owner
+分别排序。
+```
+
+只有 dependency-valid Graph/RT publication 或一个已准入的合法 no-op 才会把
+`ComputeRun::Succeeded` 解析为成功。Cache persistence、durable output commit、Graph 文档保存、
+daemon terminal state、result availability 与 caller observation 都保持为独立 outcome。
+
+| 持久化领域 | 目标 authority | 完成与耐久契约 |
+| --- | --- | --- |
+| Graph 文档 | Graph-state save transaction | 带版本、same-directory staging、expected-version validation、atomic replacement 与显式 achieved-durability result |
+| Disk cache | 使用有界 I/O mechanism 的 Graph cache policy | 可丢弃 acceleration；failure 不改写成功 Run/output outcome |
+| 用户输出 | `OutputStore` commit authority | 稳定 `OutputCommitId`、payload/metadata synchronization、manifest-last publication、typed receipt、recovery，且默认 no-overwrite |
+| Daemon transport | Job registry 与 result delivery | 只负责 acceptance、terminal state 与 response observation；不能据此推断 durability |
+| Codec | 注入的 representation adapter | 只负责 conversion 与 error translation；不拥有 path、retry、identity 或 commit authority |
+
+Durable output retry 通过稳定 commit identity 保持幂等，delivery 是 at least once，而不是 exactly
+once。Manifest publication 前的 cancellation 可以中止并清理 staging；manifest commit point 后
+则报告已提交 receipt，而不是假装 output 已被取消。请求 crash durability 时，必须先同步
+payload/metadata，再在平台声明支持时同步 directory。若不支持所请求 durability，必须显式失败，
+绝不能静默降级。
+
+所有 persistent path 都必须 rooted 且 normalized，通过 no-follow/identity check 拒绝 escape 与
+symlink substitution，在保留 work 前应用 quota，并把 achieved durability 暴露为 capability/
+result。`ComputeIoExecutor` 只提供有界 mechanism；上述 domain authority 保留 identity、
+ordering、policy 与 receipt ownership。
 
 ## 执行画像
 
@@ -740,6 +786,15 @@ sandbox/capability policy、shared-memory 或 FD transport、quota 和 output de
 10. Terminal publication 不表示 Run 可以回收；必须先让全部 lease/grant 达到 quiescence 并释放。
 11. `(RunId, RunLocalTaskId)` 是 completion identity；policy-binding 或 execution-route generation
     不是 Run identity。
+12. Run success 表示已验证 Graph/RT publication 或合法 no-op；它不表示 cache、output、Graph
+    文档、daemon、delivery 或 response completion。
+13. Cache 是可丢弃 acceleration，绝不是 durable user-output authority；cache persistence
+    failure 不能改写已经成功的 Run 或 output commit。
+14. Durable output commit 使用稳定 identity、manifest-last publication 与 typed receipt；
+    recovery 保持幂等，delivery 是 at least once，而不是 exactly once。
+15. Graph 文档保存保持为独立的带版本 transaction；daemon terminal state 或 acknowledgement
+    保持为非耐久 transport observation。
+16. 平台无法达到用户请求的 durability level 时必须显式失败，绝不能静默降级。
 
 ## 依赖顺序
 

@@ -523,6 +523,28 @@ pending gate；如果旧 RT proxy 先完成 commit，它会保持可见，但旧
 Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC job 继续报告
 `cancellable: false`。
 
+### 当前 compute-I/O 完成限制
+
+当前 HP product transaction 会在 revision validation 之后、no-throw live Graph swap
+之前执行符合条件的已配置 disk-cache write。因此，cache codec/filesystem failure 当前可能
+把该 Run 解析为 `Failed`，且不发布 live Graph。这是已实现 commit-policy 排序规则，
+不是 disk cache 属于 durable 用户输出的声明。
+
+Provider return、pending-Value readiness、Run terminal publication、Host result return、
+daemon job terminal state、result delivery、cache save、Graph 文档保存与用户可见文件
+副作用是不同观察。特别是：
+
+- pending producer 可以先返回，随后才 `ValueReady`；
+- 旧 `io/save` 等 operation callback 可以在包围它的 staged Run 提交前暴露外部副作用；
+- 协议 v2 `compute.submit` 只报告已接受 queued work；
+- image daemon job 在 Host compute 与受保护 artifact publication 后终态，但该 artifact
+  由进程级 lease/TTL 保留，而不是 crash durable；以及
+- Graph 文档保存是不同的 graph-state operation，绝不是 Run phase。
+
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
+接受一个目标：可选 cache 持久化与 durable output commit 在 Run publication 后拥有独立
+结果。该行为、稳定 output commit receipt 与有界 `ComputeIoExecutor` 都不是当前代码。
+
 ## 故障与生命周期语义
 
 - 非法 target、intent/ROI 组合、planning contract 和 operation failure 通过分类图错误和 Host
@@ -586,7 +608,8 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 4. 物理执行所有权与 dependency correctness 保持可分离。
 
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
-[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
+[ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)、
+[ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
 契约。本文是截至 issue #86 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
@@ -636,6 +659,9 @@ cancellation entry point 仍是未来行为。
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
+- `plugins/ops/save_op.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`

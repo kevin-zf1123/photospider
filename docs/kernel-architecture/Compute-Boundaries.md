@@ -676,6 +676,35 @@ older commit right. The installed Host, CLI, and IPC protocol version 2
 surfaces expose no cancellation entry; IPC jobs continue to report
 `cancellable: false`.
 
+### Current compute-I/O completion limits
+
+The current HP product transaction performs eligible configured disk-cache
+writes after revision validation and before the no-throw live Graph swap.
+Consequently, a cache codec/filesystem failure can currently resolve that Run
+as `Failed` with no live Graph publication. This is an implemented
+commit-policy ordering rule, not a claim that disk cache is durable user
+output.
+
+Provider return, pending-Value readiness, Run terminal publication, Host result
+return, daemon job terminal state, result delivery, cache save, Graph-document
+save, and user-visible file side effects are separate observations. In
+particular:
+
+- a pending producer can return before `ValueReady`;
+- an operation callback such as legacy `io/save` can expose an external side
+  effect before the enclosing staged Run commits;
+- protocol-v2 `compute.submit` reports only accepted queued work;
+- an image daemon job becomes terminal after Host compute and protected
+  artifact publication, but that artifact is process-scoped and lease/TTL
+  retained rather than crash durable; and
+- Graph-document save is a different graph-state operation and never a Run
+  phase.
+
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md)
+accepts a target in which optional cache persistence and durable output commit
+have independent outcomes after Run publication. That behavior, stable output
+commit receipts, and a bounded `ComputeIoExecutor` are not current code.
+
 ## Failure and Lifetime Semantics
 
 - Invalid targets, intent/ROI combinations, planning contracts, and operation
@@ -761,6 +790,7 @@ four independent correctness points:
 
 [ADR 0003](../adr/0003-process-owned-execution-resources.md),
 [ADR 0007](../adr/0007-compute-runs-and-process-execution-have-separate-owners.md),
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md),
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
@@ -820,6 +850,9 @@ points remain future behavior.
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/ipc/output_store.*`
+- `plugins/ops/save_op.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`

@@ -200,10 +200,11 @@ The cache-related node fields are:
 | `hp_region` | Formal cache metadata | Normalized logical Region known valid in that HP output. |
 
 Only HP output is formal reusable cache. That means only HP output may feed
-subsequent HP compute, disk cache, long-term storage, and other reusable cache
-behavior. RT output is not stored on `Node`; it lives in `RealtimeProxyGraph`,
-which mirrors node ids and stores low-resolution proxy output, HP-space Region,
-version, and RT dirty-source generation.
+subsequent HP compute, configured disk-cache persistence, or a separately
+requested output operation; the cache entry itself is not long-term
+user-output authority. RT output is not stored on `Node`; it lives in
+`RealtimeProxyGraph`, which mirrors node ids and stores low-resolution proxy
+output, HP-space Region, version, and RT dirty-source generation.
 
 Dirty RT worker tasks stage proxy output through `RealtimeProxyWriteBuffer`
 before committing to `RealtimeProxyGraph`. Dirty HP worker tasks stage formal
@@ -282,6 +283,31 @@ propagation.
   inspection, and operation ABI v2 use checked derived `PixelSize` and
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
+
+### Current persistence identity and completion boundaries
+
+The current Graph document serializes authored node topology/configuration
+only. It excludes `NodeOutput`, formal HP cache bytes, RT proxy state,
+allocation/value identities, producer fences, daemon job ids, delivery leases,
+and output-store records. A successful `GraphIOService::save()` captures a
+detached definition and completes the configured YAML adapter's direct
+open/write/flush/close sequence; the document has no persisted version and the
+call returns no atomic-replacement or durability receipt.
+
+Configured disk-cache locations remain backend cache identities, not Graph
+document ids or user-output commit ids. `ImageArtifactCodec` and
+`CacheMetadataCodec` convert image and metadata representations but do not own
+transaction, retry, visibility, or durability policy. The private IPC
+`OutputStore` keeps a separate process-scoped delivery record and artifact
+identity; those values are not fields of `GraphModel`, `NodeOutput`, or the
+Graph document.
+
+`ReadyFence::Ready`, formal HP publication, disk-cache save, Graph-document
+save, daemon result availability, and protected artifact publication are
+therefore different current facts. The accepted target authority and
+completion taxonomy are recorded in
+[ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md);
+they are not additional current fields.
 
 ### Implemented V-3 ownership, V-4 Region, V-6 readiness, and V-8 device surfaces
 
@@ -408,6 +434,7 @@ neither document changes the current fields described above.
 - `src/lib/adapters/yaml/parameter_value_yaml.*`
 - `src/lib/adapters/yaml/yaml_cache_metadata_codec.*`
 - `src/lib/core/cache_metadata_codec.hpp`
+- `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/core/value_image_adapter.*`
