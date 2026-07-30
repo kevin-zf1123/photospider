@@ -362,9 +362,20 @@ the manager's 64-entry default: publication pressure releases the
 lowest-revision entry. Generation advance alone does not clear residency, and
 the entry count is not device-byte or scratch admission.
 
+V-9 adds byte authority without changing logical Value identity or public
+binding facts. `ResourceLedger` owns an isolated memory/scratch account for
+each configured non-CPU `DeviceId`. Native plans use backend size/alignment
+facts; actual allocations use `allocatedSize`. A persistent device `Value`'s
+type-erased external owner holds the unique memory lease beside its native
+allocation, so Value copies and residency retain—not duplicate—the authority.
+Scratch remains outside the Value and follows the exact asynchronous
+completion owner. A completed HostPinned readback retains its shared Metal
+buffer as CPU-owned output storage after the scratch lease ends.
+
 `DataSpec`, quantization, general Map/Import providers, provider ABI v3, and
-general named immutable Value outputs remain later no-shim slices. V-8 does
-not add authoritative device-memory or scratch accounting.
+general named immutable Value outputs remain later no-shim slices. V-9 does
+not add public resource declarations, general heap suballocation, or
+device-queue budgets.
 `ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,

@@ -300,8 +300,8 @@ path may not bypass fairness, cancellation, or Run isolation.
 | Request / `ComputeRun` | Run identity, immutable inputs, request plan and dispatcher state, staged/temporary output, exception/cancellation/terminal state, Run reservations, commit policy, Run telemetry | Graph state, process workers, ready-store policy, resource mint authority |
 | `GraphRuntime` | `GraphModel`, graph-scoped state, graph-state lane, monotonic `GraphRevision`, revision capture, serialized commit validation/publication, graph events, stable graph-instance identity, copied HP/RT route ids and generations, graph-lifetime anchor, platform/session metadata | Runs, admitted-Run indexes, CPU/device/I/O/plugin workers, native devices/queues/allocators/caches, process ready store, admission, `ResourceLedger`, `PolicyRegistry`, policy bindings, physical execution routes |
 | `ExecutionService::RunLifecycleRegistry` | one process admission fence, service accepting/stopping state, graph-indexed open/closing admission rows, pending admission candidates, graph-indexed admitted `RunLease` entries, and process-wide Run enumeration | Run plans, dispatchers, terminal arbitration, staged output, Graph state, resource minting, execution policy |
-| Process `ExecutionService` | the lifecycle registry, a fixed CPU pool, one private Metal lane, a fixed `DeviceExecutorRegistry` with process-owned native queue/allocator/pipeline-cache resources, private serial-debug/GPU routes, policy-aware bounded ready storage, policy-binding state, Run/resource admission, policy-result validation, reserved start, execution exception fences, completion routing | task planning/dependencies, Graph/document persistence, cache authority, dirty propagation, visible commit, Graph state, general residency/coherency/transfer planning, device-memory accounting |
-| `ResourceLedger` | checked composition limits, transactional reservations, validated child grants, exact-once release accounting | ordering policy, task dependencies, Graph state, third-party token delegation |
+| Process `ExecutionService` | the lifecycle registry, a fixed CPU pool, one private Metal lane, a fixed `DeviceExecutorRegistry` with process-owned native queue/allocator/pipeline-cache resources, private serial-debug/GPU routes, policy-aware bounded ready storage, policy-binding state, Run/Host/device-resource admission, policy-result validation, reserved start, execution exception fences, completion routing | task planning/dependencies, Graph/document persistence, cache authority, dirty propagation, visible commit, Graph state, or general residency/coherency/transfer planning |
+| `ResourceLedger` | checked Host composition limits, isolated per-`DeviceId` memory/scratch limits, transactional Host reservations and device plans, native-actual reconciliation, validated child grants, split persistent/scratch leases, exact-once release accounting, copied diagnostics | ordering policy, task dependencies, Graph state, queue/in-flight guesses, residency eviction, or third-party token delegation |
 | Process `PolicyRegistry` | immutable built-in/DSO policy type records, validated pure-C callback tables, registry visibility, DSO leases | service bindings/contexts, ready work, workers, resources, Graph/Run state, completion or lifecycle authority |
 | Policy binding | ranking immutable Host-authored candidate descriptors within service-owned binding state | workers, physical ready store, Runs, Graph state, budget, reservations/grants/tokens, native device handles, executors, completion or lifecycle authority |
 
@@ -400,7 +400,7 @@ pre-removal failure restores `Active` for trusted retry, concurrent success is
 idempotent, and production failure or destruction of an active obligation is
 fail-stop.
 
-### Host-authoritative resource accounting
+### Host- and device-authoritative resource accounting
 
 `ExecutionService` exclusively owns an internal `ResourceLedger`, initialized
 from composition-root limits. Only trusted host code can mint its move-only,
@@ -408,16 +408,18 @@ non-forgeable reservations and execution grants. A built-in or third-party
 policy, operation plugin, or policy plugin may request or suggest resources but
 cannot construct, duplicate, enlarge, or directly release a token.
 
-The current service and ledger delivered by Issues #70 and #71 account for:
+The service and ledger delivered by Issues #70, #71, and #86 account for:
 
 - CPU execution capacity;
 - ready-store entries and bytes;
-- retained/in-flight Host memory and scratch.
+- retained/in-flight Host memory and scratch; and
+- isolated persistent-memory and scratch bytes for each configured non-CPU
+  `DeviceId`.
 
 The following dimensions remain later target behavior and are not guessed,
 reserved, or represented by fake nonzero values in the current ledger:
 
-- per-device queue, in-flight, memory, and scratch capacity;
+- per-device queue-depth and in-flight-command capacity;
 - compute-I/O operations and bytes; and
 - plugin-process, invocation, IPC/shared-memory, and isolation capacity.
 
@@ -428,6 +430,18 @@ The service charges only active Throughput root reservations against
 the general ceiling after configured interactive headroom is subtracted.
 Interactive Runs do not debit this class quota, but the ledger still authorizes
 every reservation and grant and remains the sole physical-capacity authority.
+
+Device allocation follows a separate two-stage transaction under the same
+root mutex. `try_reserve_device()` admits a complete memory/scratch plan or
+nothing for one exact configured device. Metal derives that plan from native
+heap size/alignment queries before allocation, audits each allocation's
+`allocatedSize`, and commits actual bytes before command submission. Unused
+planned bytes return immediately. The resulting memory lease follows the
+type-erased native `Value` owner through copies and residency, while the
+scratch lease follows the exact command-completion owner. Neither lease is
+Run-scoped, and neither device account can borrow Host or another device's
+capacity. Queue and pipeline-cache infrastructure remains outside these
+per-invocation dimensions.
 Throughput quota check, ledger reservation, and class charge are one serialized transaction. The
 non-authoritative class charge is removed only at exact physical root release,
 including when live child grants defer that release.

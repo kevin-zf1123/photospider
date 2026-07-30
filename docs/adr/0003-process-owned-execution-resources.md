@@ -10,8 +10,9 @@ source/downstream phases, enters it only as ready, lease-backed submissions.
 Independent Runs from multiple Graphs may overlap on that pool. `GraphRuntime`
 stores only copied HP/RT route ids and nonzero generations; it owns no physical
 worker, queue, policy context, or plugin DSO lifetime. The service exclusively
-owns a Host-authoritative ledger and an entry/byte-bounded ready store;
-complete CPU/retained/scratch/ready Run vectors share that authority. One
+owns a Host-and-per-device authoritative ledger and an entry/byte-bounded ready
+store; complete CPU/retained/scratch/ready Run vectors share the Host vector.
+One
 Interactive and one Throughput policy binding order work behind Host-authored
 class, frontier, fairness, and fallback rules. Issue #72 keeps strong Graph
 identity, authoritative revision, request-owned staging, and revision-safe
@@ -34,6 +35,9 @@ enters the selected operation only after reserved start. Issue #85 adds
 explicit revision-preserving CPU/Metal transfer, exact completion identity,
 one shared process-owned `ResidencyManager`, and Run-bound pending-Value
 continuations without creating another ready store or capacity authority.
+Issue #86 adds isolated configured non-CPU `DeviceId` memory/scratch accounts,
+native plan/actual reconciliation, and owner-bound persistent/completion
+leases to that sole service ledger.
 Public Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
 as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
@@ -100,7 +104,7 @@ Interactive and one Throughput binding rank already admitted ready work through
 the same Host-authored frontier and validation path. They do not own threads,
 the physical ready store, resource tokens, budget, Graph state, native device
 handles, completion routes, or lifecycle authority. The service owns binding
-state and the store, while a Host-owned `ResourceLedger` validates all
+state and the store, while a service-owned `ResourceLedger` validates all
 reservations and releases them exactly once. `PolicyRegistry` owns immutable
 built-in and DSO policy type records; DSO callbacks use the self-contained C11
 policy ABI v1 and receive only scalar candidate snapshots.
@@ -113,12 +117,18 @@ Physical execution is divided into resource executors:
 - a plugin invocation adapter backed by a separate
   `PluginRuntimeSupervisor` for process, IPC, security, and failure isolation.
 
-The current #84 and #85 slices realize the CPU executor, one service-owned
+The current #84 through #86 slices realize the CPU executor, one service-owned
 Metal lane, a source-private fixed device-executor registry, explicit
-CPU/Metal transfer, and exact process-owned residency. In the enabled
+CPU/Metal transfer, exact process-owned residency, and authoritative
+per-`DeviceId` memory/scratch accounting. In the enabled
 repository Metal-plugin profile, the Apple entry owns and reuses its native
 device/queue and validated pipeline cache, while each entry receives an
-invocation-scoped native allocator. Perlin publishes a pending native Value,
+invocation-scoped native allocator. Before native allocation, Perlin and
+CPU-to-Metal upload atomically reserve complete device plans derived from
+Metal heap size/alignment queries. Native `allocatedSize` facts reconcile the
+plans before command commit: unused bytes return immediately, persistent
+memory leases move into the native `Value` owner, and scratch leases move into
+the exact command-completion owner. Perlin publishes a pending native Value,
 encodes texture-to-buffer readback, and returns without a command-buffer wait.
 Completion freshness, applicable producer Ready publication, destination Ready
 publication, and resident insertion are one manager-locked transaction.
@@ -129,8 +139,10 @@ observation; rejected and born-stale candidates do not. This prevents a late
 older Run start from regressing the manager generation.
 Pending-Value continuation reuses the existing Run and ready store. This adds
 no public device-executor API, no Graph/cache authority, and no second
-device-capacity ledger. Authoritative device-memory and scratch accounting
-remains #86.
+device-capacity ledger. The service-owned `ResourceLedger` remains the sole
+authority: Host dimensions retain their meanings while each configured
+non-CPU `DeviceId` has isolated immutable memory/scratch limits and copied
+limits/reserved/available diagnostics.
 
 The worker-owning scheduler plugin ABI, SDK target, `IScheduler` hierarchy, and
 per-Graph physical owners have been removed as a complete breaking migration.

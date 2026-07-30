@@ -43,7 +43,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_graph_internal` | Build-only `GraphModel` and graph-service helper. | `GraphModel` remains private under `src/lib/graph`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation v2 loader, adapter, and lifetime helper. | It is not exported. |
 | `photospider_policy_internal` | Build-only pure-C policy DSO registry/loader, built-in types, bindings, contexts, faults, and DSO leases. | It owns ordering contexts only; it owns no worker, queue, grant, Run, Graph, or execution route. |
-| `photospider_execution_internal` | Build-only private physical-execution resources and accounting primitives. | `ResourceLedger`, the fixed `DeviceExecutorRegistry`, and platform executor factories are compiled here; each composition-root `ExecutionService` owns its sole Host-authoritative ledger and registry. |
+| `photospider_execution_internal` | Build-only private physical-execution resources and accounting primitives. | `ResourceLedger`, the fixed `DeviceExecutorRegistry`, and platform executor factories are compiled here; each composition-root `ExecutionService` owns its sole Host-and-per-device authoritative ledger and registry. |
 | `photospider_compute_internal` | Build-only compute, request-owned HP/RT `ComputeRun`, policy-aware ready store, reserved-start transaction, private route execution, runtime, and dirty-region helpers. | Runs and physical route mechanisms remain private. |
 | `photospider_host_internal` | Build-only embedded Host adapter and Kernel facade closure. | It is not exported and exposes no private execution owner to consumers. |
 | `photospider_operation_runtime` | Installable shared image-buffer/immutable Value and Region implementation. | It owns the sole process-wide allocation/revision minting authority plus dependency-neutral Region algebra, with no external package or back-link to the operation SDK. |
@@ -309,7 +309,8 @@ scheduler SDK and adds the one-header `include/photospider/policy/` pure-C
 contract. Policy registry/loading lives under `src/lib/policy/`; private
 route/runtime contracts live under `src/lib/execution/`; the policy-aware store
 and reserved-start logic remain under `src/lib/compute/`; and the sole
-Host-authoritative ledger implementation remains under `src/lib/runtime/`.
+Host-and-per-device authoritative ledger implementation remains under
+`src/lib/runtime/`.
 None of those private implementation owners becomes a public Host or IPC type.
 
 Naming rules:
@@ -491,17 +492,21 @@ In the current layout:
   returns RT output only after deterministic two-child settlement, and never
   creates cross-domain task dependencies;
 - the current `ExecutionService` owns one fixed CPU worker pool, private
-  `serial_debug` and `gpu_pipeline` behavior, one Host-authoritative ledger, a
-  fixed `DeviceExecutorRegistry`, and, in the enabled Apple repository
-  Metal-plugin profile, one process-owned Metal executor. That executor owns
-  its command queue, invocation-scoped allocator, and validated persistent
-  pipeline cache. GPU work enters it only after the common reserved-start
-  transaction, and an operation borrows the installed invocation context
-  rather than retaining native process resources;
-  the dependency-disabled profile installs no Metal executor;
-  general CPU/GPU transfer, residency, coherency, and stale-completion
-  semantics remain issue #85, while device-memory and scratch accounting in
-  `ResourceLedger` remain issue #86;
+  `serial_debug` and `gpu_pipeline` behavior, one Host-and-per-device
+  authoritative ledger, a fixed `DeviceExecutorRegistry`, and, in the enabled
+  Apple repository Metal-plugin profile, one process-owned Metal executor.
+  That executor owns its command queue, invocation-scoped native-allocation
+  facade, and validated persistent pipeline cache. GPU work enters it only
+  after the common reserved-start transaction, and an operation borrows the
+  installed invocation context rather than retaining native process resources.
+  Explicit CPU/Metal transfer, bounded residency, coherency, exact stale
+  completion, and revision-preserving publication are current from issue #85.
+  Issue #86 now makes each concrete non-CPU `DeviceId` an isolated
+  device-memory/scratch account: the executor atomically reserves a native
+  size/alignment plan before allocation, reconciles `allocatedSize`, and binds
+  independent memory/scratch leases to persistent Value and completion
+  lifetimes. The dependency-disabled profile installs no Metal executor and
+  therefore makes no native utilization claim;
   `ExecutionService` also owns a
   policy-aware entry/byte-bounded ready store,
   checked full-vector Run admission, work/byte cost, class-local Graph and
@@ -521,8 +526,8 @@ In the current layout:
 - its source-private `ExecutionLifecycleTelemetry` preallocates a fixed 65,536
   record ring, copies atomic-cut cursor pages and 15 post-transition counters,
   and grants no public or runtime authority;
-- the internal host-authoritative `ResourceLedger` is the only reservation and
-  grant mint; and
+- the internal `ResourceLedger` is the only Host reservation/grant and
+  per-device plan/lease mint; and
 - the current process policy registry owns built-in and pure-C DSO types. One
   binding per `PolicyClass` owns its context, nonzero generation, immutable
   first fault, and DSO leases. Host state selects the service class and trusted
@@ -758,11 +763,13 @@ reduces candidates through a Host-authored frontier, commits starts through a
 resource-safe transaction, and routes all work through closed private
 execution ids. Graph load/replacement now copies route values only. Issue #76
 completes the lifecycle registry, graph-close/process-shutdown, exact
-settlement, and telemetry invariants. Issue #84 is also current: one repository
-Metal operation reaches a process-owned executor through the fixed
-`DeviceExecutorRegistry`, while issues #85 and #86 retain the general transfer,
-coherency, and device-resource-accounting follow-up boundaries. The
-authoritative acyclic
+settlement, and telemetry invariants. Issues #84 through #86 are also current:
+one repository Metal operation reaches a process-owned executor through the
+fixed `DeviceExecutorRegistry`; explicit CPU/Metal transfer and bounded
+residency preserve exact revision/completion identity; and the sole service
+`ResourceLedger` now admits and reconciles isolated persistent-device-memory
+and scratch bytes through their exact native-owner lifetimes. The authoritative
+acyclic
 dependency table is in the
 [kernel evolution target](../roadmap/Kernel-Evolution.md#delivery-dependency-contract).
 

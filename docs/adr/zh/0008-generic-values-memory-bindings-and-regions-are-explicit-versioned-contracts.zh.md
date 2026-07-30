@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-8
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-9
 切片：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
 以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP；V-5
 operation-metadata routing 与有界 V-6 ReadyFence、pending CPU Value 和显式 fake-device
@@ -14,7 +14,10 @@ Ready 前拒绝 stale native completion。`ImageBuffer`、`DataType`、`Device`�
 与 operation plugin ABI v2 仍是各自
 角色边缘上的兼容契约；本 ADR 中尚未实现的部分仍是演进目标。
 
-Issue #78 批准了本契约。Issue #79 至 #85 交付了有界的 V-2 至 V-8 实现切片；Issue #86
+V-9 新增 source-private 的 per-device memory/scratch plan、native actual-byte 校准，以及随
+native Value 与 completion ownership 延续的 lease，而不改变上述 public contract。
+
+Issue #78 批准了本契约。Issue #79 至 #86 交付了有界的 V-2 至 V-9 实现切片；Issue #87
 至 #90 仍是彼此独立的实现切片。合成的
 `VariableSampleField` 证明与可选 OpenEXR Deep provider 仍是彼此独立的后续 change；
 本决策不实现二者。
@@ -284,8 +287,13 @@ Metal-to-CPU transfer 会发布保留同一逻辑 `ValueRevisionId` 的独立 bi
 admission。Pending operation Value 会让其 Run 保持未 settlement，并且只有 terminal success
 之后才能通过同一个 `ExecutionService` ready store 释放 dependant。Metal Perlin 路径会编码
 显式 texture-to-shared-buffer blit、安装 completion handler、commit 并立即返回，不再调用
-`waitUntilCompleted` 或 `getBytes`。V-8 刻意不新增 authoritative device-memory 或 scratch
-ledger；该职责仍属于 #86。
+`waitUntilCompleted` 或 `getBytes`。V-9 保持 Host `ResourceVector` 不变，并为每个已配置的
+非 CPU `DeviceId` 新增隔离且 immutable 的 memory/scratch account。Perlin 与 CPU-to-Metal
+upload 会查询 native heap size/alignment，并在 allocation 前预留完整 plan。它们会审计
+`allocatedSize`、归还未使用的 plan byte，并在 command submission 前提交精确 actual byte。
+Memory lease 由 `BufferHandle` 会复制、residency 会保留的同一个 type-erased native owner
+拥有；scratch 由精确 completion object 保留到 terminal native handling 结束。Residency
+仍是按 entry 数量有界的 retention owner，不是 byte-budget authority。
 
 Current-generation handoff 会分阶段完成，而不会在 coordinator critical section 中
 allocation。Kernel 会在提交 publication 前预跟踪一个零 generation lineage row。只有

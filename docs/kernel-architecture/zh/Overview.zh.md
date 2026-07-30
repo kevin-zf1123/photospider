@@ -175,7 +175,7 @@ graph TD
     Kernel --> PluginManager
     EmbeddedHost --> ExecutionService["Host ExecutionService"]
     Kernel --> ExecutionService
-    ExecutionService --> ResourceLedger["ResourceLedger"]
+    ExecutionService --> ResourceLedger["Host/device ResourceLedger"]
     ExecutionService --> PolicyRegistry["进程 PolicyRegistry"]
     ExecutionService --> PrivateRoutes["私有 execution route"]
     Kernel --> ComputeService
@@ -542,10 +542,11 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   fence、精确 settlement 与 source-private telemetry 已是当前行为。Public cancellation control
   仍是未来行为。
 - [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
-  定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #85 已是当前行为：V-8 提供显式
+  定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #86 已是当前行为：V-8 提供显式
   CPU/Metal transfer、保留 revision 的 replica、进程级 residency、精确 stale-completion
-  rejection 与 pending-Value continuation，且不改变 operation ABI v2。Device-memory/scratch
-  admission 与其余通用 provider migration 仍是未来工作。
+  rejection 与 pending-Value continuation，且不改变 operation ABI v2。V-9 在唯一的 service
+  `ResourceLedger` 内新增原子 per-device memory/scratch plan、native actual-byte 校准，以及
+  persistent/completion 生命周期 lease。其余通用 provider migration 仍是未来工作。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。

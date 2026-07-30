@@ -210,7 +210,7 @@ graph TD
     Kernel --> PluginManager
     EmbeddedHost --> ExecutionService["host ExecutionService"]
     Kernel --> ExecutionService
-    ExecutionService --> ResourceLedger["ResourceLedger"]
+    ExecutionService --> ResourceLedger["Host/device ResourceLedger"]
     ExecutionService --> PolicyRegistry["process PolicyRegistry"]
     ExecutionService --> PrivateRoutes["private execution routes"]
     Kernel --> ComputeService
@@ -678,11 +678,13 @@ Important current behavior:
   telemetry are current. Public cancellation control remains future.
 - [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
   defines the versioned data, binding, and Region direction. Its issues #79
-  through #85 are current: V-8 provides explicit CPU/Metal transfer,
+  through #86 are current: V-8 provides explicit CPU/Metal transfer,
   revision-preserving replicas, process-owned residency, exact stale-completion
   rejection, and pending-Value continuation without changing operation ABI v2.
-  Device-memory/scratch admission and the remaining generic provider migration
-  stay future work.
+  V-9 adds atomic per-device memory/scratch plans, native actual-byte
+  reconciliation, and persistent/completion lifetime leases inside the sole
+  service `ResourceLedger`. The remaining generic provider migration stays
+  future work.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of

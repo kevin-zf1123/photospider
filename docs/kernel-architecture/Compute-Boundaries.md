@@ -30,7 +30,7 @@ flowchart TD
   HOST["ps::Host"] --> ADAPTER["embedded Host adapter"]
   ADAPTER --> KERNEL["Kernel"]
   KERNEL --> EXEC["injected CPU ExecutionService"]
-  EXEC --> LEDGER["host-authoritative ResourceLedger"]
+  EXEC --> LEDGER["Host/device-authoritative ResourceLedger"]
   EXEC --> STORE["bounded ready store"]
   EXEC --> POLICY["Interactive/Throughput policy bindings"]
   KERNEL --> REQUEST["bounded compute-request lane"]
@@ -115,11 +115,11 @@ reserved-start transaction.
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
 | `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, callback owner, and cancellation owner for pending-Value fence waits for one full HP request | Execution-route workers, Run terminal state, native completion freshness, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, or authoritative device-memory/scratch accounting |
+| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one Host/device-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, residency eviction, or resource ordering/fairness |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
-| `ResourceLedger` | Atomically reserve checked CPU, retained-memory, scratch, ready-entry, and ready-byte vectors; mint bounded child grants; release exact vectors after parent/child ownership ends | Worker creation, ordering policy, task dependencies, device/I/O/plugin resource guesses, or lifecycle admission |
+| `ResourceLedger` | Atomically reserve checked Host vectors and isolated per-`DeviceId` memory/scratch plans; reconcile native actual bytes; mint bounded Host grants and split device leases; release exact authority after its true owner ends; copy deterministic diagnostics | Worker creation, ordering policy, task dependencies, queue/in-flight/I/O/plugin guesses, residency eviction, or lifecycle admission |
 | `GraphRuntime::ExecutionRouteBinding` | Store one copied private route id and nonzero generation per intent | Physical route ownership, policy context, workers, queues, or reservations |
 
 Compute collaborators live under `src/lib/compute/`; the ledger and Graph route
@@ -215,8 +215,20 @@ Duplicate and proper-subset identities cannot consume another admission. The
 Perlin provider encodes an explicit texture-to-buffer blit and calls neither
 `waitUntilCompleted` nor `getBytes`; CPU-to-Metal uses the inverse explicit
 blit. `GraphRuntime` still owns no native Metal state, #74 remains the final
-visible-commit gate, and #86 still owns authoritative device-memory/scratch
-accounting.
+visible-commit gate, and #86 keeps device-memory/scratch authority inside the
+service ledger rather than residency or the Run.
+
+Metal obtains a complete preallocation plan from native heap texture/buffer
+size-and-alignment queries before its first allocation. Actual
+`MTLResource::allocatedSize` values must fit that atomic plan before command
+commit. The plan then becomes two unique owners: persistent memory follows the
+type-erased native `Value` owner across copies and residency, while scratch
+follows the exact command-completion object across success, native failure,
+stale/rejected publication, and callback unwind. Unused planned bytes return
+at actual commit. Device accounts are isolated by complete `DeviceId`, do not
+borrow Host capacity, and provide copied limits/reserved/available snapshots.
+Command queues, fixed lanes, and pipeline cache entries remain infrastructure,
+not per-invocation scratch.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
@@ -474,8 +486,8 @@ start, and transfers callback ownership to the copied Graph route binding.
 
 The process service is explicitly composed before Kernel and owns one direct
 fixed CPU worker pool, one private Metal worker lane, one fixed
-device-executor registry, one host-authoritative ledger, and one bounded ready
-store. Configuration
+device-executor registry, one Host-and-per-device authoritative ledger, and one
+bounded ready store. Configuration
 resolves and freezes `[1,8]` CPU infrastructure workers once; Graph load,
 replacement, Run execution, and dirty phases never resize either lane.
 Benchmark `execution.threads` is a per-Run ceiling rather than an execution
@@ -522,7 +534,9 @@ closed `cpu`, `serial_debug`, and `gpu_pipeline` implementations and applies the
 same ledger/reserved-start boundary to all of them. Route replacement validates
 and publishes a fresh generation without constructing a per-Graph executor or
 reservation. The ledger does not invent device, I/O, or plugin-specific
-dimensions.
+utilization dimensions: it adds only explicit native memory/scratch bytes for
+configured non-CPU `DeviceId` accounts and keeps I/O/plugin dimensions outside
+this authority.
 
 The canonical inventory is route and registry aware: `cpu` and `serial_debug`
 expose CPU only; `gpu_pipeline` exposes Metal then CPU when a Metal executor is
@@ -532,10 +546,11 @@ admission. Submission re-resolves the same identity; replacement or unload
 racing a cached plan therefore fails before provider entry instead of mixing
 callback and metadata revisions. CPU work enters the
 fixed pool and Metal work enters the single GPU lane and then the matching
-registry executor, while both consume the same Run root grants and
-maximum-parallelism ceiling. An unavailable device is
+registry executor. Both consume the same Host Run-root grants and
+maximum-parallelism ceiling; native allocation additionally consumes only the
+selected concrete device account. An unavailable device is
 rejected before active-Run publication, and completion, exception, cancellation,
-reuse, shutdown, and drainage retire the exact common ledger/Run state.
+reuse, shutdown, and drainage retire the exact Host, device, and Run state.
 
 Every operation ready submission also carries the exact implementation
 identity plus `reentrant`, `maximum_parallelism`, and `exclusive_key`.

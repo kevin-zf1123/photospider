@@ -294,9 +294,17 @@ publication 随后会在暴露 currentness 前推进该行，因此晚启动的�
 revision 最低的 entry。Generation 推进本身不会清除 residency，而且这个 entry 数量不是
 device-byte 或 scratch admission。
 
+V-9 在不改变逻辑 Value identity 或 public binding fact 的前提下新增 byte authority。
+`ResourceLedger` 为每个已配置非 CPU `DeviceId` 拥有隔离的 memory/scratch account。Native
+plan 使用 backend size/alignment fact，actual allocation 使用 `allocatedSize`。Persistent
+device `Value` 的 type-erased external owner 会把唯一 memory lease 与 native allocation
+共同保留，因此 Value 副本与 residency 会保留而不是复制该 authority。Scratch 不进入 Value，
+而是随精确 asynchronous completion owner 延续。完成后的 HostPinned readback 在 scratch lease
+结束后继续保留其 shared Metal buffer，并将其归类为 CPU-owned output storage。
+
 `DataSpec`、quantization、通用 Map/Import provider、provider ABI v3 与通用命名 immutable
-Value output 仍属于后续 no-shim slice。V-8 不新增 authoritative device-memory 或 scratch
-核算。`ParameterMap` 仍用于 configuration 与当前命名
+Value output 仍属于后续 no-shim slice。V-9 不新增 public resource declaration、通用 heap
+suballocation 或 device-queue budget。`ParameterMap` 仍用于 configuration 与当前命名
 scalar-result storage。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与

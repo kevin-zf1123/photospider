@@ -241,8 +241,8 @@ store 和全局 policy；永久 worker-local 路径不得绕过公平性、取�
 | Request / `ComputeRun` | Run 身份、不可变输入、请求计划与 dispatcher 状态、staged/temporary output、exception/cancellation/terminal 状态、Run reservation、commit policy、Run telemetry | Graph state、进程 worker、ready-store policy、资源铸造权威 |
 | `GraphRuntime` | `GraphModel`、graph-scoped state、graph-state lane、单调 `GraphRevision`、revision capture、串行 commit validation/publication、graph event、稳定 graph-instance identity、复制的 HP/RT route id 与 generation、graph-lifetime anchor、platform/session metadata | Run、admitted-Run index、CPU/device/I/O/plugin worker、native device/queue/allocator/cache、进程 ready store、admission、`ResourceLedger`、`PolicyRegistry`、policy binding、物理 execution route |
 | `ExecutionService::RunLifecycleRegistry` | 一个 process admission fence、service accepting/stopping state、按 Graph 建索引的 open/closing admission row、pending admission candidate、按 Graph 建索引且已 admission 的 `RunLease` entry，以及 process-wide Run enumeration | Run plan、dispatcher、terminal arbitration、staged output、Graph state、resource minting、execution policy |
-| 进程 `ExecutionService` | lifecycle registry、固定 CPU pool、一个私有 Metal lane、带有 process-owned native queue/allocator/pipeline-cache resource 的固定 `DeviceExecutorRegistry`、私有 serial-debug/GPU route、policy-aware 有界 ready storage、policy-binding state、Run/resource admission、policy 结果验证、reserved start、执行异常 fence、completion routing | 任务规划/依赖、Graph/document persistence、cache authority、dirty propagation、可见 commit、Graph state、通用 residency/coherency/transfer planning、device-memory 核算 |
-| `ResourceLedger` | checked composition limit、事务型 reservation、经过验证的 child grant、exact-once release accounting | 排序策略、任务依赖、Graph state、向第三方委托 token |
+| 进程 `ExecutionService` | lifecycle registry、固定 CPU pool、一个私有 Metal lane、带有 process-owned native queue/allocator/pipeline-cache resource 的固定 `DeviceExecutorRegistry`、私有 serial-debug/GPU route、policy-aware 有界 ready storage、policy-binding state、Run/Host/device-resource admission、policy 结果验证、reserved start、执行异常 fence、completion routing | 任务规划/依赖、Graph/document persistence、cache authority、dirty propagation、可见 commit、Graph state 或通用 residency/coherency/transfer planning |
+| `ResourceLedger` | checked Host composition limit、隔离的 per-`DeviceId` memory/scratch limit、事务型 Host reservation 与 device plan、native actual 校准、经过验证的 child grant、拆分的 persistent/scratch lease、exact-once release accounting、复制式 diagnostic | 排序策略、任务依赖、Graph state、对 queue/in-flight 的猜测、residency eviction 或向第三方委托 token |
 | 进程 `PolicyRegistry` | immutable built-in/DSO policy type record、经过验证的纯 C callback table、registry visibility、DSO lease | service binding/context、ready work、worker、resource、Graph/Run state、completion 或 lifecycle authority |
 | Policy binding | 在 service-owned binding state 中对 Host 编写的 immutable candidate descriptor 排序 | worker、物理 ready store、Run、Graph state、budget、reservation/grant/token、native device handle、executor、completion 或 lifecycle authority |
 
@@ -319,22 +319,23 @@ worker 会先 retire execution-grant/route accounting，然后在 `in_flight` �
 retry，并发 success 是幂等的，而 production failure 或 active obligation destruction 会
 fail-stop。
 
-### Host 权威的资源核算
+### Host 与 device 权威的资源核算
 
 `ExecutionService` 独占拥有一个内部 `ResourceLedger`，并用 composition-root limit 初始化。
 只有可信 host code 可以铸造其 move-only、不可伪造 reservation 与 execution grant。
 内建或第三方 policy、operation plugin 或 policy plugin 可以请求或建议资源，但不能构造、
 复制、扩大或直接释放 token。
 
-当前 Issue #70 与 #71 service 与 ledger 会核算：
+Issue #70、#71 与 #86 交付的 service 与 ledger 会核算：
 
 - CPU 执行容量；
 - ready-store entry 与 byte；
-- retained/in-flight Host memory 与 scratch。
+- retained/in-flight Host memory 与 scratch；以及
+- 每个已配置非 CPU `DeviceId` 的隔离 persistent-memory 与 scratch byte。
 
 以下维度仍是后续目标行为；当前 ledger 不会猜测、预留，也不会用虚构的非零值表示它们：
 
-- 每 device 的 queue、in-flight、memory 与 scratch 容量；
+- 每 device 的 queue-depth 与 in-flight-command 容量；
 - compute-I/O operation 与 byte；以及
 - plugin-process、invocation、IPC/shared-memory 与隔离容量。
 
@@ -343,6 +344,15 @@ Admission 会事务性验证一个 checked resource vector，只返回完整 Run
 child grant。Service 从 general admission ceiling 中减去配置的 interactive headroom 后，只把
 active Throughput root reservation 计入该 ceiling。Interactive Run 不会扣减这项 class quota，但
 每个 reservation 与 grant 仍必须由 ledger 授权，ledger 也仍是唯一物理容量 authority。
+
+Device allocation 在同一个 root mutex 下遵循独立的两阶段事务。`try_reserve_device()` 对一个精确的
+已配置 device 准入完整 memory/scratch plan，或者什么也不准入。Metal 会在 allocation 前根据
+native heap size/alignment query 得到该 plan，审计每个 allocation 的 `allocatedSize`，并在
+command submission 前提交 actual byte。未使用的 planned byte 会立即归还。得到的 memory lease
+会随 type-erased native `Value` owner 跨副本与 residency 延续，而 scratch lease 会随精确的
+command-completion owner 延续。两种 lease 都不以 Run 为作用域，而且任何 device account 都不能
+借用 Host 或其他 device 的容量。Queue 与 pipeline-cache 基础设施仍不属于这些 per-invocation
+dimension。
 Throughput quota check、ledger reservation 与 class
 charge 构成一个串行 transaction。不具权威的 class charge 只有在精确物理 root release 时才会
 扣回，包括 live child grant 推迟该 release 的情况。

@@ -7,8 +7,9 @@ embedded composition root 显式创建并注入一个固定的 `ExecutionService
 工作（包括 connected-parameter preflight，以及 dirty source/downstream 阶段）只以已 ready 且由
 lease 支撑的 submission 进入该 service。来自多个 Graph 的独立 Run 可以在该 pool 上重叠。
 `GraphRuntime` 只存储复制的 HP/RT route id 与 nonzero generation；它不拥有物理 worker、queue、
-policy context 或 plugin DSO lifetime。Service 独占一个 Host 权威 ledger 与按 entry/byte 有界的
-ready store；完整 CPU/retained/scratch/ready Run vector 共享该 authority。恰好一个 Interactive 与
+policy context 或 plugin DSO lifetime。Service 独占一个 Host 与逐设备权威 ledger，以及按
+entry/byte 有界的 ready store；完整 CPU/retained/scratch/ready Run vector 共享其中的 Host vector。
+恰好一个 Interactive 与
 一个 Throughput policy binding 会在 Host 编写的 class、frontier、fairness 与 fallback 规则之后
 排列工作。Issue #72 把强类型 Graph identity、authoritative revision、request-owned staging 与
 revision-safe publication 保持在 execution service 之外。Issue #73 为每个当前 Run 提供私有弱
@@ -25,7 +26,9 @@ Issue #84 移除了 per-Graph native Metal ownership，并在 `ExecutionService`
 invocation allocator 与持久 pipeline cache，并且只在 reserved start 后进入选中的 operation。
 Issue #85 新增显式且保留 revision 的 CPU/Metal transfer、精确 completion identity、唯一共享的
 进程级 `ResidencyManager` 与 Run-bound pending-Value continuation，且不创建另一套 ready store
-或 capacity authority。Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
+或 capacity authority。Issue #86 在这套唯一的 service ledger 中增加相互隔离的已配置非 CPU
+`DeviceId` memory/scratch 账户、原生 plan/actual 校准，以及绑定到持久 owner/completion 的 lease。
+Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
 取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 
 ## 背景
@@ -74,7 +77,7 @@ resource reservation 和 commit policy 单元。
 Policy binding 是 `ExecutionService` 的内部比较 seam。恰好一个 Interactive 与一个 Throughput
 binding 通过同一条 Host 编写的 frontier 与 validation path 排列已经准入的 ready work。它们不拥有
 thread、物理 ready store、resource token、budget、Graph state、native device handle、completion
-route 或 lifecycle authority。Service 拥有 binding state 与 store，而 Host-owned
+route 或 lifecycle authority。Service 拥有 binding state 与 store，而 service-owned
 `ResourceLedger` 验证所有 reservation，并保证其恰好释放一次。`PolicyRegistry` 拥有 immutable
 built-in 与 DSO policy type record；DSO callback 使用自包含的 C11 policy ABI v1，并且只接收
 scalar candidate snapshot。
@@ -86,19 +89,24 @@ scalar candidate snapshot。
 - 有界 compute I/O executor；
 - plugin invocation adapter，由独立 `PluginRuntimeSupervisor` 负责 process、IPC、安全和故障隔离。
 
-当前 #84 与 #85 切片实现 CPU executor、一个由 service 拥有的 Metal lane、source-private 的固定
-device-executor registry、显式 CPU/Metal transfer 与精确进程级 residency。在仓库 Metal plugin
-已启用的 profile 中，Apple entry 会拥有并复用 native device/queue 与经过校验的 pipeline cache，
-而每次 entry 都获得 invocation-scoped native allocator。Perlin 会发布 pending native Value、
+当前 #84 至 #86 切片实现 CPU executor、一个由 service 拥有的 Metal lane、source-private 的固定
+device-executor registry、显式 CPU/Metal transfer、精确进程级 residency，以及权威的
+per-`DeviceId` memory/scratch 核算。在仓库 Metal plugin 已启用的 profile 中，Apple entry 会拥有并
+复用 native device/queue 与经过校验的 pipeline cache，而每次 entry 都获得 invocation-scoped
+native allocator。在进行 native allocation 前，Perlin 与 CPU-to-Metal upload 会根据 Metal heap
+size/alignment query 原子预留完整 device plan。Native `allocatedSize` fact 会在 command commit
+前校准该 plan：未使用的字节立即归还，persistent memory lease 移入 native `Value` owner，
+scratch lease 移入精确的 command-completion owner。Perlin 会发布 pending native Value、
 编码 texture-to-buffer readback，并且不等待 command buffer 就返回。Completion freshness、
 适用的 producer Ready publication、destination Ready publication 与 resident insertion 是一个
 由 manager lock 保护的事务。Kernel 会先在可失败的 coordinator submission 前预跟踪 lineage，
 但不推进它。Accepted current publication 随后会在 coordinator 仍排除 currentness observation
 时执行无 allocation 的 manager 推进；被拒绝和 born-stale 的 candidate 不会执行该推进。
 这会阻止晚启动的较旧 Run 让 manager generation 倒退。Pending-Value continuation 复用既有
-Run 与 ready store。该切片不
-增加 public device-executor API、Graph/cache authority 或第二套 device-capacity ledger。权威
-device-memory 与 scratch 核算仍属于 #86。
+Run 与 ready store。该切片不增加 public device-executor API、Graph/cache authority 或第二套
+device-capacity ledger。由 service 拥有的 `ResourceLedger` 仍是唯一权威：Host dimension
+保持既有含义，而每个已配置的非 CPU `DeviceId` 都拥有隔离且 immutable 的 memory/scratch
+limit，以及复制出的 limits/reserved/available diagnostic。
 
 拥有 worker 的 scheduler plugin ABI、SDK target、`IScheduler` hierarchy 与 per-Graph 物理 owner
 已经通过一次完整的破坏性迁移被移除。没有留下 compatibility adapter 或 forwarding layer。

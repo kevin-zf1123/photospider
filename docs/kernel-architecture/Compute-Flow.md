@@ -27,7 +27,7 @@ service, a Graph lifetime anchor, and one copied execution-route binding per
 intent. Each binding contains only an exact route id and nonzero generation.
 `GraphRuntime` owns no native platform context. The embedded composition root
 creates one private fixed `ExecutionService` before Kernel. The service
-exclusively owns the Host-authoritative resource ledger, policy bindings,
+exclusively owns the Host/device-authoritative resource ledger, policy bindings,
 bounded ready store, reserved-start transactions, physical routes, and
 completion callbacks; Kernel injects that owner into each request-local
 `ComputeService`.
@@ -82,6 +82,18 @@ complete CPU, retained-memory, scratch, ready-entry, and ready-byte vector from
 the service-owned Host ledger. Graph load copies route ids and generations but
 owns no worker grant. This contract does not claim all threads used by compute,
 operations, or a private GPU backend.
+
+Device allocation has a separate lifetime from Run admission. One complete
+non-CPU `DeviceId` account atomically reserves persistent-memory and scratch
+plans under the same ledger root mutex. The Metal Perlin path plans its output
+texture, permutation/scale buffers, and readback buffer before its first native
+allocation; CPU-to-Metal upload plans its destination texture and staging
+buffer before either allocation. Native heap size/alignment supplies the plan,
+`allocatedSize` supplies actual bytes, and command commit occurs only after
+actual reconciliation. Persistent memory then follows the native Value owner
+through residency, while scratch remains charged until the exact native
+completion owner retires. Provider/Run return cannot release either owner
+early, and queue/pipeline infrastructure is not charged as invocation scratch.
 
 Benchmark configuration does not reconfigure that process pool. For each
 benchmark Run, `execution.threads` resolves to an optional positive

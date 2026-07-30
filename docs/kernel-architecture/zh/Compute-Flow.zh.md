@@ -24,7 +24,7 @@ CLI / TUI
 `ComputeRequestCoordinator`、事件服务、Graph lifetime anchor，以及每个 intent 的一个
 execution binding。每个 binding 只包含精确 route ID 与非零 generation。`GraphRuntime`
 不拥有 native platform context。Embedded composition root 还会在 Kernel 之前创建一个私有固定
-`ExecutionService`。该 service 独占 Host 权威 resource ledger、policy binding、有界 ready
+`ExecutionService`。该 service 独占 Host/device 权威 resource ledger、policy binding、有界 ready
 store、reserved-start transaction、物理 route 与 completion callback；Kernel 会把该 owner
 注入每个 request-local `ComputeService`。
 
@@ -64,6 +64,15 @@ unsupported 与 dependency-disabled profile 则让 registry 中没有 Metal exec
 原子预留完整的 CPU、retained-memory、scratch、ready-entry 与 ready-byte vector。Graph load
 只复制 route ID 与 generation，不拥有 worker grant。该契约不声称覆盖 compute、operation
 或私有 GPU backend 使用的全部 thread。
+
+Device allocation 与 Run admission 具有不同生命周期。一个完整非 CPU `DeviceId` account 会在同一
+ledger root mutex 下原子预留 persistent-memory 与 scratch plan。Metal Perlin 路径会在首个
+native allocation 前规划 output texture、permutation/scale buffer 与 readback buffer；
+CPU-to-Metal upload 会在两项 allocation 前规划 destination texture 与 staging buffer。Native
+heap size/alignment 提供 plan，`allocatedSize` 提供 actual byte，只有完成 actual 校准后才会
+command commit。随后 persistent memory 随 native Value owner 跨 residency 延续，scratch
+则保持计费直到精确 native completion owner 退役。Provider/Run return 都不能提前释放任一
+owner，queue/pipeline infrastructure 也不按 invocation scratch 计费。
 
 Benchmark 配置不会重新配置该进程池。对于每次 benchmark Run，`execution.threads` 会解析为
 一个可选正值 `maximum_parallelism`：缺失或 `0` 会在 `[1,8]` 中选择有界自动值，

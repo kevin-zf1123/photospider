@@ -3,7 +3,7 @@
 ## Status
 
 Accepted as the target contract for Project 4 generic data and heterogeneous
-execution. The source tree now implements bounded V-2 through V-8 slices:
+execution. The source tree now implements bounded V-2 through V-9 slices:
 CPU DenseTensor/ImageView values, checked BufferHandle ownership and runtime
 identity, and the public Region MVP used by dirty planning, validity, and the
 core dense operation; V-5 operation-metadata routing and the bounded V-6
@@ -18,8 +18,12 @@ completion rejection before destination readiness. `ImageBuffer`, `DataType`, `D
 their role-specific edges; the unimplemented portions of this ADR remain
 evolution targets.
 
-Issue #78 ratified this contract. Issues #79 through #85 delivered the bounded
-V-2 through V-8 implementation slices; issues #86 through #90 remain separate
+V-9 adds source-private per-device memory/scratch plans, native actual-byte
+reconciliation, and leases following native Value and completion ownership
+without changing those public contracts.
+
+Issue #78 ratified this contract. Issues #79 through #86 delivered the bounded
+V-2 through V-9 implementation slices; issues #87 through #90 remain separate
 implementation slices. A synthetic
 `VariableSampleField` proof and an optional OpenEXR Deep provider remain
 separate later changes; neither is implemented by this decision.
@@ -344,8 +348,15 @@ Values keep their Run unsettled and release dependants only through the same
 `ExecutionService` ready store after terminal success. The Metal Perlin path
 encodes an explicit texture-to-shared-buffer blit, installs the completion
 handler, commits, and returns without `waitUntilCompleted` or `getBytes`.
-V-8 intentionally adds no authoritative device-memory or scratch ledger; that
-remains #86.
+V-9 keeps the Host `ResourceVector` unchanged and adds isolated immutable
+memory/scratch accounts for each configured non-CPU `DeviceId`. Perlin and
+CPU-to-Metal upload query native heap size/alignment and reserve their complete
+plans before allocation. They audit `allocatedSize`, return unused plan bytes,
+and commit exact actual bytes before command submission. The memory lease is
+owned by the same type-erased native owner that `BufferHandle` copies and
+residency retains; scratch is owned by the exact completion object until
+terminal native handling. Residency remains a count-bounded retention owner,
+not a byte-budget authority.
 
 The current-generation handoff is staged rather than allocating in the
 coordinator critical section. Kernel pretracks a zero-generation lineage row

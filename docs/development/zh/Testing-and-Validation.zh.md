@@ -527,16 +527,25 @@ queue/pipeline diagnostics 稳定、计数单调推进，并且同一个 executo
 不变、外层 TLS context 保持、返回后 TLS 清空以及后续 invocation 成功后才退出。alarm 会把
 此前的自死锁转化为有界测试失败，而不使用 detached thread 或制造生命周期竞态。验证该
 watchdog path 后，测试会执行一次真实 CPU-to-Metal upload，并证明精确保留 revision 的 device
-replica 进入 residency。随后，它让真实仓库 Perlin operation 通过同一个
-`ExecutionService` 连续运行两次，并证明 queue 可用、两次 operation submission 与 executor
-entry、八个 invocation allocation 已退役、一条 pipeline 被复用、asynchronous pending-Value
-readback 生成 CPU-owned output、使用专用 Metal worker id，并且已结算 ledger 为空。
+replica 进入 residency。V-9 还会证明 upload scratch 仅在 completion 后归还、persistent
+memory 会跨 callback return 与 residency 保留、capacity-one eviction 会归还旧 lease，并且
+最终 manager destruction 会归还最后一个 lease。极小的 Perlin device budget 会在首个
+texture/buffer allocation 前拒绝完整 native heap-query plan。预算充足的路径随后让真实仓库
+Perlin operation 通过同一个 `ExecutionService` 连续运行两次，并证明 queue 可用、两次
+operation submission 与 executor entry、八个 invocation allocation 已退役、一条 pipeline 被
+复用、asynchronous pending-Value readback 生成 CPU-owned output、使用专用 Metal worker id，
+并且已结算的 Host 与 device reservation 都为零。Upload 与 download 都会在 command commit 前
+审计 native `allocatedSize`。
 
-V-8 在 `test_device_residency` 中新增九个可移植 case。它们固定 direct host-read 与 transfer
+V-8 与 V-9 在 `test_device_residency` 中的可移植 case 会固定 direct host-read 与 transfer
 planning、精确 current completion publication、destination Ready 前的 late stale rejection、
 pretracked current publication 对晚启动旧 Run admission 的拒绝、failed/discarded
 nonpublication、不会消耗正确 admission 的 proper-subset identity rejection、
-concurrent exact callback 与 duplicate-completion rejection。`test_compute_run` 新增确定性 case，
+concurrent exact callback 与 duplicate-completion rejection。附加真实 memory-only lease 的
+fake native owner 还会证明：creator/Run-equivalent release 不会提前归还 byte、residency eviction
+只释放自己的 strong owner、外部 Value 副本会延长生命周期，而且 stale、rejected、cancelled
+或复用 identity 不会 double-release，也不会消费另一个 allocation 的 authority。
+`test_compute_run` 新增确定性 case，
 覆盖 early fence callback 在原 grant 退役前保持 parked、executor lifetime 延长 Run settlement、
 pending Value dependency deferral、无需等待 producer 即可退役 continuation 的 cancellation，以及
 绝不释放 dependent work 的 typed stale failure。这些 case 使用 gate 和 future，不含 timing sleep。
@@ -559,7 +568,8 @@ Installed Host、CLI 与 IPC protocol-v2 surface 仍不暴露 cancellation comma
 cmake --build build \
   --target test_policy_registry test_policy_execution \
   test_physical_execution_routes test_device_executor_registry \
-  test_device_residency test_compute_run test_resource_admission \
+  test_device_residency test_compute_run test_resource_ledger \
+  test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
@@ -567,6 +577,7 @@ cmake --build build \
 ./build/tests/test_physical_execution_routes
 ./build/tests/test_device_executor_registry
 ./build/tests/test_device_residency
+./build/tests/test_resource_ledger
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -588,9 +599,12 @@ ctest --test-dir build --output-on-failure \
 - `test_kernel_contracts` 驱动真实 `GraphIOService` stream 进入 post-write、post-flush 与
   post-close failure state。每个 phase 都必须返回 `GraphErrc::Io`；已创建的 destination 证明
   文档所述 non-atomic post-open 行为。
-- `test_resource_ledger` 证明 checked vector arithmetic、当前五个维度各自的 saturation 与 exact
-  recovery、atomic mixed-vector 与 pair admission、bounded child grant、deferred parent release、
-  move-only token contract，以及并发无 overcommit 行为。
+- `test_resource_ledger` 证明 checked Host/device vector arithmetic、当前五个 Host dimension
+  各自的 saturation 与 exact recovery、CPU/重复 device configuration rejection、zero 与
+  exact-boundary device plan、atomic memory-plus-scratch rejection、per-device isolation、
+  same-device contention、plan-to-actual shrink、typed underplanning failure、拆分的
+  memory/scratch lifetime、move-only authority、延迟 asynchronous release、bounded Host child
+  grant、deferred Host parent release，以及并发无 overcommit 行为。
 - `test_resource_admission` 证明精确私有 route vocabulary、worker-limit rollback、每个 Host 一个固定
   pool 且不同 Host composition 彼此独立，以及 validation-first session route replacement 会在无效
   candidate 后保留先前复制的 route。

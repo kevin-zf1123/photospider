@@ -402,21 +402,25 @@ closing and releases the fence before waiting for the lane, so commit-first
 publication may finish and close-first validation denies commit without a
 registry/lane lock cycle.
 
-`ExecutionService` exclusively owns a host-authoritative `ResourceLedger`
+`ExecutionService` exclusively owns a Host/device-authoritative `ResourceLedger`
 initialized from composition-root limits. Only trusted host code mints its
 move-only, non-forgeable reservations and grants. A policy or plugin may request
 or suggest resources but cannot construct, duplicate, enlarge, or directly
 release a token.
 
 The current ledger validates transactional vectors for CPU slots, ready-store
-entries and bytes, retained/in-flight Host memory, and scratch memory. Device
-queues/memory/in-flight work, compute-I/O operations/bytes, and
+entries and bytes, retained/in-flight Host memory, and Host scratch. It also
+owns isolated immutable memory/scratch limits for each configured non-CPU
+`DeviceId`. Native allocation plans commit both dimensions atomically, return
+unused bytes after `allocatedSize` reconciliation, and split actual ownership
+between persistent native Value owners and asynchronous completion scratch.
+Device queue depth/in-flight command limits, compute-I/O operations/bytes, and
 plugin-process/invocation/IPC remain future dimensions and are not represented
 by fake zero-valued authority. Current success, failure, rejection, rollback,
-replacement, and worker-exception paths release every reservation and grant
-exactly once. Current cancellation and close/shutdown finalization preserve
-that contract. Capacity exhaustion and checked overflow fail without
-partial reservation, overcommit, or silent clamping.
+replacement, worker-exception, stale completion, eviction, cancellation, and
+close/shutdown paths release every authority exactly once. Capacity exhaustion
+and checked overflow fail without partial reservation, overcommit, cross-device
+borrowing, or silent clamping.
 
 Each policy binding is a comparison seam, not a physical executor or resource
 authority. The current Interactive and Throughput bindings rank immutable
@@ -736,7 +740,7 @@ The implemented V-2 through V-8 subset is deliberately narrower:
   TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
   and same-key plugin replacement cannot inherit that source-private contract.
 
-V-8 still has no DataSpec, public device registry, device-memory/scratch ledger
+V-9 still has no DataSpec, public device registry, device queue/in-flight
 dimensions, quantization, packed element, provider ABI v3, or general named
 graph Value outputs. Its native executor, transfer submission, mutable
 producer, completion admission, and residency owner remain source-private.
@@ -832,10 +836,14 @@ the kernel, public ABI, and dependency-disabled product.
 
 ## Heterogeneous Executors
 
-A current V-8 Metal route combines process ownership, registry dispatch,
+A current V-9 Metal route combines process ownership, registry dispatch,
 queue/allocator/cache reuse, provider-state removal, asynchronous pending
 Values, explicit CPU/Metal transfer, process residency, and exact stale-result
-arbitration. Authoritative device-resource ledger dimensions remain #86.
+arbitration. Its sole service ledger now atomically admits per-device
+memory/scratch plans before native allocation, reconciles native actual bytes,
+binds memory to persistent Value ownership, and binds scratch to exact command
+completion. Queue, lane, and pipeline-cache infrastructure remain outside
+per-invocation accounting.
 
 A GPU executor is not a second ordinary CPU worker pool. Each physical device
 executor owns its native queue/stream, allocator, in-flight limit, memory and

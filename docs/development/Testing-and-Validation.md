@@ -676,19 +676,30 @@ diagnostics, preserved outer TLS context, cleared post-return TLS, and a
 successful later invocation. The alarm turns the former self-deadlock into a
 bounded test failure without detached threads or lifetime races. After proving
 that watchdog path, the test performs one real CPU-to-Metal upload and proves
-an exact revision-preserving device replica enters residency. It then runs the
-real repository Perlin operation twice through one `ExecutionService` and
-proves queue availability, two operation submissions and executor entries,
-eight retired invocation allocations, one reused pipeline, asynchronous
-pending-Value readback to CPU-owned outputs, the dedicated Metal worker id, and
-an empty settled ledger.
+an exact revision-preserving device replica enters residency. V-9 additionally
+proves upload scratch returns only after completion, persistent memory remains
+through callback return and residency, capacity-one eviction returns the old
+lease, and final manager destruction returns the last lease. A tiny Perlin
+device budget rejects the complete native heap-query plan before its first
+texture/buffer allocation. The sufficient-budget path runs the real repository
+Perlin operation twice through one `ExecutionService` and proves queue
+availability, two operation submissions and executor entries, eight retired
+invocation allocations, one reused pipeline, asynchronous pending-Value
+readback to CPU-owned outputs, the dedicated Metal worker id, and zero settled
+Host and device reservations. Native `allocatedSize` is audited before command
+commit in both upload and download.
 
-V-8 adds nine portable cases in `test_device_residency`. They lock direct
+V-8 and V-9 portable cases in `test_device_residency` lock direct
 host-read versus transfer planning, exact current completion publication, late
 stale rejection before destination Ready, pretracked current publication
 rejecting a late older Run admission, failed/discarded nonpublication,
 proper-subset identity rejection without consuming a rightful admission,
-concurrent exact callbacks, and duplicate-completion rejection.
+concurrent exact callbacks, and duplicate-completion rejection. Real
+memory-only leases attached to fake native owners further prove creator/Run-
+equivalent release does not return bytes early, residency eviction releases
+only its own strong owner, an external Value copy extends lifetime, and stale,
+rejected, cancelled, or reused identities neither double-release nor consume
+another allocation's authority.
 `test_compute_run` adds deterministic cases for an early fence callback parked
 until original grant retirement, executor lifetime extending Run settlement,
 pending Value dependency deferral, cancellation that retires a continuation
@@ -718,7 +729,8 @@ Run the focused policy/execution boundary with:
 cmake --build build \
   --target test_policy_registry test_policy_execution \
   test_physical_execution_routes test_device_executor_registry \
-  test_device_residency test_compute_run test_resource_admission \
+  test_device_residency test_compute_run test_resource_ledger \
+  test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
@@ -726,6 +738,7 @@ cmake --build build \
 ./build/tests/test_physical_execution_routes
 ./build/tests/test_device_executor_registry
 ./build/tests/test_device_residency
+./build/tests/test_resource_ledger
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -748,10 +761,14 @@ Focused companion regressions own the remaining boundaries:
   post-write, post-flush, and post-close failure states. Each phase must return
   `GraphErrc::Io`, and the created destination demonstrates the documented
   non-atomic post-open behavior.
-- `test_resource_ledger` proves checked vector arithmetic, independent
-  saturation and exact recovery for all five current dimensions, atomic
-  mixed-vector and pair admission, bounded child grants, deferred parent
-  release, move-only token contracts, and concurrent no-overcommit behavior.
+- `test_resource_ledger` proves checked Host and device-vector arithmetic,
+  independent saturation and exact recovery for all five Host dimensions,
+  CPU/duplicate device configuration rejection, zero and exact-boundary
+  device plans, atomic memory-plus-scratch rejection, per-device isolation,
+  same-device contention, plan-to-actual shrink, typed underplanning failure,
+  split memory/scratch lifetimes, move-only authority, delayed asynchronous
+  release, bounded Host child grants, deferred Host parent release, and
+  concurrent no-overcommit behavior.
 - `test_resource_admission` proves the exact private-route vocabulary,
   worker-limit rollback, one fixed pool per Host with independent Host
   compositions, and validation-first session route replacement that preserves

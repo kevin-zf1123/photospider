@@ -35,7 +35,7 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_graph_internal` | 仅用于构建的 `GraphModel` 与 graph-service helper。 | `GraphModel` 继续私有地位于 `src/lib/graph`。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation v2 loader、adapter 与 lifetime helper。 | 不导出。 |
 | `photospider_policy_internal` | 仅用于构建的纯 C policy DSO registry/loader、built-in type、binding、context、fault 与 DSO lease。 | 只拥有 ordering context，不拥有 worker、queue、grant、Run、Graph 或 execution route。 |
-| `photospider_execution_internal` | 仅用于构建的私有物理执行资源与 accounting primitive。 | `ResourceLedger`、固定 `DeviceExecutorRegistry` 和平台 executor factory 在这里编译；每个 composition-root `ExecutionService` 拥有唯一 Host 权威 ledger 与 registry。 |
+| `photospider_execution_internal` | 仅用于构建的私有物理执行资源与 accounting primitive。 | `ResourceLedger`、固定 `DeviceExecutorRegistry` 和平台 executor factory 在这里编译；每个 composition-root `ExecutionService` 拥有唯一 Host 与逐设备权威 ledger 及 registry。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、request-owned HP/RT `ComputeRun`、policy-aware ready store、reserved-start transaction、私有 route execution、runtime 与 dirty-region helper。 | Run 与物理 route mechanism 保持私有。 |
 | `photospider_host_internal` | 仅用于构建的 embedded Host adapter 与 Kernel facade closure。 | 不导出，也不会向 consumer 暴露私有 execution owner。 |
 | `photospider_operation_runtime` | 可安装的 shared image-buffer/immutable Value 与 Region 实现。 | 持有唯一的进程级 allocation/revision minting authority 与 dependency-neutral Region algebra；没有外部 package，也不反向链接 operation SDK。 |
@@ -267,8 +267,8 @@ Issue #38 已完成 operation extension contract，并移除八个过渡性 exte
 重复 declaration。Issue #75 删除拥有 worker 的 scheduler SDK，并增加只含一个 header 的
 `include/photospider/policy/` 纯 C contract。Policy registry/loading 位于 `src/lib/policy/`；私有
 route/runtime contract 位于 `src/lib/execution/`；policy-aware store 与 reserved-start logic 保持在
-`src/lib/compute/`；唯一 Host 权威 ledger 实现保持在 `src/lib/runtime/`。这些私有 implementation
-owner 都不会成为 public Host 或 IPC type。
+`src/lib/compute/`；唯一 Host 与逐设备权威 ledger 实现保持在 `src/lib/runtime/`。这些私有
+implementation owner 都不会成为 public Host 或 IPC type。
 
 命名规则：
 
@@ -417,13 +417,16 @@ fence、单调 Graph close、显式 shutdown、精确 settlement 与 source-priv
 - 当前 request-owned `RunGroup` coordination 让 HP 与 RT 保持为独立 Run，只在两个 child 按确定性
   规则 settle 后返回 RT output，并且绝不创建 cross-domain task dependency；
 - 当前 `ExecutionService` 拥有一个固定 CPU worker pool、私有 `serial_debug`/`gpu_pipeline` 行为、
-  一个 Host 权威 ledger、固定 `DeviceExecutorRegistry`，并且在启用仓库 Metal plugin 的 Apple
-  profile 中拥有一个进程级 Metal executor。该 executor 拥有 command queue、
-  invocation-scoped allocator 与经过验证的持久 pipeline cache。GPU work 只会在公共
-  reserved-start transaction 后进入该 executor；operation 只借用已安装的 invocation context，
-  不保留进程级 native resource。Dependency-disabled profile 不安装 Metal executor。通用 CPU/GPU
-  transfer、residency、coherency 与 stale-completion 语义仍归 issue #85；`ResourceLedger`
-  中的 device-memory 与 scratch accounting 仍归 issue #86；
+  一个 Host 与逐设备权威 ledger、固定 `DeviceExecutorRegistry`，并且在启用仓库 Metal plugin
+  的 Apple profile 中拥有一个进程级 Metal executor。该 executor 拥有 command queue、
+  invocation-scoped native-allocation facade 与经过验证的持久 pipeline cache。GPU work 只会在
+  公共 reserved-start transaction 后进入该 executor；operation 只借用已安装的 invocation
+  context，不保留进程级 native resource。Issue #85 交付的显式 CPU/Metal transfer、有界
+  residency、coherency、准确 stale completion 与保留 revision 的 publication 已是当前行为。
+  Issue #86 现在让每个具体非 CPU `DeviceId` 成为相互隔离的 device-memory/scratch 账户：
+  executor 在 allocation 前原子预留原生 size/alignment plan，校准 `allocatedSize`，并把彼此独立的
+  memory/scratch lease 分别绑定到持久 Value 与 completion 生命周期。Dependency-disabled
+  profile 不安装 Metal executor，因此不提出原生 utilization claim；
   `ExecutionService` 还拥有
   policy-aware、受 entry/byte 约束的 ready store、checked full-vector Run admission、work/byte
   cost、class-local Graph/weighted-Run 公平性、稳定 aging、三个 Interactive dispatch 的 burst
@@ -439,7 +442,7 @@ fence、单调 Graph close、显式 shutdown、精确 settlement 与 source-priv
   token；
 - 其 source-private `ExecutionLifecycleTelemetry` 会预分配固定 65,536 条 record 的 ring，复制
   atomic-cut cursor page 与 15 个 post-transition counter，且不授予 public 或 runtime authority；
-- 内部 Host 权威 `ResourceLedger` 是唯一的 reservation 与 grant mint；以及
+- 内部 `ResourceLedger` 是唯一的 Host reservation/grant 与逐设备 plan/lease mint；以及
 - 当前 process policy registry 拥有 built-in 与纯 C DSO type。每个 `PolicyClass` 的一个 binding
   拥有 context、非零 generation、immutable first fault 与 DSO lease。Host state 选择 service class
   与可信 frontier；policy 只排列不可变 scalar descriptor，不拥有 worker、queue、token、native
@@ -638,10 +641,11 @@ ownership。Issue #75 现在已成为当前行为：删除所有 per-Graph sched
 增加 process policy binding 与纯 C policy ABI，通过 Host-authored frontier 收窄 candidate，以
 resource-safe transaction 提交 start，并让所有 work 进入封闭的私有 execution id。Graph load/
 replacement 现在只复制 route value。Issue #76 已收束 lifecycle registry、graph-close/
-process-shutdown、精确 settlement 与 telemetry 不变量。Issue #84 也已成为当前行为：一条仓库
-Metal operation 会通过固定 `DeviceExecutorRegistry` 进入进程拥有的 executor；通用 transfer、
-coherency 与 device-resource-accounting 后续边界仍分别归 issue #85 与 #86。权威的无环
-依赖表位于
+process-shutdown、精确 settlement 与 telemetry 不变量。Issue #84 至 #86 也已成为当前行为：
+一条仓库 Metal operation 会通过固定 `DeviceExecutorRegistry` 进入进程拥有的 executor；显式
+CPU/Metal transfer 与有界 residency 会保持准确的 revision/completion identity；唯一 service
+`ResourceLedger` 现在会在准确原生 owner 生命周期内接纳并校准相互隔离的持久 device-memory 与
+scratch 字节。权威的无环依赖表位于
 [内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md#交付依赖契约)。
 
 1. **已完成：** 建立 public header 安装与 self-containment 边界。

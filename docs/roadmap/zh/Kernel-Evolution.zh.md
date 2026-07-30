@@ -324,16 +324,21 @@ open-row/registered-Run validation 与 publication。Close 会标记 closing、�
 lane，因此 commit-first publication 可以完成，close-first validation 会拒绝 commit，并且不会形成
 registry/lane lock cycle。
 
-`ExecutionService` 独占一个由 composition-root limit 初始化、Host 权威的 `ResourceLedger`。只有
+`ExecutionService` 独占一个由 composition-root limit 初始化、Host/device 权威的
+`ResourceLedger`。只有
 受信任 Host code 能铸造其 move-only、不可伪造的 reservation 与 grant。Policy 或 plugin 可以请求
 或建议 resource，但不能构造、复制、扩大或直接释放 token。
 
-当前 ledger 会验证 CPU slot、ready-store entry/byte、retained/in-flight Host memory 与 scratch
-memory 的事务性 vector。Device queue/memory/in-flight work、compute-I/O operation/byte，以及
-plugin-process/invocation/IPC 仍是未来维度，当前不会用虚假的零值 authority 表示。当前 success、
-failure、rejection、rollback、replacement 与 worker-exception 路径都会恰好一次释放每个
-reservation/grant；当前 cancellation 与 close/shutdown finalization 会保持该契约。Capacity
-exhaustion 与 checked overflow 会在无 partial reservation、overcommit 或 silent clamping 的情况下失败。
+当前 ledger 会验证 CPU slot、ready-store entry/byte、retained/in-flight Host memory 与 Host
+scratch 的事务性 vector。它还为每个已配置非 CPU `DeviceId` 拥有隔离且 immutable 的
+memory/scratch limit。Native allocation plan 会原子提交两个 dimension，在 `allocatedSize`
+校准后归还未使用 byte，并把 actual ownership 拆分给 persistent native Value owner 与
+asynchronous completion scratch。Device queue depth/in-flight command limit、compute-I/O
+operation/byte，以及 plugin-process/invocation/IPC 仍是未来维度，当前不会用虚假的零值 authority
+表示。当前 success、failure、rejection、rollback、replacement、worker-exception、stale
+completion、eviction、cancellation 与 close/shutdown path 都会恰好一次释放每份 authority。
+Capacity exhaustion 与 checked overflow 会在无 partial reservation、overcommit、跨 device
+借用或 silent clamping 的情况下失败。
 
 每个 policy binding 都是比较 seam，而不是物理 executor 或 resource authority。当前 Interactive
 与 Throughput binding 会排列 Host 编写的 immutable candidate descriptor；由 service 拥有的 store
@@ -586,7 +591,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
   source-private contract。
 
-V-8 仍不含 DataSpec、public device registry、device-memory/scratch ledger dimension、
+V-9 仍不含 DataSpec、public device registry、device queue/in-flight dimension、
 quantization、packed element、provider ABI v3 或通用 named graph Value output。Native
 executor、transfer submission、mutable producer、completion admission 与 residency owner
 仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host surface
@@ -668,9 +673,12 @@ requirement 或 transitive dependency。
 
 ## 异构 Executor
 
-当前 V-8 Metal route 组合了 process ownership、registry dispatch、queue/allocator/cache 复用、
+当前 V-9 Metal route 组合了 process ownership、registry dispatch、queue/allocator/cache 复用、
 provider-state 移除、asynchronous pending Value、显式 CPU/Metal transfer、进程级 residency 与
-精确 stale-result arbitration。权威 device-resource ledger dimension 仍属于 #86。
+精确 stale-result arbitration。它的唯一 service ledger 现在会在 native allocation 前原子准入
+per-device memory/scratch plan、校准 native actual byte、把 memory 绑定到 persistent Value
+ownership，并把 scratch 绑定到精确 command completion。Queue、lane 与 pipeline-cache
+infrastructure 仍不属于 per-invocation 核算。
 
 GPU executor 不是第二个普通 CPU worker pool。每个物理 device executor 拥有 native queue/stream、
 allocator、in-flight limit、memory/scratch reservation、pipeline cache、transfer queue 和 completion

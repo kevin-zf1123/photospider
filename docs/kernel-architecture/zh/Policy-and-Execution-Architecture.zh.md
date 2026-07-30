@@ -274,7 +274,14 @@ destination。Run settlement 会保留 executor 与 continuation，直至每个 
 capacity authority。已结算 replica 可在 Run 释放后继续复用，但 manager 默认的 64-entry
 上限会在 publication pressure 下释放 revision 最低的 entry，从而限制强
 native/provider retention；generation 推进本身不会批量清除它们。这个 entry 数量既不
-测量也不准入 bytes。权威 device-memory 与 scratch admission 仍属于 #86。
+测量也不准入 bytes。
+
+V-9 把权威 device-memory 与 scratch admission 放入既有 service `ResourceLedger`，而不是
+policy 或 residency。每个已配置非 CPU `DeviceId` 都有隔离 limit。Metal 会在 allocation
+前原子预留 native size/alignment plan、审计 `allocatedSize`，并在 command submission 前提交
+actual byte。Persistent memory 随 native Value owner 跨 residency 延续；scratch 随精确
+command completion 延续。Policy 看不到 native handle 或 token，不排列 byte owner，也不会
+获得第二套 waiting/fairness queue。
 
 Freshness publication 分为两个阶段。Kernel 先要求 `ExecutionService` 预跟踪 lineage，
 但不改变其 current generation；该可失败 allocation 会在 coordinator submission 前完成。
