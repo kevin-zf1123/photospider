@@ -62,6 +62,7 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
 | `RunTerminal` | `ComputeRun` 仲裁器精确发布一次成功、失败或取消。 |
 | `ResultAvailable` | 可以取得受保留快照或 delivery lease。 |
 | `OutputCommitted` | 输出权威已越过请求的原子可见性与 durability 点，并能返回稳定回执。 |
+| `OutputCommitFailed` | 输出事务报告类型化的 encode、暂存或请求 durability 提交失败；它没有返回声称达到请求 durability 的回执。 |
 | `GraphDocumentSaved` | 独立文档事务已发布一个版本并报告实际 durability。 |
 | `ResponseObserved` | client 收到确认；响应丢失不会撤销更早的服务端转换。 |
 
@@ -74,9 +75,11 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
 - 成功产值 Run 依次观察到 operation 成功返回、producer fence 成功完成、
   `ValueReady`、经过校验的 Graph/RT 发布，随后才是
   `RunTerminal(Succeeded)`；
-- operation、readiness、dependency 或 commit failure 可以发布其类型化失败事实，
-  随后直接进入 `RunTerminal(Failed)`，不得伪造 `ValueReady` 或
-  `OutputCommitted`；
+- operation、readiness、dependency 或 Run terminal 之前的 `ComputeRun`
+  result-commit failure 可以发布其类型化失败事实，随后直接进入
+  `RunTerminal(Failed)`，不得伪造 `ValueReady` 或 `OutputCommitted`。这里的
+  result-commit failure 只限该 Run 的 Graph/RT validation、publication 或
+  commit resolution，不包含后续 `OutputStore` 事务；
 - 赢得 Run 仲裁的 cancellation 进入 `RunTerminal(Cancelled)`。迟到或 stale 的
   provider/fence completion 只执行清理，不能发布 Value 或 durable-output
   receipt；若某项输出事务在之后的 cancellation 前已经独立提交，其回执继续对该
@@ -90,6 +93,10 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
 它暴露两种结果，只有承诺的每种结果都成功时才成功；它不扩展 Run 终态。
 目标中的 Run 后置 cache、codec 与 output 工作拥有自身类型化 outcome，不得延迟
 或改写已经发布的 Run 终态。
+Run terminal 之后的输出失败发布 `OutputCommitFailed`，而不是
+`RunTerminal(Failed)`，既不产生也不撤销 `ValueReady`。调用方或 daemon 可以
+报告组合 request failure，但必须保留下层 Run terminal 与 output、document、
+cache/codec 和 response 事实；不能把聚合结果反投射回 Run state。
 
 ### 每类持久化只有一个权威
 
@@ -117,9 +124,11 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
 目标把缓存写入移动到可见 Graph 发布之后，或移入独立缓存持久化阶段。缓存写入
 失败随后只记录缓存失败，不回滚或替换已经成功的 Run 或 output commit。
 
-输出 encode、暂存或 durable commit 失败属于输出事务。Graph 文档保存失败属于
-保存事务。Daemon 响应丢失只改变 client 观察。这些失败都不改写此前发布的 Run
-终态。
+输出 encode、暂存或 durable commit 失败属于输出事务，并报告
+`OutputCommitFailed`，且不产生声称达到请求 durability 的
+`OutputCommitted` 回执。Graph 文档保存失败属于保存事务。Cache write/codec
+失败属于 cache policy 或调用操作；daemon 响应丢失只改变 client 观察。这些失败
+都不延迟、回滚或改写此前发布的 Run 终态。
 
 当前 product 与目标不同：延迟缓存持久化可能在可见 Graph 发布前失败。这是记录
 在案的迁移缺口，不是缓存具有输出权威的证据。

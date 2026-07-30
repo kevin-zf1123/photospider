@@ -75,6 +75,7 @@ The target contract distinguishes these observable facts:
 | `RunTerminal` | The `ComputeRun` arbiter published exactly one success, failure, or cancellation. |
 | `ResultAvailable` | A retained snapshot or delivery lease can be obtained. |
 | `OutputCommitted` | Output authority crossed its requested atomic visibility and durability point and can return a stable receipt. |
+| `OutputCommitFailed` | The output transaction reported a typed encode, staging, or requested-durability commit failure; it returned no receipt claiming the requested durability. |
 | `GraphDocumentSaved` | An independent document transaction published a version and reports its achieved durability. |
 | `ResponseObserved` | A client received an acknowledgement; response loss does not reverse an earlier server transition. |
 
@@ -88,9 +89,12 @@ The legal Run branches are different partial orders:
 - a successful value-producing Run observes successful operation return,
   successful producer-fence completion, `ValueReady`, validated Graph/RT
   publication, and then `RunTerminal(Succeeded)`;
-- an operation, readiness, dependency, or commit failure can publish its typed
-  failure and proceed directly to `RunTerminal(Failed)`, without fabricating
-  `ValueReady` or `OutputCommitted`;
+- an operation, readiness, dependency, or pre-terminal `ComputeRun`
+  result-commit failure can publish its typed failure and proceed directly to
+  `RunTerminal(Failed)`, without fabricating `ValueReady` or
+  `OutputCommitted`. Here a result-commit failure is limited to this Run's
+  Graph/RT validation, publication, or commit resolution; it does not include
+  a later `OutputStore` transaction;
 - cancellation that wins the Run arbiter proceeds to
   `RunTerminal(Cancelled)`. Late or stale provider/fence completions perform
   cleanup only and cannot publish a value or durable-output receipt; an output
@@ -107,6 +111,11 @@ API is a named composite operation. It exposes both outcomes and succeeds only
 when every outcome it promised succeeds; it does not broaden the Run terminal.
 Target post-Run cache, codec, and output work has its own typed outcome and
 must neither delay nor rewrite an already published Run terminal.
+An output failure after Run terminal publishes `OutputCommitFailed`, not
+`RunTerminal(Failed)`, and neither creates nor revokes `ValueReady`. A caller
+or daemon may report a composite request failure, but it must preserve the Run
+terminal and the output, document, cache/codec, and response facts underneath;
+it cannot project the aggregate result back into Run state.
 
 ### Persistence classes have one authority each
 
@@ -142,9 +151,12 @@ failure without rolling back or replacing an already successful Run or output
 commit.
 
 Output encode, staging, or durable commit failure belongs to the output
-transaction. Graph-document save failure belongs to the save transaction.
-Daemon response loss changes only what the client observed. None of those
-failures rewrites a previously published Run terminal.
+transaction and reports `OutputCommitFailed` without producing an
+`OutputCommitted` receipt at the requested durability. Graph-document save
+failure belongs to the save transaction. Cache write/codec failure belongs to
+cache policy or the calling operation, and daemon response loss changes only
+what the client observed. None of those failures delays, rolls back, or
+rewrites a previously published Run terminal.
 
 The current product differs: deferred cache persistence can fail before
 visible Graph publication. This is a documented migration gap, not evidence

@@ -272,9 +272,9 @@ Created -> Admitted -> Queued -> Running -> CommitPending -> Terminal
 Safe paths may skip nonterminal phases but never move backward. Exactly one
 `Succeeded`, `Failed`, or `Cancelled` outcome is published. Completion alone is
 not success: dependency aggregation and the serialized graph-state commit
-predicate must succeed. Cancellation, failure, and commit share one terminal
-arbiter. Terminal publication may precede physical quiescence when
-non-preemptible work must drain.
+predicate must succeed. Cancellation, Run-internal failure, and the Graph/RT
+result-commit contender share one Run terminal arbiter. Terminal publication
+may precede physical quiescence when non-preemptible work must drain.
 
 `ComputeRun` gives request-local state a stable lifetime. It does not own the
 meaning of dependency transitions: `ComputeTaskDispatcher` remains responsible
@@ -477,12 +477,12 @@ mutate visible Graph/proxy state or write deferred cache artifacts.
 
 Issue #73 makes cancellation part of that current predicate. One private
 request source and immutable monotonic deadline contend through the same Run
-arbiter as failure and commit. Built-in ready entries are purged by exact Run
-identity, dependent re-entry is rejected, queued plan/callback completion units
-retire exactly once, and entered non-preemptible work drains without permitting
-staged publication. The accepted commit contender, exact predicate, eligible
-persistence, visible swap, and terminal resolution share one serialized
-graph-state work item.
+arbiter as Run-internal failure and the Graph/RT result-commit contender.
+Built-in ready entries are purged by exact Run identity, dependent re-entry is
+rejected, queued plan/callback completion units retire exactly once, and
+entered non-preemptible work drains without permitting staged publication. The
+accepted commit contender, exact predicate, eligible persistence, visible
+swap, and terminal resolution share one serialized graph-state work item.
 
 Issue #74 extends that predicate with a current supersession generation.
 Supersession selects a newer generation and requests
@@ -887,7 +887,9 @@ successful value-producing Run:
     -> validated Graph/RT publication
     -> RunTerminal(Succeeded)
 
-operation/readiness/dependency/commit failure:
+pre-terminal ComputeRun failure:
+  operation/readiness/dependency failure
+  OR Graph/RT validation/publication/Run-result commit failure
   typed failure -> RunTerminal(Failed)
   (no fabricated ValueReady or OutputCommitted)
 
@@ -905,8 +907,12 @@ RunTerminal(Succeeded) -> ResultAvailable   (when a result is retained)
 compute-and-persist success =
   RunTerminal(Succeeded) AND OutputCommitted
 
-RequestAccepted, GraphDocumentSaved, and ResponseObserved are separately
-ordered by the operation that owns them.
+post-Run output transaction failure =
+  RunTerminal(unchanged) AND OutputCommitFailed
+  (no new or revoked ValueReady; no requested-durability receipt)
+
+RequestAccepted, OutputCommitFailed, GraphDocumentSaved, and ResponseObserved
+are separately ordered by the operation that owns them.
 ```
 
 Only dependency-valid Graph/RT publication, or an admitted valid no-op,
@@ -914,14 +920,19 @@ resolves `ComputeRun::Succeeded`. Cache persistence, durable output commit,
 Graph-document save, daemon terminal state, result availability, and caller
 observation remain independent outcomes. Post-Run cache, codec, and output work
 has its own typed outcome and cannot delay or rewrite the published Run
-terminal. A receipt committed independently before a later Run cancellation
-remains authoritative for that output transaction.
+terminal. An output failure after Run terminal reports `OutputCommitFailed`,
+not `RunTerminal(Failed)`, and neither creates nor revokes `ValueReady`. A
+caller or daemon may report a composite request failure, but it preserves the
+Run terminal and the output, Graph-document, cache/codec, and response facts
+instead of projecting that aggregate result back into Run state. A receipt
+committed independently before a later Run cancellation remains authoritative
+for that output transaction.
 
 | Persistence domain | Target authority | Completion and durability contract |
 | --- | --- | --- |
 | Graph document | Graph-state save transaction | Versioned, same-directory staging with expected-version validation, atomic replacement, and an explicit achieved-durability result |
 | Disk cache | Graph cache policy using bounded I/O mechanism | Discardable acceleration; failure does not rewrite successful Run/output outcomes |
-| User output | `OutputStore` commit authority | Stable `OutputCommitId`; complete payload/metadata validation and file synchronization; canonical manifest validation, synchronization, and atomic no-replace publication; leaf-to-durability-root directory barriers; typed achieved-durability receipt; recovery; and no-overwrite by default |
+| User output | `OutputStore` commit authority | Stable `OutputCommitId`; complete payload/metadata validation and file synchronization; canonical manifest validation, synchronization, and atomic no-replace publication; leaf-to-durability-root directory barriers; typed achieved-durability receipt or `OutputCommitFailed`; recovery; and no-overwrite by default |
 | Daemon transport | Job registry and result delivery | Acceptance, terminal state, and response observation only; no durability inference |
 | Codec | Injected representation adapter | Conversion and error translation only; no path, retry, identity, or commit authority |
 
@@ -1026,6 +1037,10 @@ cross-process GPU handles require a later device/fence protocol.
     observation.
 16. A requested durability level that the platform cannot achieve fails
     explicitly and is never silently downgraded.
+17. A caller or daemon may aggregate Run, output, Graph-document, cache/codec,
+    and response facts into one request outcome, but it preserves each
+    authority-owned fact and never projects composite failure back into Run
+    state.
 
 ## Dependency Ordering
 

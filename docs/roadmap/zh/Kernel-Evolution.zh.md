@@ -222,8 +222,9 @@ Created -> Admitted -> Queued -> Running -> CommitPending -> Terminal
 
 安全路径可以跳过非 terminal phase，但绝不倒退。只发布一个 `Succeeded`、`Failed` 或
 `Cancelled` outcome。Completion 本身不等于成功：dependency aggregation 与串行化 graph-state
-commit predicate 都必须成功。Cancellation、failure 与 commit 共享一个 terminal arbiter。当不可抢占
-work 仍需排空时，terminal publication 可以先于物理 quiescence。
+commit predicate 都必须成功。Cancellation、Run 内部 failure 与 Graph/RT result-commit
+contender 共享一个 Run terminal arbiter。当不可抢占 work 仍需排空时，terminal publication
+可以先于物理 quiescence。
 
 `ComputeRun` 为 request-local state 提供稳定生命周期，但不拥有 dependency transition 的语义；
 dependency counter、ready detection 和 dependent release 仍由 `ComputeTaskDispatcher` 负责。
@@ -382,11 +383,11 @@ identity/revision 与 descriptor 相等、live identity/revision 相等，以及
 不能修改 visible Graph/proxy state 或写入 deferred cache artifact。
 
 Issue #73 让 cancellation 成为该当前 predicate 的组成部分。一个私有 request source 与 immutable
-monotonic deadline 会通过与 failure/commit 相同的 Run arbiter 竞争。内建 ready entry 按精确 Run
-identity 清除，dependent re-entry 被拒绝，queued plan/callback completion unit 恰好一次 retire，
-已经进入的 non-preemptible work 则会排空，但不能允许 staged publication。被接受的 commit
-contender、精确 predicate、符合条件的 persistence、visible swap 与 terminal resolution 会共享同一个
-串行 graph-state work item。
+monotonic deadline 会通过与 Run 内部 failure 和 Graph/RT result-commit contender 相同的 Run
+arbiter 竞争。内建 ready entry 按精确 Run identity 清除，dependent re-entry 被拒绝，queued
+plan/callback completion unit 恰好一次 retire，已经进入的 non-preemptible work 则会排空，
+但不能允许 staged publication。被接受的 commit contender、精确 predicate、符合条件的
+persistence、visible swap 与 terminal resolution 会共享同一个串行 graph-state work item。
 
 Issue #74 已扩展该 predicate，要求 supersession generation 仍为 current。Supersession 会选择一个
 更新 generation，
@@ -714,7 +715,9 @@ destination；daemon job state 与 acknowledgement 都是 process-local；私有
     -> 经过校验的 Graph/RT publication
     -> RunTerminal(Succeeded)
 
-operation/readiness/dependency/commit failure：
+Run terminal 之前的 ComputeRun failure：
+  operation/readiness/dependency failure
+  或 Graph/RT validation/publication/Run-result commit failure
   类型化失败 -> RunTerminal(Failed)
   （不伪造 ValueReady 或 OutputCommitted）
 
@@ -732,21 +735,29 @@ RunTerminal(Succeeded) -> ResultAvailable   （保留结果时）
 compute-and-persist success =
   RunTerminal(Succeeded) AND OutputCommitted
 
-RequestAccepted、GraphDocumentSaved 与 ResponseObserved 由拥有相应操作的 owner
-分别排序。
+Run 后置 output transaction failure =
+  RunTerminal(unchanged) AND OutputCommitFailed
+  （不产生或撤销 ValueReady；不返回声称达到请求 durability 的回执）
+
+RequestAccepted、OutputCommitFailed、GraphDocumentSaved 与 ResponseObserved
+由拥有相应操作的 owner 分别排序。
 ```
 
 只有 dependency-valid Graph/RT publication 或一个已准入的合法 no-op 才会把
 `ComputeRun::Succeeded` 解析为成功。Cache persistence、durable output commit、Graph 文档保存、
 daemon terminal state、result availability 与 caller observation 都保持为独立 outcome。Run
 后置 cache、codec 与 output 工作拥有自身类型化 outcome，不能延迟或改写已发布 Run terminal。
-在之后 Run cancellation 之前已经独立提交的 receipt 继续对该输出事务保持权威。
+Run terminal 之后的输出失败报告 `OutputCommitFailed`，而不是
+`RunTerminal(Failed)`，既不产生也不撤销 `ValueReady`。调用方或 daemon 可以报告组合
+request failure，但必须保留 Run terminal 与 output、Graph 文档、cache/codec 和 response
+事实，不能把聚合结果反投射回 Run state。在之后 Run cancellation 之前已经独立提交的
+receipt 继续对该输出事务保持权威。
 
 | 持久化领域 | 目标 authority | 完成与耐久契约 |
 | --- | --- | --- |
 | Graph 文档 | Graph-state save transaction | 带版本、same-directory staging、expected-version validation、atomic replacement 与显式 achieved-durability result |
 | Disk cache | 使用有界 I/O mechanism 的 Graph cache policy | 可丢弃 acceleration；failure 不改写成功 Run/output outcome |
-| 用户输出 | `OutputStore` commit authority | 稳定 `OutputCommitId`；完整 payload/metadata 校验与文件同步；canonical manifest 校验、同步和原子 no-replace 发布；从叶目录到 durability root 的目录屏障；类型化 achieved-durability receipt；recovery；且默认 no-overwrite |
+| 用户输出 | `OutputStore` commit authority | 稳定 `OutputCommitId`；完整 payload/metadata 校验与文件同步；canonical manifest 校验、同步和原子 no-replace 发布；从叶目录到 durability root 的目录屏障；类型化 achieved-durability receipt 或 `OutputCommitFailed`；recovery；且默认 no-overwrite |
 | Daemon transport | Job registry 与 result delivery | 只负责 acceptance、terminal state 与 response observation；不能据此推断 durability |
 | Codec | 注入的 representation adapter | 只负责 conversion 与 error translation；不拥有 path、retry、identity 或 commit authority |
 
@@ -821,6 +832,9 @@ sandbox/capability policy、shared-memory 或 FD transport、quota 和 output de
 15. Graph 文档保存保持为独立的带版本 transaction；daemon terminal state 或 acknowledgement
     保持为非耐久 transport observation。
 16. 平台无法达到用户请求的 durability level 时必须显式失败，绝不能静默降级。
+17. 调用方或 daemon 可以把 Run、output、Graph 文档、cache/codec 与 response
+    事实聚合为一个 request outcome，但必须保留每个 authority 自有事实，绝不能
+    把 composite failure 反投射回 Run state。
 
 ## 依赖顺序
 
