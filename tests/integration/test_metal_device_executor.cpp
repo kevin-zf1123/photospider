@@ -3,19 +3,27 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "compute/compute_run.hpp"
 #include "compute/execution_service.hpp"
+#include "execution/device_execution_context.hpp"
+#include "execution/device_executor_registry.hpp"
 #include "execution/execution_task_runtime.hpp"
 #include "metal/perlin_noise_metal.hpp"
 #include "photospider/core/image_buffer.hpp"
@@ -95,6 +103,122 @@ class MetalIntegrationHost final : public ExecutionHostContext {
   /** @brief Last Run id forwarded as trace epoch. */
   std::atomic_uint64_t last_epoch_{0U};
 };
+
+/**
+ * @brief Adapts one test callback to the production device invocation
+ * contract.
+ *
+ * @throws std::bad_alloc when callback ownership cannot allocate.
+ * @note The callback remains stack-bounded and is invoked only by the real
+ * executor under test.
+ */
+class CallbackDeviceExecutorInvocation final
+    : public execution::DeviceExecutorInvocation {
+ public:
+  /** @brief Owned callback entered by `run()`. */
+  using Callback = std::function<void()>;
+
+  /**
+   * @brief Takes ownership of one required callback.
+   * @param callback Nonempty callback to enter inside the executor context.
+   * @throws std::invalid_argument when callback is empty.
+   * @throws std::bad_alloc when callback ownership cannot allocate.
+   */
+  explicit CallbackDeviceExecutorInvocation(Callback callback)
+      : callback_(std::move(callback)) {
+    if (!callback_) {
+      throw std::invalid_argument(
+          "CallbackDeviceExecutorInvocation requires a callback.");
+    }
+  }
+
+  /** @copydoc execution::DeviceExecutorInvocation::run */
+  void run() override { callback_(); }
+
+ private:
+  /** @brief Callback borrowed by the executor only for the current call. */
+  Callback callback_;
+};
+
+/** @brief Exact exception text used by the native-allocation unwind probe. */
+constexpr char kExpectedFailure[] = "expected post-allocation Metal failure";
+
+/**
+ * @brief Distinct provider exception thrown after real native allocation.
+ *
+ * @throws Nothing for construction, copying, destruction, and observation.
+ * @note Exact dynamic type and message prove the executor does not replace the
+ * provider exception while unwinding its native allocation scope.
+ */
+class NativeAllocationProbeError final : public std::exception {
+ public:
+  /** @copydoc std::exception::what */
+  const char* what() const noexcept override { return kExpectedFailure; }
+};
+
+/**
+ * @brief Shared state for deterministic direct-registry serialization.
+ *
+ * Every field except the condition variable and mutex is protected by
+ * `mutex`. The first callback waits while retaining the real executor lock;
+ * the test thread releases it after the second callback has had a bounded,
+ * explicitly signalled opportunity to enter.
+ *
+ * @throws Nothing for construction and destruction.
+ */
+struct ExecutorSerializationProbe final {
+  /** @brief Protects every state transition below. */
+  std::mutex mutex;
+
+  /** @brief Publishes callback entry, start-gate, and release transitions. */
+  std::condition_variable condition;
+
+  /** @brief Whether the first callback reached the executor context. */
+  bool first_entered = false;
+
+  /** @brief Whether the first callback completed its guarded region. */
+  bool first_exited = false;
+
+  /** @brief Whether the second caller is waiting at the test start gate. */
+  bool second_ready = false;
+
+  /** @brief Opens the second caller's direct registry entry gate. */
+  bool start_second = false;
+
+  /** @brief Releases the first callback from its controlled wait. */
+  bool release_first = false;
+
+  /** @brief Whether the first callback exhausted its safety timeout. */
+  bool first_wait_timed_out = false;
+
+  /** @brief Whether the second callback entered before the first exited. */
+  bool second_entered_before_first_exit = false;
+
+  /** @brief Number of callbacks currently inside the executor context. */
+  std::uint32_t active_callbacks = 0U;
+
+  /** @brief Maximum simultaneous callbacks observed by this probe. */
+  std::uint32_t maximum_active_callbacks = 0U;
+
+  /** @brief Total callbacks that entered the executor context. */
+  std::uint32_t callback_entries = 0U;
+
+  /** @brief Callbacks that observed a non-null borrowed queue. */
+  std::uint32_t valid_context_entries = 0U;
+};
+
+/** @brief Safety bound for every positive condition-variable handshake. */
+constexpr auto kExecutorProbeTimeout = std::chrono::seconds(5);
+
+/**
+ * @brief Bounded overlap opportunity after the second caller is released.
+ *
+ * The second thread has already reached a condition-variable start gate before
+ * this interval begins. A missing executor mutex therefore lets its callback
+ * enter and signal immediately, while a correct mutex keeps it blocked until
+ * the first callback is explicitly released.
+ */
+constexpr auto kOverlapObservationWindow = std::chrono::milliseconds(500);
 
 /**
  * @brief Run-owned Perlin input and callback output retained through service
@@ -315,8 +439,282 @@ void expect_identical_perlin_outputs(
 }
 
 /**
+ * @brief Proves direct concurrent registry calls are serialized by the real
+ * executor rather than by the service Metal lane.
+ *
+ * @throws GoogleTest assertion control only; thread failures are captured and
+ * reported after both callers have joined.
+ * @note Positive handshakes use five-second safety bounds, while the second
+ * caller receives a separately signalled overlap opportunity before release.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     DirectRegistryCallsAreSerializedInsideRealExecutor) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  ExecutorSerializationProbe probe;
+  std::exception_ptr first_failure;
+  std::exception_ptr second_failure;
+  bool first_tls_cleared = false;
+  bool second_tls_cleared = false;
+
+  CallbackDeviceExecutorInvocation first_invocation([&probe] {
+    execution::MetalExecutionContext* context =
+        execution::current_metal_execution_context();
+    const bool context_is_valid =
+        context != nullptr && context->command_queue_handle() != nullptr;
+
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    ++probe.callback_entries;
+    ++probe.active_callbacks;
+    probe.maximum_active_callbacks =
+        std::max(probe.maximum_active_callbacks, probe.active_callbacks);
+    if (context_is_valid) {
+      ++probe.valid_context_entries;
+    }
+    probe.first_entered = true;
+    probe.condition.notify_all();
+    if (!probe.condition.wait_for(lock, kExecutorProbeTimeout,
+                                  [&probe] { return probe.release_first; })) {
+      probe.first_wait_timed_out = true;
+    }
+    --probe.active_callbacks;
+    probe.first_exited = true;
+    probe.condition.notify_all();
+  });
+
+  CallbackDeviceExecutorInvocation second_invocation([&probe] {
+    execution::MetalExecutionContext* context =
+        execution::current_metal_execution_context();
+    const bool context_is_valid =
+        context != nullptr && context->command_queue_handle() != nullptr;
+
+    std::lock_guard<std::mutex> lock(probe.mutex);
+    ++probe.callback_entries;
+    ++probe.active_callbacks;
+    probe.maximum_active_callbacks =
+        std::max(probe.maximum_active_callbacks, probe.active_callbacks);
+    if (context_is_valid) {
+      ++probe.valid_context_entries;
+    }
+    probe.second_entered_before_first_exit = !probe.first_exited;
+    --probe.active_callbacks;
+    probe.condition.notify_all();
+  });
+
+  std::thread first_thread([&] {
+    try {
+      registry.execute(Device::GPU_METAL, first_invocation);
+    } catch (...) {
+      first_failure = std::current_exception();
+    }
+    first_tls_cleared = execution::current_metal_execution_context() == nullptr;
+  });
+
+  bool first_entered = false;
+  {
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    first_entered = probe.condition.wait_for(
+        lock, kExecutorProbeTimeout, [&probe] { return probe.first_entered; });
+  }
+  if (!first_entered) {
+    {
+      std::lock_guard<std::mutex> lock(probe.mutex);
+      probe.release_first = true;
+    }
+    probe.condition.notify_all();
+    first_thread.join();
+    FAIL() << "The first real Metal callback did not enter before timeout";
+  }
+
+  std::thread second_thread([&] {
+    try {
+      {
+        std::unique_lock<std::mutex> lock(probe.mutex);
+        probe.second_ready = true;
+        probe.condition.notify_all();
+        probe.condition.wait(lock, [&probe] { return probe.start_second; });
+      }
+      registry.execute(Device::GPU_METAL, second_invocation);
+    } catch (...) {
+      second_failure = std::current_exception();
+    }
+    second_tls_cleared =
+        execution::current_metal_execution_context() == nullptr;
+  });
+
+  bool second_ready = false;
+  {
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    second_ready = probe.condition.wait_for(
+        lock, kExecutorProbeTimeout, [&probe] { return probe.second_ready; });
+  }
+  if (!second_ready) {
+    {
+      std::lock_guard<std::mutex> lock(probe.mutex);
+      probe.start_second = true;
+      probe.release_first = true;
+    }
+    probe.condition.notify_all();
+    second_thread.join();
+    first_thread.join();
+    FAIL() << "The second registry caller did not reach its start gate";
+  }
+
+  bool second_entered_while_first_was_blocked = false;
+  {
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    probe.start_second = true;
+    probe.condition.notify_all();
+    second_entered_while_first_was_blocked = probe.condition.wait_for(
+        lock, kOverlapObservationWindow,
+        [&probe] { return probe.second_entered_before_first_exit; });
+    probe.release_first = true;
+  }
+  probe.condition.notify_all();
+  second_thread.join();
+  first_thread.join();
+
+  EXPECT_FALSE(first_failure);
+  EXPECT_FALSE(second_failure);
+  EXPECT_TRUE(first_tls_cleared);
+  EXPECT_TRUE(second_tls_cleared);
+  EXPECT_FALSE(probe.first_wait_timed_out);
+  EXPECT_TRUE(probe.first_entered);
+  EXPECT_TRUE(probe.first_exited);
+  EXPECT_FALSE(second_entered_while_first_was_blocked);
+  EXPECT_FALSE(probe.second_entered_before_first_exit);
+  EXPECT_EQ(probe.callback_entries, 2U);
+  EXPECT_EQ(probe.valid_context_entries, 2U);
+  EXPECT_EQ(probe.maximum_active_callbacks, 1U);
+  EXPECT_EQ(probe.active_callbacks, 0U);
+
+  const execution::DeviceExecutorDiagnostics diagnostics =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(diagnostics.device, Device::GPU_METAL);
+  EXPECT_TRUE(diagnostics.queue_ready);
+  EXPECT_EQ(diagnostics.invocation_count, 2U);
+  EXPECT_EQ(diagnostics.total_allocations, 0U);
+  EXPECT_EQ(diagnostics.live_allocations, 0U);
+  EXPECT_EQ(diagnostics.pipeline_cache_entries, 0U);
+}
+
+/**
+ * @brief Proves native allocations and TLS retire on exception and that the
+ * same real executor accepts a later invocation.
+ *
+ * @throws GoogleTest assertion control only; the expected provider exception
+ * is caught and validated by exact dynamic type and message.
+ * @note The throwing and recovery callbacks execute synchronously on the test
+ * thread so post-call TLS observation checks the same thread-local slot.
+ */
+TEST(MetalDeviceExecutorIntegration,
+     ThrowingDirectInvocationRetiresResourcesAndRestoresExecutor) {
+  execution::DeviceExecutorRegistry registry =
+      execution::make_default_device_executor_registry();
+  if (!registry.contains(Device::GPU_METAL)) {
+    GTEST_SKIP() << "No usable Metal device and command queue on this host";
+  }
+
+  ASSERT_EQ(execution::current_metal_execution_context(), nullptr);
+  const execution::DeviceExecutorDiagnostics before =
+      registry.diagnostics(Device::GPU_METAL);
+  ASSERT_EQ(before.device, Device::GPU_METAL);
+  ASSERT_TRUE(before.queue_ready);
+  ASSERT_EQ(before.invocation_count, 0U);
+  ASSERT_EQ(before.total_allocations, 0U);
+  ASSERT_EQ(before.live_allocations, 0U);
+  ASSERT_EQ(before.pipeline_cache_entries, 0U);
+
+  bool throwing_context_was_current = false;
+  bool throwing_queue_was_ready = false;
+  bool throwing_texture_was_allocated = false;
+  bool throwing_buffer_was_allocated = false;
+  CallbackDeviceExecutorInvocation throwing_invocation([&] {
+    execution::MetalExecutionContext& context =
+        execution::require_current_metal_execution_context();
+    throwing_context_was_current =
+        execution::current_metal_execution_context() == &context;
+    throwing_queue_was_ready = context.command_queue_handle() != nullptr;
+    throwing_texture_was_allocated =
+        context.allocate_float32_texture_2d(2U, 2U) != nullptr;
+    const std::array<std::uint32_t, 4> payload{{84U, 1U, 2U, 3U}};
+    throwing_buffer_was_allocated =
+        context.allocate_shared_buffer_copy(payload.data(), sizeof(payload)) !=
+        nullptr;
+    throw NativeAllocationProbeError{};
+  });
+
+  bool caught_expected_exception = false;
+  try {
+    registry.execute(Device::GPU_METAL, throwing_invocation);
+  } catch (const NativeAllocationProbeError& error) {
+    caught_expected_exception = true;
+    EXPECT_STREQ(error.what(), kExpectedFailure);
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << "Unexpected exception type: " << error.what();
+  } catch (...) {
+    ADD_FAILURE() << "Unexpected non-standard exception type";
+  }
+
+  ASSERT_TRUE(caught_expected_exception);
+  EXPECT_TRUE(throwing_context_was_current);
+  EXPECT_TRUE(throwing_queue_was_ready);
+  EXPECT_TRUE(throwing_texture_was_allocated);
+  EXPECT_TRUE(throwing_buffer_was_allocated);
+  EXPECT_EQ(execution::current_metal_execution_context(), nullptr);
+
+  const execution::DeviceExecutorDiagnostics after_throw =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(after_throw.device, Device::GPU_METAL);
+  EXPECT_TRUE(after_throw.queue_ready);
+  EXPECT_EQ(after_throw.invocation_count, before.invocation_count + 1U);
+  EXPECT_EQ(after_throw.total_allocations, before.total_allocations + 2U);
+  EXPECT_EQ(after_throw.live_allocations, 0U);
+  EXPECT_EQ(after_throw.pipeline_cache_entries, before.pipeline_cache_entries);
+
+  bool recovery_context_was_current = false;
+  bool recovery_queue_was_ready = false;
+  bool recovery_buffer_was_allocated = false;
+  CallbackDeviceExecutorInvocation recovery_invocation([&] {
+    execution::MetalExecutionContext& context =
+        execution::require_current_metal_execution_context();
+    recovery_context_was_current =
+        execution::current_metal_execution_context() == &context;
+    recovery_queue_was_ready = context.command_queue_handle() != nullptr;
+    const std::array<std::uint32_t, 2> payload{{84U, 85U}};
+    recovery_buffer_was_allocated =
+        context.allocate_shared_buffer_copy(payload.data(), sizeof(payload)) !=
+        nullptr;
+  });
+
+  EXPECT_NO_THROW(registry.execute(Device::GPU_METAL, recovery_invocation));
+  EXPECT_TRUE(recovery_context_was_current);
+  EXPECT_TRUE(recovery_queue_was_ready);
+  EXPECT_TRUE(recovery_buffer_was_allocated);
+  EXPECT_EQ(execution::current_metal_execution_context(), nullptr);
+
+  const execution::DeviceExecutorDiagnostics after_recovery =
+      registry.diagnostics(Device::GPU_METAL);
+  EXPECT_EQ(after_recovery.device, Device::GPU_METAL);
+  EXPECT_TRUE(after_recovery.queue_ready);
+  EXPECT_EQ(after_recovery.invocation_count, before.invocation_count + 2U);
+  EXPECT_EQ(after_recovery.total_allocations, before.total_allocations + 3U);
+  EXPECT_EQ(after_recovery.live_allocations, 0U);
+  EXPECT_EQ(after_recovery.pipeline_cache_entries,
+            before.pipeline_cache_entries);
+}
+
+/**
  * @brief Runs the real repository Metal operation twice through one process
  * executor and proves resource ownership/reuse.
+ *
+ * @throws GoogleTest assertion control and unexpected service/provider
+ * failures.
+ * @note Runtime absence of a usable Metal device reports a platform skip.
  */
 TEST(MetalDeviceExecutorIntegration,
      PerlinReusesQueueAndPipelineAndRetiresAllocations) {

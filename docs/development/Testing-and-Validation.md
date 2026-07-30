@@ -652,10 +652,16 @@ Metal implementation/device and use CPU fallback when Metal is absent.
 borrowed TLS context restoration, provider-exception identity, and copied
 diagnostics without a platform SDK. On Apple with the repository operation
 plugin enabled,
-`test_metal_device_executor` runs the real repository Perlin operation twice
-through one `ExecutionService`, then proves queue availability, two executor
-entries, six retired invocation allocations, one reused pipeline, CPU-owned
-outputs, the dedicated Metal worker id, and an empty settled ledger.
+`test_metal_device_executor` directly drives the factory-created real registry
+from two controlled threads and proves the executor itself prevents callback
+overlap. It also allocates a real texture and shared buffer before throwing,
+then proves exact provider-exception identity, same-thread TLS restoration,
+zero live allocations, stable queue/pipeline diagnostics, and successful
+re-entry through the same executor. Finally, it runs the real repository
+Perlin operation twice through one `ExecutionService` and proves queue
+availability, two executor entries, six retired invocation allocations, one
+reused pipeline, CPU-owned outputs, the dedicated Metal worker id, and an
+empty settled ledger.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
 parsing and exact Host application. `test_host_adapter` loads real operation
