@@ -83,10 +83,30 @@ does not imply `ValueReady`; readiness does not imply Run success; Run success
 does not imply cache save, output commit, Graph-document save, daemon result
 availability, or response observation.
 
+The legal Run branches are different partial orders:
+
+- a successful value-producing Run observes successful operation return,
+  successful producer-fence completion, `ValueReady`, validated Graph/RT
+  publication, and then `RunTerminal(Succeeded)`;
+- an operation, readiness, dependency, or commit failure can publish its typed
+  failure and proceed directly to `RunTerminal(Failed)`, without fabricating
+  `ValueReady` or `OutputCommitted`;
+- cancellation that wins the Run arbiter proceeds to
+  `RunTerminal(Cancelled)`. Late or stale provider/fence completions perform
+  cleanup only and cannot publish a value or durable-output receipt; an output
+  receipt committed independently before a later cancellation remains
+  authoritative for that output transaction; and
+- an admitted empty-plan, zero-work, or otherwise validated no-op can proceed
+  from no-work validation directly to `RunTerminal(Succeeded)`. Reusing an
+  already complete result does not fabricate a new `OperationReturned` or
+  `ValueReady` fact or a durable-output receipt.
+
 `ComputeRun::Succeeded` retains the ADR 0007 meaning: validated Graph/RT
 publication or a validated no-op won. A future `compute-and-persist` or export
 API is a named composite operation. It exposes both outcomes and succeeds only
 when every outcome it promised succeeds; it does not broaden the Run terminal.
+Target post-Run cache, codec, and output work has its own typed outcome and
+must neither delay nor rewrite an already published Run terminal.
 
 ### Persistence classes have one authority each
 
@@ -149,19 +169,45 @@ The authority performs this protocol:
    content identity, and commit id;
 2. reconcile idempotency: return the original receipt for the same committed
    identity, and reject the same key with different content;
-3. create private same-root stages for immutable payload/chunk data and
-   metadata;
-4. validate sizes and digests, then synchronize data for the requested
-   durability;
-5. atomically publish a final manifest/commit record as the multi-file
-   visibility point;
-6. synchronize its containing directory for crash durability; and
-7. persist and return an `OutputCommitReceipt` only after the commit point.
+3. create private same-root stages for immutable payload/chunk data, metadata,
+   and every transaction-owned temporary file;
+4. completely write every payload and metadata file, synchronize each file,
+   and then revalidate its exact length, digest, filesystem identity,
+   `OutputCommitId`, committed version/generation, and content binding. Any
+   failure before manifest publication leaves no published manifest or
+   receipt;
+5. encode the complete canonical manifest into a unique private stage, write
+   all manifest bytes, and validate the stored canonical content, exact
+   reference set, payload lengths/digests, and
+   `OutputCommitId`/version/generation/content bindings. Synchronize the
+   manifest file itself before publication;
+6. use a platform-supported atomic no-replace operation to publish the final
+   manifest/commit record as the sole multi-file visibility point, then
+   revalidate the published identity;
+7. for crash durability, execute a durability barrier for every directory
+   created, renamed, or modified by the transaction, ordered from the leaf
+   directory through the configured durability root. Each barrier is directory
+   `fsync` or a documented platform-equivalent mechanism;
+8. persist and return an `OutputCommitReceipt` only after every barrier required
+   by the requested durability class succeeds; and
+9. on recovery, recognize committed manifests, reconstruct the commit index,
+   and conservatively remove or quarantine incomplete stages and orphans.
 
 The receipt identifies commit, descriptor/content, namespace, version, and
 achieved durability. It is not a mutable cache or staging path. The default
 policy never overwrites a committed output; replacement uses an explicit new
 version/commit identity.
+
+The achieved durability is typed. An explicitly requested atomic-visible
+transaction can return only an atomic-visibility receipt after the no-replace
+manifest publication and identity validation. A crash-durable receipt is
+available only after the manifest file and all referenced files are
+synchronized and the complete leaf-to-root directory barrier succeeds. A
+platform/filesystem without the required file synchronization, directory
+barrier, or atomic no-replace publication reports a typed unsupported or
+transaction failure and never labels the weaker result crash durable. A crash
+durability failure after atomic visibility produces no crash-durable receipt;
+retry with the same commit identity reconciles that state idempotently.
 
 Delivery is at-least-once and commit is idempotent. A response lost after the
 commit point is resolved by querying or repeating with the same commit id.

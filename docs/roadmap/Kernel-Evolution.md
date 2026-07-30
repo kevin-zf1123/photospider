@@ -859,11 +859,12 @@ scratch reservations, pipeline cache, transfer queues, and completion fences.
 CPU workers do not block waiting for GPU completion. A stale device completion
 releases resources but cannot commit to a newer graph revision.
 
-The accepted compute I/O executor handles bounded cache/asset reads and writes
-and data movement around codecs. It is budgeted by both operation count and
-estimated retained bytes. It does not own daemon framing, Graph-document
-persistence, `OutputStore` commit policy, user paths, retries, or durability
-claims. CPU-heavy codec work returns to the existing CPU executor.
+The accepted target for the compute I/O executor handles bounded cache/asset
+reads and writes and data movement around codecs. It is budgeted by both
+operation count and estimated retained bytes. It does not own daemon framing,
+Graph-document persistence, `OutputStore` commit policy, user paths, retries,
+or durability claims. CPU-heavy codec work returns to the existing CPU
+executor.
 
 ### Compute I/O durability and completion target
 
@@ -879,8 +880,27 @@ also expose a file before its enclosing staged Run commits.
 accepts a target typed partial order:
 
 ```text
-OperationReturned -> ValueReady -> RunTerminal
-RunTerminal       -> ResultAvailable        (when a result is retained)
+successful value-producing Run:
+  OperationReturned(success)
+    -> producer fences succeed
+    -> ValueReady
+    -> validated Graph/RT publication
+    -> RunTerminal(Succeeded)
+
+operation/readiness/dependency/commit failure:
+  typed failure -> RunTerminal(Failed)
+  (no fabricated ValueReady or OutputCommitted)
+
+Run cancellation:
+  cancellation wins -> RunTerminal(Cancelled)
+  late/stale completion -> cleanup only
+  (no new ValueReady or durable receipt)
+
+validated empty-plan / zero-work / no-op:
+  no-work validation -> RunTerminal(Succeeded)
+  (no new OperationReturned, ValueReady, or durable receipt)
+
+RunTerminal(Succeeded) -> ResultAvailable   (when a result is retained)
 
 compute-and-persist success =
   RunTerminal(Succeeded) AND OutputCommitted
@@ -892,13 +912,16 @@ ordered by the operation that owns them.
 Only dependency-valid Graph/RT publication, or an admitted valid no-op,
 resolves `ComputeRun::Succeeded`. Cache persistence, durable output commit,
 Graph-document save, daemon terminal state, result availability, and caller
-observation remain independent outcomes.
+observation remain independent outcomes. Post-Run cache, codec, and output work
+has its own typed outcome and cannot delay or rewrite the published Run
+terminal. A receipt committed independently before a later Run cancellation
+remains authoritative for that output transaction.
 
 | Persistence domain | Target authority | Completion and durability contract |
 | --- | --- | --- |
 | Graph document | Graph-state save transaction | Versioned, same-directory staging with expected-version validation, atomic replacement, and an explicit achieved-durability result |
 | Disk cache | Graph cache policy using bounded I/O mechanism | Discardable acceleration; failure does not rewrite successful Run/output outcomes |
-| User output | `OutputStore` commit authority | Stable `OutputCommitId`, payload/metadata synchronization, manifest-last publication, typed receipt, recovery, and no-overwrite by default |
+| User output | `OutputStore` commit authority | Stable `OutputCommitId`; complete payload/metadata validation and file synchronization; canonical manifest validation, synchronization, and atomic no-replace publication; leaf-to-durability-root directory barriers; typed achieved-durability receipt; recovery; and no-overwrite by default |
 | Daemon transport | Job registry and result delivery | Acceptance, terminal state, and response observation only; no durability inference |
 | Codec | Injected representation adapter | Conversion and error translation only; no path, retry, identity, or commit authority |
 
@@ -906,9 +929,16 @@ Durable output retry is idempotent by stable commit identity and delivery is
 at least once, not exactly once. Cancellation before manifest publication may
 abort and clean staging; after the manifest commit point it reports the
 committed receipt rather than pretending the output was cancelled. Requested
-crash durability requires payload/metadata synchronization followed by
-directory synchronization where the platform advertises support. Unsupported
-durability fails explicitly; it is never silently downgraded.
+crash durability requires complete payload/metadata validation and file
+synchronization, a completely written and validated canonical manifest,
+manifest-file synchronization before atomic no-replace publication, published
+identity validation, and directory barriers for every directory created,
+renamed, or modified by the transaction from the leaf to the configured
+durability root. An atomic-visible receipt can be returned after its weaker
+commit point; a crash-durable receipt is returned only after all stronger
+barriers succeed. Unsupported file synchronization, directory barriers, or
+atomic no-replace publication fail explicitly; durability is never silently
+downgraded.
 
 All persistent paths are rooted and normalized, reject escapes and symlink
 substitution through no-follow/identity checks, apply quotas before retained
@@ -986,9 +1016,11 @@ cross-process GPU handles require a later device/fence protocol.
 13. Cache is discardable acceleration and never the durable user-output
     authority; cache persistence failure cannot rewrite an already successful
     Run or output commit.
-14. Durable output commit uses stable identity, manifest-last publication, and
-    a typed receipt; recovery is idempotent and delivery is at least once, not
-    exactly once.
+14. Durable output commit uses stable identity, completely validated and
+    synchronized payload/metadata and canonical manifest files, atomic
+    no-replace manifest-last publication, leaf-to-durability-root directory
+    barriers, and a typed achieved-durability receipt; recovery is idempotent
+    and delivery is at least once, not exactly once.
 15. Graph-document save remains a separately versioned transaction, and daemon
     terminal state or acknowledgement remains a non-durable transport
     observation.

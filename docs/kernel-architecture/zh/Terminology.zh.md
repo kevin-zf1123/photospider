@@ -76,10 +76,11 @@ synchronization 后通过 no-replace rename 发布。其 index 位于内存，re
 `OutputStore` publication 后到达的状态。它不是 durable acknowledgement，并会随进程丢失。
 
 **耐久输出提交（Durable output commit，仅为已接受目标）**
-未来 user-output transaction：由稳定 `OutputCommitId` 标识，在 payload/metadata
-synchronization 与请求且受支持的 directory synchronization 后，以 manifest-last publication
-完成。它会返回 typed receipt、以幂等方式恢复有歧义的 retry，并支持 at-least-once delivery；
-不声称 exactly-once delivery。参见
+未来 user-output transaction：由稳定 `OutputCommitId` 标识，只有在完整 payload/metadata
+校验与文件同步、canonical manifest 暂存/校验/文件同步、原子 no-replace manifest-last
+publication，以及请求的从叶目录到 durability root 的目录屏障完成后才完成。它的 typed
+receipt 区分达到 atomic-visible 与 crash-durable，以幂等方式恢复有歧义的 retry，并支持
+at-least-once delivery；不声称 exactly-once delivery。参见
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)。
 
 **每图独占访问（Per-graph exclusive access）**

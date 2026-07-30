@@ -690,10 +690,10 @@ allocator、in-flight limit、memory/scratch reservation、pipeline cache、tran
 fence。CPU worker 不阻塞等待 GPU completion；stale device completion 会释放资源，但不能提交到
 更新的 graph revision。
 
-已接受的 compute I/O executor 处理有界 cache/asset read/write 与 codec 周边数据移动，同时按
-operation 数量和 estimated retained bytes 预算。它不拥有 daemon framing、Graph 文档
-persistence、`OutputStore` commit policy、用户 path、retry 或 durability claim；CPU-heavy
-codec work 返回既有 CPU executor。
+已接受的 compute I/O executor 目标处理有界 cache/asset read/write 与 codec 周边数据移动，
+同时按 operation 数量和 estimated retained bytes 预算。它不拥有 daemon framing、Graph
+文档 persistence、`OutputStore` commit policy、用户 path、retry 或 durability claim；
+CPU-heavy codec work 返回既有 CPU executor。
 
 ### Compute I/O 耐久性与完成目标
 
@@ -707,8 +707,27 @@ destination；daemon job state 与 acknowledgement 都是 process-local；私有
 接受以下 typed partial order 目标：
 
 ```text
-OperationReturned -> ValueReady -> RunTerminal
-RunTerminal       -> ResultAvailable        （保留结果时）
+成功产值 Run：
+  OperationReturned(success)
+    -> producer fence 成功
+    -> ValueReady
+    -> 经过校验的 Graph/RT publication
+    -> RunTerminal(Succeeded)
+
+operation/readiness/dependency/commit failure：
+  类型化失败 -> RunTerminal(Failed)
+  （不伪造 ValueReady 或 OutputCommitted）
+
+Run cancellation：
+  cancellation 获胜 -> RunTerminal(Cancelled)
+  late/stale completion -> 只清理
+  （不产生新的 ValueReady 或 durable receipt）
+
+经过校验的 empty-plan / zero-work / no-op：
+  no-work validation -> RunTerminal(Succeeded)
+  （不产生新的 OperationReturned、ValueReady 或 durable receipt）
+
+RunTerminal(Succeeded) -> ResultAvailable   （保留结果时）
 
 compute-and-persist success =
   RunTerminal(Succeeded) AND OutputCommitted
@@ -719,21 +738,26 @@ RequestAccepted、GraphDocumentSaved 与 ResponseObserved 由拥有相应操作�
 
 只有 dependency-valid Graph/RT publication 或一个已准入的合法 no-op 才会把
 `ComputeRun::Succeeded` 解析为成功。Cache persistence、durable output commit、Graph 文档保存、
-daemon terminal state、result availability 与 caller observation 都保持为独立 outcome。
+daemon terminal state、result availability 与 caller observation 都保持为独立 outcome。Run
+后置 cache、codec 与 output 工作拥有自身类型化 outcome，不能延迟或改写已发布 Run terminal。
+在之后 Run cancellation 之前已经独立提交的 receipt 继续对该输出事务保持权威。
 
 | 持久化领域 | 目标 authority | 完成与耐久契约 |
 | --- | --- | --- |
 | Graph 文档 | Graph-state save transaction | 带版本、same-directory staging、expected-version validation、atomic replacement 与显式 achieved-durability result |
 | Disk cache | 使用有界 I/O mechanism 的 Graph cache policy | 可丢弃 acceleration；failure 不改写成功 Run/output outcome |
-| 用户输出 | `OutputStore` commit authority | 稳定 `OutputCommitId`、payload/metadata synchronization、manifest-last publication、typed receipt、recovery，且默认 no-overwrite |
+| 用户输出 | `OutputStore` commit authority | 稳定 `OutputCommitId`；完整 payload/metadata 校验与文件同步；canonical manifest 校验、同步和原子 no-replace 发布；从叶目录到 durability root 的目录屏障；类型化 achieved-durability receipt；recovery；且默认 no-overwrite |
 | Daemon transport | Job registry 与 result delivery | 只负责 acceptance、terminal state 与 response observation；不能据此推断 durability |
 | Codec | 注入的 representation adapter | 只负责 conversion 与 error translation；不拥有 path、retry、identity 或 commit authority |
 
 Durable output retry 通过稳定 commit identity 保持幂等，delivery 是 at least once，而不是 exactly
 once。Manifest publication 前的 cancellation 可以中止并清理 staging；manifest commit point 后
-则报告已提交 receipt，而不是假装 output 已被取消。请求 crash durability 时，必须先同步
-payload/metadata，再在平台声明支持时同步 directory。若不支持所请求 durability，必须显式失败，
-绝不能静默降级。
+则报告已提交 receipt，而不是假装 output 已被取消。请求 crash durability 时，必须完整校验并
+同步 payload/metadata 文件，完整写入并校验 canonical manifest，在原子 no-replace 发布前同步
+manifest 文件，校验已发布 identity，并为事务创建、rename 或修改的每一级目录按从叶目录到配置
+durability root 的顺序执行屏障。Atomic-visible receipt 可以在其较弱提交点后返回；只有所有更强
+屏障都成功后才能返回 crash-durable receipt。不支持 file synchronization、directory barrier
+或 atomic no-replace publication 时必须显式失败，绝不能静默降级 durability。
 
 所有 persistent path 都必须 rooted 且 normalized，通过 no-follow/identity check 拒绝 escape 与
 symlink substitution，在保留 work 前应用 quota，并把 achieved durability 暴露为 capability/
@@ -790,8 +814,10 @@ sandbox/capability policy、shared-memory 或 FD transport、quota 和 output de
     文档、daemon、delivery 或 response completion。
 13. Cache 是可丢弃 acceleration，绝不是 durable user-output authority；cache persistence
     failure 不能改写已经成功的 Run 或 output commit。
-14. Durable output commit 使用稳定 identity、manifest-last publication 与 typed receipt；
-    recovery 保持幂等，delivery 是 at least once，而不是 exactly once。
+14. Durable output commit 使用稳定 identity、经过完整校验与同步的 payload/metadata 和
+    canonical manifest 文件、原子 no-replace manifest-last publication、从叶目录到
+    durability root 的目录屏障与类型化 achieved-durability receipt；recovery 保持幂等，
+    delivery 是 at least once，而不是 exactly once。
 15. Graph 文档保存保持为独立的带版本 transaction；daemon terminal state 或 acknowledgement
     保持为非耐久 transport observation。
 16. 平台无法达到用户请求的 durability level 时必须显式失败，绝不能静默降级。

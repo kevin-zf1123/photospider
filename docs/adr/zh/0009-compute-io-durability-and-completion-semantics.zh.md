@@ -69,9 +69,27 @@ PhotoSpider 已经有若干有效的完成与持久化机制，但每个机制�
 不暗示 Run 成功；Run 成功也不暗示缓存保存、输出提交、Graph 文档保存、daemon
 结果可用或响应观察。
 
+合法 Run 分支具有不同偏序：
+
+- 成功产值 Run 依次观察到 operation 成功返回、producer fence 成功完成、
+  `ValueReady`、经过校验的 Graph/RT 发布，随后才是
+  `RunTerminal(Succeeded)`；
+- operation、readiness、dependency 或 commit failure 可以发布其类型化失败事实，
+  随后直接进入 `RunTerminal(Failed)`，不得伪造 `ValueReady` 或
+  `OutputCommitted`；
+- 赢得 Run 仲裁的 cancellation 进入 `RunTerminal(Cancelled)`。迟到或 stale 的
+  provider/fence completion 只执行清理，不能发布 Value 或 durable-output
+  receipt；若某项输出事务在之后的 cancellation 前已经独立提交，其回执继续对该
+  输出事务保持权威；以及
+- 已准入的 empty-plan、zero-work 或其他经过校验的 no-op 可以从 no-work 校验直接
+  进入 `RunTerminal(Succeeded)`。复用已有完整结果不得伪造新的
+  `OperationReturned`、`ValueReady` 事实或 durable-output receipt。
+
 `ComputeRun::Succeeded` 保留 ADR 0007 的含义：经过校验的 Graph/RT 发布或经过
 校验的 no-op 获胜。未来 `compute-and-persist` 或 export API 是具名组合操作。
 它暴露两种结果，只有承诺的每种结果都成功时才成功；它不扩展 Run 终态。
+目标中的 Run 后置 cache、codec 与 output 工作拥有自身类型化 outcome，不得延迟
+或改写已经发布的 Run 终态。
 
 ### 每类持久化只有一个权威
 
@@ -121,15 +139,38 @@ output intent/value；只有 `OutputStore` 编排能在 Run 结果已知后发�
 1. 校验 rooted namespace、请求的 durability、quota、descriptor、内容 identity
    与 commit id；
 2. 协调幂等性：相同已提交 identity 返回原回执，同一键配不同内容则拒绝；
-3. 为不可变 payload/chunk 数据与元数据创建私有同 root stage；
-4. 校验尺寸与 digest，然后按请求 durability 同步数据；
-5. 原子发布最终 manifest/commit record，作为多文件可见性点；
-6. 为 crash durability 同步其包含目录；以及
-7. 只在提交点之后持久化并返回 `OutputCommitReceipt`。
+3. 为不可变 payload/chunk 数据、元数据与每个事务自有临时文件创建私有同 root
+   stage；
+4. 完整写入每个 payload 和 metadata 文件，同步每个文件，随后重新校验其精确
+   长度、digest、文件系统 identity、`OutputCommitId`、已提交
+   version/generation 与内容绑定。Manifest 发布前的任何失败都不会留下已发布
+   manifest 或 receipt；
+5. 把完整 canonical manifest 编码到唯一私有 stage，写完全部 manifest 字节，
+   并校验已存 canonical content、精确引用集合、payload 长度/digest，以及
+   `OutputCommitId`/version/generation/content 绑定。在发布前同步 manifest
+   文件本身；
+6. 使用平台支持的原子 no-replace 操作发布最终 manifest/commit record，使其成为
+   唯一多文件可见性点，随后重新校验已发布 identity；
+7. 对于 crash durability，为本事务创建、rename 或修改过的每一级目录执行
+   durability barrier，顺序从叶目录到配置的 durability root。每个屏障使用
+   directory `fsync` 或有文档说明的平台等价机制；
+8. 只有在请求 durability class 要求的每个屏障均成功后，才持久化并返回
+   `OutputCommitReceipt`；以及
+9. 恢复时识别已提交 manifest，重建 commit index，并保守删除或隔离未完成
+   stage 和 orphan。
 
 回执标识 commit、descriptor/content、namespace、version 与达到的 durability。
 它不是可变 cache 或 staging path。默认策略绝不覆盖已提交输出；替换使用显式
 新 version/commit identity。
+
+实际达到的 durability 是类型化的。显式请求 atomic-visible 的事务只有在
+no-replace manifest 发布和 identity 校验后，才能返回仅声明原子可见性的回执。
+只有 manifest 文件及其引用的全部文件均完成同步，且从叶目录到 root 的完整目录
+屏障成功后，才能得到 crash-durable receipt。无法提供所需 file synchronization、
+directory barrier 或 atomic no-replace publication 的平台/文件系统会报告类型化
+unsupported 或事务失败，绝不会把较弱结果标成 crash durable。若原子可见后 crash
+durability 失败，不产生 crash-durable receipt；使用相同 commit identity 的重试会
+以幂等方式协调该状态。
 
 交付采用 at-least-once，提交具有幂等性。提交点之后响应丢失时，使用同一 commit
 id 查询或重试。store 返回同一回执、继续可恢复 pending 事务，或报告类型化冲突/

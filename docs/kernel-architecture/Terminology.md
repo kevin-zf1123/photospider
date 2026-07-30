@@ -95,10 +95,12 @@ publication. It is not a durable acknowledgement and is lost with the process.
 
 **Durable output commit (accepted target only)**
 A future user-output transaction identified by a stable `OutputCommitId` and
-completed by manifest-last publication after payload/metadata synchronization
-and any requested supported directory synchronization. It returns a typed
-receipt, recovers ambiguous retries idempotently, and supports at-least-once
-delivery; it does not claim exactly-once delivery. See
+completed only after full payload/metadata validation and file synchronization,
+canonical manifest staging/validation/file synchronization, atomic no-replace
+manifest-last publication, and any requested leaf-to-durability-root directory
+barriers. Its typed receipt distinguishes atomic-visible from crash-durable
+achievement, it recovers ambiguous retries idempotently, and it supports
+at-least-once delivery; it does not claim exactly-once delivery. See
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
 
 **Per-graph exclusive access**
