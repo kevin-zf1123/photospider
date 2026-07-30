@@ -97,8 +97,8 @@ representation 与显式 `1..9` 数值。
 `OperationPluginRegistrar` 注册。普通插件请求 `operation_sdk` package component，并且只链接
 `Photospider::operation_sdk`。该 interface target 提供安装头，并传递链接
 `Photospider::operation_runtime`；后者的 shared library 实现公共 image-buffer factory、
-immutable CPU DenseTensor Value 与 checked view symbol，以及 dependency-neutral Region
-value/algebra，不反向链接 SDK，也不要求外部 package。静态 Host product 与独立加载且使用
+explicit-binding DenseTensor Value 与 checked view symbol、dependency-neutral device/access
+fact，以及 Region value/algebra，不反向链接 SDK，也不要求外部 package。静态 Host product 与独立加载且使用
 Value 的 operation DSO 因而都通过同一个 runtime image
 解析 allocation/revision minting，而不会把 counter 复制进每个 DSO。这是普通 dynamic
 dependency，不是 ELF/Mach-O symbol interposition 或 plugin ABI callback。这些 data/memory
@@ -441,7 +441,7 @@ Interactive 与 Throughput 绑定是不同上下文，各有独立非零代次�
 | 操作插件 v2 | 临时 C++ registrar 与回调值 | 在 Host 校验下执行操作计算并返回值 |
 | 策略插件 v1 | 冻结 64 位 profile 下的精确大小纯 C 记录 | 只排序；不具备资源或执行能力 |
 
-### 已实现的 V-2 至 V-6 SDK 子集与未来 provider ABI
+### 已实现的 V-2 至 V-8 SDK 子集与未来 provider ABI
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受单独版本化的 pure-C provider ABI v3，用于 Schema、Facet、Layout、access、
@@ -470,8 +470,16 @@ V-6 把 installed、dependency-neutral 的 `ReadyFence` observer 与同步 Value
 `operation_runtime`。Pending publication authority 与 `ValueTransferTask` 保持 source-private，
 因此 SDK consumer 可以观察 readiness，但不能创建 pending producer 或 transfer task。
 
-这些切片都不会把 Value、BufferHandle、lease、Region、ReadyFence 或 PImpl 放进 v2 callback
-record，也不会改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成
+V-8 新增 installed、经过检查的 `DeviceBackend`、`DeviceId`、`MemoryDomain`、
+`StorageBinding`、producer identity 与纯 `AccessPlan` observation。Native allocation
+construction、native handle、mutable pending-device producer、completion admission、
+`ResidencyManager` 与 CPU/Metal transfer submission 都保持 source-private。仓库 Metal operation
+只通过 source-private invocation 边界接收借用的 device/queue/allocator context，在内部发布
+pending native Value，并执行显式 asynchronous readback。第三方 v2 callback 不会获得这个
+context，也不能从 `ImageBuffer::context` 推断它。
+
+这些切片都不会把 Value、BufferHandle、lease、Region、ReadyFence、device/access record 或
+PImpl 放进 v2 callback record，也不会改变表中的两个当前边界。在每个仓库自有 operation 与 installed consumer 完成
 migration 前，
 operation ABI v2 仍是当前 operation contract。完成边界随后会删除 v2、其 entry point、SDK、
 fixture 与 package surface，不保留永久 dual loader、wrapper、alias、forwarding header 或
@@ -516,7 +524,10 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 ## 实现与验证入口
 
 - `include/photospider/data/value.hpp`
+- `include/photospider/core/device.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/plugin_api.hpp`
@@ -525,6 +536,9 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `src/lib/core/value.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/policy/policy_registry.*`
@@ -533,6 +547,8 @@ C 函数指针。精确布局断言和校验明确规定受支持 profile，但�
 - `tests/unit/test_op_registry_m31.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
+- `tests/unit/test_device_residency.cpp`
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/integration/static_product_consumer_smoke.py`

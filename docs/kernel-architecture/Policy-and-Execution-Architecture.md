@@ -305,9 +305,39 @@ cache. Reserved-start workers enter that
 executor synchronously and invoke the already selected operation through the
 same Run completion/exception path. The Metal Perlin provider now borrows those
 resources and keeps no static native state; `GraphRuntime`, `Kernel`, operation
-metadata, and policy state expose no native handle or capability hook. V-7
-adds no general transfer/residency/coherency model and no device-memory ledger:
-those remain #85 and #86 respectively.
+metadata, and policy state expose no native handle or capability hook.
+
+V-8 adds source-private, explicit CPU/Metal access and residency to that same
+execution domain. `AccessPlan` selects exactly one of direct, map, import,
+transfer, or unsupported without performing hidden work. A transfer preserves
+the logical `ValueRevisionId` while publishing a distinct checked
+`StorageBinding`; CPU-to-Metal upload and Metal-to-CPU readback are explicit
+asynchronous tasks. The Metal Perlin provider publishes a pending native Value
+and encodes texture-to-shared-buffer readback without waiting on a command
+buffer or calling synchronous `getBytes`.
+
+`ExecutionService` owns the one process `ResidencyManager` and routes pending
+Value continuations through its existing ready store. Exact completion
+identity includes Graph/revision/target/intent/generation, Run/task, source and
+destination revision, producer, and binding facts. Freshness admission,
+source/destination terminal publication, and resident insertion form one
+manager-locked transaction. A late, duplicate, or mismatched completion
+cannot publish Ready, release dependent work, enter residency, or restore an
+older commit right; it settles the affected destination with a typed failure
+when it still owns that producer. Run settlement retains the executor and
+continuation until every pending fence callback has retired. V-8 adds no
+second ready store, Graph authority, persistence path, or device-memory
+capacity authority. Authoritative device-memory and scratch admission remains
+#86.
+
+Freshness publication uses two phases. Kernel first asks `ExecutionService` to
+pretrack the lineage without changing its current generation; this fallible
+allocation completes before coordinator submission. When the candidate is
+accepted as current, the coordinator invokes a no-throw, no-allocation service
+callback while holding its mutex and before publishing its own current row.
+That callback advances the manager under the manager mutex. Failed,
+close-rejected, and born-stale candidates never invoke it, and an older Run
+that starts afterward cannot regress the monotonic manager generation.
 
 ## Host, CLI, and IPC Surfaces
 

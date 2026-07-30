@@ -3,20 +3,23 @@
 ## Status
 
 Accepted as the target contract for Project 4 generic data and heterogeneous
-execution. The source tree now implements bounded V-2 through V-7 slices:
+execution. The source tree now implements bounded V-2 through V-8 slices:
 CPU DenseTensor/ImageView values, checked BufferHandle ownership and runtime
 identity, and the public Region MVP used by dirty planning, validity, and the
 core dense operation; V-5 operation-metadata routing and the bounded V-6
 ReadyFence, pending CPU Value, and explicit fake-device Value-copy proof are
 also current. V-7 adds one source-private process device-executor registry and
 runs the repository Metal Perlin operation through its owned queue, invocation
-allocator, and pipeline cache. `ImageBuffer`, `DataType`, `Device`,
+allocator, and pipeline cache. V-8 adds explicit device/binding facts,
+nonblocking access plans, revision-preserving CPU/Metal transfers, exact
+process residency, Run-scoped pending-Value continuations, and stale native
+completion rejection before destination readiness. `ImageBuffer`, `DataType`, `Device`,
 `ParameterMap`, and operation plugin ABI v2 remain compatibility contracts at
 their role-specific edges; the unimplemented portions of this ADR remain
 evolution targets.
 
-Issue #78 ratified this contract. Issues #79 through #84 delivered the bounded
-V-2 through V-7 implementation slices; issues #85 through #90 remain separate
+Issue #78 ratified this contract. Issues #79 through #85 delivered the bounded
+V-2 through V-8 implementation slices; issues #86 through #90 remain separate
 implementation slices. A synthetic
 `VariableSampleField` proof and an optional OpenEXR Deep provider remain
 separate later changes; neither is implemented by this decision.
@@ -323,10 +326,34 @@ Metal-plugin profile, its Apple executor owns one native device and queue, one
 callback-scoped texture/buffer allocator, and a validated persistent pipeline
 cache. Reserved-start work invokes the
 Metal Perlin provider inside that borrowed context and returns an independent
-CPU compatibility image. This proof still has no general `DeviceId`,
-`AccessPlan`, residency replica, coherency/visibility model, bidirectional
-transfer, or stale-completion arbitration; #85 owns those general access and
-transfer semantics, while #86 owns device-memory and scratch accounting.
+CPU compatibility image.
+
+The implemented V-8 subset adds dependency-neutral `DeviceBackend`,
+`DeviceId`, `MemoryDomain`, `StorageBinding`, producer identity, and exhaustive
+`AccessPlan` outcomes. `BufferHandle` may retain a source-private native owner
+without exposing its handle; non-host-visible access throws instead of mapping,
+waiting, or transferring. CPU-to-CPU, CPU-to-Metal, and Metal-to-CPU transfers
+publish distinct bindings that preserve one logical `ValueRevisionId`. The
+process-owned `ResidencyManager` admits complete Run/task/producer/revision/
+binding identities and linearizes current-generation validation, producer
+Ready publication, and replica insertion under one lock. Therefore a newer
+generation either makes an old callback typed-Failed before destination Ready,
+or follows a completion that was already current; mismatched and duplicate
+identities cannot consume or republish another admission. Pending operation
+Values keep their Run unsettled and release dependants only through the same
+`ExecutionService` ready store after terminal success. The Metal Perlin path
+encodes an explicit texture-to-shared-buffer blit, installs the completion
+handler, commits, and returns without `waitUntilCompleted` or `getBytes`.
+V-8 intentionally adds no authoritative device-memory or scratch ledger; that
+remains #86.
+
+The current-generation handoff is staged rather than allocating in the
+coordinator critical section. Kernel pretracks a zero-generation lineage row
+before submitting publication. Only an accepted current candidate advances the
+pretracked row through a no-throw callback immediately before coordinator
+currentness becomes observable. A rejected or born-stale candidate leaves the
+row unchanged, and a generation-N Run that starts after N+1 publication cannot
+move the monotonic manager row backwards.
 
 A `ComputeRun` retains request-local immutable Values and their authoritative
 bindings. Settlement accounts for every output's terminal fence state,

@@ -221,9 +221,13 @@ as a production runtime boundary. The current production Metal operation path
 does not use that adapter or retain an `ImageBuffer::context` payload. After
 reserved start, the Metal Perlin provider borrows the process executor's
 command queue, invocation-scoped allocator, and validated pipeline cache, then
-returns a CPU-owned `ImageBuffer`; the provider owns no independent native
-lifecycle. Direct interpretation of `context` remains backend-specific and is
-not a portable memory contract.
+encodes compute plus an explicit texture-to-shared-buffer blit, installs a
+native completion handler, commits without waiting, and source-privately
+returns a pending host-visible Value. `TaskSubmissionPlan` creates the CPU
+`ImageBuffer` compatibility snapshot only after that Value becomes Ready. The
+provider owns no independent native lifecycle, calls neither
+`waitUntilCompleted` nor `getBytes`, and cannot make `ImageBuffer::context` a
+portable memory contract.
 
 ## Boundaries and Rationale
 
@@ -256,7 +260,7 @@ supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
 target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
-### Implemented V-3/V-4/V-6 relationship and remaining target
+### Implemented V-3/V-4/V-6/V-8 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -296,9 +300,21 @@ source-private producer retires its mutable capability before every terminal
 state, and the source-private transfer task copies a distinct CPU allocation
 only as executor-queued work.
 
-V-6 still does not implement quantization, device identity or registry, general
-access/visibility planning, residency, bidirectional device transfer, stale
-completion arbitration, provider ABI v3, or general named graph Value outputs.
+V-8 adds explicit `DeviceBackend`, `DeviceId`, `MemoryDomain`,
+`StorageBinding`, producer identity, and `AccessPlan` without adding fields to
+`ImageBuffer`. A Value binding may be host-visible or device-local; metadata
+observation grants no pointer, and host access fails rather than starting an
+implicit transfer. CPU/Metal transfer produces a distinct binding for the same
+logical revision. Exact current-generation completion publishes Ready and
+process residency atomically; stale completion publishes typed failure before
+dependants can observe Ready. The lineage row is pretracked before coordinator
+submission and advanced only by accepted current publication, so an older Run
+that starts after a newer publication remains stale. The current source-private Metal path implements
+both buffer-to-texture upload and texture-to-buffer download.
+
+V-8 still does not implement quantization, general Map/Import providers,
+provider ABI v3, general named graph Value outputs, or authoritative
+device-memory/scratch accounting.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
@@ -312,6 +328,8 @@ operation ABI.
 ## Implementation and Validation Entry Points
 
 - `include/photospider/core/image_buffer.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/data/value.hpp`
@@ -323,6 +341,9 @@ operation ABI.
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/metal_device_executor.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`

@@ -417,15 +417,42 @@ class CommandRecorder:
         @param command Executable and argv produced by the smoke driver.
         @param cwd Working directory selected by the smoke driver.
         @return Zero, matching a successful required subprocess.
-        @throws OSError If a synthetic consumer executable cannot be written.
-        @note ``cwd`` is intentionally not inspected. A consumer build command
-          creates only the empty file that the driver subsequently discovers;
-          no command is executed.
+        @throws OSError If a synthetic cache or consumer executable cannot be
+          written.
+        @note ``cwd`` is intentionally not inspected. A consumer configure
+          creates a cache-shaped record of its source, build, and ``-D``
+          arguments so post-configure validators observe the same boundary as
+          a real CMake call. A consumer build command creates only the empty
+          file that the driver subsequently discovers; no command is executed.
         """
 
         del cwd
         recorded = list(command)
         self.commands.append(recorded)
+        if (
+            len(recorded) >= 4
+            and recorded[1] == "-S"
+            and "-B" in recorded
+        ):
+            build_argument_index = recorded.index("-B") + 1
+            if build_argument_index < len(recorded):
+                build = pathlib.Path(
+                    recorded[build_argument_index]
+                ).resolve()
+                cache_values = {
+                    "CMAKE_HOME_DIRECTORY": str(
+                        pathlib.Path(recorded[2]).resolve()
+                    ),
+                    "CMAKE_CACHEFILE_DIR": str(build),
+                }
+                for argument in recorded:
+                    if not argument.startswith("-D") or "=" not in argument:
+                        continue
+                    assignment, value = argument[2:].split("=", 1)
+                    key = assignment.split(":", 1)[0]
+                    if key:
+                        cache_values[key] = value
+                write_cmake_cache(build, cache_values)
         if len(recorded) >= 3 and recorded[1] == "--build":
             build = pathlib.Path(recorded[2]).resolve()
             executable_name = self._executable_by_build.get(build)

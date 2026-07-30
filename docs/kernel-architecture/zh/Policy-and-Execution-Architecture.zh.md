@@ -254,8 +254,31 @@ pipeline cache。
 Reserved-start worker 会同步进入该 executor，并通过同一条 Run completion/exception path 调用
 已经选中的 operation。Metal Perlin provider 现在只借用这些 resource，不保留 static native
 state；`GraphRuntime`、`Kernel`、operation metadata 与 policy state 都不暴露 native handle 或
-capability hook。V-7 不增加通用 transfer/residency/coherency model，也不增加 device-memory
-ledger；二者分别仍属于 #85 与 #86。
+capability hook。
+
+V-8 在同一个 execution domain 中增加 source-private 的显式 CPU/Metal access 与 residency。
+`AccessPlan` 精确选择 direct、map、import、transfer 或 unsupported 中的一种，且不会执行隐藏
+工作。Transfer 在发布不同且经过检查的 `StorageBinding` 时保留逻辑
+`ValueRevisionId`；CPU-to-Metal upload 与 Metal-to-CPU readback 都是显式 asynchronous task。
+Metal Perlin provider 发布 pending native Value，并编码 texture-to-shared-buffer readback，
+不会等待 command buffer，也不会调用同步 `getBytes`。
+
+`ExecutionService` 拥有唯一的进程级 `ResidencyManager`，并让 pending Value continuation
+经过既有 ready store。精确 completion identity 包含 Graph/revision/target/intent/generation、
+Run/task、source/destination revision、producer 与 binding fact。Freshness admission、
+source/destination terminal publication 和 resident insertion 构成一个由 manager lock 保护的
+事务。晚到、重复或 identity 不匹配的 completion 不能发布 Ready、释放 dependent work、进入
+residency 或恢复旧 commit right；如果它仍拥有对应 producer，就以 typed failure 结算受影响的
+destination。Run settlement 会保留 executor 与 continuation，直至每个 pending fence callback
+都退役。V-8 不新增第二套 ready store、Graph authority、persistence path 或 device-memory
+capacity authority。权威 device-memory 与 scratch admission 仍属于 #86。
+
+Freshness publication 分为两个阶段。Kernel 先要求 `ExecutionService` 预跟踪 lineage，
+但不改变其 current generation；该可失败 allocation 会在 coordinator submission 前完成。
+Candidate 被接受为 current 时，coordinator 会在持有自身 mutex 且发布自身 current row 前，
+调用一个 no-throw、no-allocation 的 service callback。该 callback 在 manager mutex 下推进
+manager。失败、被 close 拒绝或 born-stale 的 candidate 绝不调用它；之后才启动的较旧 Run
+也不能让单调 manager generation 倒退。
 
 ## Host、CLI 与 IPC 接口面
 

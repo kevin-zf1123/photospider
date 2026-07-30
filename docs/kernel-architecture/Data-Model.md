@@ -168,7 +168,7 @@ Graph state.
 | Field | Meaning |
 | --- | --- |
 | `image_buffer` | Independent current plugin ABI v2, tiled-write, codec, and Host compatibility snapshot. |
-| `image_value` | Sealed CPU image Value and allocation/revision identity authority when valid. |
+| `image_value` | Immutable sealed or producer-pending Value with explicit allocation/binding/revision identity when valid. Pending state is request-local and cannot enter formal cache or visible commit. |
 | `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
 | `space` | Spatial transform, scale, and ROI metadata. |
 | `debug` | Worker/device/timing/range diagnostics. Enabled CPU range inspection walks active scalar bytes through `ImageBuffer::step`; padding is excluded and opaque device values retain provider diagnostics. |
@@ -283,7 +283,7 @@ propagation.
   `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
   or algorithm implementation when a matrix slice or library call requires it.
 
-### Implemented V-3 ownership, V-4 Region, and V-6 readiness surfaces
+### Implemented V-3 ownership, V-4 Region, V-6 readiness, and V-8 device surfaces
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete generic-value replacement. V-2 introduced the bounded CPU
@@ -294,10 +294,11 @@ identity:
   `ElementSemantics`, and `StorageEncoding` separate;
 - installed `ImageFacet` explicitly assigns distinct x/y and optional channel
   axes;
-- `BufferHandle` is a checked immutable nonempty range over one CPU allocation
-  identity, exposes no pointer, and creates checked identity-preserving
-  subranges; identity `valid()` checks only a nonzero issued token, not whether
-  the allocation still has a live owner;
+- `BufferHandle` is a checked immutable nonempty range over one explicit
+  storage binding, exposes no raw or native pointer, and creates checked
+  identity-preserving subranges; CPU builders own host bytes, while
+  source-private device publication may retain an opaque native owner and
+  independently record host visibility;
 - `ValueBuilder` owns the only move-only `WriteLease`, refuses seal while a
   lease is live, and publishes immutable bytes with a fresh `ValueRevisionId`;
 - the vector convenience constructor still deep-copies lvalue and rvalue
@@ -311,9 +312,12 @@ identity:
   stride-aware unsigned-8 execution, reuses a sealed input Value when present,
   and publishes its exact sealed result revision.
 
-Private `NodeOutput` now retains `image_value` beside `image_buffer`. A valid
-sealed Value is the CPU image allocation/revision identity authority; the
-ImageBuffer is an independent compatibility snapshot. Ordinary HP commit,
+Private `NodeOutput` retains `image_value` beside `image_buffer`. A valid Value
+is the immutable allocation/binding/revision authority; the ImageBuffer is an
+independent CPU compatibility snapshot. A producer-pending Value may live in
+request-local temporary output only: `TaskSubmissionPlan` holds its Run
+unsettled and releases dependants after terminal Ready, while Failed,
+ProducerCancelled, or stale-typed completion releases none. Ordinary HP commit,
 sequential HP compute, connected-preflight shadow cache, dirty HP commit, and
 disk decode normalize legacy CPU buffers before formal publication. Immutable
 cache copies preserve both identities; dirty clones clear the old Value before
@@ -340,9 +344,23 @@ inspectable while payload access is rejected. The source-private physical
 `ValueTransferTask` allocates a distinct pending CPU destination and copies its
 validated envelope only from executor-queued work after source readiness.
 
-`DataSpec`, real device routing and identity, general `AccessPlan`, residency,
-bidirectional transfer and stale-completion arbitration, quantization, provider
-ABI v3, and general named immutable Value outputs remain later no-shim slices.
+V-8 installs `DeviceBackend`, checked `DeviceId`, `MemoryDomain`,
+`StorageBinding`, producer identity, and exhaustive `AccessPlan` outcomes.
+Planning is nonblocking and records source facts, exact target capability,
+visibility obligations, lease kind, and transfer bytes without touching
+payload. Host access still requires both producer Ready and a host-visible
+binding; otherwise it throws without an implicit wait, map, import, transfer,
+or readback. Explicit CPU/Metal transfers publish distinct bindings while
+preserving one logical `ValueRevisionId`. The process `ResidencyManager` indexes
+only exact Ready replicas and atomically gates destination readiness on complete
+completion identity plus current supersession generation. A fallible
+prepublication step creates the lineage row without advancing it; accepted
+coordinator publication then advances that row before exposing currentness, so
+a late older Run observation cannot regress freshness.
+
+`DataSpec`, quantization, general Map/Import providers, provider ABI v3, and
+general named immutable Value outputs remain later no-shim slices. V-8 does
+not add authoritative device-memory or scratch accounting.
 `ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,
@@ -359,6 +377,8 @@ neither document changes the current fields described above.
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
@@ -382,6 +402,8 @@ neither document changes the current fields described above.
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`

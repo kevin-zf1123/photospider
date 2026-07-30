@@ -285,6 +285,14 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "CpuToMetalTransferUsesInjectedProviderAndRejectsHostRead"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
+            "ExternalTransferFailureIsTypedAndLaterTransferRecovers"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "ChainedTransferReadinessQueuesDistinctLaterTaskWithoutBlocking"
         ),
         (

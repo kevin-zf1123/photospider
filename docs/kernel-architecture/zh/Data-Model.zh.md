@@ -129,7 +129,7 @@ Scalar 拼写保持稳定；array 与 object 递归渲染；object key 保持 or
 | 字段 | 含义 |
 | --- | --- |
 | `image_buffer` | 独立的当前 plugin ABI v2、tiled-write、codec 与 Host compatibility snapshot。 |
-| `image_value` | 有效时作为 CPU 图像 Value 及 allocation/revision identity authority 的 sealed Value。 |
+| `image_value` | 有效时作为带显式 allocation/binding/revision identity 的 immutable sealed 或 producer-pending Value。Pending state 只属于 request local，不能进入正式 cache 或 visible commit。 |
 | `data` | 作为 `plugin::ParameterMap` 保存的命名标量或结构化输出。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
 | `debug` | worker/设备/计时/范围诊断信息。启用的 CPU range inspection 会通过 `ImageBuffer::step` 遍历 active scalar byte；padding 被排除，opaque device value 保留 provider diagnostic。 |
@@ -228,7 +228,7 @@ RT proxy commit 之后。
   只有 OpenCV provider 或算法实现在 matrix slice 或 library call
   确实需要时，才会创建 OpenCV geometry。
 
-### 已实现的 V-3 ownership、V-4 Region 与 V-6 readiness surface
+### 已实现的 V-3 ownership、V-4 Region、V-6 readiness 与 V-8 device surface
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受完整的通用 Value 替换。V-2 引入了有界 CPU DenseTensor 子集；V-3 现已接通其
@@ -237,9 +237,10 @@ physical ownership 与正式 HP cache identity：
 - installed `DenseTensorDescriptor` 把 concrete shape、`ElementSemantics` 与
   `StorageEncoding` 分开；
 - installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
-- `BufferHandle` 是同一 CPU allocation identity 上受检、不可变、非空的 range；它不暴露
-  pointer，并创建保留 identity 的 checked subrange；identity `valid()` 只检查非零且已签发的
-  token，不检查 allocation 是否仍有 live owner；
+- `BufferHandle` 是同一显式 storage binding 上受检、不可变、非空的 range；它不暴露 raw
+  或 native pointer，并创建保留 identity 的 checked subrange；CPU builder 拥有 host byte，
+  而 source-private device publication 可以保留 opaque native owner，并独立记录 host
+  visibility；
 - `ValueBuilder` 拥有唯一 move-only `WriteLease`，live lease 存在时拒绝 seal，并以全新
   `ValueRevisionId` 发布 immutable byte；
 - vector 便捷 constructor 仍会在 seal 前 deep-copy lvalue/rvalue 的
@@ -252,9 +253,12 @@ physical ownership 与正式 HP cache identity：
   stride-aware unsigned-8 execution；它会复用已有 sealed input Value，并发布完全相同的
   sealed result revision。
 
-私有 `NodeOutput` 现在同时保留 `image_value` 与 `image_buffer`。有效的 sealed Value 是
-CPU image allocation/revision identity authority；ImageBuffer 是独立 compatibility
-snapshot。普通 HP commit、sequential HP compute、connected-preflight shadow cache、
+私有 `NodeOutput` 同时保留 `image_value` 与 `image_buffer`。有效 Value 是 immutable
+allocation/binding/revision authority；ImageBuffer 是独立 CPU compatibility snapshot。
+Producer-pending Value 只能存在于 request-local 临时 output：`TaskSubmissionPlan` 会让其 Run
+保持未 settlement，并在 terminal Ready 后释放 dependant；Failed、ProducerCancelled 或
+stale-typed completion 不会释放任何 dependant。普通 HP commit、sequential HP compute、
+connected-preflight shadow cache、
 dirty HP commit 与 disk decode 都会在正式发布前规范化 legacy CPU buffer。immutable cache
 copy 保留两类 identity；dirty clone 在 mutation 前清除旧 Value 并对最终 byte 重新 seal；
 replacement 与 disk decode 生成新 identity。allocation/revision token 只在进程内有效，
@@ -276,9 +280,20 @@ descriptor/layout/size/identity metadata，同时拒绝 payload access。Source-
 `ValueTransferTask` 会分配独立 pending CPU destination，并且只在 source ready 后通过
 executor-queued work 复制已验证的 envelope。
 
-`DataSpec`、真实 device routing 与 identity、通用 `AccessPlan`、residency、bidirectional
-transfer 与 stale-completion arbitration、quantization、provider ABI v3 和通用命名 immutable
-Value output 仍属于后续 no-shim slice。`ParameterMap` 仍用于 configuration 与当前命名
+V-8 安装 `DeviceBackend`、checked `DeviceId`、`MemoryDomain`、`StorageBinding`、
+producer identity 与穷尽的 `AccessPlan` outcome。Planning 保持非阻塞，只记录 source fact、
+精确 target capability、visibility obligation、lease kind 与 transfer byte，不触碰 payload。
+Host access 仍同时要求 producer Ready 与 host-visible binding；否则会抛错，不会隐式等待、
+map、import、transfer 或 readback。显式 CPU/Metal transfer 会发布独立 binding，同时保留同一
+逻辑 `ValueRevisionId`。进程级 `ResidencyManager` 只索引精确 Ready replica，并以完整
+completion identity 加 current supersession generation 原子门控 destination readiness。
+一个可失败的 prepublication 步骤会创建 lineage row 而不推进它；accepted coordinator
+publication 随后会在暴露 currentness 前推进该行，因此晚启动的较旧 Run observation
+不能让 freshness 倒退。
+
+`DataSpec`、quantization、通用 Map/Import provider、provider ABI v3 与通用命名 immutable
+Value output 仍属于后续 no-shim slice。V-8 不新增 authoritative device-memory 或 scratch
+核算。`ParameterMap` 仍用于 configuration 与当前命名
 scalar-result storage。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
@@ -294,6 +309,8 @@ dependency 工作由
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
@@ -317,6 +334,8 @@ dependency 工作由
 - `src/lib/core/ops.cpp`
 - `src/lib/core/parameter_value_text.*`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `src/lib/compute/tiled_input_normalizer.*`

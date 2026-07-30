@@ -23,7 +23,9 @@ Graph close、显式 process execution shutdown、精确 settlement 与 source-p
 Issue #84 移除了 per-Graph native Metal ownership，并在 `ExecutionService` 中安装固定的
 `DeviceExecutorRegistry`；其中的 Metal executor 拥有一个 device、command queue、
 invocation allocator 与持久 pipeline cache，并且只在 reserved start 后进入选中的 operation。
-Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
+Issue #85 新增显式且保留 revision 的 CPU/Metal transfer、精确 completion identity、唯一共享的
+进程级 `ResidencyManager` 与 Run-bound pending-Value continuation，且不创建另一套 ready store
+或 capacity authority。Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
 取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
 
 ## 背景
@@ -32,8 +34,9 @@ Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详
 `cpu`、`serial_debug` 与 `gpu_pipeline`；其物理 worker、queue、device routing、completion
 与 exception 都保持为 Host execution module 的私有实现。Policy binding 是 process/service state，
 绝不属于 Graph state。Service 根据 composition-root configuration 冻结一个 CPU worker 数量，
-拥有一个固定 Metal worker lane 与一个不可变 device-executor registry，并为每个
-Run 保持隔离的 completion/failure/trace state，并允许来自多个 Graph 的独立 HP 与 RT Run 重叠。
+拥有一个固定 Metal worker lane 与一个共享 residency manager 的不可变 device-executor
+registry，并为每个 Run 保持隔离的 completion/failure/trace state，并允许来自多个 Graph 的独立
+HP 与 RT Run 重叠。
 
 规范 device inventory 感知 route。`cpu` 与 `serial_debug` 只暴露 CPU；固定 registry 包含可用
 Metal executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与
@@ -83,13 +86,19 @@ scalar candidate snapshot。
 - 有界 compute I/O executor；
 - plugin invocation adapter，由独立 `PluginRuntimeSupervisor` 负责 process、IPC、安全和故障隔离。
 
-当前 #84 切片实现 CPU executor、一个由 service 拥有的 Metal lane，以及 source-private 的固定
-device-executor registry。在仓库 Metal plugin 已启用的 profile 中，Apple entry 会拥有并复用
-native device/queue 与经过校验的 pipeline cache，而每次 entry 都获得 invocation-scoped native
-allocator。它不增加 public
-device-executor API，也不增加第二套 device-capacity ledger。通用 CPU/GPU transfer、residency、
-coherency、visibility 与 stale-completion arbitration 仍属于 #85；device-memory 与 scratch
-核算仍属于 #86。
+当前 #84 与 #85 切片实现 CPU executor、一个由 service 拥有的 Metal lane、source-private 的固定
+device-executor registry、显式 CPU/Metal transfer 与精确进程级 residency。在仓库 Metal plugin
+已启用的 profile 中，Apple entry 会拥有并复用 native device/queue 与经过校验的 pipeline cache，
+而每次 entry 都获得 invocation-scoped native allocator。Perlin 会发布 pending native Value、
+编码 texture-to-buffer readback，并且不等待 command buffer 就返回。Completion freshness、
+适用的 producer Ready publication、destination Ready publication 与 resident insertion 是一个
+由 manager lock 保护的事务。Kernel 会先在可失败的 coordinator submission 前预跟踪 lineage，
+但不推进它。Accepted current publication 随后会在 coordinator 仍排除 currentness observation
+时执行无 allocation 的 manager 推进；被拒绝和 born-stale 的 candidate 不会执行该推进。
+这会阻止晚启动的较旧 Run 让 manager generation 倒退。Pending-Value continuation 复用既有
+Run 与 ready store。该切片不
+增加 public device-executor API、Graph/cache authority 或第二套 device-capacity ledger。权威
+device-memory 与 scratch 核算仍属于 #86。
 
 拥有 worker 的 scheduler plugin ABI、SDK target、`IScheduler` hierarchy 与 per-Graph 物理 owner
 已经通过一次完整的破坏性迁移被移除。没有留下 compatibility adapter 或 forwarding layer。

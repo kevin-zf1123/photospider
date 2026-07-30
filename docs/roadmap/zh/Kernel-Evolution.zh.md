@@ -488,14 +488,17 @@ logical dirty/cache validity，以及由精确 core dense path 执行的 ImageRe
 dependency-neutral ReadyFence/Value readiness contract，以及一条由确定性 fake device executor
 证明的显式 source-private CPU Value-copy task。V-7 现已在进程 execution domain 中新增固定的
 source-private `DeviceExecutorRegistry`，并让仓库 Metal Perlin operation 经过其自有
-device/queue、invocation-scoped allocator 与持久 pipeline cache。精确行为记录在
+device/queue、invocation-scoped allocator 与持久 pipeline cache。V-8 现已新增经过检查的
+CPU/Metal binding fact、纯显式 access planning、保留 revision 的双向 transfer、进程级
+residency、精确 stale-completion arbitration、pending-Value continuation 与 asynchronous
+Perlin readback。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
 [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
 [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-7 子集是当前 runtime 事实。
+只有这里明确指出的 V-2 至 V-8 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -526,13 +529,15 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-7 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-8 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics，以及 8/16/32/64-bit byte-addressed storage encoding；
 - `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis；
-- public `BufferHandle` 是同一个 opaque process-local CPU `AllocationIdentity` 上受检、非空的
-  range；subrange 会保留 allocation lifetime，且不暴露 raw pointer；
+- public `BufferHandle` 是同一个 opaque process-local `AllocationIdentity` 上受检、非空的
+  range；subrange 会保留 allocation lifetime。CPU allocation 可以签发 host read lease，
+  source-private native binding 则保留 external owner，并且只暴露经过检查的 binding fact；
+  两条路径都不暴露 public raw pointer 或 native pointer；
 - move-only `ValueBuilder` 控制唯一 move-only `WriteLease`，要求 byte offset 为零的 positive
   exact-envelope producer layout，在 lease 存活时拒绝 seal，并发布全新 process-local
   `ValueRevisionId`；
@@ -544,16 +549,26 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   completer 会发布 cancellation；wait 通过共享的 non-inline executor 入队，该 executor 在
   pending、queued 及 callback 完成前保持存活，并在 callback 进入时释放 queued
   self-retention；
-- 同步 Value 初始即为 Ready；source-private pending producer 保留唯一 mutable CPU
-  capability，并在每次 terminal state 前撤销它；pending/failed/cancelled Value 保留 immutable
-  metadata，但拒绝 BufferHandle 与 checked-view payload access；source-private
-  `ValueTransferTask` 会准备全新 pending CPU allocation，并且只在 source ready 后通过显式
-  queued work 复制已验证的 envelope；
+- 同步 Value 初始即为 Ready；source-private CPU 与 native pending producer 保留唯一 mutable
+  completion capability，并在每次 terminal state 前撤销它；pending/failed/cancelled Value
+  保留 immutable metadata，但拒绝 BufferHandle 与 checked-view payload access；
+- 经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、producer identity 与纯
+  `AccessPlan`，会显式表示 direct、map、import、transfer 或 unsupported access。
+  `ValueTransferTask` 在全新的 destination binding 上保留逻辑 revision，并且只在 source ready
+  后以显式 queued work 执行 CPU copy、CPU-to-Metal upload 或 Metal-to-CPU readback；
+- 唯一的进程级 `ResidencyManager` 按精确 revision/binding 索引合格 replica。它会原子校验完整
+  Graph/Run/generation/task/producer/binding completion identity、发布 readiness 并插入
+  residency，因此晚到、重复或 identity 不匹配的 completion 不能释放 dependency work，也不能
+  重新获得 stale commit right。Kernel 会在 coordinator submission 前预跟踪每条 lineage，
+  而且只有 accepted current publication 才会在 currentness 可观察前推进该行，从而阻止之后
+  才启动的较旧 Run 让 freshness 倒退；
 - source-private `DeviceExecutorRegistry` composition 会在 `ExecutionService` 下拥有固定的非 CPU
   executor；在仓库 plugin 已启用的 Apple profile 中，Metal executor 拥有一个可复用 native
   device/queue 与经过校验的 pipeline cache，通过 invocation allocator 把 callback-scoped
   texture/buffer 保留到 callback 返回，并在 reserved start 后进入一条选中的 Perlin operation，
-  且不会通过 Graph、policy、metadata 或 public Host state 暴露 native handle；
+  且不会通过 Graph、policy、metadata 或 public Host state 暴露 native handle。Perlin 会发布
+  pending native Value，并编码 asynchronous texture-to-shared-buffer readback，不等待 command
+  buffer，也不调用同步 `getBytes`；
 - `image_process:invert_dense` 把精确 descriptor-only inference 与 stride-aware
   unsigned-8 execution 分开，已有 sealed input Value 时直接复用，并发布精确 sealed result
   revision 与独立 ImageBuffer compatibility snapshot；
@@ -571,28 +586,28 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
   source-private contract。
 
-V-7 仍不含 DataSpec、通用 `DeviceId`、public device registry、通用 AccessPlan、residency 或
-visibility model、bidirectional device transfer、stale-completion arbitration、
-device-memory/scratch ledger dimension、quantization、packed element、provider ABI v3 或通用
-named graph Value output。首个 native executor 仍是 source-private；Perlin callback 会同步等待，
-然后返回 CPU compatibility image。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host
-surface 的 compatibility representation。
+V-8 仍不含 DataSpec、public device registry、device-memory/scratch ledger dimension、
+quantization、packed element、provider ABI v3 或通用 named graph Value output。Native
+executor、transfer submission、mutable producer、completion admission 与 residency owner
+仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host surface
+的 compatibility representation。
 
 `ElementSemantics`、`StorageEncoding` 与 `QuantizationSchema` 彼此独立。Describable、
 executable 与 convertible 支持也彼此独立，而且 conversion 始终显式。因此 FP64、任意
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-对于当前 V-6 CPU 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
+对于当前 V-8 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
 builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。
 Source-private producer 可以通过其不可复制的 capability，在预先验证的
-binding/Layout/handle envelope 内完成一个 sealed pending CPU payload。该 capability 的退役
+binding/Layout/handle envelope 内完成一个 sealed pending CPU 或 native payload。该 capability 的退役
 happen-before Ready、Failed 或 ProducerCancelled 发布。Pending、Failed 与
-ProducerCancelled 不暴露 consumer-readable payload。固定 CPU binding 会在 Ready 前完成
-direct host visibility，因此 Ready 允许当前 CPU `ReadLease`；对于其他 binding，完整目标仍要求
-通用 `AccessPlan` 完成 visibility。Strided、Blocked 与 ProviderDefined Layout 都保留有界
-buffer envelope。`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，通用 access 仍是显式
-`Direct | Map | Import | Transfer | Unsupported` plan。
+ProducerCancelled 不暴露 consumer-readable payload。CPU binding 可以提供 direct host
+visibility；device-local binding 不会提供。Strided、Blocked 与 ProviderDefined Layout 都保留
+有界 buffer envelope。`DeviceBackend`、`DeviceId` 与 `MemoryDomain` 彼此分离，当前 access
+由 `Direct | Map | Import | Transfer | Unsupported` plan 显式表示。V-8 中只有 direct CPU
+access 与显式 CPU/Metal transfer 具有 production execution；其他 plan kind 仍是 typed
+outcome，而不是隐藏工作。
 
 已实现的 `RegionSet` 是基于显式逻辑 domain key 的有界析取范式。MVP 支持 Whole、Empty、
 ImageRect、TensorSlice 与一个 nonempty clause。Region algebra 返回 Exact、带标签的
@@ -653,9 +668,9 @@ requirement 或 transitive dependency。
 
 ## 异构 Executor
 
-当前 V-7 Metal executor 有意只证明 process ownership、registry dispatch、queue/allocator/cache
-复用与 provider-state 移除。通用 asynchronous completion、transfer queue、residency、
-stale-result arbitration 与 device-resource ledger dimension 仍属于后续切片。
+当前 V-8 Metal route 组合了 process ownership、registry dispatch、queue/allocator/cache 复用、
+provider-state 移除、asynchronous pending Value、显式 CPU/Metal transfer、进程级 residency 与
+精确 stale-result arbitration。权威 device-resource ledger dimension 仍属于 #86。
 
 GPU executor 不是第二个普通 CPU worker pool。每个物理 device executor 拥有 native queue/stream、
 allocator、in-flight limit、memory/scratch reservation、pipeline cache、transfer queue 和 completion

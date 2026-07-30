@@ -122,9 +122,10 @@ registry symbols. An ordinary plugin requests the `operation_sdk` package
 component and links only `Photospider::operation_sdk`. That interface target
 carries the installed headers and transitively links
 `Photospider::operation_runtime`, whose shared library implements public
-image-buffer factories, immutable CPU DenseTensor Value and checked view
-symbols, and dependency-neutral Region value/algebra, without linking back to
-the SDK or requiring an external package. The static Host product and
+image-buffer factories, explicit-binding DenseTensor Value and checked view
+symbols, dependency-neutral device/access facts, and Region value/algebra,
+without linking back to the SDK or requiring an external package. The static
+Host product and
 independently loaded Value-using
 operation DSOs therefore resolve allocation/revision minting through that one
 runtime image instead of copying counters into each DSO. This is an ordinary
@@ -580,7 +581,7 @@ profiles:
 | Operation plugin v2 | Provisional C++ registrar and callback values | Operation computation and returned values under Host validation |
 | Policy plugin v1 | Exact-size pure C records under a frozen 64-bit profile | Ranking only; no resource or execution capability |
 
-### Implemented V-2 through V-6 SDK subset and future provider ABI
+### Implemented V-2 through V-8 SDK subset and future provider ABI
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts a separately versioned pure-C provider ABI v3 for Schema, Facet,
@@ -616,9 +617,20 @@ synchronous Value readiness to `operation_runtime`. Pending publication
 authority and `ValueTransferTask` remain source-private, so an SDK consumer can
 observe readiness but cannot create a pending producer or transfer task.
 
-None of these slices places Value, BufferHandle, leases, Region, ReadyFence, or
-a PImpl in a v2 callback record, and none changes the two current boundaries in
-the table. Operation ABI v2 remains the current operation contract until every
+V-8 adds installed checked `DeviceBackend`, `DeviceId`, `MemoryDomain`,
+`StorageBinding`, producer identity, and pure `AccessPlan` observation. Native
+allocation construction, native handles, mutable pending-device producers,
+completion admission, `ResidencyManager`, and CPU/Metal transfer submission
+remain source-private. The repository Metal operation receives its borrowed
+device/queue/allocator context only through the source-private invocation
+boundary, publishes a pending native Value internally, and performs explicit
+asynchronous readback. A third-party v2 callback receives no such context and
+cannot infer one from `ImageBuffer::context`.
+
+None of these slices places Value, BufferHandle, leases, Region, ReadyFence,
+device/access records, or a PImpl in a v2 callback record, and none changes the
+two current boundaries in the table. Operation ABI v2 remains the current
+operation contract until every
 repository-owned operation and installed consumer has migrated. The completion
 boundary then deletes v2, its entry point, SDK, fixtures, and package surface
 without a permanent dual loader, wrapper, alias, forwarding header, or
@@ -674,7 +686,10 @@ record the follow-up direction.
 ## Implementation and Validation Entry Points
 
 - `include/photospider/data/value.hpp`
+- `include/photospider/core/device.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/plugin_api.hpp`
@@ -683,6 +698,9 @@ record the follow-up direction.
 - `src/lib/core/value.cpp`
 - `src/lib/core/cpu_dense_image_operation.*`
 - `src/lib/plugin/operation_host_adapter.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/policy/policy_registry.*`
@@ -691,6 +709,8 @@ record the follow-up direction.
 - `tests/unit/test_op_registry_m31.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
+- `tests/unit/test_device_residency.cpp`
 - `tests/fixtures/value_identity_dso.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/integration/static_product_consumer_smoke.py`

@@ -97,9 +97,9 @@ Host-owned reserved-start transaction 提交的每个 Run 执行权。
 | `DirtySnapshotTaskGraphPruner` | 从既有 plan 选择活动 dirty work | task expansion |
 | `IntentUpdateCoordinator` | HP-only 或 HP/RT sibling 语义 | 物理优先级或 worker 所有权 |
 | `ComputeTaskDispatcher` | Dependency counter、ready release、temporary-result indexing、completion、exception、full HP commit 与 dirty source-first submission helper | Run storage、Graph topology derivation、dirty staged commit、policy ranking 或物理执行 |
-| `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、冻结的 implementation/device snapshot、结果槽与 callback owner | execution-route worker、Run terminal state 或 dirty-path execution |
+| `TaskSubmissionPlan` | 一个 full HP request 的 Run-owned dense index、依赖状态、exact-once task state、冻结的 implementation/device snapshot、结果槽、callback owner 与 pending-Value fence wait cancellation owner | execution-route worker、Run terminal state、native completion freshness 或 dirty-path execution |
 | `ReadyTaskSubmission` | 一个 dependency-ready task 的 move-only 不可变 metadata、selected `Device`、精确 operation constraint、复合 task identity、匹配 Run lease 与 owned executable | Planning、dependency derivation、Graph/cache authority 或 commit |
-| `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、一个带 process-owned native resource 的固定 `DeviceExecutorRegistry`、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、一个 process-domain operation gate、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority、visible commit、通用 device residency/coherency/transfer planning 或 device-memory 核算 |
+| `ExecutionService` | 一个 Host-owned 固定 CPU pool、一个由 service 拥有的 Metal lane、一个带 process-owned native resource 与共享精确 `ResidencyManager` 的固定 `DeviceExecutorRegistry`、私有 `serial_debug`/`gpu_pipeline` route、一个 Host 权威 `ResourceLedger`、一个 process-domain operation gate、一个私有 lifecycle-admission registry、policy-aware 有界 ready storage、Run-scoped ReadyFence continuation routing、进程级 policy binding、reserved-start transaction、精确 Run queued purge/running drainage，以及按 Run 隔离的 completion/failure/trace settlement | Planning、dependency、Graph/cache state、cancellation authority、visible commit、access-plan selection 或 authoritative device-memory/scratch 核算 |
 | `NodeExecutor` | 一致的 monolithic/tiled operation 调用 | 图变更策略 |
 | `ComputeMetricsRecorder` | compute event、timing、benchmark event 和 debug metadata | execution trace 所有权 |
 | `PolicyRegistry` 与 policy binding | 验证 built-in/DSO policy type，拥有进程级 context 与 DSO lease，并为 Host-authored 不可变 candidate snapshot 排序 | worker、queue、resource grant、Run、Graph、completion 或 start authority |
@@ -153,10 +153,32 @@ path。一个 non-virtual、source-private 的 executor 入口会在 concrete ad
 身份识别的 callback frame。直接递归与 `A -> B -> A` 之类的间接环会在
 submission/entry counter、context 安装或 provider 入口之前以稳定的 `std::logic_error` 失败，
 而不同 executor 可以同步嵌套。作用域化 frame 恢复会保留外层 context，并原样传播 provider
-异常。Perlin provider 会借用 executor resource，并返回 CPU-owned compatibility image；
-`GraphRuntime` 不再拥有 native Metal state。本切片不增加通用 `AccessPlan`、residency、
-visibility、bidirectional transfer、stale-completion arbitration，也不增加
-device-memory/scratch ledger dimension；这些分别仍属于 #85 与 #86。
+异常。
+
+V-8 新增显式 device/binding observation、AccessPlan classification、保留 revision 的 CPU/Metal
+transfer 与精确 residency，同时不会把隐式 payload work 插入 `Value` accessor。Metal provider
+会发布 pending source-private Value，并在 command commit 后立即返回。`TaskSubmissionPlan`
+会先递增 completion，再注册 fence wait；生产 ReadyFence executor 会保留精确 Run、lease、
+task 与 ready-store route，把早到 callback 停放到原始 QueueEntry 与 grant 退役之后，并在所有
+continuation owner 退役前阻止 terminal settlement。成功 continuation 会先物化 CPU
+compatibility snapshot，再释放 dependant；Failed、ProducerCancelled、stale 或 mismatched
+completion 不释放任何 dependant。
+
+Registry 共享的 `ResidencyManager` 会在 native commit 前准入完整
+Graph/target/intent/generation/Run/task/producer/revision/binding identity。Current-generation
+publication 被提交给 coordinator 之前，Kernel 会先以可失败方式预跟踪 request lineage，
+并建立内部零 generation 占位。只有被接受的 current publication 才会在 coordinator mutex
+仍排除 `is_current()` 的期间调用 manager 的无 allocation generation 推进；被拒绝或
+born-stale 的 candidate 不会推进它。因此，如果 N+1 在 generation N 启动物理 Run 前成为
+current，N 随后的 observation 不能让 manager 倒退，其 transfer admission 会被视为 stale。
+Current-generation
+校验、producer Ready transition 与 resident 插入形成同一个 manager-locked 线性化区间。因此，
+新 generation 要么先于旧 callback，使 destination 在 Ready 前进入 typed failure；要么发生在
+一个已经以 current 身份发布的 completion 之后。Duplicate 与 proper-subset identity 不能消费
+另一条 admission。Perlin provider 会编码显式 texture-to-buffer blit，不调用
+`waitUntilCompleted` 或 `getBytes`；CPU-to-Metal 使用相反方向的显式 blit。`GraphRuntime`
+仍不拥有 native Metal state，#74 仍是最终 visible-commit gate，#86 仍拥有 authoritative
+device-memory/scratch 核算。
 
 当前内建 CPU 准入会把强制、经检查的 service envelope 与可审计的 adapter envelope 组合起来。
 Run/control/plan 或 phase-context 共享的 retained storage 只计费一次。统一的逐任务 retained 与
@@ -555,12 +577,15 @@ Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC
 [ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)、
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #84 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是截至 issue #85 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源以及精确 implementation/key gate。
 每次 `GPU_METAL` start 随后都会进入匹配的固定、进程自有 registry executor，并在 provider
 返回前借用其 queue、invocation allocator 与 pipeline cache。Sequential provider entry 通过
-direct lease 使用同一 ledger 与 gate。Graph 只保留复制的 route id/generation，不拥有 native
+direct lease 使用同一 ledger 与 gate。Pending device work 会返回 Value，其 Run-scoped
+continuation 会重新进入同一个 ready store；精确 freshness 会在 dependency release 前门控
+destination Ready 与进程 residency，而 graph-state transaction 仍是最终 publication
+authority。Graph 只保留复制的 route id/generation，不拥有 native
 device owner；不再存在拥有 worker 的 scheduler SDK、scheduler plugin、per-Graph 物理 owner 或
 compatibility adapter。独立 realtime child Run、request-owned staging、强 identity/revision check、
 latest-wins supersession、cancellation observation、精确 Run queued purge、dependent suppression 与
@@ -575,6 +600,8 @@ cancellation entry point 仍是未来行为。
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
@@ -597,6 +624,9 @@ cancellation entry point 仍是未来行为。
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`

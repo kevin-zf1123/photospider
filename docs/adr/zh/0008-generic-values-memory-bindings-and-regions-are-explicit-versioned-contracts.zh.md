@@ -2,16 +2,19 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-7
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-8
 切片：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
 以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP；V-5
 operation-metadata routing 与有界 V-6 ReadyFence、pending CPU Value 和显式 fake-device
 Value-copy 证明也已成为当前行为。V-7 新增一套 source-private 的进程级 device-executor
 registry，并让仓库 Metal Perlin operation 经过其自有 queue、invocation allocator 与 pipeline
-cache。`ImageBuffer`、`DataType`、`Device`、`ParameterMap` 与 operation plugin ABI v2 仍是各自
+cache。V-8 新增显式 device/binding 事实、非阻塞 access plan、保留 revision 的 CPU/Metal
+transfer、精确的进程级 residency、Run-scoped pending-Value continuation，以及在 destination
+Ready 前拒绝 stale native completion。`ImageBuffer`、`DataType`、`Device`、`ParameterMap`
+与 operation plugin ABI v2 仍是各自
 角色边缘上的兼容契约；本 ADR 中尚未实现的部分仍是演进目标。
 
-Issue #78 批准了本契约。Issue #79 至 #84 交付了有界的 V-2 至 V-7 实现切片；Issue #85
+Issue #78 批准了本契约。Issue #79 至 #85 交付了有界的 V-2 至 V-8 实现切片；Issue #86
 至 #90 仍是彼此独立的实现切片。合成的
 `VariableSampleField` 证明与可选 OpenEXR Deep provider 仍是彼此独立的后续 change；
 本决策不实现二者。
@@ -268,9 +271,27 @@ ready 后复制一个已验证的 CPU envelope，并发布独立 destination。
 拥有一个 native device 与 queue、一个 callback-scoped texture/buffer allocator，以及经过校验的
 持久 pipeline cache。经过 reserved start 的 work 会在该借用 context 内调用 Metal Perlin
 provider，并返回独立的 CPU compatibility image。
-该证明仍不包含通用 `DeviceId`、`AccessPlan`、residency replica、coherency/visibility model、
-bidirectional transfer 或 stale-completion arbitration；这些通用 access 与 transfer 语义属于
-#85，device-memory 与 scratch 核算属于 #86。
+
+已实现的 V-8 子集新增 dependency-neutral 的 `DeviceBackend`、`DeviceId`、
+`MemoryDomain`、`StorageBinding`、producer identity 与穷尽的 `AccessPlan` outcome。
+`BufferHandle` 可以保留 source-private native owner 而不暴露其 handle；对 non-host-visible
+binding 的访问会抛错，而不会隐式 map、等待或 transfer。CPU-to-CPU、CPU-to-Metal 与
+Metal-to-CPU transfer 会发布保留同一逻辑 `ValueRevisionId` 的独立 binding。进程级
+`ResidencyManager` 会准入完整的 Run/task/producer/revision/binding identity，并在同一把锁下
+线性化 current-generation 校验、producer Ready 发布与 replica 插入。因此，新 generation
+要么让旧 callback 在 destination Ready 前进入 typed Failed，要么发生在一个已经以 current
+身份完成的 completion 之后；mismatched 与 duplicate identity 不能消费或重新发布另一条
+admission。Pending operation Value 会让其 Run 保持未 settlement，并且只有 terminal success
+之后才能通过同一个 `ExecutionService` ready store 释放 dependant。Metal Perlin 路径会编码
+显式 texture-to-shared-buffer blit、安装 completion handler、commit 并立即返回，不再调用
+`waitUntilCompleted` 或 `getBytes`。V-8 刻意不新增 authoritative device-memory 或 scratch
+ledger；该职责仍属于 #86。
+
+Current-generation handoff 会分阶段完成，而不会在 coordinator critical section 中
+allocation。Kernel 会在提交 publication 前预跟踪一个零 generation lineage row。只有
+accepted current candidate 才会通过 no-throw callback 推进该预跟踪行，而且 callback
+紧邻 coordinator currentness 可观察之前执行。被拒绝或 born-stale 的 candidate 保持该行
+不变；在 N+1 publication 后才启动的 generation-N Run 不能让单调 manager row 倒退。
 
 `ComputeRun` 会保留 request-local 不可变 Value 及其 authoritative binding。Settlement 会核算
 每个 output 的 terminal fence state、provider-generation lease、access obligation 与

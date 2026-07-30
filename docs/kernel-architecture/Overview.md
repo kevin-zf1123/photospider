@@ -45,11 +45,11 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_opencv_operation_provider_internal` | Build-only, optional repository OpenCV CPU operation provider. It owns operation algorithms, OpenCV process initialization, and OpenCV exception translation, and exists only with `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, configured-provider composition, v2 loader, value adapter, and DSO lifetime ownership. |
 | `photospider_policy_internal` | Build-only process policy registry, pure-C ABI-v1 DSO loader, immutable bindings, sticky faults, and DSO leases. |
-| `photospider_execution_internal` | Build-only private physical-resource accounting, execution-domain support, and bounded CPU Value-transfer task. |
+| `photospider_execution_internal` | Build-only private physical-resource accounting, execution-domain support, explicit CPU/Metal Value-transfer tasks, exact completion identity, and process-owned residency. |
 | `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, event, fixed worker service, reserved-start, and private route implementation; it depends one-way on policy and execution internals. |
 | `photospider_host_internal` | Build-only Kernel/Interaction facades and embedded Host composition root. It selects real YAML persistence adapters or explicit unavailable adapters according to the producer capability. |
 | `photospider_kernel` | Buildable aggregate target that compiles the real selected core, graph, operation-plugin, policy, execution, compute, Host, and optional provider/adapter modules; it is not an install artifact or a placeholder library. |
-| `photospider_operation_runtime` | Installable shared implementation of public image-buffer factories, the immutable CPU DenseTensor Value/ImageView subset, Region algebra, and ReadyFence. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Threads, graph, registry, native-device SDK, or embedded-product dependency. |
+| `photospider_operation_runtime` | Installable shared implementation of public image-buffer factories, the explicit-binding DenseTensor Value/ImageView subset, Region algebra, and ReadyFence. It owns the sole process-wide allocation/revision minting authority used by the static Host and every Value-using DSO, with no OpenCV, yaml-cpp, Threads, graph, registry, native-device SDK, or embedded-product dependency. |
 | `photospider_operation_sdk` | Installable interface target for operation v2 and dependency-neutral data/memory headers; it transitively links `operation_runtime`. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_policy_sdk` | Installable dependency-neutral interface target carrying the self-contained pure-C policy ABI header plus C11/C++17 requirements. |
@@ -554,6 +554,23 @@ identity, while dirty mutation, replacement, and disk reload mint new runtime
 identities. Host and operation plugin ABI v2 remain on the current ImageBuffer
 compatibility boundary until their later migration slices.
 
+V-8 adds checked `DeviceId`, `MemoryDomain`, `StorageBinding`, native-allocation
+retention, producer identity, and an explicit `AccessPlan`. A transfer creates
+a distinct physical replica while preserving the same logical
+`ValueRevisionId`; no host pointer is invented for a device-local binding.
+`ResidencyManager` is the single process owner of exact eligible replicas and
+publishes destination readiness and residency in one freshness-checked
+transaction. Kernel pretracks a lineage before fallible coordinator
+publication, and an accepted current-generation callback advances that
+preallocated row under coordinator-to-manager ordering before currentness is
+observable. A later older Run observation cannot regress it. Pending Values
+re-enter the existing `ExecutionService` ready
+store through Run-scoped continuations, so CPU workers do not wait for Metal
+completion. The Metal Perlin route produces a pending native Value and uses
+explicit asynchronous texture-to-buffer readback before downstream CPU access.
+Operation ABI v2 and Host surfaces still use ImageBuffer compatibility values;
+V-8 adds no public native-device context or new ABI slot.
+
 ### Dirty Region Propagation
 
 ROI propagation is handled through `RoiPropagationService` using
@@ -585,7 +602,9 @@ Important current behavior:
   executes owned callbacks under stable Run leases and routes failure by
   `(RunId, RunLocalTaskId)`; all dirty routes retain owned Run leases through completion. One private request source fans its stable
   first reason into both realtime child Runs, while HP-only child cancellation
-  remains local.
+  remains local. A pending Value adds one Run-owned fence continuation; the Run
+  cannot settle until every such continuation has retired, including failure
+  and cancellation paths.
 - Each live Graph coordinator owns checked graph-wide generations, one latest
   pending mailbox and persistent continuation ticket per exact key, and one
   logical active-runner marker. The existing bounded compute-lane worker runs
@@ -657,6 +676,13 @@ Important current behavior:
   and protocol-v2 control surface are current. Issue #76's lifecycle registry,
   Graph close/process shutdown fence, exact settlement, and source-private
   telemetry are current. Public cancellation control remains future.
+- [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
+  defines the versioned data, binding, and Region direction. Its issues #79
+  through #85 are current: V-8 provides explicit CPU/Metal transfer,
+  revision-preserving replicas, process-owned residency, exact stale-completion
+  rejection, and pending-Value continuation without changing operation ABI v2.
+  Device-memory/scratch admission and the remaining generic provider migration
+  stay future work.
 
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of
@@ -667,7 +693,9 @@ this current-state document.
 - `CMakeLists.txt`
 - `include/photospider/host/host.hpp`
 - `include/photospider/data/value.hpp`
+- `include/photospider/core/device.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_document_reader.hpp`
 - `src/lib/graph/graph_document_writer.hpp`
@@ -687,6 +715,9 @@ this current-state document.
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
@@ -699,4 +730,6 @@ this current-state document.
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_device_residency.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

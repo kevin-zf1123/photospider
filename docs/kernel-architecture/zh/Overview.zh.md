@@ -38,11 +38,11 @@ planning、pruning、dispatch、propagation、cache decision、execution 和 met
 | `photospider_opencv_operation_provider_internal` | 仅用于构建、可选的仓库 OpenCV CPU operation provider。它拥有 operation algorithm、OpenCV 进程初始化与 OpenCV 异常翻译，并且只在 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=ON` 时存在。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation plugin manager、configured-provider composition、v2 loader、value adapter 与 DSO lifetime owner。 |
 | `photospider_policy_internal` | 仅用于构建的进程 policy registry、纯 C ABI-v1 DSO loader、不可变 binding、sticky fault 与 DSO lease。 |
-| `photospider_execution_internal` | 仅用于构建的私有物理资源计账、execution-domain 支持与有界 CPU Value-transfer task。 |
+| `photospider_execution_internal` | 仅用于构建的私有物理资源计账、execution-domain 支持、显式 CPU/Metal Value-transfer task、精确 completion identity 与进程级 residency。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、dirty-region、runtime、interaction、event、固定 worker service、reserved-start 与私有 route 实现；它单向依赖 policy 和 execution internal。 |
 | `photospider_host_internal` | 仅用于构建的 Kernel/Interaction facade 与 embedded Host composition root。它根据 producer capability 选择真实 YAML persistence adapter 或显式 unavailable adapter。 |
 | `photospider_kernel` | 可构建的聚合 target，编译实际选中的 core、graph、operation-plugin、policy、execution、compute、Host 以及可选 provider/adapter 模块；它不是安装 artifact，也不是占位 library。 |
-| `photospider_operation_runtime` | 可安装的 public image-buffer factory、immutable CPU DenseTensor Value/ImageView 子集、Region algebra 与 ReadyFence 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Threads、graph、registry、native-device SDK 或 embedded product。 |
+| `photospider_operation_runtime` | 可安装的 public image-buffer factory、explicit-binding DenseTensor Value/ImageView 子集、Region algebra 与 ReadyFence 共享实现。它持有静态 Host 与每个 Value-using DSO 共用的唯一进程级 allocation/revision minting authority；不依赖 OpenCV、yaml-cpp、Threads、graph、registry、native-device SDK 或 embedded product。 |
 | `photospider_operation_sdk` | operation v2 与 dependency-neutral data/memory header 的可安装 interface target；传递链接 `operation_runtime`。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter，只使用 OpenCV `core` component；仅在 `PHOTOSPIDER_ENABLE_OPENCV=ON` 时存在。 |
 | `photospider_policy_sdk` | 携带自包含纯 C policy ABI header 与 C11/C++17 requirement 的可安装、无依赖 interface target。 |
@@ -447,6 +447,19 @@ stride-aware execution 分开，校验返回的完整 descriptor/facet/layout，
 replacement 与 disk reload 则铸造新 runtime identity。Host 与 operation plugin ABI v2 会继续
 停留在当前 ImageBuffer compatibility 边界，直到后续 migration slice。
 
+V-8 新增经过检查的 `DeviceId`、`MemoryDomain`、`StorageBinding`、native-allocation retention、
+producer identity 与显式 `AccessPlan`。Transfer 会创建不同的物理 replica，同时保留同一个逻辑
+`ValueRevisionId`；device-local binding 不会被伪造出 host pointer。`ResidencyManager` 是精确
+合格 replica 的唯一进程 owner，并在同一个 freshness-checked transaction 中发布 destination
+readiness 与 residency。Kernel 会在可失败的 coordinator publication 前预跟踪 lineage；
+accepted current-generation callback 会按 coordinator-to-manager 顺序推进该预分配行，
+然后 currentness 才可观察。较旧 Run 随后的 observation 不能让该行倒退。Pending Value
+通过 Run-scoped continuation 重新进入既有
+`ExecutionService` ready store，因此 CPU worker 不会等待 Metal completion。Metal Perlin route
+会产生 pending native Value，并在下游 CPU access 前执行显式 asynchronous
+texture-to-buffer readback。Operation ABI v2 与 Host surface 仍使用 ImageBuffer compatibility
+value；V-8 不增加 public native-device context 或新 ABI slot。
+
 ### 脏区传播
 
 ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 propagator、`GraphModel`
@@ -474,6 +487,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   full、dirty 与 preflight work 会在稳定 Run lease 下执行 owned callback，并按
   `(RunId, RunLocalTaskId)` 路由 failure；所有 dirty route 都会通过 completion 保留 owned Run lease。一个私有 request source 会把稳定的首个 reason 扇出到两个 realtime
   child Run，而 HP-only child cancellation 保持局部。
+  Pending Value 会增加一个 Run-owned fence continuation；在每个 continuation 退役前，即使经过
+  failure 或 cancellation path，Run 也不能结算。
 - 每个 live Graph coordinator 拥有 checked graph-wide generation、每个精确 key 的一个 latest
   pending mailbox 与 persistent continuation ticket，以及一个 logical active-runner marker。现有有界
   compute-lane worker 执行每次 ticket turn；supersession 不创建 background runner 或额外 thread。
@@ -526,6 +541,11 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
   surface 也已是当前行为。Issue #76 的 lifecycle registry、Graph close/process shutdown
   fence、精确 settlement 与 source-private telemetry 已是当前行为。Public cancellation control
   仍是未来行为。
+- [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
+  定义版本化 data、binding 与 Region 方向。其中 issue #79 至 #85 已是当前行为：V-8 提供显式
+  CPU/Metal transfer、保留 revision 的 replica、进程级 residency、精确 stale-completion
+  rejection 与 pending-Value continuation，且不改变 operation ABI v2。Device-memory/scratch
+  admission 与其余通用 provider migration 仍是未来工作。
 
 [内核演进 roadmap](../../roadmap/zh/Kernel-Evolution.zh.md) 把目标决策组合成长远方向，但不会改变
 本文档所记录的当前状态。
@@ -535,7 +555,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `CMakeLists.txt`
 - `include/photospider/host/host.hpp`
 - `include/photospider/data/value.hpp`
+- `include/photospider/core/device.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `src/lib/graph/graph_document_reader.hpp`
 - `src/lib/graph/graph_document_writer.hpp`
@@ -555,6 +577,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `src/lib/runtime/kernel.*`
 - `src/lib/runtime/graph_runtime.*`
 - `src/lib/compute/compute_run.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
@@ -567,4 +592,6 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_value_identity_dso.cpp`
 - `tests/unit/test_compute_run.cpp`
+- `tests/unit/test_device_residency.cpp`
+- `tests/integration/test_metal_device_executor.cpp`
 - `tests/unit/test_stdlib_image_buffer_processing.cpp`

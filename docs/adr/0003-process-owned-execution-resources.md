@@ -30,8 +30,11 @@ execution shutdown, exact settlement, and source-private telemetry. Issue #84
 removes per-Graph native Metal ownership and installs a fixed
 `DeviceExecutorRegistry` in `ExecutionService`; its Metal executor owns one
 device, command queue, invocation allocator, and persistent pipeline cache and
-enters the selected operation only after reserved start. Public Host/CLI/IPC
-cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
+enters the selected operation only after reserved start. Issue #85 adds
+explicit revision-preserving CPU/Metal transfer, exact completion identity,
+one shared process-owned `ResidencyManager`, and Run-bound pending-Value
+continuations without creating another ready store or capacity authority.
+Public Host/CLI/IPC cancellation controls remain future behavior. ADR 0007 supersedes this ADR only
 as the detailed
 ownership and lifecycle contract; the high-level process ownership decision
 and its historical context remain in force.
@@ -44,7 +47,7 @@ The route vocabulary is closed to `cpu`, `serial_debug`, and
 exceptions remain private to Host execution modules. Policy binding is
 process/service state and never Graph state. The service freezes one CPU worker
 count from composition-root configuration, owns one fixed Metal worker lane
-and one immutable device-executor registry, and keeps isolated
+and one immutable device-executor registry with a shared residency manager, and keeps isolated
 completion/failure/trace state per Run, and permits independent HP and RT Runs
 from multiple Graphs to overlap.
 
@@ -110,14 +113,24 @@ Physical execution is divided into resource executors:
 - a plugin invocation adapter backed by a separate
   `PluginRuntimeSupervisor` for process, IPC, security, and failure isolation.
 
-The current #84 slice realizes the CPU executor, one service-owned Metal lane,
-and a source-private fixed device-executor registry. In the enabled repository
-Metal-plugin profile, the Apple entry owns and reuses its native device/queue
-and validated pipeline cache, while each entry receives an invocation-scoped
-native allocator. It adds no public
-device-executor API and no second device-capacity ledger. General CPU/GPU
-transfer, residency, coherency, visibility, and stale-completion arbitration
-remain #85; device-memory and scratch accounting remain #86.
+The current #84 and #85 slices realize the CPU executor, one service-owned
+Metal lane, a source-private fixed device-executor registry, explicit
+CPU/Metal transfer, and exact process-owned residency. In the enabled
+repository Metal-plugin profile, the Apple entry owns and reuses its native
+device/queue and validated pipeline cache, while each entry receives an
+invocation-scoped native allocator. Perlin publishes a pending native Value,
+encodes texture-to-buffer readback, and returns without a command-buffer wait.
+Completion freshness, applicable producer Ready publication, destination Ready
+publication, and resident insertion are one manager-locked transaction.
+Kernel first pretracks the lineage without advancing it before fallible
+coordinator submission. An accepted current publication then performs a
+no-allocation manager advance while the coordinator still excludes currentness
+observation; rejected and born-stale candidates do not. This prevents a late
+older Run start from regressing the manager generation.
+Pending-Value continuation reuses the existing Run and ready store. This adds
+no public device-executor API, no Graph/cache authority, and no second
+device-capacity ledger. Authoritative device-memory and scratch accounting
+remains #86.
 
 The worker-owning scheduler plugin ABI, SDK target, `IScheduler` hierarchy, and
 per-Graph physical owners have been removed as a complete breaking migration.

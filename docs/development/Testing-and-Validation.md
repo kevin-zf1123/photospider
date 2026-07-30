@@ -206,7 +206,7 @@ turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
 `test_cpu_dense_tensor_image_operation` and
 `test_value_identity_across_dsos` binaries. Before installation it runs all
-44 dense-image cases plus the dual-DSO identity case in that actual disabled
+46 dense-image cases plus the dual-DSO identity case in that actual disabled
 producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
@@ -577,11 +577,13 @@ rules. The group cases distinguish a request-level accepted reason from a
 reason that actually wins an open child arbiter: late Superseded or
 ExplicitRequest after two child successes cannot replace aggregate success,
 while a winning cancellation retains the first reason below failure priority.
-CMake discovers all 15 cases through CTest with a 60-second per-case timeout.
+CMake discovers all 16 cases through CTest with a 60-second per-case timeout.
 The stress cases assert one ticket, one logical active owner, at most one
 pending owner, exact displaced settlement, and only the final current
 generation remaining commit-eligible; they do not create a background runner
-or rely on timing sleeps.
+or rely on timing sleeps. The current-observer case proves an accepted newer
+generation advances external freshness before physical execution while a
+prepared older generation that is born stale emits no observer notification.
 
 `test_kernel_contracts` owns the product boundary. It proves missing intent and
 explicit HP share one key, failed newest work does not resurrect an older
@@ -672,11 +674,26 @@ same-executor callback recursion through the real registry, and exits only
 after proving the exact error text, unchanged nested counters/resource
 diagnostics, preserved outer TLS context, cleared post-return TLS, and a
 successful later invocation. The alarm turns the former self-deadlock into a
-bounded test failure without detached threads or lifetime races. Finally, the
-test runs the real repository Perlin operation twice through one
-`ExecutionService` and proves queue availability, two submissions and executor
-entries, six retired invocation allocations, one reused pipeline, CPU-owned
-outputs, the dedicated Metal worker id, and an empty settled ledger.
+bounded test failure without detached threads or lifetime races. After proving
+that watchdog path, the test performs one real CPU-to-Metal upload and proves
+an exact revision-preserving device replica enters residency. It then runs the
+real repository Perlin operation twice through one `ExecutionService` and
+proves queue availability, two operation submissions and executor entries,
+eight retired invocation allocations, one reused pipeline, asynchronous
+pending-Value readback to CPU-owned outputs, the dedicated Metal worker id, and
+an empty settled ledger.
+
+V-8 adds nine portable cases in `test_device_residency`. They lock direct
+host-read versus transfer planning, exact current completion publication, late
+stale rejection before destination Ready, pretracked current publication
+rejecting a late older Run admission, failed/discarded nonpublication,
+proper-subset identity rejection without consuming a rightful admission,
+concurrent exact callbacks, and duplicate-completion rejection.
+`test_compute_run` adds deterministic cases for an early fence callback parked
+until original grant retirement, executor lifetime extending Run settlement,
+pending Value dependency deferral, cancellation that retires a continuation
+without waiting for its producer, and typed stale failure that never releases
+dependent work. These cases use gates and futures and contain no timing sleep.
 
 `test_cli_policy_execution_config` locks transactional policy/execution config
 parsing and exact Host application. `test_host_adapter` loads real operation
@@ -701,13 +718,14 @@ Run the focused policy/execution boundary with:
 cmake --build build \
   --target test_policy_registry test_policy_execution \
   test_physical_execution_routes test_device_executor_registry \
-  test_compute_run test_resource_admission \
+  test_device_residency test_compute_run test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
 ./build/tests/test_device_executor_registry
+./build/tests/test_device_residency
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -1058,10 +1076,10 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor, ImageView, Region, and ReadyFence Validation
+## CPU DenseTensor, ImageView, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-6 boundary. Its 44 durable cases
+binary for the implemented V-2 through V-8 boundary. Its 46 durable cases
 verify:
 
 - copyable ReadyFence polling, queued non-inline waits, observer-local waiter
@@ -1075,11 +1093,15 @@ verify:
 - pending Value metadata/identity observation, typed rejection of BufferHandle
   and checked-view payload access, and private producer revocation before
   readable Ready publication;
-- explicit fake-executor transfer enqueue, distinct allocation/revision
-  identity, sole-executor retention through destination completion,
+- explicit fake-executor transfer enqueue, distinct allocation binding with a
+  preserved logical revision, sole-executor retention through destination completion,
   byte-identical completion, chained readiness without worker blocking,
   unreadable source failure/cancellation propagation, and destination-only
   cancellation when transfer ownership drops;
+- explicit injected CPU-to-Metal transfer, checked device-local binding,
+  revision preservation, rejection of a claimed host-visible target without a
+  host pointer, no implicit host read or readback, typed provider failure, and
+  successful later transfer through the same executor;
 - malformed facet, stride, byte-offset, and exact-envelope rejection, including
   checked single-axis/cross-axis writable collision and overflow cases plus
   accepted padded, transposed, and singleton-axis layouts;
@@ -1128,14 +1150,14 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 44 dense cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all 46 dense cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
 synchronous Ready Value fence without optional dependencies. The
-provider-disabled nested build below also compiles and runs all 44 dense cases
+provider-disabled nested build below also compiles and runs all 46 dense cases
 plus that dual-DSO case, so the real core operation, fence/transfer proof, and
 identity authority do not depend on the optional OpenCV operation provider or
 a native device SDK.
@@ -1174,9 +1196,9 @@ dedicated disk-cache and kernel-lifecycle concurrency binaries, plus the
 provider-independent `test_kernel_contracts` internal-seam consumer, then
 queries the machine-readable CTest inventory. `test_kernel_contracts` is built
 to exercise the focused-only direct-consumer closure but is deliberately not
-discovered in this nested inventory. That inventory must contain exactly 52
+discovered in this nested inventory. That inventory must contain exactly 54
 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 44
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 46
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two

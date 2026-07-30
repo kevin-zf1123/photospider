@@ -113,9 +113,9 @@ reserved-start transaction.
 | `DirtySnapshotTaskGraphPruner` | Active dirty work selected from an existing plan | Task expansion |
 | `IntentUpdateCoordinator` | HP-only or HP/RT sibling semantics | Physical priority or worker ownership |
 | `ComputeTaskDispatcher` | Dependency counters, ready release, temporary-result indexing, completion, exceptions, full HP commit, and dirty source-first submission helper | Run storage, graph topology derivation, dirty staged commit, policy ranking, or physical execution |
-| `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, and callback owner for one full HP request | Execution-route workers, Run terminal state, or dirty-path execution |
+| `TaskSubmissionPlan` | Run-owned dense indexes, dependency state, exact-once task state, frozen implementation/device snapshots, result slots, callback owner, and cancellation owner for pending-Value fence waits for one full HP request | Execution-route workers, Run terminal state, native completion freshness, or dirty-path execution |
 | `ReadyTaskSubmission` | Move-only immutable metadata, selected `Device`, exact operation constraints, composite task identity, matching Run lease, and owned executable for one dependency-ready task | Planning, dependency derivation, Graph/cache authority, or commit |
-| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, general device residency/coherency/transfer planning, or device-memory accounting |
+| `ExecutionService` | One Host-owned fixed CPU pool, one service-owned Metal lane, one fixed `DeviceExecutorRegistry` with process-owned native resources and shared exact `ResidencyManager`, private `serial_debug` and `gpu_pipeline` routes, one host-authoritative `ResourceLedger`, one process-domain operation gate, one private lifecycle-admission registry, policy-aware bounded ready storage, Run-scoped ReadyFence continuation routing, process policy bindings, reserved-start transactions, exact-Run queued purge/running drainage, and Run-local completion/failure/trace settlement | Planning, dependencies, Graph/cache state, cancellation authority, visible commit, access-plan selection, or authoritative device-memory/scratch accounting |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Execution-trace ownership |
 | `PolicyRegistry` and policy bindings | Validate built-in/DSO policy types, own process-scoped contexts and DSO leases, and rank immutable Host-authored candidate snapshots | Workers, queues, resource grants, Runs, Graphs, completion, or start authority |
@@ -184,11 +184,39 @@ Direct recursion and indirect cycles such as `A -> B -> A` fail with a stable
 `std::logic_error` before submission/entry counters, context installation, or
 provider entry, while a distinct executor may nest synchronously. Scoped frame
 restoration preserves the outer context and propagates provider exceptions
-unchanged. The Perlin provider borrows executor resources and returns a
-CPU-owned compatibility image, while `GraphRuntime` owns no native Metal state.
-This slice adds no general `AccessPlan`, residency, visibility, bidirectional
-transfer, stale-completion arbitration, or device-memory/scratch ledger
-dimensions; those remain #85 and #86.
+unchanged.
+
+V-8 adds explicit device/binding observations and AccessPlan classification,
+revision-preserving CPU/Metal transfer, and exact residency without inserting
+implicit payload work into `Value` accessors. A Metal provider publishes a
+pending source-private Value and returns immediately after command commit.
+`TaskSubmissionPlan` increments completion before registering the fence wait;
+the production ReadyFence executor retains the exact Run, lease, task, and
+ready-store route, parks an early callback until the original QueueEntry and
+grant retire, and keeps terminal settlement blocked until every continuation
+owner retires. A successful continuation materializes the CPU compatibility
+snapshot and only then releases dependants. Failed, ProducerCancelled, stale,
+or mismatched completion releases none.
+
+The registry's shared `ResidencyManager` admits complete Graph/target/intent/
+generation/Run/task/producer/revision/binding identity before native commit.
+Before coordinator publication is submitted, Kernel fallibly pretracks the
+request lineage with an internal zero-generation placeholder. Only an accepted
+current publication invokes the manager's no-allocation generation advance
+while the coordinator mutex still excludes `is_current()`; rejected and
+born-stale candidates do not advance it. Consequently, if N+1 becomes current
+before generation N starts its physical Run, N's later observation cannot move
+the manager backwards and its transfer admission is stale.
+Current-generation validation, producer Ready transitions, and resident
+insertion form one manager-locked linearization interval. A newer generation
+therefore either precedes an old callback and gives its destination a typed
+failure before Ready, or follows a completion already published as current.
+Duplicate and proper-subset identities cannot consume another admission. The
+Perlin provider encodes an explicit texture-to-buffer blit and calls neither
+`waitUntilCompleted` nor `getBytes`; CPU-to-Metal uses the inverse explicit
+blit. `GraphRuntime` still owns no native Metal state, #74 remains the final
+visible-commit gate, and #86 still owns authoritative device-memory/scratch
+accounting.
 
 Current built-in CPU admission combines a mandatory checked service envelope
 with an auditable adapter envelope. Shared Run/control/plan or phase-context
@@ -720,14 +748,18 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #84: all HP/RT ready work enters one Host-owned
+is authoritative through issue #85: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources plus exact implementation/key gates before a closed private
 route starts execution. Every `GPU_METAL` start then enters the matching fixed,
 process-owned registry executor and borrows its queue, invocation allocator,
 and pipeline cache through provider return. Sequential provider entry uses the
-same ledger and gates through a direct lease. Graphs retain only copied route
+same ledger and gates through a direct lease. Pending device work returns a
+Value whose Run-scoped continuation re-enters this same ready store; exact
+freshness gates destination Ready and process residency before dependency
+release, while the graph-state transaction remains final publication
+authority. Graphs retain only copied route
 ids/generations and no native device owner; no worker-owning scheduler SDK,
 scheduler plugin, per-Graph physical owner, or compatibility adapter remains.
 Separate realtime child Runs, request-owned staging, strong identity/revision
@@ -746,6 +778,8 @@ points remain future behavior.
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
 - `include/photospider/data/region.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `src/lib/compute/compute_service.*`
 - `src/lib/compute/compute_commit_policy.hpp`
@@ -768,6 +802,9 @@ points remain future behavior.
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
 - `src/lib/execution/execution_task_runtime.hpp`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/policy/policy_registry.*`
 - `src/lib/providers/configured_operation_providers.*`

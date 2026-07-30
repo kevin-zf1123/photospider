@@ -181,8 +181,11 @@ compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.m
 插件、调度器和核心 compute 代码不得把 Metal buffer adapter 视为生产运行边界。当前生产
 Metal operation 路径不使用该 adapter，也不保留 `ImageBuffer::context` payload。Reserved start
 之后，Metal Perlin provider 会借用进程 executor 的 command queue、invocation-scoped allocator
-与经过校验的 pipeline cache，再返回 CPU-owned `ImageBuffer`；provider 不拥有独立 native
-lifecycle。直接解释 `context` 仍属于 backend-specific 行为，不是可移植内存契约。
+与经过校验的 pipeline cache，编码 compute 加显式 texture-to-shared-buffer blit、安装 native
+completion handler、commit 且不等待，并通过 source-private 路径返回 pending host-visible
+Value。`TaskSubmissionPlan` 只会在该 Value 进入 Ready 后创建 CPU `ImageBuffer`
+compatibility snapshot。Provider 不拥有独立 native lifecycle，不调用 `waitUntilCompleted`
+或 `getBytes`，也不能把 `ImageBuffer::context` 变成可移植内存契约。
 
 ## 边界与原理
 
@@ -209,7 +212,7 @@ Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`�
 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
-### 已实现的 V-3/V-4/V-6 关系与剩余目标
+### 已实现的 V-3/V-4/V-6/V-8 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -244,9 +247,18 @@ Ready 前拒绝 payload access。Source-private producer 会在每次 terminal s
 mutable capability，而 source-private transfer task 只通过 executor-queued work 复制一份
 独立 CPU allocation。
 
-V-6 仍不实现 quantization、device identity 或 registry、通用 access/visibility planning、
-residency、bidirectional device transfer、stale completion arbitration、provider ABI v3 或
-通用命名 graph Value output。
+V-8 在不向 `ImageBuffer` 新增字段的前提下加入显式 `DeviceBackend`、`DeviceId`、
+`MemoryDomain`、`StorageBinding`、producer identity 与 `AccessPlan`。Value binding 可以是
+host-visible 或 device-local；metadata observation 不授予 pointer，host access 会失败而不是
+启动隐式 transfer。CPU/Metal transfer 为同一逻辑 revision 生成独立 binding。精确且仍属于
+current generation 的 completion 会原子发布 Ready 与进程 residency；stale completion 会在
+dependant 能看到 Ready 前发布 typed failure。Lineage row 会在 coordinator submission 前被
+预跟踪，并且只由 accepted current publication 推进，因此在较新 publication 后才启动的旧
+Run 仍为 stale。当前 source-private Metal 路径同时实现
+buffer-to-texture upload 与 texture-to-buffer download。
+
+V-8 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、通用命名 graph
+Value output 或 authoritative device-memory/scratch 核算。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
@@ -258,6 +270,8 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 ## 实现与验证入口
 
 - `include/photospider/core/image_buffer.hpp`
+- `include/photospider/core/device.hpp`
+- `include/photospider/memory/access_plan.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/data/value.hpp`
@@ -269,6 +283,9 @@ OpenCV geometry 或 TensorSlice reinterpretation 进入 operation ABI。
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
 - `src/lib/execution/value_transfer_task.*`
+- `src/lib/execution/device_completion.*`
+- `src/lib/execution/residency_manager.*`
+- `src/lib/execution/metal_device_executor.*`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`

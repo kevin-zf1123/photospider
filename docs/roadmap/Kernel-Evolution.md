@@ -616,7 +616,11 @@ explicit source-private CPU Value-copy task proved with a deterministic fake
 device executor. V-7 now adds a fixed source-private
 `DeviceExecutorRegistry` to the process execution domain and runs the
 repository Metal Perlin operation through its owned device/queue,
-invocation-scoped allocator, and persistent pipeline cache. Their exact
+invocation-scoped allocator, and persistent pipeline cache. V-8 now adds
+checked CPU/Metal binding facts, pure explicit access planning,
+revision-preserving bidirectional transfer, process-owned residency, exact
+stale-completion arbitration, pending-Value continuation, and asynchronous
+Perlin readback. Their exact
 behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
@@ -625,7 +629,7 @@ behavior is documented in
 ownership in
 [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
 and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
-complete model below is the accepted target; only the explicit V-2 through V-7 subset called
+complete model below is the accepted target; only the explicit V-2 through V-8 subset called
 out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
@@ -661,15 +665,17 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-7 subset is deliberately narrower:
+The implemented V-2 through V-8 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
   byte-addressed storage encoding;
 - `ImageFacet` explicitly maps distinct x/y and optional channel axes;
 - public `BufferHandle` is a checked nonempty range over one opaque
-  process-local CPU `AllocationIdentity`; subranges retain allocation lifetime
-  and expose no raw pointer;
+  process-local `AllocationIdentity`; subranges retain allocation lifetime.
+  CPU allocations may issue host read leases, while source-private native
+  bindings retain an external owner and expose only checked binding facts;
+  neither path exposes a public raw or native pointer;
 - move-only `ValueBuilder` controls the only move-only `WriteLease`, requires a
   zero-offset positive exact-envelope producer layout, refuses seal while the
   lease is live, and publishes a fresh process-local `ValueRevisionId`;
@@ -684,19 +690,32 @@ The implemented V-2 through V-7 subset is deliberately narrower:
   through a shared non-inline executor retained while pending or queued and
   through callback completion, with queued self-retention released on callback
   entry;
-- synchronous Values start Ready, while a source-private pending producer
-  retains the only mutable CPU capability and revokes it before every terminal
-  state; pending/failed/cancelled Values preserve immutable metadata but reject
-  BufferHandle and checked-view payload access; a source-private
-  `ValueTransferTask` prepares a fresh pending CPU allocation and copies the
-  validated envelope only as explicit queued work after source readiness;
+- synchronous Values start Ready, while source-private CPU and native pending
+  producers retain the only mutable completion capability and revoke it before
+  every terminal state; pending/failed/cancelled Values preserve immutable
+  metadata but reject BufferHandle and checked-view payload access;
+- checked `DeviceId`, `MemoryDomain`, `StorageBinding`, producer identity, and
+  pure `AccessPlan` make direct, map, import, transfer, or unsupported access
+  explicit. `ValueTransferTask` preserves the logical revision across a fresh
+  destination binding and performs CPU copy, CPU-to-Metal upload, or
+  Metal-to-CPU readback only as explicit queued work after source readiness;
+- one process-owned `ResidencyManager` indexes eligible exact revision/binding
+  replicas. It atomically validates the complete Graph/Run/generation/task/
+  producer/binding completion identity, publishes readiness, and inserts
+  residency, so late, duplicate, or mismatched completions cannot release
+  dependency work or regain a stale commit right. Kernel pretracks each
+  lineage before coordinator submission, and only accepted current publication
+  advances that row before currentness becomes observable, preventing a later
+  older Run start from regressing freshness;
 - source-private `DeviceExecutorRegistry` composition owns fixed non-CPU
   executors under `ExecutionService`; in the enabled Apple repository-plugin
   profile, the Metal executor owns one reusable native device/queue and
   validated pipeline cache, retains
   callback-scoped textures/buffers through an invocation allocator, and enters
   one selected Perlin operation after reserved start without exposing native
-  handles through Graph, policy, metadata, or public Host state;
+  handles through Graph, policy, metadata, or public Host state. Perlin
+  publishes a pending native Value and encodes asynchronous texture-to-shared-
+  buffer readback without command-buffer waits or synchronous `getBytes`;
 - `image_process:invert_dense` separates exact descriptor-only inference from
   stride-aware unsigned-8 execution, reuses a sealed input Value when present,
   and publishes the exact sealed result revision plus an independent
@@ -717,13 +736,11 @@ The implemented V-2 through V-7 subset is deliberately narrower:
   TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
   and same-key plugin replacement cannot inherit that source-private contract.
 
-V-7 still has no DataSpec, general `DeviceId`, public device registry,
-general AccessPlan, residency or visibility model, bidirectional device
-transfer, stale-completion arbitration, device-memory/scratch ledger
+V-8 still has no DataSpec, public device registry, device-memory/scratch ledger
 dimensions, quantization, packed element, provider ABI v3, or general named
-graph Value outputs. Its first native executor is source-private and the
-Perlin callback waits synchronously before returning a CPU compatibility
-image. ImageBuffer remains the
+graph Value outputs. Its native executor, transfer submission, mutable
+producer, completion admission, and residency owner remain source-private.
+ImageBuffer remains the
 compatibility representation for operation ABI v2, tiled writes, codecs, and
 Host surfaces.
 
@@ -734,20 +751,20 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-6 CPU subset, `BufferHandle` is a checked immutable byte
-range. Consumer reads and ordinary builder writes require leases; sealed Values
-never issue `WriteLease`, and consumer writes are always rejected. A
-source-private producer may complete one sealed pending CPU payload through its
+For the current V-8 subset, `BufferHandle` is a checked immutable byte range.
+Consumer reads and ordinary builder writes require leases; sealed Values never
+issue `WriteLease`, and consumer writes are always rejected. A source-private
+producer may complete one sealed pending CPU or native payload through its
 noncopyable capability inside the prevalidated binding/Layout/handle envelope.
 It retires that capability happens-before publishing Ready, Failed, or
 ProducerCancelled. Pending, Failed, and ProducerCancelled expose no
-consumer-readable payload. The fixed CPU binding has direct host visibility
-before Ready, so Ready permits the current CPU `ReadLease`; the complete target
-still requires a general `AccessPlan` to discharge visibility for other
-bindings. Strided, Blocked, and ProviderDefined Layouts retain bounded buffer
-envelopes. `DeviceBackend`, `DeviceId`, and `MemoryDomain` are separate, and
-general access remains an explicit
-`Direct | Map | Import | Transfer | Unsupported` plan.
+consumer-readable payload. A CPU binding may provide direct host visibility;
+a device-local binding does not. Strided, Blocked, and ProviderDefined Layouts
+retain bounded buffer envelopes. `DeviceBackend`, `DeviceId`, and
+`MemoryDomain` are separate, and current access is explicitly represented by a
+`Direct | Map | Import | Transfer | Unsupported` plan. Only direct CPU access
+and explicit CPU/Metal transfer have production execution in V-8; the other
+plan kinds remain typed outcomes rather than hidden work.
 
 The implemented `RegionSet` is bounded DNF over explicit logical domain keys.
 The MVP supports Whole, Empty, ImageRect, TensorSlice, and one nonempty clause.
@@ -815,10 +832,10 @@ the kernel, public ABI, and dependency-disabled product.
 
 ## Heterogeneous Executors
 
-A current V-7 Metal executor deliberately proves only process ownership,
-registry dispatch, queue/allocator/cache reuse, and provider-state removal.
-General asynchronous completion, transfer queues, residency, stale-result
-arbitration, and device-resource ledger dimensions remain later slices.
+A current V-8 Metal route combines process ownership, registry dispatch,
+queue/allocator/cache reuse, provider-state removal, asynchronous pending
+Values, explicit CPU/Metal transfer, process residency, and exact stale-result
+arbitration. Authoritative device-resource ledger dimensions remain #86.
 
 A GPU executor is not a second ordinary CPU worker pool. Each physical device
 executor owns its native queue/stream, allocator, in-flight limit, memory and

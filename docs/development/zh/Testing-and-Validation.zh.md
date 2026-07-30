@@ -159,7 +159,7 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_value_identity_across_dsos`
-binary。安装前，它会在该真实 disabled producer 中运行全部 44 个 dense-image case 与一个
+binary。安装前，它会在该真实 disabled producer 中运行全部 46 个 dense-image case 与一个
 双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
@@ -447,10 +447,12 @@ same-key ticket adoption、跨 target/intent/Graph isolation、close retirement�
 36,000 次 publication storm，以及 `RunGroup` cancellation/aggregate 规则。Group case 会区分
 request-level accepted reason 与真正赢得开放 child arbiter 的 reason：两个 child 都成功后的迟到
 Superseded 或 ExplicitRequest 不能替换 aggregate success；真正赢得取消时，第一个 reason 会在
-failure priority 之下保持稳定。CMake 会通过 CTest 发现全部 15 个 case，每个 case 的 timeout 为
+failure priority 之下保持稳定。CMake 会通过 CTest 发现全部 16 个 case，每个 case 的 timeout 为
 60 秒。Stress case 会断言一个 ticket、一个 logical active owner、至多一个 pending owner、被替换
 owner 的精确 settlement，并且只有最终 current generation 保持 commit eligibility；它们不创建
-background runner，也不依赖 timing sleep。
+background runner，也不依赖 timing sleep。Current-observer case 会证明 accepted 较新
+generation 在物理执行前推进 external freshness，而一个 prepared 但 born-stale 的旧
+generation 不会发出 observer notification。
 
 `test_kernel_contracts` 负责产品边界。它证明缺失 intent 与显式 HP 共用一个 key、最新 work 失败
 不会恢复更旧的 prepared commit、已经提交的旧 output 保持可见，以及 RT publication 前后发生的
@@ -523,10 +525,21 @@ queue/pipeline diagnostics 稳定、计数单调推进，并且同一个 executo
 成功进入。另一个 threadsafe death-test child 会安装五秒 alarm，通过真实 registry 尝试同步的
 同 executor callback 递归，并且只有在证明精确错误文本、nested counter/resource diagnostics
 不变、外层 TLS context 保持、返回后 TLS 清空以及后续 invocation 成功后才退出。alarm 会把
-此前的自死锁转化为有界测试失败，而不使用 detached thread 或制造生命周期竞态。最后，该测试
-会让真实仓库 Perlin operation 通过同一个 `ExecutionService` 连续运行两次，并证明 queue 可用、
-两次 submission 与 executor entry、六个 invocation allocation 已退役、一条 pipeline 被复用、
-output 归 CPU 所有、使用专用 Metal worker id，并且已结算 ledger 为空。
+此前的自死锁转化为有界测试失败，而不使用 detached thread 或制造生命周期竞态。验证该
+watchdog path 后，测试会执行一次真实 CPU-to-Metal upload，并证明精确保留 revision 的 device
+replica 进入 residency。随后，它让真实仓库 Perlin operation 通过同一个
+`ExecutionService` 连续运行两次，并证明 queue 可用、两次 operation submission 与 executor
+entry、八个 invocation allocation 已退役、一条 pipeline 被复用、asynchronous pending-Value
+readback 生成 CPU-owned output、使用专用 Metal worker id，并且已结算 ledger 为空。
+
+V-8 在 `test_device_residency` 中新增九个可移植 case。它们固定 direct host-read 与 transfer
+planning、精确 current completion publication、destination Ready 前的 late stale rejection、
+pretracked current publication 对晚启动旧 Run admission 的拒绝、failed/discarded
+nonpublication、不会消耗正确 admission 的 proper-subset identity rejection、
+concurrent exact callback 与 duplicate-completion rejection。`test_compute_run` 新增确定性 case，
+覆盖 early fence callback 在原 grant 退役前保持 parked、executor lifetime 延长 Run settlement、
+pending Value dependency deferral、无需等待 producer 即可退役 continuation 的 cancellation，以及
+绝不释放 dependent work 的 typed stale failure。这些 case 使用 gate 和 future，不含 timing sleep。
 
 `test_cli_policy_execution_config` 固定事务型 policy/execution config parsing 与精确 Host
 application。`test_host_adapter` 会加载真实 operation ABI-v2 与纯 C policy ABI-v1 fixture，配置两种
@@ -546,13 +559,14 @@ Installed Host、CLI 与 IPC protocol-v2 surface 仍不暴露 cancellation comma
 cmake --build build \
   --target test_policy_registry test_policy_execution \
   test_physical_execution_routes test_device_executor_registry \
-  test_compute_run test_resource_admission \
+  test_device_residency test_compute_run test_resource_admission \
   test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
   test_ipc_daemon graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
 ./build/tests/test_device_executor_registry
+./build/tests/test_device_residency
 ./build/tests/test_compute_run --gtest_filter='Issue75DeviceRouting.*'
 ./build/tests/test_resource_admission
 ./build/tests/test_cli_policy_execution_config \
@@ -840,10 +854,10 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor、ImageView、Region 与 ReadyFence 验证
+## CPU DenseTensor、ImageView、Region、ReadyFence 与 Transfer 验证
 
-`test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-6 边界的 provider-independent
-integration binary。它的 44 个长期用例验证：
+`test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-8 边界的 provider-independent
+integration binary。它的 46 个长期用例验证：
 
 - copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
   exactly-once Ready/Failed/ProducerCancelled settlement、typed failure retention 与
@@ -854,10 +868,13 @@ integration binary。它的 44 个长期用例验证：
   destruction 与 callback entry 的真实竞争、唯一 terminal settlement 与 callback 至多交付一次；
 - pending Value metadata/identity observation、对 BufferHandle 与 checked-view payload
   access 的 typed rejection，以及 private producer 在 readable Ready publication 前撤权；
-- 显式 fake-executor transfer enqueue、独立 allocation/revision identity、byte-identical
-  completion、唯一 executor 会存活到 destination 完成、无需阻塞 worker 的 chained
+- 显式 fake-executor transfer enqueue、独立 allocation binding 与保留的逻辑 revision、
+  byte-identical completion、唯一 executor 会存活到 destination 完成、无需阻塞 worker 的 chained
   readiness、保持不可读的 source failure/cancellation propagation，以及 transfer ownership
   被丢弃时只取消 destination；
+- 显式注入的 CPU-to-Metal transfer、经过检查的 device-local binding、revision preservation、
+  对“host-visible 但没有 host pointer”目标的拒绝、没有隐式 host read/readback、typed provider
+  failure，以及同一 executor 上后续 transfer 成功恢复；
 - malformed facet、stride、byte offset 与 exact-envelope rejection，包括受检的单轴/跨轴
   writable collision 与 overflow case，以及可接受的 padded、transposed 和 singleton-axis
   layout；
@@ -901,12 +918,12 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 44 个 dense
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 46 个 dense
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
 都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
-provider-disabled nested build 也会编译并运行全部 44 个 dense case 与该双 DSO case，因此真实
+provider-disabled nested build 也会编译并运行全部 46 个 dense case 与该双 DSO case，因此真实
 core operation、fence/transfer proof 与 identity authority 都不依赖 optional OpenCV operation
 provider 或 native device SDK。
 
@@ -936,8 +953,8 @@ DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary�
 kernel-lifecycle concurrency binary，以及 provider-independent `test_kernel_contracts`
 internal-seam consumer，再查询机器可读的 CTest inventory。`test_kernel_contracts` 的构建用于
 覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。该
-inventory 必须精确包含 52 项：`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 44 个
+inventory 必须精确包含 54 项：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 46 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case 与
