@@ -2,8 +2,10 @@
 
 ## 状态
 
-作为 Issue #87 的目标契约接受。Issue #87 保持 open，等待独立审核；其 OpenSpec
-change 保持 active 且不归档。
+作为 Issue #87 的目标契约接受。独立审核已在 Primary 提交
+`f8eba94a53fb5bd41250489df88f5d6480baf853` 上通过完整决策，包括全部三项
+Codex review 修复。生命周期收口由 Issue/Project 历史与对应 OpenSpec 生命周期
+分别记录。
 
 本 ADR 是决策与文档变更。它不新增 `ComputeIoExecutor`，不修改协议 v2 或已安装
 ABI，不让当前 Graph/cache writer 变成原子事务，也不把当前私有 IPC
@@ -316,6 +318,6 @@ graph-state 提交中制造过期文档覆盖或存储延迟。
 - [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)。
 
 已接受目标与依赖顺序位于
-[内核演进路线图](../../roadmap/zh/Kernel-Evolution.zh.md)和 active OpenSpec change
-`decide-compute-io-durability-and-completion-semantics`。Live Issue 与 Project state
-继续作为交付状态权威。
+[内核演进路线图](../../roadmap/zh/Kernel-Evolution.zh.md)和 OpenSpec change
+`decide-compute-io-durability-and-completion-semantics`。Issue/Project 历史与
+OpenSpec 生命周期分别记录交付收口。

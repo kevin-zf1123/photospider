@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted as the target contract for Issue #87. Issue #87 remains open for
-independent audit, and its OpenSpec change remains active and unarchived.
+Accepted as the target contract for Issue #87. Independent audit passed the
+complete decision, including all three Codex-review corrections, at Primary
+commit `f8eba94a53fb5bd41250489df88f5d6480baf853`. Lifecycle finalization is
+recorded separately in Issue/Project history and the corresponding OpenSpec
+lifecycle.
 
 This ADR is a decision and documentation change. It does not add
 `ComputeIoExecutor`, change protocol v2 or the installed ABI, make current
@@ -380,7 +383,6 @@ Current behavior remains authoritative in:
 - [Kernel Cache Model](../kernel-architecture/Cache-Model.md).
 
 The accepted target and dependency sequence live in
-[Kernel Evolution Roadmap](../roadmap/Kernel-Evolution.md) and the active
-OpenSpec change
-`decide-compute-io-durability-and-completion-semantics`. Live Issue and Project
-state remain the delivery-status authority.
+[Kernel Evolution Roadmap](../roadmap/Kernel-Evolution.md) and the OpenSpec
+change `decide-compute-io-durability-and-completion-semantics`. Issue/Project
+history and the OpenSpec lifecycle record delivery finalization separately.
