@@ -561,6 +561,7 @@ target_link_libraries(photospider_policy_internal PRIVATE
 
 # Module: private physical execution resources and accounting.
 set(PHOTOSPIDER_EXECUTION_INTERNAL_SOURCES
+    src/lib/execution/compute_io_executor.cpp
     src/lib/execution/device_completion.cpp
     src/lib/execution/device_executor_registry.cpp
     src/lib/execution/execution_task_runtime.cpp
@@ -602,6 +603,8 @@ target_link_libraries(photospider_execution_internal PRIVATE
     Photospider::operation_runtime
     Threads::Threads
     ${PHOTOSPIDER_EXECUTION_PLATFORM_LIBRARIES})
+target_link_libraries(photospider_graph_internal PRIVATE
+    photospider_execution_internal)
 
 # Module: compute, dirty execution, GraphRuntime, and interaction ownership.
 set(KERNEL_FACADE_SOURCES
@@ -1492,6 +1495,15 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
         target_compile_definitions(test_kernel_contracts PRIVATE
             PHOTOSPIDER_INTERNAL_YAML_GRAPH_DOCUMENT_ADAPTER_TESTING)
     endif()
+
+    add_ps_test(test_compute_io_executor
+        tests/unit/test_compute_io_executor.cpp
+        photospider_execution_internal)
+    gtest_discover_tests(test_compute_io_executor
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS execution
+            TIMEOUT 30)
 
     add_ps_test(test_disk_cache_diagnostic_concurrency
         tests/integration/test_disk_cache_diagnostic_concurrency.cpp)

@@ -29,6 +29,7 @@ struct PolicyLifecycleObserver;
 }  // namespace policy
 
 namespace execution {
+class ComputeIoExecutor;
 enum class PhysicalExecutionLane : std::uint8_t;
 }  // namespace execution
 
@@ -82,8 +83,9 @@ struct OperationExecutionConstraints final {
  * @brief Private composition-root limits for one execution domain.
  *
  * This source-tree type carries every Host ledger dimension explicitly plus
- * independent concrete-device byte accounts. `resource_vector()` converts
- * only the Host dimensions when constructing the private service.
+ * independent concrete-device byte accounts and independent compute-I/O task
+ * and planned-byte limits. `resource_vector()` converts only the Host
+ * dimensions when constructing the private service.
  *
  * @throws std::bad_alloc when copied device-limit storage cannot allocate.
  * @note This is not an installed policy API or execution extension surface.
@@ -103,6 +105,22 @@ struct ExecutionResourceLimits final {
 
   /** @brief Accounted bytes available in the bounded ready store. */
   std::uint64_t ready_bytes = 0U;
+
+  /**
+   * @brief Concurrent tasks admitted by the independent compute-I/O executor.
+   *
+   * @note This budget is not a Host ledger, ready-store, or device-account
+   * dimension. Zero is invalid at `ExecutionService` construction.
+   */
+  std::uint64_t compute_io_task_limit = 0U;
+
+  /**
+   * @brief Summed planned bytes admitted by the compute-I/O executor.
+   *
+   * @note This independent capacity is charged atomically with task count.
+   * Zero is invalid at `ExecutionService` construction.
+   */
+  std::uint64_t compute_io_planned_bytes_limit = 0U;
 
   /**
    * @brief Capacity excluded from Throughput Run admission.
@@ -834,12 +852,15 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
 /**
  * @brief Owns one fixed Host execution domain for concurrent Runs.
  *
- * The service owns a fixed CPU worker pool, one private Metal worker lane, and
- * one fixed process-owned device executor registry. It accepts only
- * `ReadyTaskSubmission`. Each active Run has isolated
+ * The service owns a fixed CPU worker pool, one private Metal worker lane, one
+ * fixed process-owned device executor registry, and one independently bounded
+ * compute-I/O worker. It accepts only `ReadyTaskSubmission` for compute lanes;
+ * cache/codec owners explicitly submit lazy callbacks to the private I/O
+ * executor. Each active Run has isolated
  * completion, exception, trace-target, and settlement state while independent
  * Runs may overlap. The service also exclusively owns the host-authoritative
- * resource ledger and policy-aware entry/byte-bounded ready store. Two private
+ * resource ledger and policy-aware entry/byte-bounded ready store. Compute-I/O
+ * task/byte accounting is separate from those authorities. Two private
  * policy strategies
  * rank explicit interactive/throughput QoS with checked work/byte service,
  * Graph/Run fairness, dispatch aging, admission headroom, and bounded batch
@@ -847,9 +868,8 @@ class ReadyTaskSubmissionRuntime : public ExecutionTaskRuntime {
  * only that exact candidate/version for its current selection cycle, evaluates
  * independent work, and uses notification-driven bounded waiting when every
  * compatible candidate is blocked. Policies own no physical or resource
- * authority. The service owns
- * no planning, dependency, Graph/cache, dirty propagation, visible commit, or
- * final lifecycle-registry authority.
+ * authority. The service owns no planning, dependency, Graph/cache policy,
+ * dirty propagation, visible commit, or final lifecycle-registry authority.
  *
  * @throws std::bad_alloc or std::system_error from explicit execution setup.
  * @note This private source-tree service is explicitly composed and injected;
@@ -859,7 +879,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
  public:
   /**
    * @brief Returns bounded product defaults supplied by the composition root.
-   * @return Host limits, candidate Metal limits, and interactive headroom.
+   * @return Host limits, compute-I/O limits, candidate Metal limits, and
+   * interactive headroom.
    * @throws std::bad_alloc when default device-limit storage cannot allocate.
    * @note Service construction retains the Metal account only when the frozen
    * registry owns an executable Metal device. Tests and alternate products
@@ -878,7 +899,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
   /**
    * @brief Creates an unconfigured domain with explicit immutable limits.
    * @param resource_limits Complete Host limits and device-account candidates.
-   * @throws std::invalid_argument if interactive headroom exceeds a limit.
+   * @throws std::invalid_argument if interactive headroom exceeds a limit or
+   * either compute-I/O limit is zero.
    * @throws std::invalid_argument for CPU or duplicate device candidates.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
    * @note The default fixed registry determines which validated device
@@ -892,7 +914,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * registry.
    * @param resource_limits Complete Host limits and device-account candidates.
    * @param device_executors Complete registry moved into process ownership.
-   * @throws std::invalid_argument if interactive headroom exceeds a limit.
+   * @throws std::invalid_argument if interactive headroom exceeds a limit or
+   * either compute-I/O limit is zero.
    * @throws std::invalid_argument for CPU or duplicate device candidates.
    * @throws std::bad_alloc if private pool/ledger ownership cannot allocate.
    * @note Tests and alternate composition roots finish registration before
@@ -919,8 +942,8 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param worker_count Zero for bounded hardware resolution or exact `[1,8]`.
    * @param resource_limits Complete private Host/device-composed limits.
    * @throws std::invalid_argument if the worker request exceeds eight, the
-   * configured CPU limit cannot permit the resolved fixed pool, or interactive
-   * headroom exceeds a ledger limit.
+   * configured CPU limit cannot permit the resolved fixed pool, interactive
+   * headroom exceeds a ledger limit, or either compute-I/O limit is zero.
    * @throws std::bad_alloc or std::system_error if setup fails.
    */
   ExecutionService(unsigned int worker_count,
@@ -981,10 +1004,12 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Copies service execution diagnostics.
-   * @return Text containing fixed CPU/GPU lanes, active Runs, and queued work.
+   * @return Text containing fixed CPU/GPU/I/O lanes, active Runs, ready work,
+   * and independent compute-I/O task/byte usage.
    * @throws std::bad_alloc if formatting storage cannot allocate.
    * @throws std::system_error if private state locking fails.
-   * @note The snapshot grants no worker, queue, Run, or lifecycle authority.
+   * @note The snapshot grants no worker, queue, budget, Run, or lifecycle
+   * authority.
    */
   std::string get_stats() const;
 
@@ -1085,6 +1110,25 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @throws std::system_error from ledger snapshot locking.
    */
   ResourceLedger::Snapshot resource_snapshot() const;
+
+  /**
+   * @brief Returns the process-domain bounded compute-I/O executor.
+   * @return Stable service-owned executor reference.
+   * @throws Nothing.
+   * @note The caller retains cache/codec policy and must provide an explicit
+   * lifetime token plus planned-byte estimate for every lazy submission.
+   * Returned authority is source-private and must not escape service lifetime.
+   */
+  execution::ComputeIoExecutor& compute_io_executor() noexcept;
+
+  /**
+   * @brief Returns the read-only process-domain compute-I/O executor.
+   * @return Stable service-owned executor reference.
+   * @throws Nothing.
+   * @note Observation grants no Graph, cache, path, retry, or publication
+   * policy. Returned authority is source-private.
+   */
+  const execution::ComputeIoExecutor& compute_io_executor() const noexcept;
 
   /**
    * @brief Copies one configured concrete-device resource account.
@@ -1280,16 +1324,18 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
 
   /**
    * @brief Completes idempotent process execution-domain shutdown.
-   * @return Nothing after registry/resource/route/worker/binding retirement
-   * and final ServiceStopped publication.
+   * @return Nothing after registry, compute-I/O, resource, route, worker, and
+   * binding retirement plus final ServiceStopped publication.
    * @throws std::logic_error from a same-service worker/policy callback before
    * mutation or when authoritative resource state is unexpectedly nonzero.
    * @throws std::system_error from control-thread synchronization.
    * @note Concurrent/repeated non-worker callers join or observe the same
    * generation. Once worker ownership transfers to local shutdown state, an
-   * armed guard joins and accounts every remaining thread before any unwind;
-   * no recoverable validation may destroy a joinable std::thread. This
-   * operation never reopens admission.
+   * armed guard joins and accounts every remaining thread before any unwind.
+   * The independent I/O worker first stops admission, drains accepted
+   * provider callbacks, joins, and verifies both private budgets are zero; no
+   * recoverable validation may destroy a joinable std::thread. This operation
+   * never reopens admission.
    */
   void shutdown();
 
@@ -1718,7 +1764,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * selection inputs. An all-blocked lane waits on the worker-notification
    * epoch with a bounded low-frequency fallback; spurious wakes do not retry.
    * A committed non-CPU start enters the matching fixed device executor before
-   * invoking the same submission callback and completion path.
+   * invoking the same submission callback and completion path. CPU-lane
+   * workers install a thread-local guard that rejects blocking compute-I/O
+   * completion waits before any condition-variable wait begins.
    */
   void worker_loop(int worker_id,
                    execution::PhysicalExecutionLane lane) noexcept;

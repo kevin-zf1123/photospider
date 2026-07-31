@@ -25,6 +25,7 @@
 #if defined(PHOTOSPIDER_INTERNAL_EXECUTION_SERVICE_TESTING)
 #include "compute/execution_service_test_probe.hpp"
 #endif
+#include "execution/compute_io_executor.hpp"
 #include "execution/device_executor_registry.hpp"
 #include "execution/physical_execution_routes.hpp"
 #include "photospider/core/graph_error.hpp"
@@ -3415,7 +3416,8 @@ void retain_executable_device_limits(
 }  // namespace
 
 /**
- * @brief Owns all fixed-pool, bounded-store, registry, and ledger state.
+ * @brief Owns fixed compute/I/O workers, bounded stores, registries, and
+ * ledgers.
  *
  * @throws std::bad_alloc from container growth and worker creation staging.
  * @note One mutex defines queue-to-Run lock order: pool mutex is acquired
@@ -3425,13 +3427,15 @@ class ExecutionService::PoolState final {
  public:
   /**
    * @brief Creates one unconfigured execution domain with immutable limits.
-   * @param resource_limits Complete ledger and ready-store limits whose device
-   * accounts already match the fixed registry.
+   * @param resource_limits Complete Host, ready-store, compute-I/O, and device
+   * limits whose device accounts already match the fixed registry.
    * @param device_executors Complete fixed device registry.
    * @param telemetry Stable physical counter owner.
    * @param policy_observer Stable non-owning service callback/binding observer.
-   * @throws std::invalid_argument when interactive headroom exceeds a limit.
-   * @throws std::bad_alloc when ledger state cannot allocate.
+   * @throws std::invalid_argument when interactive headroom exceeds a limit or
+   * either compute-I/O limit is zero.
+   * @throws std::bad_alloc or std::system_error when ledger or worker state
+   * cannot be constructed.
    */
   PoolState(ExecutionResourceLimits resource_limits,
             execution::DeviceExecutorRegistry device_executors,
@@ -3439,6 +3443,9 @@ class ExecutionService::PoolState final {
             policy::PolicyLifecycleObserver policy_observer)
       : registry(policy::PolicyRegistry::process_instance()),
         device_executors(std::move(device_executors)),
+        compute_io_executor(execution::ComputeIoExecutorLimits{
+            resource_limits.compute_io_task_limit,
+            resource_limits.compute_io_planned_bytes_limit}),
         interactive_binding(registry.create_binding(
             "interactive", PolicyClass::Interactive, 1U, policy_observer)),
         throughput_binding(registry.create_binding(
@@ -3526,6 +3533,11 @@ class ExecutionService::PoolState final {
    * @brief Fixed process-owned device executors destroyed after worker join.
    */
   execution::DeviceExecutorRegistry device_executors;
+
+  /**
+   * @brief Independent process I/O worker with private task/byte accounting.
+   */
+  execution::ComputeIoExecutor compute_io_executor;
 
   /** @brief Serializes preparation/publication of policy replacements only. */
   mutable std::mutex policy_mutation_mutex;
@@ -3852,6 +3864,8 @@ ExecutionResourceLimits ExecutionService::default_resource_limits() {
       512U * kOneMebibyte,
       65536U,
       256U * kOneMebibyte,
+      64U,
+      256U * kOneMebibyte,
       ResourceVector{1U, 64U * kOneMebibyte, 32U * kOneMebibyte, 1024U,
                      16U * kOneMebibyte},
       std::vector<DeviceResourceLimit>{DeviceResourceLimit{
@@ -4065,6 +4079,8 @@ bool ExecutionService::is_configured() const {
 
 /** @copydoc ExecutionService::get_stats */
 std::string ExecutionService::get_stats() const {
+  const execution::ComputeIoExecutorSnapshot compute_io =
+      pool_->compute_io_executor.snapshot();
   std::lock_guard<std::mutex> lock(pool_->mutex);
   const ResourceLedger::Snapshot resources = pool_->ledger.snapshot();
   std::ostringstream stream;
@@ -4072,7 +4088,9 @@ std::string ExecutionService::get_stats() const {
          << ", Active runs: " << pool_->ready_store.run_count()
          << ", Ready tasks: " << pool_->ready_store.entry_count()
          << ", Ready bytes: " << pool_->ready_store.byte_count()
-         << ", Reserved CPU: " << resources.reserved.cpu_slots;
+         << ", Reserved CPU: " << resources.reserved.cpu_slots
+         << ", Compute I/O tasks: " << compute_io.active_tasks
+         << ", Compute I/O bytes: " << compute_io.active_planned_bytes;
   return stream.str();
 }
 
@@ -4231,6 +4249,17 @@ ResourceLedger::Snapshot ExecutionService::resource_snapshot() const {
   return pool_->ledger.snapshot();
 }
 
+/** @copydoc ExecutionService::compute_io_executor */
+execution::ComputeIoExecutor& ExecutionService::compute_io_executor() noexcept {
+  return pool_->compute_io_executor;
+}
+
+/** @copydoc ExecutionService::compute_io_executor */
+const execution::ComputeIoExecutor& ExecutionService::compute_io_executor()
+    const noexcept {
+  return pool_->compute_io_executor;
+}
+
 /** @copydoc ExecutionService::device_resource_snapshot */
 std::optional<ResourceLedger::DeviceSnapshot>
 ExecutionService::device_resource_snapshot(DeviceId device) const {
@@ -4347,6 +4376,15 @@ void ExecutionService::shutdown() {
 
   try {
     lifecycle_registry_->wait_until_empty();
+    pool_->compute_io_executor.shutdown();
+    const execution::ComputeIoExecutorSnapshot compute_io =
+        pool_->compute_io_executor.snapshot();
+    if (compute_io.active_tasks != 0U ||
+        compute_io.active_planned_bytes != 0U ||
+        !compute_io.shutdown_complete) {
+      throw std::logic_error(
+          "ExecutionService compute-I/O executor did not drain.");
+    }
     const ResourceLedger::Snapshot before_stop = pool_->ledger.snapshot();
     if (before_stop.reserved != ResourceVector{}) {
       throw std::logic_error(
@@ -5344,6 +5382,8 @@ void ExecutionService::retire_worker_entry(
 /** @copydoc ExecutionService::worker_loop */
 void ExecutionService::worker_loop(
     int worker_id, execution::PhysicalExecutionLane lane) noexcept {
+  const execution::ComputeIoWaitProhibitionScope compute_io_wait_prohibition(
+      lane == execution::PhysicalExecutionLane::Cpu);
   for (;;) {
     std::shared_ptr<QueueEntry> entry;
     std::exception_ptr selection_failure;

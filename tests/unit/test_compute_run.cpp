@@ -2186,6 +2186,8 @@ ExecutionResourceLimits execution_limits(const ResourceVector& resources) {
       resources.scratch_bytes,
       resources.ready_entries,
       resources.ready_bytes,
+      8U,
+      16U * 1024U * 1024U,
       ResourceVector{},
       {},
   };
@@ -4318,6 +4320,26 @@ TEST(ReadyTaskSubmission,
 }
 
 /**
+ * @brief Proves process composition rejects either zero compute-I/O limit.
+ *
+ * @note Each failed service construction must unwind its partially composed
+ * process resources without publishing an executable domain.
+ */
+TEST(ExecutionService, RejectsZeroComputeIoLimitsDuringComposition) {
+  ExecutionResourceLimits task_limits =
+      ExecutionService::default_resource_limits();
+  task_limits.compute_io_task_limit = 0U;
+  EXPECT_THROW((void)ExecutionService(std::move(task_limits)),
+               std::invalid_argument);
+
+  ExecutionResourceLimits byte_limits =
+      ExecutionService::default_resource_limits();
+  byte_limits.compute_io_planned_bytes_limit = 0U;
+  EXPECT_THROW((void)ExecutionService(std::move(byte_limits)),
+               std::invalid_argument);
+}
+
+/**
  * @brief Verifies one isolated service executes one Run and can be reused.
  *
  * @note Equal local task values across sequential Runs remain isolated by
@@ -4852,7 +4874,7 @@ TEST(ExecutionService, RejectsEveryNonCpuRunDimensionAndRecoversExactly) {
 TEST(ExecutionService, RejectsRunResourceOverflowWithoutPartialReservation) {
   constexpr std::uint64_t kMaximum = std::numeric_limits<std::uint64_t>::max();
   const ExecutionResourceLimits limits{
-      1U, kMaximum, kMaximum, kMaximum, kMaximum, ResourceVector{}, {}};
+      1U, kMaximum, kMaximum, kMaximum, kMaximum, 1U, 1U, ResourceVector{}, {}};
   constexpr ReadyTaskResourceDemand kOverflowDemand{1U, 1U, kMaximum};
   ExecutionService service(1U, limits);
   ExecutionServiceHost host;
