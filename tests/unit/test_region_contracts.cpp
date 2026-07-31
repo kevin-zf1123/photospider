@@ -328,6 +328,79 @@ TEST(RegionContract, ComputesRepresentableUnionAndDifference) {
             (ImageRect{image_region_domain(), 0, 8, 4, 9}));
 }
 
+/**
+ * @brief Proves exact difference preserves equal atoms in a shared clause.
+ * @return Nothing; GoogleTest reports clause or remainder mismatches.
+ * @throws Region validation or allocation exceptions from test construction.
+ * @note Only the image atom varies; the tensor atom is an identical
+ * conjunctive constraint that must survive the representable edge removal.
+ */
+TEST(RegionContract, DifferencePreservesSharedClauseAtoms) {
+  const RegionDomainKey image_domain{30U, 1U};
+  const RegionDomainKey shared_domain{30U, 2U};
+  const TensorSlice shared{shared_domain, {{2U, 5U}, {7U, 9U}}};
+  const RegionSet left =
+      RegionSet::from_atoms({ImageRect{image_domain, 0, 10, 0, 3}, shared});
+  const RegionSet right =
+      RegionSet::from_atoms({ImageRect{image_domain, 0, 4, 0, 3}, shared});
+
+  const RegionOperationResult remainder = difference_regions(left, right);
+
+  ASSERT_EQ(remainder.status(), RegionOperationStatus::Exact);
+  ASSERT_TRUE(remainder.region().has_value());
+  EXPECT_EQ(
+      *remainder.region(),
+      RegionSet::from_atoms({ImageRect{image_domain, 4, 10, 0, 3}, shared}));
+}
+
+/**
+ * @brief Proves shared-clause difference also supports one TensorSlice edge.
+ * @return Nothing; GoogleTest reports clause or tensor remainder mismatches.
+ * @throws Region validation or allocation exceptions from test construction.
+ * @note The equal ImageRect remains conjunctive while one tensor axis loses
+ * its low edge.
+ */
+TEST(RegionContract, DifferencePreservesSharedTensorClauseAtoms) {
+  const RegionDomainKey tensor_domain{30U, 3U};
+  const RegionDomainKey shared_domain{30U, 4U};
+  const ImageRect shared{shared_domain, -2, 3, 4, 8};
+  const RegionSet left = RegionSet::from_atoms(
+      {TensorSlice{tensor_domain, {{0U, 10U}, {2U, 5U}}}, shared});
+  const RegionSet right = RegionSet::from_atoms(
+      {TensorSlice{tensor_domain, {{0U, 4U}, {2U, 5U}}}, shared});
+
+  const RegionOperationResult remainder = difference_regions(left, right);
+
+  ASSERT_EQ(remainder.status(), RegionOperationStatus::Exact);
+  ASSERT_TRUE(remainder.region().has_value());
+  EXPECT_EQ(*remainder.region(),
+            RegionSet::from_atoms(
+                {TensorSlice{tensor_domain, {{4U, 10U}, {2U, 5U}}}, shared}));
+}
+
+/**
+ * @brief Proves changing two clause atoms remains outside one-clause exactness.
+ * @return Nothing; GoogleTest reports accidental constraint loss.
+ * @throws Region validation or allocation exceptions from test construction.
+ * @note The mathematical remainder needs two clauses, so neither atom may be
+ * silently selected as the sole varying constraint.
+ */
+TEST(RegionContract, DifferenceRejectsTwoVaryingClauseAtoms) {
+  const RegionDomainKey first_domain{30U, 5U};
+  const RegionDomainKey second_domain{30U, 6U};
+  const RegionSet left =
+      RegionSet::from_atoms({ImageRect{first_domain, 0, 10, 0, 3},
+                             ImageRect{second_domain, 0, 10, 0, 3}});
+  const RegionSet right =
+      RegionSet::from_atoms({ImageRect{first_domain, 0, 4, 0, 3},
+                             ImageRect{second_domain, 0, 4, 0, 3}});
+
+  const RegionOperationResult remainder = difference_regions(left, right);
+
+  EXPECT_EQ(remainder.status(), RegionOperationStatus::TooComplex);
+  EXPECT_FALSE(remainder.region().has_value());
+}
+
 TEST(RegionContract, MergesOneVaryingAtomWhilePreservingSharedClauseAtoms) {
   const RegionDomainKey image_domain{31U, 1U};
   const RegionDomainKey shared_domain{31U, 2U};

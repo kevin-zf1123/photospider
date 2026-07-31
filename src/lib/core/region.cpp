@@ -720,17 +720,51 @@ RegionOperationResult difference_regions(const RegionSet& left,
   if (overlap.region()->is_empty()) {
     return RegionOperationResult::exact(left);
   }
-  if (left.atoms().size() != 1U || right.atoms().size() != 1U ||
-      !(atom_domain(left.atoms().front()) ==
-        atom_domain(right.atoms().front())) ||
-      atom_kind(left.atoms().front()) != atom_kind(right.atoms().front())) {
+  if (left.atoms().size() != overlap.region()->atoms().size()) {
     return RegionOperationResult::failure(
         RegionOperationStatus::TooComplex,
-        "Region difference would require multiple clauses or atoms.");
+        "Region difference has different constrained domain sets.");
   }
 
-  const RegionAtom& source = left.atoms().front();
-  const RegionAtom& cut = overlap.region()->atoms().front();
+  std::vector<RegionAtom> remainder_atoms = left.atoms();
+  std::optional<std::size_t> differing_index;
+  for (std::size_t index = 0U; index < left.atoms().size(); ++index) {
+    const RegionAtom& source_atom = left.atoms()[index];
+    const RegionAtom& cut_atom = overlap.region()->atoms()[index];
+    if (!(atom_domain(source_atom) == atom_domain(cut_atom))) {
+      return RegionOperationResult::failure(
+          RegionOperationStatus::TooComplex,
+          "Region difference has different constrained domain sets.");
+    }
+    if (atom_kind(source_atom) != atom_kind(cut_atom)) {
+      return RegionOperationResult::failure(
+          RegionOperationStatus::Unsupported,
+          "Region difference found incompatible atom kinds for one domain.");
+    }
+    if (const auto* source_tensor = std::get_if<TensorSlice>(&source_atom)) {
+      if (source_tensor->axes.size() !=
+          std::get<TensorSlice>(cut_atom).axes.size()) {
+        return RegionOperationResult::failure(
+            RegionOperationStatus::Unsupported,
+            "Region difference found a TensorSlice rank mismatch.");
+      }
+    }
+    if (source_atom == cut_atom) {
+      continue;
+    }
+    if (differing_index.has_value()) {
+      return RegionOperationResult::failure(
+          RegionOperationStatus::TooComplex,
+          "Region difference varies in more than one constrained domain.");
+    }
+    differing_index = index;
+  }
+  if (!differing_index.has_value()) {
+    return RegionOperationResult::exact(RegionSet::empty());
+  }
+
+  const RegionAtom& source = left.atoms()[*differing_index];
+  const RegionAtom& cut = overlap.region()->atoms()[*differing_index];
   if (const auto* source_image = std::get_if<ImageRect>(&source)) {
     const ImageRect& cut_image = std::get<ImageRect>(cut);
     ImageRect remainder = *source_image;
@@ -751,8 +785,9 @@ RegionOperationResult difference_regions(const RegionSet& left,
           RegionOperationStatus::TooComplex,
           "ImageRect difference would create a sparse Region.");
     }
+    remainder_atoms[*differing_index] = std::move(remainder);
     return RegionOperationResult::exact(
-        RegionSet::from_image_rect(std::move(remainder)));
+        RegionSet::from_atoms(std::move(remainder_atoms)));
   }
 
   const TensorSlice& source_tensor = std::get<TensorSlice>(source);
@@ -792,8 +827,9 @@ RegionOperationResult difference_regions(const RegionSet& left,
     remainder.axes[*differing_axis].end =
         cut_tensor.axes[*differing_axis].begin;
   }
+  remainder_atoms[*differing_index] = std::move(remainder);
   return RegionOperationResult::exact(
-      RegionSet::from_tensor_slice(std::move(remainder)));
+      RegionSet::from_atoms(std::move(remainder_atoms)));
 }
 
 /** @copydoc clip_region_to_image_bounds */

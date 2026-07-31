@@ -295,7 +295,10 @@ immutable normalized `RegionSet`、bounded algebra、typed operation outcome 与
 `Node::hp_region` 是随唯一正式 HP cache authority 一起发布的 validity metadata。Dirty
 source history、per-node state、monolithic work 与 edge mapping 都保留 Region；image-only
 tile rectangle 从其 source Region 派生并与其并存。Core dense invert path 执行精确
-ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice，operation ABI v2 保持不变。
+ImageRect 或 TensorSlice selection；RT 拒绝 TensorSlice，operation ABI v2 保持不变。当只有
+一个 compatible atom 变化且 overlap 从其一侧移除区间时，精确 one-clause difference 会保留
+其他所有相等的 constrained-domain atom；会切分 atom 或同时改变多个 domain 的差集仍返回
+类型化 `TooComplex`。
 
 V-6 为每个 Value 附加 installed、copyable `ReadyFence` observer。同步 publication 初始即为
 Ready。Source-private pending producer 保留唯一 mutable CPU allocation capability，在发布

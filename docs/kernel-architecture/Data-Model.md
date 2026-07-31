@@ -360,7 +360,10 @@ published with the one formal HP cache authority. Dirty source history,
 per-node state, monolithic work, and edge mappings retain Region; image-only
 tile rectangles are derived beside their source Region. The core dense invert
 path executes exact ImageRect or TensorSlice selections, while RT rejects
-TensorSlice and operation ABI v2 remains unchanged.
+TensorSlice and operation ABI v2 remains unchanged. Exact one-clause
+difference preserves every equal constrained-domain atom when only one
+compatible atom varies and the overlap removes one of its edges; differences
+that would split an atom or vary multiple domains remain typed `TooComplex`.
 
 V-6 attaches an installed, copyable `ReadyFence` observer to every Value.
 Synchronous publications start Ready. A source-private pending producer keeps

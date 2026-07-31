@@ -461,7 +461,10 @@ RegionOperationResult union_regions(const RegionSet& left,
  * @param budget Explicit nonzero complexity limit.
  * @return Exact, Unsupported, or TooComplex.
  * @throws std::bad_alloc when result storage cannot allocate.
- * @note Sparse differences return TooComplex rather than widening.
+ * @note Clauses with identical constrained domains may subtract exactly when
+ *       all but one atom are equal and the overlap removes one edge from the
+ *       sole varying compatible atom. Equal conjunctive atoms are preserved.
+ *       Sparse differences return TooComplex rather than widening.
  */
 RegionOperationResult difference_regions(const RegionSet& left,
                                          const RegionSet& right,
