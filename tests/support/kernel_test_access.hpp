@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "compute/execution_service.hpp"
 #include "runtime/kernel.hpp"
 
 namespace ps::testing {
@@ -277,8 +278,10 @@ class KernelTestAccess {
    * @throws std::system_error if graph-registry or graph-state synchronization
    * fails.
    * @note The submitted closure intentionally borrows `kernel.cache_service_`
-   * through the real graph-state lane. It is a private lifetime-regression
-   * seam, not a production cache API or an alternate ownership wrapper.
+   * and the process executor through the real graph-state lane. The retained
+   * runtime is the explicit task lifetime token. This is a private
+   * lifetime-regression seam, not a production cache API or an alternate
+   * ownership wrapper.
    */
   static std::future<void> submit_cache_save(Kernel& kernel,
                                              const std::string& name,
@@ -286,9 +289,11 @@ class KernelTestAccess {
                                              std::string precision) {
     auto runtime = runtime_owner(kernel, name);
     return runtime->graph_state().submit(
-        [&kernel, node_id,
+        [&kernel, runtime = std::move(runtime), node_id,
          precision = std::move(precision)](GraphModel& graph) {
-          kernel.cache_service_.save_cache_if_configured(
+          const std::shared_ptr<const void> lifetime_token(runtime);
+          kernel.cache_service_.save_cache_if_configured_via_executor(
+              kernel.execution_service_->compute_io_executor(), lifetime_token,
               graph, graph.node(node_id), precision);
         });
   }

@@ -315,8 +315,8 @@ ComputeService::Request make_service_compute_request(
  *
  * The policy validates Run/staging provenance outside the graph-state lane,
  * materializes publication copies there, and then validates live provenance,
- * performs eligible deferred persistence, and swaps visible state in one
- * serialized graph-state work item.
+ * performs eligible deferred persistence through the process I/O executor,
+ * and swaps visible state in one serialized graph-state work item.
  *
  * @throws std::bad_alloc when publication cloning or path/output storage
  * allocates.
@@ -332,8 +332,8 @@ class KernelGraphRevisionCommitPolicy final
    * @brief Captures exact staged owners and persistence policy.
    * @param runtime Runtime whose visible graph/proxy and lane are
    * authoritative.
-   * @param execution_service Process lifecycle registry owner used only for
-   * the brief graph-state/lifecycle commit predicate.
+   * @param execution_service Process lifecycle registry and independent
+   * compute-I/O executor owner.
    * @param cache Cache service used only after the live predicate succeeds.
    * @param staged_graph Request-owned Graph used by every compute callback.
    * @param staged_proxy Optional request-owned proxy used by dirty/RT work.
@@ -370,8 +370,8 @@ class KernelGraphRevisionCommitPolicy final
                        "HP staged commit has no validated target output.");
     }
 
-    std::unique_ptr<GraphModel> graph_publication =
-        staged_graph.clone_for_compute();
+    std::shared_ptr<GraphModel> graph_publication(
+        staged_graph.clone_for_compute());
     std::unique_ptr<compute::RealtimeProxyGraph> proxy_publication;
     if (staged_proxy != nullptr) {
       proxy_publication = staged_proxy->clone_for_compute();
@@ -407,7 +407,7 @@ class KernelGraphRevisionCommitPolicy final
 #endif
             if (save_cache_) {
               graph_publication->set_skip_save_cache(false);
-              persist_changed_hp_nodes(live_graph, *graph_publication);
+              persist_changed_hp_nodes(live_graph, graph_publication);
             }
             live_graph.publish_compute_snapshot(*graph_publication);
             if (proxy_publication) {
@@ -594,30 +594,36 @@ class KernelGraphRevisionCommitPolicy final
   /**
    * @brief Persists only staged HP nodes whose content version changed.
    * @param live_graph Predicate-validated live baseline.
-   * @param publication Prepared staged Graph publication copy.
+   * @param publication Shared prepared Graph publication transaction.
    * @return Nothing after every eligible configured artifact is saved.
-   * @throws Cache codec, filesystem, Graph, or allocation exceptions unchanged.
+   * @throws Compute-I/O admission, cache codec, filesystem, Graph, allocation,
+   * or synchronization exceptions unchanged.
    * @note Persistence runs after revision validation and before visible swap.
-   *       Any failure leaves live in-memory Graph/proxy state unchanged.
+   * The graph-state lane waits for typed completion; the CPU compute pool does
+   * not. The shared publication is the explicit task lifetime token. Any
+   * failure leaves live in-memory Graph/proxy state unchanged.
    */
-  void persist_changed_hp_nodes(const GraphModel& live_graph,
-                                GraphModel& publication) const {
-    for (int node_id : publication.node_ids()) {
-      const Node& staged_node = publication.node(node_id);
+  void persist_changed_hp_nodes(
+      const GraphModel& live_graph,
+      const std::shared_ptr<GraphModel>& publication) const {
+    const std::shared_ptr<const void> transaction_lifetime(publication);
+    for (int node_id : publication->node_ids()) {
+      const Node& staged_node = publication->node(node_id);
       const Node& live_node = live_graph.node(node_id);
       if (staged_node.hp_version == live_node.hp_version ||
           !staged_node.cached_output_high_precision) {
         continue;
       }
-      cache_.save_cache_if_configured(publication, staged_node,
-                                      cache_precision_);
+      cache_.save_cache_if_configured_via_executor(
+          execution_service_.compute_io_executor(), transaction_lifetime,
+          *publication, staged_node, cache_precision_);
     }
   }
 
   /** @brief Borrowed runtime valid through the request-lane callback. */
   GraphRuntime& runtime_;
 
-  /** @brief Borrowed process lifecycle registry facade. */
+  /** @brief Borrowed lifecycle and independent compute-I/O process owner. */
   compute::ExecutionService& execution_service_;
 
   /** @brief Borrowed Kernel-owned cache service used for deferred writes. */

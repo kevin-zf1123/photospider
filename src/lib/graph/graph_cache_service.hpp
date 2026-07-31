@@ -10,6 +10,10 @@
 
 namespace ps {
 
+namespace execution {
+class ComputeIoExecutor;
+}  // namespace execution
+
 /**
  * @class GraphCacheService
  * @brief Coordinates graph memory-cache cleanup and HP disk-cache persistence.
@@ -25,7 +29,10 @@ namespace ps {
  * GraphModel's locked disk-cache diagnostic API. Image bytes and detached
  * named values cross injected `ImageArtifactCodec` and `CacheMetadataCodec`
  * boundaries; this service contains no OpenCV/YAML calls or provider-library
- * types.
+ * types. Staged HP commit may submit the const cache-save mechanism to the
+ * process compute-I/O executor while the graph-state policy owner retains path,
+ * failure, timing, and publication decisions; synchronous administration and
+ * load paths remain unchanged.
  */
 class GraphCacheService {
  public:
@@ -150,6 +157,36 @@ class GraphCacheService {
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
                                 const std::string& cache_precision) const;
+
+  /**
+   * @brief Saves one eligible HP cache through the bounded process I/O worker.
+   *
+   * The caller remains on its graph-state transaction lane. This method first
+   * performs read-only policy checks and checked planned-byte estimation, then
+   * lazily constructs one callback only after executor task/byte admission. It
+   * waits for typed terminal completion, applies worker duration to the Graph
+   * timing counter, and propagates codec/filesystem failure before returning.
+   *
+   * @param executor Process-owned independent compute-I/O authority.
+   * @param lifetime_token Non-null prepared-Graph or Run owner retained until
+   * callback settlement.
+   * @param graph Transaction-owned Graph providing cache policy and paths.
+   * @param node Stable node inside `graph` whose formal HP output is saved.
+   * @param cache_precision Precision label forwarded to the selected codec.
+   * @return Nothing after a no-op policy decision or successful completion.
+   * @throws GraphError with `ComputeError` for typed admission rejection or
+   * cancellation.
+   * @throws Codec, filesystem, graph, allocation, or synchronization
+   * exceptions from estimation, construction, execution, or waiting.
+   * @note The I/O callback receives only const Graph/Node access and therefore
+   * cannot mutate Graph state. This preserves the current pre-publication
+   * cache failure ordering; it grants no Graph-document, daemon, OutputStore,
+   * retry, receipt, or durability authority.
+   */
+  void save_cache_if_configured_via_executor(
+      execution::ComputeIoExecutor& executor,
+      const std::shared_ptr<const void>& lifetime_token, GraphModel& graph,
+      const Node& node, const std::string& cache_precision) const;
 
   /**
    * @brief Attempts to satisfy a node from disk cache into its HP memory cache.
