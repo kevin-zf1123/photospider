@@ -333,6 +333,18 @@ class DeviceExecutorRegistry final {
       ComputeIntent request_intent,
       std::uint64_t supersession_generation) noexcept;
 
+  /**
+   * @brief Retires canonical generation rows after exact Graph close drain.
+   * @param graph_instance_id Nonzero irreversibly closed Graph identity.
+   * @return Number of lineage rows removed from the shared manager.
+   * @throws std::logic_error when the shared manager is absent or a transfer
+   * for this Graph remains pending.
+   * @throws ResidencyManager validation or synchronization errors unchanged.
+   * @note Ready resident replicas are not cleared. The caller owns the
+   * Graph-close ordering proof and must prevent later generation observation.
+   */
+  std::size_t retire_graph_lineages(std::uint64_t graph_instance_id);
+
  private:
   /** @brief Number of public Device enum slots currently recognized. */
   static constexpr std::size_t kDeviceSlotCount = 4U;

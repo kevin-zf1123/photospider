@@ -1284,19 +1284,25 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason);
 
   /**
-   * @brief Waits for one Closing Graph row to empty and removes it.
+   * @brief Drains one Closing Graph and retires its lifecycle maintenance.
    * @param graph_instance_id Exact runtime identity.
-   * @return Nothing after GraphRowRemoved publication.
+   * @return Nothing after GraphRowRemoved publication and residency-lineage
+   * retirement.
    * @throws RunLifecycleRegistry settlement errors unchanged.
+   * @note Once GraphRowRemoved publishes, an unexpected residency cleanup
+   * failure terminates because the irreversible close cannot be retried.
+   * Ready resident replicas remain subject to their process-domain capacity.
    */
   void finish_graph_close_lifecycle(GraphInstanceId graph_instance_id);
 
   /**
-   * @brief Settles and removes one Graph lifecycle row before lane teardown.
+   * @brief Settles one Graph and retires its lifecycle maintenance.
    * @param graph_instance_id Exact runtime identity.
    * @param reason GraphClose or ProcessShutdown.
-   * @return Nothing after row removal.
+   * @return Nothing after row removal and residency-lineage retirement.
    * @throws RunLifecycleRegistry close errors unchanged.
+   * @note This convenience path composes the same begin/finish boundaries used
+   * by Kernel close. Post-row-removal residency failure is fail-stop.
    */
   void close_graph_lifecycle(GraphInstanceId graph_instance_id,
                              ComputeRunCancellationReason reason);

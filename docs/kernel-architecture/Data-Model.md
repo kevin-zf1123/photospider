@@ -389,7 +389,11 @@ a late older Run observation cannot regress freshness. Settled replicas may
 outlive their producing Run, but strong native/provider ownership is bounded by
 the manager's 64-entry default: publication pressure releases the
 lowest-revision entry. Generation advance alone does not clear residency, and
-the entry count is not device-byte or scratch admission.
+the entry count is not device-byte or scratch admission. After exact Graph
+close has drained every Run and pending native completion, the manager retires
+all generation rows for that nonreused `GraphInstanceId`; calling retirement
+while a transfer remains pending is an invariant failure. This Graph-scoped
+maintenance does not clear settled resident replicas.
 
 V-9 adds byte authority without changing logical Value identity or public
 binding facts. `ResourceLedger` owns an isolated memory/scratch account for

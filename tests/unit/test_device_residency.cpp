@@ -458,6 +458,50 @@ TEST(DeviceResidency,
 }
 
 /**
+ * @brief Proves Graph retirement removes only the matching generation rows.
+ * @return Nothing; GoogleTest reports retirement counts or isolation failures.
+ * @throws Residency validation, allocation, or synchronization exceptions.
+ * @note Two lineages share Graph 7 while one belongs to Graph 8. Repeating
+ * retirement is idempotent and does not consume the other Graph's row.
+ */
+TEST(DeviceResidency, RetiresAllAndOnlyOneClosedGraphLineages) {
+  ResidencyManager manager;
+  manager.track_lineage(7U, 41, ComputeIntent::GlobalHighPrecision);
+  manager.track_lineage(7U, 42, ComputeIntent::RealTimeUpdate);
+  manager.track_lineage(8U, 41, ComputeIntent::GlobalHighPrecision);
+
+  EXPECT_EQ(manager.retire_graph_lineages(7U), 2U);
+  EXPECT_EQ(manager.retire_graph_lineages(7U), 0U);
+  EXPECT_EQ(manager.retire_graph_lineages(8U), 1U);
+  EXPECT_THROW((void)manager.retire_graph_lineages(0U), std::invalid_argument);
+}
+
+/**
+ * @brief Proves lineage retirement rejects an undrained native transfer.
+ * @return Nothing; GoogleTest reports premature retirement or cleanup errors.
+ * @throws Fake publication, identity, or synchronized manager exceptions.
+ * @note Removing the exact admission models terminal native cleanup; only
+ * afterward may Graph-scoped generation state retire.
+ */
+TEST(DeviceResidency, RejectsLineageRetirementWhileTransferIsPending) {
+  ResidencyManager manager;
+  PendingReplicaPair pair = make_pending_replica_pair();
+  const DeviceCompletionIdentity identity(make_seed(1U, 19U), pair.source.value,
+                                          pair.destination.value);
+  manager.observe_generation(identity.seed());
+  ASSERT_NO_THROW(manager.register_transfer(identity));
+
+  EXPECT_THROW(
+      (void)manager.retire_graph_lineages(identity.seed().graph_instance_id()),
+      std::logic_error);
+  EXPECT_TRUE(manager.discard_transfer(identity));
+  EXPECT_EQ(manager.retire_graph_lineages(identity.seed().graph_instance_id()),
+            1U);
+  EXPECT_TRUE(pair.source.producer.cancel());
+  EXPECT_TRUE(pair.destination.producer.cancel());
+}
+
+/**
  * @brief Proves zero cannot disable the resident-entry ownership bound.
  * @return Nothing; GoogleTest reports constructor validation failures.
  * @throws Nothing after GoogleTest handles the expected invalid argument.

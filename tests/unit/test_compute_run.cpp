@@ -3862,6 +3862,36 @@ TEST(RunGroupLifecycle, ReleasesBothTerminalChildLeasesTogether) {
 }
 
 /**
+ * @brief Proves service Graph close retires residency generation maintenance.
+ * @return Nothing; GoogleTest reports retained lineage rows after close.
+ * @throws Service, Graph-anchor, residency, or lifecycle exceptions unchanged.
+ * @note The test retains the injected process manager outside the moved
+ * registry. A post-close retirement count of zero proves the service already
+ * removed both exact Graph rows; settled resident replicas are not involved.
+ */
+TEST(ExecutionServiceLifecycle,
+     GraphCloseRetiresResidencyGenerationMaintenance) {
+  execution::DeviceExecutorRegistry registry;
+  std::shared_ptr<execution::ResidencyManager> residency =
+      registry.residency_manager();
+  ExecutionService service(ExecutionService::default_resource_limits(),
+                           std::move(registry));
+  const GraphInstanceId graph_instance_id{611U};
+  auto anchor = std::make_shared<GraphLifetimeAnchor>(graph_instance_id);
+  service.register_graph_lifecycle(anchor);
+  residency->track_lineage(graph_instance_id.value(), 71,
+                           ComputeIntent::GlobalHighPrecision);
+  residency->track_lineage(graph_instance_id.value(), 72,
+                           ComputeIntent::RealTimeUpdate);
+
+  service.close_graph_lifecycle(graph_instance_id,
+                                ComputeRunCancellationReason::GraphClose);
+  anchor->mark_retired();
+
+  EXPECT_EQ(residency->retire_graph_lineages(graph_instance_id.value()), 0U);
+}
+
+/**
  * @brief Verifies explicit cancellation keeps one stable reason and callback.
  *
  * @return Nothing; GoogleTest assertions report arbiter, notification, or

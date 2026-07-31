@@ -46,6 +46,8 @@ enum class ResidencyCompletionDisposition : std::uint32_t {
  * commit authority. Completed replicas are retained up to a fixed entry-count
  * capacity; publication beyond that bound evicts the oldest logical revision
  * and releases its strong native/provider owners.
+ * Canonical generation rows are Graph-scoped maintenance state and retire
+ * after exact Graph close has drained every Run and pending native completion.
  *
  * @throws std::system_error when synchronization fails and std::bad_alloc when
  * map ownership cannot allocate.
@@ -113,6 +115,22 @@ class ResidencyManager final {
       std::uint64_t graph_instance_id, int target_node_id,
       ComputeIntent request_intent,
       std::uint64_t supersession_generation) noexcept;
+
+  /**
+   * @brief Retires every canonical generation row for one closed Graph.
+   * @param graph_instance_id Nonzero irreversibly closed Graph identity.
+   * @return Number of generation rows removed; zero makes repeated retirement
+   * idempotent.
+   * @throws std::invalid_argument when `graph_instance_id` is zero.
+   * @throws std::logic_error while any admitted transfer for the Graph remains
+   * pending.
+   * @throws std::system_error when synchronization fails.
+   * @note The caller must first drain all Graph Runs and native completions.
+   * Ready resident replicas remain bounded process-domain values and are not
+   * removed by lineage retirement. A nonreused Graph identity must never
+   * admit or observe new generations after this call.
+   */
+  std::size_t retire_graph_lineages(std::uint64_t graph_instance_id);
 
   /**
    * @brief Admits one exact replica production before native submission.
@@ -251,6 +269,7 @@ class ResidencyManager final {
   mutable std::mutex mutex_;
   /**
    * @brief Newest generation per lineage, or zero for a pretracked placeholder.
+   * @note Rows retire together after their exact Graph lifecycle drains.
    */
   std::map<LineageKey, std::uint64_t> current_generations_;
   /** @brief Exact admitted identity indexed by destination producer scalar. */

@@ -100,6 +100,32 @@ void ResidencyManager::publish_current_generation(
   }
 }
 
+/** @copydoc ResidencyManager::retire_graph_lineages */
+std::size_t ResidencyManager::retire_graph_lineages(
+    std::uint64_t graph_instance_id) {
+  if (graph_instance_id == 0U) {
+    throw std::invalid_argument(
+        "Residency lineage retirement requires a nonzero Graph identity.");
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto& pending : pending_transfers_) {
+    if (pending.second.seed().graph_instance_id() == graph_instance_id) {
+      throw std::logic_error(
+          "Residency lineage retirement requires drained Graph transfers.");
+    }
+  }
+
+  std::size_t retired = 0U;
+  auto lineage = current_generations_.lower_bound(
+      LineageKey{graph_instance_id, -1, ComputeIntent::GlobalHighPrecision});
+  while (lineage != current_generations_.end() &&
+         lineage->first.graph_instance_id == graph_instance_id) {
+    lineage = current_generations_.erase(lineage);
+    ++retired;
+  }
+  return retired;
+}
+
 /** @copydoc ResidencyManager::register_transfer */
 void ResidencyManager::register_transfer(
     const DeviceCompletionIdentity& identity) {

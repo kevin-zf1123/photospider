@@ -355,7 +355,10 @@ the implementation does not fabricate recovery.
 After the Graph index and candidate count are empty, close performs the exact
 irreversible tail:
 
-1. remove the empty lifecycle-registry row;
+1. remove the empty lifecycle-registry row, then retire every residency
+   generation row for that exact `GraphInstanceId`; a surviving pending
+   transfer is fail-stop, while settled Ready replicas remain governed by
+   process-domain capacity;
 2. stop coordinator and compute-request admission, wake capacity-blocked
    producers, retire parked tickets, drain accepted callbacks, and join the
    request worker while graph-state finalization remains available;

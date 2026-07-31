@@ -319,7 +319,10 @@ publication 随后会在暴露 currentness 前推进该行，因此晚启动的�
 不能让 freshness 倒退。已结算 replica 可以比 producing Run 活得更久，但 manager 默认
 最多保留 64 个 entry，从而限制强 native/provider ownership；publication pressure 会释放
 revision 最低的 entry。Generation 推进本身不会清除 residency，而且这个 entry 数量不是
-device-byte 或 scratch admission。
+device-byte 或 scratch admission。在精确 Graph close 排空全部 Run 与 pending native
+completion 后，manager 会退役该不复用 `GraphInstanceId` 的全部 generation row；仍有 transfer
+pending 时调用退役属于 invariant failure。这项 Graph-scoped maintenance 不会清除已结算的
+resident replica。
 
 V-9 在不改变逻辑 Value identity 或 public binding fact 的前提下新增 byte authority。
 `ResourceLedger` 为每个已配置非 CPU `DeviceId` 拥有隔离的 memory/scratch account。Native

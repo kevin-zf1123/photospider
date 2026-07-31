@@ -234,6 +234,15 @@ void DeviceExecutorRegistry::publish_current_generation(
                                                  supersession_generation);
 }
 
+/** @copydoc DeviceExecutorRegistry::retire_graph_lineages */
+std::size_t DeviceExecutorRegistry::retire_graph_lineages(
+    std::uint64_t graph_instance_id) {
+  if (!residency_manager_) {
+    throw std::logic_error("DeviceExecutorRegistry has no residency manager.");
+  }
+  return residency_manager_->retire_graph_lineages(graph_instance_id);
+}
+
 /** @copydoc make_default_device_executor_registry */
 DeviceExecutorRegistry make_default_device_executor_registry() {
   DeviceExecutorRegistry registry;

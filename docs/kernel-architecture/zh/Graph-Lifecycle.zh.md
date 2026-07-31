@@ -279,7 +279,9 @@ registry unregistration。永不返回的 non-preemptible provider 因此可以�
 
 Graph index 与 candidate count 清空后，close 会执行以下精确且不可逆的尾序：
 
-1. 移除空 lifecycle-registry row；
+1. 移除空 lifecycle-registry row，随后退役该精确 `GraphInstanceId` 的全部 residency
+   generation row；仍有 pending transfer 属于 fail-stop，而已结算 Ready replica 继续由
+   process-domain capacity 管理；
 2. 停止 coordinator 与 compute-request admission，唤醒因容量阻塞的 producer，retire parked
    ticket，排空已接受 callback，并在 graph-state finalization 仍可用时 join request worker；
 3. 停止、排空并 join graph-state lane；
