@@ -206,7 +206,7 @@ turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
 `test_cpu_dense_tensor_image_operation` and
 `test_value_identity_across_dsos` binaries. Before installation it runs all
-46 dense-image cases plus the dual-DSO identity case in that actual disabled
+47 dense-image cases plus the dual-DSO identity case in that actual disabled
 producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
@@ -1096,7 +1096,7 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor, ImageView, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
-binary for the implemented V-2 through V-8 boundary. Its 46 durable cases
+binary for the implemented V-2 through V-8 boundary. Its 47 durable cases
 verify:
 
 - copyable ReadyFence polling, queued non-inline waits, observer-local waiter
@@ -1167,14 +1167,14 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 46 dense cases in an actual
+`DependencyDisabledInstallSmoke` builds and runs all 47 dense cases in an actual
 OpenCV/YAML-disabled product before proving the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
 synchronous Ready Value fence without optional dependencies. The
-provider-disabled nested build below also compiles and runs all 46 dense cases
+provider-disabled nested build below also compiles and runs all 47 dense cases
 plus that dual-DSO case, so the real core operation, fence/transfer proof, and
 identity authority do not depend on the optional OpenCV operation provider or
 a native device SDK.
@@ -1218,8 +1218,8 @@ discovered in this nested inventory. The CMake-registered
 target closure; its production implementation is still compiled through the
 product closure, so CTest reports the exact registered-only
 `test_compute_io_executor_NOT_BUILT` placeholder. That inventory must contain
-exactly 55 entries: `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 46
+exactly 56 entries: `DependencyDisabledInstallSmoke`,
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 47
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two

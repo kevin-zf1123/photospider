@@ -321,6 +321,10 @@ def validate_provider_disabled_inventory(
         ),
         (
             "CpuDenseTensorImageOperation."
+            "SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing"
+        ),
+        (
+            "CpuDenseTensorImageOperation."
             "BuilderScopesWriteAuthorityAndReadLeaseLifetime"
         ),
         (

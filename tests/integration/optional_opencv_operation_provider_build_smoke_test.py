@@ -133,6 +133,10 @@ CPU_DENSE_IMAGE_CTEST_NAMES = (
     ),
     (
         "CpuDenseTensorImageOperation."
+        "SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing"
+    ),
+    (
+        "CpuDenseTensorImageOperation."
         "BuilderScopesWriteAuthorityAndReadLeaseLifetime"
     ),
     (
@@ -278,7 +282,7 @@ def provider_disabled_ctest_payload() -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
     @return JSON payload containing two profile entries, one registered-only
-      executor sentinel, 46 dense-image cases, one Value-runtime case, three
+      executor sentinel, 47 dense-image cases, one Value-runtime case, three
       disk cases, and two production lifecycle cases.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
@@ -1043,7 +1047,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves 55 names and focused-test
+        @return None after parsing preserves 56 names and focused-test
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
         @note Exact labels exclude the build-smoke label from disk and
@@ -1064,6 +1068,8 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             provider_disabled_ctest_payload()
         )
 
+        self.assertEqual(len(CPU_DENSE_IMAGE_CTEST_NAMES), 47)
+        self.assertEqual(len(expected), 56)
         self.assertEqual(set(inventory), expected)
         subject.validate_provider_disabled_inventory(inventory)
 
@@ -1073,7 +1079,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         @return None after validation reports the injected property drift.
         @throws AssertionError If the exact provider-disabled contract accepts
           the sentinel with a CTest label.
-        @note The mutation starts from the complete valid 55-entry inventory
+        @note The mutation starts from the complete valid 56-entry inventory
           and changes only the sentinel's `LABELS` property.
         """
 
@@ -1095,7 +1101,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         @return None after validation reports the injected property drift.
         @throws AssertionError If the exact provider-disabled contract accepts
           the sentinel with a CTest timeout.
-        @note The mutation starts from the complete valid 55-entry inventory
+        @note The mutation starts from the complete valid 56-entry inventory
           and changes only the sentinel's `TIMEOUT` property.
         """
 

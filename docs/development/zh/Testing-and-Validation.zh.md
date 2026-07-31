@@ -159,7 +159,7 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_value_identity_across_dsos`
-binary。安装前，它会在该真实 disabled producer 中运行全部 46 个 dense-image case 与一个
+binary。安装前，它会在该真实 disabled producer 中运行全部 47 个 dense-image case 与一个
 双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
@@ -871,7 +871,7 @@ ctest --test-dir build --output-on-failure \
 ## CPU DenseTensor、ImageView、Region、ReadyFence 与 Transfer 验证
 
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-8 边界的 provider-independent
-integration binary。它的 46 个长期用例验证：
+integration binary。它的 47 个长期用例验证：
 
 - copyable ReadyFence poll、queued non-inline wait、observer-local waiter cancellation、
   exactly-once Ready/Failed/ProducerCancelled settlement、typed failure retention 与
@@ -932,12 +932,12 @@ ctest --test-dir build --output-on-failure \
   -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 46 个 dense
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 47 个 dense
 用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
 都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
-provider-disabled nested build 也会编译并运行全部 46 个 dense case 与该双 DSO case，因此真实
+provider-disabled nested build 也会编译并运行全部 47 个 dense case 与该双 DSO case，因此真实
 core operation、fence/transfer proof 与 identity authority 都不依赖 optional OpenCV operation
 provider 或 native device SDK。
 
@@ -969,9 +969,9 @@ internal-seam consumer，再查询机器可读的 CTest inventory。`test_kernel
 覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。
 CMake 注册的 `test_compute_io_executor` 行为测试 target 仍位于该嵌套 build target closure
 之外；其生产实现仍通过 product closure 被编译，因此 CTest 会报告精确的 registered-only
-占位项 `test_compute_io_executor_NOT_BUILT`。该 inventory 必须精确包含 55 项：
+占位项 `test_compute_io_executor_NOT_BUILT`。该 inventory 必须精确包含 56 项：
 `DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 46 个
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 47 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case 与
