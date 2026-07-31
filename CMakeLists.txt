@@ -220,6 +220,22 @@ foreach(EXISTING_PUBLIC_HEADER ${PHOTOSPIDER_EXISTING_BUILD_PUBLIC_HEADERS})
         file(REMOVE "${EXISTING_PUBLIC_HEADER}")
     endif()
 endforeach()
+# Package-consumer validation reads the configured allowlist rather than
+# duplicating its size or scanning the source tree. Keep the build-tree
+# manifest path stable and serialize install-relative paths one per line so
+# missing and unexpected installed files can be diagnosed as an exact set.
+set(PHOTOSPIDER_CI_INVENTORY_DIR
+    "${CMAKE_BINARY_DIR}/generated/ci_inventory")
+file(MAKE_DIRECTORY "${PHOTOSPIDER_CI_INVENTORY_DIR}")
+set(PHOTOSPIDER_PUBLIC_HEADER_INVENTORY_CONTENT "")
+foreach(PUBLIC_HEADER_RELATIVE_PATH
+        IN LISTS PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS)
+    string(APPEND PHOTOSPIDER_PUBLIC_HEADER_INVENTORY_CONTENT
+        "include/photospider/${PUBLIC_HEADER_RELATIVE_PATH}\n")
+endforeach()
+file(WRITE
+    "${PHOTOSPIDER_CI_INVENTORY_DIR}/installable_public_headers.txt"
+    "${PHOTOSPIDER_PUBLIC_HEADER_INVENTORY_CONTENT}")
 # Linked consumers receive only the public include root. Kernel/Interaction
 # facades live under src/lib/ as source-tree internals: repository targets that
 # include them must use the private roots below, and the installable
@@ -1987,6 +2003,60 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
+
+# GoogleTest.cmake records each gtest_discover_tests registration in the
+# directory TEST_INCLUDE_FILES property and sets CTEST_DISCOVERED_TEST_COUNTER
+# on its executable target. Cross-check those two CMake-owned views, then expose
+# the exact target/configuration executable mapping to nested-profile drivers.
+# A driver can consequently derive registered-but-unbuilt `_NOT_BUILT`
+# placeholders from real target existence without maintaining a target count or
+# guessing future target names.
+if(BUILD_TESTING)
+    get_property(PHOTOSPIDER_CTEST_INCLUDE_FILES DIRECTORY
+        PROPERTY TEST_INCLUDE_FILES)
+    get_property(PHOTOSPIDER_INVENTORY_ROOT_TARGETS DIRECTORY
+        PROPERTY BUILDSYSTEM_TARGETS)
+    set(PHOTOSPIDER_REGISTERED_GTEST_TARGETS "")
+    set(PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES "")
+    foreach(PHOTOSPIDER_INVENTORY_ROOT_TARGET
+            IN LISTS PHOTOSPIDER_INVENTORY_ROOT_TARGETS)
+        get_property(PHOTOSPIDER_GTEST_COUNTER_IS_SET
+            TARGET ${PHOTOSPIDER_INVENTORY_ROOT_TARGET}
+            PROPERTY CTEST_DISCOVERED_TEST_COUNTER SET)
+        if(PHOTOSPIDER_GTEST_COUNTER_IS_SET)
+            get_property(PHOTOSPIDER_GTEST_COUNTER
+                TARGET ${PHOTOSPIDER_INVENTORY_ROOT_TARGET}
+                PROPERTY CTEST_DISCOVERED_TEST_COUNTER)
+            if(NOT PHOTOSPIDER_GTEST_COUNTER EQUAL 1)
+                message(FATAL_ERROR
+                    "GoogleTest target ${PHOTOSPIDER_INVENTORY_ROOT_TARGET} is registered ${PHOTOSPIDER_GTEST_COUNTER} times; inventory requires one registration")
+            endif()
+            list(APPEND PHOTOSPIDER_REGISTERED_GTEST_TARGETS
+                ${PHOTOSPIDER_INVENTORY_ROOT_TARGET})
+            list(APPEND PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES
+                "${CMAKE_CURRENT_BINARY_DIR}/${PHOTOSPIDER_INVENTORY_ROOT_TARGET}[${PHOTOSPIDER_GTEST_COUNTER}]_include.cmake")
+        endif()
+    endforeach()
+    list(SORT PHOTOSPIDER_CTEST_INCLUDE_FILES)
+    list(SORT PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES)
+    list(SORT PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
+    if(NOT PHOTOSPIDER_CTEST_INCLUDE_FILES STREQUAL
+            PHOTOSPIDER_EXPECTED_GTEST_INCLUDE_FILES)
+        message(FATAL_ERROR
+            "CTest include inventory does not match registered GoogleTest targets")
+    endif()
+    set(PHOTOSPIDER_GTEST_TARGET_INVENTORY_CONTENT
+        "# target\tconfigured executable\n")
+    foreach(PHOTOSPIDER_REGISTERED_GTEST_TARGET
+            IN LISTS PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
+        string(APPEND PHOTOSPIDER_GTEST_TARGET_INVENTORY_CONTENT
+            "${PHOTOSPIDER_REGISTERED_GTEST_TARGET}\t$<TARGET_FILE:${PHOTOSPIDER_REGISTERED_GTEST_TARGET}>\n")
+    endforeach()
+    file(GENERATE
+        OUTPUT
+            "${PHOTOSPIDER_CI_INVENTORY_DIR}/registered_gtest_targets-$<CONFIG>.tsv"
+        CONTENT "${PHOTOSPIDER_GTEST_TARGET_INVENTORY_CONTENT}")
 endif()
 
 # The test-only product must have a closed direct-consumer set, and no target

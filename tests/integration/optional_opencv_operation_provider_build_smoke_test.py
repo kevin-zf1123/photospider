@@ -76,11 +76,14 @@ def ctest_json_test(
     return {"name": name, "properties": properties}
 
 
-def provider_disabled_ctest_payload() -> str:
+def provider_disabled_ctest_payload(
+    sentinels: tuple[str, ...] = (),
+) -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
+    @param sentinels Registered-but-unbuilt target names with no properties.
     @return JSON payload containing two profile entries, three disk cases, and
-      two production lifecycle cases.
+      two production lifecycle cases plus the requested sentinels.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
       60-second timeout. Both groups use the exact `kernel-concurrency` label.
@@ -91,6 +94,7 @@ def provider_disabled_ctest_payload() -> str:
         OPTIONAL_PROVIDER_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
         *KERNEL_LIFECYCLE_CTEST_NAMES,
+        *sentinels,
     }
     return json.dumps(
         {
@@ -811,7 +815,89 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         )
 
         self.assertEqual(set(inventory), expected)
-        subject.validate_provider_disabled_inventory(inventory)
+        subject.validate_provider_disabled_inventory(inventory, set())
+
+    def test_derives_registered_only_sentinels_from_target_manifest(
+        self,
+    ) -> None:
+        """@brief Derive placeholders from registered target-file existence.
+
+        @return None after one built target is excluded and two arbitrary
+          unbuilt registered targets become exact sentinels.
+        @throws OSError If the synthetic manifest or executable cannot be
+          created.
+        @throws AssertionError If parsing loses registrations, depends on a
+          known future target name, or accepts malformed metadata.
+        @note Every path belongs to a disposable synthetic build. The arbitrary
+          future target proves derivation is registration-driven rather than a
+          source-file or count special case.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-gtest-inventory-"
+        ) as temporary:
+            build = pathlib.Path(temporary) / "build"
+            inventory_dir = build / subject.CI_INVENTORY_RELATIVE_DIRECTORY
+            inventory_dir.mkdir(parents=True)
+            executable_dir = build / "tests"
+            executable_dir.mkdir()
+            built_target = executable_dir / "test_built"
+            built_target.write_text("synthetic executable", encoding="utf-8")
+            unbuilt_target = executable_dir / "test_unbuilt"
+            future_target = executable_dir / "test_arbitrary_future"
+            manifest = inventory_dir / (
+                "registered_gtest_targets-RelWithDebInfo.tsv"
+            )
+            manifest.write_text(
+                "# target\tconfigured executable\n"
+                f"test_built\t{built_target}\n"
+                f"test_unbuilt\t{unbuilt_target}\n"
+                f"test_arbitrary_future\t{future_target}\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                subject.registered_gtest_target_files(
+                    build, "RelWithDebInfo"
+                ),
+                {
+                    "test_arbitrary_future": future_target,
+                    "test_built": built_target,
+                    "test_unbuilt": unbuilt_target,
+                },
+            )
+            sentinels = subject.expected_registered_gtest_sentinels(
+                build, "RelWithDebInfo"
+            )
+            self.assertEqual(
+                sentinels,
+                {
+                    "test_arbitrary_future_NOT_BUILT",
+                    "test_unbuilt_NOT_BUILT",
+                },
+            )
+            inventory = subject.parse_ctest_inventory(
+                provider_disabled_ctest_payload(tuple(sorted(sentinels)))
+            )
+            subject.validate_provider_disabled_inventory(
+                inventory, sentinels
+            )
+
+            malformed_entries = (
+                "test_relative\trelative/test_relative\n",
+                f"test_built\t{built_target}\ntest_built\t{built_target}\n",
+                f"test_bad_NOT_BUILT\t{unbuilt_target}\n",
+                "blank-target\n",
+            )
+            for entry in malformed_entries:
+                with self.subTest(entry=entry):
+                    manifest.write_text(entry, encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        RuntimeError, "inventory contains"
+                    ):
+                        subject.registered_gtest_target_files(
+                            build, "RelWithDebInfo"
+                        )
 
     def test_rejects_malformed_broad_or_drifted_ctest_inventory(self) -> None:
         """@brief Reject malformed, broad, missing, or drifted inventories.
@@ -845,7 +931,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
             subject.validate_provider_disabled_inventory(
-                old_full_only_inventory
+                old_full_only_inventory, set()
             )
 
         valid_inventory = subject.parse_ctest_inventory(
@@ -860,7 +946,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             "build-smoke",
         ]
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
-            subject.validate_provider_disabled_inventory(drifted_inventory)
+            subject.validate_provider_disabled_inventory(
+                drifted_inventory, set()
+            )
 
         drifted_lifecycle_inventory = {
             name: dict(properties)
@@ -871,7 +959,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         ] = 20
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
             subject.validate_provider_disabled_inventory(
-                drifted_lifecycle_inventory
+                drifted_lifecycle_inventory, set()
             )
 
         broad_inventory = {
@@ -880,7 +968,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         }
         broad_inventory["test_scheduler_NOT_BUILT"] = {}
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
-            subject.validate_provider_disabled_inventory(broad_inventory)
+            subject.validate_provider_disabled_inventory(
+                broad_inventory, set()
+            )
 
 
 if __name__ == "__main__":

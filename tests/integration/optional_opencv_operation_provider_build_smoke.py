@@ -7,9 +7,15 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 
 from cmake_build_smoke_support import remove_work_tree
+
+
+#: @brief Build-relative directory containing CMake-owned validation manifests.
+#: @note The directory is generated during configure and is never installed.
+CI_INVENTORY_RELATIVE_DIRECTORY = pathlib.Path("generated/ci_inventory")
 
 
 def run(command: list[str], cwd: pathlib.Path) -> None:
@@ -86,6 +92,107 @@ def validate_provider_disabled_cache(values: dict[str, str]) -> None:
             "nested provider-disabled cache profile mismatch: "
             f"{mismatches}"
         )
+
+
+def registered_gtest_target_files(
+    build: pathlib.Path, configuration: str
+) -> dict[str, pathlib.Path]:
+    """@brief Read configured GoogleTest targets and executable locations.
+
+    @param build Configured nested provider-disabled build directory.
+    @param configuration Exact single- or multi-config name selected for the
+      nested build.
+    @return Mapping from every uniquely registered GoogleTest target to its
+      configuration-specific executable path.
+    @throws OSError If the generated inventory cannot be read.
+    @throws UnicodeError If the generated inventory is not valid UTF-8.
+    @throws RuntimeError If the configuration or inventory is missing,
+      malformed, empty, duplicated, or contains a relative executable path.
+    @note CMake generates the TSV from its ``gtest_discover_tests`` registration
+      metadata and ``$<TARGET_FILE:...>`` expressions. This parser does not
+      infer registrations from source filenames or from CTest's observed
+      sentinel set.
+    """
+
+    if (
+        not configuration
+        or pathlib.PurePath(configuration).name != configuration
+        or configuration in {".", ".."}
+    ):
+        raise RuntimeError(
+            "invalid nested provider build configuration for GoogleTest "
+            f"inventory: {configuration!r}"
+        )
+    inventory_path = (
+        build
+        / CI_INVENTORY_RELATIVE_DIRECTORY
+        / f"registered_gtest_targets-{configuration}.tsv"
+    )
+    if not inventory_path.is_file():
+        raise RuntimeError(
+            "configured GoogleTest target inventory is missing: "
+            f"{inventory_path}"
+        )
+
+    targets: dict[str, pathlib.Path] = {}
+    for line in inventory_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#"):
+            continue
+        if not line:
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains a blank entry"
+            )
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains a malformed "
+                f"entry: {line!r}"
+            )
+        target_name, executable_text = fields
+        executable = pathlib.Path(executable_text)
+        if (
+            re.fullmatch(r"[A-Za-z0-9_.:+-]+", target_name) is None
+            or target_name.endswith("_NOT_BUILT")
+            or not executable.is_absolute()
+        ):
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains an invalid "
+                f"entry: {line!r}"
+            )
+        if target_name in targets:
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains a duplicate "
+                f"target: {target_name!r}"
+            )
+        targets[target_name] = executable
+    if not targets:
+        raise RuntimeError("configured GoogleTest target inventory is empty")
+    return targets
+
+
+def expected_registered_gtest_sentinels(
+    build: pathlib.Path, configuration: str
+) -> set[str]:
+    """@brief Derive exact registered-but-unbuilt CTest placeholders.
+
+    @param build Configured and selectively built provider-disabled tree.
+    @param configuration Exact configuration whose target paths were built.
+    @return Sentinel names for registered GoogleTest executables that are not
+      regular files after the focused build.
+    @throws OSError If the configured target inventory cannot be read.
+    @throws UnicodeError If the configured inventory is not valid UTF-8.
+    @throws RuntimeError If the configured target inventory is invalid.
+    @note Target-file existence observes the real build closure, including
+      targets built indirectly as dependencies. The returned names follow
+      CMake GoogleTest's exact ``${target}_NOT_BUILT`` convention.
+    """
+
+    targets = registered_gtest_target_files(build, configuration)
+    return {
+        f"{target_name}_NOT_BUILT"
+        for target_name, executable in targets.items()
+        if not executable.is_file()
+    }
 
 
 def parse_ctest_inventory(
@@ -188,14 +295,19 @@ def query_ctest_inventory(
 
 def validate_provider_disabled_inventory(
     inventory: dict[str, dict[str, object]],
+    expected_sentinels: set[str],
 ) -> None:
     """@brief Require the runnable provider-disabled CTest surface.
 
     @param inventory Unique registered tests and properties from the nested
       build.
-    @return None when only the intended focused tests and install smoke exist.
-    @throws RuntimeError If a focused test is missing, a broad-suite test
-      remains registered, or a required concurrency property drifts.
+    @param expected_sentinels Exact registered-but-unbuilt names derived from
+      CMake's target inventory and the completed focused build closure.
+    @return None when only the intended focused tests, install smoke, and
+      CMake-derived registered-only sentinels exist.
+    @throws RuntimeError If a focused test is missing, a sentinel is malformed
+      or has properties, a broad-suite test remains registered, or a required
+      concurrency property drifts.
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
@@ -225,18 +337,42 @@ def validate_provider_disabled_inventory(
             "ShutdownAndGraphPublicationShareOneProductionAdmissionBoundary"
         ),
     }
+    malformed_sentinels = sorted(
+        name
+        for name in expected_sentinels
+        if re.fullmatch(r"[A-Za-z0-9_.:+-]+_NOT_BUILT", name) is None
+    )
+    if malformed_sentinels:
+        raise RuntimeError(
+            "provider-disabled expected sentinel inventory is malformed: "
+            f"{malformed_sentinels}"
+        )
     expected = {
         "DependencyDisabledInstallSmoke",
         (
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
-    } | disk_cache_tests | lifecycle_tests
+    } | disk_cache_tests | lifecycle_tests | expected_sentinels
     names = set(inventory)
     if names != expected:
         raise RuntimeError(
             "provider-disabled CTest inventory mismatch: "
             f"expected {sorted(expected)}, got {sorted(names)}"
+        )
+
+    sentinel_property_mismatches = {
+        name: {
+            "LABELS": inventory[name].get("LABELS"),
+            "TIMEOUT": inventory[name].get("TIMEOUT"),
+        }
+        for name in expected_sentinels
+        if "LABELS" in inventory[name] or "TIMEOUT" in inventory[name]
+    }
+    if sentinel_property_mismatches:
+        raise RuntimeError(
+            "provider-disabled registered-only CTest property mismatch: "
+            f"{sentinel_property_mismatches}"
         )
 
     expected_properties = {
@@ -397,7 +533,10 @@ def main() -> int:
     inventory = query_ctest_inventory(
         args.ctest_executable, work, configuration, repo
     )
-    validate_provider_disabled_inventory(inventory)
+    validate_provider_disabled_inventory(
+        inventory,
+        expected_registered_gtest_sentinels(work, configuration),
+    )
     run(
         [
             args.ctest_executable,

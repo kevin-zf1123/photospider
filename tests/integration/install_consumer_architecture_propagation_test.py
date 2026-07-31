@@ -588,6 +588,99 @@ class SymbolToolHarness:
         return [command[0] for command in self.run_commands]
 
 
+class ConfiguredPublicHeaderInventoryTest(unittest.TestCase):
+    """@brief Validate CMake-derived package header inventory parsing.
+
+    @throws OSError If a disposable inventory cannot be created or read.
+    @throws AssertionError If valid exact paths drift or malformed entries are
+      accepted.
+    @note Tests use only synthetic build trees and never configure or install
+      the repository product.
+    """
+
+    def test_loads_exact_sorted_public_header_includes(self) -> None:
+        """@brief Convert the configured allowlist into consumer includes.
+
+        @return None after unsorted CMake entries become a sorted exact include
+          inventory with no count-specific expectation.
+        @throws OSError If the synthetic manifest cannot be written.
+        @throws AssertionError If path conversion loses or invents an entry.
+        @note The fixture deliberately uses an arbitrary new header name to
+          prove that the parser is driven by the configured allowlist.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-public-header-inventory-"
+        ) as temporary:
+            build = pathlib.Path(temporary) / "build"
+            manifest = (
+                build
+                / static_product.PUBLIC_HEADER_INVENTORY_RELATIVE_PATH
+            )
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                "include/photospider/plugin/plugin_api.hpp\n"
+                "include/photospider/data/arbitrary_future_value.hpp\n"
+                "include/photospider/policy/policy_plugin_api.h\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                static_product.public_header_includes(build),
+                [
+                    "#include <photospider/data/arbitrary_future_value.hpp>",
+                    "#include <photospider/plugin/plugin_api.hpp>",
+                    "#include <photospider/policy/policy_plugin_api.h>",
+                ],
+            )
+
+    def test_rejects_missing_or_malformed_public_header_inventory(
+        self,
+    ) -> None:
+        """@brief Reject absent, empty, duplicate, and unsafe manifest entries.
+
+        @return None after every fail-closed counterexample raises RuntimeError.
+        @throws OSError If a synthetic malformed manifest cannot be written.
+        @throws AssertionError If any malformed inventory is accepted.
+        @note The fixtures cover exact-root, canonical-path, suffix, duplicate,
+          and nonempty constraints without accessing repository headers.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-public-header-invalid-"
+        ) as temporary:
+            build = pathlib.Path(temporary) / "build"
+            manifest = (
+                build
+                / static_product.PUBLIC_HEADER_INVENTORY_RELATIVE_PATH
+            )
+            with self.assertRaisesRegex(RuntimeError, "is missing"):
+                static_product.public_header_includes(build)
+
+            manifest.parent.mkdir(parents=True)
+            malformed_payloads = (
+                "",
+                "include/other/header.hpp\n",
+                "include/photospider/../header.hpp\n",
+                "include/photospider/header.cpp\n",
+                (
+                    "include/photospider/header.hpp\n"
+                    "include/photospider/header.hpp\n"
+                ),
+                (
+                    "include/photospider/header.hpp\n\n"
+                    "include/photospider/other.hpp\n"
+                ),
+            )
+            for payload in malformed_payloads:
+                with self.subTest(payload=payload):
+                    manifest.write_text(payload, encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        RuntimeError, "public-header inventory"
+                    ):
+                        static_product.public_header_includes(build)
+
+
 class InstallConsumerCTestRegistrationTest(unittest.TestCase):
     """@brief Lock active CTest commands for the three real install smokes.
 
