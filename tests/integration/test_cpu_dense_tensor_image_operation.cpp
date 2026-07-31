@@ -36,6 +36,7 @@
 #include "core/ops.hpp"
 #include "core/pending_value.hpp"
 #include "core/value_image_adapter.hpp"
+#include "execution/compute_io_executor.hpp"
 #include "execution/value_transfer_task.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -167,6 +168,343 @@ Value make_unsigned8_rank4_value(std::size_t width, std::size_t height,
   return Value::from_cpu_dense_tensor(std::move(descriptor), image,
                                       std::move(layout), std::move(storage));
 }
+
+/**
+ * @brief Adds two matrix-fixture sizes with checked host arithmetic.
+ *
+ * @param left First byte or element count.
+ * @param right Second byte or element count.
+ * @return Exact sum.
+ * @throws std::overflow_error when the sum exceeds `std::size_t`.
+ * @note This helper protects test fixture construction before allocation.
+ */
+std::size_t checked_matrix_add(std::size_t left, std::size_t right) {
+  if (right > std::numeric_limits<std::size_t>::max() - left) {
+    throw std::overflow_error("Generic matrix fixture addition overflowed.");
+  }
+  return left + right;
+}
+
+/**
+ * @brief Multiplies two matrix-fixture sizes with checked host arithmetic.
+ *
+ * @param left First byte or element dimension.
+ * @param right Second byte or element dimension.
+ * @return Exact product.
+ * @throws std::overflow_error when the product exceeds `std::size_t`.
+ * @note Zero factors produce zero without division.
+ */
+std::size_t checked_matrix_multiply(std::size_t left, std::size_t right) {
+  if (left != 0U && right > std::numeric_limits<std::size_t>::max() / left) {
+    throw std::overflow_error(
+        "Generic matrix fixture multiplication overflowed.");
+  }
+  return left * right;
+}
+
+/**
+ * @brief Computes the logical element count of one positive matrix shape.
+ *
+ * @param shape Nonempty positive logical extents.
+ * @return Exact product of every extent.
+ * @throws std::invalid_argument when shape is empty or contains zero.
+ * @throws std::overflow_error when the product is unrepresentable.
+ */
+std::size_t matrix_element_count(const std::vector<std::size_t>& shape) {
+  if (shape.empty()) {
+    throw std::invalid_argument("Generic matrix shape must not be empty.");
+  }
+  std::size_t count = 1U;
+  for (const std::size_t extent : shape) {
+    if (extent == 0U) {
+      throw std::invalid_argument(
+          "Generic matrix shape extents must be positive.");
+    }
+    count = checked_matrix_multiply(count, extent);
+  }
+  return count;
+}
+
+/**
+ * @brief Converts one row-major logical index to rank-general coordinates.
+ *
+ * @param index Index strictly below the shape element count.
+ * @param shape Nonempty positive logical extents.
+ * @return One in-range coordinate per axis.
+ * @throws std::out_of_range when index is outside the logical tensor.
+ * @throws std::invalid_argument or std::overflow_error from shape validation.
+ * @throws std::bad_alloc when coordinate storage cannot allocate.
+ */
+std::vector<std::size_t> matrix_coordinates(
+    std::size_t index, const std::vector<std::size_t>& shape) {
+  if (index >= matrix_element_count(shape)) {
+    throw std::out_of_range("Generic matrix logical index is out of range.");
+  }
+  std::vector<std::size_t> coordinates(shape.size(), 0U);
+  for (std::size_t reverse = shape.size(); reverse > 0U; --reverse) {
+    const std::size_t axis = reverse - 1U;
+    coordinates[axis] = index % shape[axis];
+    index /= shape[axis];
+  }
+  return coordinates;
+}
+
+/**
+ * @brief Builds one positive non-overlapping layout with rank-general gaps.
+ *
+ * Each outer-axis stride is the complete inner envelope plus a fixed number
+ * of element-sized padding bytes. The returned storage size is the exact
+ * producer envelope required by `Value::from_cpu_dense_tensor`.
+ *
+ * @param shape Nonempty positive logical extents.
+ * @param element_bytes Positive physical bytes per logical element.
+ * @param padding_elements Gap inserted between adjacent outer-axis slabs.
+ * @return Positive layout and exact storage size.
+ * @throws std::invalid_argument for zero element width or malformed shape.
+ * @throws std::overflow_error for unrepresentable envelope or signed stride.
+ * @throws std::bad_alloc when stride storage cannot allocate.
+ */
+std::pair<StridedLayout, std::size_t> make_positive_matrix_layout(
+    const std::vector<std::size_t>& shape, std::size_t element_bytes,
+    std::size_t padding_elements) {
+  (void)matrix_element_count(shape);
+  if (element_bytes == 0U) {
+    throw std::invalid_argument(
+        "Generic matrix element width must be positive.");
+  }
+  const std::size_t padding_bytes =
+      checked_matrix_multiply(padding_elements, element_bytes);
+  std::vector<std::ptrdiff_t> strides(shape.size(), 0);
+  std::size_t inner_span = element_bytes;
+  for (std::size_t reverse = shape.size(); reverse > 0U; --reverse) {
+    const std::size_t axis = reverse - 1U;
+    const std::size_t stride =
+        axis + 1U == shape.size()
+            ? element_bytes
+            : checked_matrix_add(inner_span, padding_bytes);
+    if (stride >
+        static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+      throw std::overflow_error(
+          "Generic matrix stride exceeds the signed layout domain.");
+    }
+    strides[axis] = static_cast<std::ptrdiff_t>(stride);
+    inner_span = checked_matrix_add(
+        checked_matrix_multiply(shape[axis] - 1U, stride), inner_span);
+  }
+  return {StridedLayout{std::move(strides)}, inner_span};
+}
+
+/**
+ * @brief Returns one exactly representable deterministic floating test value.
+ *
+ * @param seed Integral case-specific starting value.
+ * @param logical_index Row-major logical element index.
+ * @return `seed + logical_index / 4`, exactly representable in FP32 and FP64
+ * for the bounded fixtures.
+ * @throws Nothing.
+ */
+double expected_matrix_element(double seed,
+                               std::size_t logical_index) noexcept {
+  return seed + static_cast<double>(logical_index) * 0.25;
+}
+
+/**
+ * @brief Creates one deterministic positive-layout FP32 or FP64 Value.
+ *
+ * @param shape Nonempty positive logical shape.
+ * @param image_facet Optional explicit image-axis mapping.
+ * @param bit_width Floating storage width, exactly 32 or 64.
+ * @param padding_elements Element-sized gap between outer logical slabs.
+ * @param seed Integral start used by `expected_matrix_element`.
+ * @return Ready immutable CPU Value whose padding bytes are `0xA5`.
+ * @throws std::invalid_argument for unsupported width or invalid Value facts.
+ * @throws std::overflow_error for unrepresentable layout arithmetic.
+ * @throws std::bad_alloc when descriptor, layout, or payload allocation fails.
+ * @note Active element bytes contain native FP32/FP64 values; comparisons use
+ * the same process and do not define persistent byte order.
+ */
+Value make_floating_matrix_value(std::vector<std::size_t> shape,
+                                 std::optional<ImageFacet> image_facet,
+                                 std::uint32_t bit_width,
+                                 std::size_t padding_elements, double seed) {
+  DenseTensorDescriptor descriptor{std::move(shape),
+                                   ElementSemantics::FloatingPoint,
+                                   StorageEncoding{bit_width}};
+  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
+  const auto [layout, storage_size] = make_positive_matrix_layout(
+      descriptor.shape, element_bytes, padding_elements);
+  std::vector<std::byte> storage(storage_size, std::byte{0xA5});
+  const std::size_t count = matrix_element_count(descriptor.shape);
+  for (std::size_t index = 0U; index < count; ++index) {
+    const std::vector<std::size_t> coordinates =
+        matrix_coordinates(index, descriptor.shape);
+    std::size_t offset = layout.byte_offset;
+    for (std::size_t axis = 0U; axis < coordinates.size(); ++axis) {
+      offset = checked_matrix_add(
+          offset, checked_matrix_multiply(
+                      coordinates[axis],
+                      static_cast<std::size_t>(layout.byte_strides[axis])));
+    }
+    const double expected = expected_matrix_element(seed, index);
+    if (bit_width == 32U) {
+      const float value = static_cast<float>(expected);
+      std::memcpy(storage.data() + offset, &value, sizeof(value));
+    } else if (bit_width == 64U) {
+      std::memcpy(storage.data() + offset, &expected, sizeof(expected));
+    } else {
+      throw std::invalid_argument(
+          "Generic matrix requires FP32 or FP64 storage.");
+    }
+  }
+  return Value::from_cpu_dense_tensor(std::move(descriptor), image_facet,
+                                      layout, std::move(storage));
+}
+
+/**
+ * @brief Reads one FP32 or FP64 logical element through a checked tensor view.
+ *
+ * @param view Ready retaining view with floating element semantics.
+ * @param coordinates One in-range coordinate per logical axis.
+ * @return Element widened to double for deterministic GoogleTest comparison.
+ * @throws std::invalid_argument for a non-FP32/FP64 descriptor.
+ * @throws std::out_of_range for invalid coordinates.
+ */
+double read_floating_matrix_element(
+    const DenseTensorView& view, const std::vector<std::size_t>& coordinates) {
+  const std::byte* element = view.element_data(coordinates);
+  const std::uint32_t bit_width = view.descriptor().storage_encoding.bit_width;
+  if (bit_width == 32U) {
+    float value = 0.0F;
+    std::memcpy(&value, element, sizeof(value));
+    return static_cast<double>(value);
+  }
+  if (bit_width == 64U) {
+    double value = 0.0;
+    std::memcpy(&value, element, sizeof(value));
+    return value;
+  }
+  throw std::invalid_argument(
+      "Generic matrix read requires FP32 or FP64 storage.");
+}
+
+/**
+ * @brief Copies the complete host-visible storage envelope of one Ready Value.
+ *
+ * @param value Ready host-visible Value.
+ * @return Independent copy including active elements and padding.
+ * @throws ReadyFenceAccessError or BufferAccessError when access is forbidden.
+ * @throws std::bad_alloc when byte storage cannot allocate.
+ */
+std::vector<std::byte> copy_matrix_storage(const Value& value) {
+  const ReadLease read = value.buffer_handle().acquire_read();
+  return std::vector<std::byte>(read.data(), read.data() + read.size());
+}
+
+/**
+ * @brief Snapshot populated by one admitted generic-Value I/O observation.
+ *
+ * @throws std::bad_alloc when copied descriptor, layout, or bytes allocate.
+ * @note Test code reads fields only after typed completion establishes worker
+ * synchronization.
+ */
+struct MatrixIoObservation final {
+  /** @brief Exact copied logical descriptor. */
+  DenseTensorDescriptor descriptor;
+  /** @brief Exact copied optional Image Facet. */
+  std::optional<ImageFacet> image_facet;
+  /** @brief Exact copied physical layout. */
+  StridedLayout layout;
+  /** @brief Exact copied storage binding. */
+  StorageBinding binding;
+  /** @brief Exact copied allocation identity. */
+  AllocationIdentity allocation;
+  /** @brief Exact copied logical revision. */
+  ValueRevisionId revision;
+  /** @brief Complete copied storage envelope including padding. */
+  std::vector<std::byte> storage;
+  /** @brief True only after the independent worker completed every copy. */
+  bool visited = false;
+};
+
+/**
+ * @brief Proves one Value crosses bounded compute-I/O retention unchanged.
+ *
+ * @param source Ready host-visible image or latent Value.
+ * @param executor Live bounded independent I/O worker.
+ * @return Nothing; GoogleTest reports admission, completion, or fact mismatch.
+ * @throws Executor, Value access, synchronization, or allocation exceptions.
+ * @note The task observes process-local facts only and creates no artifact,
+ * codec request, cache identity, or durability authority.
+ */
+void expect_matrix_io_observation(const Value& source,
+                                  execution::ComputeIoExecutor& executor) {
+  auto observation = std::make_shared<MatrixIoObservation>();
+  const std::shared_ptr<const void> lifetime_token =
+      std::static_pointer_cast<const void>(std::make_shared<Value>(source));
+  const Value retained = source;
+  const execution::ComputeIoSubmission submission = executor.try_submit(
+      static_cast<std::uint64_t>(source.storage_size()), lifetime_token,
+      [retained, observation]() -> execution::ComputeIoExecutor::Task {
+        return [retained, observation]() {
+          observation->descriptor = retained.dense_tensor_descriptor();
+          observation->image_facet = retained.image_facet();
+          observation->layout = retained.strided_layout();
+          observation->binding = retained.storage_binding();
+          observation->allocation = retained.allocation_identity();
+          observation->revision = retained.revision_id();
+          observation->storage = copy_matrix_storage(retained);
+          observation->visited = true;
+        };
+      });
+  ASSERT_TRUE(submission.accepted());
+  ASSERT_TRUE(submission.completion().active());
+  const execution::ComputeIoTaskResult result = submission.completion().wait();
+  ASSERT_EQ(result.status(), execution::ComputeIoCompletionStatus::Succeeded);
+  ASSERT_TRUE(observation->visited);
+  EXPECT_EQ(observation->descriptor, source.dense_tensor_descriptor());
+  EXPECT_EQ(observation->image_facet, source.image_facet());
+  EXPECT_EQ(observation->layout.byte_strides,
+            source.strided_layout().byte_strides);
+  EXPECT_EQ(observation->layout.byte_offset,
+            source.strided_layout().byte_offset);
+  EXPECT_EQ(observation->binding, source.storage_binding());
+  EXPECT_EQ(observation->allocation, source.allocation_identity());
+  EXPECT_EQ(observation->revision, source.revision_id());
+  EXPECT_EQ(observation->storage, copy_matrix_storage(source));
+  const execution::ComputeIoExecutorSnapshot snapshot = executor.snapshot();
+  EXPECT_EQ(snapshot.active_tasks, 0U);
+  EXPECT_EQ(snapshot.active_planned_bytes, 0U);
+}
+
+/**
+ * @brief Owns bytes representing one dependency-neutral device allocation.
+ *
+ * @throws std::bad_alloc when construction cannot allocate the envelope.
+ */
+struct FakeMatrixDeviceAllocation final {
+  /**
+   * @brief Allocates one fixed fake device-local envelope.
+   * @param size Positive byte count copied by the injected provider.
+   * @throws std::bad_alloc when byte storage cannot allocate.
+   */
+  explicit FakeMatrixDeviceAllocation(std::size_t size) : bytes(size) {}
+
+  /** @brief Complete fake device-local storage envelope. */
+  std::vector<std::byte> bytes;
+};
+
+/**
+ * @brief Proves explicit CPU/device/I-O boundaries preserve one producer Value.
+ *
+ * @param source Ready host-visible Value with a positive exact producer layout.
+ * @param io_executor Live bounded compute-I/O executor.
+ * @return Nothing; GoogleTest reports metadata, identity, fence, or byte loss.
+ * @throws Transfer, Value, executor, synchronization, or allocation exceptions.
+ * @note CPU/device destinations preserve logical revision while minting fresh
+ * allocation identities. The fake device binding remains non-host-visible.
+ */
+void expect_positive_matrix_boundaries(
+    const Value& source, execution::ComputeIoExecutor& io_executor);
 
 /**
  * @brief Returns the complete validity Region for one rank-four test output.
@@ -690,6 +1028,87 @@ class FakeDeviceExecutor final : public ReadyFenceExecutor {
   /** @brief Total callbacks admitted over this executor lifetime. */
   std::size_t submitted_count_ = 0U;
 };
+
+/** @copydoc expect_positive_matrix_boundaries */
+void expect_positive_matrix_boundaries(
+    const Value& source, execution::ComputeIoExecutor& io_executor) {
+  const std::vector<std::byte> source_storage = copy_matrix_storage(source);
+
+  ValueTransferTask cpu_transfer = ValueTransferTask::prepare_cpu_copy(source);
+  const Value cpu_destination = cpu_transfer.destination();
+  auto cpu_executor = std::make_shared<FakeDeviceExecutor>();
+  EXPECT_EQ(cpu_destination.dense_tensor_descriptor(),
+            source.dense_tensor_descriptor());
+  EXPECT_EQ(cpu_destination.image_facet(), source.image_facet());
+  EXPECT_EQ(cpu_destination.strided_layout().byte_strides,
+            source.strided_layout().byte_strides);
+  EXPECT_EQ(cpu_destination.strided_layout().byte_offset,
+            source.strided_layout().byte_offset);
+  EXPECT_EQ(cpu_destination.revision_id(), source.revision_id());
+  EXPECT_NE(cpu_destination.allocation_identity(),
+            source.allocation_identity());
+  EXPECT_EQ(cpu_destination.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  EXPECT_EQ(cpu_transfer.access_plan().kind(), AccessPlanKind::Transfer);
+  cpu_transfer.enqueue(cpu_executor);
+  ASSERT_EQ(cpu_executor->pending_count(), 1U);
+  cpu_executor->run_next();
+  EXPECT_EQ(cpu_destination.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(copy_matrix_storage(cpu_destination), source_storage);
+
+  auto device_allocation =
+      std::make_shared<FakeMatrixDeviceAllocation>(source.storage_size());
+  const AccessTarget target{DeviceId(DeviceBackend::Metal),
+                            MemoryDomain::DeviceLocal, false, true};
+  ValueTransferTask device_transfer =
+      ValueTransferTask::prepare_external_transfer(
+          source, target, device_allocation, device_allocation.get(), nullptr,
+          [device_allocation](
+              const Value& ready_source,
+              const std::shared_ptr<DeviceTransferCompletion>& completion) {
+            const ReadLease read = ready_source.buffer_handle().acquire_read();
+            if (read.size() != device_allocation->bytes.size()) {
+              throw std::logic_error(
+                  "Generic matrix device envelope size changed.");
+            }
+            std::memcpy(device_allocation->bytes.data(), read.data(),
+                        read.size());
+            if (!completion->complete_ready()) {
+              throw std::logic_error(
+                  "Generic matrix device completion lost authority.");
+            }
+          });
+  const Value device_destination = device_transfer.destination();
+  auto device_executor = std::make_shared<FakeDeviceExecutor>();
+  EXPECT_EQ(device_destination.dense_tensor_descriptor(),
+            source.dense_tensor_descriptor());
+  EXPECT_EQ(device_destination.image_facet(), source.image_facet());
+  EXPECT_EQ(device_destination.strided_layout().byte_strides,
+            source.strided_layout().byte_strides);
+  EXPECT_EQ(device_destination.strided_layout().byte_offset,
+            source.strided_layout().byte_offset);
+  EXPECT_EQ(device_destination.revision_id(), source.revision_id());
+  EXPECT_NE(device_destination.allocation_identity(),
+            source.allocation_identity());
+  const StorageBinding pending_binding = device_destination.storage_binding();
+  EXPECT_EQ(pending_binding.device, DeviceId(DeviceBackend::Metal));
+  EXPECT_EQ(pending_binding.memory_domain, MemoryDomain::DeviceLocal);
+  EXPECT_EQ(pending_binding.byte_size, source.storage_size());
+  EXPECT_FALSE(pending_binding.host_visible);
+  EXPECT_EQ(device_destination.ready_fence().poll().state(),
+            ReadyFenceState::Pending);
+  device_transfer.enqueue(device_executor);
+  ASSERT_EQ(device_executor->pending_count(), 1U);
+  device_executor->run_next();
+  EXPECT_EQ(device_destination.ready_fence().poll().state(),
+            ReadyFenceState::Ready);
+  EXPECT_EQ(device_allocation->bytes, source_storage);
+  EXPECT_THROW(device_destination.buffer_handle().acquire_read(),
+               BufferAccessError);
+
+  expect_matrix_io_observation(source, io_executor);
+}
 
 /**
  * @brief One-use C++17 barrier for deterministic concurrent test starts.
@@ -2062,6 +2481,243 @@ TEST(CpuDenseTensorImageOperation,
             (std::vector<std::ptrdiff_t>{4, 1}));
   EXPECT_EQ(std::to_integer<std::uint8_t>(read.data()[0]), 1U);
   EXPECT_EQ(std::to_integer<std::uint8_t>(read.data()[6]), 6U);
+}
+
+/**
+ * @brief Verifies the complete V-12 floating generic-Value matrix.
+ *
+ * The image branch crosses 1/3/4/8/16 channels and FP32/FP64 through padded
+ * Values, ImageRect merge, the CPU ImageBuffer bridge, explicit CPU copy,
+ * injected fake-Metal transfer, and bounded compute I/O. The latent branch
+ * crosses rank one through five, FP32/FP64, TensorSlice merge, and the same
+ * explicit resource boundaries. Final aliases prove negative and zero strides
+ * remain readable immutable views but cannot become producer destinations
+ * through implicit compaction.
+ *
+ * @return Nothing; GoogleTest reports the traced matrix dimension and failed
+ * descriptor, Region, element, binding, fence, allocation, or byte fact.
+ * @throws Value, Region, transfer, executor, synchronization, filesystem-free
+ * adapter, or allocation exceptions unchanged.
+ * @note The fake device validates the generic transfer contract, not the real
+ * Metal operation provider's intentionally narrower descriptor capability.
+ * Compute-I/O observation creates no artifact or persistence authority.
+ */
+TEST(CpuDenseTensorImageOperation,
+     GenericFloatingMatrixPreservesChannelsLatentsStridesAndBoundaries) {
+  execution::ComputeIoExecutor io_executor(
+      execution::ComputeIoExecutorLimits{1U, 1024U * 1024U});
+  ImageFacet image_facet;
+  image_facet.x_axis = 1U;
+  image_facet.y_axis = 0U;
+  image_facet.channel_axis = 2U;
+
+  for (const std::uint32_t bit_width : {32U, 64U}) {
+    for (const std::size_t channels : {1U, 3U, 4U, 8U, 16U}) {
+      SCOPED_TRACE(::testing::Message() << "image channels=" << channels
+                                        << " bit_width=" << bit_width);
+      const std::vector<std::size_t> shape{2U, 3U, channels};
+      const DenseTensorDescriptor expected_descriptor{
+          shape, ElementSemantics::FloatingPoint, StorageEncoding{bit_width}};
+      const Value existing =
+          make_floating_matrix_value(shape, image_facet, bit_width, 2U, 10.0);
+      const Value update =
+          make_floating_matrix_value(shape, image_facet, bit_width, 3U, 110.0);
+      ASSERT_EQ(existing.dense_tensor_descriptor(), expected_descriptor);
+      ASSERT_EQ(existing.image_facet(), std::optional<ImageFacet>(image_facet));
+      EXPECT_GT(existing.strided_layout().byte_strides[0],
+                static_cast<std::ptrdiff_t>(3U * channels * (bit_width / 8U)));
+      NodeOutput existing_output;
+      existing_output.image_value = existing;
+      EXPECT_EQ(
+          value_image_adapter::full_node_output_region(existing_output),
+          RegionSet::from_image_rect({image_region_domain(), 0, 3, 0, 2}));
+
+      const DenseTensorView existing_view(existing);
+      const std::size_t element_count = matrix_element_count(shape);
+      for (std::size_t index = 0U; index < element_count; ++index) {
+        const std::vector<std::size_t> coordinates =
+            matrix_coordinates(index, shape);
+        EXPECT_EQ(read_floating_matrix_element(existing_view, coordinates),
+                  expected_matrix_element(10.0, index));
+      }
+
+      const ImageBuffer compatibility =
+          value_image_adapter::snapshot_cpu_image_buffer(existing);
+      EXPECT_EQ(compatibility.width, 3);
+      EXPECT_EQ(compatibility.height, 2);
+      EXPECT_EQ(compatibility.channels, static_cast<int>(channels));
+      EXPECT_EQ(compatibility.type,
+                bit_width == 32U ? DataType::FLOAT32 : DataType::FLOAT64);
+      const Value bridge_round_trip =
+          value_image_adapter::snapshot_cpu_image_value(compatibility);
+      EXPECT_EQ(bridge_round_trip.dense_tensor_descriptor(),
+                expected_descriptor);
+      EXPECT_EQ(bridge_round_trip.image_facet(),
+                std::optional<ImageFacet>(image_facet));
+      const DenseTensorView round_trip_view(bridge_round_trip);
+      for (std::size_t index = 0U; index < element_count; ++index) {
+        const std::vector<std::size_t> coordinates =
+            matrix_coordinates(index, shape);
+        EXPECT_EQ(read_floating_matrix_element(round_trip_view, coordinates),
+                  expected_matrix_element(10.0, index));
+      }
+
+      NodeOutput update_output;
+      update_output.image_value = update;
+      const RegionSet image_update =
+          RegionSet::from_image_rect({image_region_domain(), 1, 3, 0, 1});
+      const std::optional<NodeOutput> merged =
+          value_image_adapter::merge_node_output_region(
+              existing_output, update_output, image_update);
+      ASSERT_TRUE(merged.has_value());
+      ASSERT_TRUE(merged->image_value.valid());
+      EXPECT_EQ(merged->image_value.dense_tensor_descriptor(),
+                expected_descriptor);
+      EXPECT_EQ(merged->image_value.image_facet(),
+                std::optional<ImageFacet>(image_facet));
+      const DenseTensorView merged_view(merged->image_value);
+      for (std::size_t index = 0U; index < element_count; ++index) {
+        const std::vector<std::size_t> coordinates =
+            matrix_coordinates(index, shape);
+        const bool selected = coordinates[0] < 1U && coordinates[1] >= 1U;
+        EXPECT_EQ(read_floating_matrix_element(merged_view, coordinates),
+                  expected_matrix_element(selected ? 110.0 : 10.0, index));
+      }
+
+      expect_positive_matrix_boundaries(existing, io_executor);
+    }
+  }
+
+  for (const std::uint32_t bit_width : {32U, 64U}) {
+    for (std::size_t rank = 1U; rank <= 5U; ++rank) {
+      SCOPED_TRACE(::testing::Message()
+                   << "latent rank=" << rank << " bit_width=" << bit_width);
+      std::vector<std::size_t> shape(rank, 2U);
+      for (std::size_t axis = 0U; axis < rank; ++axis) {
+        shape[axis] += (rank + axis) % 2U;
+      }
+      const DenseTensorDescriptor expected_descriptor{
+          shape, ElementSemantics::FloatingPoint, StorageEncoding{bit_width}};
+      const Value existing = make_floating_matrix_value(
+          shape, std::nullopt, bit_width, rank + 1U, 20.0);
+      const Value update = make_floating_matrix_value(
+          shape, std::nullopt, bit_width, rank + 2U, 220.0);
+      ASSERT_EQ(existing.dense_tensor_descriptor(), expected_descriptor);
+      EXPECT_FALSE(existing.image_facet().has_value());
+
+      std::vector<RegionInterval> full_axes;
+      std::vector<RegionInterval> selected_axes;
+      full_axes.reserve(rank);
+      selected_axes.reserve(rank);
+      for (const std::size_t extent : shape) {
+        full_axes.push_back({0U, static_cast<std::uint64_t>(extent)});
+        selected_axes.push_back({1U, static_cast<std::uint64_t>(extent)});
+      }
+      NodeOutput existing_output;
+      existing_output.image_value = existing;
+      EXPECT_EQ(value_image_adapter::full_node_output_region(existing_output),
+                RegionSet::from_tensor_slice(
+                    {dense_tensor_region_domain(), full_axes}));
+
+      const DenseTensorView existing_view(existing);
+      const std::size_t element_count = matrix_element_count(shape);
+      for (std::size_t index = 0U; index < element_count; ++index) {
+        const std::vector<std::size_t> coordinates =
+            matrix_coordinates(index, shape);
+        EXPECT_EQ(read_floating_matrix_element(existing_view, coordinates),
+                  expected_matrix_element(20.0, index));
+      }
+
+      NodeOutput update_output;
+      update_output.image_value = update;
+      const RegionSet tensor_update = RegionSet::from_tensor_slice(
+          {dense_tensor_region_domain(), selected_axes});
+      const std::optional<NodeOutput> merged =
+          value_image_adapter::merge_node_output_region(
+              existing_output, update_output, tensor_update);
+      ASSERT_TRUE(merged.has_value());
+      ASSERT_TRUE(merged->image_value.valid());
+      EXPECT_EQ(merged->image_value.dense_tensor_descriptor(),
+                expected_descriptor);
+      EXPECT_FALSE(merged->image_value.image_facet().has_value());
+      const DenseTensorView merged_view(merged->image_value);
+      for (std::size_t index = 0U; index < element_count; ++index) {
+        const std::vector<std::size_t> coordinates =
+            matrix_coordinates(index, shape);
+        const bool selected = std::all_of(
+            coordinates.begin(), coordinates.end(),
+            [](std::size_t coordinate) { return coordinate >= 1U; });
+        EXPECT_EQ(read_floating_matrix_element(merged_view, coordinates),
+                  expected_matrix_element(selected ? 220.0 : 20.0, index));
+      }
+
+      expect_positive_matrix_boundaries(existing, io_executor);
+    }
+  }
+
+  const std::vector<std::size_t> alias_shape{2U, 3U};
+  const Value alias_base =
+      make_floating_matrix_value(alias_shape, std::nullopt, 64U, 0U, 30.0);
+  const DenseTensorDescriptor alias_descriptor =
+      alias_base.dense_tensor_descriptor();
+  StridedLayout reverse_layout = alias_base.strided_layout();
+  reverse_layout.byte_strides[1] = -reverse_layout.byte_strides[1];
+  reverse_layout.byte_offset = 2U * sizeof(double);
+  const Value reverse =
+      Value::from_cpu_dense_tensor(alias_descriptor, std::nullopt,
+                                   reverse_layout, alias_base.buffer_handle());
+  StridedLayout broadcast_layout = alias_base.strided_layout();
+  broadcast_layout.byte_strides[0] = 0;
+  const Value broadcast = Value::from_cpu_dense_tensor(
+      alias_descriptor, std::nullopt, broadcast_layout,
+      alias_base.buffer_handle());
+  EXPECT_EQ(reverse.allocation_identity(), alias_base.allocation_identity());
+  EXPECT_EQ(broadcast.allocation_identity(), alias_base.allocation_identity());
+  EXPECT_NE(reverse.revision_id(), alias_base.revision_id());
+  EXPECT_NE(broadcast.revision_id(), alias_base.revision_id());
+
+  const DenseTensorView base_view(alias_base);
+  const DenseTensorView reverse_view(reverse);
+  const DenseTensorView broadcast_view(broadcast);
+  for (std::size_t row = 0U; row < 2U; ++row) {
+    for (std::size_t column = 0U; column < 3U; ++column) {
+      EXPECT_EQ(read_floating_matrix_element(reverse_view, {row, column}),
+                read_floating_matrix_element(base_view, {row, 2U - column}));
+      EXPECT_EQ(read_floating_matrix_element(broadcast_view, {row, column}),
+                read_floating_matrix_element(base_view, {0U, column}));
+    }
+  }
+
+  NodeOutput broadcast_output;
+  broadcast_output.image_value = broadcast;
+  NodeOutput reverse_output;
+  reverse_output.image_value = reverse;
+  const RegionSet alias_update = RegionSet::from_tensor_slice(
+      {dense_tensor_region_domain(), {{1U, 2U}, {1U, 3U}}});
+  const std::optional<NodeOutput> alias_merged =
+      value_image_adapter::merge_node_output_region(
+          broadcast_output, reverse_output, alias_update);
+  ASSERT_TRUE(alias_merged.has_value());
+  const DenseTensorView alias_merged_view(alias_merged->image_value);
+  for (std::size_t row = 0U; row < 2U; ++row) {
+    for (std::size_t column = 0U; column < 3U; ++column) {
+      const DenseTensorView& expected_source =
+          row >= 1U && column >= 1U ? reverse_view : broadcast_view;
+      EXPECT_EQ(read_floating_matrix_element(alias_merged_view, {row, column}),
+                read_floating_matrix_element(expected_source, {row, column}));
+    }
+  }
+
+  expect_matrix_io_observation(reverse, io_executor);
+  expect_matrix_io_observation(broadcast, io_executor);
+  EXPECT_THROW((void)ValueTransferTask::prepare_cpu_copy(reverse),
+               std::invalid_argument);
+  EXPECT_THROW((void)ValueTransferTask::prepare_cpu_copy(broadcast),
+               std::invalid_argument);
+
+  const execution::ComputeIoExecutorSnapshot final_io = io_executor.snapshot();
+  EXPECT_EQ(final_io.active_tasks, 0U);
+  EXPECT_EQ(final_io.active_planned_bytes, 0U);
 }
 
 TEST(CpuDenseTensorImageOperation,
