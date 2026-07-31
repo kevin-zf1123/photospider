@@ -689,6 +689,17 @@ codec/filesystem failure can still resolve that Run as `Failed` with no live
 Graph publication. This is an implemented commit-policy ordering rule, not a
 claim that disk cache is durable user output.
 
+The V-12 generic-data matrix also submits admitted observation work that
+retains an immutable image or latent `Value` directly. Under a non-null
+lifetime token and exact planned-byte charge, the I/O worker observes the same
+descriptor, optional Image Facet, layout, binding, allocation, logical
+revision, and complete storage envelope, then returns both budgets at typed
+settlement. This proves that the bounded execution mechanism does not itself
+narrow FP64, channels, rank, or strides. It does not define generic
+serialization: the current product cache still crosses an image-only
+`ImageBuffer`/selected-precision codec boundary, and latent Values have no such
+artifact path.
+
 Provider return, pending-Value readiness, Run terminal publication, Host result
 return, daemon job terminal state, result delivery, cache save, Graph-document
 save, and user-visible file side effects are separate observations. In

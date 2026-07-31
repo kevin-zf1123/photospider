@@ -499,14 +499,18 @@ CPU/Metal binding fact、纯显式 access planning、保留 revision 的双向 t
 residency、精确 stale-completion arbitration、pending-Value continuation 与 asynchronous
 Perlin readback。V-9 现已新增仅面向 fixed registry 中可执行设备的隔离 memory/scratch
 account，在 allocation 前准入 native plan，与 allocator 上报的 actual byte 对账，并把精确
-lease 绑定到 persistent Value 与 asynchronous completion。精确行为记录在
+lease 绑定到 persistent Value 与 asynchronous completion。V-10 批准 typed compute-I/O
+completion 并让 persistence authority 保持分离；V-11 通过 `ComputeIoExecutor` 运行首条有界
+cache/codec mechanism。V-12 现在会验证已安装通用模型中的 1/3/4/8/16 通道 FP32/FP64
+image、rank-one 至 rank-five FP32/FP64 latent Value、padded 与 signed/zero stride、精确
+Region merge、显式 CPU/external-device transfer 和有界 compute-I/O retention。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
 [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
 [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-9 子集是当前 runtime 事实。
+只有这里明确指出的 V-2 至 V-12 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -537,7 +541,7 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-9 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-12 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
   或 floating element semantics，以及 8/16/32/64-bit byte-addressed storage encoding；
@@ -597,7 +601,16 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
   TensorSlice；TensorSlice 是 HP-only monolithic work，same-key plugin replacement 无法继承该
   source-private contract。
 
-V-9 仍不含 DataSpec、public device registry、device queue/in-flight dimension、
+V-12 增加的是验证，而不是新的 representation 或 provider ABI。它的 dependency-neutral
+矩阵会证明：1/3/4/8/16 通道 active logical FP32/FP64 image element 穿过 padded Value 与 CPU
+ImageBuffer bridge；rank-one 至 rank-five FP32/FP64 latent Value 穿过完整 rank TensorSlice；
+ImageRect/TensorSlice merge 保留选中/未选中的 element；显式 CPU 与注入式 external-device
+transfer 保留完整正向 producer envelope；binding、allocation、revision 与 Pending-to-Ready
+事实保持精确；negative/zero-stride 不可变 view 可读，并且 transfer 会显式拒绝它们。已准入
+compute-I/O task 会在有界 budget 下保留并观察相同的 Value metadata 与字节，但不会创建
+artifact 或 persistence identity。
+
+V-12 仍不含 DataSpec、public device registry、device queue/in-flight dimension、
 quantization、packed element、provider ABI v3 或通用 named graph Value output。Native
 executor、transfer submission、mutable producer、completion admission 与 residency owner
 仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host surface
@@ -608,7 +621,7 @@ executable 与 convertible 支持也彼此独立，而且 conversion 始终显�
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-对于当前 V-9 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
+对于当前 V-12 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
 builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。
 Source-private producer 可以通过其不可复制的 capability，在预先验证的
 binding/Layout/handle envelope 内完成一个 sealed pending CPU 或 native payload。该 capability 的退役

@@ -207,9 +207,11 @@ carrier。新增通用 value kind、rank/shape model、descriptor、handle 或 r
   均未表示；
 - `context` 不能替代 planning、cache key、ROI 或 synchronization 所需的 descriptor fact。
 
-因此，8/16 通道图像和 FP64 不能被宣传为完整 framework contract；FP4、latent Tensor、
-Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`、descriptor、handle 和
-region 方向记录在精确的
+因此，`ImageBuffer` 本身不能被宣传为 8/16 通道图像或 FP64 的完整 framework contract。
+V-12 验证 image-faceted 通用 Value 与 CPU Value/ImageBuffer bridge 会为 1/3/4/8/16 通道、
+FP32/FP64（包括带 padding 的源 layout）保留 active logical element；它不会扩大 image-only
+operation、selected-precision codec 或 Host surface。`ImageBuffer` 不表示 FP4、latent Tensor、
+Deep Image 或 vector-scene value。通用 `Value`、descriptor、handle 和 region 方向记录在精确的
 [通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
 ### Readiness、交付与持久化彼此独立
@@ -230,7 +232,7 @@ delivery state，不是 crash-durable output receipt。
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)
 固定。
 
-### 已实现的 V-3/V-4/V-6/V-8/V-9 关系与剩余目标
+### 已实现的 V-3/V-4/V-6/V-8/V-9/V-12 关系与剩余目标
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受以下完整替换：
@@ -286,13 +288,23 @@ lease 随 native Value/residency owner 延续，scratch lease 随精确 completi
 settlement 不释放仍被 owner 持有的 allocation，而 residency entry count 仍只是 retention
 bound，不是 byte authority。
 
-V-9 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、public device
+Issue #89 / V-12 现在会在不改变 `ImageBuffer` 的前提下验证通用矩阵。长期
+dependency-neutral 用例覆盖 1/3/4/8/16 通道 FP32/FP64 image Value、rank-one 至 rank-five
+FP32/FP64 latent Value、正向 padded producer layout、negative/zero-stride 不可变 view、
+ImageRect/TensorSlice merge、显式 CPU 与注入式 external-device transfer，以及有界
+compute-I/O retention。CPU/device transfer 会在不同 binding 中保留完整正向 producer envelope
+与精确逻辑 revision；Region merge 保留逻辑上选中/未选中的 element，同时可以发布新的
+contiguous allocation。signed/zero layout 保持为不可变 view 事实，并在作为 transfer producer
+layout 时被显式拒绝。
+
+V-12 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、public device
 registry、device queue/in-flight accounting 或通用命名 graph Value output。Issue #87 的
-compute-I/O durability 决策与 Issue #88 首条有界 cache/codec execution 垂直路径已是当前行为：
-process executor 会保留 transaction lifetime 并预算 work，但不改变 `ImageBuffer` 或 codec
-ABI。Run publication 之后的 cache outcome 与 durable output 仍是未来工作。Issue #89 继续负责
-multi-channel、FP64、latent 与 stride matrix。`ImageBuffer` 仍是 operation ABI v2、tiled write、
-codec 与 Host surface 的 compatibility contract。
+compute-I/O durability 决策与 Issue #88 首条有界 cache/codec execution 垂直路径继续是当前
+行为：process executor 会保留 transaction lifetime 并预算 work，但不改变 `ImageBuffer` 或
+codec ABI。V-12 I/O observation 证明已准入 task 对通用 Value 的 retention，而不是 lossless
+artifact format。Run publication 之后的 cache outcome 与 durable output 仍是未来工作。
+`ImageBuffer` 仍是 operation ABI v2、tiled write、codec 与 Host surface 的 compatibility
+contract。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。

@@ -254,10 +254,14 @@ Current limitations are explicit:
 - `context` cannot substitute for descriptor facts needed by planning, cache
   keys, ROI, or synchronization.
 
-Therefore 8/16-channel images and FP64 are not advertised as complete framework
-contracts, and FP4, latent Tensor, Deep Image, and vector-scene values are not
-supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
-target is documented in the exact
+Therefore `ImageBuffer` alone is not advertised as a complete framework
+contract for 8/16-channel images or FP64. V-12 verifies that image-faceted
+generic Values and the CPU Value/ImageBuffer bridge preserve active logical
+elements for 1/3/4/8/16 channels and FP32/FP64, including padded source
+layouts; it does not widen image-only operations, selected-precision codecs,
+or Host surfaces. FP4, latent Tensor, Deep Image, and vector-scene values are
+not represented by `ImageBuffer`. The general `Value`, descriptor, handle, and
+region target is documented in the exact
 [general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
 ### Readiness, delivery, and persistence are separate
@@ -281,7 +285,7 @@ side effect can precede Run commit and has no OutputStore transaction. These
 current limits and the separate target output authority are fixed by
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
 
-### Implemented V-3/V-4/V-6/V-8/V-9 relationship and remaining target
+### Implemented V-3/V-4/V-6/V-8/V-9/V-12 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -348,15 +352,27 @@ owner, while scratch leases follow exact completion; Run settlement does not
 release a still-owned allocation, and the residency entry count remains a
 retention bound rather than byte authority.
 
-V-9 still does not implement quantization, general Map/Import providers,
+Issue #89 / V-12 now verifies the generic matrix without changing
+`ImageBuffer`. The long-lived dependency-neutral case covers 1/3/4/8/16-channel
+FP32/FP64 image Values, rank-one through rank-five FP32/FP64 latent Values,
+positive padded producer layouts, negative/zero-stride immutable views,
+ImageRect/TensorSlice merge, explicit CPU and injected external-device
+transfer, and bounded compute-I/O retention. CPU/device transfer preserves the
+complete positive producer envelope and exact logical revision in a distinct
+binding; Region merge preserves logical selected/unselected elements while it
+may publish a fresh contiguous allocation. Signed/zero layouts remain
+immutable view facts and are rejected explicitly as transfer producer layouts.
+
+V-12 still does not implement quantization, general Map/Import providers,
 provider ABI v3, a public device registry, device queue/in-flight accounting,
 or general named graph Value outputs. Issue #87's compute-I/O durability
-decision and Issue #88's first bounded cache/codec execution vertical are
+decision and Issue #88's first bounded cache/codec execution vertical remain
 current: the process executor retains transaction lifetime and budgets work,
-but does not change `ImageBuffer` or codec ABI. Post-publication cache outcomes
-and durable output remain future. Issue #89 retains the multi-channel, FP64,
-latent, and stride matrix. `ImageBuffer` remains the compatibility contract
-for operation ABI v2, tiled writes, codecs, and Host surfaces.
+but does not change `ImageBuffer` or codec ABI. The V-12 I/O observation proves
+generic Value retention by an admitted task, not a lossless artifact format.
+Post-publication cache outcomes and durable output remain future.
+`ImageBuffer` remains the compatibility contract for operation ABI v2, tiled
+writes, codecs, and Host surfaces.
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.

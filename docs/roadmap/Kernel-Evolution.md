@@ -627,7 +627,13 @@ stale-completion arbitration, pending-Value continuation, and asynchronous
 Perlin readback. V-9 now adds isolated memory/scratch accounts only for
 executable devices in the fixed registry, admits native plans before
 allocation, reconciles allocator-reported actual bytes, and binds exact leases
-to persistent Values and asynchronous completion. Their exact
+to persistent Values and asynchronous completion. V-10 ratifies typed
+compute-I/O completion and keeps persistence authorities separate; V-11 runs
+the first bounded cache/codec mechanism through `ComputeIoExecutor`. V-12 now
+verifies the installed generic model across 1/3/4/8/16-channel FP32/FP64
+images, rank-one through rank-five FP32/FP64 latent Values, padded and
+signed/zero strides, exact Region merge, explicit CPU/external-device transfer,
+and bounded compute-I/O retention. Their exact
 behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
@@ -636,8 +642,8 @@ behavior is documented in
 ownership in
 [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
 and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
-complete model below is the accepted target; only the explicit V-2 through V-9
-subset called out here is a current runtime fact.
+complete model below is the accepted target; only the explicit V-2 through
+V-12 subset called out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -672,7 +678,7 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-9 subset is deliberately narrower:
+The implemented V-2 through V-12 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
   unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
@@ -748,7 +754,18 @@ The implemented V-2 through V-9 subset is deliberately narrower:
   TensorSlice through checked strides; TensorSlice is HP-only monolithic work,
   and same-key plugin replacement cannot inherit that source-private contract.
 
-V-9 still has no DataSpec, public device registry, device queue/in-flight
+V-12 adds verification rather than a new representation or provider ABI. Its
+dependency-neutral matrix proves active logical FP32/FP64 image elements for
+1/3/4/8/16 channels through padded Values and the CPU ImageBuffer bridge;
+rank-one through rank-five FP32/FP64 latent Values through full-rank
+TensorSlice; selected/unselected ImageRect/TensorSlice merge; complete positive
+producer-envelope preservation across explicit CPU and injected external-device
+transfer; exact binding, allocation, revision, and Pending-to-Ready facts; and
+immutable negative/zero-stride reads plus explicit transfer rejection. An
+admitted compute-I/O task retains and observes the same Value metadata and
+bytes under bounded budgets, but creates no artifact or persistence identity.
+
+V-12 still has no DataSpec, public device registry, device queue/in-flight
 dimensions, quantization, packed element, provider ABI v3, or general named
 graph Value outputs. Its native executor, transfer submission, mutable
 producer, completion admission, and residency owner remain source-private.
@@ -763,7 +780,7 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-9 subset, `BufferHandle` is a checked immutable byte range.
+For the current V-12 subset, `BufferHandle` is a checked immutable byte range.
 Consumer reads and ordinary builder writes require leases; sealed Values never
 issue `WriteLease`, and consumer writes are always rejected. A source-private
 producer may complete one sealed pending CPU or native payload through its

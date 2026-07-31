@@ -334,8 +334,17 @@ device `Value` 的 type-erased external owner 会把唯一 memory lease 与 nati
 而是随精确 asynchronous completion owner 延续。完成后的 HostPinned readback 在 scratch lease
 结束后继续保留其 shared Metal buffer，并将其归类为 CPU-owned output storage。
 
+V-12 针对最容易暴露 image-only 假设的维度验证这套已安装模型。dependency-neutral 矩阵覆盖
+带 padding image-faceted Value 的 1/3/4/8/16 通道与 FP32/FP64、rank-one 至 rank-five
+FP32/FP64 latent Value、精确 ImageRect/TensorSlice merge，以及有界 negative/zero-stride
+不可变 view。显式 CPU 与注入式 external-device transfer 会保留完整正向 producer
+envelope、descriptor、facet、layout 与逻辑 revision，同时生成不同 allocation 并暴露
+Pending-to-Ready binding 事实。已准入的 `ComputeIoExecutor` task 会在显式 task/byte budget
+下保留并观察同一个不可变 Value 的事实与字节；该观察不会创建 cache、artifact 或
+persistence identity。
+
 `DataSpec`、quantization、通用 Map/Import provider、provider ABI v3 与通用命名 immutable
-Value output 仍属于后续 no-shim slice。V-9 不新增 public resource declaration、通用 heap
+Value output 仍属于后续 no-shim slice。V-12 不新增 public resource declaration、通用 heap
 suballocation 或 device-queue budget。`ParameterMap` 仍用于 configuration 与当前命名
 scalar-result storage。
 

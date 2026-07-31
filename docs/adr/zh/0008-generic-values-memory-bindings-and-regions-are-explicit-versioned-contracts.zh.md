@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-9
+已接受为 Project 4 通用数据与异构执行的目标契约。源码树现在已经实现有界的 V-2 至 V-12
 切片：CPU DenseTensor/ImageView Value、checked BufferHandle ownership 与 runtime identity，
 以及由 dirty planning、validity 和 core dense operation 使用的 public Region MVP；V-5
 operation-metadata routing 与有界 V-6 ReadyFence、pending CPU Value 和显式 fake-device
@@ -17,8 +17,16 @@ Ready 前拒绝 stale native completion。`ImageBuffer`、`DataType`、`Device`�
 V-9 新增 source-private 的 per-device memory/scratch plan、native actual-byte 校准，以及随
 native Value 与 completion ownership 延续的 lease，而不改变上述 public contract。
 
-Issue #78 批准了本契约。Issue #79 至 #86 交付了有界的 V-2 至 V-9 实现切片；Issue #87
-至 #90 仍是彼此独立的实现切片。合成的
+V-10 批准 typed compute-I/O completion，并让 cache、Graph-document、daemon-delivery 与
+durable-output authority 保持分离。V-11 在不改变 codec ABI 或 commit policy 的前提下，通过
+`ComputeIoExecutor` 安装首条有界 cache/codec execution 垂直路径。V-12 增加一套
+dependency-neutral 验证矩阵，覆盖 1/3/4/8/16 通道 FP32/FP64 image Value、rank-one 至
+rank-five FP32/FP64 latent Value、正向 padding、有界 signed/zero-stride 不可变 view、精确
+Region merge、显式 CPU/external-device transfer 与 compute-I/O retention。该矩阵验证现有
+契约；它不扩大内置 operation、真实 Metal provider 或 image-codec capability surface。
+
+Issue #78 批准了本契约。Issue #79 至 #89 交付了有界的 V-2 至 V-12 实现与决策切片；
+Issue #90 仍是独立的实现切片。合成的
 `VariableSampleField` 证明与可选 OpenEXR Deep provider 仍是彼此独立的后续 change；
 本决策不实现二者。
 

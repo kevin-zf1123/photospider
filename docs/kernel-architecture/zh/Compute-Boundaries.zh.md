@@ -533,6 +533,14 @@ estimated retained bytes 原子限制容量。Prepared transaction 会一直保�
 failure 仍可能把该 Run 解析为 `Failed`，且不发布 live Graph。这是已实现 commit-policy
 排序规则，不是 disk cache 属于 durable 用户输出的声明。
 
+V-12 通用数据矩阵还会提交已准入的 observation work，并直接保留不可变 image 或 latent
+`Value`。在非空 lifetime token 与精确 planned-byte charge 下，I/O worker 会观察相同的
+descriptor、可选 Image Facet、layout、binding、allocation、逻辑 revision 与完整 storage
+envelope，随后在 typed settlement 时归还两个 budget。这证明有界 execution mechanism 本身
+不会窄化 FP64、channel、rank 或 stride。它不定义通用 serialization：当前 product cache
+仍会穿过 image-only `ImageBuffer`/selected-precision codec 边界，而 latent Value 没有这条
+artifact path。
+
 Provider return、pending-Value readiness、Run terminal publication、Host result return、
 daemon job terminal state、result delivery、cache save、Graph 文档保存与用户可见文件
 副作用是不同观察。特别是：
