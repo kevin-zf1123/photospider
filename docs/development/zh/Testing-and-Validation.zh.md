@@ -108,6 +108,21 @@ bindir。每个 case 都使用自身配置的 prefix，通过共享 capability d
 覆盖。全部 matrix build/install directory 与 absolute destination 都必须严格位于 CTest work
 root 之下，并在成功或失败后清理。
 
+配置后的 producer 还会把 `PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` 序列化为
+build-tree inventory，其中使用安装相对路径 `include/photospider/...`。写入任何 record 前，
+兼容 CMake 3.16 的 writer 会拒绝反斜杠、CMake 可以表达的全部 ASCII C0 control（code 1 至 31）
+与 DEL；diagnostic 只标识 allowlist 位置，不复述被拒绝字段。CMake string 无法表达 NUL，因此
+reader 会独立拒绝伪造或被外部修改的 manifest 中包括 NUL 在内的全部 C0 control 以及 DEL。
+LF 是唯一的 record separator；普通空格仍是合法的 POSIX path 数据。
+
+Smoke 会拒绝缺失、空、重复、含 control、含反斜杠、非 canonical 或非 header 的 entry。
+它先执行精确的 `PurePosixPath` 拼写/root/suffix 检查，再从该 inventory 生成 external consumer
+的 include 清单，并要求已安装 include tree 与配置得到的路径集合完全相等。因此缺失文件与
+意外文件都会在同一项精确比较中失败；driver 和文档均不维护第二份 public-header 数量，
+未进入 allowlist 的 source-tree 文件也无法静默扩大 package surface。Safety regression 会让
+带普通空格的路径经过真实 CMake writer 与 parser 往返，并证明 CMake 可表达的每个 control、
+形似 parent 的反斜杠路径与普通反斜杠路径都会在序列化前失败。
+
 该 smoke 会检查每个已安装的 `Photospider*Targets*.cmake` 文件，因为 package 将基础 target、
 依赖 OpenCV 的 target 与 embedded-product target 分到不同 export set 中。它的 dependency
 classifier 只识别 producer 接受的精确 OpenCV component target 拼写：裸 lowercase name、lowercase
@@ -187,7 +202,9 @@ Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 pr
 Build smoke 是一种长期维护的 CTest，其主要边界会委托执行 CMake configure/build/install、
 exported package 或 external consumer build，或者专用 compile target。所有此类测试都携带精确且
 稳定的 CTest 标签 `build-smoke`。如果 companion 只在进程内调用 driver 的 Python cleanup 或 layout
-helper，它会作为普通 safety regression 留在完整 CTest 分片。
+helper，或者配置一个不需要 compiler 的 manifest-generation fixture，并且没有委托执行 product
+build、install、external consumer、compile target 或生成的 executable，它仍会作为普通 safety
+regression 留在完整 CTest 分片。
 
 当前带标签的 inventory 是
 `DependencyDisabledInstallSmoke`、
@@ -200,15 +217,19 @@ helper，它会作为普通 safety regression 留在完整 CTest 分片。
 会构建专用 self-containment target；普通 GoogleTest binary、daemon/CLI process test 与
 `PhotospiderdCapabilityHelp` 不会创建 child build，因此继续留在主 CTest 分片。
 `OpenCvOperationProviderBuildSmokeSafety` 也留在该分片：它是 OpenCV build-smoke driver 的普通
-safety regression，本身不会启动 CMake、CTest、install 或 compile target。
+safety regression。其唯一的 `project(... NONE)` fixture 会使用 imported executable 执行 production
+manifest generator，但不会启动 compiler、product build、CTest、install、compile target 或生成的
+executable。
 `InstallConsumerArchitecturePropagationSafety` 同样留在主分片：它使用可丢弃的 producer cache
 fixture 执行三个 install-consumer driver 的真实命令构造路径，同时替换 subprocess 执行，因此能
-在不启动 configure、build 或 install 的情况下验证 cache 到 child argv 的传播。同一进程还会向
-static-product driver 的 production archive-symbol helper 注入 executable lookup、validation 与
-captured-command callback；它会在不改变进程 PATH、也不取代真实 installed archive scan 的前提下，
-锁定 Darwin xcrun-first fallback、非 Darwin 独立性、全部 candidate failure 与 canonical path
-去重。CMake 注册该 safety test 时，还会传入当前 build tree、CTest executable、configuration 与
-Python launcher。测试随后通过 `ctest --show-only=json-v1` 和生产 inventory parser 查询该 build
+在不启动 product configure、build 或 install 的情况下验证 cache 到 child argv 的传播。另一项
+`cmake -P` fixture 会直接调用 production public-header writer，并且不会执行 project configure。
+同一进程还会向 static-product driver 的 production archive-symbol helper 注入 executable lookup、
+validation 与 captured-command callback；它会在不改变进程 PATH、也不取代真实 installed archive
+scan 的前提下，锁定 Darwin xcrun-first fallback、非 Darwin 独立性、全部 candidate failure 与
+canonical path 去重。CMake 注册该 safety test 时，还会传入当前 build tree、CMake 与 CTest
+executable、configuration 与 Python launcher。测试随后通过 `ctest --show-only=json-v1` 和生产
+inventory parser 查询该 build
 tree，并要求三个
 真实 smoke 遵循配置相关的精确集合：所有 profile 都必须各自只注册一次
 `DependencyDisabledInstallSmoke` 与 `IpcDisabledInstallSmoke`；
@@ -979,25 +1000,43 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 `BUILD_TESTING=ON` 与 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`
 配置一个临时嵌套 build，同时保留 OpenCV、YAML、graph CLI 与 operation-plugin 的默认启用值。
 因此 provider-aware broad suite gate 为关闭。Driver 会校验精确 CMake cache 画像，构建上述
-provider-independent focused binary 与 stdlib-only fixture，并额外构建 CPU
-DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary、
-kernel-lifecycle concurrency binary，以及 provider-independent `test_kernel_contracts`
-internal-seam consumer，再查询机器可读的 CTest inventory。`test_kernel_contracts` 的构建用于
-覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。
-CMake 注册的 `test_compute_io_executor` 行为测试 target 仍位于该嵌套 build target closure
-之外；其生产实现仍通过 product closure 被编译，因此 CTest 会报告精确的 registered-only
-占位项 `test_compute_io_executor_NOT_BUILT`。该 inventory 必须精确包含 57 项：
-`DependencyDisabledInstallSmoke`、
+provider-independent focused provider binary 及其 stdlib-only fixture、CPU
+DenseTensor/ImageView integration binary、专用 disk-cache 与 kernel-lifecycle concurrency
+binary，以及 provider-independent `test_kernel_contracts` internal-seam consumer，再查询机器
+可读的 CTest inventory。`test_kernel_contracts` 的构建用于覆盖 focused-only direct-consumer
+closure，但不会在该嵌套 inventory 中被 discover。
+
+配置期间，CMake 会在交叉核验 GoogleTest registration metadata 后，序列化每个 active
+`gtest_discover_tests` target 及其配置专属 `$<TARGET_FILE:...>` 路径。生成的 TSV 只允许一个
+精确首行 header `# target<TAB>configured executable`，其后只能出现非空的双字段 data record。
+CMake writer 只接受由字母、数字、`_`、`.`、`+` 与 `-` 组成的 local executable target name，
+同时保留 `$<TARGET_FILE:...>` 与 `$<CONFIG>`，直到 generation 阶段才求值，因此 single-config
+与 multi-config build 都会选择原生 executable path。Reader 会拒绝缺失或重复的 header、
+后续任何 comment 或空行、额外字段、重复 target、输入的 `_NOT_BUILT`，以及所有非结构性 C0
+control 与 DEL；即使 CMake 无法表达 NUL，reader 仍会拒绝它。Target path 必须在词法上是绝对
+POSIX path、Windows drive-rooted path 或 Windows UNC path；普通空格与 Windows 反斜杠是合法数据。
+
+Focused build 完成后，driver 会从 executable 不是 regular file 的已注册 target 推导精确且
+不带 label 的 `${target}_NOT_BUILT` 集合。该过程会观察真实 build closure（包括间接
+dependency），无需硬编码 target 数量或未来 target 名，也不会从 CTest 实际观察到的 sentinel
+反推 expectation。精确 CTest
+inventory 等于该推导集合与以下条目的并集：`DependencyDisabledInstallSmoke`、
 `OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 48 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
-`DiskCacheDiagnosticConcurrency.*` case 与
-两个 `KernelLifecycleConcurrency.*` case，以及该 executor 占位项。Disk-cache case 必须只保留
-`kernel-concurrency` label 与 20 秒 timeout；lifecycle case 保留同一 label 与 60 秒
-timeout；dense-image 与 Value-runtime case 保留 30 秒 timeout，后者只携带
-`value-runtime` label。Executor 占位项不携带 label 或 timeout；不得残留任何其他 unbuilt
-占位项或依赖 provider 的 broad test。Driver 随后通过 CTest 运行全部已构建 focused case。
-禁用 profile 要求 dependency-neutral
+`DiskCacheDiagnosticConcurrency.*` case，以及两个 `KernelLifecycleConcurrency.*` case。推导出的
+sentinel 不得带 label 或 timeout。
+
+在当前 V-13 checkpoint 中，CMake 在该 profile 下精确注册七个 active GoogleTest target。
+Focused build 会具现其中五个，CTest discover 出 55 个可运行 focused case；两个动态推导出的
+sentinel 精确为 `test_compute_io_executor_NOT_BUILT` 与
+`test_packed_fp4_dense_tensor_NOT_BUILT`。再加上 `DependencyDisabledInstallSmoke`，精确 CTest
+inventory 因而包含 58 项。这是 dynamic manifest 与真实 build closure 的已验证结果，不是
+production driver 维护的 target 数量或 sentinel 名单。推导出的 sentinel 不带 label 或 timeout；
+disk-cache case 只保留 `kernel-concurrency` label 与 20 秒 timeout，lifecycle case 保留同一 label
+与 60 秒 timeout；dense-image 与 Value-runtime case 保留 30 秒 timeout，且只有后者携带
+`value-runtime` label。缺失或额外 entry 都会失败，因此不得残留依赖 provider 的 broad test。
+Driver 随后通过 CTest 运行全部已构建 focused case。禁用 profile 要求 dependency-neutral
 analyzer/math/dense-invert operation 仍被 seed、OpenCV-backed operation key 不存在，并要求
 replacement provider 能发布、执行且完整退役其 resize key。该临时 build 是长期 product
 configuration 检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前阶段禁用的是

@@ -140,6 +140,29 @@ part of `StaticProductConsumerSmoke`. All matrix build/install directories and
 absolute destinations are strict descendants of the CTest work root and are
 removed after either success or failure.
 
+The configured producer also serializes
+`PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` into a build-tree
+inventory using install-relative `include/photospider/...` paths. Before it
+writes any record, the CMake 3.16-compatible writer rejects a backslash, every
+CMake-representable ASCII C0 control (codes 1 through 31), and DEL; diagnostics
+identify the allowlist position without reproducing the rejected field.
+CMake strings cannot represent NUL, so the reader independently rejects all
+C0 controls including NUL, plus DEL, in a forged or externally modified
+manifest. LF is the only record separator. Ordinary spaces remain legal POSIX
+path data.
+
+The smoke rejects a missing, empty, duplicate, control-bearing, backslash-
+bearing, noncanonical, or non-header entry. It applies an exact
+`PurePosixPath` spelling/root/suffix check before generating the external
+consumer's include list, then requires the installed include tree to equal the
+configured path set. Missing and unexpected files therefore fail the same
+exact comparison; neither the driver nor the documentation maintains a second
+public-header count, and an unallowlisted source-tree file cannot silently
+widen the package surface. The safety regression round-trips an ordinary-space
+path through the production CMake writer and parser, and proves that every
+CMake-representable control and both parent-like and ordinary backslash paths
+fail before serialization.
+
 The smoke inspects every installed `Photospider*Targets*.cmake` file because
 the package separates base, OpenCV-dependent, and embedded-product targets
 into distinct export sets. Its dependency classifier recognizes only the exact
@@ -242,8 +265,10 @@ A build smoke is a durable CTest whose primary boundary delegates to a CMake
 configure/build/install, an exported-package or external-consumer build, or a
 dedicated compile target. Every such test carries the exact stable CTest label
 `build-smoke`. A companion that only calls the driver's Python cleanup or
-layout helpers in-process remains an ordinary safety regression in the full
-CTest shard.
+layout helpers, or configures a compiler-free manifest-generation fixture,
+remains an ordinary safety regression in the full CTest shard when it does not
+delegate to a product build, install, external consumer, compile target, or
+generated executable.
 
 The maintained labelled inventory is
 `DependencyDisabledInstallSmoke`,
@@ -257,20 +282,23 @@ CTest command builds the dedicated self-containment target; ordinary
 GoogleTest binaries, daemon/CLI process tests, and
 `PhotospiderdCapabilityHelp` do not create a child build and remain in the main
 CTest shard. `OpenCvOperationProviderBuildSmokeSafety` also remains there: it
-is the ordinary safety regression for the OpenCV build-smoke driver and does
-not itself start CMake, CTest, an install, or a compile target.
+is the ordinary safety regression for the OpenCV build-smoke driver. Its one
+`project(... NONE)` fixture exercises the production manifest generator with
+an imported executable, but starts no compiler, product build, CTest, install,
+compile target, or generated executable.
 `InstallConsumerArchitecturePropagationSafety` likewise remains in the main
 shard: it runs the three install-consumer drivers' real command-construction
 paths against disposable producer cache fixtures while replacing subprocess
 execution, so it verifies cache-to-child-argv propagation without launching a
-configure, build, or install. The same process injects executable lookup,
-validation, and captured-command callbacks into the static-product driver's
-production archive-symbol helpers. It locks Darwin xcrun-first fallback,
-non-Darwin independence, all-candidate failure, and canonical path
-de-duplication without changing process PATH or replacing the real installed
-archive scan. When CMake registers the safety test, it also supplies the
-current build tree, CTest executable, configuration, and Python launcher. The
-test queries that tree through
+product configure, build, or install. A separate `cmake -P` fixture calls the
+production public-header writer directly and performs no project configure.
+The same process injects executable lookup, validation, and captured-command
+callbacks into the static-product driver's production archive-symbol helpers.
+It locks Darwin xcrun-first fallback, non-Darwin independence, all-candidate
+failure, and canonical path de-duplication without changing process PATH or
+replacing the real installed archive scan. When CMake registers the safety
+test, it also supplies the current build tree, CMake and CTest executables,
+configuration, and Python launcher. The test queries that tree through
 `ctest --show-only=json-v1` and the production inventory parser. It requires
 `DependencyDisabledInstallSmoke` and `IpcDisabledInstallSmoke` exactly once in
 every profile, requires `StaticProductConsumerSmoke` exactly once only when
@@ -1234,31 +1262,55 @@ dedicated disk-cache and kernel-lifecycle concurrency binaries, plus the
 provider-independent `test_kernel_contracts` internal-seam consumer, then
 queries the machine-readable CTest inventory. `test_kernel_contracts` is built
 to exercise the focused-only direct-consumer closure but is deliberately not
-discovered in this nested inventory. The CMake-registered
-`test_compute_io_executor` behavior target remains outside this nested build
-target closure; its production implementation is still compiled through the
-product closure, so CTest reports the exact registered-only
-`test_compute_io_executor_NOT_BUILT` placeholder. That inventory must contain
-exactly 57 entries: `DependencyDisabledInstallSmoke`,
+discovered in this nested inventory.
+
+During configuration, CMake serializes every active `gtest_discover_tests`
+target and its configuration-specific `$<TARGET_FILE:...>` path after
+cross-checking the GoogleTest registration metadata. The generated TSV has one
+exact first-line header, `# target<TAB>configured executable`, followed only by
+nonempty two-field data records. The CMake writer accepts only local executable
+target names composed of letters, digits, `_`, `.`, `+`, and `-`, while keeping
+`$<TARGET_FILE:...>` and `$<CONFIG>` unevaluated until generation so single-
+and multi-config builds select the native executable path. The reader rejects a
+missing or repeated header, every later comment or blank line, an extra field,
+a duplicate target, `_NOT_BUILT` input, and every non-structural C0 control or
+DEL. NUL remains reader-rejected even though CMake cannot represent it. Target
+paths must be lexically absolute POSIX paths, Windows drive-rooted paths, or
+Windows UNC paths; ordinary spaces and Windows backslashes are valid data.
+
+After the focused build, the driver derives the exact unlabelled
+`${target}_NOT_BUILT` set from registered targets whose executable is not a
+regular file. This observes the real build closure, including indirect
+dependencies, without hard-coding a target count or future target name and
+without deriving expectations from CTest's observed sentinels. The exact CTest
+inventory is the union of that derived set and
+`DependencyDisabledInstallSmoke`,
 `OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 48
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
-`KernelLifecycleConcurrency.*` cases, plus the executor placeholder.
-Disk-cache cases retain only the
+`KernelLifecycleConcurrency.*` cases.
+
+At the current V-13 checkpoint, CMake registers exactly seven active GoogleTest
+targets in this profile. The focused build materializes five of them and CTest
+discovers 55 runnable focused cases. The two derived sentinels are exactly
+`test_compute_io_executor_NOT_BUILT` and
+`test_packed_fp4_dense_tensor_NOT_BUILT`; together with
+`DependencyDisabledInstallSmoke`, the exact CTest inventory therefore contains
+58 entries. This is a verified result of the dynamic manifest and build closure,
+not a target count or sentinel list maintained by the production driver.
+Derived sentinels carry no label or timeout. Disk-cache cases retain only the
 `kernel-concurrency` label and a 20-second timeout; lifecycle cases retain that
 label and a 60-second timeout; dense-image and Value-runtime cases retain their
-30-second timeout, with the latter carrying only the `value-runtime` label.
-The executor placeholder remains unlabelled and has no timeout; no other
-unbuilt placeholder or broad provider-dependent test may remain registered.
+30-second timeout, with only the latter carrying `value-runtime`. Missing or
+extra entries fail, so no provider-dependent broad test may remain registered.
 The driver runs every built focused case through CTest. The disabled profile
-requires dependency-neutral
-analyzer/math/dense-invert operations to remain seeded, OpenCV-backed operation
-keys to be absent, and the replacement provider to publish, execute, and fully
-retire its resize key. The transient build is a long-lived product
-configuration check; it emits commands/results to CTest and retains no per-run
-report. This stage disables the operation provider, not the separate OpenCV
-codec, normalization, adapter, or embedded-product dependencies.
+requires dependency-neutral analyzer/math/dense-invert operations to remain
+seeded, OpenCV-backed operation keys to be absent, and the replacement provider
+to publish, execute, and fully retire its resize key. The transient build is a
+long-lived product configuration check; it emits commands/results to CTest and
+retains no per-run report. This stage disables the operation provider, not the
+separate OpenCV codec, normalization, adapter, or embedded-product dependencies.
 
 The OpenCV-provider and injected-codec nested-build drivers import the same
 destructive work-tree helper from `cmake_build_smoke_support.py`. Before

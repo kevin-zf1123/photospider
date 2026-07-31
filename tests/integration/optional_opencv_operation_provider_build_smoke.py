@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 
 from cmake_build_smoke_support import remove_work_tree
@@ -24,12 +25,57 @@ PROVIDER_DISABLED_BUILD_TARGETS = (
     "test_kernel_contracts",
 )
 
-#: @brief Exact registered-but-unbuilt CTest placeholders in this profile.
-#: @note The executor implementation is compiled through the product closure,
-#:   while its dedicated behavior target remains outside this nested build.
-PROVIDER_DISABLED_REGISTERED_SENTINELS = (
-    "test_compute_io_executor_NOT_BUILT",
+#: @brief Build-relative directory containing CMake-owned validation manifests.
+#: @note The directory is generated during configure and is never installed.
+CI_INVENTORY_RELATIVE_DIRECTORY = pathlib.Path("generated/ci_inventory")
+#: @brief Exact first record required by every registered-GTest TSV manifest.
+#: @note No comment, blank, or repeated-header record is legal after this line.
+REGISTERED_GTEST_TARGET_INVENTORY_HEADER = (
+    "# target\tconfigured executable"
 )
+#: @brief Legal local executable-target spelling shared with the CMake writer.
+#: @note Colons are excluded because root BUILDSYSTEM_TARGETS entries are local
+#:   targets rather than imported or alias names.
+REGISTERED_GTEST_TARGET_NAME_PATTERN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+def contains_forbidden_ascii_control(
+    text: str, allowed_controls: str = ""
+) -> bool:
+    """@brief Detect ASCII controls that are not structural delimiters.
+
+    @param text Exact manifest text or field to inspect.
+    @param allowed_controls Control characters reserved by the current record
+      format, normally LF and TAB while validating the complete TSV.
+    @return True if text contains a disallowed C0 control or DEL; otherwise
+      False.
+    @throws None Character inspection is deterministic and in-memory.
+    @note NUL is included even though CMake strings cannot represent it, so an
+      externally modified or forged manifest still fails closed.
+    """
+
+    return any(
+        character not in allowed_controls
+        and (ord(character) < 32 or ord(character) == 127)
+        for character in text
+    )
+
+
+def is_portable_absolute_path(path_text: str) -> bool:
+    """@brief Recognize native absolute paths independent of the host OS.
+
+    @param path_text One control-free executable-path TSV field.
+    @return True for an absolute POSIX path, Windows drive-rooted path, or
+      Windows UNC path; otherwise False.
+    @throws None Pure path parsing performs no filesystem access.
+    @note Backslashes are valid Windows path data. The caller later creates a
+      host-native ``Path`` so real same-host manifests retain ``is_file``
+      behavior, while cross-platform safety fixtures remain parseable.
+    """
+
+    return pathlib.PurePosixPath(path_text).is_absolute() or (
+        pathlib.PureWindowsPath(path_text).is_absolute()
+    )
 
 
 def run(command: list[str], cwd: pathlib.Path) -> None:
@@ -106,6 +152,134 @@ def validate_provider_disabled_cache(values: dict[str, str]) -> None:
             "nested provider-disabled cache profile mismatch: "
             f"{mismatches}"
         )
+
+
+def registered_gtest_target_files(
+    build: pathlib.Path, configuration: str
+) -> dict[str, pathlib.Path]:
+    """@brief Read configured GoogleTest targets and executable locations.
+
+    @param build Configured nested provider-disabled build directory.
+    @param configuration Exact single- or multi-config name selected for the
+      nested build.
+    @return Mapping from every uniquely registered GoogleTest target to its
+      configuration-specific executable path.
+    @throws OSError If the generated inventory cannot be read.
+    @throws UnicodeError If the generated inventory is not valid UTF-8.
+    @throws RuntimeError If the configuration or inventory is missing,
+      malformed, empty, duplicated, contains controls, lacks its exact unique
+      header, or contains an invalid target or relative executable path.
+    @note CMake generates the TSV from its ``gtest_discover_tests`` registration
+      metadata and ``$<TARGET_FILE:...>`` expressions. Each later line is
+      exactly one two-field data record; comments, repeated headers, and blank
+      lines are rejected. POSIX absolute paths and Windows drive/UNC paths are
+      accepted without rejecting ordinary spaces or Windows backslashes. This
+      parser does not infer registrations from source filenames or from
+      CTest's observed sentinel set.
+    """
+
+    if (
+        not configuration
+        or pathlib.PurePosixPath(configuration).name != configuration
+        or pathlib.PureWindowsPath(configuration).name != configuration
+        or configuration in {".", ".."}
+        or contains_forbidden_ascii_control(configuration)
+    ):
+        raise RuntimeError(
+            "invalid nested provider build configuration for GoogleTest "
+            f"inventory: {configuration!r}"
+        )
+    inventory_path = (
+        build
+        / CI_INVENTORY_RELATIVE_DIRECTORY
+        / f"registered_gtest_targets-{configuration}.tsv"
+    )
+    if not inventory_path.is_file():
+        raise RuntimeError(
+            "configured GoogleTest target inventory is missing: "
+            f"{inventory_path}"
+        )
+
+    with inventory_path.open(
+        "r", encoding="utf-8", newline=""
+    ) as inventory_file:
+        inventory_text = inventory_file.read()
+    if contains_forbidden_ascii_control(inventory_text, "\n\t"):
+        raise RuntimeError(
+            "configured GoogleTest target inventory contains a forbidden "
+            "ASCII control character"
+        )
+    lines = inventory_text.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    if not lines or lines[0] != REGISTERED_GTEST_TARGET_INVENTORY_HEADER:
+        raise RuntimeError(
+            "configured GoogleTest target inventory has a missing or "
+            "invalid header"
+        )
+
+    targets: dict[str, pathlib.Path] = {}
+    for line_number, line in enumerate(lines[1:], start=2):
+        if not line:
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains a blank entry"
+            )
+        if line.startswith("#"):
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains a comment "
+                f"or repeated header at line {line_number}"
+            )
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains a malformed "
+                f"entry at line {line_number}"
+            )
+        target_name, executable_text = fields
+        executable = pathlib.Path(executable_text)
+        if (
+            REGISTERED_GTEST_TARGET_NAME_PATTERN.fullmatch(target_name) is None
+            or target_name.endswith("_NOT_BUILT")
+            or not is_portable_absolute_path(executable_text)
+        ):
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains an invalid "
+                f"entry at line {line_number}"
+            )
+        if target_name in targets:
+            raise RuntimeError(
+                "configured GoogleTest target inventory contains a duplicate "
+                f"target: {target_name!r}"
+            )
+        targets[target_name] = executable
+    if not targets:
+        raise RuntimeError("configured GoogleTest target inventory is empty")
+    return targets
+
+
+def expected_registered_gtest_sentinels(
+    build: pathlib.Path, configuration: str
+) -> set[str]:
+    """@brief Derive exact registered-but-unbuilt CTest placeholders.
+
+    @param build Configured and selectively built provider-disabled tree.
+    @param configuration Exact configuration whose target paths were built.
+    @return Sentinel names for registered GoogleTest executables that are not
+      regular files after the focused build.
+    @throws OSError If the configured target inventory cannot be read.
+    @throws UnicodeError If the configured inventory is not valid UTF-8.
+    @throws RuntimeError If the configured target inventory is invalid.
+    @note Target-file existence observes the real build closure, including
+      targets built indirectly as dependencies. The returned names follow
+      CMake GoogleTest's exact ``${target}_NOT_BUILT`` convention.
+    """
+
+    targets = registered_gtest_target_files(build, configuration)
+    return {
+        f"{target_name}_NOT_BUILT"
+        for target_name, executable in targets.items()
+        if not executable.is_file()
+    }
 
 
 def parse_ctest_inventory(
@@ -208,22 +382,25 @@ def query_ctest_inventory(
 
 def validate_provider_disabled_inventory(
     inventory: dict[str, dict[str, object]],
+    expected_sentinels: set[str],
 ) -> None:
     """@brief Require the exact provider-disabled CTest surface.
 
     @param inventory Unique registered tests and properties from the nested
       build.
+    @param expected_sentinels Exact registered-but-unbuilt names derived from
+      CMake's target inventory and the completed focused build closure.
     @return None when only the intended focused tests, install smoke, and
-      registered-only sentinel exist.
-    @throws RuntimeError If a focused test is missing, a broad-suite test
-      remains registered, the registered-only sentinel gains a label or
-      timeout, or a required concurrency property drifts.
+      CMake-derived registered-only sentinels exist.
+    @throws RuntimeError If a focused test is missing, a sentinel is malformed
+      or has properties, a broad-suite test remains registered, or a required
+      concurrency property drifts.
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
-    @note `test_compute_io_executor` remains registered by the focused CMake
-      profile but is deliberately not rebuilt here; CTest therefore exposes
-      its one exact `_NOT_BUILT` placeholder.
+    @note The current V-13 closure deliberately leaves the compute-I/O and
+      packed-FP4 behavior targets unbuilt. Their placeholders are observations
+      derived from the configured target manifest, not hard-coded inputs.
     """
 
     disk_cache_tests = {
@@ -447,19 +624,28 @@ def validate_provider_disabled_inventory(
     value_runtime_tests = {
         "ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide"
     }
+    malformed_sentinels = sorted(
+        name
+        for name in expected_sentinels
+        if re.fullmatch(r"[A-Za-z0-9_.:+-]+_NOT_BUILT", name) is None
+    )
+    if malformed_sentinels:
+        raise RuntimeError(
+            "provider-disabled expected sentinel inventory is malformed: "
+            f"{malformed_sentinels}"
+        )
     expected = {
         "DependencyDisabledInstallSmoke",
         (
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
-        *PROVIDER_DISABLED_REGISTERED_SENTINELS,
-    }
-    expected |= (
+    } | (
         disk_cache_tests
         | lifecycle_tests
         | dense_image_tests
         | value_runtime_tests
+        | expected_sentinels
     )
     names = set(inventory)
     if names != expected:
@@ -473,7 +659,7 @@ def validate_provider_disabled_inventory(
             "LABELS": inventory[name].get("LABELS"),
             "TIMEOUT": inventory[name].get("TIMEOUT"),
         }
-        for name in PROVIDER_DISABLED_REGISTERED_SENTINELS
+        for name in expected_sentinels
         if "LABELS" in inventory[name] or "TIMEOUT" in inventory[name]
     }
     if sentinel_property_mismatches:
@@ -643,7 +829,10 @@ def main() -> int:
     inventory = query_ctest_inventory(
         args.ctest_executable, work, configuration, repo
     )
-    validate_provider_disabled_inventory(inventory)
+    validate_provider_disabled_inventory(
+        inventory,
+        expected_registered_gtest_sentinels(work, configuration),
+    )
     run(
         [
             args.ctest_executable,
