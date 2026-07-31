@@ -204,6 +204,18 @@ owner retires. A successful continuation materializes the CPU compatibility
 snapshot and only then releases dependants. Failed, ProducerCancelled, stale,
 or mismatched completion releases none.
 
+V-13 extends the same explicit task boundary by layout family rather than by
+implicit conversion. A packed FP4 source is validated against the version-1
+Blocked producer envelope: rank-matched complete quantization blocks,
+nibble-aligned bit offset/strides, non-overlapping complete block spans, and an
+exact retained byte size. CPU and injected external-device destinations retain
+the full descriptor/scale schema, Blocked layout, bit order/offset, unused
+nibble bits, and logical revision while receiving fresh binding/producer
+identity. An oversized immutable BufferHandle alias remains a valid bounded
+view but is not an exact transfer producer; preparation rejects it before
+destination publication or provider effects. The transfer performs no
+dequantization, requantization, ImageBuffer adaptation, or implicit wait.
+
 The registry's shared `ResidencyManager` admits complete Graph/target/intent/
 generation/Run/task/producer/revision/binding identity before native commit.
 Before coordinator publication is submitted, Kernel fallibly pretracks the
@@ -706,6 +718,14 @@ serialization: the current product cache still crosses an image-only
 `ImageBuffer`/selected-precision codec boundary, and latent Values have no such
 artifact path.
 
+V-13 does not widen that persistence boundary. Formal HP memory-cache state may
+retain a packed Value and exact TensorSlice validity, but configured image disk
+save validates ImageBuffer compatibility before estimating or admitting a
+`ComputeIoExecutor` task. Packed, quantized, or latent formal Values raise
+`GraphError{InvalidParameter}` before filesystem paths or codecs are touched.
+This fail-closed result is a typed boundary observation, not a generic artifact
+format, digest, manifest, or durable-output completion state.
+
 Provider return, pending-Value readiness, Run terminal publication, Host result
 return, daemon job terminal state, result delivery, cache save, Graph-document
 save, and user-visible file side effects are separate observations. In
@@ -879,6 +899,7 @@ cannot.
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
@@ -910,6 +931,7 @@ cannot.
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`

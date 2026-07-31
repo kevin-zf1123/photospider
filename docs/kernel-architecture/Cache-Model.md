@@ -278,6 +278,30 @@ one exact built-in ImageRect. TensorSlice and Whole do not enter the RT or
 downsample rectangle boundary. Region values and Tensor axes are included in
 retained-memory accounting.
 
+## V-13 Packed Memory Cache and Image Disk Boundary
+
+A formal HP `NodeOutput` may retain the complete immutable packed FP4 Value in
+its existing Value authority. Ordinary cache copies preserve descriptor,
+block-scale quantization, Blocked layout, exact byte envelope, allocation,
+logical revision, and Ready state. `Node::hp_region` independently retains the
+exact TensorSlice validity; neither fact is reconstructed from an ImageBuffer.
+This is runtime memory-cache retention, not a new persistent identity or cache
+format.
+
+The configured disk mechanism remains explicitly image-only. Before planned
+bytes are admitted to `ComputeIoExecutor`, before the executor callback is
+created, and before filesystem or codec work, `GraphCacheService` requires a
+formal Value to be Ready, host-readable, image-faceted, Strided, unquantized,
+and compatible with the whole-byte ImageBuffer element set. Packed, quantized,
+or latent formal Values fail with `GraphError{InvalidParameter}`. A node with no
+effective nonempty image cache entry retains its historical no-op behavior and
+does not enter this validation boundary.
+
+The rejection does not drop named metadata, widen FP4 bytes, invent an image
+facet, persist scales separately, or mint descriptor/content/layout/artifact
+digests. Supporting those behaviors requires a later generic artifact and
+manifest contract; the current `ImageArtifactCodec` ABI is unchanged.
+
 ### Current bounded mechanism and future persistence relationship
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
@@ -317,6 +341,8 @@ receipts, or durability. The future post-publication cache outcome and
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/core/value_image_adapter.*`
+- `include/photospider/data/packed_dense_tensor_view.hpp`
+- `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
@@ -331,6 +357,7 @@ receipts, or durability. The future post-publication cache outcome and
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/unit/test_compute_io_executor.cpp`

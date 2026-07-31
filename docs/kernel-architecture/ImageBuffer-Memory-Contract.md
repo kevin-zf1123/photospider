@@ -285,7 +285,7 @@ side effect can precede Run commit and has no OutputStore transaction. These
 current limits and the separate target output authority are fixed by
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md).
 
-### Implemented V-3/V-4/V-6/V-8/V-9/V-12 relationship and remaining target
+### Implemented V-3/V-4/V-6/V-8/V-9/V-12/V-13 relationship and remaining target
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete replacement:
@@ -371,9 +371,30 @@ minting allocation/revision/producer facts, creating a fence, invoking the
 provider, or publishing a Pending destination; the general native publisher is
 not narrowed and may still publish checked signed immutable aliases.
 
-V-12 still does not implement quantization, general Map/Import providers,
-provider ABI v3, a public device registry, device queue/in-flight accounting,
-or general named graph Value outputs. Issue #87's compute-I/O durability
+Issue #90 / V-13 likewise leaves `ImageBuffer` unchanged while installing one
+real packed path beside it. Four-bit E2M1 storage and finite-positive
+row-major block scales are independent descriptor facts; version-1
+`BlockedLayout` carries nibble-aligned bit strides, an absolute bit offset, and
+explicit nibble order. `PackedDenseTensorView` performs checked encoded and
+dequantized reads, and the bounded TensorSlice copy accepts only complete
+block-aligned selections, directly copies codes/scales, and publishes a fresh
+packed CPU Value. `DenseTensorView`, `ImageView`, and
+`dense_tensor_element_bytes()` continue to reject Blocked FP4 rather than
+pretending that one nibble is one byte.
+
+Explicit CPU and injected external-device transfer preserve packed bytes,
+unused nibble bits, descriptor/quantization/layout facts, and logical revision
+without adapting through `ImageBuffer`. Formal HP memory cache can retain this
+Value and exact TensorSlice validity. The image-only disk cache is an explicit
+compatibility boundary: a packed, quantized, or latent formal Value fails with
+`GraphError{InvalidParameter}` before executor admission, filesystem mutation,
+or codec calls. No widening, metadata-only fallback, or generic durable format
+occurs.
+
+V-13 still does not implement other quantization formulae or packed formats,
+unaligned requantizing slices, general Map/Import providers, provider ABI v3, a
+public device registry, device queue/in-flight accounting, generic Value
+persistence, or general named graph Value outputs. Issue #87's compute-I/O durability
 decision and Issue #88's first bounded cache/codec execution vertical remain
 current: the process executor retains transaction lifetime and budgets work,
 but does not change `ImageBuffer` or codec ABI. The V-12 I/O observation proves
@@ -400,12 +421,15 @@ operation ABI.
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/packed_dense_tensor_view.hpp`
+- `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/memory/strided_layout.hpp`
 - `include/photospider/plugin/op_contract.hpp`
 - `src/lib/core/image_buffer.cpp`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/execution/value_transfer_task.*`
 - `src/lib/execution/device_completion.*`
 - `src/lib/execution/residency_manager.*`
@@ -424,3 +448,4 @@ operation ABI.
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`

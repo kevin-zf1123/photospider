@@ -158,16 +158,17 @@ component 会保持 not-found 而不使 discovery 失败；省略 component 或�
 长期 `DependencyDisabledInstallSmoke` 会配置一个 OpenCV 与 YAML capability 均禁用的 clean
 producer，禁用这两个 package discovery，关闭 IPC，只启用 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
-`test_cpu_dense_tensor_image_operation`、`test_value_identity_across_dsos`
-binary。安装前，它会在该真实 disabled producer 中运行全部 48 个 dense-image case 与一个
-双 DSO identity case，包括
+`test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
+`test_value_identity_across_dsos` binary。安装前，它会在该真实 disabled producer 中运行全部
+48 个 dense-image case、全部 4 个 packed FP4 case 与一个双 DSO identity case，包括
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path，以及 Value allocation
 ownership、lease、signed-view 与 cache-identity 回归。它会验证派生的 provider/plugin/CLI
 默认值，以及三类无效显式组合的精确诊断。
 Clean install 后，它会拒绝 OpenCV header、target、export reference 与 yaml-cpp link 泄漏；
 optional `operation_opencv` 保持 unavailable，required component 则失败。外部 consumer 会在
 两个 discovery 均禁用时配置，链接并运行 `Photospider::photospider`，分配中立 image，并通过
-installed package 使用 `ValueBuilder`、write/read lease、runtime identity 与 ImageView，
+installed package 使用 `ValueBuilder`、write/read lease、runtime identity、ImageView，以及
+public FP4/quantization/Blocked/PackedDenseTensorView contract，
 加载并关闭 empty Host session，并观察显式 YAML operation 返回 `GraphErrc::Io`。CI 只有在校验
 producer cache identity、configuration、完整 capability profile 与已构建 dense integration
 target 后才可复用该 producer。
@@ -868,7 +869,7 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor、ImageView、Region、ReadyFence 与 Transfer 验证
+## CPU DenseTensor、Packed FP4、Region、ReadyFence 与 Transfer 验证
 
 `test_cpu_dense_tensor_image_operation` 是已实现 V-2 至 V-12 边界的 provider-independent
 integration binary。它的 48 个长期用例验证：
@@ -925,6 +926,15 @@ checked ImageRect/PixelRect conversion、Region propagation、route 选中的 sa
 replacement rejection、HP/RT intent-sensitive implementation selection、Tensor planning/task
 selection/edge mapping 与 Region dirty lifecycle。
 
+`test_packed_fp4_dense_tensor` 拥有 4 个 dependency-neutral V-13 integration case。它们验证
+两种 nibble order 与 nonzero bit offset、精确 encoded/scale-dequantized E2M1 access、严格
+descriptor/quantization/layout/envelope rejection、block-aligned TensorSlice 对 scale/code 的
+投影与 fresh identity、byte-view 与 ImageBuffer fail-closed 行为、保留表示的 CPU 与注入式
+fake-device transfer、精确正式 memory-cache retention，以及在 executor、filesystem 或 codec
+副作用前发生的 typed image disk-cache rejection。Malformed matrix 包括错误 quantization
+rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误 layout version/
+alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
+
 Active output byte 必须等于 `255 - input`；input/output row padding 不被当作 image element。
 
 聚焦验证命令为：
@@ -932,13 +942,15 @@ Active output byte 必须等于 `255 - input`；input/output row padding 不被�
 ```bash
 cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
+  test_packed_fp4_dense_tensor \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor)\.'
 ```
 
-`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 48 个 dense
-用例，再证明 installed consumer；`StaticProductConsumerSmoke` 会证明 operation-SDK-only
+`DependencyDisabledInstallSmoke` 会在真实 OpenCV/YAML disabled product 中构建并运行全部 48 个
+dense 用例与全部 4 个 packed FP4 用例，再证明 installed consumer；
+`StaticProductConsumerSmoke` 会证明 operation-SDK-only
 installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
 都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述

@@ -252,14 +252,14 @@ daemon result availability 与受保护 artifact publication 是不同的当前�
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)；
 它们不是新增的当前字段。
 
-### 已实现的 V-3 ownership、V-4 Region、V-6 readiness 与 V-8 device surface
+### 已实现的 V-3 ownership 至 V-13 packed data surface
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 接受完整的通用 Value 替换。V-2 引入了有界 CPU DenseTensor 子集；V-3 现已接通其
 physical ownership 与正式 HP cache identity：
 
-- installed `DenseTensorDescriptor` 把 concrete shape、`ElementSemantics` 与
-  `StorageEncoding` 分开；
+- installed `DenseTensorDescriptor` 把 concrete shape、`ElementSemantics`、
+  `StorageEncoding` 与可选 quantization 分开；
 - installed `ImageFacet` 显式指定彼此不同的 x/y axis 与可选 channel axis；
 - `BufferHandle` 是同一显式 storage binding 上受检、不可变、非空的 range；它不暴露 raw
   或 native pointer，并创建保留 identity 的 checked subrange；CPU builder 拥有 host byte，
@@ -347,10 +347,32 @@ allocation 并暴露 Pending-to-Ready binding 事实。已准入的 `ComputeIoEx
 显式 task/byte budget 下保留并观察同一个不可变 Value 的事实与字节；该观察不会创建
 cache、artifact 或 persistence identity。
 
-`DataSpec`、quantization、通用 Map/Import provider、provider ABI v3 与通用命名 immutable
-Value output 仍属于后续 no-shim slice。V-12 不新增 public resource declaration、通用 heap
-suballocation 或 device-queue budget。`ParameterMap` 仍用于 configuration 与当前命名
-scalar-result storage。
+V-13 安装了一条有界 packed/quantized execution 垂直路径，且不会重新解释 byte-addressed
+模型。`StorageEncodingKind::Fp4E2M1` 会把 four-bit E2M1 与 floating-point semantics 分开
+标识；可选 `QuantizationSchema` 则拥有 rank-matched positive block shape，以及每个 row-major
+logical block 对应的一项 finite positive scale。Shape 必须能被完整 block 整除。Version-1
+`BlockedLayout` 会独立记录相同 block shape、nibble-aligned block bit stride、absolute bit
+offset，以及显式 least- 或 most-significant-first nibble order。Publication 会证明精确 byte
+bounds 与互不重叠的完整 block span。`Value` 只保留一个带 tag 的 Strided 或 Blocked layout；
+`dense_tensor_element_bytes()` 与 `DenseTensorView` 会拒绝 packed storage，
+`PackedDenseTensorView` 则提供 checked encoded-code 与 scale-dequantized access，不会伪造
+element byte pointer。
+
+已安装 packed execution operation 只接受 domain 匹配、full-rank、nonempty，且每个 endpoint
+都与 quantization block 对齐的 TensorSlice。它会把 FP4 code 与所选 scale 直接复制到 fresh
+CPU Value，保留 nibble order 与 bit offset，并生成 canonical contiguous block bit stride，
+不会 dequantize 或 requantize。显式 CPU 与注入式 external-device transfer 会在不同 binding
+中保留完整 descriptor、quantization、Blocked layout、byte envelope、unused nibble bit、
+readiness transition 与逻辑 revision。正式 HP memory cache copy 会保留该 immutable Value 与
+精确 TensorSlice validity。当前 image-only disk cache 则会在 compute-I/O admission、filesystem
+mutation 或 codec invocation 前，以 `GraphError{InvalidParameter}` 拒绝 packed、quantized 或
+latent 正式 Value；这不代表存在通用 artifact format 或持久 digest。
+
+`DataSpec`、更多 packed encoding 或 quantization formula、需要 requantize 的未对齐 slice、
+通用 Map/Import provider、provider ABI v3、通用 Value persistence 与通用命名 immutable Value
+output 仍属于后续 no-shim slice。V-13 不新增 public resource declaration、通用 heap
+suballocation、device-queue budget、canonical descriptor/content/layout digest、manifest 或
+chunk。`ParameterMap` 仍用于 configuration 与当前命名 scalar-result storage。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。Issue #62 在不让已配置 product dependency 变为 optional 的
@@ -364,9 +386,11 @@ dependency 工作由
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/core/device.hpp`
 - `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
@@ -384,6 +408,7 @@ dependency 工作由
 - `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
@@ -404,5 +429,6 @@ dependency 工作由
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

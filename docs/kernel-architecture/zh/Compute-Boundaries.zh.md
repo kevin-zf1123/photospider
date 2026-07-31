@@ -168,6 +168,15 @@ continuation owner 退役前阻止 terminal settlement。成功 continuation 会
 compatibility snapshot，再释放 dependant；Failed、ProducerCancelled、stale 或 mismatched
 completion 不释放任何 dependant。
 
+V-13 会按 layout family 扩展同一条显式 task boundary，而不是引入隐式 conversion。Packed FP4
+source 会按照 version-1 Blocked producer envelope 校验：rank-matched 完整 quantization block、
+nibble-aligned bit offset/stride、互不重叠的完整 block span，以及精确 retained byte size。CPU 与
+注入式 external-device destination 会保留完整 descriptor/scale schema、Blocked layout、bit
+order/offset、unused nibble bit 与逻辑 revision，同时取得 fresh binding/producer identity。
+Oversized immutable BufferHandle alias 仍可作为有效 bounded view，但不是精确 transfer producer；
+preparation 会在 destination publication 或 provider effect 前拒绝它。Transfer 不执行
+dequantization、requantization、ImageBuffer adaptation 或 implicit wait。
+
 Registry 共享的 `ResidencyManager` 会在 native commit 前准入完整
 Graph/target/intent/generation/Run/task/producer/revision/binding identity。Current-generation
 publication 被提交给 coordinator 之前，Kernel 会先以可失败方式预跟踪 request lineage，
@@ -545,6 +554,12 @@ envelope，随后在 typed settlement 时归还两个 budget。这证明有界 e
 仍会穿过 image-only `ImageBuffer`/selected-precision codec 边界，而 latent Value 没有这条
 artifact path。
 
+V-13 不会放宽该 persistence boundary。正式 HP memory-cache state 可以保留 packed Value 与
+精确 TensorSlice validity，但已配置 image disk save 会在估算或准入 `ComputeIoExecutor` task
+前校验 ImageBuffer compatibility。Packed、quantized 或 latent 正式 Value 会在 filesystem path
+或 codec 被触碰前抛出 `GraphError{InvalidParameter}`。这项 fail-closed 结果是类型化 boundary
+observation，不是通用 artifact format、digest、manifest 或 durable-output completion state。
+
 Provider return、pending-Value readiness、Run terminal publication、Host result return、
 daemon job terminal state、result delivery、cache save、Graph 文档保存与用户可见文件
 副作用是不同观察。特别是：
@@ -679,6 +694,7 @@ completion，CPU worker 则不能等待。
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/cpu_dense_image_operation.*`
+- `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
 - `src/lib/core/ops.cpp`
@@ -710,6 +726,7 @@ completion，CPU worker 则不能等待。
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`

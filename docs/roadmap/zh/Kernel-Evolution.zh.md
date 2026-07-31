@@ -503,14 +503,17 @@ lease 绑定到 persistent Value 与 asynchronous completion。V-10 批准 typed
 completion 并让 persistence authority 保持分离；V-11 通过 `ComputeIoExecutor` 运行首条有界
 cache/codec mechanism。V-12 现在会验证已安装通用模型中的 1/3/4/8/16 通道 FP32/FP64
 image、rank-one 至 rank-five FP32/FP64 latent Value、padded 与 signed/zero stride、精确
-Region merge、显式 CPU/external-device transfer 和有界 compute-I/O retention。精确行为记录在
+Region merge、显式 CPU/external-device transfer 和有界 compute-I/O retention。V-13 现在会
+安装一条 packed FP4 E2M1、block-scale quantized DenseTensor 垂直路径，包含 version-1 Blocked
+addressing、checked packed access、block-aligned TensorSlice copy、保留表示的 transfer、精确
+memory-cache retention 与 fail-closed image disk persistence。精确行为记录在
 [内核数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、
 [ImageBuffer 内存契约](../../kernel-architecture/zh/ImageBuffer-Memory-Contract.zh.md)、
 [插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
 [内核缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)；execution ownership 记录在
 [策略与执行架构](../../kernel-architecture/zh/Policy-and-Execution-Architecture.zh.md)与
 [计算边界](../../kernel-architecture/zh/Compute-Boundaries.zh.md)。下述完整模型是已接受目标；
-只有这里明确指出的 V-2 至 V-12 子集是当前 runtime 事实。
+只有这里明确指出的 V-2 至 V-13 子集是当前 runtime 事实。
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
 是完整目标契约的权威来源。其核心分离关系是：
@@ -541,21 +544,27 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 `VariableSampleField + ImageFacet + DeepSampleFacet`。StructuredValue v1 是自包含的，
 不含 runtime child Value。
 
-已实现的 V-2 至 V-12 子集刻意保持更窄的范围：
+已实现的 V-2 至 V-13 子集刻意保持更窄的范围：
 
 - `DenseTensorDescriptor` 包含 positive concrete shape、彼此独立的 unsigned/signed integer
-  或 floating element semantics，以及 8/16/32/64-bit byte-addressed storage encoding；
+  或 floating element semantics、8/16/32/64-bit native scalar storage 或显式 four-bit FP4
+  E2M1 encoding，以及可选 V-13 block-scale quantization；后者包含 rank-matched positive block
+  shape，以及每个完整 row-major logical block 对应的一项 finite positive scale；
 - `ImageFacet` 显式映射彼此不同的 x/y axis 与可选 channel axis；
 - public `BufferHandle` 是同一个 opaque process-local `AllocationIdentity` 上受检、非空的
   range；subrange 会保留 allocation lifetime。CPU allocation 可以签发 host read lease，
   source-private native binding 则保留 external owner，并且只暴露经过检查的 binding fact；
   两条路径都不暴露 public raw pointer 或 native pointer；
 - move-only `ValueBuilder` 控制唯一 move-only `WriteLease`，要求 byte offset 为零的 positive
-  exact-envelope producer layout，在 lease 存活时拒绝 seal，并发布全新 process-local
-  `ValueRevisionId`；
+  exact-envelope Strided producer，或 version-1、nibble-aligned、exact-envelope、non-overlapping
+  Blocked producer，在 lease 存活时拒绝 seal，并发布全新 process-local `ValueRevisionId`；
 - final、copyable `Value` 共享 immutable descriptor/layout/handle state；通过 sealed handle
-  构造的 Value 可以使用受界限约束的 byte offset 与正、零或负 signed stride；
-- retaining checked `DenseTensorView`/`ImageView` 持有 `ReadLease` 并暴露只读 address；
+  构造的 Value 只保留一个带 tag 的 Strided 或 Blocked layout；Strided alias 可以使用受界限
+  约束的 byte offset 与正、零或负 signed stride，V-13 Blocked alias 则使用 checked bit offset
+  与 block bit stride；
+- retaining checked `DenseTensorView`/`ImageView` 持有 `ReadLease` 并暴露只读 whole-byte
+  address；`PackedDenseTensorView` 则暴露 checked FP4 code 与 scale-dequantized value，不伪造
+  element byte pointer；
 - installed `ReadyFence` 是 Pending、Ready、Failed 或 ProducerCancelled 的 copyable
   nonblocking observer；其 move-only completer 只发布一个 terminal state，丢弃 unresolved
   completer 会发布 cancellation；wait 通过共享的 non-inline executor 入队，该 executor 在
@@ -590,7 +599,9 @@ operation 与带 lease 的不可变进程级 provider generation 实现扩展。
 - 私有正式 HP CPU image cache entry 把有效 sealed `NodeOutput::image_value` 作为
   allocation/revision authority。普通 copy 保留 identity；dirty mutation、replacement 与
   disk decode 创建新 identity；disk save 读取 Value byte；runtime token 永不成为持久
-  cache/task key。
+  cache/task key。V-13 正式 memory-cache copy 还会保留 packed Value 与精确 TensorSlice
+  validity，而 image-only disk cache 会在 executor admission、filesystem mutation 或 codec
+  call 前拒绝 packed、quantized 或 latent 正式 Value；
 - installed `RegionSet` 支持规范 Empty/Whole、由 ImageRect 或 rank-general TensorSlice atom
   组成的一个有界 nonempty conjunction、checked normalization/clipping/algebra/containment、
   显式 budget，以及 typed Exact/ConservativeSuperset/Unknown/Unsupported/TooComplex outcome；
@@ -615,8 +626,19 @@ envelope、non-overlap 权威；external rejection 发生在保留 destination o
 publisher。已准入 compute-I/O task 会在有界 budget 下保留并观察相同的 Value metadata 与字节，
 但不会创建 artifact 或 persistence identity。
 
-V-12 仍不含 DataSpec、public device registry、device queue/in-flight dimension、
-quantization、packed element、provider ABI v3 或通用 named graph Value output。Native
+V-13 新增一条可执行 packed 垂直路径。FP4 E2M1 encoding、floating-point semantics 与
+block-scale quantization 保持为彼此独立的事实。Version-1 `BlockedLayout` 记录 matching block
+shape、nibble-aligned block bit stride、absolute bit offset 与显式 nibble order。Checked
+publication 会证明完整 block、精确 byte bounds 与互不重叠的 block span。Packed TensorSlice
+copy 只接受 full-rank、nonempty、block-aligned interval，会投影 row-major scale、直接复制 code，
+并发布 fresh canonical blocked CPU Value。CPU 与注入式 external-device transfer 会在不同
+binding 中保留 descriptor、quantization、layout、byte envelope（包括 unused nibble bit）、逻辑
+revision 与 Pending-to-Ready fact。正式 memory cache 会保留精确 Value/Region fact；image disk
+persistence 则 fail-closed，不会伪造 widened image byte 或通用 artifact format。
+
+V-13 仍不含 DataSpec、public device registry、device queue/in-flight dimension、更多 packed
+encoding 或 quantization formula、未对齐 requantizing slice、provider ABI v3、通用 Value
+persistence、canonical descriptor/content/layout digest、manifest/chunk 或通用 named graph Value output。Native
 executor、transfer submission、mutable producer、completion admission 与 residency owner
 仍是 source-private。ImageBuffer 仍是 operation ABI v2、tiled write、codec 与 Host surface
 的 compatibility representation。
@@ -626,7 +648,7 @@ executable 与 convertible 支持也彼此独立，而且 conversion 始终显�
 channel、padded 或 signed stride、N-dimensional latent value 与 packed FP4 都可以表示，
 而无需静默 float32 conversion、one-byte-per-element 假设或 channel-role 猜测。
 
-对于当前 V-12 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
+对于当前 V-13 子集，`BufferHandle` 是已检查的不可变 byte range。Consumer read 与普通
 builder write 需要 lease；已 seal Value 永不签发 `WriteLease`，consumer write 始终被拒绝。
 Source-private producer 可以通过其不可复制的 capability，在预先验证的
 binding/Layout/handle envelope 内完成一个 sealed pending CPU 或 native payload。该 capability 的退役

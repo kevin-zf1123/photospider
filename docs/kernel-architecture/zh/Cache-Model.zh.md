@@ -211,6 +211,25 @@ RT proxy state 使用 HP-space `region_hp`，但仍只支持 image。Checked ada
 不会进入 RT 或 downsample rectangle boundary。Region value 与 Tensor axis 会计入
 retained-memory accounting。
 
+## V-13 Packed Memory Cache 与 Image Disk Boundary
+
+正式 HP `NodeOutput` 可以通过既有 Value authority 保留完整 immutable packed FP4 Value。
+普通 cache copy 会保留 descriptor、block-scale quantization、Blocked layout、精确 byte
+envelope、allocation、逻辑 revision 与 Ready state。`Node::hp_region` 会独立保留精确
+TensorSlice validity；两类事实都不会从 ImageBuffer 重建。这是 runtime memory-cache retention，
+不是新的 persistent identity 或 cache format。
+
+已配置 disk mechanism 继续明确保持 image-only。在 planned byte 被 `ComputeIoExecutor` 准入、
+executor callback 被创建，以及 filesystem 或 codec 工作发生前，`GraphCacheService` 要求正式
+Value 为 Ready、host-readable、image-faceted、Strided、unquantized，并与 whole-byte
+ImageBuffer element set 兼容。Packed、quantized 或 latent 正式 Value 会以
+`GraphError{InvalidParameter}` 失败。没有有效 nonempty image cache entry 的节点会保留历史
+no-op 行为，不会进入这条 validation boundary。
+
+这项拒绝不会丢弃 named metadata、widen FP4 byte、伪造 image facet、单独持久化 scale，或生成
+descriptor/content/layout/artifact digest。支持这些行为需要后续通用 artifact 与 manifest
+contract；当前 `ImageArtifactCodec` ABI 保持不变。
+
 ### 当前有界机制与未来持久化关系
 
 [ADR 0008](../../adr/zh/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
@@ -246,6 +265,8 @@ eligibility、path、output commit policy、Graph 文档 transaction、daemon st
 - `src/lib/providers/configured_image_artifact_codec.*`
 - `src/lib/providers/configured_persistence_adapters.*`
 - `src/lib/core/value_image_adapter.*`
+- `include/photospider/data/packed_dense_tensor_view.hpp`
+- `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/data/region.hpp`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
@@ -260,6 +281,7 @@ eligibility、path、output commit policy、Graph 文档 transaction、daemon st
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/unit/test_compute_io_executor.cpp`

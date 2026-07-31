@@ -309,7 +309,7 @@ completion taxonomy are recorded in
 [ADR 0009](../adr/0009-compute-io-durability-and-completion-semantics.md);
 they are not additional current fields.
 
-### Implemented V-3 ownership, V-4 Region, V-6 readiness, and V-8 device surfaces
+### Implemented V-3 ownership through V-13 packed data surfaces
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 accepts the complete generic-value replacement. V-2 introduced the bounded CPU
@@ -317,7 +317,7 @@ DenseTensor subset; V-3 now connects its physical ownership and formal HP cache
 identity:
 
 - installed `DenseTensorDescriptor` keeps concrete shape,
-  `ElementSemantics`, and `StorageEncoding` separate;
+  `ElementSemantics`, `StorageEncoding`, and optional quantization separate;
 - installed `ImageFacet` explicitly assigns distinct x/y and optional channel
   axes;
 - `BufferHandle` is a checked immutable nonempty range over one explicit
@@ -426,10 +426,40 @@ admitted `ComputeIoExecutor` task retains and observes the same immutable Value
 facts and bytes under explicit task/byte budgets; that observation creates no
 cache, artifact, or persistence identity.
 
-`DataSpec`, quantization, general Map/Import providers, provider ABI v3, and
-general named immutable Value outputs remain later no-shim slices. V-12 does
-not add public resource declarations, general heap suballocation, or
-device-queue budgets.
+V-13 installs one bounded packed/quantized execution vertical without
+reinterpreting the byte-addressed model. `StorageEncodingKind::Fp4E2M1`
+identifies four-bit E2M1 independently from floating-point semantics, while an
+optional `QuantizationSchema` owns a rank-matched positive block shape and one
+finite positive scale per row-major logical block. The shape must divide into
+complete blocks. A version-1 `BlockedLayout` separately records the matching
+block shape, nibble-aligned block bit strides, absolute bit offset, and explicit
+least- or most-significant-first nibble order. Publication proves exact byte
+bounds and non-overlapping complete block spans. `Value` retains exactly one
+tagged Strided or Blocked layout; `dense_tensor_element_bytes()` and
+`DenseTensorView` reject packed storage, while `PackedDenseTensorView` provides
+checked encoded-code and scale-dequantized access without manufacturing an
+element byte pointer.
+
+The installed packed execution operation accepts only a matching-domain,
+full-rank, nonempty TensorSlice whose endpoints align to every quantization
+block. It directly copies FP4 codes and selected scales into a fresh CPU Value,
+preserves nibble order and bit offset, and emits canonical contiguous block bit
+strides without dequantization or requantization. Explicit CPU and injected
+external-device transfers preserve the complete descriptor, quantization,
+Blocked layout, byte envelope, unused nibble bits, readiness transition, and
+logical revision in a distinct binding. Formal HP memory cache copies retain
+that immutable Value and exact TensorSlice validity. The current image-only
+disk cache instead rejects packed, quantized, or latent formal Values with
+`GraphError{InvalidParameter}` before compute-I/O admission, filesystem
+mutation, or codec invocation; no generic artifact format or persistent digest
+is implied.
+
+`DataSpec`, additional packed encodings or quantization formulae, unaligned
+requantizing slices, general Map/Import providers, provider ABI v3, generic
+Value persistence, and general named immutable Value outputs remain later
+no-shim slices. V-13 does not add public resource declarations, general heap
+suballocation, device-queue budgets, canonical descriptor/content/layout
+digests, manifests, or chunks.
 `ParameterMap` remains configuration and current named scalar-result storage.
 
 Keeping graph identity and topology in one model makes traversal, compute,
@@ -445,9 +475,11 @@ neither document changes the current fields described above.
 
 - `include/photospider/data/value.hpp`
 - `include/photospider/data/image_view.hpp`
+- `include/photospider/data/packed_dense_tensor_view.hpp`
 - `include/photospider/data/region.hpp`
 - `include/photospider/core/device.hpp`
 - `include/photospider/memory/access_plan.hpp`
+- `include/photospider/memory/blocked_layout.hpp`
 - `include/photospider/memory/buffer_handle.hpp`
 - `include/photospider/memory/ready_fence.hpp`
 - `include/photospider/memory/strided_layout.hpp`
@@ -465,6 +497,7 @@ neither document changes the current fields described above.
 - `src/lib/ipc/output_store.*`
 - `src/lib/core/pending_value.hpp`
 - `src/lib/core/value.cpp`
+- `src/lib/core/packed_dense_tensor.cpp`
 - `src/lib/core/value_image_adapter.*`
 - `src/lib/core/region.*`
 - `src/lib/core/region_image_adapter.*`
@@ -485,5 +518,6 @@ neither document changes the current fields described above.
 - `tests/integration/test_stride_aware_compute_paths.cpp`
 - `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
+- `tests/integration/test_packed_fp4_dense_tensor.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

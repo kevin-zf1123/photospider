@@ -633,7 +633,11 @@ the first bounded cache/codec mechanism through `ComputeIoExecutor`. V-12 now
 verifies the installed generic model across 1/3/4/8/16-channel FP32/FP64
 images, rank-one through rank-five FP32/FP64 latent Values, padded and
 signed/zero strides, exact Region merge, explicit CPU/external-device transfer,
-and bounded compute-I/O retention. Their exact
+and bounded compute-I/O retention. V-13 now installs one packed FP4 E2M1,
+block-scale quantized DenseTensor vertical with version-1 Blocked addressing,
+checked packed access, block-aligned TensorSlice copy, representation-preserving
+transfer, exact memory-cache retention, and fail-closed image disk persistence.
+Their exact
 behavior is documented in
 [Kernel Data Model](../kernel-architecture/Data-Model.md),
 [ImageBuffer Memory Contract](../kernel-architecture/ImageBuffer-Memory-Contract.md),
@@ -643,7 +647,7 @@ ownership in
 [Policy and Execution Architecture](../kernel-architecture/Policy-and-Execution-Architecture.md)
 and [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md). The
 complete model below is the accepted target; only the explicit V-2 through
-V-12 subset called out here is a current runtime fact.
+V-13 subset called out here is a current runtime fact.
 
 [ADR 0008](../adr/0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md)
 is authoritative for the complete target contract. Its central separation is:
@@ -678,11 +682,13 @@ explicit and never inferred from names. Per-site variable samples use
 `VariableSampleField + ImageFacet + DeepSampleFacet`. StructuredValue v1 is
 self-contained and does not contain runtime child Values.
 
-The implemented V-2 through V-12 subset is deliberately narrower:
+The implemented V-2 through V-13 subset is deliberately narrower:
 
 - `DenseTensorDescriptor` contains positive concrete shape, independent
-  unsigned/signed integer or floating element semantics, and 8/16/32/64-bit
-  byte-addressed storage encoding;
+  unsigned/signed integer or floating element semantics, 8/16/32/64-bit native
+  scalar storage or the explicit four-bit FP4 E2M1 encoding, and optional V-13
+  block-scale quantization with a rank-matched positive block shape and one
+  finite positive scale per complete row-major logical block;
 - `ImageFacet` explicitly maps distinct x/y and optional channel axes;
 - public `BufferHandle` is a checked nonempty range over one opaque
   process-local `AllocationIdentity`; subranges retain allocation lifetime.
@@ -690,13 +696,19 @@ The implemented V-2 through V-12 subset is deliberately narrower:
   bindings retain an external owner and expose only checked binding facts;
   neither path exposes a public raw or native pointer;
 - move-only `ValueBuilder` controls the only move-only `WriteLease`, requires a
-  zero-offset positive exact-envelope producer layout, refuses seal while the
-  lease is live, and publishes a fresh process-local `ValueRevisionId`;
+  zero-offset positive exact-envelope Strided producer or a version-1
+  nibble-aligned exact-envelope non-overlapping Blocked producer, refuses seal
+  while the lease is live, and publishes a fresh process-local
+  `ValueRevisionId`;
 - final copyable `Value` shares immutable descriptor/layout/handle state;
-  Values over sealed handles may use a bounded byte offset and positive, zero,
-  or negative signed strides;
+  Values over sealed handles retain exactly one tagged Strided or Blocked
+  layout; Strided aliases may use a bounded byte offset and positive, zero, or
+  negative signed strides, while V-13 Blocked aliases use checked bit offsets
+  and block bit strides;
 - retaining checked `DenseTensorView`/`ImageView` hold a `ReadLease` and expose
-  read-only addresses;
+  read-only whole-byte addresses; `PackedDenseTensorView` instead exposes
+  checked FP4 codes and scale-dequantized values without a fake element byte
+  pointer;
 - installed `ReadyFence` is a copyable nonblocking observer of Pending, Ready,
   Failed, or ProducerCancelled; its move-only completer publishes one terminal
   state, dropped completion publishes cancellation, and waits are enqueued
@@ -742,7 +754,10 @@ The implemented V-2 through V-12 subset is deliberately narrower:
   `NodeOutput::image_value` as allocation/revision authority. Ordinary copies
   preserve identity; dirty mutation, replacement, and disk decode create fresh
   identity; disk save reads Value bytes; and runtime tokens are never
-  persistent cache/task keys.
+  persistent cache/task keys. V-13 formal memory-cache copies also retain
+  packed Values and exact TensorSlice validity, while the image-only disk cache
+  rejects packed, quantized, or latent formal Values before executor admission,
+  filesystem mutation, or codec calls;
 - installed `RegionSet` supports canonical Empty/Whole, one bounded nonempty
   conjunction of ImageRect or rank-general TensorSlice atoms, checked
   normalization/clipping/algebra/containment, explicit budgets, and typed
@@ -772,9 +787,24 @@ narrowing the general signed immutable publisher. An admitted compute-I/O task
 retains and observes the same Value metadata and bytes under bounded budgets,
 but creates no artifact or persistence identity.
 
-V-12 still has no DataSpec, public device registry, device queue/in-flight
-dimensions, quantization, packed element, provider ABI v3, or general named
-graph Value outputs. Its native executor, transfer submission, mutable
+V-13 adds one executable packed vertical. FP4 E2M1 encoding, floating-point
+semantics, and block-scale quantization remain independent facts. Version-1
+`BlockedLayout` records matching block shape, nibble-aligned block bit strides,
+absolute bit offset, and explicit nibble order. Checked publication proves
+complete blocks, exact byte bounds, and non-overlapping block spans. The packed
+TensorSlice copy accepts only full-rank nonempty block-aligned intervals,
+projects row-major scales, directly copies codes, and publishes a fresh
+canonical blocked CPU Value. CPU and injected external-device transfer preserve
+descriptor, quantization, layout, byte envelope (including unused nibble bits),
+logical revision, and Pending-to-Ready facts in a distinct binding. Formal
+memory cache retains the exact Value/Region facts; image disk persistence fails
+closed without inventing widened image bytes or a generic artifact format.
+
+V-13 still has no DataSpec, public device registry, device queue/in-flight
+dimensions, additional packed encodings or quantization formulae, unaligned
+requantizing slices, provider ABI v3, generic Value persistence, canonical
+descriptor/content/layout digests, manifests/chunks, or general named graph
+Value outputs. Its native executor, transfer submission, mutable
 producer, completion admission, and residency owner remain source-private.
 ImageBuffer remains the
 compatibility representation for operation ABI v2, tiled writes, codecs, and
@@ -787,7 +817,7 @@ signed strides, N-dimensional latent values, and packed FP4 to be represented
 without silent float32 conversion, one-byte-per-element assumptions, or
 channel-role guessing.
 
-For the current V-12 subset, `BufferHandle` is a checked immutable byte range.
+For the current V-13 subset, `BufferHandle` is a checked immutable byte range.
 Consumer reads and ordinary builder writes require leases; sealed Values never
 issue `WriteLease`, and consumer writes are always rejected. A source-private
 producer may complete one sealed pending CPU or native payload through its

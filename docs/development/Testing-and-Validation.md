@@ -204,10 +204,10 @@ The durable `DependencyDisabledInstallSmoke` configures a clean producer with
 OpenCV and YAML capabilities disabled, disables both package discoveries,
 turns off IPC, enables only the dependency-neutral test surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product, and
-`test_cpu_dense_tensor_image_operation` and
+`test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`, and
 `test_value_identity_across_dsos` binaries. Before installation it runs all
-48 dense-image cases plus the dual-DSO identity case in that actual disabled
-producer, including the
+48 dense-image cases, all four packed FP4 cases, and the dual-DSO identity case
+in that actual disabled producer, including the
 `register_core_operations -> OpRegistry -> NodeExecutor` invert path and Value
 ownership, lease, signed-view, and cache-identity regressions. It verifies the
 derived provider/plugin/CLI defaults and the precise diagnostics for three
@@ -216,8 +216,9 @@ After a clean install it rejects OpenCV headers, targets, export references,
 and yaml-cpp link leakage; optional `operation_opencv` remains unavailable
 while the required component fails. An external consumer configures with both
 discoveries disabled, links/runs `Photospider::photospider`, allocates a neutral
-image, uses `ValueBuilder`, write/read leases, runtime identities, and
-ImageView through the installed package, loads and closes an empty Host
+image, uses `ValueBuilder`, write/read leases, runtime identities, ImageView,
+and the public FP4/quantization/Blocked/PackedDenseTensorView contracts through
+the installed package, loads and closes an empty Host
 session, and observes `GraphErrc::Io` from an explicit YAML operation. CI may
 reuse a producer only after its cache identity, configuration, complete
 capability profile, and already-built dense integration target are validated.
@@ -1093,7 +1094,7 @@ ctest --test-dir build --output-on-failure \
   -R '^ImageArtifactCodecDependencyDisabledBuild$' -j 2
 ```
 
-## CPU DenseTensor, ImageView, Region, ReadyFence, and Transfer Validation
+## CPU DenseTensor, Packed FP4, Region, ReadyFence, and Transfer Validation
 
 `test_cpu_dense_tensor_image_operation` is a provider-independent integration
 binary for the implemented V-2 through V-12 boundary. Its 48 durable cases
@@ -1160,6 +1161,18 @@ same-key device replacement rejection, HP/RT intent-sensitive implementation
 selection, Tensor planning/task selection/edge mapping, and Region dirty
 lifecycle.
 
+`test_packed_fp4_dense_tensor` owns four dependency-neutral V-13 integration
+cases. They verify both nibble orders and a nonzero bit offset, exact encoded
+and scale-dequantized E2M1 access, strict descriptor/quantization/layout/
+envelope rejection, block-aligned TensorSlice scale/code projection with fresh
+identities, byte-view and ImageBuffer fail-closed behavior, representation-
+preserving CPU and injected fake-device transfer, exact formal memory-cache
+retention, and typed image disk-cache rejection before executor, filesystem,
+or codec effects. The malformed matrix includes wrong quantization rank/count,
+zero or non-divisible blocks, nonfinite/nonpositive scales, bad layout version/
+alignment/overlap/size, quantized Strided publication, and oversized blocked
+transfer aliases.
+
 Active output bytes must equal `255 - input`; input and output row padding is
 not treated as image elements.
 
@@ -1168,13 +1181,15 @@ Run the focused validation with:
 ```bash
 cmake --build build --target test_region_contracts \
   test_cpu_dense_tensor_image_operation \
+  test_packed_fp4_dense_tensor \
   public_header_self_containment -j 2
 ctest --test-dir build --output-on-failure \
-  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation)\.'
+  -R '^(RegionContract|RegionImageAdapter|RegionPropagation|RegionRouteSelection|RegionPlanning|RegionLifecycle|CpuDenseTensorImageOperation|PackedFp4DenseTensor)\.'
 ```
 
-`DependencyDisabledInstallSmoke` builds and runs all 48 dense cases in an actual
-OpenCV/YAML-disabled product before proving the installed consumer.
+`DependencyDisabledInstallSmoke` builds and runs all 48 dense cases plus all
+four packed FP4 cases in an actual OpenCV/YAML-disabled product before proving
+the installed consumer.
 `StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.
