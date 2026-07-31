@@ -81,6 +81,13 @@ observations。Smoke 也会拒绝已安装的 test product archive、已导出�
 seam definition。该测试继续属于带 label 的 `build-smoke`；普通完整 CTest selection 不会让
 package construction 混入 runtime-test ownership。
 
+配置后的 producer 还会把 `PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` 序列化为
+build-tree inventory，其中使用安装相对路径 `include/photospider/...`。Smoke 会拒绝缺失、空、
+重复、非 canonical 或非 header 的 entry，从该 inventory 生成 external consumer 的 include 清单，
+并要求已安装 include tree 与配置得到的路径集合完全相等。因此缺失文件与意外文件都会在同一项
+精确比较中失败；driver 和文档均不维护第二份 public-header 数量，未进入 allowlist 的 source-tree
+文件也无法静默扩大 package surface。
+
 该 smoke 会检查每个已安装的 `Photospider*Targets*.cmake` 文件，因为 package 将基础 target、
 依赖 OpenCV 的 target 与 embedded-product target 分到不同 export set 中。它的 dependency
 classifier 只识别 producer 接受的精确 OpenCV component target 拼写：裸 lowercase name、lowercase
@@ -673,19 +680,26 @@ tiled exception wrapper。两次相互独立的 `cv::Error::StsNoMem` 注入都�
 `OpenCvOperationProviderDisabledBuild` 会使用
 `BUILD_TESTING=ON` 与 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`
 配置一个临时嵌套 build，同时保留 OpenCV、YAML、graph CLI 与 operation-plugin 的默认启用值。
-因此 provider-aware broad suite gate 为关闭。Driver 会校验精确 CMake cache 画像，构建上述
-provider-independent focused binary 与 stdlib-only fixture，并额外构建专用 disk-cache
-diagnostic concurrency binary，再查询机器可读的 CTest inventory。该 inventory 必须精确包含
-`DependencyDisabledInstallSmoke`、
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores` 与三个
-`DiskCacheDiagnosticConcurrency.*` case；每个 concurrency case 必须仅保留
-`kernel-concurrency` label 与 20 秒 timeout。不得残留任何依赖 provider 的 broad test。
-Driver 随后通过 CTest 运行 optional-provider case 与全部三个 concurrency case。禁用
-profile 要求依赖中立
-analyzer/math operation 仍被 seed、OpenCV-backed operation key 不存在，并要求 replacement
-provider 能发布、执行且完整退役其 resize key。该临时 build 是长期 product configuration
-检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前阶段禁用的是 operation provider，
-不是彼此独立的 OpenCV codec、normalization、adapter 或 embedded-product 依赖。
+因此 provider-aware broad suite gate 为关闭。Driver 会校验精确 CMake cache 画像，构建
+provider-independent focused provider binary 及其 stdlib-only fixture，并额外构建专用 disk-cache
+diagnostic 与 kernel-lifecycle concurrency binary，再查询机器可读的 CTest inventory。
+
+配置期间，CMake 会在交叉核验 GoogleTest registration metadata 后，序列化每个 active
+`gtest_discover_tests` target 及其配置专属 `$<TARGET_FILE:...>` 路径。Focused build 完成后，
+driver 会从 executable 不是 regular file 的已注册 target 推导精确且不带 label 的
+`${target}_NOT_BUILT` 集合。该过程会观察真实 build closure（包括间接 dependency），无需硬编码
+target 数量或未来 target 名，也不会从 CTest 实际观察到的 sentinel 反推 expectation。精确 CTest
+inventory 等于该推导集合与以下条目的并集：`DependencyDisabledInstallSmoke`、
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、三个
+`DiskCacheDiagnosticConcurrency.*` case，以及两个 `KernelLifecycleConcurrency.*` case。推导出的
+sentinel 不得带 label 或 timeout；disk-cache case 必须仅保留 `kernel-concurrency` label 与 20 秒
+timeout，lifecycle case 则保留同一 label 与 60 秒 timeout。缺失或额外 entry 都会失败，因此不得
+残留任何依赖 provider 的 broad test。Driver 随后通过 CTest 运行 optional-provider case 与全部
+concurrency case。禁用 profile 要求依赖中立 analyzer/math operation 仍被 seed、OpenCV-backed
+operation key 不存在，并要求 replacement provider 能发布、执行且完整退役其 resize key。该临时
+build 是长期 product configuration 检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前
+阶段禁用的是 operation provider，不是彼此独立的 OpenCV codec、normalization、adapter 或
+embedded-product 依赖。
 
 OpenCV-provider 与注入式 codec 两个嵌套 build driver 都从
 `cmake_build_smoke_support.py` 导入同一份破坏性 work-tree helper。移除临时目录前，该 helper

@@ -87,6 +87,14 @@ product、package、configuration 与 compile 边界，不是 migration 或 sour
 safety regression：其 Python unittest 会在进程内验证 cleanup guard 与 cache-layout helper，
 但不会启动 child configure、build、install 或 compile target。
 
+两项 nested-profile inventory 无需在 workflow 中维护数量，也仍保持精确。Static-product producer
+会导出已配置的 CMake public-header install allowlist，consumer 要求已安装 include tree 与这些相对
+路径完全相等。Provider-disabled producer 会导出 active `gtest_discover_tests` target 及其配置专属
+executable 路径；focused build 完成后，driver 要求恰好只有那些不存在 executable file 的已注册
+target 表现为不带 label 的 `*_NOT_BUILT` 占位项。两项检查都会拒绝缺失和额外 entry，因此新增
+allowlisted header 或已注册 GoogleTest target 时，expectation 会通过其权威 CMake declaration
+变化，而不是依赖 Python 数字或针对未来名称的特判。
+
 `build-integrity-default` 会构建一次完整 default profile，并上传 `ci-build-default`。普通测试 job
 会复用该 artifact：
 

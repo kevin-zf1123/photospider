@@ -109,6 +109,16 @@ archive, exported test target, or exported internal seam definition. This
 remains a labelled `build-smoke`; ordinary complete CTest selection does not
 make package construction part of runtime-test ownership.
 
+The configured producer also serializes
+`PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` into a build-tree
+inventory using install-relative `include/photospider/...` paths. The smoke
+rejects a missing, empty, duplicate, noncanonical, or non-header entry, generates
+the external consumer's include list from that inventory, and requires the
+installed include tree to equal the configured path set. Missing and unexpected
+files therefore fail the same exact comparison; neither the driver nor the
+documentation maintains a second public-header count, and an unallowlisted
+source-tree file cannot silently widen the package surface.
+
 The smoke inspects every installed `Photospider*Targets*.cmake` file because
 the package separates base, OpenCV-dependent, and embedded-product targets
 into distinct export sets. Its dependency classifier recognizes only the exact
@@ -849,16 +859,28 @@ the public ABI.
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, while OpenCV, YAML, graph
 CLI, and operation-plugin defaults remain enabled. The provider-aware broad
 suite gate is therefore off. The driver validates the exact CMake cache
-profile, builds the provider-independent focused provider binary, its
-stdlib-only fixture, and the dedicated disk-cache diagnostic concurrency binary,
-then queries the machine-readable CTest inventory. That inventory must contain
-exactly `DependencyDisabledInstallSmoke`,
-`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, and the three
-`DiskCacheDiagnosticConcurrency.*` cases; every concurrency case must retain
-only the `kernel-concurrency` label and its 20-second timeout. No broad
-provider-dependent test may remain registered. The driver runs the optional
-provider case and all three concurrency cases through CTest. The disabled
-profile requires dependency-neutral
+profile, builds the provider-independent focused provider binary and its
+stdlib-only fixture, plus the dedicated disk-cache diagnostic and kernel-
+lifecycle concurrency binaries, then queries the machine-readable CTest
+inventory.
+
+During configuration, CMake serializes every active `gtest_discover_tests`
+target and its configuration-specific `$<TARGET_FILE:...>` path after
+cross-checking the GoogleTest registration metadata. After the focused build,
+the driver derives the exact unlabelled `${target}_NOT_BUILT` set from registered
+targets whose executable is not a regular file. This observes the real build
+closure, including indirect dependencies, without hard-coding a target count or
+future target name and without deriving expectations from CTest's observed
+sentinels. The exact CTest inventory is the union of that derived set and
+`DependencyDisabledInstallSmoke`,
+`OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, the three
+`DiskCacheDiagnosticConcurrency.*` cases, and the two
+`KernelLifecycleConcurrency.*` cases. Derived sentinels must carry no label or
+timeout; disk-cache cases retain only the `kernel-concurrency` label and their
+20-second timeout, while lifecycle cases retain that label and their 60-second
+timeout. Missing or extra entries fail, so no provider-dependent broad test may
+remain registered. The driver runs the optional-provider and all concurrency
+cases through CTest. The disabled profile requires dependency-neutral
 analyzer/math operations to remain seeded, OpenCV-backed operation keys to be
 absent, and the replacement provider to publish, execute, and fully retire its
 resize key. The transient build is a long-lived product configuration check;

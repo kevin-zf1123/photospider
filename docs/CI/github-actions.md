@@ -101,6 +101,17 @@ ordinary full-CTest safety regression for the OpenCV nested-build driver: its
 Python unittest exercises cleanup guards and cache-layout helpers in-process,
 but does not start a child configure, build, install, or compile target.
 
+Two nested-profile inventories remain exact without workflow-maintained counts.
+The static-product producer exports its configured CMake public-header install
+allowlist, and the consumer requires the installed include tree to equal those
+relative paths. The provider-disabled producer exports its active
+`gtest_discover_tests` targets with configuration-specific executable paths;
+after the focused build, the driver requires exactly the registered targets
+without executable files to appear as unlabelled `*_NOT_BUILT` placeholders.
+Both checks reject missing and extra entries, so a new allowlisted header or
+registered GoogleTest target changes the expectation through its authoritative
+CMake declaration rather than a Python number or future-name special case.
+
 `build-integrity-default` builds the complete default profile once and uploads
 `ci-build-default`. The regular test jobs reuse that artifact:
 
