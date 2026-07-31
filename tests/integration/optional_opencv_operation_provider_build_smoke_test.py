@@ -55,6 +55,11 @@ DEPENDENCY_DISABLED_CTEST_NAME = "DependencyDisabledInstallSmoke"
 VALUE_RUNTIME_CTEST_NAME = (
     "ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide"
 )
+#: @brief Stable registered-only executor placeholder required by the profile.
+#: @note The production executor still compiles through the nested product.
+COMPUTE_IO_EXECUTOR_NOT_BUILT_CTEST_NAME = (
+    "test_compute_io_executor_NOT_BUILT"
+)
 #: @brief Stable Value-backed dense-image cases required without the provider.
 #: @note The names independently mirror the dedicated integration target.
 CPU_DENSE_IMAGE_CTEST_NAMES = (
@@ -272,18 +277,20 @@ def ctest_json_test(
 def provider_disabled_ctest_payload() -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
-    @return JSON payload containing two profile entries, 46 dense-image cases,
-      one Value-runtime case, three disk cases, and two production lifecycle
-      cases.
+    @return JSON payload containing two profile entries, one registered-only
+      executor sentinel, 46 dense-image cases, one Value-runtime case, three
+      disk cases, and two production lifecycle cases.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
-      60-second timeout. Both groups use the exact `kernel-concurrency` label.
+      60-second timeout. Both groups use the exact `kernel-concurrency` label;
+      the registered-only executor sentinel has no label or timeout.
     """
 
     names = {
         DEPENDENCY_DISABLED_CTEST_NAME,
         OPTIONAL_PROVIDER_CTEST_NAME,
         VALUE_RUNTIME_CTEST_NAME,
+        COMPUTE_IO_EXECUTOR_NOT_BUILT_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
         *KERNEL_LIFECYCLE_CTEST_NAMES,
         *CPU_DENSE_IMAGE_CTEST_NAMES,
@@ -976,12 +983,15 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         """@brief Pin the provider-disabled nested build target closure.
 
         @return None after the target tuple contains the sole focused
-          internal-test-product consumer and no full-suite-only target.
+          internal-test-product consumer, leaves the executor behavior target
+          registered-only, and contains no full-suite-only target.
         @throws AssertionError If the long-lived dependency-disabled profile
-          silently loses its kernel contract build or widens into the full
-          suite.
+          silently loses its kernel contract build, rebuilds the executor
+          behavior target, or widens into the full suite.
         @note The CMake configure remains authoritative for the direct-link
-          closure; this test protects the Python smoke's exercised surface.
+          closure; the nested product still compiles the executor
+          implementation while this test protects the Python smoke's exercised
+          surface.
         """
 
         self.assertEqual(
@@ -997,6 +1007,10 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         )
         self.assertNotIn(
             "test_compute_service_split",
+            subject.PROVIDER_DISABLED_BUILD_TARGETS,
+        )
+        self.assertNotIn(
+            "test_compute_io_executor",
             subject.PROVIDER_DISABLED_BUILD_TARGETS,
         )
 
@@ -1029,17 +1043,18 @@ class ProviderDisabledProfileTest(unittest.TestCase):
     def test_accepts_exact_focused_ctest_inventory(self) -> None:
         """@brief Parse and accept the supported provider-off CTest surface.
 
-        @return None after parsing preserves 54 names and focused-test
+        @return None after parsing preserves 55 names and focused-test
           properties.
         @throws AssertionError If parsing or validation rejects the contract.
         @note Exact labels exclude the build-smoke label from disk and
-          Value-runtime test cases.
+          Value-runtime test cases; the executor sentinel remains unlabelled.
         """
 
         expected = {
             DEPENDENCY_DISABLED_CTEST_NAME,
             OPTIONAL_PROVIDER_CTEST_NAME,
             VALUE_RUNTIME_CTEST_NAME,
+            COMPUTE_IO_EXECUTOR_NOT_BUILT_CTEST_NAME,
             *DISK_CACHE_CTEST_NAMES,
             *KERNEL_LIFECYCLE_CTEST_NAMES,
             *CPU_DENSE_IMAGE_CTEST_NAMES,

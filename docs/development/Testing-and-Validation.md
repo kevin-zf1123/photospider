@@ -1213,18 +1213,25 @@ dedicated disk-cache and kernel-lifecycle concurrency binaries, plus the
 provider-independent `test_kernel_contracts` internal-seam consumer, then
 queries the machine-readable CTest inventory. `test_kernel_contracts` is built
 to exercise the focused-only direct-consumer closure but is deliberately not
-discovered in this nested inventory. That inventory must contain exactly 54
-entries: `DependencyDisabledInstallSmoke`,
+discovered in this nested inventory. The CMake-registered
+`test_compute_io_executor` behavior target remains outside this nested build
+target closure; its production implementation is still compiled through the
+product closure, so CTest reports the exact registered-only
+`test_compute_io_executor_NOT_BUILT` placeholder. That inventory must contain
+exactly 55 entries: `DependencyDisabledInstallSmoke`,
 `OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`, all 46
 `CpuDenseTensorImageOperation.*` cases,
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`, the three
 `DiskCacheDiagnosticConcurrency.*` cases, and the two
-`KernelLifecycleConcurrency.*` cases. Disk-cache cases retain only the
+`KernelLifecycleConcurrency.*` cases, plus the executor placeholder.
+Disk-cache cases retain only the
 `kernel-concurrency` label and a 20-second timeout; lifecycle cases retain that
 label and a 60-second timeout; dense-image and Value-runtime cases retain their
-30-second timeout, with the latter carrying only the `value-runtime` label. No
-broad provider-dependent test may remain registered. The driver runs every
-focused case through CTest. The disabled profile requires dependency-neutral
+30-second timeout, with the latter carrying only the `value-runtime` label.
+The executor placeholder remains unlabelled and has no timeout; no other
+unbuilt placeholder or broad provider-dependent test may remain registered.
+The driver runs every built focused case through CTest. The disabled profile
+requires dependency-neutral
 analyzer/math/dense-invert operations to remain seeded, OpenCV-backed operation
 keys to be absent, and the replacement provider to publish, execute, and fully
 retire its resize key. The transient build is a long-lived product

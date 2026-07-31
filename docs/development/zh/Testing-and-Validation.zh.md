@@ -966,17 +966,21 @@ provider-independent focused binary 与 stdlib-only fixture，并额外构建 CP
 DenseTensor/ImageView integration binary、专用 disk-cache concurrency binary、
 kernel-lifecycle concurrency binary，以及 provider-independent `test_kernel_contracts`
 internal-seam consumer，再查询机器可读的 CTest inventory。`test_kernel_contracts` 的构建用于
-覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。该
-inventory 必须精确包含 54 项：`DependencyDisabledInstallSmoke`、
+覆盖 focused-only direct-consumer closure，但不会在该嵌套 inventory 中被 discover。
+CMake 注册的 `test_compute_io_executor` 行为测试 target 仍位于该嵌套 build target closure
+之外；其生产实现仍通过 product closure 被编译，因此 CTest 会报告精确的 registered-only
+占位项 `test_compute_io_executor_NOT_BUILT`。该 inventory 必须精确包含 55 项：
+`DependencyDisabledInstallSmoke`、
 `OptionalOpenCvOperationProvider.ReplacementExecutesAndRestores`、全部 46 个
 `CpuDenseTensorImageOperation.*` case、
 `ValueIdentityAcrossDsos.MintingAuthorityIsProcessWide`、三个
 `DiskCacheDiagnosticConcurrency.*` case 与
-两个 `KernelLifecycleConcurrency.*` case。Disk-cache case 必须只保留
+两个 `KernelLifecycleConcurrency.*` case，以及该 executor 占位项。Disk-cache case 必须只保留
 `kernel-concurrency` label 与 20 秒 timeout；lifecycle case 保留同一 label 与 60 秒
 timeout；dense-image 与 Value-runtime case 保留 30 秒 timeout，后者只携带
-`value-runtime` label。不得残留任何依赖 provider 的 broad test。Driver 随后通过 CTest
-运行全部 focused case。禁用 profile 要求 dependency-neutral
+`value-runtime` label。Executor 占位项不携带 label 或 timeout；不得残留任何其他 unbuilt
+占位项或依赖 provider 的 broad test。Driver 随后通过 CTest 运行全部已构建 focused case。
+禁用 profile 要求 dependency-neutral
 analyzer/math/dense-invert operation 仍被 seed、OpenCV-backed operation key 不存在，并要求
 replacement provider 能发布、执行且完整退役其 resize key。该临时 build 是长期 product
 configuration 检查；它把命令与结果写入 CTest，不保留逐次运行报告。当前阶段禁用的是

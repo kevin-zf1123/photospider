@@ -24,6 +24,13 @@ PROVIDER_DISABLED_BUILD_TARGETS = (
     "test_kernel_contracts",
 )
 
+#: @brief Exact registered-but-unbuilt CTest placeholders in this profile.
+#: @note The executor implementation is compiled through the product closure,
+#:   while its dedicated behavior target remains outside this nested build.
+PROVIDER_DISABLED_REGISTERED_SENTINELS = (
+    "test_compute_io_executor_NOT_BUILT",
+)
+
 
 def run(command: list[str], cwd: pathlib.Path) -> None:
     """@brief Run one required nested-build command with inherited output.
@@ -202,16 +209,20 @@ def query_ctest_inventory(
 def validate_provider_disabled_inventory(
     inventory: dict[str, dict[str, object]],
 ) -> None:
-    """@brief Require the runnable provider-disabled CTest surface.
+    """@brief Require the exact provider-disabled CTest surface.
 
     @param inventory Unique registered tests and properties from the nested
       build.
-    @return None when only the intended focused tests and install smoke exist.
+    @return None when only the intended focused tests, install smoke, and
+      registered-only sentinel exist.
     @throws RuntimeError If a focused test is missing, a broad-suite test
       remains registered, or a required concurrency property drifts.
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
+    @note `test_compute_io_executor` remains registered by the focused CMake
+      profile but is deliberately not rebuilt here; CTest therefore exposes
+      its one exact `_NOT_BUILT` placeholder.
     """
 
     disk_cache_tests = {
@@ -433,6 +444,7 @@ def validate_provider_disabled_inventory(
             "OptionalOpenCvOperationProvider."
             "ReplacementExecutesAndRestores"
         ),
+        *PROVIDER_DISABLED_REGISTERED_SENTINELS,
     }
     expected |= (
         disk_cache_tests
