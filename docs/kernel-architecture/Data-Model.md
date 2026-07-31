@@ -412,13 +412,19 @@ V-12 verifies this installed model across the dimensions most likely to expose
 image-only assumptions. The dependency-neutral matrix covers 1/3/4/8/16
 channels and FP32/FP64 for padded image-faceted Values, rank-one through
 rank-five FP32/FP64 latent Values, exact ImageRect/TensorSlice merge, and
-bounded negative- and zero-stride immutable views. Explicit CPU and injected
-external-device transfers preserve the complete positive producer envelope,
-descriptor, facet, layout, and logical revision while minting a distinct
-allocation and exposing Pending-to-Ready binding facts. An admitted
-`ComputeIoExecutor` task retains and observes the same immutable Value facts
-and bytes under explicit task/byte budgets; that observation creates no cache,
-artifact, or persistence identity.
+bounded negative- and zero-stride immutable views. The rank-one fixture has a
+sole stride wider than its element, an exact padded storage span, and an
+independent byte oracle for active elements and padding sentinels. CPU-copy and
+injected external-device preparation share the builder's positive,
+zero-offset, exact-envelope, non-overlap validation authority. Negative or
+zero strides therefore fail before an external owner, destination identities,
+or a Pending fence can escape, while the general immutable publisher retains
+its signed-view role. Supported transfers preserve the complete positive
+producer envelope, descriptor, facet, layout, and logical revision while
+minting a distinct allocation and exposing Pending-to-Ready binding facts. An
+admitted `ComputeIoExecutor` task retains and observes the same immutable Value
+facts and bytes under explicit task/byte budgets; that observation creates no
+cache, artifact, or persistence identity.
 
 `DataSpec`, quantization, general Map/Import providers, provider ABI v3, and
 general named immutable Value outputs remain later no-shim slices. V-12 does

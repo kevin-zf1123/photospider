@@ -1083,7 +1083,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         @return None after validation reports the injected property drift.
         @throws AssertionError If the exact provider-disabled contract accepts
           the sentinel with a CTest label.
-        @note The mutation starts from the complete valid 56-entry inventory
+        @note The mutation starts from the complete valid 57-entry inventory
           and changes only the sentinel's `LABELS` property.
         """
 
@@ -1105,7 +1105,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         @return None after validation reports the injected property drift.
         @throws AssertionError If the exact provider-disabled contract accepts
           the sentinel with a CTest timeout.
-        @note The mutation starts from the complete valid 56-entry inventory
+        @note The mutation starts from the complete valid 57-entry inventory
           and changes only the sentinel's `TIMEOUT` property.
         """
 

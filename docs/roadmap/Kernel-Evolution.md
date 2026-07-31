@@ -762,8 +762,15 @@ TensorSlice; selected/unselected ImageRect/TensorSlice merge; complete positive
 producer-envelope preservation across explicit CPU and injected external-device
 transfer; exact binding, allocation, revision, and Pending-to-Ready facts; and
 immutable negative/zero-stride reads plus explicit transfer rejection. An
-admitted compute-I/O task retains and observes the same Value metadata and
-bytes under bounded budgets, but creates no artifact or persistence identity.
+independent direct-offset byte oracle proves that the rank-one sole stride is
+wider than the element, its required storage span is padded, its active bytes
+remain exact, and its padding sentinel is untouched. CPU-copy and external
+preparation reuse one core positive, zero-offset, exact-envelope, non-overlap
+authority; external rejection precedes destination-owner retention, identity
+minting, fence creation, provider invocation, and Pending publication without
+narrowing the general signed immutable publisher. An admitted compute-I/O task
+retains and observes the same Value metadata and bytes under bounded budgets,
+but creates no artifact or persistence identity.
 
 V-12 still has no DataSpec, public device registry, device queue/in-flight
 dimensions, quantization, packed element, provider ABI v3, or general named

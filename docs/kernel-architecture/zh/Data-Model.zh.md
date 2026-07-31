@@ -337,11 +337,15 @@ device `Value` 的 type-erased external owner 会把唯一 memory lease 与 nati
 V-12 针对最容易暴露 image-only 假设的维度验证这套已安装模型。dependency-neutral 矩阵覆盖
 带 padding image-faceted Value 的 1/3/4/8/16 通道与 FP32/FP64、rank-one 至 rank-five
 FP32/FP64 latent Value、精确 ImageRect/TensorSlice merge，以及有界 negative/zero-stride
-不可变 view。显式 CPU 与注入式 external-device transfer 会保留完整正向 producer
-envelope、descriptor、facet、layout 与逻辑 revision，同时生成不同 allocation 并暴露
-Pending-to-Ready binding 事实。已准入的 `ComputeIoExecutor` task 会在显式 task/byte budget
-下保留并观察同一个不可变 Value 的事实与字节；该观察不会创建 cache、artifact 或
-persistence identity。
+不可变 view。Rank-one fixture 的唯一 stride 大于 element width，并具有精确 padded storage
+span；独立 byte oracle 会验证 active element 与 padding sentinel。CPU-copy 与注入式
+external-device preparation 会复用 builder 的正向、零 offset、精确 envelope、non-overlap
+校验权威。因此 negative 或 zero stride 会在 external owner、destination identity 或 Pending
+fence 逸出前失败，而通用 immutable publisher 仍保留 signed-view 职责。受支持 transfer 会
+保留完整正向 producer envelope、descriptor、facet、layout 与逻辑 revision，同时生成不同
+allocation 并暴露 Pending-to-Ready binding 事实。已准入的 `ComputeIoExecutor` task 会在
+显式 task/byte budget 下保留并观察同一个不可变 Value 的事实与字节；该观察不会创建
+cache、artifact 或 persistence identity。
 
 `DataSpec`、quantization、通用 Map/Import provider、provider ABI v3 与通用命名 immutable
 Value output 仍属于后续 no-shim slice。V-12 不新增 public resource declaration、通用 heap

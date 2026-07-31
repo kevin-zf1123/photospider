@@ -157,8 +157,12 @@ submission/entry counter、context 安装或 provider 入口之前以稳定的 `
 
 V-8 新增显式 device/binding observation、AccessPlan classification、保留 revision 的 CPU/Metal
 transfer 与精确 residency，同时不会把隐式 payload work 插入 `Value` accessor。Metal provider
-会发布 pending source-private Value，并在 command commit 后立即返回。`TaskSubmissionPlan`
-会先递增 completion，再注册 fence wait；生产 ReadyFence executor 会保留精确 Run、lease、
+会发布 pending source-private Value，并在 command commit 后立即返回。
+CPU-copy 与注入式 external-device transfer preparation 会复用同一个 core 正向、零 offset、
+精确 envelope、non-overlap producer validator。External path 会在保留 owner、生成 destination
+identity、创建 ReadyFence、调用 provider 或发布 Pending destination 前完成该检查。这条
+preparation boundary 不会收紧通用 native publisher 对 checked signed immutable alias 的支持。
+`TaskSubmissionPlan` 会先递增 completion，再注册 fence wait；生产 ReadyFence executor 会保留精确 Run、lease、
 task 与 ready-store route，把早到 callback 停放到原始 QueueEntry 与 grant 退役之后，并在所有
 continuation owner 退役前阻止 terminal settlement。成功 continuation 会先物化 CPU
 compatibility snapshot，再释放 dependant；Failed、ProducerCancelled、stale 或 mismatched
@@ -626,7 +630,8 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 [ADR 0007](../../adr/zh/0007-compute-runs-and-process-execution-have-separate-owners.zh.md)、
 [ADR 0009](../../adr/zh/0009-compute-io-durability-and-completion-semantics.zh.md)与精确的
 [进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了已接受方向和详细所有权
-契约。本文是截至 issue #88 的权威说明：所有 HP/RT ready work 都进入一个 Host-owned 有界 store；
+契约。本文是当前已实现计算边界的权威说明，其中包括 Issue #89 的 V-12 验证范围：所有 HP/RT
+ready work 都进入一个 Host-owned 有界 store；
 Host 选择 service class 与可信 frontier；built-in 或纯 C policy 对不可变 candidate 排序；
 reserved-start transaction 在封闭私有 route 启动执行前提交资源以及精确 implementation/key gate。
 每次 `GPU_METAL` start 随后都会进入匹配的固定、进程自有 registry executor，并在 provider

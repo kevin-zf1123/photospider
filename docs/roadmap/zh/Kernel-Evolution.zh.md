@@ -606,9 +606,14 @@ V-12 增加的是验证，而不是新的 representation 或 provider ABI。它�
 ImageBuffer bridge；rank-one 至 rank-five FP32/FP64 latent Value 穿过完整 rank TensorSlice；
 ImageRect/TensorSlice merge 保留选中/未选中的 element；显式 CPU 与注入式 external-device
 transfer 保留完整正向 producer envelope；binding、allocation、revision 与 Pending-to-Ready
-事实保持精确；negative/zero-stride 不可变 view 可读，并且 transfer 会显式拒绝它们。已准入
-compute-I/O task 会在有界 budget 下保留并观察相同的 Value metadata 与字节，但不会创建
-artifact 或 persistence identity。
+事实保持精确；negative/zero-stride 不可变 view 可读，并且 transfer 会显式拒绝它们。独立
+direct-offset byte oracle 会证明 rank-one 的唯一 stride
+大于 element，其 required storage span 真实带有 padding、active byte 保持精确且 padding
+sentinel 未被改写。CPU-copy 与 external preparation 会复用同一个 core 正向、零 offset、精确
+envelope、non-overlap 权威；external rejection 发生在保留 destination owner、生成 identity、
+创建 fence、调用 provider 与发布 Pending destination 之前，同时不会收紧通用 signed immutable
+publisher。已准入 compute-I/O task 会在有界 budget 下保留并观察相同的 Value metadata 与字节，
+但不会创建 artifact 或 persistence identity。
 
 V-12 仍不含 DataSpec、public device registry、device queue/in-flight dimension、
 quantization、packed element、provider ABI v3 或通用 named graph Value output。Native

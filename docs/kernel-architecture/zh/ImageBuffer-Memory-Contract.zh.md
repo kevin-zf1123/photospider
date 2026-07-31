@@ -295,7 +295,12 @@ ImageRect/TensorSlice merge、显式 CPU 与注入式 external-device transfer�
 compute-I/O retention。CPU/device transfer 会在不同 binding 中保留完整正向 producer envelope
 与精确逻辑 revision；Region merge 保留逻辑上选中/未选中的 element，同时可以发布新的
 contiguous allocation。signed/zero layout 保持为不可变 view 事实，并在作为 transfer producer
-layout 时被显式拒绝。
+layout 时被显式拒绝。Rank-one fixture 的唯一 stride 大于 element width；独立 direct-offset
+byte oracle 会证明精确 storage span、active value 与未被修改的 padding sentinel。CPU-copy 与
+external-device preparation 会复用同一个 core 正向、零 offset、精确 envelope、non-overlap
+validator。External rejection 发生在保留 destination owner、生成
+allocation/revision/producer 事实、创建 fence、调用 provider 或发布 Pending destination 之前；
+通用 native publisher 不会被收紧，仍可发布经过检查的 signed immutable alias。
 
 V-12 仍不实现 quantization、通用 Map/Import provider、provider ABI v3、public device
 registry、device queue/in-flight accounting 或通用命名 graph Value output。Issue #87 的

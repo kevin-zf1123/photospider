@@ -362,6 +362,14 @@ complete positive producer envelope and exact logical revision in a distinct
 binding; Region merge preserves logical selected/unselected elements while it
 may publish a fresh contiguous allocation. Signed/zero layouts remain
 immutable view facts and are rejected explicitly as transfer producer layouts.
+The rank-one fixtures use a sole stride wider than the element width, and an
+independent direct-offset byte oracle proves the exact storage span, active
+values, and untouched padding sentinels. CPU-copy and external-device
+preparation reuse one core positive, zero-offset, exact-envelope, non-overlap
+validator. External rejection occurs before retaining the destination owner,
+minting allocation/revision/producer facts, creating a fence, invoking the
+provider, or publishing a Pending destination; the general native publisher is
+not narrowed and may still publish checked signed immutable aliases.
 
 V-12 still does not implement quantization, general Map/Import providers,
 provider ABI v3, a public device registry, device queue/in-flight accounting,

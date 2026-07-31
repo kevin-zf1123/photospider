@@ -190,6 +190,12 @@ V-8 adds explicit device/binding observations and AccessPlan classification,
 revision-preserving CPU/Metal transfer, and exact residency without inserting
 implicit payload work into `Value` accessors. A Metal provider publishes a
 pending source-private Value and returns immediately after command commit.
+CPU-copy and injected external-device transfer preparation reuse one core
+positive, zero-offset, exact-envelope, non-overlap producer validator. The
+external path completes that check before retaining its owner, minting
+destination identities, creating a ReadyFence, invoking its provider, or
+publishing a Pending destination. This preparation boundary does not narrow
+the general native publisher's checked signed immutable aliases.
 `TaskSubmissionPlan` increments completion before registering the fence wait;
 the production ReadyFence executor retains the exact Run, lease, task, and
 ready-store route, parks an early callback until the original QueueEntry and
@@ -815,7 +821,8 @@ four independent correctness points:
 and the exact
 [process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
 record the accepted direction and detailed ownership contract. This document
-is authoritative through issue #88: all HP/RT ready work enters one Host-owned
+is authoritative for the currently implemented compute boundary, including
+Issue #89's V-12 verification scope: all HP/RT ready work enters one Host-owned
 bounded store, the Host chooses a service class and trusted frontier, a built-in
 or pure-C policy ranks immutable candidates, and a reserved-start transaction
 commits resources plus exact implementation/key gates before a closed private
