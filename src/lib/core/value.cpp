@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -7,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "core/pending_value.hpp"
@@ -15,6 +17,9 @@
 
 namespace ps {
 namespace {
+
+/** @brief One and only one physical layout retained by a Value publication. */
+using ValueLayout = std::variant<StridedLayout, BlockedLayout>;
 
 /**
  * @brief Owns process-wide allocation, revision, and producer sequences.
@@ -174,14 +179,12 @@ std::size_t stride_magnitude(std::ptrdiff_t stride) {
  *
  * @param descriptor Logical descriptor to validate.
  * @param facet Optional explicit image-axis mapping.
- * @return Validated element byte width.
- * @throws std::invalid_argument for empty/zero shape, unsupported elements, or
- * malformed image axes.
- * @note Layout and allocation ranges are validated separately.
+ * @throws std::invalid_argument for empty/zero shape or malformed image axes.
+ * @note Element encoding, quantization, layout, and allocation ranges are
+ * validated separately.
  */
-std::size_t validate_descriptor_and_facet(
-    const DenseTensorDescriptor& descriptor,
-    const std::optional<ImageFacet>& facet) {
+void validate_shape_and_facet(const DenseTensorDescriptor& descriptor,
+                              const std::optional<ImageFacet>& facet) {
   if (descriptor.shape.empty()) {
     throw std::invalid_argument("DenseTensor rank must be positive.");
   }
@@ -191,9 +194,8 @@ std::size_t validate_descriptor_and_facet(
     }
   }
 
-  const std::size_t element_bytes = dense_tensor_element_bytes(descriptor);
   if (!facet.has_value()) {
-    return element_bytes;
+    return;
   }
   if (facet->x_axis >= descriptor.shape.size() ||
       facet->y_axis >= descriptor.shape.size()) {
@@ -209,7 +211,26 @@ std::size_t validate_descriptor_and_facet(
     throw std::invalid_argument(
         "ImageFacet channel axis must be distinct and in rank.");
   }
-  return element_bytes;
+}
+
+/**
+ * @brief Validates one currently supported whole-byte Strided descriptor.
+ * @param descriptor Logical descriptor to validate.
+ * @param facet Optional explicit image-axis mapping.
+ * @return Positive whole-byte element width.
+ * @throws std::invalid_argument for malformed shape/facet, quantization on a
+ * Strided V-13 value, or unsupported whole-byte encoding.
+ * @note Packed FP4 uses the separate Blocked descriptor authority.
+ */
+std::size_t validate_descriptor_and_facet(
+    const DenseTensorDescriptor& descriptor,
+    const std::optional<ImageFacet>& facet) {
+  validate_shape_and_facet(descriptor, facet);
+  if (descriptor.quantization.has_value()) {
+    throw std::invalid_argument(
+        "Strided DenseTensor does not support quantization in V-13.");
+  }
+  return dense_tensor_element_bytes(descriptor);
 }
 
 /**
@@ -357,6 +378,172 @@ void validate_producer_envelope(const DenseTensorDescriptor& descriptor,
 }
 
 /**
+ * @brief Derived exact block-grid facts for one validated FP4 descriptor.
+ * @note Values are logical metadata only and carry no allocation identity.
+ */
+struct BlockedDescriptorFacts {
+  /** @brief Number of quantization blocks along each tensor axis. */
+  std::vector<std::size_t> block_grid_shape;
+  /** @brief Number of logical FP4 elements inside one complete block. */
+  std::size_t block_element_count = 0U;
+  /** @brief Number of active packed bits inside one complete block. */
+  std::size_t block_bits = 0U;
+};
+
+/**
+ * @brief Validates the bounded V-13 FP4 block-scale descriptor.
+ *
+ * @param descriptor Candidate logical descriptor and quantization schema.
+ * @return Derived grid, element-count, and block-bit facts.
+ * @throws std::invalid_argument for unsupported encoding, absent/malformed
+ * quantization, non-divisible extents, or invalid scales.
+ * @throws std::overflow_error when block/grid products cannot be represented.
+ * @throws std::bad_alloc when derived rank storage cannot allocate.
+ * @note ImageFacet validation is unnecessary because blocked publication
+ * deliberately supplies no image facet.
+ */
+BlockedDescriptorFacts validate_blocked_descriptor(
+    const DenseTensorDescriptor& descriptor) {
+  validate_shape_and_facet(descriptor, std::nullopt);
+  if (descriptor.element_semantics != ElementSemantics::FloatingPoint ||
+      descriptor.storage_encoding.kind != StorageEncodingKind::Fp4E2M1 ||
+      dense_tensor_element_bits(descriptor) != 4U) {
+    throw std::invalid_argument(
+        "Blocked DenseTensor requires floating-point FP4 E2M1 encoding.");
+  }
+  if (!descriptor.quantization.has_value()) {
+    throw std::invalid_argument(
+        "Blocked FP4 DenseTensor requires block-scale quantization.");
+  }
+  const QuantizationSchema& quantization = *descriptor.quantization;
+  if (quantization.block_shape.size() != descriptor.shape.size()) {
+    throw std::invalid_argument(
+        "Quantization block shape rank must match DenseTensor rank.");
+  }
+
+  BlockedDescriptorFacts facts;
+  facts.block_grid_shape.reserve(descriptor.shape.size());
+  facts.block_element_count = 1U;
+  std::size_t scale_count = 1U;
+  for (std::size_t axis = 0U; axis < descriptor.shape.size(); ++axis) {
+    const std::size_t block_extent = quantization.block_shape[axis];
+    if (block_extent == 0U || descriptor.shape[axis] % block_extent != 0U) {
+      throw std::invalid_argument(
+          "DenseTensor extents must be divisible by positive quantization "
+          "block extents.");
+    }
+    const std::size_t grid_extent = descriptor.shape[axis] / block_extent;
+    facts.block_grid_shape.push_back(grid_extent);
+    facts.block_element_count =
+        checked_multiply(facts.block_element_count, block_extent);
+    scale_count = checked_multiply(scale_count, grid_extent);
+  }
+  if (quantization.scales.size() != scale_count) {
+    throw std::invalid_argument(
+        "Quantization scale count must match the logical block grid.");
+  }
+  for (const float scale : quantization.scales) {
+    if (!std::isfinite(scale) || scale <= 0.0F) {
+      throw std::invalid_argument(
+          "Quantization scales must all be finite and positive.");
+    }
+  }
+  facts.block_bits = checked_multiply(facts.block_element_count, 4U);
+  return facts;
+}
+
+/**
+ * @brief Validates one Blocked layout and computes its exact byte envelope.
+ *
+ * @param descriptor Valid candidate FP4 descriptor.
+ * @param layout Candidate versioned Blocked layout.
+ * @return Required byte count through the final active block bit.
+ * @throws std::invalid_argument for invalid version, rank, shape, bit order,
+ * alignment, strides, or overlapping block ranges.
+ * @throws std::overflow_error when bit-span or byte-envelope arithmetic
+ * overflows.
+ * @throws std::bad_alloc when rank-bounded proof storage cannot allocate.
+ * @note The returned envelope includes unused leading/trailing nibble bits.
+ */
+std::size_t blocked_required_storage_size(
+    const DenseTensorDescriptor& descriptor, const BlockedLayout& layout) {
+  const BlockedDescriptorFacts facts = validate_blocked_descriptor(descriptor);
+  if (layout.version != 1U) {
+    throw std::invalid_argument(
+        "Blocked DenseTensor layout version must be 1.");
+  }
+  if (layout.block_shape != descriptor.quantization->block_shape ||
+      layout.block_bit_strides.size() != descriptor.shape.size()) {
+    throw std::invalid_argument(
+        "Blocked layout rank and block shape must match quantization.");
+  }
+  switch (layout.bit_order) {
+    case PackedBitOrder::LeastSignificantFirst:
+    case PackedBitOrder::MostSignificantFirst:
+      break;
+    default:
+      throw std::invalid_argument("Blocked layout bit order is invalid.");
+  }
+  if (layout.bit_offset % 4U != 0U) {
+    throw std::invalid_argument(
+        "Blocked FP4 layout bit offset must be nibble-aligned.");
+  }
+
+  std::vector<std::pair<std::size_t, std::size_t>> active_axes;
+  active_axes.reserve(descriptor.shape.size());
+  std::size_t maximum_block_start = layout.bit_offset;
+  for (std::size_t axis = 0U; axis < descriptor.shape.size(); ++axis) {
+    const std::size_t bit_stride = layout.block_bit_strides[axis];
+    if (bit_stride == 0U || bit_stride % 4U != 0U) {
+      throw std::invalid_argument(
+          "Blocked FP4 bit strides must be positive and nibble-aligned.");
+    }
+    const std::size_t grid_extent = facts.block_grid_shape[axis];
+    maximum_block_start = checked_add(
+        maximum_block_start, checked_multiply(grid_extent - 1U, bit_stride));
+    if (grid_extent > 1U) {
+      active_axes.emplace_back(bit_stride, grid_extent);
+    }
+  }
+  std::sort(active_axes.begin(), active_axes.end(),
+            [](const auto& left, const auto& right) {
+              return left.first < right.first;
+            });
+  std::size_t covered_span = facts.block_bits;
+  for (const auto& [bit_stride, grid_extent] : active_axes) {
+    if (bit_stride < covered_span) {
+      throw std::invalid_argument(
+          "Blocked producer layout has overlapping block bit ranges.");
+    }
+    covered_span = checked_add(covered_span,
+                               checked_multiply(grid_extent - 1U, bit_stride));
+  }
+
+  const std::size_t exclusive_bit_end =
+      checked_add(maximum_block_start, facts.block_bits);
+  return checked_add(exclusive_bit_end, 7U) / 8U;
+}
+
+/**
+ * @brief Validates an exact writable Blocked allocation envelope.
+ * @param descriptor Candidate packed descriptor.
+ * @param layout Candidate packed layout.
+ * @param storage_size Proposed exact byte allocation length.
+ * @throws std::invalid_argument when layout validation fails or size differs.
+ * @throws std::overflow_error or std::bad_alloc from checked layout proof.
+ * @note Validation performs no allocation publication or identity minting.
+ */
+void validate_blocked_producer_envelope(const DenseTensorDescriptor& descriptor,
+                                        const BlockedLayout& layout,
+                                        std::size_t storage_size) {
+  if (storage_size == 0U ||
+      storage_size != blocked_required_storage_size(descriptor, layout)) {
+    throw std::invalid_argument(
+        "Blocked DenseTensor storage must equal its exact byte envelope.");
+  }
+}
+
+/**
  * @brief Reports whether one axis is explicitly assigned by an image facet.
  *
  * @param facet Valid explicit image-axis mapping.
@@ -423,6 +610,13 @@ void validate_dense_tensor_producer_envelope(
     std::size_t storage_size) {
   validate_producer_envelope(
       descriptor, layout, dense_tensor_element_bytes(descriptor), storage_size);
+}
+
+/** @copydoc ps::validate_dense_tensor_producer_envelope */
+void validate_dense_tensor_producer_envelope(
+    const DenseTensorDescriptor& descriptor, const BlockedLayout& layout,
+    std::size_t storage_size) {
+  validate_blocked_producer_envelope(descriptor, layout, storage_size);
 }
 
 /**
@@ -743,8 +937,8 @@ struct Value::Impl final {
   /** @brief Optional validated explicit image-axis mapping. */
   std::optional<ImageFacet> image_facet;
 
-  /** @brief Validated signed physical layout and logical-origin offset. */
-  StridedLayout layout;
+  /** @brief Exactly one validated Strided or Blocked physical layout. */
+  ValueLayout layout;
 
   /** @brief Immutable checked explicit storage-binding range. */
   BufferHandle buffer;
@@ -763,7 +957,7 @@ struct Value::Impl final {
    *
    * @param descriptor_in Logical descriptor to retain.
    * @param image_facet_in Optional image facet to retain.
-   * @param layout_in Signed checked layout to retain.
+   * @param layout_in Tagged checked layout to retain.
    * @param buffer_in Sealed checked allocation range to retain.
    * @param ready_fence_in Valid producer-completion observer.
    * @param revision_in Fresh nonzero publication revision.
@@ -776,7 +970,7 @@ struct Value::Impl final {
    *       source-private pending producer.
    */
   Impl(DenseTensorDescriptor descriptor_in,
-       std::optional<ImageFacet> image_facet_in, StridedLayout layout_in,
+       std::optional<ImageFacet> image_facet_in, ValueLayout layout_in,
        BufferHandle buffer_in, ReadyFence ready_fence_in,
        ValueRevisionId revision_in, ProducerIdentity producer_in)
       : descriptor(std::move(descriptor_in)),
@@ -800,8 +994,8 @@ struct ValueBuilder::Impl final {
   /** @brief Optional validated explicit image facet. */
   std::optional<ImageFacet> image_facet;
 
-  /** @brief Validated positive exact producer layout. */
-  StridedLayout layout;
+  /** @brief Validated exact Strided or Blocked producer layout. */
+  ValueLayout layout;
 
   /** @brief Private complete allocation handle. */
   BufferHandle buffer;
@@ -817,13 +1011,13 @@ struct ValueBuilder::Impl final {
    *
    * @param descriptor_in Logical descriptor to own.
    * @param image_facet_in Optional image facet to own.
-   * @param layout_in Positive exact producer layout to own.
+   * @param layout_in Tagged exact producer layout to own.
    * @param buffer_in Private complete allocation handle.
    * @param authority_in Fresh producer authority.
    * @throws Nothing under member move contracts.
    */
   Impl(DenseTensorDescriptor descriptor_in,
-       std::optional<ImageFacet> image_facet_in, StridedLayout layout_in,
+       std::optional<ImageFacet> image_facet_in, ValueLayout layout_in,
        BufferHandle buffer_in,
        std::shared_ptr<WriteLease::Authority> authority_in) noexcept
       : descriptor(std::move(descriptor_in)),
@@ -860,26 +1054,45 @@ struct PendingValueProducer::Impl final {
       : buffer(std::move(buffer_in)), completer(std::move(completer_in)) {}
 };
 
-/** @copydoc ps::dense_tensor_element_bytes */
-std::size_t dense_tensor_element_bytes(
-    const DenseTensorDescriptor& descriptor) {
+/** @copydoc ps::dense_tensor_element_bits */
+std::size_t dense_tensor_element_bits(const DenseTensorDescriptor& descriptor) {
   switch (descriptor.element_semantics) {
     case ElementSemantics::UnsignedInteger:
     case ElementSemantics::SignedInteger:
-      if (descriptor.storage_encoding.bit_width == 8U ||
-          descriptor.storage_encoding.bit_width == 16U) {
-        return descriptor.storage_encoding.bit_width / 8U;
+      if (descriptor.storage_encoding.kind ==
+              StorageEncodingKind::NativeScalar &&
+          (descriptor.storage_encoding.bit_width == 8U ||
+           descriptor.storage_encoding.bit_width == 16U)) {
+        return descriptor.storage_encoding.bit_width;
       }
       break;
     case ElementSemantics::FloatingPoint:
-      if (descriptor.storage_encoding.bit_width == 32U ||
-          descriptor.storage_encoding.bit_width == 64U) {
-        return descriptor.storage_encoding.bit_width / 8U;
+      if (descriptor.storage_encoding.kind ==
+              StorageEncodingKind::NativeScalar &&
+          (descriptor.storage_encoding.bit_width == 32U ||
+           descriptor.storage_encoding.bit_width == 64U)) {
+        return descriptor.storage_encoding.bit_width;
+      }
+      if (descriptor.storage_encoding.kind == StorageEncodingKind::Fp4E2M1 &&
+          descriptor.storage_encoding.bit_width == 4U) {
+        return 4U;
       }
       break;
   }
   throw std::invalid_argument(
       "DenseTensor element semantics and encoding are unsupported.");
+}
+
+/** @copydoc ps::dense_tensor_element_bytes */
+std::size_t dense_tensor_element_bytes(
+    const DenseTensorDescriptor& descriptor) {
+  const std::size_t element_bits = dense_tensor_element_bits(descriptor);
+  if (descriptor.storage_encoding.kind != StorageEncodingKind::NativeScalar ||
+      element_bits % 8U != 0U) {
+    throw std::invalid_argument(
+        "DenseTensor element encoding is not whole-byte addressable.");
+  }
+  return element_bits / 8U;
 }
 
 /** @copydoc ValueBuilder::ValueBuilder */
@@ -910,6 +1123,22 @@ ValueBuilder ValueBuilder::allocate_cpu_dense_tensor(
   return ValueBuilder(std::make_unique<Impl>(
       std::move(isolated_descriptor), isolated_image_facet,
       std::move(isolated_layout), std::move(buffer), std::move(authority)));
+}
+
+/** @copydoc ValueBuilder::allocate_cpu_blocked_dense_tensor */
+ValueBuilder ValueBuilder::allocate_cpu_blocked_dense_tensor(
+    DenseTensorDescriptor descriptor, BlockedLayout layout,
+    std::size_t storage_size) {
+  validate_dense_tensor_producer_envelope(descriptor, layout, storage_size);
+
+  DenseTensorDescriptor isolated_descriptor = descriptor;
+  BlockedLayout isolated_layout = layout;
+  BufferHandle buffer = BufferHandle::allocate_for_builder(storage_size);
+  auto authority = std::make_shared<WriteLease::Authority>();
+  return ValueBuilder(
+      std::make_unique<Impl>(std::move(isolated_descriptor), std::nullopt,
+                             ValueLayout(std::move(isolated_layout)),
+                             std::move(buffer), std::move(authority)));
 }
 
 /** @copydoc ValueBuilder::acquire_write */
@@ -1093,6 +1322,47 @@ PendingValuePublication PendingValuePublisher::allocate_cpu_dense_tensor(
           PendingValueProducer(std::move(producer))};
 }
 
+/** @copydoc PendingValuePublisher::allocate_cpu_blocked_dense_tensor */
+PendingValuePublication
+PendingValuePublisher::allocate_cpu_blocked_dense_tensor(
+    DenseTensorDescriptor descriptor, BlockedLayout layout,
+    std::size_t storage_size, std::optional<ValueRevisionId> replica_revision) {
+  if (replica_revision.has_value() && !replica_revision->valid()) {
+    throw std::invalid_argument(
+        "Pending blocked CPU Value replica revision must be valid.");
+  }
+  ValueBuilder builder = ValueBuilder::allocate_cpu_blocked_dense_tensor(
+      std::move(descriptor), std::move(layout), storage_size);
+  if (!builder.impl_ || builder.impl_->sealed ||
+      !builder.impl_->authority->builder_open.load(std::memory_order_acquire)) {
+    throw std::logic_error(
+        "Pending blocked Value publication requires an open builder.");
+  }
+  if (builder.impl_->authority->lease_active.load(std::memory_order_acquire)) {
+    throw std::logic_error(
+        "Pending blocked Value cannot retain an ordinary WriteLease.");
+  }
+
+  PendingReadyFence pending_fence = make_pending_ready_fence();
+  const ValueRevisionId revision =
+      replica_revision.has_value()
+          ? *replica_revision
+          : ValueRevisionId(process_identity_authority().mint_value_revision());
+  const ProducerIdentity producer_identity(
+      process_identity_authority().mint_producer_identity());
+  auto published = std::make_shared<const Value::Impl>(
+      builder.impl_->descriptor, std::nullopt, builder.impl_->layout,
+      builder.impl_->buffer, pending_fence.fence, revision, producer_identity);
+  auto producer = std::make_unique<PendingValueProducer::Impl>(
+      builder.impl_->buffer, std::move(pending_fence.completer));
+
+  builder.impl_->authority->builder_open.store(false,
+                                               std::memory_order_release);
+  builder.impl_->sealed = true;
+  return {Value(std::move(published)),
+          PendingValueProducer(std::move(producer))};
+}
+
 /** @copydoc PendingDeviceValueProducer::operator= */
 PendingDeviceValueProducer& PendingDeviceValueProducer::operator=(
     PendingDeviceValueProducer&& other) noexcept {
@@ -1168,6 +1438,36 @@ PendingDeviceValuePublication PendingDeviceValuePublisher::publish_dense_tensor(
           PendingDeviceValueProducer(std::move(pending_fence.completer))};
 }
 
+/** @copydoc PendingDeviceValuePublisher::publish_blocked_dense_tensor */
+PendingDeviceValuePublication
+PendingDeviceValuePublisher::publish_blocked_dense_tensor(
+    DenseTensorDescriptor descriptor, BlockedLayout layout,
+    std::shared_ptr<void> owner, void* native_handle, std::byte* host_pointer,
+    std::size_t storage_size, DeviceId device, MemoryDomain memory_domain,
+    std::optional<ValueRevisionId> replica_revision) {
+  validate_dense_tensor_producer_envelope(descriptor, layout, storage_size);
+  if (replica_revision.has_value() && !replica_revision->valid()) {
+    throw std::invalid_argument(
+        "Pending blocked device Value replica revision must be valid.");
+  }
+
+  BufferHandle buffer = BufferHandle::retain_external_binding(
+      std::move(owner), native_handle, host_pointer, storage_size, device,
+      memory_domain);
+  PendingReadyFence pending_fence = make_pending_ready_fence();
+  const ValueRevisionId revision =
+      replica_revision.has_value()
+          ? *replica_revision
+          : ValueRevisionId(process_identity_authority().mint_value_revision());
+  const ProducerIdentity producer(
+      process_identity_authority().mint_producer_identity());
+  auto published = std::make_shared<const Value::Impl>(
+      std::move(descriptor), std::nullopt, ValueLayout(std::move(layout)),
+      std::move(buffer), pending_fence.fence, revision, producer);
+  return {Value(std::move(published)),
+          PendingDeviceValueProducer(std::move(pending_fence.completer))};
+}
+
 /** @copydoc Value::Value */
 Value::Value(std::shared_ptr<const Impl> impl) noexcept
     : impl_(std::move(impl)) {}
@@ -1217,6 +1517,46 @@ Value Value::from_cpu_dense_tensor(DenseTensorDescriptor descriptor,
       ReadyFence::already_ready(), revision, producer));
 }
 
+/** @copydoc Value::from_cpu_blocked_dense_tensor */
+Value Value::from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
+                                           BlockedLayout layout,
+                                           std::vector<std::byte> storage) {
+  ValueBuilder builder = ValueBuilder::allocate_cpu_blocked_dense_tensor(
+      std::move(descriptor), std::move(layout), storage.size());
+  {
+    WriteLease lease = builder.acquire_write();
+    std::memcpy(lease.data(), storage.data(), storage.size());
+  }
+  return builder.seal();
+}
+
+/** @copydoc Value::from_cpu_blocked_dense_tensor */
+Value Value::from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
+                                           BlockedLayout layout,
+                                           BufferHandle buffer) {
+  if (!buffer.valid()) {
+    throw std::invalid_argument(
+        "Blocked DenseTensor Value requires a valid BufferHandle.");
+  }
+  const std::size_t required_size =
+      blocked_required_storage_size(descriptor, layout);
+  if (required_size > buffer.size()) {
+    throw std::out_of_range(
+        "Blocked DenseTensor layout exceeds its BufferHandle.");
+  }
+
+  const ValueRevisionId revision(
+      process_identity_authority().mint_value_revision());
+  const ProducerIdentity producer(
+      process_identity_authority().mint_producer_identity());
+  DenseTensorDescriptor isolated_descriptor = descriptor;
+  BlockedLayout isolated_layout = layout;
+  return Value(std::make_shared<const Impl>(
+      std::move(isolated_descriptor), std::nullopt,
+      ValueLayout(std::move(isolated_layout)), std::move(buffer),
+      ReadyFence::already_ready(), revision, producer));
+}
+
 /** @copydoc Value::valid */
 bool Value::valid() const noexcept {
   return impl_ != nullptr;
@@ -1238,12 +1578,38 @@ const std::optional<ImageFacet>& Value::image_facet() const {
   return impl_->image_facet;
 }
 
+/** @copydoc Value::storage_layout_kind */
+StorageLayoutKind Value::storage_layout_kind() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no storage layout kind.");
+  }
+  return std::holds_alternative<StridedLayout>(impl_->layout)
+             ? StorageLayoutKind::Strided
+             : StorageLayoutKind::Blocked;
+}
+
 /** @copydoc Value::strided_layout */
 const StridedLayout& Value::strided_layout() const {
   if (!impl_) {
     throw std::logic_error("Invalid Value has no StridedLayout.");
   }
-  return impl_->layout;
+  const auto* layout = std::get_if<StridedLayout>(&impl_->layout);
+  if (layout == nullptr) {
+    throw std::logic_error("Blocked Value has no StridedLayout.");
+  }
+  return *layout;
+}
+
+/** @copydoc Value::blocked_layout */
+const BlockedLayout& Value::blocked_layout() const {
+  if (!impl_) {
+    throw std::logic_error("Invalid Value has no BlockedLayout.");
+  }
+  const auto* layout = std::get_if<BlockedLayout>(&impl_->layout);
+  if (layout == nullptr) {
+    throw std::logic_error("Strided Value has no BlockedLayout.");
+  }
+  return *layout;
 }
 
 /** @copydoc Value::storage_size */
@@ -1361,6 +1727,10 @@ DenseTensorView::DenseTensorView(Value value) : value_(std::move(value)) {
   if (!value_.valid()) {
     throw std::invalid_argument(
         "DenseTensorView requires a valid DenseTensor Value.");
+  }
+  if (value_.storage_layout_kind() != StorageLayoutKind::Strided) {
+    throw std::invalid_argument(
+        "DenseTensorView requires a byte-addressed Strided Value.");
   }
   read_lease_ = value_.buffer_handle().acquire_read();
 }

@@ -26,6 +26,23 @@ namespace ps::value_image_adapter {
 Value snapshot_cpu_image_value(const ImageBuffer& buffer);
 
 /**
+ * @brief Validates that one Value can enter the current ImageBuffer boundary.
+ *
+ * @param value Candidate Ready host-readable image Value.
+ * @throws std::invalid_argument for invalid, packed, quantized, latent, or
+ * otherwise unsupported image facts.
+ * @throws ReadyFenceAccessError when producer completion is not Ready.
+ * @throws BufferAccessError when the retained binding is not host-readable.
+ * @throws std::bad_alloc when retaining view state cannot allocate.
+ * @note Success establishes Strided layout, absent quantization, explicit
+ * ImageFacet, supported whole-byte element encoding, singleton unassigned
+ * axes, and direct host visibility. Validation reads no payload byte, allocates
+ * no ImageBuffer, performs no conversion, and invokes no codec or filesystem
+ * mechanism.
+ */
+void validate_image_buffer_compatible_value(const Value& value);
+
+/**
  * @brief Copies one sealed image Value into a current CPU ImageBuffer snapshot.
  *
  * @param value Valid DenseTensor Value with an explicit ImageFacet.

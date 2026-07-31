@@ -190,6 +190,28 @@ class PendingValuePublisher final {
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
       StridedLayout layout, std::size_t storage_size,
       std::optional<ValueRevisionId> replica_revision = std::nullopt);
+
+  /**
+   * @brief Allocates and seals one pending V-13 Blocked CPU DenseTensor.
+   *
+   * @param descriptor Valid FP4 descriptor and block-scale quantization.
+   * @param layout Valid exact Blocked producer layout.
+   * @param storage_size Exact complete byte envelope.
+   * @param replica_revision Optional logical revision preserved by transfer;
+   *        absence mints a new revision.
+   * @return Pending Value and its unique private byte-envelope producer.
+   * @throws std::invalid_argument for malformed packed facts or an invalid
+   *         optional replica revision.
+   * @throws std::overflow_error for checked address or identity exhaustion.
+   * @throws std::bad_alloc when allocation or publication state cannot
+   *         allocate.
+   * @note Validation and ordinary builder-authority retirement match the
+   *       synchronous blocked builder. No ImageFacet or conversion is created.
+   */
+  static PendingValuePublication allocate_cpu_blocked_dense_tensor(
+      DenseTensorDescriptor descriptor, BlockedLayout layout,
+      std::size_t storage_size,
+      std::optional<ValueRevisionId> replica_revision = std::nullopt);
 };
 
 /**
@@ -332,6 +354,31 @@ class PendingDeviceValuePublisher final {
       StridedLayout layout, std::shared_ptr<void> owner, void* native_handle,
       std::byte* host_pointer, std::size_t storage_size, DeviceId device,
       MemoryDomain memory_domain,
+      std::optional<ValueRevisionId> replica_revision = std::nullopt);
+
+  /**
+   * @brief Publishes a validated pending FP4 Blocked external binding.
+   *
+   * @param descriptor Valid packed descriptor and quantization schema.
+   * @param layout Exact version-1 Blocked layout.
+   * @param owner Non-null owner retaining the complete native allocation.
+   * @param native_handle Non-null opaque native allocation handle.
+   * @param host_pointer Optional host-visible allocation start.
+   * @param storage_size Positive exact byte envelope.
+   * @param device Concrete process-local destination device.
+   * @param memory_domain Explicit destination allocation domain.
+   * @param replica_revision Optional source logical revision to preserve.
+   * @return Pending Value plus unique terminal capability.
+   * @throws std::invalid_argument for malformed descriptor, layout, binding,
+   *         or replica revision.
+   * @throws std::overflow_error for checked envelope or identity arithmetic.
+   * @throws std::bad_alloc when control or immutable state cannot allocate.
+   * @note Publication performs no payload access, conversion, or native work.
+   */
+  static PendingDeviceValuePublication publish_blocked_dense_tensor(
+      DenseTensorDescriptor descriptor, BlockedLayout layout,
+      std::shared_ptr<void> owner, void* native_handle, std::byte* host_pointer,
+      std::size_t storage_size, DeviceId device, MemoryDomain memory_domain,
       std::optional<ValueRevisionId> replica_revision = std::nullopt);
 };
 

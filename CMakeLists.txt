@@ -149,6 +149,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     core/inspection_types.hpp
     core/result_types.hpp
     data/image_view.hpp
+    data/packed_dense_tensor_view.hpp
     data/region.hpp
     data/value.hpp
     host/compute_request.hpp
@@ -156,6 +157,7 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     host/graph_session.hpp
     host/host.hpp
     memory/access_plan.hpp
+    memory/blocked_layout.hpp
     memory/buffer_handle.hpp
     memory/ready_fence.hpp
     memory/strided_layout.hpp
@@ -176,7 +178,7 @@ if(PHOTOSPIDER_ENABLE_OPENCV)
     list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
         plugin/opencv_adapter.hpp)
 endif()
-set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 24)
+set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 26)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
@@ -249,6 +251,7 @@ add_library(photospider_operation_runtime SHARED
     src/lib/core/ready_fence.cpp
     src/lib/core/region.cpp
     src/lib/core/value.cpp
+    src/lib/core/packed_dense_tensor.cpp
     src/lib/execution/device_execution_context.cpp)
 add_library(Photospider::operation_runtime ALIAS
     photospider_operation_runtime)
@@ -1418,6 +1421,26 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_cpu_dense_tensor_image_operation
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+
+    # Long-lived V-13 dependency-neutral packed FP4/quantization vertical.
+    add_executable(test_packed_fp4_dense_tensor
+        tests/integration/test_packed_fp4_dense_tensor.cpp)
+    set_target_properties(test_packed_fp4_dense_tensor PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+    target_include_directories(test_packed_fp4_dense_tensor PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/tests")
+    target_link_libraries(test_packed_fp4_dense_tensor PRIVATE
+        photospider
+        GTest::gtest
+        GTest::gtest_main)
+    gtest_discover_tests(test_packed_fp4_dense_tensor
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES
+            LABELS value-runtime
+            TIMEOUT 30)
 
     add_executable(test_value_identity_across_dsos
         tests/integration/test_value_identity_dso.cpp)

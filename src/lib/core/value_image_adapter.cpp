@@ -276,6 +276,23 @@ RegionSet full_dense_tensor_region(const DenseTensorDescriptor& descriptor) {
 
 }  // namespace
 
+/** @copydoc validate_image_buffer_compatible_value */
+void validate_image_buffer_compatible_value(const Value& value) {
+  if (!value.valid()) {
+    throw std::invalid_argument(
+        "ImageBuffer adaptation requires a valid Value.");
+  }
+  const DenseTensorDescriptor& descriptor = value.dense_tensor_descriptor();
+  if (value.storage_layout_kind() != StorageLayoutKind::Strided ||
+      descriptor.quantization.has_value() || !value.image_facet().has_value()) {
+    throw std::invalid_argument(
+        "ImageBuffer adaptation requires an unquantized image-faceted "
+        "Strided Value.");
+  }
+  const ImageView view(value);
+  (void)image_type_from_dense_element(view.descriptor());
+}
+
 /** @copydoc snapshot_cpu_image_value */
 Value snapshot_cpu_image_value(const ImageBuffer& buffer) {
   validate_image_buffer(buffer);
@@ -330,6 +347,7 @@ Value snapshot_cpu_image_value(const ImageBuffer& buffer) {
 
 /** @copydoc snapshot_cpu_image_buffer */
 ImageBuffer snapshot_cpu_image_buffer(const Value& value) {
+  validate_image_buffer_compatible_value(value);
   ImageView view(value);
   const DataType type = image_type_from_dense_element(view.descriptor());
   ImageBuffer output = make_aligned_cpu_image_buffer(

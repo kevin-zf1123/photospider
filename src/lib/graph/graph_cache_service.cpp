@@ -3,6 +3,7 @@
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING)
 #include <atomic>
 #endif
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -67,6 +68,50 @@ const NodeOutput* hp_cache_ptr(const Node& node) {
     return &*node.cached_output_high_precision;
   }
   return nullptr;
+}
+
+/**
+ * @brief Reports whether a node configures one executable image cache entry.
+ *
+ * @param node Node whose cache destinations are inspected without mutation.
+ * @return True when at least one image entry has a nonempty location.
+ * @throws Nothing for current string and vector read operations.
+ * @note Unsupported or empty cache entries retain their historical no-op
+ *       behavior and do not trigger Value/ImageBuffer compatibility checks.
+ */
+bool has_image_disk_cache_entry(const Node& node) {
+  return std::any_of(
+      node.caches.begin(), node.caches.end(), [](const CacheEntry& entry) {
+        return entry.cache_type == "image" && !entry.location.empty();
+      });
+}
+
+/**
+ * @brief Fails closed when a formal Value cannot enter image disk persistence.
+ *
+ * @param output Formal HP output inspected without payload copying.
+ * @throws GraphError with `InvalidParameter` for packed, quantized, latent,
+ * non-host-readable, pending, or otherwise unsupported Value facts.
+ * @throws std::bad_alloc when validation state or diagnostic allocation fails.
+ * @note This helper performs no planned-byte admission, filesystem operation,
+ * codec call, ImageBuffer allocation, payload read, or persistent identity
+ * creation. Metadata-only outputs with no formal Value remain supported.
+ */
+void validate_image_disk_cache_output(const NodeOutput& output) {
+  if (!output.image_value.valid()) {
+    return;
+  }
+  try {
+    value_image_adapter::validate_image_buffer_compatible_value(
+        output.image_value);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& error) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        std::string("Image disk cache cannot persist formal Value: ") +
+            error.what());
+  }
 }
 
 /**
@@ -224,6 +269,10 @@ std::optional<std::uint64_t> cache_save_planned_bytes(
       node.caches.empty() || hp_cache_ptr(node) == nullptr) {
     return std::nullopt;
   }
+  if (!has_image_disk_cache_entry(node)) {
+    return std::nullopt;
+  }
+  validate_image_disk_cache_output(*hp_cache_ptr(node));
 
   constexpr std::uint64_t kTaskAndPathOverhead = 1024U;
   constexpr std::uint64_t kEntryOverhead = 256U;
@@ -571,7 +620,6 @@ bool finalize_disk_cache_load(
  * @param metadata_codec Named-value codec retained by GraphCacheService.
  * @param timing_graph Optional graph-state-only timing sink; null on the
  * independent I/O worker.
- * @return Nothing after a policy no-op or processing every supported entry.
  * @throws Codec, filesystem, Graph, Value, or allocation exceptions unchanged.
  * @note A null timing sink guarantees that provider work mutates no Graph
  * state. Partial HP output removes older artifacts exactly as the synchronous
@@ -589,6 +637,10 @@ void save_cache_mechanism(const GraphModel& graph, const Node& node,
   if (graph.cache_root.empty() || node.caches.empty() || output == nullptr) {
     return;
   }
+  if (!has_image_disk_cache_entry(node)) {
+    return;
+  }
+  validate_image_disk_cache_output(*output);
   const bool complete_output = has_complete_hp_cache(node);
 
   for (const CacheEntry& cache_entry : node.caches) {

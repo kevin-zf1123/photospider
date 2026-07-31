@@ -157,14 +157,14 @@ class ValueTransferTask final {
   ~ValueTransferTask() noexcept;
 
   /**
-   * @brief Prepares one explicit positive-layout CPU envelope copy.
+   * @brief Prepares one explicit exact-producer-layout CPU envelope copy.
    *
    * @param source Valid CPU DenseTensor Value retained by the task.
    * @return Move-only task with a distinct revision-preserving Pending
    * destination.
    * @throws std::invalid_argument when source is invalid, not a host-visible
-   * CPU binding, or its current layout cannot be used as a positive exact
-   * producer layout.
+   * CPU binding, or its current Strided/Blocked layout cannot be used as an
+   * exact non-overlapping producer layout.
    * @throws std::overflow_error for address or identity overflow.
    * @throws std::bad_alloc when destination or task state cannot allocate.
    * @note Preparation performs no source payload access and enqueues no work.
@@ -182,14 +182,17 @@ class ValueTransferTask final {
    * @param operation Nonempty provider invoked only after source Ready.
    * @return Move-only task with a distinct revision-preserving destination.
    * @throws std::invalid_argument when source/binding/provider is invalid,
-   * requested host access lacks a host pointer, the source is not a positive
-   * zero-offset exact non-overlapping producer layout, or access planning does
-   * not select Transfer.
+   * requested host access lacks a host pointer, the source is not an exact
+   * supported Strided/Blocked non-overlapping producer layout, or access
+   * planning does not select Transfer.
    * @throws std::overflow_error for envelope or identity exhaustion.
    * @throws std::bad_alloc when destination/task ownership cannot allocate.
-   * @note Producer-layout validation completes before retaining `owner`,
+   * @note Producer-layout validation completes before retaining `owner` in
+   * published destination state,
    * minting destination identities, creating a fence, or publishing a Pending
-   * destination. The destination envelope equals source.storage_size().
+   * destination. The destination envelope equals source.storage_size(), and
+   * descriptor, quantization, layout, packing offset, and logical revision are
+   * preserved without conversion.
    * Preparation performs no payload read and submits no native work.
    */
   static ValueTransferTask prepare_external_transfer(

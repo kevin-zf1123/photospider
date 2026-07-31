@@ -294,7 +294,8 @@ def write_consumer(source: Path) -> None:
     @throws OSError If source files cannot be written.
     @note The executable verifies neutral allocation, installed V-6 readiness,
       the extended operation metadata layout, empty-session lifecycle, and
-      explicit persistence failure without any parser or image-library API.
+      packed V-13 Value access, and explicit persistence failure without any
+      parser or image-library API.
     """
 
     source.mkdir(parents=True)
@@ -331,6 +332,7 @@ def write_consumer(source: Path) -> None:
                 "#include <photospider/core/image_buffer.hpp>",
                 "#include <photospider/core/result_types.hpp>",
                 "#include <photospider/data/image_view.hpp>",
+                "#include <photospider/data/packed_dense_tensor_view.hpp>",
                 "#include <photospider/data/region.hpp>",
                 "#include <photospider/data/value.hpp>",
                 "#include <photospider/host/host.hpp>",
@@ -415,6 +417,23 @@ def write_consumer(source: Path) -> None:
                 "      std::to_integer<unsigned int>(",
                 "          *view.channel_data(2U, 1U, 0U)) != 6U) {",
                 "    return 16;",
+                "  }",
+                "",
+                "  ps::DenseTensorDescriptor packed_descriptor{",
+                "      {1U, 4U}, ps::ElementSemantics::FloatingPoint,",
+                "      ps::StorageEncoding{4U, ps::StorageEncodingKind::Fp4E2M1},",
+                "      ps::QuantizationSchema{{1U, 4U}, {2.0F}}};",
+                "  ps::BlockedLayout packed_layout{",
+                "      1U, {1U, 4U}, {16U, 16U}, 4U,",
+                "      ps::PackedBitOrder::LeastSignificantFirst};",
+                "  const ps::Value packed = ps::Value::from_cpu_blocked_dense_tensor(",
+                "      std::move(packed_descriptor), std::move(packed_layout),",
+                "      {std::byte{0x10}, std::byte{0x32}, std::byte{0x04}});",
+                "  const ps::PackedDenseTensorView packed_view(packed);",
+                "  if (packed.storage_layout_kind() != ps::StorageLayoutKind::Blocked ||",
+                "      packed_view.encoded_element({0U, 3U}) != 4U ||",
+                "      packed_view.dequantized_element({0U, 3U}) != 4.0F) {",
+                "    return 19;",
                 "  }",
                 "",
                 "  auto host = ps::create_embedded_host();",
@@ -538,6 +557,7 @@ def main() -> int:
                     "photospider_kernel",
                     "photospider",
                     "test_cpu_dense_tensor_image_operation",
+                    "test_packed_fp4_dense_tensor",
                     "test_value_identity_across_dsos",
                     "--config",
                     args.config,
@@ -550,10 +570,14 @@ def main() -> int:
         dense_test_executable = configured_test_executable(
             build, args.config, "test_cpu_dense_tensor_image_operation"
         )
+        packed_test_executable = configured_test_executable(
+            build, args.config, "test_packed_fp4_dense_tensor"
+        )
         identity_test_executable = configured_test_executable(
             build, args.config, "test_value_identity_across_dsos"
         )
         run([str(dense_test_executable)], repo)
+        run([str(packed_test_executable)], repo)
         run([str(identity_test_executable)], repo)
 
         child_architecture_arguments = (

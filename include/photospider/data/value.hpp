@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "photospider/memory/access_plan.hpp"
+#include "photospider/memory/blocked_layout.hpp"
 #include "photospider/memory/buffer_handle.hpp"
 #include "photospider/memory/ready_fence.hpp"
 #include "photospider/memory/strided_layout.hpp"
@@ -26,8 +27,8 @@ class PendingDeviceValuePublisher;
  * @brief Identifies the logical interpretation of one tensor element.
  *
  * @throws Nothing.
- * @note Element semantics are independent from physical bit width. V-2 does
- *       not yet model quantization, packing, byte order, or vector lanes.
+ * @note Element semantics are independent from physical encoding,
+ *       quantization, packing, byte order, and vector lanes.
  */
 enum class ElementSemantics : std::uint32_t {
   /** @brief Unsigned integer element. */
@@ -39,27 +40,93 @@ enum class ElementSemantics : std::uint32_t {
 };
 
 /**
- * @brief Describes the byte-addressed storage width of one tensor element.
+ * @brief Identifies one concrete physical scalar encoding family.
  *
  * @throws Nothing for ordinary value operations.
- * @note V-2 accepts unsigned/signed 8- or 16-bit integers and 32- or 64-bit
- *       floating-point values. Packed sub-byte encodings remain unsupported.
+ * @note The encoding kind is independent from logical element semantics and
+ *       quantization. V-13 adds one explicit packed FP4 format without
+ *       changing existing whole-byte scalar encodings.
+ */
+enum class StorageEncodingKind : std::uint32_t {
+  /** @brief Existing whole-byte scalar selected with ElementSemantics. */
+  NativeScalar = 0U,
+  /** @brief Four-bit E2M1 floating-point code with a separate sign bit. */
+  Fp4E2M1 = 1U,
+};
+
+/**
+ * @brief Describes the physical encoding of one tensor element.
+ *
+ * @throws Nothing for ordinary value operations.
+ * @note Existing aggregate initialization such as `StorageEncoding{32U}`
+ *       selects NativeScalar. Packing and quantization remain separate facts.
  */
 struct StorageEncoding {
   /** @brief Number of physical bits occupied by one logical element. */
   std::uint32_t bit_width = 0U;
 
+  /** @brief Concrete numeric code carried by those physical bits. */
+  StorageEncodingKind kind = StorageEncodingKind::NativeScalar;
+
   /**
    * @brief Compares the complete physical encoding.
    *
    * @param other Encoding to compare.
-   * @return True when bit widths match.
+   * @return True when bit widths and encoding kinds match.
    * @throws Nothing.
    * @note Logical element semantics are stored by DenseTensorDescriptor.
    */
   bool operator==(const StorageEncoding& other) const noexcept {
-    return bit_width == other.bit_width;
+    return bit_width == other.bit_width && kind == other.kind;
   }
+};
+
+/**
+ * @brief Describes symmetric scale quantization over logical tensor blocks.
+ *
+ * Every block uses one immutable finite positive scale and an implicit exact
+ * zero origin. Blocks are enumerated in row-major order over the grid formed
+ * by `descriptor.shape / block_shape`.
+ *
+ * @throws std::bad_alloc when copying block or scale storage allocates and
+ * fails.
+ * @note V-13 supports this bounded scale-only schema. Integer zero points,
+ *       partial edge blocks, and other quantization formulae require explicit
+ *       later contracts rather than reinterpretation of these fields.
+ */
+struct QuantizationSchema {
+  /** @brief Positive logical element extents covered by one scale. */
+  std::vector<std::size_t> block_shape;
+
+  /** @brief One finite positive multiplier per row-major logical block. */
+  std::vector<float> scales;
+
+  /**
+   * @brief Compares the complete immutable quantization interpretation.
+   *
+   * @param other Schema to compare.
+   * @return True when block shapes and every exact float value match.
+   * @throws Nothing under standard vector equality.
+   * @note Exact equality is appropriate for immutable runtime metadata; this
+   *       is not a canonical persistent digest or approximate numeric test.
+   */
+  bool operator==(const QuantizationSchema& other) const noexcept {
+    return block_shape == other.block_shape && scales == other.scales;
+  }
+};
+
+/**
+ * @brief Identifies the physical layout family retained by one Value.
+ *
+ * @throws Nothing for ordinary value operations.
+ * @note V-13 publishes exactly one Strided or Blocked layout. Provider-defined
+ *       layouts remain a later contract.
+ */
+enum class StorageLayoutKind : std::uint32_t {
+  /** @brief Signed whole-byte stride layout. */
+  Strided = 0U,
+  /** @brief Versioned bit-addressed block layout. */
+  Blocked = 1U,
 };
 
 /**
@@ -76,21 +143,26 @@ struct DenseTensorDescriptor {
   /** @brief Logical interpretation of each stored element. */
   ElementSemantics element_semantics = ElementSemantics::UnsignedInteger;
 
-  /** @brief Physical byte-addressed encoding of each stored element. */
+  /** @brief Physical native-scalar or packed encoding of each stored element.
+   */
   StorageEncoding storage_encoding;
+
+  /** @brief Optional logical block quantization interpretation. */
+  std::optional<QuantizationSchema> quantization = std::nullopt;
 
   /**
    * @brief Compares all logical DenseTensor facts.
    *
    * @param other Descriptor to compare.
-   * @return True when shape, semantics, and encoding all match.
+   * @return True when shape, semantics, encoding, and quantization all match.
    * @throws Nothing under vector equality for size_t elements.
    * @note Physical strides and bytes are intentionally excluded.
    */
   bool operator==(const DenseTensorDescriptor& other) const noexcept {
     return shape == other.shape &&
            element_semantics == other.element_semantics &&
-           storage_encoding == other.storage_encoding;
+           storage_encoding == other.storage_encoding &&
+           quantization == other.quantization;
   }
 };
 
@@ -129,12 +201,24 @@ struct ImageFacet {
  * @brief Returns the validated byte width of one DenseTensor element.
  *
  * @param descriptor Descriptor whose semantics and encoding are inspected.
- * @return One, two, four, or eight bytes for a supported V-2 element.
- * @throws std::invalid_argument for an unknown semantic category or an
- *         unsupported semantic/bit-width combination.
- * @note Shape, facet, strides, and storage are not inspected.
+ * @return One, two, four, or eight bytes for a supported native scalar.
+ * @throws std::invalid_argument for an unknown semantic category, unsupported
+ *         semantic/encoding/bit-width combination, or packed encoding.
+ * @note Shape, quantization, facet, layout, and storage are not inspected.
  */
 std::size_t dense_tensor_element_bytes(const DenseTensorDescriptor& descriptor);
+
+/**
+ * @brief Returns the validated physical bit width of one DenseTensor element.
+ *
+ * @param descriptor Descriptor whose semantics and encoding are inspected.
+ * @return Four, eight, sixteen, thirty-two, or sixty-four physical bits for a
+ *         supported native or V-13 FP4 element.
+ * @throws std::invalid_argument for an unknown semantic category or unsupported
+ *         semantic/encoding/bit-width combination.
+ * @note Shape, quantization, facet, layout, and storage are not inspected.
+ */
+std::size_t dense_tensor_element_bits(const DenseTensorDescriptor& descriptor);
 
 /**
  * @brief Opaque process-local identity of one immutable Value publication.
@@ -289,10 +373,11 @@ class Value;
 /**
  * @brief Exclusive producer for one future immutable CPU DenseTensor Value.
  *
- * ValueBuilder validates a positive-stride exact producer envelope and proves
- * that all logical element byte ranges are non-overlapping before allocation.
- * It issues at most one active move-only WriteLease and closes all producer
- * authority at seal. No BufferHandle escapes before seal.
+ * ValueBuilder validates either a positive-stride byte-addressed envelope or
+ * the V-13 version-1 bit-addressed Blocked envelope and proves that writable
+ * element/block ranges are non-overlapping before allocation. It issues at
+ * most one active move-only WriteLease and closes all producer authority at
+ * seal. No BufferHandle escapes before seal.
  *
  * @throws Nothing for move construction, move assignment, and destruction.
  * @note The builder is externally serialized. It provides raw allocation-byte
@@ -359,6 +444,32 @@ class ValueBuilder final {
   static ValueBuilder allocate_cpu_dense_tensor(
       DenseTensorDescriptor descriptor, std::optional<ImageFacet> image_facet,
       StridedLayout layout, std::size_t storage_size);
+
+  /**
+   * @brief Allocates one exact writable CPU FP4 Blocked DenseTensor producer.
+   *
+   * Validation checks the V-13 floating-point E2M1 descriptor and independent
+   * block-scale schema, forbids ImageFacet adaptation, requires a version-1
+   * nibble-aligned layout with matching block shape, and proves exact bounded
+   * non-overlapping complete block ranges before allocation.
+   *
+   * @param descriptor Logical packed descriptor copied into private state.
+   * @param layout Physical Blocked layout copied into private state.
+   * @param storage_size Exact positive allocation byte length, including any
+   *        unused leading or trailing nibble.
+   * @return Move-only exclusive builder ready to issue one WriteLease over the
+   *         complete byte envelope.
+   * @throws std::invalid_argument for malformed descriptor, quantization,
+   *         layout, alignment, overlap, or storage-size mismatch.
+   * @throws std::overflow_error when block, bit, byte, or identity arithmetic
+   *         overflows.
+   * @throws std::bad_alloc when validation state or CPU storage cannot
+   * allocate.
+   * @note No ImageBuffer or byte-addressed element view is implied.
+   */
+  static ValueBuilder allocate_cpu_blocked_dense_tensor(
+      DenseTensorDescriptor descriptor, BlockedLayout layout,
+      std::size_t storage_size);
 
   /**
    * @brief Acquires the builder's sole active exclusive write lease.
@@ -489,6 +600,45 @@ class Value final {
                                      StridedLayout layout, BufferHandle buffer);
 
   /**
+   * @brief Publishes one exclusively owned immutable CPU FP4 Blocked tensor.
+   *
+   * @param descriptor Valid V-13 FP4 descriptor with block-scale quantization.
+   * @param layout Valid version-1 bit-addressed Blocked layout.
+   * @param storage Exclusively owned complete byte envelope.
+   * @return Fresh immutable Ready CPU Value with Blocked layout identity.
+   * @throws std::invalid_argument for malformed descriptor, quantization,
+   *         layout, overlap, alignment, or exact-envelope mismatch.
+   * @throws std::overflow_error when checked bit, byte, or identity arithmetic
+   *         overflows.
+   * @throws std::bad_alloc when allocation or immutable state creation fails.
+   * @note Input bytes are copied into isolated builder storage. Padding and
+   *       unused nibble bits become immutable and remain transfer-visible.
+   */
+  static Value from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
+                                             BlockedLayout layout,
+                                             std::vector<std::byte> storage);
+
+  /**
+   * @brief Publishes an immutable FP4 Blocked view over a sealed CPU buffer.
+   *
+   * @param descriptor Valid V-13 FP4 descriptor with block-scale quantization.
+   * @param layout Valid checked Blocked layout, including absolute bit offset.
+   * @param buffer Sealed immutable range retained by the Value.
+   * @return Fresh Value revision sharing the supplied allocation identity.
+   * @throws std::invalid_argument for an invalid buffer or malformed descriptor
+   *         or layout.
+   * @throws std::out_of_range when the checked bit envelope escapes the buffer.
+   * @throws std::overflow_error when checked arithmetic or identity minting
+   *         overflows.
+   * @throws std::bad_alloc when immutable state creation fails.
+   * @note This operation creates no ImageFacet and performs no payload access.
+   *       A later checked host view still requires host visibility.
+   */
+  static Value from_cpu_blocked_dense_tensor(DenseTensorDescriptor descriptor,
+                                             BlockedLayout layout,
+                                             BufferHandle buffer);
+
+  /**
    * @brief Reports whether this handle owns a published DenseTensor.
    *
    * @return True when immutable state is present.
@@ -515,12 +665,33 @@ class Value final {
   const std::optional<ImageFacet>& image_facet() const;
 
   /**
+   * @brief Identifies the one physical layout retained by this Value.
+   *
+   * @return Strided or Blocked for a valid publication.
+   * @throws std::logic_error when the handle is invalid.
+   * @note The result grants no payload, conversion, or device authority.
+   */
+  StorageLayoutKind storage_layout_kind() const;
+
+  /**
    * @brief Returns the immutable physical byte strides.
    *
    * @return Borrowed validated layout retained by this Value.
-   * @throws std::logic_error when the handle is invalid.
+   * @throws std::logic_error when the handle is invalid or retains Blocked
+   *         rather than Strided layout.
    */
   const StridedLayout& strided_layout() const;
+
+  /**
+   * @brief Returns the immutable physical Blocked layout.
+   *
+   * @return Borrowed validated versioned bit-addressed layout.
+   * @throws std::logic_error when the handle is invalid or retains Strided
+   *         rather than Blocked layout.
+   * @note The reference remains valid while this Value or a copy retains the
+   *       shared immutable state.
+   */
+  const BlockedLayout& blocked_layout() const;
 
   /**
    * @brief Returns the exact owned byte-envelope size.
@@ -629,7 +800,8 @@ class Value final {
 /**
  * @brief Retaining read-only, bounds-checked view of one DenseTensor Value.
  *
- * @throws std::invalid_argument when construction receives an invalid Value.
+ * @throws std::invalid_argument when construction receives an invalid or
+ * non-Strided Value.
  * @throws ReadyFenceAccessError when the retained Value is not Ready.
  * @throws BufferAccessError when the retained binding is not host-visible.
  * @note Copy and copy-like move operations are noexcept. The view stores a
@@ -642,7 +814,7 @@ class DenseTensorView final {
    * @brief Retains a valid Ready host-visible DenseTensor Value.
    *
    * @param value Value copied or moved into the view.
-   * @throws std::invalid_argument when value is invalid.
+   * @throws std::invalid_argument when value is invalid or non-Strided.
    * @throws ReadyFenceAccessError when value producer completion is Pending,
    *         Failed, or ProducerCancelled.
    * @throws BufferAccessError when value has no host-visible binding.

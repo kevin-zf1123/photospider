@@ -161,10 +161,20 @@ ValueTransferTask ValueTransferTask::prepare_cpu_copy(Value source) {
     throw std::logic_error(
         "Distinct CPU copy did not produce a Transfer access plan.");
   }
-  PendingValuePublication publication =
-      PendingValuePublisher::allocate_cpu_dense_tensor(
-          source.dense_tensor_descriptor(), source.image_facet(),
-          source.strided_layout(), source.storage_size(), source.revision_id());
+  PendingValuePublication publication = [&source]() {
+    switch (source.storage_layout_kind()) {
+      case StorageLayoutKind::Strided:
+        return PendingValuePublisher::allocate_cpu_dense_tensor(
+            source.dense_tensor_descriptor(), source.image_facet(),
+            source.strided_layout(), source.storage_size(),
+            source.revision_id());
+      case StorageLayoutKind::Blocked:
+        return PendingValuePublisher::allocate_cpu_blocked_dense_tensor(
+            source.dense_tensor_descriptor(), source.blocked_layout(),
+            source.storage_size(), source.revision_id());
+    }
+    throw std::logic_error("Value transfer source layout kind is invalid.");
+  }();
   return ValueTransferTask(std::make_shared<Impl>(
       std::move(source), std::move(publication), std::move(plan)));
 }
@@ -186,20 +196,40 @@ ValueTransferTask ValueTransferTask::prepare_external_transfer(
     throw std::invalid_argument(
         "Host-readable transfer target requires a host pointer.");
   }
-  validate_dense_tensor_producer_envelope(source.dense_tensor_descriptor(),
-                                          source.strided_layout(),
-                                          source.storage_size());
+  switch (source.storage_layout_kind()) {
+    case StorageLayoutKind::Strided:
+      validate_dense_tensor_producer_envelope(source.dense_tensor_descriptor(),
+                                              source.strided_layout(),
+                                              source.storage_size());
+      break;
+    case StorageLayoutKind::Blocked:
+      validate_dense_tensor_producer_envelope(source.dense_tensor_descriptor(),
+                                              source.blocked_layout(),
+                                              source.storage_size());
+      break;
+  }
   AccessPlan plan = source.plan_access(target);
   if (plan.kind() != AccessPlanKind::Transfer) {
     throw std::invalid_argument(
         "External Value transfer requires a Transfer access plan.");
   }
-  PendingDeviceValuePublication publication =
-      PendingDeviceValuePublisher::publish_dense_tensor(
-          source.dense_tensor_descriptor(), source.image_facet(),
-          source.strided_layout(), std::move(owner), native_handle,
-          host_pointer, source.storage_size(), target.device,
-          target.memory_domain, source.revision_id());
+  PendingDeviceValuePublication publication = [&]() {
+    switch (source.storage_layout_kind()) {
+      case StorageLayoutKind::Strided:
+        return PendingDeviceValuePublisher::publish_dense_tensor(
+            source.dense_tensor_descriptor(), source.image_facet(),
+            source.strided_layout(), std::move(owner), native_handle,
+            host_pointer, source.storage_size(), target.device,
+            target.memory_domain, source.revision_id());
+      case StorageLayoutKind::Blocked:
+        return PendingDeviceValuePublisher::publish_blocked_dense_tensor(
+            source.dense_tensor_descriptor(), source.blocked_layout(),
+            std::move(owner), native_handle, host_pointer,
+            source.storage_size(), target.device, target.memory_domain,
+            source.revision_id());
+    }
+    throw std::logic_error("Value transfer source layout kind is invalid.");
+  }();
   return ValueTransferTask(
       std::make_shared<Impl>(std::move(source), std::move(publication),
                              std::move(plan), std::move(operation)));

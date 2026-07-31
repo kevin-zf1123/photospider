@@ -26,10 +26,13 @@ class ComputeIoExecutor;
  * @note Disk-cache load wrappers keep their historical bool return contract:
  * true means a reusable output is available, false means the caller should
  * compute normally. Detailed miss/error diagnostics are recorded through
- * GraphModel's locked disk-cache diagnostic API. Image bytes and detached
- * named values cross injected `ImageArtifactCodec` and `CacheMetadataCodec`
- * boundaries; this service contains no OpenCV/YAML calls or provider-library
- * types. Staged HP commit may submit the const cache-save mechanism to the
+ * GraphModel's locked disk-cache diagnostic API. Compatible image bytes and
+ * detached named values cross injected `ImageArtifactCodec` and
+ * `CacheMetadataCodec` boundaries; packed, quantized, or latent formal Values
+ * fail with a typed invalid-parameter error before executor admission,
+ * filesystem mutation, or codec invocation. This service contains no
+ * OpenCV/YAML calls or provider-library types. Staged HP commit may submit the
+ * const cache-save mechanism to the
  * process compute-I/O executor while the graph-state policy owner retains path,
  * failure, timing, and publication decisions; synchronous administration and
  * load paths remain unchanged.
@@ -144,7 +147,10 @@ class GraphCacheService {
    * @param cache_precision Precision label used for image serialization.
    * @throws Codec, filesystem, graph, or allocation exceptions from saving.
    * @note The method is a no-op for disabled saving, missing cache roots,
-   * unsupported cache entries, empty locations, or nodes without HP output.
+   * unsupported cache-entry types, empty locations, or nodes without HP
+   * output. A configured image entry with a packed, quantized, or latent formal
+   * Value instead throws `GraphError{InvalidParameter}` before filesystem or
+   * codec effects.
    * Partial hp_region validity is never serialized; any older configured
    * artifact for that node is removed so a later load cannot relabel stale
    * bytes as complete.
@@ -152,7 +158,9 @@ class GraphCacheService {
    * into a temporary codec-compatible ImageBuffer; otherwise the legacy
    * ImageBuffer is used. Opaque non-CPU images are skipped without unsafe
    * mapping, while named ParameterValue outputs cross the metadata codec; a
-   * future device adapter may add explicit download. Runtime allocation and
+   * future device adapter may add explicit download. The current Value must be
+   * image-faceted, Strided, unquantized, host-readable, and whole-byte
+   * compatible before the save mechanism proceeds. Runtime allocation and
    * Value revision identities are never persisted.
    */
   void save_cache_if_configured(GraphModel& graph, const Node& node,
@@ -173,7 +181,9 @@ class GraphCacheService {
    * @param graph Transaction-owned Graph providing cache policy and paths.
    * @param node Stable node inside `graph` whose formal HP output is saved.
    * @param cache_precision Precision label forwarded to the selected codec.
-   * @return Nothing after a no-op policy decision or successful completion.
+   * @throws GraphError with `InvalidParameter` when image disk persistence
+   * rejects a packed, quantized, latent, or otherwise incompatible Value
+   * before executor admission.
    * @throws GraphError with `ComputeError` for typed admission rejection or
    * cancellation.
    * @throws Codec, filesystem, graph, allocation, or synchronization
