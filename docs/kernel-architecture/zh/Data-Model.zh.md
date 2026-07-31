@@ -320,9 +320,11 @@ publication 随后会在暴露 currentness 前推进该行，因此晚启动的�
 最多保留 64 个 entry，从而限制强 native/provider ownership；publication pressure 会释放
 revision 最低的 entry。Generation 推进本身不会清除 residency，而且这个 entry 数量不是
 device-byte 或 scratch admission。在精确 Graph close 排空全部 Run 与 pending native
-completion 后，manager 会退役该不复用 `GraphInstanceId` 的全部 generation row；仍有 transfer
-pending 时调用退役属于 invariant failure。这项 Graph-scoped maintenance 不会清除已结算的
-resident replica。
+completion 后，manager 会退役该不复用 `GraphInstanceId` 的全部 generation row。Close tail
+还会在本次退役前 join compute-request lane：prepared candidate 会在执行其可失败 lineage
+pretracking 之前先拥有一个 reserved lane ticket，因此之后不再有 caller 能重建零 generation
+row。仍有 transfer pending 时调用退役属于 invariant failure。这项 Graph-scoped maintenance
+不会清除已结算的 resident replica。
 
 V-9 在不改变逻辑 Value identity 或 public binding fact 的前提下新增 byte authority。
 `ResourceLedger` 为每个已配置非 CPU `DeviceId` 拥有隔离的 memory/scratch account。Native

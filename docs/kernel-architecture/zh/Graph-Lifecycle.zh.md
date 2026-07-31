@@ -279,14 +279,17 @@ registry unregistration。永不返回的 non-preemptible provider 因此可以�
 
 Graph index 与 candidate count 清空后，close 会执行以下精确且不可逆的尾序：
 
-1. 移除空 lifecycle-registry row，随后退役该精确 `GraphInstanceId` 的全部 residency
+1. 在每个已 admission Run 与 native completion 都结算后，移除空 lifecycle-registry row；
+2. 停止 coordinator 与 compute-request admission，唤醒因容量阻塞的 producer，retire parked
+   ticket，排空已接受 callback，并在 graph-state finalization 仍可用时 join request worker。
+   `PreparedCandidate` 会在 Kernel 预跟踪其 residency lineage 之前拥有一个已 admission 的
+   reserved ticket，因此这次 drain 也会结算暂停在该区间的 caller；
+3. 只有在 request worker join 后，才退役该精确 `GraphInstanceId` 的全部 residency
    generation row；仍有 pending transfer 属于 fail-stop，而已结算 Ready replica 继续由
    process-domain capacity 管理；
-2. 停止 coordinator 与 compute-request admission，唤醒因容量阻塞的 producer，retire parked
-   ticket，排空已接受 callback，并在 graph-state finalization 仍可用时 join request worker；
-3. 停止、排空并 join graph-state lane；
-4. 把 runtime 标记为 retired，并释放 route ownership；
-5. 再次获取 graph-registry mutex，验证该 name 仍指向所保留 runtime，擦除 map entry，并在释放
+4. 停止、排空并 join graph-state lane；
+5. 把 runtime 标记为 retired，并释放 route ownership；
+6. 再次获取 graph-registry mutex，验证该 name 仍指向所保留 runtime，擦除 map entry，并在释放
    mutex 前发布 close-generation success。随后其余 shared runtime owner 可安全 retire，不会留下
    任何由 map 派生的 dangling pointer。
 

@@ -1486,6 +1486,8 @@ if(PHOTOSPIDER_BUILD_PROVIDER_INDEPENDENT_FOCUSED_TESTS)
     add_ps_test(test_kernel_contracts
         tests/integration/test_kernel_contracts.cpp
         photospider_internal_test_product)
+    target_sources(test_kernel_contracts PRIVATE
+        tests/integration/test_kernel_lineage_close_contract.cpp)
     target_compile_definitions(test_kernel_contracts PRIVATE
         PHOTOSPIDER_INTERNAL_GRAPH_CACHE_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING

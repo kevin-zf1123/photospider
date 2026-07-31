@@ -592,9 +592,11 @@ daemon job terminal state、result delivery、cache save、Graph 文档保存与
 - Graph close 会先把精确的 lifecycle-registry row 标记为 `Closing`，拒绝并 settle pending
   candidate，再对该 row 中每个已安装 Run 请求 `GraphClose` cancellation。Finalization 会等待
   terminal outcome、physical quiescence、graph commit/discard、root/child grant 精确释放与
-  registry unregistration。只有移除空 row 后，Kernel 才依次停止 compute-request lane、停止
-  graph-state lane 并销毁 Graph state。Closing linearize 后会收纳 cleanup callback failure；
-  如果 synchronization/structural failure 可能丢失 cancellation authority，则采取 fail-stop。
+  registry unregistration。只有移除空 row 后，Kernel 才依次停止并排空 compute-request lane、
+  退役精确 Graph 的 residency lineage row、停止 graph-state lane 并销毁 Graph state。
+  Request lane 必须先 join，因为 prepared candidate 会在可失败 lineage pretracking 前拥有
+  reserved ticket。Closing linearize 后会收纳 cleanup callback failure；如果
+  synchronization/structural failure 可能丢失 cancellation authority，则采取 fail-stop。
   无关 Graph 与 process-owned route 会继续运行。
 - Process execution shutdown 使用同一个 registry fence 停止全局 admission 并关闭每个 Graph
   row，请求 `ProcessShutdown` cancellation，排空全部 admitted Run，然后 retire ready work、

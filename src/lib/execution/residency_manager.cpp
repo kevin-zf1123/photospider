@@ -126,6 +126,25 @@ std::size_t ResidencyManager::retire_graph_lineages(
   return retired;
 }
 
+/** @copydoc ResidencyManager::lineage_count_for_graph */
+std::size_t ResidencyManager::lineage_count_for_graph(
+    std::uint64_t graph_instance_id) const {
+  if (graph_instance_id == 0U) {
+    throw std::invalid_argument(
+        "Residency lineage observation requires a nonzero Graph identity.");
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::size_t count = 0U;
+  auto lineage = current_generations_.lower_bound(
+      LineageKey{graph_instance_id, -1, ComputeIntent::GlobalHighPrecision});
+  while (lineage != current_generations_.end() &&
+         lineage->first.graph_instance_id == graph_instance_id) {
+    ++lineage;
+    ++count;
+  }
+  return count;
+}
+
 /** @copydoc ResidencyManager::register_transfer */
 void ResidencyManager::register_transfer(
     const DeviceCompletionIdentity& identity) {

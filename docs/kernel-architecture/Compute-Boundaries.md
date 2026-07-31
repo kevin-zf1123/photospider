@@ -770,10 +770,13 @@ unchanged.
   every installed Run in that row. Finalization waits for terminal outcome,
   physical quiescence, graph commit/discard, exact root/child grant release,
   and registry unregistration. Only after the empty row is removed does Kernel
-  stop the compute-request lane, stop the graph-state lane, and destroy Graph
-  state. After Closing linearizes, cleanup callback failures are contained and
-  synchronization/structural failure that could lose cancellation authority
-  fails stop. Unrelated Graphs and process-owned routes continue running.
+  stop and drain the compute-request lane, retire exact-Graph residency lineage
+  rows, stop the graph-state lane, and destroy Graph state. The request lane
+  joins first because a prepared candidate owns a reserved ticket before
+  fallible lineage pretracking. After Closing linearizes, cleanup callback
+  failures are contained and synchronization/structural failure that could
+  lose cancellation authority fails stop. Unrelated Graphs and process-owned
+  routes continue running.
 - Process execution shutdown uses the same registry fence to stop global
   admission and close every Graph row, requests `ProcessShutdown`
   cancellation, drains every admitted Run, then retires ready work, routes,

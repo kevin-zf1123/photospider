@@ -143,7 +143,10 @@ Kernel first pretracks the lineage without advancing it before fallible
 coordinator submission. An accepted current publication then performs a
 no-allocation manager advance while the coordinator still excludes currentness
 observation; rejected and born-stale candidates do not. This prevents a late
-older Run start from regressing the manager generation.
+older Run start from regressing the manager generation. Because a prepared
+candidate owns compute-request-lane admission before the fallible pretrack,
+Graph close joins that lane before retiring the exact Graph's generation rows;
+no permanent closed-identity tombstone is required.
 Pending-Value continuation reuses the existing Run and ready store. This adds
 no public device-executor API, no Graph/cache authority, and no second
 device-capacity ledger. The service-owned `ResourceLedger` remains the sole

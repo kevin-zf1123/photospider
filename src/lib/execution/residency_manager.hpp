@@ -125,12 +125,24 @@ class ResidencyManager final {
    * @throws std::logic_error while any admitted transfer for the Graph remains
    * pending.
    * @throws std::system_error when synchronization fails.
-   * @note The caller must first drain all Graph Runs and native completions.
+   * @note The caller must first drain all Graph Runs, native completions, and
+   * the Graph request lane whose prepared candidates can still pretrack rows.
    * Ready resident replicas remain bounded process-domain values and are not
    * removed by lineage retirement. A nonreused Graph identity must never
    * admit or observe new generations after this call.
    */
   std::size_t retire_graph_lineages(std::uint64_t graph_instance_id);
+
+  /**
+   * @brief Counts canonical generation rows for one exact Graph identity.
+   * @param graph_instance_id Nonzero Graph identity to inspect.
+   * @return Number of pretracked or generation-bearing lineage rows.
+   * @throws std::invalid_argument when `graph_instance_id` is zero.
+   * @throws std::system_error when synchronization fails.
+   * @note This diagnostic grants no freshness, publication, or retirement
+   * authority and may become stale immediately after return.
+   */
+  std::size_t lineage_count_for_graph(std::uint64_t graph_instance_id) const;
 
   /**
    * @brief Admits one exact replica production before native submission.

@@ -364,7 +364,11 @@ before submitting publication. Only an accepted current candidate advances the
 pretracked row through a no-throw callback immediately before coordinator
 currentness becomes observable. A rejected or born-stale candidate leaves the
 row unchanged, and a generation-N Run that starts after N+1 publication cannot
-move the monotonic manager row backwards.
+move the monotonic manager row backwards. The prepared candidate owns a
+compute-request-lane reserved ticket before this fallible pretracking step.
+Graph close therefore drains and joins that lane before retiring the exact
+Graph's lineage rows, preventing a paused caller from recreating maintenance
+state after retirement.
 
 A `ComputeRun` retains request-local immutable Values and their authoritative
 bindings. Settlement accounts for every output's terminal fence state,

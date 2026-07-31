@@ -355,16 +355,21 @@ the implementation does not fabricate recovery.
 After the Graph index and candidate count are empty, close performs the exact
 irreversible tail:
 
-1. remove the empty lifecycle-registry row, then retire every residency
-   generation row for that exact `GraphInstanceId`; a surviving pending
-   transfer is fail-stop, while settled Ready replicas remain governed by
-   process-domain capacity;
+1. remove the empty lifecycle-registry row after every admitted Run and native
+   completion settles;
 2. stop coordinator and compute-request admission, wake capacity-blocked
    producers, retire parked tickets, drain accepted callbacks, and join the
-   request worker while graph-state finalization remains available;
-3. stop, drain, and join the graph-state lane;
-4. mark the runtime retired and release route ownership;
-5. retake the graph-registry mutex, verify that the name still denotes the
+   request worker while graph-state finalization remains available. A
+   `PreparedCandidate` owns one admitted reserved ticket before Kernel
+   pretracks its residency lineage, so this drain also settles callers paused
+   in that interval;
+3. retire every residency generation row for that exact `GraphInstanceId`
+   only after the request worker joins; a surviving pending transfer is
+   fail-stop, while settled Ready replicas remain governed by process-domain
+   capacity;
+4. stop, drain, and join the graph-state lane;
+5. mark the runtime retired and release route ownership;
+6. retake the graph-registry mutex, verify that the name still denotes the
    retained runtime, erase that map entry, and publish close-generation success
    before releasing the mutex. Remaining shared runtime owners may then retire
    without any dangling map-derived pointer.

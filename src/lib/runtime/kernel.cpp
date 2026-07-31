@@ -418,7 +418,13 @@ bool Kernel::close_graph_with_reason(
     lifecycle_linearized = true;
     runtime->stop_compute_request_admission();
     execution_service_->finish_graph_close_lifecycle(*graph_instance_id);
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)
+    testing::notify_kernel_close_test_hook(
+        testing::KernelCloseTestEvent::LifecycleDrainedBeforeRequestLaneDrain);
+#endif
     runtime->close_compute_requests();
+    (void)execution_service_->retire_graph_supersession_lineages(
+        *graph_instance_id);
     runtime->graph_state().close_and_drain();
     runtime->stop();
 #if defined(PHOTOSPIDER_INTERNAL_KERNEL_CLOSE_TESTING)

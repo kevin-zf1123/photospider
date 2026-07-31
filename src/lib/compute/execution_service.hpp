@@ -1171,9 +1171,10 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * made current by this method.
    * @return Nothing.
    * @throws ResidencyManager validation, allocation, or synchronization errors.
-   * @note Kernel calls this before submitting the coordinator publication.
-   * Rollback or born-stale settlement may leave a zero-generation placeholder
-   * but cannot stale current work.
+   * @note Kernel calls this after coordinator preparation owns request-lane
+   * admission and before submitting publication. Rollback or born-stale
+   * settlement may leave a zero-generation placeholder but cannot stale
+   * current work. Graph close joins that lane before retiring placeholders.
    */
   void prepare_supersession_lineage(GraphInstanceId graph_instance_id,
                                     const SupersessionIdentity& identity);
@@ -1284,16 +1285,31 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
       GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason);
 
   /**
-   * @brief Drains one Closing Graph and retires its lifecycle maintenance.
+   * @brief Drains one Closing Graph and removes its Run lifecycle row.
    * @param graph_instance_id Exact runtime identity.
-   * @return Nothing after GraphRowRemoved publication and residency-lineage
-   * retirement.
+   * @return Nothing after GraphRowRemoved publication.
    * @throws RunLifecycleRegistry settlement errors unchanged.
-   * @note Once GraphRowRemoved publishes, an unexpected residency cleanup
-   * failure terminates because the irreversible close cannot be retried.
-   * Ready resident replicas remain subject to their process-domain capacity.
+   * @note Kernel must still drain and join the Graph compute-request lane
+   * before retiring residency lineages. A prepared candidate owns request-lane
+   * admission before it pretracks residency, so retiring here would permit a
+   * late zero-generation row to survive irreversible Graph close.
    */
   void finish_graph_close_lifecycle(GraphInstanceId graph_instance_id);
+
+  /**
+   * @brief Retires residency lineages after the exact Graph request lane
+   * drains.
+   * @param graph_instance_id Exact irreversibly closing runtime identity.
+   * @return Number of canonical generation rows removed.
+   * @throws Nothing; an unexpected validation, pending-transfer, allocation,
+   * or synchronization failure terminates after irreversible lifecycle close.
+   * @note Kernel calls this only after `GraphRuntime::close_compute_requests()`
+   * joins every prepared, published, and active candidate, and before closing
+   * graph-state. Ready resident replicas remain bounded process-domain values.
+   * No producer may admit, pretrack, or observe this Graph identity afterward.
+   */
+  std::size_t retire_graph_supersession_lineages(
+      GraphInstanceId graph_instance_id) noexcept;
 
   /**
    * @brief Settles one Graph and retires its lifecycle maintenance.
@@ -1301,8 +1317,9 @@ class ExecutionService final : public ReadyTaskSubmissionRuntime {
    * @param reason GraphClose or ProcessShutdown.
    * @return Nothing after row removal and residency-lineage retirement.
    * @throws RunLifecycleRegistry close errors unchanged.
-   * @note This convenience path composes the same begin/finish boundaries used
-   * by Kernel close. Post-row-removal residency failure is fail-stop.
+   * @note This convenience path is for lifecycle-only service callers that
+   * own no Graph request coordinator. Kernel uses the split begin, finish,
+   * request-lane drain, and lineage-retirement sequence instead.
    */
   void close_graph_lifecycle(GraphInstanceId graph_instance_id,
                              ComputeRunCancellationReason reason);

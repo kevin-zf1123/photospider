@@ -241,6 +241,11 @@ PreparedProductCompute prepare_product_compute(GraphRuntime& runtime,
       runtime.prepare_compute_request(key);
   request.cancellation_source = cancellation;
   request.supersession = prepared.identity();
+#if defined(PHOTOSPIDER_INTERNAL_KERNEL_COMMIT_TESTING)
+  testing::notify_kernel_compute_admission_test_hook(
+      testing::KernelComputeAdmissionTestEvent::
+          ProductCandidatePreparedBeforeLineageTracking);
+#endif
   return PreparedProductCompute{std::move(request), std::move(cancellation),
                                 std::move(prepared)};
 }
@@ -652,6 +657,20 @@ namespace testing {
 namespace {
 
 /**
+ * @brief Borrowed candidate-admission hook pointer for the test-only seam.
+ * @throws Nothing for alias use.
+ */
+using AdmissionHookPtr = const KernelComputeAdmissionTestHook*;
+
+/**
+ * @brief Process-local candidate-admission observer for deterministic tests.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Tests serialize installation and join every affected caller before
+ * clearing the borrowed pointer.
+ */
+std::atomic<AdmissionHookPtr> g_kernel_compute_admission_test_hook{nullptr};
+
+/**
  * @brief Borrowed staged-commit hook pointer stored by the test-only seam.
  * @throws Nothing for alias use.
  */
@@ -667,6 +686,22 @@ std::atomic<KernelComputeCommitTestHookPtr> g_kernel_compute_commit_test_hook{
     nullptr};  // NOLINT(whitespace/indent_namespace)
 
 }  // namespace
+
+/** @copydoc ps::testing::set_kernel_compute_admission_test_hook */
+void set_kernel_compute_admission_test_hook(
+    const KernelComputeAdmissionTestHook* hook) noexcept {
+  g_kernel_compute_admission_test_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc ps::testing::notify_kernel_compute_admission_test_hook */
+void notify_kernel_compute_admission_test_hook(
+    KernelComputeAdmissionTestEvent event) noexcept {
+  const KernelComputeAdmissionTestHook* hook =
+      g_kernel_compute_admission_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->notify != nullptr) {
+    hook->notify(hook->context, event);
+  }
+}
 
 /** @copydoc ps::testing::set_kernel_compute_commit_test_hook */
 void set_kernel_compute_commit_test_hook(

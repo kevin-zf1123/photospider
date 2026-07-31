@@ -485,8 +485,9 @@ calling-thread result translation 只能修改旧 slot；该 slot 随最后一�
 5. 等待 terminal outcome、物理 quiescence、graph finalization、exact resource release、
    admitted-Run unregistration 与 graph-lifetime lease release；
 6. 移除空 registry row，在 graph-state finalization 仍可用时停止并排空私有 per-Graph
-   compute-request lane，再停止并排空 graph-state lane、销毁 Graph state，但不停止任何
-   process-owned execution route；
+   compute-request lane，只有在每个 prepared candidate 的 reserved ticket 都结算后才退役精确
+   Graph 的 residency lineage maintenance，再停止并排空 graph-state lane、销毁 Graph
+   state，但不停止任何 process-owned execution route；
 7. 在 graph-registry lock 下验证同一个 retained runtime、擦除其 name，并在任何后续 lookup
    可以观察到 absence 之前发布 close-generation success；
 8. 让 `ExecutionService` 和无关 Graph Run 继续运行。
@@ -497,8 +498,11 @@ cancellation record 或 settlement obligation，则采取 fail-stop。process
 `Accepting -> Stopping` 后遵循相同规则。
 
 实现会把 registry fence 与本地双 lane 顺序组合起来，而不会恢复旧的 single-lane 模型。Graph
-close 会注销每个 Run、移除空 row、停止/排空 compute-request lane，再停止/排空 graph-state lane
-并销毁 Graph state。Graph destruction 不会停止 process-owned route，marker 后也不存在 reopen。
+close 会注销每个 Run、移除空 row、停止/排空 compute-request lane、退役该精确 Graph 的
+residency generation row，再停止/排空 graph-state lane 并销毁 Graph state。Request-lane
+drain 必须先于 retirement，因为 prepared candidate 会在可失败 lineage pretracking 前拥有
+reserved ticket；因此 drain/join 无需 process-lifetime tombstone 就能排除后续行重建。Graph
+destruction 不会停止 process-owned route，marker 后也不存在 reopen。
 
 当前进程执行域 shutdown（#76）：
 

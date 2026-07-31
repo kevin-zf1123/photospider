@@ -3,6 +3,61 @@
 namespace ps::testing {
 
 /**
+ * @brief Deterministic checkpoints from private compute candidate admission.
+ * @throws Nothing for value construction and comparison.
+ * @note This contract exists only in BUILD_TESTING product builds and exposes
+ * no installed or Host-facing API.
+ */
+enum class KernelComputeAdmissionTestEvent {
+  /**
+   * @brief Candidate owns request-lane admission before lineage pretracking.
+   *
+   * @note Blocking here reproduces the Graph-close interval in which lineage
+   * retirement must remain behind compute-request lane drainage.
+   */
+  ProductCandidatePreparedBeforeLineageTracking,
+};
+
+/**
+ * @brief Borrowed observer for deterministic candidate-admission races.
+ * @throws Nothing for aggregate construction.
+ * @note Tests retain the hook and context until every affected caller and
+ * Graph close settles. The callback may block but must remain noexcept.
+ */
+struct KernelComputeAdmissionTestHook {
+  /** @brief Borrowed test context that outlives the installed hook. */
+  void* context = nullptr;
+
+  /**
+   * @brief Observes one exact candidate-admission checkpoint.
+   * @param context Borrowed context supplied by the installing test.
+   * @param event Exact checkpoint reached by the product path.
+   * @return Nothing.
+   * @throws Nothing; callbacks must contain all failures.
+   */
+  void (*notify)(void* context,
+                 KernelComputeAdmissionTestEvent event) noexcept = nullptr;
+};
+
+/**
+ * @brief Installs or clears the process-local candidate-admission observer.
+ * @param hook Borrowed hook retained through all notifications, or nullptr.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void set_kernel_compute_admission_test_hook(
+    const KernelComputeAdmissionTestHook* hook) noexcept;
+
+/**
+ * @brief Publishes one candidate-admission checkpoint to the observer.
+ * @param event Exact product boundary reached by the caller.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void notify_kernel_compute_admission_test_hook(
+    KernelComputeAdmissionTestEvent event) noexcept;
+
+/**
  * @brief Deterministic checkpoints from the private Kernel staged-commit path.
  * @throws Nothing for value construction and comparison.
  * @note This contract exists only in BUILD_TESTING product builds and is not

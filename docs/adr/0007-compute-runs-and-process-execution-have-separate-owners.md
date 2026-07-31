@@ -609,9 +609,11 @@ clear a same-name replacement.
    resource release, admitted-Run unregistration, and graph-lifetime lease
    release;
 6. removes the empty registry row, stops and drains the private per-Graph
-   compute-request lane while graph-state finalization remains available, then
-   stops and drains the graph-state lane and destroys graph state without
-   stopping any process-owned execution route;
+   compute-request lane while graph-state finalization remains available,
+   retires exact-Graph residency lineage maintenance only after every prepared
+   candidate's reserved ticket settles, then stops and drains the graph-state
+   lane and destroys graph state without stopping any process-owned execution
+   route;
 7. under the graph-registry lock verifies the same retained runtime, erases its
    name, and publishes close-generation success before any later lookup can
    observe absence; and
@@ -625,9 +627,13 @@ after process `Accepting -> Stopping`.
 
 The implementation composes the registry fence with the local two-lane order
 without restoring the old single-lane model. Graph close unregisters every Run,
-removes the empty row, stops/drains the compute-request lane, then stops/drains
-the graph-state lane and destroys Graph state. Graph destruction does not stop
-process-owned routes, and there is no post-marker reopen.
+removes the empty row, stops/drains the compute-request lane, retires the exact
+Graph's residency generation rows, then stops/drains the graph-state lane and
+destroys Graph state. The request-lane drain precedes retirement because a
+prepared candidate owns a reserved ticket before fallible lineage pretracking;
+the drain/join therefore excludes any later row recreation without a
+process-lifetime tombstone. Graph destruction does not stop process-owned
+routes, and there is no post-marker reopen.
 
 Current process execution-domain shutdown (#76):
 

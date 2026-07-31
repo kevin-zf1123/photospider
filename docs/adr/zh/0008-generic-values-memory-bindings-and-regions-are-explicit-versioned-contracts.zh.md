@@ -300,6 +300,9 @@ allocation。Kernel 会在提交 publication 前预跟踪一个零 generation li
 accepted current candidate 才会通过 no-throw callback 推进该预跟踪行，而且 callback
 紧邻 coordinator currentness 可观察之前执行。被拒绝或 born-stale 的 candidate 保持该行
 不变；在 N+1 publication 后才启动的 generation-N Run 不能让单调 manager row 倒退。
+Prepared candidate 会在这个可失败 pretracking 步骤前拥有一个 compute-request-lane reserved
+ticket。因此 Graph close 会先 drain 并 join 该 lane，再退役精确 Graph 的 lineage row，从而
+防止暂停的 caller 在 retirement 后重建 maintenance state。
 
 `ComputeRun` 会保留 request-local 不可变 Value 及其 authoritative binding。Settlement 会核算
 每个 output 的 terminal fence state、provider-generation lease、access obligation 与

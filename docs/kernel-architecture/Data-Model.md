@@ -391,7 +391,10 @@ the manager's 64-entry default: publication pressure releases the
 lowest-revision entry. Generation advance alone does not clear residency, and
 the entry count is not device-byte or scratch admission. After exact Graph
 close has drained every Run and pending native completion, the manager retires
-all generation rows for that nonreused `GraphInstanceId`; calling retirement
+all generation rows for that nonreused `GraphInstanceId`. The close tail also
+joins the compute-request lane before this retirement: a prepared candidate
+already owns one reserved lane ticket before its fallible lineage pretracking,
+so no caller can recreate a zero-generation row afterward. Calling retirement
 while a transfer remains pending is an invariant failure. This Graph-scoped
 maintenance does not clear settled resident replicas.
 

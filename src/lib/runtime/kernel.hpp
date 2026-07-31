@@ -333,10 +333,12 @@ class Kernel {
    *       to Closing and requests GraphClose, stops external compute-request
    *       admission, settles and unregisters every indexed Run/candidate,
    *       removes the empty row, drains and joins compute-request while
-   *       graph-state remains available for commit denial/discard, then drains
-   *       graph-state and removes runtime/routes. Final map removal and success
-   *       publication are atomic to later name lookups. After lifecycle
-   *       linearization the Graph is never reopened.
+   *       graph-state remains available for commit denial/discard, retires the
+   *       exact Graph's residency lineages only after every prepared
+   *       candidate ticket settles, then drains graph-state and removes
+   *       runtime/routes. Final map removal and success publication are atomic
+   *       to later name lookups. After lifecycle linearization the Graph is
+   *       never reopened.
    */
   bool close_graph(const std::string& name);
 
@@ -1438,7 +1440,8 @@ class Kernel {
    * and GraphInstanceId before selecting again. Pre-linearization failure is
    * published to exact-generation joiners before rethrow and permits a later
    * fresh-generation retry after all old joiners observe it. Registry row
-   * removal precedes compute-request lane drain, then graph-state drain and
+   * removal precedes compute-request lane drain; exact-Graph residency lineage
+   * retirement follows that drain and precedes graph-state drain plus
    * route/model retirement. Final graph-map removal and successful close
    * publication are one registry-locked transaction, so no caller observes an
    * absent name before the generation is complete.

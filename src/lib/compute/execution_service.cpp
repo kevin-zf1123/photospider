@@ -4330,8 +4330,13 @@ std::uint64_t ExecutionService::begin_graph_close_lifecycle(
 void ExecutionService::finish_graph_close_lifecycle(
     GraphInstanceId graph_instance_id) {
   lifecycle_registry_->finish_graph_close(graph_instance_id);
+}
+
+/** @copydoc ExecutionService::retire_graph_supersession_lineages */
+std::size_t ExecutionService::retire_graph_supersession_lineages(
+    GraphInstanceId graph_instance_id) noexcept {
   try {
-    (void)pool_->device_executors.retire_graph_lineages(
+    return pool_->device_executors.retire_graph_lineages(
         graph_instance_id.value());
   } catch (...) {
     std::terminate();
@@ -4343,6 +4348,7 @@ void ExecutionService::close_graph_lifecycle(
     GraphInstanceId graph_instance_id, ComputeRunCancellationReason reason) {
   (void)begin_graph_close_lifecycle(graph_instance_id, reason);
   finish_graph_close_lifecycle(graph_instance_id);
+  (void)retire_graph_supersession_lineages(graph_instance_id);
 }
 
 /** @copydoc ExecutionService::validate_shutdown_caller */

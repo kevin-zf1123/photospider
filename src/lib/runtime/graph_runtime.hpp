@@ -487,7 +487,9 @@ class GraphRuntime : public ExecutionHostContext {
    *         GraphStateExecutor::close_and_drain.
    * @note Graph-state admission must remain available until this returns
    * because accepted requests may still submit their final predicate
-   * transaction.
+   * transaction. Total admission includes each coordinator reservation held
+   * by a provisional prepared candidate, so return also proves no caller can
+   * perform later residency-lineage pretracking for this Graph.
    */
   void close_compute_requests() {
     compute_request_coordinator_.stop_admission();
