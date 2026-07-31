@@ -1657,6 +1657,42 @@ TEST(CpuDenseTensorImageOperation,
                std::overflow_error);
 }
 
+/**
+ * @brief Proves ImageView rejects huge immutable aliases before int narrowing.
+ * @return Nothing; GoogleTest reports missing or displaced adapter validation.
+ * @throws Value construction exceptions before the expected snapshot failure.
+ * @note The non-singleton x axis deliberately uses zero stride over one byte,
+ * so allocation size cannot mask the `INT_MAX + 1` logical image extent.
+ */
+TEST(CpuDenseTensorImageOperation,
+     SnapshotRejectsHugeZeroStrideImageBeforeIntNarrowing) {
+  const std::size_t huge_extent =
+      static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1U;
+  const Value storage = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{1U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}},
+      std::nullopt, StridedLayout{{1}}, {std::byte{7U}});
+  ImageFacet image;
+  image.x_axis = 1U;
+  image.y_axis = 0U;
+  image.channel_axis = 2U;
+  const Value alias = Value::from_cpu_dense_tensor(
+      DenseTensorDescriptor{{1U, huge_extent, 1U},
+                            ElementSemantics::UnsignedInteger,
+                            StorageEncoding{8U}},
+      image, StridedLayout{{0, 0, 0}}, storage.buffer_handle());
+
+  try {
+    (void)value_image_adapter::snapshot_cpu_image_buffer(alias);
+    FAIL() << "Huge ImageView extent must fail before int conversion";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_STREQ(
+        error.what(),
+        "ImageView extent exceeds the current ImageBuffer adapter domain.");
+  }
+}
+
 TEST(CpuDenseTensorImageOperation,
      BuilderScopesWriteAuthorityAndReadLeaseLifetime) {
   DenseTensorDescriptor descriptor{{4U},
