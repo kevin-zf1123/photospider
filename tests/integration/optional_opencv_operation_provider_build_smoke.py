@@ -216,7 +216,8 @@ def validate_provider_disabled_inventory(
     @return None when only the intended focused tests, install smoke, and
       registered-only sentinel exist.
     @throws RuntimeError If a focused test is missing, a broad-suite test
-      remains registered, or a required concurrency property drifts.
+      remains registered, the registered-only sentinel gains a label or
+      timeout, or a required concurrency property drifts.
     @note `test_kernel_contracts` remains a buildable focused target for the
       separate injected-codec smoke but is deliberately not broadly discovered
       in this provider-disabled CTest inventory.
@@ -457,6 +458,20 @@ def validate_provider_disabled_inventory(
         raise RuntimeError(
             "provider-disabled CTest inventory mismatch: "
             f"expected {sorted(expected)}, got {sorted(names)}"
+        )
+
+    sentinel_property_mismatches = {
+        name: {
+            "LABELS": inventory[name].get("LABELS"),
+            "TIMEOUT": inventory[name].get("TIMEOUT"),
+        }
+        for name in PROVIDER_DISABLED_REGISTERED_SENTINELS
+        if "LABELS" in inventory[name] or "TIMEOUT" in inventory[name]
+    }
+    if sentinel_property_mismatches:
+        raise RuntimeError(
+            "provider-disabled registered-only CTest property mismatch: "
+            f"{sentinel_property_mismatches}"
         )
 
     expected_properties = {

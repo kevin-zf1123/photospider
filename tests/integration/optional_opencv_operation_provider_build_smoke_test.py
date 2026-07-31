@@ -1067,6 +1067,48 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         self.assertEqual(set(inventory), expected)
         subject.validate_provider_disabled_inventory(inventory)
 
+    def test_rejects_labelled_executor_sentinel(self) -> None:
+        """@brief Reject a label attached to the registered-only sentinel.
+
+        @return None after validation reports the injected property drift.
+        @throws AssertionError If the exact provider-disabled contract accepts
+          the sentinel with a CTest label.
+        @note The mutation starts from the complete valid 55-entry inventory
+          and changes only the sentinel's `LABELS` property.
+        """
+
+        inventory = subject.parse_ctest_inventory(
+            provider_disabled_ctest_payload()
+        )
+        inventory[COMPUTE_IO_EXECUTOR_NOT_BUILT_CTEST_NAME]["LABELS"] = [
+            "build-smoke"
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError, "registered-only CTest property mismatch"
+        ):
+            subject.validate_provider_disabled_inventory(inventory)
+
+    def test_rejects_timed_executor_sentinel(self) -> None:
+        """@brief Reject a timeout attached to the registered-only sentinel.
+
+        @return None after validation reports the injected property drift.
+        @throws AssertionError If the exact provider-disabled contract accepts
+          the sentinel with a CTest timeout.
+        @note The mutation starts from the complete valid 55-entry inventory
+          and changes only the sentinel's `TIMEOUT` property.
+        """
+
+        inventory = subject.parse_ctest_inventory(
+            provider_disabled_ctest_payload()
+        )
+        inventory[COMPUTE_IO_EXECUTOR_NOT_BUILT_CTEST_NAME]["TIMEOUT"] = 1
+
+        with self.assertRaisesRegex(
+            RuntimeError, "registered-only CTest property mismatch"
+        ):
+            subject.validate_provider_disabled_inventory(inventory)
+
     def test_rejects_malformed_broad_or_drifted_ctest_inventory(self) -> None:
         """@brief Reject malformed, broad, missing, or drifted inventories.
 
