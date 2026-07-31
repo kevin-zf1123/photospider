@@ -653,10 +653,14 @@ def public_header_includes(build: Path) -> list[str]:
     @throws OSError If the configured inventory cannot be read.
     @throws UnicodeError If the configured inventory is not valid UTF-8.
     @throws RuntimeError If the inventory is missing, empty, duplicated, or
-      contains a noncanonical/non-header path outside ``include/photospider``.
+      contains a control byte, backslash, or noncanonical/non-header POSIX path
+      outside ``include/photospider``.
     @note CMake serializes the same explicit relative-path list used by its
-      install rules. The smoke never scans the source tree or maintains a
-      second expected header count.
+      install rules after applying the same control/backslash policy. NUL is
+      impossible in a CMake string but remains rejected here for forged or
+      externally modified manifests. Ordinary spaces remain valid path data.
+      The smoke never scans the source tree or maintains a second expected
+      header count.
     """
 
     inventory_path = build / PUBLIC_HEADER_INVENTORY_RELATIVE_PATH
@@ -665,7 +669,22 @@ def public_header_includes(build: Path) -> list[str]:
             "configured public-header inventory is missing: "
             f"{inventory_path}"
         )
-    raw_headers = inventory_path.read_text(encoding="utf-8").splitlines()
+    with inventory_path.open(
+        "r", encoding="utf-8", newline=""
+    ) as inventory_file:
+        inventory_text = inventory_file.read()
+    if any(
+        character != "\n"
+        and (ord(character) < 32 or ord(character) == 127)
+        for character in inventory_text
+    ):
+        raise RuntimeError(
+            "configured public-header inventory contains a forbidden "
+            "ASCII control character"
+        )
+    raw_headers = inventory_text.split("\n")
+    if raw_headers and not raw_headers[-1]:
+        raw_headers.pop()
     if not raw_headers or any(not header for header in raw_headers):
         raise RuntimeError(
             "configured public-header inventory is empty or contains a "
@@ -673,7 +692,12 @@ def public_header_includes(build: Path) -> list[str]:
         )
 
     headers: set[str] = set()
-    for raw_header in raw_headers:
+    for line_number, raw_header in enumerate(raw_headers, start=1):
+        if "\\" in raw_header:
+            raise RuntimeError(
+                "configured public-header inventory contains a forbidden "
+                f"backslash at line {line_number}"
+            )
         header = PurePosixPath(raw_header)
         if (
             header.as_posix() != raw_header

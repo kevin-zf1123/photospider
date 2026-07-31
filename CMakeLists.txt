@@ -95,6 +95,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+include("${PROJECT_SOURCE_DIR}/cmake/PhotospiderCiInventory.cmake")
 
 # --- Compiler Settings ---
 set(CMAKE_CXX_STANDARD 17)
@@ -227,15 +228,9 @@ endforeach()
 set(PHOTOSPIDER_CI_INVENTORY_DIR
     "${CMAKE_BINARY_DIR}/generated/ci_inventory")
 file(MAKE_DIRECTORY "${PHOTOSPIDER_CI_INVENTORY_DIR}")
-set(PHOTOSPIDER_PUBLIC_HEADER_INVENTORY_CONTENT "")
-foreach(PUBLIC_HEADER_RELATIVE_PATH
-        IN LISTS PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS)
-    string(APPEND PHOTOSPIDER_PUBLIC_HEADER_INVENTORY_CONTENT
-        "include/photospider/${PUBLIC_HEADER_RELATIVE_PATH}\n")
-endforeach()
-file(WRITE
+photospider_write_public_header_inventory(
     "${PHOTOSPIDER_CI_INVENTORY_DIR}/installable_public_headers.txt"
-    "${PHOTOSPIDER_PUBLIC_HEADER_INVENTORY_CONTENT}")
+    PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS)
 # Linked consumers receive only the public include root. Kernel/Interaction
 # facades live under src/lib/ as source-tree internals: repository targets that
 # include them must use the private roots below, and the installable
@@ -1804,6 +1799,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/install_consumer_architecture_propagation_test.py"
             --build-dir "${CMAKE_BINARY_DIR}"
+            --cmake-executable "${CMAKE_COMMAND}"
             --ctest-executable "${CMAKE_CTEST_COMMAND}"
             --config "$<CONFIG>"
             --python-executable "${Python3_EXECUTABLE}"
@@ -1867,6 +1863,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
                 "${PROJECT_SOURCE_DIR}/tests/integration")
         set_tests_properties(
             OpenCvOperationProviderBuildSmokeSafety PROPERTIES
+            ENVIRONMENT
+                "PHOTOSPIDER_CMAKE_EXECUTABLE=${CMAKE_COMMAND}"
             TIMEOUT 30)
         add_test(NAME OpenCvOperationProviderDisabledBuild
             COMMAND ${Python3_EXECUTABLE}
@@ -2046,17 +2044,9 @@ if(BUILD_TESTING)
         message(FATAL_ERROR
             "CTest include inventory does not match registered GoogleTest targets")
     endif()
-    set(PHOTOSPIDER_GTEST_TARGET_INVENTORY_CONTENT
-        "# target\tconfigured executable\n")
-    foreach(PHOTOSPIDER_REGISTERED_GTEST_TARGET
-            IN LISTS PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
-        string(APPEND PHOTOSPIDER_GTEST_TARGET_INVENTORY_CONTENT
-            "${PHOTOSPIDER_REGISTERED_GTEST_TARGET}\t$<TARGET_FILE:${PHOTOSPIDER_REGISTERED_GTEST_TARGET}>\n")
-    endforeach()
-    file(GENERATE
-        OUTPUT
-            "${PHOTOSPIDER_CI_INVENTORY_DIR}/registered_gtest_targets-$<CONFIG>.tsv"
-        CONTENT "${PHOTOSPIDER_GTEST_TARGET_INVENTORY_CONTENT}")
+    photospider_generate_registered_gtest_target_inventory(
+        "${PHOTOSPIDER_CI_INVENTORY_DIR}/registered_gtest_targets-$<CONFIG>.tsv"
+        PHOTOSPIDER_REGISTERED_GTEST_TARGETS)
 endif()
 
 # The test-only product must have a closed direct-consumer set, and no target

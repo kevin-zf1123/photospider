@@ -38,6 +38,12 @@ BUILD_SMOKE_INVENTORY_MODULE_PATH = (
 BUILD_SMOKE_INVENTORY_MODULE_NAME = (
     "_photospider_install_consumer_build_smoke_inventory"
 )
+#: @brief Production CMake module that owns both CI manifest writers.
+#: @note Safety tests execute this exact module in script mode rather than
+#:   reproducing its serialization or validation rules in Python.
+CI_INVENTORY_CMAKE_MODULE_PATH = (
+    REPOSITORY_ROOT / "cmake" / "PhotospiderCiInventory.cmake"
+)
 #: @brief Import specification for the production CTest inventory parser.
 #: @note The loader releases its source file after synchronous module execution.
 BUILD_SMOKE_INVENTORY_SPEC = importlib.util.spec_from_file_location(
@@ -59,6 +65,21 @@ ctest_inventory = importlib.util.module_from_spec(
 )
 sys.modules[BUILD_SMOKE_INVENTORY_MODULE_NAME] = ctest_inventory
 BUILD_SMOKE_INVENTORY_SPEC.loader.exec_module(ctest_inventory)
+
+
+def write_exact_text(path: pathlib.Path, text: str) -> None:
+    """@brief Write UTF-8 fixture text without native newline translation.
+
+    @param path Existing-parent destination owned by the current test.
+    @param text Exact manifest or CMake script bytes to serialize as UTF-8.
+    @return None after the file is closed successfully.
+    @throws OSError If the fixture file cannot be opened or written.
+    @note Explicit ``newline=''`` keeps LF/CR injection cases identical on
+      Python 3.9 and later across POSIX and Windows hosts.
+    """
+
+    with path.open("w", encoding="utf-8", newline="") as output_file:
+        output_file.write(text)
 
 
 #: @brief Module-owned multi-architecture CMake cache fixture for all cases.
@@ -305,6 +326,7 @@ def parse_live_inventory_arguments(
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--build-dir", type=pathlib.Path)
+    parser.add_argument("--cmake-executable", default="cmake")
     parser.add_argument("--ctest-executable", default="ctest")
     parser.add_argument("--config")
     parser.add_argument("--python-executable")
@@ -591,12 +613,20 @@ class SymbolToolHarness:
 class ConfiguredPublicHeaderInventoryTest(unittest.TestCase):
     """@brief Validate CMake-derived package header inventory parsing.
 
-    @throws OSError If a disposable inventory cannot be created or read.
+    @throws OSError If a disposable inventory cannot be created or read, or if
+      the configured CMake executable cannot start.
+    @throws subprocess.CalledProcessError If the production CMake writer rejects
+      a valid fixture.
     @throws AssertionError If valid exact paths drift or malformed entries are
       accepted.
-    @note Tests use only synthetic build trees and never configure or install
-      the repository product.
+    @note Tests use only synthetic build trees. One case launches the exact
+      production writer in CMake script mode; no product configure, compiler,
+      build, install, or executable is involved.
     """
+
+    #: @brief CMake launcher used only for the production writer safety case.
+    #: @note CTest supplies CMAKE_COMMAND; direct unittest execution uses PATH.
+    cmake_executable: str = "cmake"
 
     def test_loads_exact_sorted_public_header_includes(self) -> None:
         """@brief Convert the configured allowlist into consumer includes.
@@ -618,17 +648,19 @@ class ConfiguredPublicHeaderInventoryTest(unittest.TestCase):
                 / static_product.PUBLIC_HEADER_INVENTORY_RELATIVE_PATH
             )
             manifest.parent.mkdir(parents=True)
-            manifest.write_text(
+            write_exact_text(
+                manifest,
                 "include/photospider/plugin/plugin_api.hpp\n"
                 "include/photospider/data/arbitrary_future_value.hpp\n"
+                "include/photospider/data/path with space.hpp\n"
                 "include/photospider/policy/policy_plugin_api.h\n",
-                encoding="utf-8",
             )
 
             self.assertEqual(
                 static_product.public_header_includes(build),
                 [
                     "#include <photospider/data/arbitrary_future_value.hpp>",
+                    "#include <photospider/data/path with space.hpp>",
                     "#include <photospider/plugin/plugin_api.hpp>",
                     "#include <photospider/policy/policy_plugin_api.h>",
                 ],
@@ -658,27 +690,144 @@ class ConfiguredPublicHeaderInventoryTest(unittest.TestCase):
                 static_product.public_header_includes(build)
 
             manifest.parent.mkdir(parents=True)
-            malformed_payloads = (
-                "",
-                "include/other/header.hpp\n",
-                "include/photospider/../header.hpp\n",
-                "include/photospider/header.cpp\n",
-                (
+            malformed_payloads = {
+                "empty": "",
+                "wrong-root": "include/other/header.hpp\n",
+                "posix-parent": "include/photospider/../header.hpp\n",
+                "backslash-parent": (
+                    "include/photospider/..\\outside.hpp\n"
+                ),
+                "backslash-path": (
+                    "include/photospider/folder\\header.hpp\n"
+                ),
+                "wrong-suffix": "include/photospider/header.cpp\n",
+                "duplicate": (
                     "include/photospider/header.hpp\n"
                     "include/photospider/header.hpp\n"
                 ),
-                (
+                "blank-line": (
                     "include/photospider/header.hpp\n\n"
                     "include/photospider/other.hpp\n"
                 ),
+                "delete": "include/photospider/del\x7fheader.hpp\n",
+            }
+            malformed_payloads.update(
+                {
+                    f"c0-{control_code}": (
+                        "include/photospider/control"
+                        f"{chr(control_code)}header.hpp\n"
+                    )
+                    for control_code in range(32)
+                }
             )
-            for payload in malformed_payloads:
-                with self.subTest(payload=payload):
-                    manifest.write_text(payload, encoding="utf-8")
+            for case_name, payload in malformed_payloads.items():
+                with self.subTest(case=case_name):
+                    write_exact_text(manifest, payload)
                     with self.assertRaisesRegex(
                         RuntimeError, "public-header inventory"
                     ):
                         static_product.public_header_includes(build)
+
+    def test_cmake_writer_rejects_unsafe_fields_before_serialization(
+        self,
+    ) -> None:
+        """@brief Exercise the production CMake writer's field boundary.
+
+        @return None after one ordinary-space POSIX path round-trips through the
+          real writer/parser and every backslash or representable control case
+          fails before a manifest is created.
+        @throws OSError If the script fixture cannot be written or CMake cannot
+          start.
+        @throws subprocess.CalledProcessError If the valid writer invocation
+          fails.
+        @throws AssertionError If CMake accepts an unsafe field, leaks it in the
+          diagnostic, or the real parser rejects the safe generated manifest.
+        @note C0 codes 1 through 31 and DEL are representable by CMake. NUL is
+          exercised only at the Python reader boundary because neither CMake
+          strings nor subprocess argv can carry it.
+        """
+
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-public-header-cmake-writer-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            script = sandbox / "write_public_header_inventory.cmake"
+            write_exact_text(
+                script,
+                "cmake_minimum_required(VERSION 3.16)\n"
+                f'include("{CI_INVENTORY_CMAKE_MODULE_PATH.as_posix()}")\n'
+                "set(PHOTOSPIDER_TEST_PUBLIC_HEADERS "
+                '"${PHOTOSPIDER_TEST_PUBLIC_HEADER}")\n'
+                "photospider_write_public_header_inventory(\n"
+                '  "${PHOTOSPIDER_TEST_OUTPUT}"\n'
+                "  PHOTOSPIDER_TEST_PUBLIC_HEADERS)\n",
+            )
+
+            safe_build = sandbox / "safe build"
+            safe_manifest = (
+                safe_build
+                / static_product.PUBLIC_HEADER_INVENTORY_RELATIVE_PATH
+            )
+            subprocess.run(
+                [
+                    self.cmake_executable,
+                    (
+                        "-DPHOTOSPIDER_TEST_PUBLIC_HEADER="
+                        "data/path with space.hpp"
+                    ),
+                    f"-DPHOTOSPIDER_TEST_OUTPUT={safe_manifest}",
+                    "-P",
+                    str(script),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                static_product.public_header_includes(safe_build),
+                ["#include <photospider/data/path with space.hpp>"],
+            )
+
+            unsafe_fields = {
+                "backslash-parent": "..\\outside.hpp",
+                "backslash-path": "folder\\header.hpp",
+                "delete": "del\x7fheader.hpp",
+                **{
+                    f"c0-{control_code}": (
+                        f"control{chr(control_code)}header.hpp"
+                    )
+                    for control_code in range(1, 32)
+                },
+            }
+            for case_name, unsafe_field in unsafe_fields.items():
+                with self.subTest(case=case_name):
+                    rejected_manifest = (
+                        sandbox
+                        / case_name
+                        / static_product.PUBLIC_HEADER_INVENTORY_RELATIVE_PATH
+                    )
+                    result = subprocess.run(
+                        [
+                            self.cmake_executable,
+                            (
+                                "-DPHOTOSPIDER_TEST_PUBLIC_HEADER="
+                                f"{unsafe_field}"
+                            ),
+                            f"-DPHOTOSPIDER_TEST_OUTPUT={rejected_manifest}",
+                            "-P",
+                            str(script),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertRegex(
+                        result.stderr,
+                        r"forbidden (?:backslash|ASCII control code)",
+                    )
+                    self.assertNotIn(unsafe_field, result.stderr)
+                    self.assertFalse(rejected_manifest.exists())
 
 
 class InstallConsumerCTestRegistrationTest(unittest.TestCase):
@@ -1855,6 +2004,9 @@ class InstallConsumerArchitecturePropagationTest(unittest.TestCase):
 if __name__ == "__main__":
     live_options, forwarded_unittest_argv = (
         parse_live_inventory_arguments(sys.argv)
+    )
+    ConfiguredPublicHeaderInventoryTest.cmake_executable = (
+        live_options.cmake_executable
     )
     InstallConsumerCTestRegistrationTest.live_build_dir = (
         live_options.build_dir
