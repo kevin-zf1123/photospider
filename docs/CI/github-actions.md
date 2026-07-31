@@ -98,8 +98,28 @@ self-containment invokes its dedicated compile target. These are durable
 product, package, configuration, and compile boundaries, not migration or
 source-layout checks. `OpenCvOperationProviderBuildSmokeSafety` remains an
 ordinary full-CTest safety regression for the OpenCV nested-build driver: its
-Python unittest exercises cleanup guards and cache-layout helpers in-process,
-but does not start a child configure, build, install, or compile target.
+Python unittest exercises cleanup guards and cache-layout helpers in-process.
+It also configures one compiler-free `project(... NONE)` fixture through the
+production manifest generator; it never starts a child build, install, compile
+target, or generated executable.
+
+Two nested-profile inventories remain exact without workflow-maintained counts.
+The static-product producer exports its configured CMake public-header install
+allowlist, and the consumer requires the installed include tree to equal those
+relative paths. Its CMake writer rejects backslashes and representable ASCII
+controls before serialization; its parser independently rejects all ASCII C0
+controls including NUL, plus DEL, and requires exact canonical POSIX install
+paths while preserving ordinary spaces.
+The provider-disabled producer exports its active `gtest_discover_tests`
+targets with configuration-specific executable paths through a TSV containing
+one exact header and strict two-field data lines. Later comments, blank lines,
+controls, extra fields, invalid or duplicate target names, and relative paths
+fail closed; absolute POSIX, Windows drive, and Windows UNC paths remain valid.
+After the focused build, the driver requires exactly the registered targets
+without executable files to appear as unlabelled `*_NOT_BUILT` placeholders.
+Both checks reject missing and extra entries, so a new allowlisted header or
+registered GoogleTest target changes the expectation through its authoritative
+CMake declaration rather than a Python number or future-name special case.
 
 `build-integrity-default` builds the complete default profile once and uploads
 `ci-build-default`. The regular test jobs reuse that artifact:

@@ -85,7 +85,21 @@ build profile；public-header self-containment 会调用专用 compile target。
 product、package、configuration 与 compile 边界，不是 migration 或 source-layout 检查。
 `OpenCvOperationProviderBuildSmokeSafety` 继续作为 OpenCV nested-build driver 的普通完整 CTest
 safety regression：其 Python unittest 会在进程内验证 cleanup guard 与 cache-layout helper，
-但不会启动 child configure、build、install 或 compile target。
+还会通过 production manifest generator 配置一个无需 compiler 的 `project(... NONE)` fixture；
+它不会启动 child build、install、compile target 或生成的 executable。
+
+两项 nested-profile inventory 无需在 workflow 中维护数量，也仍保持精确。Static-product producer
+会导出已配置的 CMake public-header install allowlist，consumer 要求已安装 include tree 与这些相对
+路径完全相等。其 CMake writer 会在序列化前拒绝反斜杠与可表达的 ASCII control；parser 会独立
+拒绝包括 NUL 在内的全部 ASCII C0 control 以及 DEL，要求精确 canonical POSIX install path，
+同时保留普通空格。Provider-disabled producer 会通过只包含一个精确 header 与严格双字段 data
+line 的 TSV，导出 active
+`gtest_discover_tests` target 及其配置专属 executable 路径；后续 comment、空行、control、额外
+字段、非法或重复 target name 与相对路径都会 fail closed，绝对 POSIX path、Windows drive path
+与 Windows UNC path 仍然有效。Focused build 完成后，driver 要求恰好只有那些不存在 executable
+file 的已注册 target 表现为不带 label 的 `*_NOT_BUILT` 占位项。两项检查都会拒绝缺失和额外
+entry，因此新增 allowlisted header 或已注册 GoogleTest target 时，expectation 会通过其权威
+CMake declaration 变化，而不是依赖 Python 数字或针对未来名称的特判。
 
 `build-integrity-default` 会构建一次完整 default profile，并上传 `ci-build-default`。普通测试 job
 会复用该 artifact：

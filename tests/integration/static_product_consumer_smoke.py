@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from textwrap import dedent
 from typing import Any, Callable
 
@@ -116,6 +116,13 @@ EXPECTED_IPC_DIRECT_INCLUDES = {
         "photospider/host/compute_request.hpp",
     ),
 }
+
+#: @brief Configured CMake allowlist consumed by the package smoke.
+#: @note The path is relative to the producer build tree and remains a
+#:   generated validation input rather than an installed package artifact.
+PUBLIC_HEADER_INVENTORY_RELATIVE_PATH = Path(
+    "generated/ci_inventory/installable_public_headers.txt"
+)
 FORBIDDEN_IPC_DECLARATION_PATTERNS = {
     "backend implementation type": (
         r"\b(?:Kernel|GraphModel|InteractionService|ComputeService|"
@@ -636,23 +643,85 @@ def configure_fresh_producer(
     return run_command(command, repo)
 
 
-def public_header_includes(repo: Path) -> list[str]:
-    """@brief Generate includes for every installable public header.
+def public_header_includes(build: Path) -> list[str]:
+    """@brief Load exact consumer includes from CMake's install allowlist.
 
-    @param repo Repository root containing ``include/photospider``.
-    @return Sorted ``#include`` directives relative to ``include``.
-    @throws OSError If the public header tree cannot be traversed.
-    @note The function is read-only and filters to C/C++ header suffixes used by
-      the install rule.
+    @param build Configured producer build tree containing the generated
+      public-header inventory.
+    @return Sorted ``#include`` directives relative to the installed include
+      root.
+    @throws OSError If the configured inventory cannot be read.
+    @throws UnicodeError If the configured inventory is not valid UTF-8.
+    @throws RuntimeError If the inventory is missing, empty, duplicated, or
+      contains a control byte, backslash, or noncanonical/non-header POSIX path
+      outside ``include/photospider``.
+    @note CMake serializes the same explicit relative-path list used by its
+      install rules after applying the same control/backslash policy. NUL is
+      impossible in a CMake string but remains rejected here for forged or
+      externally modified manifests. Ordinary spaces remain valid path data.
+      The smoke never scans the source tree or maintains a second expected
+      header count.
     """
 
-    public_root = repo / "include" / "photospider"
-    headers = sorted(
-        path.relative_to(repo / "include").as_posix()
-        for path in public_root.rglob("*")
-        if path.is_file() and path.suffix in {".h", ".hpp", ".hh", ".hxx"}
-    )
-    return [f"#include <{header}>" for header in headers]
+    inventory_path = build / PUBLIC_HEADER_INVENTORY_RELATIVE_PATH
+    if not inventory_path.is_file():
+        raise RuntimeError(
+            "configured public-header inventory is missing: "
+            f"{inventory_path}"
+        )
+    with inventory_path.open(
+        "r", encoding="utf-8", newline=""
+    ) as inventory_file:
+        inventory_text = inventory_file.read()
+    if any(
+        character != "\n"
+        and (ord(character) < 32 or ord(character) == 127)
+        for character in inventory_text
+    ):
+        raise RuntimeError(
+            "configured public-header inventory contains a forbidden "
+            "ASCII control character"
+        )
+    raw_headers = inventory_text.split("\n")
+    if raw_headers and not raw_headers[-1]:
+        raw_headers.pop()
+    if not raw_headers or any(not header for header in raw_headers):
+        raise RuntimeError(
+            "configured public-header inventory is empty or contains a "
+            "blank entry"
+        )
+
+    headers: set[str] = set()
+    for line_number, raw_header in enumerate(raw_headers, start=1):
+        if "\\" in raw_header:
+            raise RuntimeError(
+                "configured public-header inventory contains a forbidden "
+                f"backslash at line {line_number}"
+            )
+        header = PurePosixPath(raw_header)
+        if (
+            header.as_posix() != raw_header
+            or header.is_absolute()
+            or header.parts[:2] != ("include", "photospider")
+            or len(header.parts) < 3
+            or any(part in {"", ".", ".."} for part in header.parts)
+            or header.suffix not in {".h", ".hpp", ".hh", ".hxx"}
+        ):
+            raise RuntimeError(
+                "configured public-header inventory contains an invalid "
+                f"entry: {raw_header!r}"
+            )
+        if raw_header in headers:
+            raise RuntimeError(
+                "configured public-header inventory contains a duplicate "
+                f"entry: {raw_header!r}"
+            )
+        headers.add(raw_header)
+
+    return [
+        f"#include <{header.removeprefix('include/')}>"
+        for header in sorted(headers)
+    ]
 
 
 def ipc_consumer_source() -> str:
@@ -960,7 +1029,10 @@ def validate_complete_surface_inventory(source: str) -> dict[str, list[str]]:
 
 
 def write_consumer_projects(
-    repo: Path, embedded_source_dir: Path, ipc_source_dir: Path
+    repo: Path,
+    build: Path,
+    embedded_source_dir: Path,
+    ipc_source_dir: Path,
 ) -> tuple[list[str], dict[str, list[str]]]:
     """@brief Create independent embedded and IPC installed consumers.
 
@@ -971,7 +1043,9 @@ def write_consumer_projects(
     ``ipc_client`` component and links only its exported target. Each project
     generates its own target manifest for single- and multi-config generators.
 
-    @param repo Repository root used only to inventory public headers.
+    @param repo Repository root used by generated behavior sources.
+    @param build Configured producer build tree containing CMake's exact
+      installable-public-header inventory.
     @param embedded_source_dir Transient embedded consumer source directory.
     @param ipc_source_dir Transient IPC-only consumer source directory.
     @return Embedded include directives and verified IPC call inventories.
@@ -986,7 +1060,7 @@ def write_consumer_projects(
 
     embedded_source_dir.mkdir(parents=True, exist_ok=True)
     ipc_source_dir.mkdir(parents=True, exist_ok=True)
-    include_lines = public_header_includes(repo)
+    include_lines = public_header_includes(build)
     (embedded_source_dir / "CMakeLists.txt").write_text(
         "\n".join(
             [
@@ -2987,10 +3061,9 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
-        "installed public header inventory is exactly 21 files": len(install["headers"])
-        == 21,
-        "consumer compiles every installed public header": compiled_headers
-        == install["headers"],
+        "installed public headers match the configured CMake allowlist": (
+            install["headers"] == compiled_headers
+        ),
         "exported namespace target exists": install["export_mentions_namespace_target"],
         "exported IPC namespace target exists": install[
             "export_mentions_ipc_namespace_target"
@@ -3230,23 +3303,6 @@ def main() -> int:
     required_opencv_missing_build = work / "required-opencv-missing-build"
     unknown_component_src = work / "unknown-component-src"
     unknown_component_build = work / "unknown-component-build"
-    compiled_public_headers, surface_inventory = write_consumer_projects(
-        repo, embedded_consumer_src, ipc_consumer_src
-    )
-    unknown_component_src.mkdir(parents=True)
-    (unknown_component_src / "CMakeLists.txt").write_text(
-        "\n".join(
-            [
-                "cmake_minimum_required(VERSION 3.16)",
-                "project(photospider_unknown_component LANGUAGES CXX)",
-                "find_package(Photospider CONFIG REQUIRED",
-                "    COMPONENTS unknown_component)",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
     producer_configure_code: int | None = None
     if args.configure_fresh_producer:
         producer_configure_code = configure_fresh_producer(
@@ -3262,6 +3318,23 @@ def main() -> int:
             "fresh producer configure not requested; existing build tree used",
             flush=True,
         )
+
+    compiled_public_headers, surface_inventory = write_consumer_projects(
+        repo, build, embedded_consumer_src, ipc_consumer_src
+    )
+    unknown_component_src.mkdir(parents=True)
+    (unknown_component_src / "CMakeLists.txt").write_text(
+        "\n".join(
+            [
+                "cmake_minimum_required(VERSION 3.16)",
+                "project(photospider_unknown_component LANGUAGES CXX)",
+                "find_package(Photospider CONFIG REQUIRED",
+                "    COMPONENTS unknown_component)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     opencv_config_dir_value = cmake_cache_value(build, "OpenCV_DIR")
     if not opencv_config_dir_value or opencv_config_dir_value.endswith("-NOTFOUND"):

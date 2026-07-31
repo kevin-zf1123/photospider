@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
 import tempfile
 import unittest
 from typing import Optional
@@ -15,6 +16,36 @@ from unittest import mock
 import cmake_build_smoke_support as build_support
 import image_artifact_codec_dependency_disabled_smoke as image_consumer
 import optional_opencv_operation_provider_build_smoke as subject
+
+
+#: @brief Resolved repository root used to load the production CMake writer.
+#: @note The path is immutable and never passed to destructive helpers.
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
+#: @brief Exact CMake module used by the root producer configuration.
+#: @note The safety fixture includes this module directly, avoiding a duplicate
+#:   test-only generator implementation.
+CI_INVENTORY_CMAKE_MODULE_PATH = (
+    REPOSITORY_ROOT / "cmake" / "PhotospiderCiInventory.cmake"
+)
+#: @brief CMake launcher for the production generator fixture.
+#: @note CTest supplies CMAKE_COMMAND through the environment; direct unittest
+#:   execution resolves the conventional cmake command through PATH.
+CMAKE_EXECUTABLE = os.environ.get("PHOTOSPIDER_CMAKE_EXECUTABLE", "cmake")
+
+
+def write_exact_text(path: pathlib.Path, text: str) -> None:
+    """@brief Write one UTF-8 fixture without host newline conversion.
+
+    @param path Existing-parent test-owned destination.
+    @param text Exact CMake or manifest text to serialize.
+    @return None after the file is closed successfully.
+    @throws OSError If the fixture cannot be opened or written.
+    @note Explicit ``newline=''`` preserves CR/LF injection cases on Python 3.9
+      and later and keeps CMake fixture inputs byte-stable across host systems.
+    """
+
+    with path.open("w", encoding="utf-8", newline="") as output_file:
+        output_file.write(text)
 
 
 #: @brief Stable disk-cache concurrency cases required in focused inventories.
@@ -76,11 +107,14 @@ def ctest_json_test(
     return {"name": name, "properties": properties}
 
 
-def provider_disabled_ctest_payload() -> str:
+def provider_disabled_ctest_payload(
+    sentinels: tuple[str, ...] = (),
+) -> str:
     """@brief Construct the valid provider-disabled JSON-v1 inventory.
 
+    @param sentinels Registered-but-unbuilt target names with no properties.
     @return JSON payload containing two profile entries, three disk cases, and
-      two production lifecycle cases.
+      two production lifecycle cases plus the requested sentinels.
     @throws Nothing; every serialized value is deterministic and JSON-safe.
     @note Disk cases receive a 20-second timeout; lifecycle cases receive a
       60-second timeout. Both groups use the exact `kernel-concurrency` label.
@@ -91,6 +125,7 @@ def provider_disabled_ctest_payload() -> str:
         OPTIONAL_PROVIDER_CTEST_NAME,
         *DISK_CACHE_CTEST_NAMES,
         *KERNEL_LIFECYCLE_CTEST_NAMES,
+        *sentinels,
     }
     return json.dumps(
         {
@@ -758,10 +793,15 @@ class ConfigurationLayoutTest(unittest.TestCase):
 class ProviderDisabledProfileTest(unittest.TestCase):
     """@brief Verifies cache and CTest inventory profile contracts.
 
+    @throws OSError If a synthetic manifest or compiler-free CMake generator
+      fixture cannot be created or started.
+    @throws subprocess.CalledProcessError If the valid production-generator
+      fixture fails configuration.
     @throws AssertionError When the validator accepts a mismatched capability
       profile or provider-dependent broad-suite inventory.
-    @note Tests use only synthetic dictionaries and JSON; no CMake process or
-      real build tree is accessed.
+    @note Tests use disposable dictionaries, JSON, manifests, and one
+      ``project(... NONE)`` generator fixture. No compiler, product build,
+      install, or generated executable is started.
     """
 
     def test_accepts_exact_cache_and_rejects_provider_mismatch(self) -> None:
@@ -811,7 +851,314 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         )
 
         self.assertEqual(set(inventory), expected)
-        subject.validate_provider_disabled_inventory(inventory)
+        subject.validate_provider_disabled_inventory(inventory, set())
+
+    def test_derives_registered_only_sentinels_from_target_manifest(
+        self,
+    ) -> None:
+        """@brief Derive placeholders from registered target-file existence.
+
+        @return None after one built target is excluded and two arbitrary
+          unbuilt registered targets become exact sentinels.
+        @throws OSError If the synthetic manifest or executable cannot be
+          created.
+        @throws AssertionError If parsing loses registrations, depends on a
+          known future target name, or accepts malformed metadata.
+        @note Every path belongs to a disposable synthetic build. The arbitrary
+          future target proves derivation is registration-driven rather than a
+          source-file or count special case.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-gtest-inventory-"
+        ) as temporary:
+            build = pathlib.Path(temporary) / "build"
+            inventory_dir = build / subject.CI_INVENTORY_RELATIVE_DIRECTORY
+            inventory_dir.mkdir(parents=True)
+            executable_dir = build / "tests"
+            executable_dir.mkdir()
+            built_target = executable_dir / "test_built"
+            built_target.write_text("synthetic executable", encoding="utf-8")
+            unbuilt_target = executable_dir / "test_unbuilt"
+            future_target = executable_dir / "test_arbitrary_future"
+            manifest = inventory_dir / (
+                "registered_gtest_targets-RelWithDebInfo.tsv"
+            )
+            write_exact_text(
+                manifest,
+                "# target\tconfigured executable\n"
+                f"test_built\t{built_target}\n"
+                f"test_unbuilt\t{unbuilt_target}\n"
+                f"test_arbitrary_future\t{future_target}\n",
+            )
+
+            self.assertEqual(
+                subject.registered_gtest_target_files(
+                    build, "RelWithDebInfo"
+                ),
+                {
+                    "test_arbitrary_future": future_target,
+                    "test_built": built_target,
+                    "test_unbuilt": unbuilt_target,
+                },
+            )
+            sentinels = subject.expected_registered_gtest_sentinels(
+                build, "RelWithDebInfo"
+            )
+            self.assertEqual(
+                sentinels,
+                {
+                    "test_arbitrary_future_NOT_BUILT",
+                    "test_unbuilt_NOT_BUILT",
+                },
+            )
+            inventory = subject.parse_ctest_inventory(
+                provider_disabled_ctest_payload(tuple(sorted(sentinels)))
+            )
+            subject.validate_provider_disabled_inventory(
+                inventory, sentinels
+            )
+
+            malformed_payloads = {
+                "missing-header": f"test_built\t{built_target}\n",
+                "wrong-header": (
+                    "# wrong\tconfigured executable\n"
+                    f"test_built\t{built_target}\n"
+                ),
+                "repeated-header": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    f"test_built\t{built_target}\n"
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                ),
+                "later-comment": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    f"test_built\t{built_target}\n"
+                    "# injected comment\n"
+                ),
+                "blank-line": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    f"test_built\t{built_target}\n\n"
+                ),
+                "extra-field": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    f"test_built\t{built_target}\textra\n"
+                ),
+                "relative-path": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    "test_relative\trelative/test_relative\n"
+                ),
+                "duplicate-target": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    f"test_built\t{built_target}\n"
+                    f"test_built\t{built_target}\n"
+                ),
+                "sentinel-target": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    f"test_bad_NOT_BUILT\t{unbuilt_target}\n"
+                ),
+                "alias-target": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    f"test::alias\t{unbuilt_target}\n"
+                ),
+                "single-field": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    "blank-target\n"
+                ),
+                "delete-in-path": (
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    "test_delete\t/absolute/del\x7fpath\n"
+                ),
+            }
+            malformed_payloads.update(
+                {
+                    f"c0-in-path-{control_code}": (
+                        f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                        "test_control\t/absolute/control"
+                        f"{chr(control_code)}path\n"
+                    )
+                    for control_code in range(32)
+                }
+            )
+            for case_name, payload in malformed_payloads.items():
+                with self.subTest(case=case_name):
+                    write_exact_text(manifest, payload)
+                    with self.assertRaisesRegex(
+                        RuntimeError, "inventory"
+                    ):
+                        subject.registered_gtest_target_files(
+                            build, "RelWithDebInfo"
+                        )
+
+    def test_accepts_portable_absolute_paths_per_configuration(self) -> None:
+        """@brief Accept safe POSIX and Windows target-file spellings.
+
+        @return None after independent Debug and RelWithDebInfo manifests accept
+          POSIX paths with spaces, Windows drive paths with either separator,
+          and a Windows UNC path.
+        @throws OSError If a synthetic configuration manifest cannot be written.
+        @throws AssertionError If a safe path is rejected, configurations bleed
+          together, or a relative Windows path is classified as absolute.
+        @note Cross-platform parsing is lexical. Only same-host paths reach the
+          later ``is_file`` observation in the real smoke.
+        """
+
+        self.assertFalse(subject.is_portable_absolute_path("C:relative.exe"))
+        portable_paths = {
+            "test_posix_space": "/absolute/path with space/test executable",
+            "test_windows_backslash": (
+                r"C:\Program Files\Photospider\test_provider.exe"
+            ),
+            "test_windows_forward": (
+                "D:/build with space/Photospider/test_provider.exe"
+            ),
+            "test_windows_unc": (
+                r"\\server\build share\Photospider\test_provider.exe"
+            ),
+        }
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-portable-paths-"
+        ) as temporary:
+            build = pathlib.Path(temporary) / "build"
+            inventory_dir = build / subject.CI_INVENTORY_RELATIVE_DIRECTORY
+            inventory_dir.mkdir(parents=True)
+            for configuration in ("Debug", "RelWithDebInfo"):
+                manifest = inventory_dir / (
+                    f"registered_gtest_targets-{configuration}.tsv"
+                )
+                write_exact_text(
+                    manifest,
+                    f"{subject.REGISTERED_GTEST_TARGET_INVENTORY_HEADER}\n"
+                    + "".join(
+                        f"{target_name}\t{path_text}\n"
+                        for target_name, path_text in portable_paths.items()
+                    ),
+                )
+                parsed = subject.registered_gtest_target_files(
+                    build, configuration
+                )
+                self.assertEqual(set(parsed), set(portable_paths))
+                for target_name, path_text in portable_paths.items():
+                    with self.subTest(
+                        configuration=configuration,
+                        target=target_name,
+                    ):
+                        self.assertTrue(
+                            subject.is_portable_absolute_path(path_text)
+                        )
+                        self.assertEqual(
+                            parsed[target_name], pathlib.Path(path_text)
+                        )
+
+    def test_cmake_generator_emits_strict_configuration_manifest(
+        self,
+    ) -> None:
+        """@brief Round-trip the production CMake generator into the parser.
+
+        @return None after the real helper preserves a legal local target name,
+          ordinary path spaces, and the RelWithDebInfo ``$<CONFIG>`` output.
+        @throws OSError If the synthetic CMake project cannot be written or the
+          configured launcher cannot start.
+        @throws subprocess.CalledProcessError If the valid fixture configure or
+          generation step fails.
+        @throws AssertionError If generated TSV content fails the production
+          parser or an illegal CMake target name reaches generation.
+        @note The fixture uses an imported executable and ``project(... NONE)``;
+          it runs CMake generation without a compiler, build, or executable.
+          Both build-type variables are set so single- and multi-config
+          generators select the same isolated configuration.
+        """
+
+        with synthetic_temporary_directory(
+            prefix="photospider-provider-cmake-inventory-"
+        ) as temporary:
+            sandbox = pathlib.Path(temporary)
+            source = sandbox / "source"
+            build = sandbox / "build"
+            source.mkdir()
+            configured_executable = (
+                sandbox / "bin with space" / "test.generated+target"
+            )
+            configured_executable.parent.mkdir()
+            write_exact_text(configured_executable, "synthetic executable")
+            write_exact_text(
+                source / "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.16)\n"
+                "project(PhotospiderCiInventoryFixture NONE)\n"
+                f'include("{CI_INVENTORY_CMAKE_MODULE_PATH.as_posix()}")\n'
+                "add_executable(test.generated+target IMPORTED GLOBAL)\n"
+                "set_target_properties(test.generated+target PROPERTIES\n"
+                f'  IMPORTED_LOCATION "{configured_executable.as_posix()}")\n'
+                "set(PHOTOSPIDER_TEST_GTEST_TARGETS "
+                "test.generated+target)\n"
+                "photospider_generate_registered_gtest_target_inventory(\n"
+                '  "${CMAKE_BINARY_DIR}/generated/ci_inventory/'
+                'registered_gtest_targets-$<CONFIG>.tsv"\n'
+                "  PHOTOSPIDER_TEST_GTEST_TARGETS)\n",
+            )
+            subprocess.run(
+                [
+                    CMAKE_EXECUTABLE,
+                    "-S",
+                    str(source),
+                    "-B",
+                    str(build),
+                    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                    "-DCMAKE_CONFIGURATION_TYPES=RelWithDebInfo",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                subject.registered_gtest_target_files(
+                    build, "RelWithDebInfo"
+                ),
+                {"test.generated+target": configured_executable},
+            )
+
+            rejected_script = sandbox / "reject_target_name.cmake"
+            write_exact_text(
+                rejected_script,
+                "cmake_minimum_required(VERSION 3.16)\n"
+                f'include("{CI_INVENTORY_CMAKE_MODULE_PATH.as_posix()}")\n'
+                "set(PHOTOSPIDER_TEST_GTEST_TARGETS "
+                '"${PHOTOSPIDER_TEST_TARGET_NAME}")\n'
+                "photospider_generate_registered_gtest_target_inventory(\n"
+                f'  "{(sandbox / "rejected.tsv").as_posix()}"\n'
+                "  PHOTOSPIDER_TEST_GTEST_TARGETS)\n",
+            )
+            for invalid_target_name in (
+                "test::alias",
+                "test target",
+                "test_target_NOT_BUILT",
+                "test\ttarget",
+                "test\ntarget",
+                "test\x7ftarget",
+            ):
+                with self.subTest(target=repr(invalid_target_name)):
+                    result = subprocess.run(
+                        [
+                            CMAKE_EXECUTABLE,
+                            (
+                                "-DPHOTOSPIDER_TEST_TARGET_NAME="
+                                f"{invalid_target_name}"
+                            ),
+                            "-P",
+                            str(rejected_script),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertRegex(
+                        result.stderr,
+                        (
+                            r"(?:forbidden ASCII control code|"
+                            r"invalid CMake target name)"
+                        ),
+                    )
+                    self.assertNotIn(invalid_target_name, result.stderr)
 
     def test_rejects_malformed_broad_or_drifted_ctest_inventory(self) -> None:
         """@brief Reject malformed, broad, missing, or drifted inventories.
@@ -845,7 +1192,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
             subject.validate_provider_disabled_inventory(
-                old_full_only_inventory
+                old_full_only_inventory, set()
             )
 
         valid_inventory = subject.parse_ctest_inventory(
@@ -860,7 +1207,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             "build-smoke",
         ]
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
-            subject.validate_provider_disabled_inventory(drifted_inventory)
+            subject.validate_provider_disabled_inventory(
+                drifted_inventory, set()
+            )
 
         drifted_lifecycle_inventory = {
             name: dict(properties)
@@ -871,7 +1220,7 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         ] = 20
         with self.assertRaisesRegex(RuntimeError, "property mismatch"):
             subject.validate_provider_disabled_inventory(
-                drifted_lifecycle_inventory
+                drifted_lifecycle_inventory, set()
             )
 
         broad_inventory = {
@@ -880,7 +1229,9 @@ class ProviderDisabledProfileTest(unittest.TestCase):
         }
         broad_inventory["test_scheduler_NOT_BUILT"] = {}
         with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
-            subject.validate_provider_disabled_inventory(broad_inventory)
+            subject.validate_provider_disabled_inventory(
+                broad_inventory, set()
+            )
 
 
 if __name__ == "__main__":
